@@ -92,6 +92,90 @@ fn application_message_roundtrips_between_members() {
 }
 
 #[test]
+fn staged_add_can_be_aborted_with_keys_intact() {
+    // The fork-loser primitive: stage an Add, then abort it. The group must be
+    // exactly as before — same epoch, same membership, same channel key, still
+    // usable — so a committer that loses a fork loses nothing.
+    let alice = MlsDevice::generate().unwrap();
+    let mut alice_group = ServerGroup::create(&alice).unwrap();
+    let key_before = alice_group
+        .channel_secret(&alice, DocType::Channel, 1)
+        .unwrap();
+    let base_before = alice_group.epoch_authenticator_id();
+
+    let bob = MlsDevice::generate().unwrap();
+    let staged = alice_group
+        .stage_add(&alice, bob.key_package().unwrap())
+        .unwrap();
+    assert_eq!(staged.commit_epoch, 0);
+    assert_eq!(staged.base_authenticator, base_before);
+
+    alice_group.abort_staged(&alice).unwrap();
+    assert_eq!(alice_group.epoch(), 0, "abort must not advance the epoch");
+    assert_eq!(
+        alice_group.member_count(),
+        1,
+        "abort must not add the member"
+    );
+    assert_eq!(
+        alice_group
+            .channel_secret(&alice, DocType::Channel, 1)
+            .unwrap(),
+        key_before,
+        "abort must preserve epoch key material"
+    );
+    // The group is still operational: a fresh stage+merge works afterward.
+    let staged2 = alice_group
+        .stage_add(&alice, bob.key_package().unwrap())
+        .unwrap();
+    alice_group.merge_staged_self(&alice).unwrap();
+    assert_eq!(alice_group.epoch(), 1);
+    assert!(alice_group.contains_device(&bob.device_id()));
+    assert!(staged2.welcome.is_some());
+}
+
+#[test]
+fn staged_then_merged_add_matches_direct_add() {
+    // Stage→merge advances the epoch and adds the member, and the joiner can join
+    // from the staged Welcome — identical outcome to the atomic add_member path.
+    let alice = MlsDevice::generate().unwrap();
+    let mut alice_group = ServerGroup::create(&alice).unwrap();
+    let bob = MlsDevice::generate().unwrap();
+
+    let staged = alice_group
+        .stage_add(&alice, bob.key_package().unwrap())
+        .unwrap();
+    alice_group.merge_staged_self(&alice).unwrap();
+    let bob_group = ServerGroup::join(&bob, &staged.welcome.unwrap()).unwrap();
+
+    assert_eq!(alice_group.epoch(), 1);
+    assert_eq!(bob_group.epoch(), 1);
+    assert_eq!(alice_group.group_id(), bob_group.group_id());
+    assert!(alice_group.contains_device(&bob.device_id()));
+}
+
+#[test]
+fn members_at_the_same_epoch_agree_on_the_base_authenticator() {
+    // The fork-vs-lag binding: every member derives the SAME epoch fingerprint at
+    // the same epoch, and it changes when the epoch advances.
+    let (alice, mut alice_group, bob, bob_group) = two_member_group();
+    let a = alice_group.epoch_authenticator_id();
+    let b = bob_group.epoch_authenticator_id();
+    assert_eq!(a, b, "members must agree on the epoch fingerprint");
+
+    let carol = MlsDevice::generate().unwrap();
+    alice_group
+        .add_member(&alice, carol.key_package().unwrap())
+        .unwrap();
+    assert_ne!(
+        alice_group.epoch_authenticator_id(),
+        a,
+        "the fingerprint must change when the epoch advances"
+    );
+    let _ = bob; // (bob_group kept at the old epoch intentionally)
+}
+
+#[test]
 fn removing_a_member_rotates_the_epoch_and_locks_them_out() {
     let (alice, mut alice_group, bob, bob_group) = two_member_group();
 

@@ -24,7 +24,7 @@ use thiserror::Error;
 
 pub use config::CIPHERSUITE;
 pub use device::{serialize_key_package, MlsDevice};
-pub use group::{AddOutcome, Incoming, ServerGroup};
+pub use group::{AddOutcome, Incoming, ServerGroup, StagedOutcome};
 pub use invite::{InviteError, InviteLedger, InviteToken, MembershipCredential};
 
 /// Errors from MLS operations.

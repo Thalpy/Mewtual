@@ -27,6 +27,22 @@ pub struct AddOutcome {
     pub commit_epoch: u64,
 }
 
+/// The result of *staging* a membership commit without merging it (see
+/// [`ServerGroup::stage_add`]). The group is left with a pending commit at
+/// `commit_epoch`; `base_authenticator` is the epoch-state fingerprint it was
+/// built on (the fork-vs-lag binding).
+#[derive(Debug, Clone)]
+pub struct StagedOutcome {
+    /// Serialized Commit message for existing members to apply.
+    pub commit: Vec<u8>,
+    /// Serialized Welcome for a joining device (present for Adds, absent for Removes).
+    pub welcome: Option<Vec<u8>>,
+    /// The epoch the commit was built at (it advances the group to `commit_epoch + 1`).
+    pub commit_epoch: u64,
+    /// The committer's epoch-state fingerprint *before* this commit.
+    pub base_authenticator: [u8; 32],
+}
+
 /// The result of processing an inbound MLS message.
 #[derive(Debug)]
 pub enum Incoming {
@@ -237,6 +253,77 @@ impl ServerGroup {
             .merge_pending_commit(device.provider())
             .map_err(proto)?;
         Ok(())
+    }
+
+    /// Stage an Add **without merging it**: produce the commit + Welcome but leave
+    /// the group with a pending commit at the current epoch. Call
+    /// [`ServerGroup::merge_staged_self`] to adopt it (advancing the epoch) or
+    /// [`ServerGroup::abort_staged`] to discard it (restoring the pre-stage state,
+    /// epoch secrets intact). This is the producer side of fork resolution: a
+    /// committer stages, broadcasts, and only merges once it knows it won.
+    pub fn stage_add(
+        &mut self,
+        device: &MlsDevice,
+        key_package: KeyPackage,
+    ) -> Result<StagedOutcome, MlsError> {
+        let base_authenticator = self.epoch_authenticator_id();
+        let commit_epoch = self.epoch();
+        let (commit, welcome, _group_info) = self
+            .group
+            .add_members(device.provider(), device.signer(), &[key_package])
+            .map_err(proto)?;
+        Ok(StagedOutcome {
+            commit: commit.tls_serialize_detached().map_err(proto)?,
+            welcome: Some(welcome.tls_serialize_detached().map_err(proto)?),
+            commit_epoch,
+            base_authenticator,
+        })
+    }
+
+    /// Stage a Remove without merging it (see [`ServerGroup::stage_add`]).
+    pub fn stage_remove(
+        &mut self,
+        device: &MlsDevice,
+        target: &DeviceId,
+    ) -> Result<StagedOutcome, MlsError> {
+        let index = self
+            .group
+            .members()
+            .find(|m| DeviceId::from_public_key_bytes(&m.signature_key) == *target)
+            .map(|m| m.index)
+            .ok_or(MlsError::MemberNotFound)?;
+        let base_authenticator = self.epoch_authenticator_id();
+        let commit_epoch = self.epoch();
+        let (commit, welcome, _group_info) = self
+            .group
+            .remove_members(device.provider(), device.signer(), &[index])
+            .map_err(proto)?;
+        Ok(StagedOutcome {
+            commit: commit.tls_serialize_detached().map_err(proto)?,
+            welcome: welcome
+                .map(|w| w.tls_serialize_detached())
+                .transpose()
+                .map_err(proto)?,
+            commit_epoch,
+            base_authenticator,
+        })
+    }
+
+    /// Adopt this group's own staged commit (advances the epoch). The inverse of
+    /// [`ServerGroup::abort_staged`].
+    pub fn merge_staged_self(&mut self, device: &MlsDevice) -> Result<(), MlsError> {
+        self.group
+            .merge_pending_commit(device.provider())
+            .map_err(proto)
+    }
+
+    /// Discard this group's own staged commit, restoring the pre-stage state with
+    /// epoch secrets intact (openmls `clear_pending_commit` only flips the group
+    /// state back to Operational). The fork **loser**'s primitive.
+    pub fn abort_staged(&mut self, device: &MlsDevice) -> Result<(), MlsError> {
+        self.group
+            .clear_pending_commit(device.provider().storage())
+            .map_err(proto)
     }
 
     /// Encrypt an application message, returning the serialized MLS message.
