@@ -114,6 +114,40 @@ impl ServerGroup {
         self.designated_committer() == Some(device.device_id())
     }
 
+    /// The leaf index of the designated committer (the lowest occupied index).
+    pub fn designated_committer_index(&self) -> Option<u32> {
+        self.group.members().map(|m| m.index.u32()).min()
+    }
+
+    /// The leaf index of a current member, by device id.
+    pub fn member_leaf_index(&self, device_id: &DeviceId) -> Option<u32> {
+        self.group
+            .members()
+            .find(|m| DeviceId::from_public_key_bytes(&m.signature_key) == *device_id)
+            .map(|m| m.index.u32())
+    }
+
+    /// The raw Ed25519 signature public key of a current member, by device id.
+    /// Used to verify a committer's per-commit signature by **roster lookup**
+    /// (a `DeviceId` is a one-way hash of the key, so the verifier looks the key
+    /// up rather than recovering it from the id).
+    pub fn member_signature_key(&self, device_id: &DeviceId) -> Option<Vec<u8>> {
+        self.group
+            .members()
+            .find(|m| DeviceId::from_public_key_bytes(&m.signature_key) == *device_id)
+            .map(|m| m.signature_key)
+    }
+
+    /// A 32-byte fingerprint of this group's current epoch state — `BLAKE3` of the
+    /// MLS `epoch_authenticator` (a members-only value every member derives
+    /// identically). Two records built against the same fingerprint are a genuine
+    /// same-base fork (resolvable by tie-break); different fingerprints at the same
+    /// epoch number mean the branches diverged earlier (a deep fork we refuse to
+    /// silently merge). Hashed so the raw epoch secret never leaves the device.
+    pub fn epoch_authenticator_id(&self) -> [u8; 32] {
+        *blake3::hash(self.group.epoch_authenticator().as_slice()).as_bytes()
+    }
+
     /// Mint a single-use, device-bound invite to this group, signed by `inviter`
     /// (who must be a current member). `invite_nonce` must be unique per invite.
     pub fn mint_invite(
@@ -165,7 +199,7 @@ impl ServerGroup {
 
         // The inviter must be a current member; verify the token under their key.
         let inviter_pk = self
-            .member_pubkey(&token.inviter_device_id)
+            .member_signature_key(&token.inviter_device_id)
             .ok_or(InviteError::InviterNotMember)?;
         if !token.verify(&inviter_pk) {
             return Err(InviteError::BadSignature.into());
@@ -185,14 +219,6 @@ impl ServerGroup {
         let outcome = self.add_member(inviter, key_package)?;
         ledger.consume(token.invite_nonce)?;
         Ok(outcome)
-    }
-
-    /// The raw signature public key of a current member, by device id.
-    fn member_pubkey(&self, device_id: &DeviceId) -> Option<Vec<u8>> {
-        self.group
-            .members()
-            .find(|m| DeviceId::from_public_key_bytes(&m.signature_key) == *device_id)
-            .map(|m| m.signature_key)
     }
 
     /// Remove the member with `target` device id and merge the commit (this

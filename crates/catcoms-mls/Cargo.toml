@@ -11,6 +11,7 @@ catcoms-crypto = { path = "../catcoms-crypto" }
 thiserror.workspace = true
 openmls = "0.8"
 openmls_rust_crypto = "0.5"
+blake3 = "1"
 openmls_basic_credential = "0.5"
 openmls_traits = "0.5"
 tls_codec = { version = "0.4", features = ["derive", "std"] }

@@ -94,6 +94,10 @@ pub struct SyncConfig {
     pub max_catchup_queue: usize,
     /// Cap on queued control-topic broadcasts awaiting send.
     pub max_outbox: usize,
+    /// How many leaf ranks above the designated committer may still author a
+    /// membership commit (0 = strict single-committer; 1 admits one backup, needed
+    /// once the proposal/commit split and fork resolution land).
+    pub max_committer_rank: u32,
 }
 
 impl Default for SyncConfig {
@@ -106,6 +110,7 @@ impl Default for SyncConfig {
             max_known_peers: 64,
             max_catchup_queue: 256,
             max_outbox: 256,
+            max_committer_rank: 0,
         }
     }
 }
@@ -280,30 +285,82 @@ fn channel_topic(group_id: &[u8], doc_type: DocType, doc_id: u128) -> Topic {
 /// causes.
 fn control_topic(group_id: &[u8]) -> Topic {
     let mut h = blake3::Hasher::new();
-    h.update(b"catcoms/control/v1");
+    // v2: the control envelope is a tagged union (see CTRL_* tags) and CommitRecord
+    // carries a committer signature; v1 and v2 nodes deliberately do not share a
+    // topic (a hard wire cutover — acceptable pre-release).
+    h.update(b"catcoms/control/v2");
     h.update(group_id);
     Topic::new(h.finalize().as_bytes().to_vec())
 }
+
+/// Control-topic envelope tags (first byte of every control message). New op kinds
+/// (proposals, revocations) land in later 6d-2 sub-blocks.
+const CTRL_COMMIT: u8 = 0;
+
+/// Domain separator for the committer's per-commit authorization signature.
+const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
 
 /// A membership commit fanned out on the control topic so existing members apply
 /// it and advance to the same epoch. `commit_epoch` is the epoch the commit was
 /// built at (it advances the group to `commit_epoch + 1`) — the linearization key
 /// for ordered replay during recovery.
+///
+/// `base_authenticator` is the committer's epoch-state fingerprint *before* the
+/// commit ([`ServerGroup::epoch_authenticator_id`]); two records at the same epoch
+/// with the same fingerprint are a same-base fork (resolvable by tie-break), a
+/// different one means the branches diverged earlier. `committer_sig` is the
+/// committer's MLS-leaf signature over the authorization transcript, so a recipient
+/// can confirm an *authorized* member produced it (openmls still independently
+/// authenticates the inner commit — this is authorization, not state auth).
 #[derive(Debug, Clone)]
 struct CommitRecord {
     group_id: Vec<u8>,
     commit_epoch: u64,
     committer_device: [u8; 32],
     mls_commit: Vec<u8>,
+    base_authenticator: [u8; 32],
+    committer_sig: [u8; 64],
+}
+
+/// The transcript a committer signs to authorize a membership commit.
+fn commit_auth_transcript(
+    group_id: &[u8],
+    commit_epoch: u64,
+    base_authenticator: &[u8; 32],
+    committer_device: &[u8; 32],
+    mls_commit: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(COMMIT_AUTH_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_u64(commit_epoch);
+    e.put_bytes(base_authenticator).expect("32 fits");
+    e.put_bytes(committer_device).expect("32 fits");
+    e.put_bytes(blake3::hash(mls_commit).as_bytes())
+        .expect("32 fits");
+    e.finish()
 }
 
 impl CommitRecord {
+    /// The bytes the committer signs / a verifier re-derives for this record.
+    fn auth_transcript(&self) -> Vec<u8> {
+        commit_auth_transcript(
+            &self.group_id,
+            self.commit_epoch,
+            &self.base_authenticator,
+            &self.committer_device,
+            &self.mls_commit,
+        )
+    }
+
     fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.put_bytes(&self.group_id).expect("group id fits");
         e.put_u64(self.commit_epoch);
         e.put_bytes(&self.committer_device).expect("32 fits");
         e.put_bytes(&self.mls_commit).expect("commit fits");
+        e.put_bytes(&self.base_authenticator).expect("32 fits");
+        e.put_bytes(&self.committer_sig).expect("64 fits");
         e.finish()
     }
 
@@ -317,12 +374,24 @@ impl CommitRecord {
             .try_into()
             .map_err(|_| SyncError::Malformed)?;
         let mls_commit = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+        let base_authenticator: [u8; 32] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        let committer_sig: [u8; 64] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
         d.finish().map_err(|_| SyncError::Malformed)?;
         Ok(Self {
             group_id,
             commit_epoch,
             committer_device,
             mls_commit,
+            base_authenticator,
+            committer_sig,
         })
     }
 }
@@ -853,23 +922,58 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Whether `record` was produced by an **authorized committer**: a current
+    /// member (found by roster lookup, since a device id is a one-way hash of the
+    /// key) whose per-commit signature verifies, of leaf rank no greater than
+    /// `max_committer_rank` above the designated committer. openmls still
+    /// independently authenticates the inner commit at `process_incoming`; this gate
+    /// authorizes *who* may advance the epoch (and, for 6d-2, lets the fork-winner
+    /// — who is not necessarily the *lowest*-index committer — be accepted).
+    fn authorize_committer(&self, record: &CommitRecord) -> bool {
+        let committer = DeviceId::from_bytes(record.committer_device);
+        // 1. The committer must be a current member; look up its raw leaf key.
+        let Some(pubkey) = self.group.member_signature_key(&committer) else {
+            tracing::warn!(
+                commit_epoch = record.commit_epoch,
+                "commit from a non-member committer; rejected"
+            );
+            return false;
+        };
+        // 2. The per-commit signature must verify under that key.
+        if !verify_with_public_bytes(&pubkey, &record.auth_transcript(), &record.committer_sig) {
+            tracing::warn!(
+                commit_epoch = record.commit_epoch,
+                "commit signature invalid; rejected"
+            );
+            return false;
+        }
+        // 3. Authority bound: the committer's leaf rank (distance above the
+        // designated committer) must be within the allowed window.
+        match (
+            self.group.member_leaf_index(&committer),
+            self.group.designated_committer_index(),
+        ) {
+            (Some(idx), Some(base))
+                if idx.saturating_sub(base) <= self.config.max_committer_rank =>
+            {
+                true
+            }
+            _ => {
+                tracing::warn!(
+                    commit_epoch = record.commit_epoch,
+                    "commit from a committer outside the allowed rank; rejected"
+                );
+                false
+            }
+        }
+    }
+
     /// Apply a commit that is exactly the next one (`commit_epoch == current`),
     /// capturing the soon-to-be-superseded epoch's keys first. Returns whether it
     /// applied.
     fn apply_commit_in_order(&mut self, record: &CommitRecord) -> bool {
         debug_assert_eq!(record.commit_epoch, self.group.epoch());
-        // Single-committer policy, enforced on the inbound path too: the commit's
-        // claimed committer must be the epoch's designated committer (lowest leaf
-        // index). openmls still independently authenticates the commit, but this
-        // makes `committer_device` meaningful and rejects a mislabeled/forked one
-        // before we spend work on it. (Full per-commit committer signatures are a
-        // 6d-2 concern.)
-        let expected = self.group.designated_committer();
-        if expected != Some(DeviceId::from_bytes(record.committer_device)) {
-            tracing::warn!(
-                commit_epoch = record.commit_epoch,
-                "membership commit not from the designated committer; rejected"
-            );
+        if !self.authorize_committer(record) {
             return false;
         }
         self.snapshot_epoch_keys();
@@ -954,10 +1058,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// drain in order); one that is ahead of us is buffered and triggers
     /// commit-catch-up; an already-applied one is ignored.
     fn on_control(&mut self, data: &[u8]) {
-        let record = match CommitRecord::decode(data) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "dropping malformed control message");
+        // The control envelope is a tagged union; only commit records exist so far.
+        let record = match data.split_first() {
+            Some((&CTRL_COMMIT, rest)) => match CommitRecord::decode(rest) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(error = %e, "dropping malformed control message");
+                    return;
+                }
+            },
+            _ => {
+                tracing::warn!("dropping control message with unknown tag");
                 return;
             }
         };
@@ -1296,8 +1407,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
         // --- expensive: validate the KeyPackage, then admit ---
         let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
-        // Capture our current-epoch channel keys before the Add advances the
-        // epoch, so an op a peer sealed at this epoch still opens for us.
+        // Capture, before the Add advances the epoch: our channel keys (so an op a
+        // peer sealed at this epoch still opens) and the base epoch-state
+        // fingerprint (the fork-vs-lag binding for the commit record).
+        let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
             .group
@@ -1305,18 +1418,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok()?;
         self.evict_past_keys();
 
-        // Retain the Add commit: queue it for fan-out on the control topic, and
-        // keep it in the commit log so we can later serve commit-catch-up to any
-        // member that missed the broadcast.
+        // Build the signed Add commit record: queue it for fan-out on the control
+        // topic, and keep it in the commit log so we can later serve commit-catch-up
+        // to any member that missed the broadcast.
+        let committer_device = *self.device.device_id().as_bytes();
+        let auth = commit_auth_transcript(
+            &self.group.group_id(),
+            outcome.commit_epoch,
+            &base_authenticator,
+            &committer_device,
+            &outcome.commit,
+        );
+        let committer_sig = self.device.sign(&auth).ok()?;
         let record = CommitRecord {
             group_id: self.group.group_id(),
             commit_epoch: outcome.commit_epoch,
-            committer_device: *self.device.device_id().as_bytes(),
+            committer_device,
             mls_commit: outcome.commit,
+            base_authenticator,
+            committer_sig,
         };
         self.record_commit(record.clone());
-        self.outbox
-            .push((self.control_topic.clone(), record.encode()));
+        let mut framed = vec![CTRL_COMMIT];
+        framed.extend_from_slice(&record.encode());
+        self.outbox.push((self.control_topic.clone(), framed));
 
         // Sign the Welcome so the joiner can authenticate it came from the inviter.
         let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &outcome.welcome);
@@ -1431,12 +1556,16 @@ mod tests {
                 commit_epoch: 1,
                 committer_device: [3u8; 32],
                 mls_commit: vec![9, 9, 9],
+                base_authenticator: [5u8; 32],
+                committer_sig: [6u8; 64],
             },
             CommitRecord {
                 group_id: b"gid".to_vec(),
                 commit_epoch: 2,
                 committer_device: [4u8; 32],
                 mls_commit: vec![1, 2, 3, 4],
+                base_authenticator: [7u8; 32],
+                committer_sig: [8u8; 64],
             },
         ];
         let decoded = decode_commit_bundle(&encode_commit_bundle(&records)).unwrap();
@@ -1445,9 +1574,16 @@ mod tests {
         assert_eq!(decoded[1].mls_commit, vec![1, 2, 3, 4]);
     }
 
-    /// A genuine membership commit applied on the inbound path is accepted; the
-    /// same commit relabeled with a different `committer_device` is rejected (the
-    /// single-committer policy is enforced when applying, not only when admitting).
+    /// Frame a commit record as a control-topic message (tagged envelope).
+    fn framed_commit(r: &CommitRecord) -> Vec<u8> {
+        let mut v = vec![CTRL_COMMIT];
+        v.extend_from_slice(&r.encode());
+        v
+    }
+
+    /// A genuine membership commit applied on the inbound path is accepted; a copy
+    /// with a tampered committer (or signature) is rejected — committer
+    /// authorization is verified by signature on apply, not only at admission.
     #[tokio::test]
     async fn control_commit_with_a_forged_committer_label_is_rejected() {
         let hub = Hub::new();
@@ -1496,12 +1632,18 @@ mod tests {
         // A tampered copy claiming a different committer is rejected; Bob stays put.
         let mut forged = genuine.clone();
         forged.committer_device = [0xAA; 32];
-        bsy.on_control(&forged.encode());
+        bsy.on_control(&framed_commit(&forged));
         assert_eq!(bsy.epoch(), 1, "forged-committer commit must be rejected");
         assert_eq!(bsy.stats().commits_applied, 0);
 
-        // The genuine commit (committer = Alice) applies.
-        bsy.on_control(&genuine.encode());
+        // A copy with a tampered signature (real committer) is also rejected.
+        let mut bad_sig = genuine.clone();
+        bad_sig.committer_sig[0] ^= 0xFF;
+        bsy.on_control(&framed_commit(&bad_sig));
+        assert_eq!(bsy.epoch(), 1, "bad-signature commit must be rejected");
+
+        // The genuine commit (committer = Alice, valid signature) applies.
+        bsy.on_control(&framed_commit(&genuine));
         assert_eq!(bsy.epoch(), 2, "genuine commit applies");
     }
 
@@ -1537,6 +1679,8 @@ mod tests {
                 commit_epoch: epoch,
                 committer_device: [0u8; 32],
                 mls_commit: vec![epoch as u8],
+                base_authenticator: [0u8; 32],
+                committer_sig: [0u8; 64],
             });
         }
         assert_eq!(node.pending_commits.len(), 4, "buffer must stay capped");
@@ -1558,6 +1702,8 @@ mod tests {
             commit_epoch: 10_000, // far beyond current(0) + 100
             committer_device: [0u8; 32],
             mls_commit: vec![1],
+            base_authenticator: [0u8; 32],
+            committer_sig: [0u8; 64],
         });
         assert!(
             node.pending_commits.is_empty(),
