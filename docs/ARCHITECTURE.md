@@ -88,11 +88,28 @@ review (run before commit) hardened it:
   authenticate the response). `serve_join` runs cheap invite checks *before* the
   expensive KeyPackage validation, and oversized control requests are dropped.
 
-**Deferred (needs the 6d proposal/commit linearization, do not ship multi-member):**
-the InviteLedger is per-member and the Add commit is not yet fanned out, so single
-use is per-admitter and a 3rd member can't yet decrypt a new joiner's traffic.
-Network join is sound for the inviter-admits case; multi-member admission logs a
-warning. Also deferred: per-peer rate limiting / off-actor offload of join work.
+## 4b. Membership commit propagation (6d-1a)
+
+The Add commit (previously discarded) is now captured and fanned out on a per-group
+**control topic**; every member applies it via `process_incoming` and advances to
+the same epoch — so a multi-member join converges and a non-admitting member can
+decrypt the new joiner's ops. A design+adversarial-review pass (verified against
+the openmls 0.8.1 source) showed the "safe by construction" claim was only *assumed*,
+so safety is **enforced**: only the **designated committer** (lowest leaf index) may
+admit, which prevents concurrent commits from forking the epoch chain. Tested with a
+3-member join + a non-committer-admit rejection.
+
+**Deferred, with the data model already in place (no rewrite):**
+- **6d-1b** — commit-catch-up recovery (a member that misses a commit needs peer
+  discovery + ordered missed-commit replay; the review showed live gossip alone
+  isn't enough and there's no DeviceId→PeerId map yet) and the bounded past-epoch
+  channel-key window for live ops crossing an epoch boundary.
+- **6d-2** — concurrent-commit fork resolution + the full RFC 9420 proposal/commit
+  split (designated committer packs replicated proposals; deterministic lowest-hash
+  tie-break; openmls `clear_pending_commit` rollback / `fork_resolution` heal),
+  plus the replicated InviteLedger (single-use across members) and joiner-bound
+  nonces. Until then network admission is single-committer only.
+- Per-peer rate limiting / off-actor offload of join work.
 
 ## 5. Roadmap (test-gated, block by block)
 

@@ -15,6 +15,18 @@ use crate::device::MlsDevice;
 use crate::invite::{membership_from_key_package, InviteError, InviteLedger, InviteToken};
 use crate::{proto, MlsError};
 
+/// The result of adding a member: the joiner's Welcome, the Commit to fan out to
+/// existing members, and the epoch the commit was built at.
+#[derive(Debug, Clone)]
+pub struct AddOutcome {
+    /// Serialized Welcome for the joining device.
+    pub welcome: Vec<u8>,
+    /// Serialized Commit message for existing members to apply.
+    pub commit: Vec<u8>,
+    /// The epoch the commit was built at (advances the group to `commit_epoch + 1`).
+    pub commit_epoch: u64,
+}
+
 /// The result of processing an inbound MLS message.
 #[derive(Debug)]
 pub enum Incoming {
@@ -60,21 +72,46 @@ impl ServerGroup {
         Ok(Self { group })
     }
 
-    /// Add `key_package`'s device and merge the commit. Returns the serialized
-    /// Welcome to deliver to the joiner.
+    /// Add `key_package`'s device and merge the commit. Returns the [`AddOutcome`]:
+    /// the Welcome for the joiner, **and** the serialized Commit (which previously
+    /// was discarded) so it can be fanned out to existing members, plus the epoch
+    /// the commit was built at (it advances the group from `commit_epoch` to
+    /// `commit_epoch + 1`).
     pub fn add_member(
         &mut self,
         device: &MlsDevice,
         key_package: KeyPackage,
-    ) -> Result<Vec<u8>, MlsError> {
-        let (_commit, welcome, _group_info) = self
+    ) -> Result<AddOutcome, MlsError> {
+        let (commit, welcome, _group_info) = self
             .group
             .add_members(device.provider(), device.signer(), &[key_package])
             .map_err(proto)?;
+        let commit_epoch = self.epoch();
         self.group
             .merge_pending_commit(device.provider())
             .map_err(proto)?;
-        welcome.tls_serialize_detached().map_err(proto)
+        Ok(AddOutcome {
+            welcome: welcome.tls_serialize_detached().map_err(proto)?,
+            commit: commit.tls_serialize_detached().map_err(proto)?,
+            commit_epoch,
+        })
+    }
+
+    /// The device id of the **designated committer** — the member with the lowest
+    /// leaf index (the only roster value every member derives identically from the
+    /// ratchet tree). In the single-committer model this member is the only one
+    /// permitted to produce commits, which prevents concurrent commits from
+    /// forking the epoch chain.
+    pub fn designated_committer(&self) -> Option<DeviceId> {
+        self.group
+            .members()
+            .min_by_key(|m| m.index.u32())
+            .map(|m| DeviceId::from_public_key_bytes(&m.signature_key))
+    }
+
+    /// Whether `device` is the designated committer.
+    pub fn is_designated_committer(&self, device: &MlsDevice) -> bool {
+        self.designated_committer() == Some(device.device_id())
     }
 
     /// Mint a single-use, device-bound invite to this group, signed by `inviter`
@@ -111,7 +148,7 @@ impl ServerGroup {
     /// targets this group; the inviter is a current member and signed the token;
     /// the invite is fresh (not expired/revoked/used); and the joiner's KeyPackage
     /// credential is bound to exactly `(this group, invite_nonce)`. On success the
-    /// nonce is consumed and the serialized Welcome is returned.
+    /// nonce is consumed and the [`AddOutcome`] (Welcome + Commit) is returned.
     pub fn add_member_via_invite(
         &mut self,
         inviter: &MlsDevice,
@@ -119,7 +156,7 @@ impl ServerGroup {
         token: &InviteToken,
         ledger: &mut InviteLedger,
         now_ms: u64,
-    ) -> Result<Vec<u8>, MlsError> {
+    ) -> Result<AddOutcome, MlsError> {
         let group_id = self.group_id();
         if token.group_id != group_id {
             return Err(InviteError::WrongGroup.into());
@@ -145,9 +182,9 @@ impl ServerGroup {
             return Err(InviteError::CredentialMismatch.into());
         }
 
-        let welcome = self.add_member(inviter, key_package)?;
+        let outcome = self.add_member(inviter, key_package)?;
         ledger.consume(token.invite_nonce)?;
-        Ok(welcome)
+        Ok(outcome)
     }
 
     /// The raw signature public key of a current member, by device id.

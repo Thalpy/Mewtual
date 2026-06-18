@@ -35,7 +35,10 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 6a | Mesh transport: libp2p `MeshService` over the seam (gossipsub + req/resp) | done |
 | 6b | Channel sync over the mesh (live gossip + catch-up); + diagnostics (tracing) | done |
 | 6c | Network join handshake (inviter-authenticated, single-use over the wire) | done |
-| 6d | Relay v2 + DCUtR, rendezvous, eclipse-resistance, proposal/commit linearization | planned |
+| 6d-1a | Membership commit propagation (single designated committer) — multi-member join converges | done |
+| 6d-1b | Commit-catch-up recovery (peer discovery, missed-commit replay) + cross-epoch op window | planned |
+| 6d-2 | Concurrent-commit fork resolution + full proposal/commit linearization | planned |
+| 6e | Relay v2 + DCUtR, rendezvous, eclipse-resistance | planned |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |

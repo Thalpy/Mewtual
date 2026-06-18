@@ -44,7 +44,8 @@ fn pair() -> (
         .unwrap();
     let welcome = alice_group
         .add_member_via_invite(&alice, kp, &token, &mut ledger, 1_000)
-        .unwrap();
+        .unwrap()
+        .welcome;
     let bob_group = ServerGroup::join(&bob, &welcome).unwrap();
 
     let hub = Hub::new();
@@ -232,6 +233,125 @@ async fn spent_invite_cannot_be_reused_for_a_second_join() {
         asy.run_once(),
     );
     assert!(matches!(second, Err(catcoms_sync::SyncError::JoinRejected)));
+}
+
+#[tokio::test]
+async fn multi_member_join_propagates_to_existing_members() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+
+    // Alice founds the group (she is leaf 0 = the designated committer).
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.subscribe_control().await.unwrap();
+
+    // Bob joins via Alice.
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (bob_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_joined.unwrap(),
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+    bsy.subscribe_control().await.unwrap();
+    assert_eq!(asy.epoch(), 1);
+    assert_eq!(bsy.epoch(), 1);
+
+    // Carol joins via Alice. Alice broadcasts the Add commit on the control topic.
+    let carol = MlsDevice::generate().unwrap();
+    let invite_c = asy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &invite_c),
+        asy.run_once(),
+    );
+    let mut csy = ChannelSync::new(
+        carol_net,
+        carol_joined.unwrap(),
+        carol,
+        rng(3),
+        Box::new(ManualClock::new(1_000)),
+    );
+    csy.subscribe_control().await.unwrap();
+    assert_eq!(asy.epoch(), 2);
+    assert_eq!(csy.epoch(), 2);
+
+    // Bob — who admitted no one — receives the broadcast commit and advances.
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(bsy.epoch(), 2, "Bob must learn of Carol's join");
+
+    // All three at epoch 2: Carol posts and Bob can decrypt it.
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    csy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    csy.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "hi", "from carol")
+    })
+    .await
+    .unwrap();
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(get_str(&bsy, "hi").as_deref(), Some("from carol"));
+}
+
+#[tokio::test]
+async fn a_non_committer_cannot_admit() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+
+    // Bob joins (member, leaf 1 — NOT the designated committer).
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_peer = PeerId::from_u64(2);
+    let bob_net = hub.join(bob_peer);
+    let (bob_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_joined.unwrap(),
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+
+    // Bob invites Carol and tries to admit her — refused, Bob is not the committer.
+    let invite_c = bsy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
+    let carol = MlsDevice::generate().unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, bob_peer, &carol, &invite_c),
+        bsy.run_once(),
+    );
+    assert!(matches!(
+        carol_joined,
+        Err(catcoms_sync::SyncError::JoinRejected)
+    ));
 }
 
 #[tokio::test]

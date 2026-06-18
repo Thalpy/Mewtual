@@ -14,7 +14,7 @@ fn two_member_group() -> (MlsDevice, ServerGroup, MlsDevice, ServerGroup) {
 
     let mut alice_group = ServerGroup::create(&alice).unwrap();
     let bob_kp = bob.key_package().unwrap();
-    let welcome = alice_group.add_member(&alice, bob_kp).unwrap();
+    let welcome = alice_group.add_member(&alice, bob_kp).unwrap().welcome;
     let bob_group = ServerGroup::join(&bob, &welcome).unwrap();
 
     (alice, alice_group, bob, bob_group)

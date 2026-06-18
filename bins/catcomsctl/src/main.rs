@@ -133,7 +133,9 @@ async fn run_demo() -> Result<(), Box<dyn Error>> {
     let parsed = InviteToken::decode(&hex::decode(&invite_blob)?)?;
     let bob_kp = bob.key_package_for_invite(&parsed.group_id, parsed.invite_nonce)?;
     let mut ledger = InviteLedger::new();
-    let welcome = alice_group.add_member_via_invite(&alice, bob_kp, &parsed, &mut ledger, now)?;
+    let welcome = alice_group
+        .add_member_via_invite(&alice, bob_kp, &parsed, &mut ledger, now)?
+        .welcome;
     let bob_group = ServerGroup::join(&bob, &welcome)?;
     println!(
         "[3] Bob joined via invite (members {}, epoch {})",

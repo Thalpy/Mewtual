@@ -31,7 +31,8 @@ fn invite_admits_a_device_and_consumes_the_nonce() {
 
     let welcome = group
         .add_member_via_invite(&alice, bob_kp, &token, &mut ledger, NOW)
-        .unwrap();
+        .unwrap()
+        .welcome;
     let bob_group = ServerGroup::join(&bob, &welcome).unwrap();
 
     assert_eq!(group.member_count(), 2);

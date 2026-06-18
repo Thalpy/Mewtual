@@ -103,6 +103,56 @@ fn channel_topic(group_id: &[u8], doc_type: DocType, doc_id: u128) -> Topic {
     Topic::new(h.finalize().as_bytes().to_vec())
 }
 
+/// The per-group **control** topic carrying membership commits. Stable per group
+/// (independent of epoch), so it survives the epoch bumps a membership change
+/// causes.
+fn control_topic(group_id: &[u8]) -> Topic {
+    let mut h = blake3::Hasher::new();
+    h.update(b"catcoms/control/v1");
+    h.update(group_id);
+    Topic::new(h.finalize().as_bytes().to_vec())
+}
+
+/// A membership commit fanned out on the control topic so existing members apply
+/// it and advance to the same epoch. `commit_epoch` is the epoch the commit was
+/// built at (it advances the group to `commit_epoch + 1`) — the linearization key.
+struct CommitRecord {
+    group_id: Vec<u8>,
+    commit_epoch: u64,
+    committer_device: [u8; 32],
+    mls_commit: Vec<u8>,
+}
+
+impl CommitRecord {
+    fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_bytes(&self.group_id).expect("group id fits");
+        e.put_u64(self.commit_epoch);
+        e.put_bytes(&self.committer_device).expect("32 fits");
+        e.put_bytes(&self.mls_commit).expect("commit fits");
+        e.finish()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, SyncError> {
+        let mut d = Decoder::new(bytes);
+        let group_id = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+        let commit_epoch = d.get_u64().map_err(|_| SyncError::Malformed)?;
+        let committer_device: [u8; 32] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        let mls_commit = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+        d.finish().map_err(|_| SyncError::Malformed)?;
+        Ok(Self {
+            group_id,
+            commit_epoch,
+            committer_device,
+            mls_commit,
+        })
+    }
+}
+
 fn encode_catchup_req(doc_type: DocType, doc_id: u128) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_u16(doc_type.tag());
@@ -167,6 +217,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     clock: Box<dyn Clock + Send>,
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
+    control_topic: Topic,
+    /// Membership commits queued for the control topic (drained in async run_once).
+    outbox: Vec<(Topic, Vec<u8>)>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
@@ -179,6 +232,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         rng: R,
         clock: Box<dyn Clock + Send>,
     ) -> Self {
+        let control_topic = control_topic(&group.group_id());
         Self {
             transport,
             group,
@@ -187,7 +241,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             clock,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
+            control_topic,
+            outbox: Vec::new(),
         }
+    }
+
+    /// Subscribe to this group's control topic so the member receives membership
+    /// commits. Call once after construction (and after joining).
+    pub async fn subscribe_control(&mut self) -> Result<(), SyncError> {
+        self.transport.subscribe(self.control_topic.clone()).await?;
+        Ok(())
+    }
+
+    /// The current epoch (for tests / diagnostics).
+    pub fn epoch(&self) -> u64 {
+        self.group.epoch()
     }
 
     /// Mint a single-use, device-bound invite to this server (the inviting device
@@ -236,24 +304,83 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(())
     }
 
-    /// Process one inbound transport event (gossiped op or catch-up request).
-    /// Returns `false` when the transport has closed.
+    /// Process one inbound transport event (gossiped op, membership commit, or a
+    /// catch-up / join request). Returns `false` when the transport has closed.
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
+        // Flush any queued membership-commit broadcasts (retries previous failures).
+        self.drain_outbox().await;
+
         let event = self.transport.next_event().await;
         match event {
             None => Ok(false),
-            Some(TransportEvent::Gossip { data, .. }) => {
-                self.on_gossip(&data);
+            Some(TransportEvent::Gossip { topic, data, .. }) => {
+                if topic == self.control_topic {
+                    self.on_control(&data);
+                } else {
+                    self.on_gossip(&data);
+                }
                 Ok(true)
             }
             Some(TransportEvent::Request {
                 data, responder, ..
             }) => {
                 let response = self.handle_request(&data);
+                // Broadcast any membership commit produced by serving the request
+                // BEFORE telling the joiner it succeeded, so a crash leaves the
+                // joiner to retry rather than the group silently missing the Add.
+                self.drain_outbox().await;
                 responder.respond(Bytes::from(response));
                 Ok(true)
             }
             Some(_) => Ok(true),
+        }
+    }
+
+    /// Publish all queued control-topic broadcasts; re-queue any that fail.
+    async fn drain_outbox(&mut self) {
+        let pending = std::mem::take(&mut self.outbox);
+        for (topic, bytes) in pending {
+            if self
+                .transport
+                .publish(topic.clone(), Bytes::from(bytes.clone()))
+                .await
+                .is_err()
+            {
+                self.outbox.push((topic, bytes));
+            }
+        }
+    }
+
+    /// Apply an inbound membership commit from the control topic. In the
+    /// single-committer model, commits arrive in epoch order under reliable
+    /// delivery; an out-of-order commit is logged and dropped (the buffering +
+    /// commit-log catch-up recovery net is a later block).
+    fn on_control(&mut self, data: &[u8]) {
+        let record = match CommitRecord::decode(data) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "dropping malformed control message");
+                return;
+            }
+        };
+        if record.group_id != self.group.group_id() {
+            return;
+        }
+        let current = self.group.epoch();
+        if record.commit_epoch != current {
+            tracing::warn!(
+                commit_epoch = record.commit_epoch,
+                current,
+                "out-of-order membership commit dropped (recovery net is a later block)"
+            );
+            return;
+        }
+        match self
+            .group
+            .process_incoming(&self.device, &record.mls_commit)
+        {
+            Ok(_) => tracing::info!(epoch = self.group.epoch(), "applied membership commit"),
+            Err(e) => tracing::warn!(error = %e, "failed to apply membership commit"),
         }
     }
 
@@ -365,6 +492,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("join request for an invite this device did not issue");
             return None;
         }
+        // Single-committer model: only the designated committer (lowest leaf
+        // index) may produce commits, so concurrent admits cannot fork the epoch
+        // chain. (Routing admissions to the committer is a later block.)
+        if !self.group.is_designated_committer(&self.device) {
+            tracing::warn!("not the designated committer; cannot admit in this block");
+            return None;
+        }
         if !invite.verify_self() {
             tracing::warn!("join request with an inauthentic invite");
             return None;
@@ -376,26 +510,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
         // --- expensive: validate the KeyPackage, then admit ---
         let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
-        let welcome = self
+        let outcome = self
             .group
             .add_member_via_invite(&self.device, key_package, &invite, &mut self.ledger, now)
             .ok()?;
 
-        if self.group.member_count() > 2 {
-            // The Add commit is merged locally but not yet fanned out to the other
-            // existing members (proposal/commit linearization is a later block),
-            // so they cannot yet decrypt the new member's traffic.
-            tracing::warn!(
-                members = self.group.member_count(),
-                "network join into a multi-member group: Add commit not yet propagated (see 6c)"
-            );
-        }
+        // Queue the Add commit for fan-out to existing members on the control
+        // topic (run_once publishes it; this member already merged it locally).
+        let record = CommitRecord {
+            group_id: self.group.group_id(),
+            commit_epoch: outcome.commit_epoch,
+            committer_device: *self.device.device_id().as_bytes(),
+            mls_commit: outcome.commit,
+        };
+        self.outbox
+            .push((self.control_topic.clone(), record.encode()));
 
         // Sign the Welcome so the joiner can authenticate it came from the inviter.
-        let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &welcome);
+        let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &outcome.welcome);
         let signature = self.device.sign(&transcript).ok()?;
         tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
-        Some(encode_join_resp(&welcome, &signature))
+        Some(encode_join_resp(&outcome.welcome, &signature))
     }
 }
 
@@ -491,7 +626,7 @@ mod tests {
         let bob_kp = bob
             .key_package_for_invite(&invite.group_id, invite.invite_nonce)
             .unwrap();
-        let welcome = mallory_group.add_member(&mallory, bob_kp).unwrap();
+        let welcome = mallory_group.add_member(&mallory, bob_kp).unwrap().welcome;
         let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &welcome);
         let mallory_sig = mallory.sign(&transcript).unwrap();
 

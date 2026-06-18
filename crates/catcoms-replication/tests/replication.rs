@@ -34,7 +34,8 @@ fn two_members() -> (MlsDevice, ServerGroup, MlsDevice, ServerGroup) {
         .unwrap();
     let welcome = ag
         .add_member_via_invite(&alice, kp, &token, &mut ledger, 1_000)
-        .unwrap();
+        .unwrap()
+        .welcome;
     let bg = ServerGroup::join(&bob, &welcome).unwrap();
     (alice, ag, bob, bg)
 }
@@ -136,7 +137,8 @@ fn late_member_catches_up_without_old_epoch_keys() {
         .unwrap();
     let welcome = ag
         .add_member_via_invite(&alice, kp, &token, &mut ledger, 1_000)
-        .unwrap();
+        .unwrap()
+        .welcome;
     let bg = ServerGroup::join(&bob, &welcome).unwrap();
     assert_eq!(ag.epoch(), 1);
 
