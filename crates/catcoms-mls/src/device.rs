@@ -87,6 +87,18 @@ impl MlsDevice {
         Ok(bundle.key_package().clone())
     }
 
+    /// This device's MLS leaf signature public key (raw bytes). Other members
+    /// verify this device's signatures against it.
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        self.signer.public().to_vec()
+    }
+
+    /// Sign arbitrary bytes with this device's MLS leaf key (e.g. inner-signing a
+    /// replicated CRDT op so authorship survives transport re-encryption).
+    pub fn sign(&self, payload: &[u8]) -> Result<[u8; 64], MlsError> {
+        self.sign_raw(payload)
+    }
+
     /// Sign raw bytes with this device's MLS leaf key (used for invite tokens).
     pub(crate) fn sign_raw(&self, payload: &[u8]) -> Result<[u8; 64], MlsError> {
         use openmls_traits::signatures::Signer;

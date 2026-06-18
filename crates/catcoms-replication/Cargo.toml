@@ -1,0 +1,22 @@
+[package]
+name = "catcoms-replication"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-wire = { path = "../catcoms-wire" }
+catcoms-crypto = { path = "../catcoms-crypto" }
+catcoms-mls = { path = "../catcoms-mls" }
+catcoms-rt = { path = "../catcoms-rt" }
+thiserror.workspace = true
+automerge = "0.10"
+blake3 = "1"
+
+[dev-dependencies]
+rand_chacha = "0.3"
+rand_core = "0.6"
+
+[lints]
+workspace = true

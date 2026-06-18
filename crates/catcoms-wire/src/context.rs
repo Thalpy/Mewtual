@@ -42,6 +42,20 @@ impl DocType {
     pub fn tag(self) -> u16 {
         self as u16
     }
+
+    /// Recover a document type from its stable tag.
+    pub fn from_tag(tag: u16) -> Option<Self> {
+        Some(match tag {
+            1 => DocType::Channel,
+            2 => DocType::Wiki,
+            3 => DocType::Status,
+            4 => DocType::Calendar,
+            5 => DocType::InviteLedger,
+            6 => DocType::MemberRoles,
+            7 => DocType::FileIndex,
+            _ => return None,
+        })
+    }
 }
 
 /// Low-level, injective context encoding: `u16` tag ‖ `u128` id (18 bytes,
