@@ -95,9 +95,13 @@ pub struct SyncConfig {
     /// Cap on queued control-topic broadcasts awaiting send.
     pub max_outbox: usize,
     /// How many leaf ranks above the designated committer may still author a
-    /// membership commit (0 = strict single-committer; 1 admits one backup, needed
-    /// once the proposal/commit split and fork resolution land).
+    /// membership commit (0 = strict single-committer, the synchronous fast path;
+    /// ≥1 enables concurrent committers and the staged fork-resolution path).
     pub max_committer_rank: u32,
+    /// How long (ms, on the injected clock) a node collects competing same-epoch
+    /// commits before adopting the lowest-`commit_id` winner — the fork-resolution
+    /// contest window. Only used when `max_committer_rank >= 1`.
+    pub stage_decision_window_ms: u64,
 }
 
 impl Default for SyncConfig {
@@ -111,8 +115,28 @@ impl Default for SyncConfig {
             max_catchup_queue: 256,
             max_outbox: 256,
             max_committer_rank: 0,
+            stage_decision_window_ms: 250,
         }
     }
+}
+
+/// A fork-resolution contest for the current epoch: a node collects competing
+/// same-base candidate commits during a bounded window, then adopts the lowest
+/// `commit_id`. Built only when `max_committer_rank >= 1`.
+#[derive(Debug)]
+struct PendingResolve {
+    /// The contested epoch (our current epoch until it resolves). Candidates must
+    /// share our epoch-state fingerprint (a same-base fork); a candidate built on a
+    /// different base is a deeper divergence and is refused in `contest_commit`.
+    epoch: u64,
+    /// The lowest-`commit_id` candidate seen so far (the provisional winner).
+    best: CommitRecord,
+    /// When the window closes (on the injected clock).
+    deadline_ms: u64,
+    /// `commit_id` of *our own* staged commit if we are a participant — so on
+    /// resolution we know whether we won (merge our pending commit) or lost (abort
+    /// it and apply the winner). `None` for a pure applier.
+    mine: Option<[u8; 32]>,
 }
 
 /// A snapshot of a [`ChannelSync`]'s internal counters and gauges. Returned by
@@ -143,6 +167,12 @@ pub struct SyncStats {
     pub doc_catchups_requested: u64,
     /// Inbound requests refused (unauthenticated / not a current member / stale).
     pub requests_rejected: u64,
+    /// Fork contests resolved (a winner adopted by tie-break).
+    pub forks_resolved: u64,
+    /// Our own staged commit lost a fork tie-break and was aborted.
+    pub forks_lost: u64,
+    /// Candidate commits refused as a too-deep fork (base-fingerprint mismatch).
+    pub forks_too_deep: u64,
     /// Gauge: past-epoch channel keys currently retained.
     pub past_keys_retained: usize,
     /// Gauge: membership commits currently buffered out of order.
@@ -342,6 +372,20 @@ fn commit_auth_transcript(
 }
 
 impl CommitRecord {
+    /// A deterministic, content-addressed id used as the fork tie-break key
+    /// (lowest wins). Built from the bytes every recipient already holds, with no
+    /// clock or receive-order input, so all members compute the same value.
+    fn commit_id(&self) -> [u8; 32] {
+        let mut h = blake3::Hasher::new();
+        h.update(b"catcoms/commit-id/v1");
+        h.update(&self.group_id);
+        h.update(&self.commit_epoch.to_be_bytes());
+        h.update(&self.base_authenticator);
+        h.update(&self.committer_device);
+        h.update(&self.mls_commit);
+        *h.finalize().as_bytes()
+    }
+
     /// The bytes the committer signs / a verifier re-derives for this record.
     fn auth_transcript(&self) -> Vec<u8> {
         commit_auth_transcript(
@@ -540,6 +584,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// skipped when choosing the next catch-up source so one bad/stale peer can't
     /// dead-end recovery. Cleared once a catch-up makes progress.
     failed_catchup_peers: VecDeque<PeerId>,
+    /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
+    pending: Option<PendingResolve>,
     /// Diagnostic counters (see [`SyncStats`]).
     stats: SyncStats,
 }
@@ -572,6 +618,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             known_peers: VecDeque::new(),
             catchup_queue: Vec::new(),
             failed_catchup_peers: VecDeque::new(),
+            pending: None,
             stats: SyncStats::default(),
         }
     }
@@ -671,6 +718,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // A tick that spent its turn fetching catch-up yields here instead of
         // blocking on a fresh event — the recovery *was* this tick's work.
         if self.drain_catchup_queue().await {
+            return Ok(true);
+        }
+        // Resolve a fork-resolution contest whose window has closed (local work).
+        if self.resolve_pending_if_expired() {
             return Ok(true);
         }
 
@@ -968,6 +1019,140 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Stage and broadcast a membership Remove as a fork-resolvable commit, then
+    /// resolve it after the contest window. Requires `max_committer_rank >= 1`
+    /// (concurrent committers enabled); with the default strict single-committer
+    /// config, remove via the local MLS path instead. Errors if a commit is
+    /// already staged here (one pending commit at a time).
+    pub async fn remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.pending.is_some() {
+            tracing::warn!("a commit is already staged here; remove deferred");
+            return Err(SyncError::JoinRejected);
+        }
+        let staged = self.group.stage_remove(&self.device, target)?;
+        let record = self.sign_staged_record(&staged);
+        let mine = record.commit_id();
+        self.pending = Some(PendingResolve {
+            epoch: staged.commit_epoch,
+            best: record.clone(),
+            deadline_ms: self.clock.now_ms() + self.config.stage_decision_window_ms,
+            mine: Some(mine),
+        });
+        let mut framed = vec![CTRL_COMMIT];
+        framed.extend_from_slice(&record.encode());
+        self.outbox.push((self.control_topic.clone(), framed));
+        self.drain_outbox().await;
+        Ok(())
+    }
+
+    /// Build the signed [`CommitRecord`] for one of our own staged commits.
+    fn sign_staged_record(&self, staged: &catcoms_mls::StagedOutcome) -> CommitRecord {
+        let committer_device = *self.device.device_id().as_bytes();
+        let auth = commit_auth_transcript(
+            &self.group.group_id(),
+            staged.commit_epoch,
+            &staged.base_authenticator,
+            &committer_device,
+            &staged.commit,
+        );
+        let committer_sig = self.device.sign(&auth).expect("sign own commit");
+        CommitRecord {
+            group_id: self.group.group_id(),
+            commit_epoch: staged.commit_epoch,
+            committer_device,
+            mls_commit: staged.commit.clone(),
+            base_authenticator: staged.base_authenticator,
+            committer_sig,
+        }
+    }
+
+    /// Fold an inbound commit into the fork-resolution contest for the current
+    /// epoch: authorize it, reject a different-base (too-deep) candidate, else
+    /// track the lowest `commit_id` seen. Nothing is applied until the window
+    /// closes (see [`ChannelSync::finalize_contest`]).
+    fn contest_commit(&mut self, record: CommitRecord) {
+        if !self.authorize_committer(&record) {
+            return;
+        }
+        let our_base = self.group.epoch_authenticator_id();
+        if record.base_authenticator != our_base {
+            tracing::warn!(
+                commit_epoch = record.commit_epoch,
+                "candidate built on a different base (fork too deep); refusing to tie-break"
+            );
+            self.stats.forks_too_deep += 1;
+            return;
+        }
+        let current = self.group.epoch();
+        match &mut self.pending {
+            Some(p) if p.epoch == current => {
+                if record.commit_id() < p.best.commit_id() {
+                    tracing::debug!("lower-id competitor adopted as provisional fork winner");
+                    p.best = record;
+                }
+            }
+            _ => {
+                // First candidate this epoch (we are a pure applier): open a contest.
+                let deadline = self.clock.now_ms() + self.config.stage_decision_window_ms;
+                self.pending = Some(PendingResolve {
+                    epoch: current,
+                    best: record,
+                    deadline_ms: deadline,
+                    mine: None,
+                });
+            }
+        }
+    }
+
+    /// If a fork-resolution contest's window has closed, adopt the lowest-`commit_id`
+    /// winner: the winning committer merges its staged commit; everyone else (and a
+    /// losing committer, after aborting its own) applies the winner. Returns whether
+    /// a contest was resolved this call.
+    fn resolve_pending_if_expired(&mut self) -> bool {
+        let (epoch, deadline) = match &self.pending {
+            Some(p) => (p.epoch, p.deadline_ms),
+            None => return false,
+        };
+        if epoch != self.group.epoch() {
+            // A stale contest from an epoch we have since left: just drop it.
+            self.pending = None;
+            return false;
+        }
+        if self.clock.now_ms() < deadline {
+            return false; // window still open
+        }
+        let p = self.pending.take().expect("checked some");
+        let won = p.mine == Some(p.best.commit_id());
+        self.snapshot_epoch_keys();
+        let advanced = if p.mine.is_some() {
+            if won {
+                self.group.merge_staged_self(&self.device).is_ok()
+            } else {
+                // We lost: roll our own staged commit back, then apply the winner.
+                self.stats.forks_lost += 1;
+                let _ = self.group.abort_staged(&self.device);
+                self.group
+                    .process_incoming(&self.device, &p.best.mls_commit)
+                    .is_ok()
+            }
+        } else {
+            self.group
+                .process_incoming(&self.device, &p.best.mls_commit)
+                .is_ok()
+        };
+        if advanced {
+            self.evict_past_keys();
+            self.stats.commits_applied += 1;
+            self.stats.forks_resolved += 1;
+            tracing::info!(epoch = self.group.epoch(), won, "resolved membership fork");
+            self.record_commit(p.best);
+            self.drain_pending_commits();
+        } else {
+            tracing::warn!("fork resolution failed to advance the epoch");
+        }
+        true
+    }
+
     /// Apply a commit that is exactly the next one (`commit_epoch == current`),
     /// capturing the soon-to-be-superseded epoch's keys first. Returns whether it
     /// applied.
@@ -1085,8 +1270,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 );
             }
             Ordering::Equal => {
-                if self.apply_commit_in_order(&record) {
-                    self.drain_pending_commits();
+                if self.config.max_committer_rank == 0 {
+                    // Single-committer fast path: no concurrent committers exist, so
+                    // no fork is possible — apply immediately (6d-1 behavior).
+                    if self.apply_commit_in_order(&record) {
+                        self.drain_pending_commits();
+                    }
+                } else {
+                    // Concurrent committers are allowed: run a fork-resolution
+                    // contest (collect competing same-base commits, adopt the
+                    // lowest commit_id when the window closes).
+                    self.contest_commit(record);
                 }
             }
             Ordering::Greater => self.buffer_future_commit(record),
@@ -1210,6 +1404,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// This member's transport peer id.
     pub fn local_peer(&self) -> catcoms_rt::PeerId {
         self.transport.local_peer()
+    }
+
+    /// Whether `device` is a current member of this group (for tests/diagnostics).
+    pub fn contains_member(&self, device: &DeviceId) -> bool {
+        self.group.contains_device(device)
+    }
+
+    /// The current member count (for tests/diagnostics).
+    pub fn member_count(&self) -> usize {
+        self.group.member_count()
     }
 
     fn on_gossip(&mut self, data: &[u8]) {

@@ -681,6 +681,177 @@ async fn out_of_order_commit_auto_recovers_through_run_once() {
     assert!(bsy.stats().commits_applied >= 2);
 }
 
+/// 6d-2a: two committers concurrently produce a membership commit at the same
+/// epoch from the same base (a fork). With `max_committer_rank >= 1` enabled, both
+/// converge deterministically on the lowest-`commit_id` winner; the loser aborts
+/// its own staged commit and adopts the winner. No epoch skip, no divergence.
+#[tokio::test]
+async fn concurrent_removes_resolve_to_a_single_winner() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let window = 1_000u64;
+
+    // Alice founds; admits Bob (epoch 1) then Carol (epoch 2). Alice and Bob both
+    // run sync nodes and subscribe to the control topic.
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(clock.clone()),
+    );
+    asy.subscribe_control().await.unwrap();
+
+    let bob = MlsDevice::generate().unwrap();
+    let inv_b = asy.mint_invite([1u8; 16], u64::MAX, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (bob_g, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &inv_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_g.unwrap(),
+        bob,
+        rng(2),
+        Box::new(clock.clone()),
+    );
+    bsy.subscribe_control().await.unwrap();
+
+    let carol = MlsDevice::generate().unwrap();
+    let inv_c = asy.mint_invite([2u8; 16], u64::MAX, vec![]).unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_g, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &inv_c),
+        asy.run_once(),
+    );
+    carol_g.unwrap();
+    assert!(bsy.run_once().await.unwrap()); // Bob applies Carol's join commit
+    assert_eq!(asy.epoch(), 2);
+    assert_eq!(bsy.epoch(), 2);
+    assert!(asy.contains_member(&carol.device_id()));
+
+    // Enable concurrent committers (rank 1) on both, with a real contest window.
+    let cfg = catcoms_sync::SyncConfig {
+        max_committer_rank: 1,
+        stage_decision_window_ms: window,
+        ..Default::default()
+    };
+    asy.set_config(cfg);
+    bsy.set_config(cfg);
+
+    // Alice (leaf 0) and Bob (leaf 1) BOTH remove Carol at epoch 2 — a same-base
+    // fork. Each stages and broadcasts its competing commit.
+    asy.remove(&carol.device_id()).await.unwrap();
+    bsy.remove(&carol.device_id()).await.unwrap();
+    assert_eq!(asy.stats().pending_commits, 0); // (this is the recovery buffer, not the contest)
+
+    // Each ingests the other's competing commit; nothing applies while the window
+    // is open.
+    assert!(asy.run_once().await.unwrap());
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(asy.epoch(), 2, "no resolution before the window closes");
+    assert_eq!(bsy.epoch(), 2);
+
+    // Close the contest window; both resolve to the lowest-commit_id winner.
+    clock.advance_ms(window);
+    assert!(asy.run_once().await.unwrap());
+    assert!(bsy.run_once().await.unwrap());
+
+    assert_eq!(asy.epoch(), 3, "fork resolved with a single epoch advance");
+    assert_eq!(bsy.epoch(), 3, "Bob converged to the same epoch");
+    assert!(
+        !asy.contains_member(&carol.device_id()),
+        "Carol was removed"
+    );
+    assert!(!bsy.contains_member(&carol.device_id()));
+    assert_eq!(asy.member_count(), bsy.member_count(), "rosters converged");
+    assert_eq!(asy.stats().forks_resolved, 1);
+    assert_eq!(bsy.stats().forks_resolved, 1);
+    assert_eq!(
+        asy.stats().forks_lost + bsy.stats().forks_lost,
+        1,
+        "exactly one committer lost the fork and aborted"
+    );
+}
+
+/// 6d-2a: with concurrent committers enabled but no actual contention, a staged
+/// remove still resolves correctly after the window — the committer merges its own
+/// commit and an applier adopts it. (Single-candidate contest = the common case.)
+#[tokio::test]
+async fn uncontested_staged_remove_merges_after_the_window() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let window = 500u64;
+
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(clock.clone()),
+    );
+    asy.subscribe_control().await.unwrap();
+
+    let bob = MlsDevice::generate().unwrap();
+    let inv_b = asy.mint_invite([1u8; 16], u64::MAX, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (bob_g, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &inv_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_g.unwrap(),
+        bob,
+        rng(2),
+        Box::new(clock.clone()),
+    );
+    bsy.subscribe_control().await.unwrap();
+
+    let carol = MlsDevice::generate().unwrap();
+    let inv_c = asy.mint_invite([2u8; 16], u64::MAX, vec![]).unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_g, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &inv_c),
+        asy.run_once(),
+    );
+    carol_g.unwrap();
+    assert!(bsy.run_once().await.unwrap());
+
+    let cfg = catcoms_sync::SyncConfig {
+        max_committer_rank: 1,
+        stage_decision_window_ms: window,
+        ..Default::default()
+    };
+    asy.set_config(cfg);
+    bsy.set_config(cfg);
+
+    // Only Alice removes Carol; Bob just ingests the broadcast.
+    asy.remove(&carol.device_id()).await.unwrap();
+    assert!(bsy.run_once().await.unwrap()); // Bob opens a single-candidate contest
+    assert_eq!(asy.epoch(), 2);
+    assert_eq!(bsy.epoch(), 2);
+
+    clock.advance_ms(window);
+    assert!(asy.run_once().await.unwrap()); // Alice merges her own staged commit
+    assert!(bsy.run_once().await.unwrap()); // Bob adopts it
+    assert_eq!(asy.epoch(), 3);
+    assert_eq!(bsy.epoch(), 3);
+    assert!(!asy.contains_member(&carol.device_id()));
+    assert!(!bsy.contains_member(&carol.device_id()));
+    assert_eq!(asy.stats().forks_lost, 0, "uncontested: nobody loses");
+    assert_eq!(bsy.stats().forks_lost, 0);
+}
+
 #[tokio::test]
 async fn catch_up_transfers_history_over_request_response() {
     catcoms_log::init_test();
