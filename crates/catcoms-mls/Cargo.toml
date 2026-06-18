@@ -1,0 +1,19 @@
+[package]
+name = "catcoms-mls"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-wire = { path = "../catcoms-wire" }
+catcoms-crypto = { path = "../catcoms-crypto" }
+thiserror.workspace = true
+openmls = "0.8"
+openmls_rust_crypto = "0.5"
+openmls_basic_credential = "0.5"
+openmls_traits = "0.5"
+tls_codec = { version = "0.4", features = ["derive", "std"] }
+
+[lints]
+workspace = true

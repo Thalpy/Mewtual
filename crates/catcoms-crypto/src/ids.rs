@@ -33,7 +33,14 @@ pub struct DeviceId([u8; 32]);
 impl DeviceId {
     /// Derive the id from the device's Ed25519 verifying key.
     pub fn from_verifying_key(vk: &VerifyingKey) -> Self {
-        Self(content_id(DEVICE_ID_LABEL, vk.as_bytes()))
+        Self::from_public_key_bytes(vk.as_bytes())
+    }
+
+    /// Derive the id directly from raw Ed25519 public-key bytes — e.g. when the
+    /// key comes from another library (openmls hands the MLS leaf signature key
+    /// back as bytes). Same scheme as [`DeviceId::from_verifying_key`].
+    pub fn from_public_key_bytes(public_key: &[u8]) -> Self {
+        Self(content_id(DEVICE_ID_LABEL, public_key))
     }
 
     /// Reconstruct an id from raw bytes (e.g. when decoding the wire).

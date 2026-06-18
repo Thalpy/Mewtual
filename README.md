@@ -28,7 +28,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 |------:|-------|-------|
 | 0 | Workspace, `Clock`/`Transport` seams, canonical wire format, CI | done |
 | 1 | Device identity + unified key hierarchy | done |
-| 2 | MLS group core (local) | planned |
+| 2 | MLS group core (local) | done |
 | 3 | Single-use device-bound invites | planned |
 | 4 | CRDT replication (inner-signed ops, proposal/commit, snapshot catch-up) | planned |
 | 5 | Storage & retention | planned |
@@ -46,6 +46,8 @@ crates/
   catcoms-rt      core runtime seams: Clock + RNG + MeshTransport (+ in-memory test impls)
   catcoms-crypto  identity (content-addressed ids, device-cert chains, revocation,
                   roster), and the unified key hierarchy / tiered key store
+  catcoms-mls     MLS group core (openmls): one group per server, pinned ciphersuite,
+                  ServerGroup lifecycle, and per-channel key derivation
 ```
 More crates (`catcoms-replication`, `catcoms-storage`, `catcoms-net`,
 `catcoms-core`, `catcoms-harness`) land with their phases.
