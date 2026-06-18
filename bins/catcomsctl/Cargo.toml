@@ -1,0 +1,27 @@
+[package]
+name = "catcomsctl"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "catcomsctl"
+path = "src/main.rs"
+
+[dependencies]
+catcoms-log = { path = "../../crates/catcoms-log" }
+catcoms-rt = { path = "../../crates/catcoms-rt" }
+catcoms-wire = { path = "../../crates/catcoms-wire" }
+catcoms-mls = { path = "../../crates/catcoms-mls" }
+catcoms-replication = { path = "../../crates/catcoms-replication" }
+catcoms-storage = { path = "../../crates/catcoms-storage" }
+catcoms-sync = { path = "../../crates/catcoms-sync" }
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+clap = { version = "4", features = ["derive"] }
+automerge = "0.10"
+hex = "0.4"
+
+[lints]
+workspace = true

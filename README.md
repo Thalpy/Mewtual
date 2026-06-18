@@ -59,13 +59,32 @@ crates/
                   request/response over Noise+yamux)
   catcoms-sync    ChannelSync: replicate encrypted CRDT docs over any MeshTransport
                   (blinded topics, live gossip, request/response catch-up)
-  catcoms-log     tracing/diagnostics init for binaries and tests (RUST_LOG)
+  catcoms-log     tracing/diagnostics init for binaries and tests (RUST_LOG) +
+                  toggleable debug-to-file (debug_log_<timestamp>.txt)
+bins/
+  catcomsctl      dev CLI driving the whole stack (`demo`), with --debug file logs
 ```
 More crates (`catcoms-core`, `catcoms-harness`) land with their phases.
 
 Diagnostics use the `tracing` facade; binaries/tests install a subscriber via
 `catcoms_log::init()` / `init_test()`. Filter with e.g.
 `RUST_LOG=catcoms_net=debug,catcoms_sync=trace`.
+
+## Try it
+
+`catcomsctl demo` composes the whole stack in one process: Alice founds a server,
+mints a single-use invite, Bob redeems it and joins the MLS group, both open a
+channel over the mesh, and exchange end-to-end-encrypted chat that converges.
+
+```sh
+cargo run -p catcomsctl -- demo                       # full end-to-end demo
+cargo run -p catcomsctl -- --debug demo               # + writes logs/debug_log_<timestamp>.txt
+cargo run -p catcomsctl -- --debug --log-dir /tmp demo
+```
+
+Diagnostics use the `tracing` facade. `--debug` writes a verbose
+`debug_log_<timestamp>.txt`; console verbosity is set with `RUST_LOG`
+(e.g. `RUST_LOG=catcoms_sync=trace cargo run -p catcomsctl -- demo`).
 
 ## Build & test
 

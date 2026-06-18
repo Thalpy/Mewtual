@@ -10,6 +10,7 @@ members = [
     "crates/catcoms-net",
     "crates/catcoms-log",
     "crates/catcoms-sync",
+    "bins/catcomsctl",
 ]
 # cargo-fuzz crates carry their own (nightly) workspace; keep them out of the main build.
 exclude = [

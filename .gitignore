@@ -2,6 +2,10 @@
 /target
 **/*.rs.bk
 
+# Debug logs written by catcomsctl --debug
+/logs
+**/debug_log_*.txt
+
 # cargo-fuzz artifacts
 crates/*/fuzz/target
 crates/*/fuzz/corpus
