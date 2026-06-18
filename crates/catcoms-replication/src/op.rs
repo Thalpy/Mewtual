@@ -157,4 +157,61 @@ impl SealedOp {
         let plaintext = unseal(channel_key, &self.blob)?;
         SignedOp::decode(&plaintext)
     }
+
+    /// Canonical wire encoding for transport (gossip / catch-up).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_u16(self.doc_type.tag());
+        e.put_u128(self.doc_id);
+        e.put_u64(self.epoch);
+        e.put_bytes(&self.blob.nonce).expect("24 fits");
+        e.put_bytes(&self.blob.ciphertext).expect("ciphertext fits");
+        e.finish()
+    }
+
+    /// Decode a sealed op produced by [`SealedOp::encode`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, ReplError> {
+        let mut d = Decoder::new(bytes);
+        let tag = d.get_u16().map_err(|_| ReplError::Malformed)?;
+        let doc_type = DocType::from_tag(tag).ok_or(ReplError::Malformed)?;
+        let doc_id = d.get_u128().map_err(|_| ReplError::Malformed)?;
+        let epoch = d.get_u64().map_err(|_| ReplError::Malformed)?;
+        let nonce: [u8; 24] = d
+            .get_bytes()
+            .map_err(|_| ReplError::Malformed)?
+            .try_into()
+            .map_err(|_| ReplError::Malformed)?;
+        let ciphertext = d.get_bytes().map_err(|_| ReplError::Malformed)?.to_vec();
+        d.finish().map_err(|_| ReplError::Malformed)?;
+        Ok(Self {
+            doc_type,
+            doc_id,
+            epoch,
+            blob: SealedBlob { nonce, ciphertext },
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sealed_op_encode_decode_roundtrips() {
+        let op = SealedOp {
+            doc_type: DocType::Channel,
+            doc_id: 7,
+            epoch: 3,
+            blob: SealedBlob {
+                nonce: [1u8; 24],
+                ciphertext: vec![9, 8, 7, 6],
+            },
+        };
+        let decoded = SealedOp::decode(&op.encode()).unwrap();
+        assert_eq!(decoded.doc_type, DocType::Channel);
+        assert_eq!(decoded.doc_id, 7);
+        assert_eq!(decoded.epoch, 3);
+        assert_eq!(decoded.blob.nonce, [1u8; 24]);
+        assert_eq!(decoded.blob.ciphertext, vec![9, 8, 7, 6]);
+    }
 }

@@ -33,7 +33,8 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 4 | CRDT replication (inner-signed ops, snapshot catch-up) | done |
 | 5 | Storage & retention | done |
 | 6a | Mesh transport: libp2p `MeshService` over the seam (gossipsub + req/resp) | done |
-| 6b | Relay v2 + DCUtR, rendezvous, anti-entropy, proposal/commit | planned |
+| 6b | Channel sync over the mesh (live gossip + catch-up); + diagnostics (tracing) | done |
+| 6c | Relay v2 + DCUtR, rendezvous, eclipse-resistance, proposal/commit linearization | planned |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
@@ -56,8 +57,15 @@ crates/
                   decorrelated eviction + holder probe, refetchable on eviction)
   catcoms-net     libp2p MeshService realizing the MeshTransport seam (gossipsub +
                   request/response over Noise+yamux)
+  catcoms-sync    ChannelSync: replicate encrypted CRDT docs over any MeshTransport
+                  (blinded topics, live gossip, request/response catch-up)
+  catcoms-log     tracing/diagnostics init for binaries and tests (RUST_LOG)
 ```
 More crates (`catcoms-core`, `catcoms-harness`) land with their phases.
+
+Diagnostics use the `tracing` facade; binaries/tests install a subscriber via
+`catcoms_log::init()` / `init_test()`. Filter with e.g.
+`RUST_LOG=catcoms_net=debug,catcoms_sync=trace`.
 
 ## Build & test
 

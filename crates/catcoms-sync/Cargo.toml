@@ -1,0 +1,26 @@
+[package]
+name = "catcoms-sync"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-rt = { path = "../catcoms-rt" }
+catcoms-replication = { path = "../catcoms-replication" }
+catcoms-mls = { path = "../catcoms-mls" }
+catcoms-wire = { path = "../catcoms-wire" }
+thiserror.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+blake3 = "1"
+automerge = "0.10"
+
+[dev-dependencies]
+catcoms-log = { path = "../catcoms-log" }
+rand_chacha = "0.3"
+rand_core = "0.6"
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+
+[lints]
+workspace = true

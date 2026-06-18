@@ -269,22 +269,42 @@ impl Actor {
     }
 
     fn handle_command(&mut self, cmd: Command) {
-        let gossipsub = &mut self.swarm.behaviour_mut().gossipsub;
         match cmd {
             Command::Subscribe(topic) => {
-                let _ = gossipsub.subscribe(&to_ident(&topic));
+                tracing::debug!(topic = %hex::encode(topic.as_bytes()), "subscribe");
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .subscribe(&to_ident(&topic));
             }
             Command::Unsubscribe(topic) => {
-                let _ = gossipsub.unsubscribe(&to_ident(&topic));
+                tracing::debug!(topic = %hex::encode(topic.as_bytes()), "unsubscribe");
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .unsubscribe(&to_ident(&topic));
             }
             Command::Publish(topic, data) => {
-                if gossipsub.publish(to_ident(&topic), data.to_vec()).is_err() {
+                let len = data.len();
+                if self
+                    .swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(to_ident(&topic), data.to_vec())
+                    .is_err()
+                {
                     // No subscribers known yet — retry when one appears.
+                    tracing::trace!(bytes = len, "publish queued (no subscribers yet)");
                     self.pending_publish.push((topic, data));
+                } else {
+                    tracing::trace!(bytes = len, "published");
                 }
             }
             Command::Request { peer, data, reply } => match self.peers.get(&peer) {
                 Some(libp2p_peer) => {
+                    tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send request");
                     let id = self
                         .swarm
                         .behaviour_mut()
@@ -293,6 +313,7 @@ impl Actor {
                     self.pending_req.insert(id, reply);
                 }
                 None => {
+                    tracing::warn!(?peer, "request to unknown peer");
                     let _ = reply.send(Err(TransportError::Unreachable(peer)));
                 }
             },
@@ -320,7 +341,11 @@ impl Actor {
         inbound: &mut InboundResponses,
     ) {
         match event {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                tracing::info!(%address, "listening");
+            }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                tracing::debug!(peer = %peer_id, "connection established");
                 let peer = to_peer(&peer_id);
                 self.peers.insert(peer, peer_id);
                 let _ = self
@@ -334,6 +359,7 @@ impl Actor {
                 ..
             } => {
                 if num_established == 0 {
+                    tracing::debug!(peer = %peer_id, "peer disconnected");
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
                     let _ = self
@@ -352,6 +378,7 @@ impl Actor {
                     .map(|s| to_peer(&s))
                     .unwrap_or_else(|| to_peer(&propagation_source));
                 let topic = from_topic_hash(&message.topic);
+                tracing::trace!(bytes = message.data.len(), "gossip received");
                 let _ = self
                     .event_tx
                     .send(TransportEvent::Gossip {

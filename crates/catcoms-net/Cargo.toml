@@ -11,6 +11,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 bytes.workspace = true
+tracing.workspace = true
 blake3 = "1"
 hex = "0.4"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
