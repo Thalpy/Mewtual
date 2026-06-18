@@ -31,7 +31,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 2 | MLS group core (local) | done |
 | 3 | Single-use device-bound invites | done |
 | 4 | CRDT replication (inner-signed ops, snapshot catch-up) | done |
-| 5 | Storage & retention | planned |
+| 5 | Storage & retention | done |
 | 6 | Real mesh (libp2p, relay, discovery) | planned |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
@@ -50,9 +50,11 @@ crates/
                   ServerGroup lifecycle, and per-channel key derivation
   catcoms-replication  encrypted CRDT documents (automerge): inner-signed ops,
                   per-epoch sealing, and snapshot catch-up for late members
+  catcoms-storage  content-addressed blob stores, per-file encryption (per-file wrap
+                  nonce), and the retention engine (3-scope expiry, GC with
+                  decorrelated eviction + holder probe, refetchable on eviction)
 ```
-More crates (`catcoms-storage`, `catcoms-net`, `catcoms-core`,
-`catcoms-harness`) land with their phases.
+More crates (`catcoms-net`, `catcoms-core`, `catcoms-harness`) land with their phases.
 
 ## Build & test
 

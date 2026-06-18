@@ -1,0 +1,22 @@
+[package]
+name = "catcoms-storage"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-crypto = { path = "../catcoms-crypto" }
+catcoms-rt = { path = "../catcoms-rt" }
+catcoms-wire = { path = "../catcoms-wire" }
+thiserror.workspace = true
+blake3 = "1"
+hex = "0.4"
+
+[dev-dependencies]
+rand_chacha = "0.3"
+rand_core = "0.6"
+tempfile = "3"
+
+[lints]
+workspace = true

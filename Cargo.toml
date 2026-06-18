@@ -6,6 +6,7 @@ members = [
     "crates/catcoms-crypto",
     "crates/catcoms-mls",
     "crates/catcoms-replication",
+    "crates/catcoms-storage",
 ]
 # cargo-fuzz crates carry their own (nightly) workspace; keep them out of the main build.
 exclude = [

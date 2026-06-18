@@ -263,6 +263,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcoms-storage"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "catcoms-crypto",
+ "catcoms-rt",
+ "catcoms-wire",
+ "hex",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "catcoms-wire"
 version = "0.0.0"
 dependencies = [
