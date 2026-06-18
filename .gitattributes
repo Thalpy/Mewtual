@@ -1,0 +1,9 @@
+# Normalise line endings to LF in the repo so shell scripts and CI behave
+# identically on Linux, Windows and Android build hosts.
+* text=auto eol=lf
+
+# Scripts must stay LF or they fail with a bad-interpreter error on Linux.
+*.sh text eol=lf
+
+# Treat fuzz corpus / binary fixtures as binary.
+*.bin binary

@@ -1,0 +1,25 @@
+# cargo-fuzz target for the wire decoder. Excluded from the main workspace;
+# run with nightly:  cargo +nightly fuzz run roundtrip
+[package]
+name = "catcoms-wire-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.catcoms-wire]
+path = ".."
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

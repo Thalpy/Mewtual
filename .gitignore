@@ -1,0 +1,15 @@
+# Rust build output
+/target
+**/*.rs.bk
+
+# cargo-fuzz artifacts
+crates/*/fuzz/target
+crates/*/fuzz/corpus
+crates/*/fuzz/artifacts
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
