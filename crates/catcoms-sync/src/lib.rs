@@ -298,6 +298,59 @@ fn encode_join_resp(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
     e.finish()
 }
 
+/// The transcript a member signs to request a removal (binds the request to the
+/// group, the target, the requester's key, and a freshness timestamp).
+fn remove_req_transcript(
+    group_id: &[u8],
+    target: &[u8; 32],
+    requester_pubkey: &[u8],
+    timestamp_ms: u64,
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(REMOVE_REQ_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(target).expect("32 fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(timestamp_ms);
+    e.finish()
+}
+
+/// Encode a signed remove request body: `target ‖ requester_pubkey ‖ ts ‖ sig`.
+fn encode_remove_request(
+    target: &[u8; 32],
+    requester_pubkey: &[u8],
+    timestamp_ms: u64,
+    signature: &[u8; 64],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(target).expect("32 fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(timestamp_ms);
+    e.put_bytes(signature).expect("64 fits");
+    e.finish()
+}
+
+/// A parsed remove request: `(target, requester_pubkey, timestamp, signature)`.
+type RemoveRequest = ([u8; 32], Vec<u8>, u64, [u8; 64]);
+
+fn decode_remove_request(bytes: &[u8]) -> Result<RemoveRequest, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let target: [u8; 32] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let timestamp_ms = d.get_u64().map_err(|_| SyncError::Malformed)?;
+    let signature: [u8; 64] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((target, pubkey, timestamp_ms, signature))
+}
+
 /// Encode the committer→joiner Welcome push payload (a winning staged admission):
 /// `[JOIN_READY] ‖ welcome ‖ signature`.
 fn encode_welcome_push(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
@@ -366,11 +419,17 @@ fn control_topic(group_id: &[u8]) -> Topic {
 }
 
 /// Control-topic envelope tags (first byte of every control message). New op kinds
-/// (proposals, revocations) land in later 6d-2 sub-blocks.
+/// (further proposals, revocations) land in later 6d-2 sub-blocks.
 const CTRL_COMMIT: u8 = 0;
+/// Control-topic tag: a member's signed request that the **designated committer**
+/// remove a target (the single-serializer proposal model, 6d-2b). Only the
+/// designated committer acts on it, so no concurrent commits arise.
+const CTRL_REMOVE_REQUEST: u8 = 1;
 
 /// Domain separator for the committer's per-commit authorization signature.
 const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
+/// Domain separator for a member's signed remove request.
+const REMOVE_REQ_DOMAIN: &str = "catcoms/remove-req/v1";
 
 /// A membership commit fanned out on the control topic so existing members apply
 /// it and advance to the same epoch. `commit_epoch` is the epoch the commit was
@@ -781,6 +840,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.remember_peer(from);
                 if topic == self.control_topic {
                     self.on_control(&data);
+                    // The designated committer may have queued a commit in response
+                    // to a remove request — fan it out now.
+                    self.drain_outbox().await;
                 } else {
                     self.on_gossip(&data);
                 }
@@ -1383,12 +1445,108 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         );
     }
 
+    /// Request that the group's **designated committer** remove `target` — the
+    /// single-serializer model (6d-2b): any member can ask, but only the one
+    /// committer executes, so no concurrent commits (and no fork) ever arise. The
+    /// signed request is broadcast on the control topic; the committer validates and
+    /// performs a synchronous remove. Safe under the default config (no contest
+    /// window needed). If *this* node is already the designated committer, the
+    /// removal is performed directly.
+    pub async fn request_remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
+        if self.group.is_designated_committer(&self.device) {
+            self.commit_remove_now(target);
+            self.drain_outbox().await;
+            return Ok(());
+        }
+        let target_bytes = *target.as_bytes();
+        let pubkey = self.device.public_key_bytes();
+        let ts = self.clock.now_ms();
+        let transcript = remove_req_transcript(&self.group.group_id(), &target_bytes, &pubkey, ts);
+        let signature = self.device.sign(&transcript)?;
+        let mut framed = vec![CTRL_REMOVE_REQUEST];
+        framed.extend_from_slice(&encode_remove_request(
+            &target_bytes,
+            &pubkey,
+            ts,
+            &signature,
+        ));
+        self.outbox.push((self.control_topic.clone(), framed));
+        self.drain_outbox().await;
+        Ok(())
+    }
+
+    /// Handle an inbound remove request: only the designated committer acts on it,
+    /// and only after authenticating the requester as a current member with a fresh
+    /// signature. The committer then performs a synchronous remove and fans out the
+    /// resulting commit.
+    fn on_remove_request(&mut self, data: &[u8]) {
+        if !self.group.is_designated_committer(&self.device) {
+            return; // some other node is the serializer
+        }
+        let (target, pubkey, ts, signature) = match decode_remove_request(data) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        // The requester must be a current member with a fresh, valid signature.
+        let requester = DeviceId::from_public_key_bytes(&pubkey);
+        if !self.group.contains_device(&requester) {
+            tracing::warn!("remove request from a non-member; ignored");
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        if self.clock.now_ms().abs_diff(ts) > MAX_REQUEST_AGE_MS {
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        let transcript = remove_req_transcript(&self.group.group_id(), &target, &pubkey, ts);
+        if !verify_with_public_bytes(&pubkey, &transcript, &signature) {
+            tracing::warn!("remove request signature invalid; ignored");
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        let target_id = DeviceId::from_bytes(target);
+        if !self.group.contains_device(&target_id) {
+            return; // already gone / never a member
+        }
+        self.commit_remove_now(&target_id);
+    }
+
+    /// Perform a removal **as the designated committer**, synchronously (no contest):
+    /// stage the Remove, capture the pre-advance keys, merge, and queue the signed
+    /// commit for fan-out. Single-committer, so it cannot fork.
+    fn commit_remove_now(&mut self, target: &DeviceId) {
+        let staged = match self.group.stage_remove(&self.device, target) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "stage_remove failed; remove not performed");
+                return;
+            }
+        };
+        let record = self.sign_staged_record(&staged);
+        self.snapshot_epoch_keys();
+        if let Err(e) = self.group.merge_staged_self(&self.device) {
+            tracing::error!(error = %e, "merge of remove commit failed");
+            let _ = self.group.abort_staged(&self.device);
+            return;
+        }
+        self.evict_past_keys();
+        self.record_commit(record.clone());
+        self.stats.commits_applied += 1;
+        let mut framed = vec![CTRL_COMMIT];
+        framed.extend_from_slice(&record.encode());
+        self.outbox.push((self.control_topic.clone(), framed));
+        tracing::info!(
+            epoch = self.group.epoch(),
+            "committer removed a member (single-serializer)"
+        );
+    }
+
     /// Apply an inbound membership commit from the control topic. A commit that is
     /// exactly the next one is applied immediately (then any buffered successors
     /// drain in order); one that is ahead of us is buffered and triggers
     /// commit-catch-up; an already-applied one is ignored.
     fn on_control(&mut self, data: &[u8]) {
-        // The control envelope is a tagged union; only commit records exist so far.
+        // The control envelope is a tagged union (commit record / remove request).
         let record = match data.split_first() {
             Some((&CTRL_COMMIT, rest)) => match CommitRecord::decode(rest) {
                 Ok(r) => r,
@@ -1397,6 +1555,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     return;
                 }
             },
+            Some((&CTRL_REMOVE_REQUEST, rest)) => {
+                self.on_remove_request(rest);
+                return;
+            }
             _ => {
                 tracing::warn!("dropping control message with unknown tag");
                 return;

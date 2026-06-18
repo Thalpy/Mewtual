@@ -1085,6 +1085,36 @@ async fn staged_join_admits_via_the_welcome_push() {
     assert!(s[0].contains_member(&bob.device_id()));
 }
 
+/// 6d-2b: a non-committer member can have a target removed by *requesting* it — the
+/// designated committer alone executes the removal (the single-serializer model).
+/// Works under the DEFAULT config (no concurrent committers, so no fork, no I1).
+#[tokio::test]
+async fn a_member_can_request_the_committer_to_remove_a_target() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    // Alice(0)=designated committer, Bob(1)=requester, Carol(2)=target; default config.
+    let (mut s, ids) = build_members(&hub, &clock, 3).await;
+    let carol = ids[2];
+    assert_eq!(s[0].epoch(), 2);
+
+    // Bob (a non-committer) requests Carol's removal; the request is broadcast.
+    s[1].request_remove(&carol).await.unwrap();
+    assert_eq!(s[1].epoch(), 2, "the requester does not commit");
+
+    // Alice (the committer) processes the request, removes Carol, and fans out the
+    // commit — all within one tick.
+    assert!(s[0].run_once().await.unwrap());
+    assert_eq!(s[0].epoch(), 3, "the committer executed the removal");
+    assert!(!s[0].contains_member(&carol));
+
+    // Bob applies the broadcast commit and converges.
+    assert!(s[1].run_once().await.unwrap());
+    assert_eq!(s[1].epoch(), 3);
+    assert!(!s[1].contains_member(&carol));
+    assert_eq!(s[0].member_count(), s[1].member_count());
+}
+
 #[tokio::test]
 async fn catch_up_transfers_history_over_request_response() {
     catcoms_log::init_test();

@@ -109,8 +109,9 @@ protocol already works, only CLI plumbing remains).
 | 6d-2a (1/2) | signed commit records + authorize-by-signature gate | ✅ `09d4cc5` |
 | 6d-2a (2a) | MLS staged-commit primitives (stage/merge/abort) | ✅ `e577a11` |
 | 6d-2a (2b) | sync-layer fork resolution (commit_id tie-break + contest window) | ✅ `939eb41` |
-| 6d-2a (2c) | two-phase staged-Add join (provisional Welcome push) + review fixes I2–I6 | ✅ this commit |
-| 6d-2b | **proposal/commit split (single serializer) — resolves I1 divergence**, then replicated single-use · joiner-nonce binding | **next** |
+| 6d-2a (2c) | two-phase staged-Add join (provisional Welcome push) + review fixes I2–I6 | ✅ `42f9b7f` |
+| 6d-2b (1) | **single-serializer remove** (members *request*; the designated committer alone commits) — the convergence-safe model, on by default | ✅ this commit |
+| 6d-2b (2…) | by-value proposal packing / batching · replicated single-use ledger · joiner-nonce binding | planned |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
@@ -183,13 +184,22 @@ review of the 6d-2a implementation") found the default path safe but the opt-in 
 converge two honest nodes to different winners under real async timing. I2/I3/I4/I6
 are fixed; **I1 is the gate**.
 
-**Next (6d-2b): the proposal/commit split** — the designated committer becomes the
-sole serializer (members replicate *proposals*; it packs them by-value into one
-commit), so concurrent commits (and thus I1's divergence) cannot arise in steady
-state; forks reduce to a rare committer-*failover* race (which then needs a published
-decision-record / barrier, tracked to 6d-3). Then the replicated single-use ledger
-and joiner-nonce binding. Re-read `design-6d2.md` first. Until 6d-2b lands and I1 is
-closed, keep `max_committer_rank=0` (network admission is single-committer).
+**6d-2b started — the single-serializer model (the convergence-safe answer to I1).**
+Insight: if only the **designated committer** ever commits and other members just
+*request* changes, there are no concurrent commits, so I1 cannot arise — and it works
+under the **default** config (no flag, no contest window). Done: `request_remove` —
+any member broadcasts a signed `CTRL_REMOVE_REQUEST`; the designated committer
+authenticates it (current member + fresh signature) and performs a synchronous remove
+(`commit_remove_now`), fanning out the commit. Distributed removes, safely, with one
+serializer.
+
+**Next (6d-2b cont.):** generalize to by-value proposal *packing/batching*
+(`CommitBuilder.propose_*`/`add_proposals`, confirmed in 0.8.1) so a committer can
+bundle several requests into one commit; the replicated single-use ledger; and
+joiner-nonce binding. The opt-in concurrent-committer path (`max_committer_rank>=1`,
+the 6d-2a contest) stays the **failover** mechanism only and remains OFF until its I1
+convergence is closed (a published decision-record / barrier, 6d-3). Re-read
+`design-6d2.md` first.
 
 ## Known limitations / deferred (the security-relevant ones)
 
