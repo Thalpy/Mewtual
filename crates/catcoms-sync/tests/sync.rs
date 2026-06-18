@@ -68,6 +68,75 @@ fn pair() -> (
     (asy, bsy, alice_peer, bob_peer)
 }
 
+/// Build an `n`-member group (member 0 founds it and admits the rest one by one,
+/// single-committer/synchronous). Every member runs a control-subscribed
+/// `ChannelSync` sharing `clock`; all end at epoch `n-1`. Returns the syncs and the
+/// members' device ids (index-aligned).
+async fn build_members(
+    hub: &std::sync::Arc<Hub>,
+    clock: &ManualClock,
+    n: usize,
+) -> (
+    Vec<ChannelSync<MemNetwork, ChaCha20Rng>>,
+    Vec<catcoms_crypto::DeviceId>,
+) {
+    let founder = MlsDevice::generate().unwrap();
+    let mut ids = vec![founder.device_id()];
+    let founder_group = ServerGroup::create(&founder).unwrap();
+    let founder_peer = PeerId::from_u64(1);
+    let mut syncs = vec![ChannelSync::new(
+        hub.join(founder_peer),
+        founder_group,
+        founder,
+        rng(1),
+        Box::new(clock.clone()),
+    )];
+    syncs[0].subscribe_control().await.unwrap();
+
+    for i in 1..n {
+        let dev = MlsDevice::generate().unwrap();
+        ids.push(dev.device_id());
+        let invite = syncs[0]
+            .mint_invite([i as u8; 16], u64::MAX, vec![])
+            .unwrap();
+        let net = hub.join(PeerId::from_u64(1 + i as u64));
+        let (joined, _) = tokio::join!(
+            catcoms_sync::request_join(&net, founder_peer, &dev, &invite),
+            syncs[0].run_once(),
+        );
+        let mut new_sync = ChannelSync::new(
+            net,
+            joined.unwrap(),
+            dev,
+            rng(1 + i as u64),
+            Box::new(clock.clone()),
+        );
+        new_sync.subscribe_control().await.unwrap();
+        syncs.push(new_sync);
+        // Previously-joined members (1..i) apply the broadcast Add to reach epoch i.
+        for s in syncs.iter_mut().skip(1).take(i - 1) {
+            assert!(s.run_once().await.unwrap());
+        }
+    }
+    for s in &syncs {
+        assert_eq!(
+            s.epoch(),
+            (n - 1) as u64,
+            "all members reach the same epoch"
+        );
+    }
+    (syncs, ids)
+}
+
+/// The fork-resolution config: concurrent committers up to `rank`, with `window`.
+fn fork_cfg(rank: u32, window: u64) -> catcoms_sync::SyncConfig {
+    catcoms_sync::SyncConfig {
+        max_committer_rank: rank,
+        stage_decision_window_ms: window,
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn live_post_replicates_over_gossip() {
     catcoms_log::init_test();
@@ -850,6 +919,134 @@ async fn uncontested_staged_remove_merges_after_the_window() {
     assert!(!bsy.contains_member(&carol.device_id()));
     assert_eq!(asy.stats().forks_lost, 0, "uncontested: nobody loses");
     assert_eq!(bsy.stats().forks_lost, 0);
+}
+
+/// 6d-2a: a member that did NOT commit anything (a pure applier) still resolves a
+/// fork it observes to the same winner as the committers — convergence holds for
+/// the whole roster, not just the participants.
+#[tokio::test]
+async fn a_non_committing_member_converges_on_the_fork_winner() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let window = 1_000u64;
+    // Alice(0), Bob(1) are committers; Carol(2) is a pure applier; Dave(3) is the
+    // removal target.
+    let (mut s, ids) = build_members(&hub, &clock, 4).await;
+    for sync in &mut s {
+        sync.set_config(fork_cfg(1, window));
+    }
+    let dave = ids[3];
+
+    s[0].remove(&dave).await.unwrap();
+    s[1].remove(&dave).await.unwrap();
+    // Alice & Bob each ingest the other's commit; Carol ingests both.
+    assert!(s[0].run_once().await.unwrap());
+    assert!(s[1].run_once().await.unwrap());
+    assert!(s[2].run_once().await.unwrap());
+    assert!(s[2].run_once().await.unwrap());
+
+    clock.advance_ms(window);
+    for sync in s.iter_mut().take(3) {
+        assert!(sync.run_once().await.unwrap());
+    }
+    for (i, sync) in s.iter().take(3).enumerate() {
+        assert_eq!(
+            sync.epoch(),
+            4,
+            "member {i} converged on the post-fork epoch"
+        );
+        assert!(!sync.contains_member(&dave), "Dave removed for member {i}");
+        assert_eq!(sync.member_count(), 3);
+        assert_eq!(sync.stats().forks_resolved, 1);
+    }
+    // The applier never staged anything, so it never "lost".
+    assert_eq!(s[2].stats().forks_lost, 0);
+}
+
+/// 6d-2a: a three-way fork (three committers, `max_committer_rank = 2`) still
+/// collapses to one winner on every node.
+#[tokio::test]
+async fn three_way_fork_collapses_to_one_winner() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let window = 1_000u64;
+    // Alice(0), Bob(1), Carol(2) are all committers (rank<=2); Dave(3) is removed.
+    let (mut s, ids) = build_members(&hub, &clock, 4).await;
+    for sync in &mut s {
+        sync.set_config(fork_cfg(2, window));
+    }
+    let dave = ids[3];
+
+    s[0].remove(&dave).await.unwrap();
+    s[1].remove(&dave).await.unwrap();
+    s[2].remove(&dave).await.unwrap();
+    // Each of the three committers must ingest the other two's competing commits.
+    for _ in 0..2 {
+        for sync in s.iter_mut().take(3) {
+            assert!(sync.run_once().await.unwrap());
+        }
+    }
+
+    clock.advance_ms(window);
+    for sync in s.iter_mut().take(3) {
+        assert!(sync.run_once().await.unwrap());
+    }
+    for (i, sync) in s.iter().take(3).enumerate() {
+        assert_eq!(sync.epoch(), 4, "committer {i} advanced exactly once");
+        assert!(!sync.contains_member(&dave));
+        assert_eq!(sync.member_count(), 3);
+    }
+    // Two of the three lost the tie-break and aborted.
+    let lost: u64 = s.iter().take(3).map(|sync| sync.stats().forks_lost).sum();
+    assert_eq!(lost, 2, "exactly two of three committers lost");
+}
+
+/// 6d-2a: after a fork resolves, the group is fully functional and its epoch state
+/// is byte-identical across winner and loser — proven by exchanging an
+/// end-to-end-encrypted channel message that converges (it only decrypts if both
+/// derived the same epoch/channel key).
+#[tokio::test]
+async fn group_is_functional_after_a_fork() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let window = 1_000u64;
+    // Alice(0), Bob(1) committers; Carol(2) the removal target.
+    let (mut s, ids) = build_members(&hub, &clock, 3).await;
+    for sync in &mut s {
+        sync.set_config(fork_cfg(1, window));
+    }
+    let carol = ids[2];
+
+    s[0].remove(&carol).await.unwrap();
+    s[1].remove(&carol).await.unwrap();
+    assert!(s[0].run_once().await.unwrap());
+    assert!(s[1].run_once().await.unwrap());
+    clock.advance_ms(window);
+    assert!(s[0].run_once().await.unwrap());
+    assert!(s[1].run_once().await.unwrap());
+    assert_eq!(s[0].epoch(), 3);
+    assert_eq!(s[1].epoch(), 3);
+    assert!(!s[0].contains_member(&carol));
+
+    // Winner and loser now exchange encrypted chat on a fresh channel.
+    let (mut bsy, _) = (s.remove(1), ()); // Bob
+    let mut asy = s.remove(0); // Alice
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    asy.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "after_fork", "still works")
+    })
+    .await
+    .unwrap();
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(
+        get_str(&bsy, "after_fork").as_deref(),
+        Some("still works"),
+        "post-fork epoch state must be identical for the message to decrypt"
+    );
 }
 
 #[tokio::test]
