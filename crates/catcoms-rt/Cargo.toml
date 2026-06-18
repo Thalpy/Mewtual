@@ -10,6 +10,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 tokio = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

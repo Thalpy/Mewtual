@@ -15,10 +15,12 @@
 
 pub mod clock;
 pub mod mem;
+pub mod rng;
 pub mod transport;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
+pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
     MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError, TransportEvent,
 };

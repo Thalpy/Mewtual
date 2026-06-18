@@ -19,7 +19,7 @@ patterns=(
 
 # Files/dirs allowed to use the primitives above (the seam implementations).
 # Extend deliberately, with review.
-allow_regex='crates/catcoms-rt/src/clock\.rs'
+allow_regex='crates/catcoms-rt/src/(clock|rng)\.rs'
 
 search_roots=()
 for d in crates bins; do

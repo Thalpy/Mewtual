@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/catcoms-wire",
     "crates/catcoms-rt",
+    "crates/catcoms-crypto",
 ]
 # cargo-fuzz crates carry their own (nightly) workspace; keep them out of the main build.
 exclude = [

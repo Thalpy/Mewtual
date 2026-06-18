@@ -26,8 +26,8 @@ Early construction, built **block-by-block with tests gating each phase**.
 
 | Phase | Block | State |
 |------:|-------|-------|
-| 0 | Workspace, `Clock`/`Transport` seams, canonical wire format, CI | in progress |
-| 1 | Device identity + unified key hierarchy | planned |
+| 0 | Workspace, `Clock`/`Transport` seams, canonical wire format, CI | done |
+| 1 | Device identity + unified key hierarchy | done |
 | 2 | MLS group core (local) | planned |
 | 3 | Single-use device-bound invites | planned |
 | 4 | CRDT replication (inner-signed ops, proposal/commit, snapshot catch-up) | planned |
@@ -42,10 +42,12 @@ Early construction, built **block-by-block with tests gating each phase**.
 
 ```
 crates/
-  catcoms-wire   canonical, injective, length-prefixed wire encoding
-  catcoms-rt     core runtime seams: Clock + MeshTransport (+ in-memory test impls)
+  catcoms-wire    canonical, injective, length-prefixed wire encoding
+  catcoms-rt      core runtime seams: Clock + RNG + MeshTransport (+ in-memory test impls)
+  catcoms-crypto  identity (content-addressed ids, device-cert chains, revocation,
+                  roster), and the unified key hierarchy / tiered key store
 ```
-More crates (`catcoms-crypto`, `catcoms-replication`, `catcoms-storage`, `catcoms-net`,
+More crates (`catcoms-replication`, `catcoms-storage`, `catcoms-net`,
 `catcoms-core`, `catcoms-harness`) land with their phases.
 
 ## Build & test
