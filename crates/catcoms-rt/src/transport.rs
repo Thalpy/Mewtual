@@ -101,6 +101,26 @@ impl Responder {
     pub fn respond(self, data: Bytes) {
         let _ = self.0.send(data);
     }
+
+    /// Create a responder paired with its receiver. A transport implementation
+    /// hands the [`Responder`] to the request handler (inside a
+    /// [`TransportEvent::Request`]) and keeps the [`ResponderRx`] to await the
+    /// reply and forward it over the wire.
+    pub fn channel() -> (Responder, ResponderRx) {
+        let (tx, rx) = oneshot::channel();
+        (Responder(tx), ResponderRx(rx))
+    }
+}
+
+/// The receiving half of a [`Responder`], held by a transport implementation.
+#[derive(Debug)]
+pub struct ResponderRx(oneshot::Receiver<Bytes>);
+
+impl ResponderRx {
+    /// Await the reply, or `None` if the responder was dropped without replying.
+    pub async fn recv(self) -> Option<Bytes> {
+        self.0.await.ok()
+    }
 }
 
 /// An inbound transport event, drained via [`MeshTransport::next_event`].

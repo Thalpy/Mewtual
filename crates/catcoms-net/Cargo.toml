@@ -1,0 +1,31 @@
+[package]
+name = "catcoms-net"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-rt = { path = "../catcoms-rt" }
+thiserror.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+bytes.workspace = true
+blake3 = "1"
+hex = "0.4"
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+libp2p = { version = "0.56", features = [
+    "tokio",
+    "gossipsub",
+    "request-response",
+    "noise",
+    "yamux",
+    "macros",
+    "tcp",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+[lints]
+workspace = true

@@ -32,7 +32,8 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 3 | Single-use device-bound invites | done |
 | 4 | CRDT replication (inner-signed ops, snapshot catch-up) | done |
 | 5 | Storage & retention | done |
-| 6 | Real mesh (libp2p, relay, discovery) | planned |
+| 6a | Mesh transport: libp2p `MeshService` over the seam (gossipsub + req/resp) | done |
+| 6b | Relay v2 + DCUtR, rendezvous, anti-entropy, proposal/commit | planned |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
@@ -53,8 +54,10 @@ crates/
   catcoms-storage  content-addressed blob stores, per-file encryption (per-file wrap
                   nonce), and the retention engine (3-scope expiry, GC with
                   decorrelated eviction + holder probe, refetchable on eviction)
+  catcoms-net     libp2p MeshService realizing the MeshTransport seam (gossipsub +
+                  request/response over Noise+yamux)
 ```
-More crates (`catcoms-net`, `catcoms-core`, `catcoms-harness`) land with their phases.
+More crates (`catcoms-core`, `catcoms-harness`) land with their phases.
 
 ## Build & test
 
