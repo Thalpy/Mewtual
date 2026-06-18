@@ -105,7 +105,7 @@ protocol already works, only CLI plumbing remains).
 | — | `catcomsctl` CLI + debug-file logging | ✅ `91c53d3` |
 | 6c | network join handshake (inviter-authenticated) | ✅ `61d990c` |
 | 6d-1a | membership commit propagation (single committer) | ✅ `89b5492` |
-| 6d-1b | commit-catch-up recovery + ordered replay + past-epoch key window | ✅ (this commit) |
+| 6d-1b | commit-catch-up recovery + ordered replay + past-epoch key window | ✅ `16a6427` |
 | 6d-2 | concurrent-commit fork resolution + full proposal/commit linearization | **next** |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
