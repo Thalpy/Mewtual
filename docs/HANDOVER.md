@@ -106,7 +106,11 @@ protocol already works, only CLI plumbing remains).
 | 6c | network join handshake (inviter-authenticated) | ✅ `61d990c` |
 | 6d-1a | membership commit propagation (single committer) | ✅ `89b5492` |
 | 6d-1b | commit-catch-up recovery + ordered replay + past-epoch key window | ✅ `16a6427` |
-| 6d-2 | concurrent-commit fork resolution + full proposal/commit linearization | **next** |
+| 6d-2a (1/2) | signed commit records + authorize-by-signature gate | ✅ `09d4cc5` |
+| 6d-2a (2a) | MLS staged-commit primitives (stage/merge/abort) | ✅ `e577a11` |
+| 6d-2a (2b) | sync-layer fork resolution (commit_id tie-break + contest window + two-phase join) | **next** |
+| 6d-2b…d | proposal/commit split · replicated single-use · joiner-nonce binding | planned |
+| 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
@@ -155,13 +159,30 @@ confirmed findings folded in before commit:
 - Past-epoch key copies re-wrapped in `Zeroizing`; `ingest_with_key` asserts the
   epoch; `catchup_queue`/`outbox` gained explicit caps.
 
-### Immediate next: 6d-2
-The hard part: concurrent-commit fork resolution (openmls `clear_pending_commit` /
-`fork_resolution::{readd,reboot}`; note `ExternalInit` recovery needs an
-`external_pub` GroupInfo extension the config does **not** emit yet), the full
-proposal/commit split with a designated committer packing replicated proposals, the
-replicated InviteLedger, and **joiner-bound nonces**. Until then network admission is
-single-committer only.
+### 6d-2 — in progress (see [`design-6d2.md`](design-6d2.md))
+The full design (openmls-0.8.1-verified, adversarially reviewed) is in
+[`design-6d2.md`](design-6d2.md). **Read it before continuing 6d-2.** Key decision:
+the fork tie-break gates on an **authorized signed committer** (not leaf-index
+equality — that rejected the fork *winner*), and `base_authenticator`
+(`epoch_authenticator()`) distinguishes a shallow same-base fork from deep
+divergence.
+
+Done so far: signed `CommitRecord` (`base_authenticator` + `committer_sig`) +
+`authorize_committer` gate + control topic v2 (`09d4cc5`); MLS stage/merge/abort
+primitives, isolation-verified (`e577a11`).
+
+**Next (6d-2a step 2b): the sync-layer fork resolution.** Add `staged:
+Option<CommitRecord>` + `commit_id()` (BLAKE3 tie-break key, lowest wins); switch
+`serve_join` to stage→broadcast→**provisional Welcome** (withhold the Welcome until
+the commit merges, so a losing committer can't strand a joiner — needs a two-phase
+join: a `JoinPending` ack + the joiner polling/receiving the Welcome after merge);
+`on_control` `Equal` branch does the tie-break (same `base_authenticator` →
+lowest `commit_id` wins, loser `abort_staged` + re-issue; different → `ForkTooDeep`);
+a `stage_decision_window_ms` contest window in `run_once` so even a non-participant
+records the deterministic winner; raise `max_committer_rank` to 1. Then 6d-2b…d
+(proposal split, replicated single-use, joiner-nonce binding). This is
+security-critical concurrency code — run the adversarial-review `Workflow` before
+commit. Until 2b lands, network admission is still single-committer.
 
 ## Known limitations / deferred (the security-relevant ones)
 
