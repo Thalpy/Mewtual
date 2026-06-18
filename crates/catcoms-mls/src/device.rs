@@ -6,10 +6,18 @@ use catcoms_crypto::DeviceId;
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::config::{capabilities, CIPHERSUITE};
 use crate::invite::MembershipCredential;
 use crate::{proto, MlsError};
+
+/// Serialize a KeyPackage for transport (so a joiner can send it to an inviter).
+pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsError> {
+    MlsMessageOut::from(key_package.clone())
+        .tls_serialize_detached()
+        .map_err(proto)
+}
 
 /// One device's MLS identity: its signature keypair, Basic credential, and the
 /// openmls provider holding its key/group state. The device id is the
@@ -97,6 +105,18 @@ impl MlsDevice {
     /// replicated CRDT op so authorship survives transport re-encryption).
     pub fn sign(&self, payload: &[u8]) -> Result<[u8; 64], MlsError> {
         self.sign_raw(payload)
+    }
+
+    /// Parse and validate a KeyPackage received over the wire (from a joiner),
+    /// using this device's crypto backend.
+    pub fn parse_key_package(&self, bytes: &[u8]) -> Result<KeyPackage, MlsError> {
+        let message = MlsMessageIn::tls_deserialize(&mut &bytes[..]).map_err(proto)?;
+        match message.extract() {
+            MlsMessageBodyIn::KeyPackage(kp_in) => kp_in
+                .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+                .map_err(proto),
+            _ => Err(MlsError::WrongMessageType),
+        }
     }
 
     /// Sign raw bytes with this device's MLS leaf key (used for invite tokens).

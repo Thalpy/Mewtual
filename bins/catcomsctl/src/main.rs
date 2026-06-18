@@ -148,8 +148,15 @@ async fn run_demo() -> Result<(), Box<dyn Error>> {
         alice_group,
         alice,
         OsCryptoRng,
+        Box::new(SystemClock),
     );
-    let mut bob_sync = ChannelSync::new(hub.join(PeerId::from_u64(2)), bob_group, bob, OsCryptoRng);
+    let mut bob_sync = ChannelSync::new(
+        hub.join(PeerId::from_u64(2)),
+        bob_group,
+        bob,
+        OsCryptoRng,
+        Box::new(SystemClock),
+    );
     alice_sync.open_channel(DocType::Channel, GENERAL).await?;
     bob_sync.open_channel(DocType::Channel, GENERAL).await?;
     println!("[4] Both opened #general over the mesh\n");

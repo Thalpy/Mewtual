@@ -21,14 +21,53 @@ use std::fmt;
 
 use automerge::{AutoCommit, AutomergeError};
 use bytes::Bytes;
-use catcoms_mls::{MlsDevice, ServerGroup};
+use catcoms_mls::{serialize_key_package, InviteLedger, InviteToken, MlsDevice, ServerGroup};
 use catcoms_replication::{EncryptedDoc, SealedOp};
-use catcoms_rt::{CryptoRngCore, MeshTransport, ProtocolId, Topic, TransportEvent};
+use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent};
 use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 
-/// Request/response protocol for catch-up (matches the mesh node's RR protocol).
-const CATCHUP_PROTOCOL: &str = "/catcoms/rr/1";
+/// Request/response protocol (one RR protocol; the first payload byte selects the
+/// request kind so it works over the single-protocol mesh node).
+const RR_PROTOCOL: &str = "/catcoms/rr/1";
+/// Request kind: catch-up (history) request.
+const KIND_CATCHUP: u8 = 0;
+/// Request kind: join (admission) request.
+const KIND_JOIN: u8 = 1;
+/// Control requests (join/catch-up) are small; reject anything larger up front.
+const MAX_CONTROL_REQUEST: usize = 64 * 1024;
+/// Domain separator for the admitter's signature over a join response.
+const JOIN_RESP_DOMAIN: &str = "catcoms/join-resp/v1";
+
+/// The transcript the admitter signs (and the joiner verifies) to authenticate a
+/// Welcome: binds the Welcome bytes to the specific invite (group + nonce).
+fn join_transcript(group_id: &[u8], invite_nonce: &[u8; 16], welcome: &[u8]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(JOIN_RESP_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(invite_nonce).expect("16 fits");
+    e.put_bytes(welcome).expect("welcome fits");
+    e.finish()
+}
+
+fn encode_join_resp(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(welcome).expect("welcome fits");
+    e.put_bytes(signature).expect("64 fits");
+    e.finish()
+}
+
+fn decode_join_resp(bytes: &[u8]) -> Result<(Vec<u8>, [u8; 64]), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let welcome = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let signature: [u8; 64] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((welcome, signature))
+}
 
 /// Errors from channel synchronization.
 #[derive(Debug, Error)]
@@ -39,9 +78,15 @@ pub enum SyncError {
     /// A replication-layer error.
     #[error(transparent)]
     Repl(#[from] catcoms_replication::ReplError),
+    /// An MLS-layer error.
+    #[error(transparent)]
+    Mls(#[from] catcoms_mls::MlsError),
     /// The requested document is not open here.
     #[error("document not open")]
     NoSuchDoc,
+    /// A join request was rejected by the inviter.
+    #[error("join request rejected")]
+    JoinRejected,
     /// A sync message was malformed.
     #[error("malformed sync message")]
     Malformed,
@@ -95,26 +140,67 @@ fn decode_bundle(bytes: &[u8]) -> Result<Vec<SealedOp>, SyncError> {
     Ok(ops)
 }
 
-/// Synchronizes a server's documents over a [`MeshTransport`]. Generic over the
-/// injected RNG `R` (e.g. `OsCryptoRng` in production, a seeded CSPRNG in tests).
+fn encode_join_req(invite: &InviteToken, key_package: &[u8]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(&invite.encode()).expect("invite fits");
+    e.put_bytes(key_package).expect("key package fits");
+    e.finish()
+}
+
+fn decode_join_req(bytes: &[u8]) -> Result<(InviteToken, Vec<u8>), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let invite_bytes = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    let invite = InviteToken::decode(invite_bytes).map_err(|_| SyncError::Malformed)?;
+    let key_package = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((invite, key_package))
+}
+
+/// Synchronizes a server's documents over a [`MeshTransport`], and admits new
+/// members via single-use invites. Generic over the injected RNG `R`
+/// (e.g. `OsCryptoRng` in production, a seeded CSPRNG in tests).
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
     group: ServerGroup,
     device: MlsDevice,
     rng: R,
+    clock: Box<dyn Clock + Send>,
+    ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Build a synchronizer over `transport` for this member's `group`/`device`.
-    pub fn new(transport: T, group: ServerGroup, device: MlsDevice, rng: R) -> Self {
+    /// `clock` is used to check invite expiry when serving join requests.
+    pub fn new(
+        transport: T,
+        group: ServerGroup,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+    ) -> Self {
         Self {
             transport,
             group,
             device,
             rng,
+            clock,
+            ledger: InviteLedger::new(),
             docs: HashMap::new(),
         }
+    }
+
+    /// Mint a single-use, device-bound invite to this server (the inviting device
+    /// is this member). Record it so this node can later admit the joiner.
+    pub fn mint_invite(
+        &self,
+        invite_nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+    ) -> Result<InviteToken, SyncError> {
+        Ok(self
+            .group
+            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?)
     }
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
@@ -163,9 +249,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some(TransportEvent::Request {
                 data, responder, ..
             }) => {
-                if let Some(bytes) = self.serve_catchup(&data) {
-                    responder.respond(Bytes::from(bytes));
-                }
+                let response = self.handle_request(&data);
+                responder.respond(Bytes::from(response));
                 Ok(true)
             }
             Some(_) => Ok(true),
@@ -180,12 +265,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_type: DocType,
         doc_id: u128,
     ) -> Result<usize, SyncError> {
-        let req = encode_catchup_req(doc_type, doc_id);
+        let mut req = vec![KIND_CATCHUP];
+        req.extend_from_slice(&encode_catchup_req(doc_type, doc_id));
         tracing::debug!(?doc_type, doc_id, "request catch-up");
         let resp = self
             .transport
-            .request(peer, ProtocolId(CATCHUP_PROTOCOL), Bytes::from(req))
+            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
             .await?;
+        if resp.is_empty() {
+            return Ok(0); // peer had nothing for this document
+        }
         let bundle = decode_bundle(&resp)?;
 
         let key = (doc_type, doc_id);
@@ -229,6 +318,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Route an inbound request by its kind byte. Returns the response bytes (an
+    /// empty response uniformly signals "nothing / rejected").
+    fn handle_request(&mut self, data: &[u8]) -> Vec<u8> {
+        if data.len() > MAX_CONTROL_REQUEST {
+            tracing::warn!(bytes = data.len(), "oversized control request dropped");
+            return Vec::new();
+        }
+        match data.split_first() {
+            Some((&KIND_CATCHUP, rest)) => self.serve_catchup(rest).unwrap_or_default(),
+            Some((&KIND_JOIN, rest)) => self.serve_join(rest).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
     fn serve_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let (doc_type, doc_id) = decode_catchup_req(data).ok()?;
         let doc = self.docs.get(&(doc_type, doc_id))?;
@@ -243,6 +346,109 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
     }
+
+    /// Admit a joiner from a join request. Cheap, KeyPackage-independent checks run
+    /// first (so junk requests never pay for KeyPackage validation); only the
+    /// invite's named inviter admits over the network (so the joiner can
+    /// authenticate the response via the invite's public key). On success the
+    /// nonce is consumed and a Welcome **signed by this (inviter) device** is
+    /// returned. Returns `None` (empty response) on any failure.
+    fn serve_join(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        let (invite, kp_bytes) = decode_join_req(data).ok()?;
+
+        // --- cheap checks first (no asymmetric crypto on the KeyPackage) ---
+        if invite.group_id != self.group.group_id() {
+            return None;
+        }
+        // Only the inviter named in the invite admits over the wire.
+        if self.device.device_id() != invite.inviter_device_id {
+            tracing::warn!("join request for an invite this device did not issue");
+            return None;
+        }
+        if !invite.verify_self() {
+            tracing::warn!("join request with an inauthentic invite");
+            return None;
+        }
+        let now = self.clock.now_ms();
+        if self.ledger.check(&invite, now).is_err() {
+            return None; // expired / revoked / already used
+        }
+
+        // --- expensive: validate the KeyPackage, then admit ---
+        let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
+        let welcome = self
+            .group
+            .add_member_via_invite(&self.device, key_package, &invite, &mut self.ledger, now)
+            .ok()?;
+
+        if self.group.member_count() > 2 {
+            // The Add commit is merged locally but not yet fanned out to the other
+            // existing members (proposal/commit linearization is a later block),
+            // so they cannot yet decrypt the new member's traffic.
+            tracing::warn!(
+                members = self.group.member_count(),
+                "network join into a multi-member group: Add commit not yet propagated (see 6c)"
+            );
+        }
+
+        // Sign the Welcome so the joiner can authenticate it came from the inviter.
+        let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &welcome);
+        let signature = self.device.sign(&transcript).ok()?;
+        tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
+        Some(encode_join_resp(&welcome, &signature))
+    }
+}
+
+/// Join a server from a pasted [`InviteToken`]: authenticate the invite, mint a
+/// bound KeyPackage, send it to `inviter` over the transport, and join from the
+/// returned Welcome — but only after verifying the Welcome was **signed by the
+/// inviter** named in the invite and that the joined group's id matches. This
+/// defeats a malicious inviter/relay trying to divert the joiner into a group it
+/// controls (the joiner's KeyPackage alone is not a secret). The caller must
+/// already be transport-connected to `inviter` (via the invite's bootstrap
+/// addresses).
+pub async fn request_join<T: MeshTransport>(
+    transport: &T,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+) -> Result<ServerGroup, SyncError> {
+    // Authenticate the pasted invite itself (signature + pubkey binds device id).
+    if !invite.verify_self() {
+        tracing::warn!("invite failed self-verification");
+        return Err(SyncError::JoinRejected);
+    }
+
+    let key_package = device.key_package_for_invite(&invite.group_id, invite.invite_nonce)?;
+    let kp_bytes = serialize_key_package(&key_package)?;
+
+    let mut payload = vec![KIND_JOIN];
+    payload.extend_from_slice(&encode_join_req(invite, &kp_bytes));
+
+    tracing::debug!("sending join request");
+    let resp = transport
+        .request(inviter, ProtocolId(RR_PROTOCOL), Bytes::from(payload))
+        .await?;
+    if resp.is_empty() {
+        return Err(SyncError::JoinRejected);
+    }
+    let (welcome, signature) = decode_join_resp(&resp)?;
+
+    // The Welcome must be signed by the inviter named in the invite.
+    let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &welcome);
+    if !invite.verify_inviter_signature(&transcript, &signature) {
+        tracing::warn!("join response was not signed by the invite's inviter");
+        return Err(SyncError::JoinRejected);
+    }
+
+    let group = ServerGroup::join(device, &welcome)?;
+    // Defense in depth: we must have landed in the group the invite named.
+    if group.group_id() != invite.group_id {
+        tracing::warn!("joined group id does not match the invite");
+        return Err(SyncError::JoinRejected);
+    }
+    tracing::info!(epoch = group.epoch(), "joined server via invite");
+    Ok(group)
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> fmt::Debug for ChannelSync<T, R> {
@@ -262,6 +468,41 @@ mod tests {
     fn catchup_request_roundtrips_through_codec() {
         let bytes = encode_catchup_req(DocType::Wiki, 99);
         assert_eq!(decode_catchup_req(&bytes).unwrap(), (DocType::Wiki, 99));
+    }
+
+    #[test]
+    fn malicious_responder_cannot_divert_joiner_into_its_own_group() {
+        use catcoms_mls::{MlsDevice, ServerGroup};
+
+        // Legit inviter Alice issues an invite to her group A.
+        let alice = MlsDevice::generate().unwrap();
+        let alice_group = ServerGroup::create(&alice).unwrap();
+        let invite = alice_group
+            .mint_invite(&alice, [7u8; 16], 10_000, vec![])
+            .unwrap();
+
+        // Mallory controls her own group M and intercepts Bob's join.
+        let mallory = MlsDevice::generate().unwrap();
+        let mut mallory_group = ServerGroup::create(&mallory).unwrap();
+
+        // Bob mints a KeyPackage bound to the invite (group A); its init key is not
+        // a secret, so Mallory can add it to HER group and craft a valid Welcome.
+        let bob = MlsDevice::generate().unwrap();
+        let bob_kp = bob
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let welcome = mallory_group.add_member(&mallory, bob_kp).unwrap();
+        let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &welcome);
+        let mallory_sig = mallory.sign(&transcript).unwrap();
+
+        // Defense 1: the response signature does NOT verify against the invite's
+        // inviter (Mallory is not Alice).
+        assert!(!invite.verify_inviter_signature(&transcript, &mallory_sig));
+
+        // Defense 2 (even if the signature somehow passed): the group Bob would
+        // land in is not the one the invite names.
+        let diverted = ServerGroup::join(&bob, &welcome).unwrap();
+        assert_ne!(diverted.group_id(), invite.group_id);
     }
 
     #[test]

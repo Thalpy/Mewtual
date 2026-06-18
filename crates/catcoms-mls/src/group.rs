@@ -86,9 +86,11 @@ impl ServerGroup {
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, MlsError> {
+        let inviter_public_key = inviter.public_key_bytes();
         let payload = InviteToken::signing_payload(
             &self.group_id(),
             &inviter.device_id(),
+            &inviter_public_key,
             &invite_nonce,
             expires_at_ms,
             &bootstrap,
@@ -97,6 +99,7 @@ impl ServerGroup {
         Ok(InviteToken {
             group_id: self.group_id(),
             inviter_device_id: inviter.device_id(),
+            inviter_public_key,
             invite_nonce,
             expires_at_ms,
             bootstrap,

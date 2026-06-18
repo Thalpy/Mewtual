@@ -23,7 +23,7 @@ pub mod invite;
 use thiserror::Error;
 
 pub use config::CIPHERSUITE;
-pub use device::MlsDevice;
+pub use device::{serialize_key_package, MlsDevice};
 pub use group::{Incoming, ServerGroup};
 pub use invite::{InviteError, InviteLedger, InviteToken, MembershipCredential};
 

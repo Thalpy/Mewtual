@@ -73,6 +73,27 @@ is broken. The load-bearing fixes:
 - **Canonical wire format** (`catcoms-wire`): length-prefixed, fixed-width, injective
   encoding — the basis of collision-free key-derivation contexts.
 
+## 4a. Network join handshake (6c)
+
+A fresh device joins over the wire by sending its invite-bound KeyPackage to the
+inviter (request/response); the inviter validates and returns a Welcome. Adversarial
+review (run before commit) hardened it:
+
+- The joiner's KeyPackage init key is **not secret**, so a malicious inviter/relay
+  could otherwise add it to a group *they* control and return a valid Welcome. The
+  invite therefore carries the **inviter's public key**; the joiner authenticates
+  the invite (`verify_self`), the admitter **signs the Welcome**, and the joiner
+  verifies that signature against the invite's inviter and re-checks `group_id`.
+- Only the invite's **named inviter admits** over the network (so the joiner can
+  authenticate the response). `serve_join` runs cheap invite checks *before* the
+  expensive KeyPackage validation, and oversized control requests are dropped.
+
+**Deferred (needs the 6d proposal/commit linearization, do not ship multi-member):**
+the InviteLedger is per-member and the Add commit is not yet fanned out, so single
+use is per-admitter and a 3rd member can't yet decrypt a new joiner's traffic.
+Network join is sound for the inviter-admits case; multi-member admission logs a
+warning. Also deferred: per-peer rate limiting / off-actor offload of join work.
+
 ## 5. Roadmap (test-gated, block by block)
 
 0. Workspace + `Clock`/`Transport` seams + canonical wire format + CI/lint gate.

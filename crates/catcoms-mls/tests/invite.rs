@@ -154,6 +154,7 @@ fn invite_from_a_non_member_is_rejected() {
     let token = InviteToken {
         group_id: group.group_id(),
         inviter_device_id: stranger.device_id(),
+        inviter_public_key: stranger.public_key_bytes(),
         invite_nonce: nonce(1),
         expires_at_ms: SOON,
         bootstrap: vec![],

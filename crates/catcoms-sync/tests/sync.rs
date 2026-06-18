@@ -6,7 +6,7 @@
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ReadDoc, ROOT};
 use catcoms_mls::{InviteLedger, MlsDevice, ServerGroup};
-use catcoms_rt::{Hub, MemNetwork, PeerId};
+use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
 use catcoms_sync::ChannelSync;
 use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
@@ -50,8 +50,20 @@ fn pair() -> (
     let hub = Hub::new();
     let alice_peer = PeerId::from_u64(1);
     let bob_peer = PeerId::from_u64(2);
-    let asy = ChannelSync::new(hub.join(alice_peer), alice_group, alice, rng(10));
-    let bsy = ChannelSync::new(hub.join(bob_peer), bob_group, bob, rng(20));
+    let asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(10),
+        Box::new(ManualClock::new(1_000)),
+    );
+    let bsy = ChannelSync::new(
+        hub.join(bob_peer),
+        bob_group,
+        bob,
+        rng(20),
+        Box::new(ManualClock::new(1_000)),
+    );
     (asy, bsy, alice_peer, bob_peer)
 }
 
@@ -96,6 +108,130 @@ async fn bidirectional_gossip_converges() {
         assert_eq!(get_str(s, "from_a").as_deref(), Some("a"));
         assert_eq!(get_str(s, "from_b").as_deref(), Some("b"));
     }
+}
+
+#[tokio::test]
+async fn fresh_device_joins_via_invite_over_the_transport() {
+    catcoms_log::init_test();
+    // Alice founds a group and runs a sync node that can admit members.
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let hub = Hub::new();
+    let alice_peer = PeerId::from_u64(1);
+    let bob_peer = PeerId::from_u64(2);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+
+    // Alice mints an invite; Bob (a brand-new device with no group) redeems it
+    // over the transport.
+    let invite = asy.mint_invite([7u8; 16], 10_000, vec![]).unwrap();
+    let bob = MlsDevice::generate().unwrap();
+    let bob_net = hub.join(bob_peer);
+
+    let (joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite),
+        asy.run_once(),
+    );
+    let bob_group = joined.expect("bob joined");
+    assert_eq!(bob_group.epoch(), 1);
+    assert!(bob_group.contains_device(&bob.device_id()));
+
+    // Bob is now a member: he and Alice converge on a channel.
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_group,
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    asy.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "welcome", "you're in")
+    })
+    .await
+    .unwrap();
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(get_str(&bsy, "welcome").as_deref(), Some("you're in"));
+}
+
+#[tokio::test]
+async fn joining_via_a_non_inviter_node_is_rejected() {
+    catcoms_log::init_test();
+    // Alice founds group A and issues an invite.
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let hub = Hub::new();
+    let alice_peer = PeerId::from_u64(1);
+    let asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    let invite = asy.mint_invite([7u8; 16], 10_000, vec![]).unwrap();
+
+    // Carol runs an unrelated group/node.
+    let carol = MlsDevice::generate().unwrap();
+    let carol_group = ServerGroup::create(&carol).unwrap();
+    let carol_peer = PeerId::from_u64(2);
+    let mut csy = ChannelSync::new(
+        hub.join(carol_peer),
+        carol_group,
+        carol,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+
+    // Bob tries to redeem Alice's invite by talking to Carol's node — rejected.
+    let bob = MlsDevice::generate().unwrap();
+    let bob_net = hub.join(PeerId::from_u64(3));
+    let (joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, carol_peer, &bob, &invite),
+        csy.run_once(),
+    );
+    assert!(matches!(joined, Err(catcoms_sync::SyncError::JoinRejected)));
+}
+
+#[tokio::test]
+async fn spent_invite_cannot_be_reused_for_a_second_join() {
+    catcoms_log::init_test();
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let hub = Hub::new();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    let invite = asy.mint_invite([7u8; 16], 10_000, vec![]).unwrap();
+
+    // First join succeeds.
+    let bob = MlsDevice::generate().unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (first, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite),
+        asy.run_once(),
+    );
+    assert!(first.is_ok());
+
+    // Replaying the same invite for a different device is rejected (single use).
+    let mallory = MlsDevice::generate().unwrap();
+    let mallory_net = hub.join(PeerId::from_u64(3));
+    let (second, _) = tokio::join!(
+        catcoms_sync::request_join(&mallory_net, alice_peer, &mallory, &invite),
+        asy.run_once(),
+    );
+    assert!(matches!(second, Err(catcoms_sync::SyncError::JoinRejected)));
 }
 
 #[tokio::test]

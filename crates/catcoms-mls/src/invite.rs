@@ -121,6 +121,10 @@ pub struct InviteToken {
     pub group_id: Vec<u8>,
     /// The inviting device's content-addressed id.
     pub inviter_device_id: DeviceId,
+    /// The inviter's Ed25519 public key (raw bytes). Lets a *joiner* — who is not
+    /// yet a group member and so has no roster — authenticate the invite and the
+    /// admitter's signed Welcome. Must content-address `inviter_device_id`.
+    pub inviter_public_key: Vec<u8>,
     /// The one-time nonce identifying this invite.
     pub invite_nonce: [u8; 16],
     /// Expiry (ms since epoch); compared against an injected clock.
@@ -131,10 +135,12 @@ pub struct InviteToken {
     pub signature: [u8; 64],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_unsigned(
     e: &mut Encoder,
     group_id: &[u8],
     inviter_device_id: &DeviceId,
+    inviter_public_key: &[u8],
     invite_nonce: &[u8; 16],
     expires_at_ms: u64,
     bootstrap: &[String],
@@ -142,6 +148,7 @@ fn write_unsigned(
     e.put_str(INVITE_DOMAIN).expect("label fits");
     e.put_bytes(group_id).expect("group id fits");
     e.put_bytes(inviter_device_id.as_bytes()).expect("32 fits");
+    e.put_bytes(inviter_public_key).expect("pubkey fits");
     e.put_bytes(invite_nonce).expect("16 fits");
     e.put_u64(expires_at_ms);
     e.put_u32(bootstrap.len() as u32);
@@ -155,6 +162,7 @@ impl InviteToken {
     pub(crate) fn signing_payload(
         group_id: &[u8],
         inviter_device_id: &DeviceId,
+        inviter_public_key: &[u8],
         invite_nonce: &[u8; 16],
         expires_at_ms: u64,
         bootstrap: &[String],
@@ -164,6 +172,7 @@ impl InviteToken {
             &mut e,
             group_id,
             inviter_device_id,
+            inviter_public_key,
             invite_nonce,
             expires_at_ms,
             bootstrap,
@@ -171,16 +180,35 @@ impl InviteToken {
         e.finish()
     }
 
-    /// Verify the token signature under the inviter's raw public key.
+    /// Verify the token signature under an externally-supplied inviter public key
+    /// (e.g. one looked up from the group roster on the admitter side).
     pub fn verify(&self, inviter_public_key: &[u8]) -> bool {
         let payload = Self::signing_payload(
             &self.group_id,
             &self.inviter_device_id,
+            &self.inviter_public_key,
             &self.invite_nonce,
             self.expires_at_ms,
             &self.bootstrap,
         );
         verify_with_public_bytes(inviter_public_key, &payload, &self.signature)
+    }
+
+    /// Self-authenticate the token: the embedded public key must content-address
+    /// the named inviter device, and must have signed the token. This lets a
+    /// joiner (with no roster) check the invite is internally consistent.
+    pub fn verify_self(&self) -> bool {
+        if DeviceId::from_public_key_bytes(&self.inviter_public_key) != self.inviter_device_id {
+            return false;
+        }
+        self.verify(&self.inviter_public_key)
+    }
+
+    /// Verify a signature made by the inviter (the embedded public key) over
+    /// `message` — e.g. the admitter's signature over a join-response transcript,
+    /// which authenticates that the Welcome really came from the inviter.
+    pub fn verify_inviter_signature(&self, message: &[u8], signature: &[u8; 64]) -> bool {
+        verify_with_public_bytes(&self.inviter_public_key, message, signature)
     }
 
     /// Serialize the full token (including signature) for pasting/transport.
@@ -190,6 +218,7 @@ impl InviteToken {
             &mut e,
             &self.group_id,
             &self.inviter_device_id,
+            &self.inviter_public_key,
             &self.invite_nonce,
             self.expires_at_ms,
             &self.bootstrap,
@@ -211,6 +240,7 @@ impl InviteToken {
             .map_err(|_| InviteError::Malformed)?
             .try_into()
             .map_err(|_| InviteError::Malformed)?;
+        let inviter_public_key = d.get_bytes().map_err(|_| InviteError::Malformed)?.to_vec();
         let invite_nonce: [u8; 16] = d
             .get_bytes()
             .map_err(|_| InviteError::Malformed)?
@@ -231,6 +261,7 @@ impl InviteToken {
         Ok(Self {
             group_id,
             inviter_device_id: DeviceId::from_bytes(inviter_device_id),
+            inviter_public_key,
             invite_nonce,
             expires_at_ms,
             bootstrap,
@@ -326,6 +357,7 @@ mod tests {
         let token = InviteToken {
             group_id: vec![1],
             inviter_device_id: DeviceId::from_bytes([0u8; 32]),
+            inviter_public_key: vec![],
             invite_nonce: [1u8; 16],
             expires_at_ms: 1000,
             bootstrap: vec![],
