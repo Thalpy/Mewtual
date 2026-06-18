@@ -237,6 +237,37 @@ impl ServerGroup {
         Ok(outcome)
     }
 
+    /// Validate that `key_package` is admissible under `token` **without** adding it
+    /// or consuming the invite — the binding checks `add_member_via_invite` runs
+    /// before the Add, factored out so a *staged* (fork-resolvable) admission can
+    /// validate up front and consume the invite only once its commit merges.
+    /// Invite freshness (the ledger) is checked separately by the caller.
+    pub fn validate_invite_binding(
+        &self,
+        key_package: &KeyPackage,
+        token: &InviteToken,
+    ) -> Result<(), MlsError> {
+        let group_id = self.group_id();
+        if token.group_id != group_id {
+            return Err(InviteError::WrongGroup.into());
+        }
+        let inviter_pk = self
+            .member_signature_key(&token.inviter_device_id)
+            .ok_or(InviteError::InviterNotMember)?;
+        if !token.verify(&inviter_pk) {
+            return Err(InviteError::BadSignature.into());
+        }
+        let membership = membership_from_key_package(key_package)?;
+        let leaf_pk = key_package.leaf_node().signature_key().as_slice();
+        if membership.group_id != group_id
+            || membership.invite_nonce != token.invite_nonce
+            || DeviceId::from_public_key_bytes(leaf_pk) != membership.device_id
+        {
+            return Err(InviteError::CredentialMismatch.into());
+        }
+        Ok(())
+    }
+
     /// Remove the member with `target` device id and merge the commit (this
     /// advances the epoch, healing forward secrecy / post-compromise security).
     pub fn remove_member(&mut self, device: &MlsDevice, target: &DeviceId) -> Result<(), MlsError> {

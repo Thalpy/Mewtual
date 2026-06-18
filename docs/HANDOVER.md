@@ -108,8 +108,9 @@ protocol already works, only CLI plumbing remains).
 | 6d-1b | commit-catch-up recovery + ordered replay + past-epoch key window | ✅ `16a6427` |
 | 6d-2a (1/2) | signed commit records + authorize-by-signature gate | ✅ `09d4cc5` |
 | 6d-2a (2a) | MLS staged-commit primitives (stage/merge/abort) | ✅ `e577a11` |
-| 6d-2a (2b) | sync-layer fork resolution (commit_id tie-break + contest window + two-phase join) | **next** |
-| 6d-2b…d | proposal/commit split · replicated single-use · joiner-nonce binding | planned |
+| 6d-2a (2b) | sync-layer fork resolution (commit_id tie-break + contest window) | ✅ `939eb41` |
+| 6d-2a (2c) | two-phase staged-Add join (provisional Welcome push) + review fixes I2–I6 | ✅ this commit |
+| 6d-2b | **proposal/commit split (single serializer) — resolves I1 divergence**, then replicated single-use · joiner-nonce binding | **next** |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
@@ -167,22 +168,28 @@ equality — that rejected the fork *winner*), and `base_authenticator`
 (`epoch_authenticator()`) distinguishes a shallow same-base fork from deep
 divergence.
 
-Done so far: signed `CommitRecord` (`base_authenticator` + `committer_sig`) +
+Done: signed `CommitRecord` (`base_authenticator` + `committer_sig`) +
 `authorize_committer` gate + control topic v2 (`09d4cc5`); MLS stage/merge/abort
-primitives, isolation-verified (`e577a11`).
+primitives (`e577a11`); the sync-layer fork resolution — `commit_id` tie-break,
+`PendingResolve` contest window, loser `abort_staged` + apply-winner (`939eb41`); and
+the **two-phase staged-Add join** — `serve_join` stages under `max_committer_rank>=1`
+and pushes the signed Welcome (`KIND_WELCOME`) to the joiner only after its commit
+wins and merges (this commit).
 
-**Next (6d-2a step 2b): the sync-layer fork resolution.** Add `staged:
-Option<CommitRecord>` + `commit_id()` (BLAKE3 tie-break key, lowest wins); switch
-`serve_join` to stage→broadcast→**provisional Welcome** (withhold the Welcome until
-the commit merges, so a losing committer can't strand a joiner — needs a two-phase
-join: a `JoinPending` ack + the joiner polling/receiving the Welcome after merge);
-`on_control` `Equal` branch does the tie-break (same `base_authenticator` →
-lowest `commit_id` wins, loser `abort_staged` + re-issue; different → `ForkTooDeep`);
-a `stage_decision_window_ms` contest window in `run_once` so even a non-participant
-records the deterministic winner; raise `max_committer_rank` to 1. Then 6d-2b…d
-(proposal split, replicated single-use, joiner-nonce binding). This is
-security-critical concurrency code — run the adversarial-review `Workflow` before
-commit. Until 2b lands, network admission is still single-committer.
+**The whole concurrent-committer path is feature-flagged OFF by default
+(`max_committer_rank=0`).** The adversarial review (see `design-6d2.md` "Adversarial
+review of the 6d-2a implementation") found the default path safe but the opt-in path
+**must-not-be-enabled** until **I1** is resolved: a wall-clock contest window can
+converge two honest nodes to different winners under real async timing. I2/I3/I4/I6
+are fixed; **I1 is the gate**.
+
+**Next (6d-2b): the proposal/commit split** — the designated committer becomes the
+sole serializer (members replicate *proposals*; it packs them by-value into one
+commit), so concurrent commits (and thus I1's divergence) cannot arise in steady
+state; forks reduce to a rare committer-*failover* race (which then needs a published
+decision-record / barrier, tracked to 6d-3). Then the replicated single-use ledger
+and joiner-nonce binding. Re-read `design-6d2.md` first. Until 6d-2b lands and I1 is
+closed, keep `max_committer_rank=0` (network admission is single-committer).
 
 ## Known limitations / deferred (the security-relevant ones)
 

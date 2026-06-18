@@ -46,6 +46,14 @@ const KIND_CATCHUP: u8 = 0;
 const KIND_JOIN: u8 = 1;
 /// Request kind: membership commit catch-up (missed-commit recovery, 6d-1b).
 const KIND_COMMIT_CATCHUP: u8 = 2;
+/// Request kind: committer→joiner Welcome delivery once a *staged* admission
+/// resolves — the provisional-Welcome push for the two-phase join (6d-2a).
+const KIND_WELCOME: u8 = 3;
+/// Join-response status byte: the admission was staged and is awaiting the
+/// fork-resolution window; the Welcome is pushed later (see `KIND_WELCOME`).
+const JOIN_PENDING: u8 = 0;
+/// Join-response status byte: the Welcome (and signature) follow inline.
+const JOIN_READY: u8 = 1;
 /// Control requests (join/catch-up) are small; reject anything larger up front.
 const MAX_CONTROL_REQUEST: usize = 64 * 1024;
 /// Ceiling on a catch-up **response** accepted from a (untrusted) serving peer,
@@ -123,6 +131,32 @@ impl Default for SyncConfig {
 /// A fork-resolution contest for the current epoch: a node collects competing
 /// same-base candidate commits during a bounded window, then adopts the lowest
 /// `commit_id`. Built only when `max_committer_rank >= 1`.
+/// Context for an admission we staged: how to finalize (or reject) the join once
+/// the fork-resolution contest resolves. The Welcome is **provisional** — it is
+/// delivered to the joiner only if our staged Add becomes the canonical winner.
+#[derive(Debug)]
+struct StagedJoin {
+    /// The joining peer, to push the Welcome / rejection to.
+    joiner: PeerId,
+    /// The single-use invite nonce, consumed only on a winning merge.
+    nonce: [u8; 16],
+    /// The openmls Welcome for the joiner.
+    welcome: Vec<u8>,
+    /// Our (inviter) signature over the join transcript, so the joiner can
+    /// authenticate the Welcome.
+    welcome_sig: [u8; 64],
+}
+
+/// Our own staged commit within a contest.
+#[derive(Debug)]
+struct MyStaged {
+    /// `commit_id` of our staged commit (so we know whether we won).
+    commit_id: [u8; 32],
+    /// Present if the staged commit is an admission (then resolution pushes the
+    /// Welcome on a win or a rejection on a loss).
+    join: Option<StagedJoin>,
+}
+
 #[derive(Debug)]
 struct PendingResolve {
     /// The contested epoch (our current epoch until it resolves). Candidates must
@@ -133,10 +167,10 @@ struct PendingResolve {
     best: CommitRecord,
     /// When the window closes (on the injected clock).
     deadline_ms: u64,
-    /// `commit_id` of *our own* staged commit if we are a participant — so on
-    /// resolution we know whether we won (merge our pending commit) or lost (abort
-    /// it and apply the winner). `None` for a pure applier.
-    mine: Option<[u8; 32]>,
+    /// Our own staged commit if we are a participant — so on resolution we know
+    /// whether we won (merge our pending commit) or lost (abort it and apply the
+    /// winner). `None` for a pure applier.
+    mine: Option<MyStaged>,
 }
 
 /// A snapshot of a [`ChannelSync`]'s internal counters and gauges. Returned by
@@ -262,6 +296,14 @@ fn encode_join_resp(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
     e.put_bytes(welcome).expect("welcome fits");
     e.put_bytes(signature).expect("64 fits");
     e.finish()
+}
+
+/// Encode the committer→joiner Welcome push payload (a winning staged admission):
+/// `[JOIN_READY] ‖ welcome ‖ signature`.
+fn encode_welcome_push(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
+    let mut out = vec![JOIN_READY];
+    out.extend_from_slice(&encode_join_resp(welcome, signature));
+    out
 }
 
 fn decode_join_resp(bytes: &[u8]) -> Result<(Vec<u8>, [u8; 64]), SyncError> {
@@ -586,6 +628,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     failed_catchup_peers: VecDeque<PeerId>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
+    /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
+    /// staged admission resolves: `(joiner, payload)` drained in `run_once`.
+    welcome_outbox: Vec<(PeerId, Vec<u8>)>,
     /// Diagnostic counters (see [`SyncStats`]).
     stats: SyncStats,
 }
@@ -619,6 +664,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             catchup_queue: Vec::new(),
             failed_catchup_peers: VecDeque::new(),
             pending: None,
+            welcome_outbox: Vec::new(),
             stats: SyncStats::default(),
         }
     }
@@ -714,14 +760,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
         // Flush any queued membership-commit broadcasts (retries previous failures).
         self.drain_outbox().await;
+        // Resolve a fork-resolution contest whose window has closed FIRST (local
+        // work) — ahead of recovery, so a tick spent on catch-up can never stretch
+        // the contest window (I4), then deliver any provisional Welcome it produced.
+        if self.resolve_pending_if_expired() {
+            self.drain_welcome_outbox().await;
+            return Ok(true);
+        }
         // Perform recovery work queued by the previous event (commit/doc catch-up).
         // A tick that spent its turn fetching catch-up yields here instead of
         // blocking on a fresh event — the recovery *was* this tick's work.
         if self.drain_catchup_queue().await {
-            return Ok(true);
-        }
-        // Resolve a fork-resolution contest whose window has closed (local work).
-        if self.resolve_pending_if_expired() {
             return Ok(true);
         }
 
@@ -744,7 +793,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 ..
             }) => {
                 self.remember_peer(from);
-                let response = self.handle_request(&data);
+                let response = self.handle_request(from, &data);
                 // Broadcast any membership commit produced by serving the request
                 // BEFORE telling the joiner it succeeded, so a crash leaves the
                 // joiner to retry rather than the group silently missing the Add.
@@ -777,6 +826,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         while self.outbox.len() > self.config.max_outbox {
             self.outbox.remove(0);
+        }
+    }
+
+    /// Push any resolved provisional-Welcome outcomes to their joiners over
+    /// request/response (best-effort: if the joiner is unreachable the join just
+    /// fails and the joiner retries).
+    async fn drain_welcome_outbox(&mut self) {
+        let pending = std::mem::take(&mut self.welcome_outbox);
+        for (joiner, payload) in pending {
+            let mut req = vec![KIND_WELCOME];
+            req.extend_from_slice(&payload);
+            let _ = self
+                .transport
+                .request(joiner, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await;
         }
     }
 
@@ -1031,7 +1095,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let staged = self.group.stage_remove(&self.device, target)?;
         let record = self.sign_staged_record(&staged);
-        let mine = record.commit_id();
+        let mine = MyStaged {
+            commit_id: record.commit_id(),
+            join: None,
+        };
         self.pending = Some(PendingResolve {
             epoch: staged.commit_epoch,
             best: record.clone(),
@@ -1071,6 +1138,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// track the lowest `commit_id` seen. Nothing is applied until the window
     /// closes (see [`ChannelSync::finalize_contest`]).
     fn contest_commit(&mut self, record: CommitRecord) {
+        // Drop any contest left over from an epoch we have since advanced past
+        // (e.g. via commit catch-up) so we never fold a candidate into stale state.
+        self.discard_stale_contest();
         if !self.authorize_committer(&record) {
             return;
         }
@@ -1086,7 +1156,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let current = self.group.epoch();
         match &mut self.pending {
             Some(p) if p.epoch == current => {
-                if record.commit_id() < p.best.commit_id() {
+                // Lowest commit_id wins; ties (astronomically unlikely BLAKE3
+                // collisions) break on the full commit bytes so the order is still
+                // deterministic across nodes (I6).
+                if (record.commit_id(), &record.mls_commit)
+                    < (p.best.commit_id(), &p.best.mls_commit)
+                {
                     tracing::debug!("lower-id competitor adopted as provisional fork winner");
                     p.best = record;
                 }
@@ -1122,33 +1197,76 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return false; // window still open
         }
         let p = self.pending.take().expect("checked some");
-        let won = p.mine == Some(p.best.commit_id());
+        let winner_id = p.best.commit_id();
+        let we_won = p.mine.as_ref().map(|m| m.commit_id) == Some(winner_id);
         self.snapshot_epoch_keys();
-        let advanced = if p.mine.is_some() {
-            if won {
-                self.group.merge_staged_self(&self.device).is_ok()
-            } else {
-                // We lost: roll our own staged commit back, then apply the winner.
+        let advanced = match &p.mine {
+            Some(_) if we_won => match self.group.merge_staged_self(&self.device) {
+                // We won: merge our own staged commit.
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::error!(error = %e, "merge of winning staged commit failed");
+                    false
+                }
+            },
+            Some(_) => {
+                // We lost: roll our staged commit back, then apply the winner.
                 self.stats.forks_lost += 1;
-                let _ = self.group.abort_staged(&self.device);
-                self.group
+                if let Err(e) = self.group.abort_staged(&self.device) {
+                    tracing::error!(error = %e, "abort of losing staged commit failed");
+                }
+                match self
+                    .group
                     .process_incoming(&self.device, &p.best.mls_commit)
-                    .is_ok()
+                {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::error!(error = %e, "applying the fork winner failed");
+                        false
+                    }
+                }
             }
-        } else {
-            self.group
+            None => match self
+                .group
                 .process_incoming(&self.device, &p.best.mls_commit)
-                .is_ok()
+            {
+                // Pure applier: apply the winner.
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::error!(error = %e, "applying the fork winner failed");
+                    false
+                }
+            },
         };
+        // Deliver the provisional-Welcome outcome to any joiner we admitted: the
+        // signed Welcome on a winning merge, an empty (rejection) push otherwise —
+        // so a losing committer never strands the joiner on a dead commit.
+        if let Some(join) = p.mine.and_then(|m| m.join) {
+            let payload = if we_won && advanced {
+                let _ = self.ledger.consume(join.nonce);
+                encode_welcome_push(&join.welcome, &join.welcome_sig)
+            } else {
+                Vec::new() // empty => rejected; the joiner retries
+            };
+            self.welcome_outbox.push((join.joiner, payload));
+        }
         if advanced {
             self.evict_past_keys();
             self.stats.commits_applied += 1;
             self.stats.forks_resolved += 1;
-            tracing::info!(epoch = self.group.epoch(), won, "resolved membership fork");
+            tracing::info!(
+                epoch = self.group.epoch(),
+                we_won,
+                "resolved membership fork"
+            );
             self.record_commit(p.best);
             self.drain_pending_commits();
         } else {
-            tracing::warn!("fork resolution failed to advance the epoch");
+            // I2: a storage/merge failure must not wedge the node — heal via the
+            // existing commit-catch-up recovery path on the next tick.
+            tracing::warn!("fork resolution did not advance the epoch; scheduling recovery");
+            let here = self.group.epoch();
+            self.enqueue_commit_catchup(here);
         }
         true
     }
@@ -1236,6 +1354,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 break;
             }
         }
+        // If a buffered commit advanced us past a fork contest we were holding, that
+        // contest is now stale — drop it (and roll back our own staged commit) so we
+        // never resolve or extend it against a superseded epoch (I3).
+        self.discard_stale_contest();
+    }
+
+    /// Drop a fork contest whose epoch we have already advanced past (e.g. via
+    /// commit catch-up / buffered-commit replay), aborting any local staged commit
+    /// it tracked. Keeps `pending` consistent with the actual epoch on every path,
+    /// not only inside `resolve_pending_if_expired`.
+    fn discard_stale_contest(&mut self) {
+        let stale = matches!(&self.pending, Some(p) if p.epoch < self.group.epoch());
+        if !stale {
+            return;
+        }
+        let had_staged = self.pending.as_ref().is_some_and(|p| p.mine.is_some());
+        let contest_epoch = self.pending.as_ref().map(|p| p.epoch).unwrap_or(0);
+        self.pending = None;
+        if had_staged {
+            // Our staged openmls commit was built on the now-superseded epoch.
+            let _ = self.group.abort_staged(&self.device);
+        }
+        tracing::warn!(
+            contest_epoch,
+            current = self.group.epoch(),
+            "discarded a stale fork contest after the epoch advanced via another path"
+        );
     }
 
     /// Apply an inbound membership commit from the control topic. A commit that is
@@ -1499,15 +1644,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Route an inbound request by its kind byte. Returns the response bytes (an
-    /// empty response uniformly signals "nothing / rejected").
-    fn handle_request(&mut self, data: &[u8]) -> Vec<u8> {
+    /// empty response uniformly signals "nothing / rejected"). `from` is the
+    /// requesting peer (needed to push a staged join's Welcome back to it).
+    fn handle_request(&mut self, from: PeerId, data: &[u8]) -> Vec<u8> {
         if data.len() > MAX_CONTROL_REQUEST {
             tracing::warn!(bytes = data.len(), "oversized control request dropped");
             return Vec::new();
         }
         match data.split_first() {
             Some((&KIND_CATCHUP, rest)) => self.serve_catchup(rest).unwrap_or_default(),
-            Some((&KIND_JOIN, rest)) => self.serve_join(rest).unwrap_or_default(),
+            Some((&KIND_JOIN, rest)) => self.serve_join(from, rest).unwrap_or_default(),
             Some((&KIND_COMMIT_CATCHUP, rest)) => {
                 self.serve_commit_catchup(rest).unwrap_or_default()
             }
@@ -1577,11 +1723,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Admit a joiner from a join request. Cheap, KeyPackage-independent checks run
     /// first (so junk requests never pay for KeyPackage validation); only the
-    /// invite's named inviter admits over the network (so the joiner can
-    /// authenticate the response via the invite's public key). On success the
-    /// nonce is consumed and a Welcome **signed by this (inviter) device** is
-    /// returned. Returns `None` (empty response) on any failure.
-    fn serve_join(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+    /// invite's named inviter admits (so the joiner can authenticate the Welcome
+    /// against the invite's public key). With the default single-committer config
+    /// the Add is merged and the signed Welcome returned synchronously (`JOIN_READY`).
+    /// With concurrent committers enabled (`max_committer_rank >= 1`) the Add is
+    /// **staged** into a fork-resolution contest and a `JOIN_PENDING` ack is
+    /// returned; the signed Welcome is **pushed** to the joiner only once the staged
+    /// commit wins and merges (so a losing committer never strands the joiner).
+    fn serve_join(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
         let (invite, kp_bytes) = decode_join_req(data).ok()?;
 
         // --- cheap checks first (no asymmetric crypto on the KeyPackage) ---
@@ -1593,11 +1742,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("join request for an invite this device did not issue");
             return None;
         }
-        // Single-committer model: only the designated committer (lowest leaf
-        // index) may produce commits, so concurrent admits cannot fork the epoch
-        // chain. (Routing admissions to the committer is a later block.)
-        if !self.group.is_designated_committer(&self.device) {
-            tracing::warn!("not the designated committer; cannot admit in this block");
+        // The admitting inviter must be an authorized committer (within rank). At
+        // rank 0 this is exactly the designated committer (the 6d-1 invariant).
+        let my_rank = match (
+            self.group.member_leaf_index(&self.device.device_id()),
+            self.group.designated_committer_index(),
+        ) {
+            (Some(idx), Some(base)) => idx.saturating_sub(base),
+            _ => return None,
+        };
+        if my_rank > self.config.max_committer_rank {
+            tracing::warn!("not an authorized committer; cannot admit");
             return None;
         }
         if !invite.verify_self() {
@@ -1608,50 +1763,97 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.ledger.check(&invite, now).is_err() {
             return None; // expired / revoked / already used
         }
-
-        // --- expensive: validate the KeyPackage, then admit ---
         let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
-        // Capture, before the Add advances the epoch: our channel keys (so an op a
-        // peer sealed at this epoch still opens) and the base epoch-state
-        // fingerprint (the fork-vs-lag binding for the commit record).
-        let base_authenticator = self.group.epoch_authenticator_id();
-        self.snapshot_epoch_keys();
-        let outcome = self
-            .group
-            .add_member_via_invite(&self.device, key_package, &invite, &mut self.ledger, now)
-            .ok()?;
-        self.evict_past_keys();
 
-        // Build the signed Add commit record: queue it for fan-out on the control
-        // topic, and keep it in the commit log so we can later serve commit-catch-up
-        // to any member that missed the broadcast.
-        let committer_device = *self.device.device_id().as_bytes();
-        let auth = commit_auth_transcript(
-            &self.group.group_id(),
-            outcome.commit_epoch,
-            &base_authenticator,
-            &committer_device,
-            &outcome.commit,
-        );
-        let committer_sig = self.device.sign(&auth).ok()?;
-        let record = CommitRecord {
-            group_id: self.group.group_id(),
-            commit_epoch: outcome.commit_epoch,
-            committer_device,
-            mls_commit: outcome.commit,
-            base_authenticator,
-            committer_sig,
-        };
-        self.record_commit(record.clone());
+        if self.config.max_committer_rank == 0 {
+            // --- synchronous single-committer path (6d-1 behavior) ---
+            let base_authenticator = self.group.epoch_authenticator_id();
+            self.snapshot_epoch_keys();
+            let outcome = self
+                .group
+                .add_member_via_invite(&self.device, key_package, &invite, &mut self.ledger, now)
+                .ok()?;
+            self.evict_past_keys();
+            let record =
+                self.sign_add_record(outcome.commit_epoch, &outcome.commit, base_authenticator);
+            self.record_commit(record.clone());
+            let mut framed = vec![CTRL_COMMIT];
+            framed.extend_from_slice(&record.encode());
+            self.outbox.push((self.control_topic.clone(), framed));
+            let transcript =
+                join_transcript(&invite.group_id, &invite.invite_nonce, &outcome.welcome);
+            let signature = self.device.sign(&transcript).ok()?;
+            tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
+            let mut resp = vec![JOIN_READY];
+            resp.extend_from_slice(&encode_join_resp(&outcome.welcome, &signature));
+            return Some(resp);
+        }
+
+        // --- staged two-phase path (fork-resolvable; provisional Welcome) ---
+        if self.pending.is_some() {
+            tracing::warn!("a commit is already staged here; rejecting concurrent join (retry)");
+            return None; // joiner retries against the (now-known) committer
+        }
+        self.group
+            .validate_invite_binding(&key_package, &invite)
+            .ok()?;
+        let staged = self.group.stage_add(&self.device, key_package).ok()?;
+        let welcome = staged.welcome.clone()?; // an Add always carries a Welcome
+        let record = self.sign_staged_record(&staged);
+        let welcome_sig = self
+            .device
+            .sign(&join_transcript(
+                &invite.group_id,
+                &invite.invite_nonce,
+                &welcome,
+            ))
+            .ok()?;
+        self.pending = Some(PendingResolve {
+            epoch: staged.commit_epoch,
+            best: record.clone(),
+            deadline_ms: now + self.config.stage_decision_window_ms,
+            mine: Some(MyStaged {
+                commit_id: record.commit_id(),
+                join: Some(StagedJoin {
+                    joiner: from,
+                    nonce: invite.invite_nonce,
+                    welcome,
+                    welcome_sig,
+                }),
+            }),
+        });
         let mut framed = vec![CTRL_COMMIT];
         framed.extend_from_slice(&record.encode());
         self.outbox.push((self.control_topic.clone(), framed));
+        tracing::info!("staged an admission; awaiting the fork-resolution window");
+        Some(vec![JOIN_PENDING])
+    }
 
-        // Sign the Welcome so the joiner can authenticate it came from the inviter.
-        let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &outcome.welcome);
-        let signature = self.device.sign(&transcript).ok()?;
-        tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
-        Some(encode_join_resp(&outcome.welcome, &signature))
+    /// Build the signed [`CommitRecord`] for an Add produced via the synchronous
+    /// (already-merged) path.
+    fn sign_add_record(
+        &self,
+        commit_epoch: u64,
+        mls_commit: &[u8],
+        base_authenticator: [u8; 32],
+    ) -> CommitRecord {
+        let committer_device = *self.device.device_id().as_bytes();
+        let auth = commit_auth_transcript(
+            &self.group.group_id(),
+            commit_epoch,
+            &base_authenticator,
+            &committer_device,
+            mls_commit,
+        );
+        let committer_sig = self.device.sign(&auth).expect("sign own commit");
+        CommitRecord {
+            group_id: self.group.group_id(),
+            commit_epoch,
+            committer_device,
+            mls_commit: mls_commit.to_vec(),
+            base_authenticator,
+            committer_sig,
+        }
     }
 }
 
@@ -1685,19 +1887,36 @@ pub async fn request_join<T: MeshTransport>(
     let resp = transport
         .request(inviter, ProtocolId(RR_PROTOCOL), Bytes::from(payload))
         .await?;
-    if resp.is_empty() {
+    match resp.split_first() {
+        // Synchronous admission (single-committer): the Welcome is inline.
+        Some((&JOIN_READY, rest)) => {
+            let (welcome, signature) = decode_join_resp(rest)?;
+            finish_join(device, invite, &welcome, &signature)
+        }
+        // Staged admission (concurrent committers): the inviter will *push* the
+        // signed Welcome once its staged commit wins and merges. Await it.
+        Some((&JOIN_PENDING, _)) => {
+            tracing::debug!("admission staged; awaiting the Welcome push");
+            await_welcome_push(transport, device, invite).await
+        }
+        // Empty or unknown => rejected.
+        _ => Err(SyncError::JoinRejected),
+    }
+}
+
+/// Verify a Welcome was signed by the invite's inviter and join from it.
+fn finish_join(
+    device: &MlsDevice,
+    invite: &InviteToken,
+    welcome: &[u8],
+    signature: &[u8; 64],
+) -> Result<ServerGroup, SyncError> {
+    let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, welcome);
+    if !invite.verify_inviter_signature(&transcript, signature) {
+        tracing::warn!("Welcome was not signed by the invite's inviter");
         return Err(SyncError::JoinRejected);
     }
-    let (welcome, signature) = decode_join_resp(&resp)?;
-
-    // The Welcome must be signed by the inviter named in the invite.
-    let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, &welcome);
-    if !invite.verify_inviter_signature(&transcript, &signature) {
-        tracing::warn!("join response was not signed by the invite's inviter");
-        return Err(SyncError::JoinRejected);
-    }
-
-    let group = ServerGroup::join(device, &welcome)?;
+    let group = ServerGroup::join(device, welcome)?;
     // Defense in depth: we must have landed in the group the invite named.
     if group.group_id() != invite.group_id {
         tracing::warn!("joined group id does not match the invite");
@@ -1705,6 +1924,37 @@ pub async fn request_join<T: MeshTransport>(
     }
     tracing::info!(epoch = group.epoch(), "joined server via invite");
     Ok(group)
+}
+
+/// Await the committer's provisional-Welcome push (`KIND_WELCOME`) for a staged
+/// admission: an empty body means the committer lost its fork (the join is
+/// rejected; the caller retries), otherwise it carries the signed Welcome.
+async fn await_welcome_push<T: MeshTransport>(
+    transport: &T,
+    device: &MlsDevice,
+    invite: &InviteToken,
+) -> Result<ServerGroup, SyncError> {
+    loop {
+        match transport.next_event().await {
+            Some(TransportEvent::Request {
+                data, responder, ..
+            }) if data.first() == Some(&KIND_WELCOME) => {
+                responder.respond(Bytes::new()); // ack the push
+                match data[1..].split_first() {
+                    Some((&JOIN_READY, body)) => {
+                        let (welcome, signature) = decode_join_resp(body)?;
+                        return finish_join(device, invite, &welcome, &signature);
+                    }
+                    // Empty body => the committer lost; rejected.
+                    _ => return Err(SyncError::JoinRejected),
+                }
+            }
+            // Ignore unrelated requests (ack so the sender isn't left hanging).
+            Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
+            Some(_) => continue,
+            None => return Err(SyncError::JoinRejected),
+        }
+    }
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> fmt::Debug for ChannelSync<T, R> {

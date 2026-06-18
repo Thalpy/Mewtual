@@ -124,6 +124,47 @@ never merged/served); no stranded joiner (Welcome only for a merged commit); aut
 (only a signed committer of rank ≤ `max_committer_rank` advances an epoch); fork-vs-lag
 (differing `base_authenticator` never tie-broken); every new buffer bounded.
 
+## Adversarial review of the 6d-2a implementation (must-read)
+
+A post-implementation `Workflow` review (42 agents, 26 confirmed findings) returned
+**default path `max_committer_rank=0`: safe-as-is** (the shipping single-committer
+path is untouched), but **opt-in path `max_committer_rank>=1`: must-fix before
+relying on it.** The flag therefore stays **OFF by default** until the items below
+land. What was found and what was done:
+
+- **I1 — CRITICAL (open): the clock-window contest can converge two honest nodes to
+  different winners.** Each node times its contest window from its *own* clock when
+  it sees its first candidate; a lower-`commit_id` candidate that arrives after a
+  node already resolved is dropped (`Ordering::Less`). So under real async timing two
+  nodes can finalize different winners at the same epoch — permanent divergence, and
+  MLS can't un-merge. **A wall-clock window is only a best-effort barrier; true
+  convergence needs the single-serializer proposal/commit model (6d-2b)**, where the
+  designated committer is the sole committer in steady state and forks only occur on
+  committer *failover*. Until 6d-2b (and likely a published decision-record / barrier
+  for the failover race), the flag must not be enabled in any real deployment. This
+  is the gate on turning on concurrent committers.
+- **I2 — HIGH (fixed):** the loser abort/apply path swallowed errors and discarded
+  the contest, wedging the node on a storage failure. Now logs the real error and, if
+  resolution doesn't advance the epoch, enqueues commit-catch-up to self-heal.
+- **I3 — HIGH (fixed):** an epoch advance via `drain_pending_commits` (catch-up) left
+  a stale `PendingResolve`, silently overwriting our staged tracking. Added
+  `discard_stale_contest` (aborts our staged commit + clears `pending`), called in
+  `drain_pending_commits` and `contest_commit`.
+- **I4 — MEDIUM (fixed):** `run_once` returned after catch-up before checking the
+  contest window, stretching it. `resolve_pending_if_expired` now runs *before* the
+  catch-up early-return.
+- **I6 — INFO (fixed):** `commit_id` ties now break on the full `mls_commit` bytes, so
+  even an (astronomically unlikely) BLAKE3 collision stays deterministic.
+- **I7 — doc (this section):** 6d-2a fork resolution covers **Removes and staged
+  Adds** (the two-phase Welcome-push join is implemented); both are gated by
+  `max_committer_rank>=1` and share the I1 limitation. Joins on the default config
+  remain synchronous single-committer.
+
+Confirmed-correct (re-verified, no action): the authorize-by-signature gate, the
+`base_authenticator` fork-vs-lag refusal, `commit_id` determinism, the rank bound,
+catch-up membership auth, and forward secrecy of aborted commits (never recorded /
+served).
+
 ## Honest residuals (deferred)
 
 Deep-partition single-use double-claim is **detected, not remediated** (`ForkTooDeep`;

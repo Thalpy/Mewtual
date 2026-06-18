@@ -1049,6 +1049,42 @@ async fn group_is_functional_after_a_fork() {
     );
 }
 
+/// 6d-2a: with concurrent committers enabled, an admission is **staged** (not
+/// merged synchronously) and the joiner is admitted via the two-phase flow — a
+/// `JOIN_PENDING` ack, then a pushed Welcome once the staged commit wins and
+/// merges. The joiner ends up a real member.
+#[tokio::test]
+async fn staged_join_admits_via_the_welcome_push() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let window = 500u64;
+    let (mut s, _ids) = build_members(&hub, &clock, 1).await; // just Alice (founder)
+    s[0].set_config(fork_cfg(1, window));
+    let alice_peer = PeerId::from_u64(1);
+
+    let invite = s[0].mint_invite([9u8; 16], u64::MAX, vec![]).unwrap();
+    let bob = MlsDevice::generate().unwrap();
+    let bob_net = hub.join(PeerId::from_u64(50));
+
+    let (bob_result, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite),
+        async {
+            // Serve the join → stage + return JOIN_PENDING.
+            s[0].run_once().await.unwrap();
+            // Close the contest window → merge → push the Welcome to Bob.
+            clock.advance_ms(window);
+            s[0].run_once().await.unwrap();
+        }
+    );
+
+    let bob_group = bob_result.expect("bob joined via the two-phase staged path");
+    assert_eq!(bob_group.epoch(), 1);
+    assert!(bob_group.contains_device(&bob.device_id()));
+    assert_eq!(s[0].epoch(), 1, "the staged admission merged");
+    assert!(s[0].contains_member(&bob.device_id()));
+}
+
 #[tokio::test]
 async fn catch_up_transfers_history_over_request_response() {
     catcoms_log::init_test();
