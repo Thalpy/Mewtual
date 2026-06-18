@@ -36,7 +36,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 6b | Channel sync over the mesh (live gossip + catch-up); + diagnostics (tracing) | done |
 | 6c | Network join handshake (inviter-authenticated, single-use over the wire) | done |
 | 6d-1a | Membership commit propagation (single designated committer) — multi-member join converges | done |
-| 6d-1b | Commit-catch-up recovery (peer discovery, missed-commit replay) + cross-epoch op window | planned |
+| 6d-1b | Missed-commit recovery (commit catch-up + ordered replay, peer discovery) + past-epoch key window | done |
 | 6d-2 | Concurrent-commit fork resolution + full proposal/commit linearization | planned |
 | 6e | Relay v2 + DCUtR, rendezvous, eclipse-resistance | planned |
 | 7 | End-to-end local integration | planned |
@@ -82,7 +82,9 @@ channel over the mesh, and exchange end-to-end-encrypted chat that converges.
 
 ```sh
 cargo run -p catcomsctl -- demo                       # full end-to-end demo
+cargo run -p catcomsctl -- recover --stats            # 6d-1b: miss a membership commit and self-heal
 cargo run -p catcomsctl -- --debug demo               # + writes logs/debug_log_<timestamp>.txt
+cargo run -p catcomsctl -- --stats demo               # print per-node SyncStats diagnostics
 cargo run -p catcomsctl -- --debug --log-dir /tmp demo
 ```
 

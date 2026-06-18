@@ -15,7 +15,7 @@ use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
 use catcoms_rt::{Clock, Hub, MemNetwork, OsCryptoRng, PeerId, RngCore, SystemClock};
-use catcoms_sync::ChannelSync;
+use catcoms_sync::{ChannelSync, SyncStats};
 use catcoms_wire::DocType;
 use clap::{Parser, Subcommand};
 
@@ -34,6 +34,9 @@ struct Cli {
     /// Directory for debug logs.
     #[arg(long, global = true, default_value = "logs")]
     log_dir: PathBuf,
+    /// Print each node's sync diagnostic counters (SyncStats) on completion.
+    #[arg(long, global = true)]
+    stats: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -42,6 +45,10 @@ struct Cli {
 enum Command {
     /// Run the full end-to-end demo (found server -> invite -> join -> chat).
     Demo,
+    /// Demonstrate membership-commit recovery (6d-1b): a member misses a commit
+    /// and self-heals via ordered commit catch-up. A scriptable debug harness for
+    /// the recovery path.
+    Recover,
     /// Print the version.
     Version,
 }
@@ -53,9 +60,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Command::Version => println!("catcomsctl {}", env!("CARGO_PKG_VERSION")),
-        Command::Demo => run_demo().await?,
+        Command::Demo => run_demo(cli.stats).await?,
+        Command::Recover => run_recover(cli.stats).await?,
     }
     Ok(())
+}
+
+/// Print a node's sync diagnostics in a compact, greppable line.
+fn print_stats(label: &str, s: &SyncStats) {
+    println!(
+        "  [stats] {label:<6} epoch-applied={} buffered={} served={} \
+commit-catchups={} ops={} past-epoch-recovered={} future-dropped={} \
+old-dropped={} doc-catchups={} | gauges: past-keys={} pending={} log={} peers={}",
+        s.commits_applied,
+        s.commits_buffered,
+        s.commits_served,
+        s.commit_catchups_requested,
+        s.ops_ingested,
+        s.ops_recovered_past_epoch,
+        s.ops_dropped_future_epoch,
+        s.ops_dropped_old_epoch,
+        s.doc_catchups_requested,
+        s.past_keys_retained,
+        s.pending_commits,
+        s.commit_log_len,
+        s.known_peers,
+    );
 }
 
 fn random_nonce() -> [u8; 16] {
@@ -105,7 +135,7 @@ fn field(doc: &AutoCommit, obj: &automerge::ObjId, key: &str) -> String {
         .unwrap_or_default()
 }
 
-async fn run_demo() -> Result<(), Box<dyn Error>> {
+async fn run_demo(stats: bool) -> Result<(), Box<dyn Error>> {
     println!("== CatComs end-to-end demo ==\n");
     let now = SystemClock.now_ms();
 
@@ -185,12 +215,116 @@ async fn run_demo() -> Result<(), Box<dyn Error>> {
     let alice_text = field_join(&alice_sync);
     let bob_text = field_join(&bob_sync);
     println!();
+    if stats {
+        print_stats("alice", &alice_sync.stats());
+        print_stats("bob", &bob_sync.stats());
+        println!();
+    }
     if alice_text == bob_text && !alice_text.is_empty() {
         println!("[OK] both members converged on an identical, encrypted transcript");
     } else {
         return Err("members did not converge".into());
     }
     Ok(())
+}
+
+/// Drive the 6d-1b commit-recovery path end to end so it can be exercised and
+/// inspected from the command line. Alice founds a server and admits Bob, Carol
+/// and Dave. Bob is offline for the control topic when Carol joins, so he *misses*
+/// that membership commit; when he later sees Dave's (future) commit he detects
+/// the gap, fetches the missing commits in order, and converges — without an
+/// explicit catch-up call.
+async fn run_recover(stats: bool) -> Result<(), Box<dyn Error>> {
+    println!("== CatComs membership-recovery demo (6d-1b) ==\n");
+    let hub = Hub::new();
+    let alice_peer = PeerId::from_u64(1);
+
+    // Alice founds the server and listens for membership commits.
+    let alice = MlsDevice::generate()?;
+    let alice_group = ServerGroup::create(&alice)?;
+    let mut alice_sync = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        OsCryptoRng,
+        Box::new(SystemClock),
+    );
+    alice_sync.subscribe_control().await?;
+    println!("[1] Alice founded server (epoch {})", alice_sync.epoch());
+
+    // Bob joins over the wire (epoch 0 -> 1).
+    let bob = MlsDevice::generate()?;
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let invite_b = alice_sync.mint_invite(random_nonce(), u64::MAX, vec![])?;
+    let (bob_group, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        alice_sync.run_once(),
+    );
+    let mut bob_sync =
+        ChannelSync::new(bob_net, bob_group?, bob, OsCryptoRng, Box::new(SystemClock));
+    println!(
+        "[2] Bob joined (Alice epoch {}, Bob epoch {}) -- Bob is offline for control",
+        alice_sync.epoch(),
+        bob_sync.epoch()
+    );
+
+    // Carol joins (epoch 1 -> 2). Bob is not on the control topic, so he MISSES it.
+    let carol = MlsDevice::generate()?;
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let invite_c = alice_sync.mint_invite(random_nonce(), u64::MAX, vec![])?;
+    let (_carol_group, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &invite_c),
+        alice_sync.run_once(),
+    );
+    bob_sync.subscribe_control().await?; // Bob comes online, but already behind
+    println!(
+        "[3] Carol joined (Alice epoch {}) -- Bob ({}) MISSED this commit",
+        alice_sync.epoch(),
+        bob_sync.epoch()
+    );
+
+    // Dave joins (epoch 2 -> 3). Bob receives this *future* commit.
+    let dave = MlsDevice::generate()?;
+    let dave_net = hub.join(PeerId::from_u64(4));
+    let invite_d = alice_sync.mint_invite(random_nonce(), u64::MAX, vec![])?;
+    let (_dave_group, _) = tokio::join!(
+        catcoms_sync::request_join(&dave_net, alice_peer, &dave, &invite_d),
+        alice_sync.run_once(),
+    );
+    println!("[4] Dave joined (Alice epoch {})", alice_sync.epoch());
+
+    // Tick 1: Bob sees the future commit, buffers it, and queues a catch-up.
+    bob_sync.run_once().await?;
+    println!(
+        "[5] Bob saw a future commit -> buffered (Bob still epoch {}, {} pending)",
+        bob_sync.epoch(),
+        bob_sync.stats().pending_commits
+    );
+
+    // Tick 2: Bob fetches the missing commits in order and converges.
+    let (bob_tick, alice_tick) = tokio::join!(bob_sync.run_once(), alice_sync.run_once());
+    bob_tick?;
+    alice_tick?;
+    println!(
+        "[6] Bob auto-recovered via commit catch-up -> epoch {}",
+        bob_sync.epoch()
+    );
+
+    println!();
+    if stats {
+        print_stats("alice", &alice_sync.stats());
+        print_stats("bob", &bob_sync.stats());
+        println!();
+    }
+    if bob_sync.epoch() == alice_sync.epoch() {
+        println!(
+            "[OK] Bob healed a missed membership commit and converged to epoch {}",
+            bob_sync.epoch()
+        );
+        Ok(())
+    } else {
+        Err("recovery failed: Bob did not converge".into())
+    }
 }
 
 /// Concatenate a member's messages for an equality check.

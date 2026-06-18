@@ -9,12 +9,14 @@ publish = false
 catcoms-rt = { path = "../catcoms-rt" }
 catcoms-replication = { path = "../catcoms-replication" }
 catcoms-mls = { path = "../catcoms-mls" }
+catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-wire = { path = "../catcoms-wire" }
 thiserror.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 blake3 = "1"
 automerge = "0.10"
+zeroize = "1"
 
 [dev-dependencies]
 catcoms-log = { path = "../catcoms-log" }

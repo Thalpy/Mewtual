@@ -176,7 +176,8 @@ pub struct SealedOp { doc_type:DocType, doc_id:u128, epoch:u64, blob:SealedBlob 
 pub struct EncryptedDoc;   // automerge doc + signed-op log
   new(DocType, doc_id, actor:&DeviceId) -> Self;  doc()->&AutoCommit;  op_count();
   edit(&mut, &MlsDevice, &ServerGroup, rng, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<SealedOp>;
-  ingest(&mut, &SealedOp, &ServerGroup, &MlsDevice) -> Result<bool>;   // verify+apply; dedup
+  ingest(&mut, &SealedOp, &ServerGroup, &MlsDevice) -> Result<bool>;   // verify+apply; dedup; epoch must == current
+  ingest_with_key(&mut, &SealedOp, key:&[u8;32]) -> Result<bool>;      // open with a caller-supplied (past-epoch) key; inner sig still verified
   export_catchup(&ServerGroup, &MlsDevice, rng) -> Result<Vec<SealedOp>>;   // re-sealed under current epoch
   import_catchup(&mut, &[SealedOp], &ServerGroup, &MlsDevice) -> Result<usize>;
 ```
@@ -208,18 +209,36 @@ pub enum BlobState { Available, EvictedRefetchable, MissingNoHolder, Unknown }
 ```rust
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   new(transport:T, group:ServerGroup, device:MlsDevice, rng:R, clock:Box<dyn Clock + Send>) -> Self;
+  set_config(SyncConfig);                                  // override recovery/key-window bounds
   async subscribe_control() -> Result<()>;                 // receive membership commits
-  epoch() -> u64;
+  epoch() -> u64;   stats() -> SyncStats;                  // SyncStats = diagnostic counters + gauges
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe blinded topic
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
-  async run_once() -> Result<bool>;                        // drain outbox; handle ONE event (gossip/control/request)
-  async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;
+  async run_once() -> Result<bool>;                        // drain outbox + recovery; then handle ONE event; early-returns if a catch-up fired
+  async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // document history catch-up
+  async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay)
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;
+
+// Bounds (all hard caps; Default suits a desktop node). past:8, commit_log:256,
+// pending:256, gap:1024, peers:64, catchup_queue:256, outbox:256.
+pub struct SyncConfig { max_past_epochs:u64, max_commit_log:usize, max_pending_commits:usize,
+                        max_commit_gap:u64, max_known_peers:usize, max_catchup_queue:usize, max_outbox:usize }
+pub struct SyncStats { commits_applied, commits_buffered, commits_served, commit_catchups_requested,
+                       ops_ingested, ops_recovered_past_epoch, ops_dropped_future_epoch, ops_dropped_old_epoch,
+                       doc_catchups_requested, requests_rejected: u64,
+                       /* gauges: */ past_keys_retained, pending_commits, commit_log_len, known_peers: usize }
 
 pub async fn request_join<T: MeshTransport>(transport:&T, inviter:PeerId, device:&MlsDevice, invite:&InviteToken)
     -> Result<ServerGroup, SyncError>;   // join over the wire; authenticates the inviter + rechecks group_id
 ```
+
+**Recovery internals (private to `catcoms-sync`, for orientation):** `commit_log`
+(VecDeque, served to peers) · `pending_commits` (BTreeMap, out-of-order buffer,
+ordered replay when the gap fills) · `past_keys` (BTreeMap `(DocType,doc_id,epoch)`
+→ `Zeroizing<[u8;32]>`, captured by `snapshot_epoch_keys` *before* each advance,
+evicted past `max_past_epochs`) · `known_peers` (VecDeque, MRU catch-up sources) ·
+`catchup_queue` (deferred `Commits{from_epoch}` / `Doc{type,id}` work).
 
 ---
 
@@ -233,11 +252,22 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
-  - `0` KIND_CATCHUP — body `u16 doc_type ‖ u128 doc_id`; response = op bundle (`u32 count ‖ len-prefixed SealedOps`).
+  - `0` KIND_CATCHUP — **authed** body (see below) wrapping `u16 doc_type ‖ u128 doc_id`; response =
+    op bundle (`u32 count ‖ len-prefixed SealedOps`), a contiguous prefix within the response budget.
   - `1` KIND_JOIN — body `bytes invite.encode() ‖ bytes key_package`; response = `bytes welcome ‖ bytes signature(64)`
-    (the admitter signs `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome`).
-  - `2` KIND_COMMIT_CATCHUP — **reserved for 6d-1b** (body `u64 from_epoch`; response = ordered `CommitRecord`s).
-  - Control requests are capped at 64 KiB (`MAX_CONTROL_REQUEST`).
+    (the admitter signs `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome`). **Not** member-authed
+    (the joiner isn't a member yet — it carries the invite/inviter auth instead).
+  - `2` KIND_COMMIT_CATCHUP — **authed** body wrapping `u64 from_epoch`; response = `u32 count ‖ len-prefixed CommitRecords`
+    with `commit_epoch >= from_epoch`, ascending, contiguous prefix within budget (empty if none).
+    The requester replays them in order via `process_incoming` (missed-membership-commit recovery).
+  - **Authed catch-up body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes signature(64)`,
+    where `inner` is the kind's own body and the signature is over
+    `catchup_auth = "catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms`.
+    The server serves only if `requester_pubkey` content-addresses a **current member** (`group.contains_device`),
+    the timestamp is within `MAX_REQUEST_AGE_MS` (60s), and the signature verifies.
+  - Requests capped at 64 KiB (`MAX_CONTROL_REQUEST`); responses capped at 16 MiB
+    (`MAX_CATCHUP_RESPONSE` inbound, `MAX_CONTROL_RESPONSE` on the serving side);
+    bundle element counts capped (`MAX_BUNDLE_ELEMENTS`).
 - **`InviteToken`** signed payload: `"catcoms/invite/v1" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str`, then `signature(64)`.
 
 ## 8. `DocType` tags (stable; only append)

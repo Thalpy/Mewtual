@@ -98,6 +98,34 @@ impl EncryptedDoc {
         self.apply_signed(op)
     }
 
+    /// Decrypt, verify and apply an inbound sealed op using an **externally
+    /// provided** channel key, *without* requiring the op's epoch to equal the
+    /// group's current epoch. This is the entry point the sync layer uses for an
+    /// op that was sealed under a just-superseded epoch and arrives after a
+    /// membership commit advanced us: the caller supplies the channel key it
+    /// retained for `sealed.epoch` (a bounded, zeroized past-epoch window).
+    ///
+    /// Confidentiality and authenticity are unchanged: a wrong key fails the AEAD
+    /// open, and the op's inner author signature is still verified before it is
+    /// applied — so this cannot be used to inject forged history. The caller pairs
+    /// `key` with an epoch and passes that as `expected_epoch`; this asserts the op
+    /// was actually sealed under it (defense in depth against a future refactor
+    /// that mis-pairs key and epoch). Returns `true` if newly applied, `false` if
+    /// it was a duplicate.
+    pub fn ingest_with_key(
+        &mut self,
+        sealed: &SealedOp,
+        expected_epoch: u64,
+        key: &[u8; 32],
+    ) -> Result<bool, ReplError> {
+        self.check_doc(sealed.doc_type, sealed.doc_id)?;
+        if sealed.epoch != expected_epoch {
+            return Err(ReplError::EpochUnavailable(sealed.epoch));
+        }
+        let op = sealed.open(key)?;
+        self.apply_signed(op)
+    }
+
     /// Export the full signed-op log, re-sealed under the current epoch, so a
     /// late-joining member can catch up without old epoch keys.
     pub fn export_catchup(

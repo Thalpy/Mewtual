@@ -354,6 +354,333 @@ async fn a_non_committer_cannot_admit() {
     ));
 }
 
+/// 6d-1b: an op sealed under the epoch just before a membership change still
+/// decrypts after the holder advances, via the bounded past-epoch key window —
+/// instead of being silently dropped as `EpochUnavailable`.
+#[tokio::test]
+async fn op_sealed_before_an_epoch_advance_still_opens() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+
+    // Alice (leaf 0, the committer) and Bob, both at epoch 1 with #general open.
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.subscribe_control().await.unwrap();
+
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_peer = PeerId::from_u64(2);
+    let bob_net = hub.join(bob_peer);
+    let (bob_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_joined.unwrap(),
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    assert_eq!(asy.epoch(), 1);
+    assert_eq!(bsy.epoch(), 1);
+
+    // Carol joins via Alice. Alice snapshots her epoch-1 #general key, admits
+    // Carol, and advances to epoch 2.
+    let carol = MlsDevice::generate().unwrap();
+    let invite_c = asy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &invite_c),
+        asy.run_once(),
+    );
+    carol_joined.unwrap();
+    assert_eq!(asy.epoch(), 2);
+
+    // Bob never processed Carol's commit, so he is still at epoch 1 and seals his
+    // op under epoch 1. It is delivered into Alice's (epoch-2) inbox.
+    assert_eq!(bsy.epoch(), 1);
+    bsy.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "late", "from epoch 1")
+    })
+    .await
+    .unwrap();
+
+    // Alice ingests the epoch-1 op while at epoch 2 — recovered via the retained
+    // past-epoch key rather than dropped.
+    assert!(asy.run_once().await.unwrap());
+    assert_eq!(get_str(&asy, "late").as_deref(), Some("from epoch 1"));
+    assert_eq!(asy.stats().ops_recovered_past_epoch, 1);
+}
+
+/// 6d-1b: when the past-epoch key window has evicted the needed epoch, an op
+/// sealed under it is not silently lost — it is counted dropped and a document
+/// catch-up is queued to reconcile it.
+#[tokio::test]
+async fn op_past_the_key_window_falls_back_to_doc_catchup() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    // Retain NO past epochs, so the window evicts the old key on every advance.
+    asy.set_config(catcoms_sync::SyncConfig {
+        max_past_epochs: 0,
+        ..catcoms_sync::SyncConfig::default()
+    });
+    asy.subscribe_control().await.unwrap();
+
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (bob_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_joined.unwrap(),
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+
+    // Carol joins; Alice advances to epoch 2 and (with the zero-width window) keeps
+    // no epoch-1 key.
+    let carol = MlsDevice::generate().unwrap();
+    let invite_c = asy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &invite_c),
+        asy.run_once(),
+    );
+    carol_joined.unwrap();
+    assert_eq!(asy.epoch(), 2);
+    assert_eq!(
+        asy.stats().past_keys_retained,
+        0,
+        "zero-width window keeps nothing"
+    );
+
+    // Bob (still epoch 1) seals an op under epoch 1; Alice can't open it (evicted).
+    bsy.post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "x", "lost-key"))
+        .await
+        .unwrap();
+    assert!(asy.run_once().await.unwrap());
+    assert_eq!(asy.stats().ops_recovered_past_epoch, 0);
+    assert_eq!(
+        asy.stats().ops_dropped_old_epoch,
+        1,
+        "counted, not silently lost"
+    );
+}
+
+/// 6d-1b: the catch-up serve endpoints are members-only. A node that is not a
+/// current member of the group (its own group / device) is refused, so an outsider
+/// cannot harvest a group's membership history or document metadata.
+#[tokio::test]
+async fn catch_up_is_refused_to_a_non_member() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+
+    // Alice founds a group and admits Bob, so she has commits + history to serve.
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (_bob, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    asy.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "secret", "members only")
+    })
+    .await
+    .unwrap();
+
+    // Mallory runs her OWN unrelated group; her device is not in Alice's group.
+    let mallory = MlsDevice::generate().unwrap();
+    let mallory_group = ServerGroup::create(&mallory).unwrap();
+    let mut msy = ChannelSync::new(
+        hub.join(PeerId::from_u64(9)),
+        mallory_group,
+        mallory,
+        rng(9),
+        Box::new(ManualClock::new(1_000)),
+    );
+
+    // Both catch-up endpoints refuse her: she gets nothing, Alice counts rejections.
+    let (commits, _) = tokio::join!(msy.request_commit_catchup(alice_peer, 0), asy.run_once(),);
+    assert_eq!(commits.unwrap(), 0, "non-member gets no commits");
+    let (ops, _) = tokio::join!(
+        msy.request_catchup(alice_peer, DocType::Channel, CHANNEL),
+        asy.run_once(),
+    );
+    assert_eq!(ops.unwrap(), 0, "non-member gets no document history");
+    assert_eq!(asy.stats().requests_rejected, 2);
+}
+
+/// 6d-1b: a member that missed a membership commit recovers it on demand with
+/// ordered replay over `request_commit_catchup` (the explicit recovery API).
+#[tokio::test]
+async fn missed_commits_recover_in_order_via_commit_catchup() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.subscribe_control().await.unwrap();
+
+    // Bob joins (Alice 0->1). Bob starts at epoch 1.
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (bob_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_joined.unwrap(),
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+    assert_eq!(bsy.epoch(), 1);
+
+    // Carol then Dave join via Alice (1->2, 2->3). Bob is NOT subscribed to the
+    // control topic, so he misses both commits.
+    for (nonce, peer) in [([2u8; 16], 3u64), ([3u8; 16], 4u64)] {
+        let dev = MlsDevice::generate().unwrap();
+        let invite = asy.mint_invite(nonce, 10_000, vec![]).unwrap();
+        let net = hub.join(PeerId::from_u64(peer));
+        let (joined, _) = tokio::join!(
+            catcoms_sync::request_join(&net, alice_peer, &dev, &invite),
+            asy.run_once(),
+        );
+        joined.unwrap();
+    }
+    assert_eq!(asy.epoch(), 3);
+    assert_eq!(bsy.epoch(), 1, "Bob missed both commits");
+
+    // Bob explicitly catches up from epoch 1; Alice serves the ordered bundle.
+    let (applied, _) = tokio::join!(bsy.request_commit_catchup(alice_peer, 1), asy.run_once(),);
+    assert_eq!(applied.unwrap(), 2, "two commits replayed in order");
+    assert_eq!(bsy.epoch(), 3, "Bob converged to the current epoch");
+    assert_eq!(asy.stats().commits_served, 1);
+}
+
+/// 6d-1b: a member that missed a commit and later sees a *future* one detects the
+/// gap, buffers it, and **auto-recovers** through `run_once` (no explicit call).
+#[tokio::test]
+async fn out_of_order_commit_auto_recovers_through_run_once() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+
+    let alice = MlsDevice::generate().unwrap();
+    let alice_group = ServerGroup::create(&alice).unwrap();
+    let alice_peer = PeerId::from_u64(1);
+    let mut asy = ChannelSync::new(
+        hub.join(alice_peer),
+        alice_group,
+        alice,
+        rng(1),
+        Box::new(ManualClock::new(1_000)),
+    );
+    asy.subscribe_control().await.unwrap();
+
+    // Bob joins (Alice 0->1). Bob starts at epoch 1, NOT yet on the control topic.
+    let bob = MlsDevice::generate().unwrap();
+    let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+    let bob_net = hub.join(PeerId::from_u64(2));
+    let (bob_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
+        asy.run_once(),
+    );
+    let mut bsy = ChannelSync::new(
+        bob_net,
+        bob_joined.unwrap(),
+        bob,
+        rng(2),
+        Box::new(ManualClock::new(1_000)),
+    );
+
+    // Carol joins (1->2) while Bob is still off the control topic — he misses it.
+    let carol = MlsDevice::generate().unwrap();
+    let invite_c = asy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
+    let carol_net = hub.join(PeerId::from_u64(3));
+    let (carol_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&carol_net, alice_peer, &carol, &invite_c),
+        asy.run_once(),
+    );
+    carol_joined.unwrap();
+
+    // Bob comes online (subscribes to control) at epoch 1, having missed epoch-1's
+    // commit. Dave joins (2->3); Bob receives that future commit.
+    bsy.subscribe_control().await.unwrap();
+    assert_eq!(bsy.epoch(), 1);
+    let dave = MlsDevice::generate().unwrap();
+    let invite_d = asy.mint_invite([3u8; 16], 10_000, vec![]).unwrap();
+    let dave_net = hub.join(PeerId::from_u64(4));
+    let (dave_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&dave_net, alice_peer, &dave, &invite_d),
+        asy.run_once(),
+    );
+    dave_joined.unwrap();
+    assert_eq!(asy.epoch(), 3);
+
+    // Tick 1: Bob processes Dave's epoch-2 commit, sees the gap (he is at epoch 1),
+    // buffers it, and queues a commit catch-up.
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(bsy.epoch(), 1, "future commit is buffered, not applied");
+    assert_eq!(bsy.stats().commits_buffered, 1);
+
+    // Tick 2: Bob's queued catch-up fires; Alice serves the ordered bundle and Bob
+    // replays epoch 1 then epoch 2, converging — all driven by run_once.
+    let (_, _) = tokio::join!(bsy.run_once(), asy.run_once());
+    assert_eq!(bsy.epoch(), 3, "Bob auto-recovered to the current epoch");
+    assert_eq!(bsy.stats().commit_catchups_requested, 1);
+    assert!(bsy.stats().commits_applied >= 2);
+}
+
 #[tokio::test]
 async fn catch_up_transfers_history_over_request_response() {
     catcoms_log::init_test();

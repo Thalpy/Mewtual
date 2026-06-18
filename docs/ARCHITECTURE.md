@@ -99,11 +99,36 @@ so safety is **enforced**: only the **designated committer** (lowest leaf index)
 admit, which prevents concurrent commits from forking the epoch chain. Tested with a
 3-member join + a non-committer-admit rejection.
 
-**Deferred, with the data model already in place (no rewrite):**
-- **6d-1b** — commit-catch-up recovery (a member that misses a commit needs peer
-  discovery + ordered missed-commit replay; the review showed live gossip alone
-  isn't enough and there's no DeviceId→PeerId map yet) and the bounded past-epoch
-  channel-key window for live ops crossing an epoch boundary.
+## 4c. Missed-commit recovery + past-epoch key window (6d-1b)
+
+A member that misses a control-topic commit (unreliable delivery / brief offline)
+self-heals: an out-of-order commit is buffered (`pending_commits`), a new
+`KIND_COMMIT_CATCHUP` request fetches the gap from any member's bounded `commit_log`,
+and the missed MLS commits are **replayed in epoch order** through `process_incoming`.
+Every retained buffer/queue is hard-bounded so an untrusted peer cannot force
+unbounded allocation; a forged future commit is gap- and size-capped and fails MLS
+verification at apply time (its only residual cost is one deduped catch-up request).
+Separately, a bounded **past-epoch channel-key window** (`snapshot_epoch_keys` before
+each advance → `Zeroizing` keys, evicted past `max_past_epochs`) lets an op sealed
+just before an epoch boundary still decrypt (`ingest_with_key`, inner signature still
+verified) instead of being dropped as `EpochUnavailable`; deeper gaps fall back to
+auto-queued document/commit catch-up. Peer discovery is by remembering inbound
+`Gossip.from`/`Request.from` (no `DeviceId→PeerId` directory yet).
+
+An adversarial review (background `Workflow`) hardened this before commit. The
+load-bearing fix: the **catch-up serve endpoints are members-only**. A requester
+proves current membership by signing `("catcoms/catchup-auth/v1" ‖ group_id ‖ kind ‖
+body ‖ requester_pubkey ‖ timestamp)` with its MLS leaf key; the server serves only
+if that key content-addresses a current member, the timestamp is fresh, and the
+signature verifies — so an outsider cannot harvest a group's id, member device ids,
+or history from these endpoints. (Residual: within-freshness-window replay of a
+captured signed request, closed by the Noise transport in production; a server nonce
+challenge or authenticated-peer binding is the full fix, with 6e.) Also folded in:
+hard response-size bounds on the *serving* side, `committer_device` validated against
+the designated committer on the inbound apply path, and explicit caps on every
+recovery buffer/queue.
+
+**Still deferred, with the data model already in place (no rewrite):**
 - **6d-2** — concurrent-commit fork resolution + the full RFC 9420 proposal/commit
   split (designated committer packs replicated proposals; deterministic lowest-hash
   tie-break; openmls `clear_pending_commit` rollback / `fork_resolution` heal),
