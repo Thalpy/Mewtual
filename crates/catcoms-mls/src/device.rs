@@ -8,6 +8,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use crate::config::{capabilities, CIPHERSUITE};
+use crate::invite::MembershipCredential;
 use crate::{proto, MlsError};
 
 /// One device's MLS identity: its signature keypair, Basic credential, and the
@@ -60,6 +61,42 @@ impl MlsDevice {
             )
             .map_err(proto)?;
         Ok(bundle.key_package().clone())
+    }
+
+    /// Build a KeyPackage whose leaf credential is bound to a specific
+    /// `(group_id, invite_nonce)` — so this KeyPackage can only be admitted into
+    /// that group via that invite, and cannot be replayed elsewhere.
+    pub fn key_package_for_invite(
+        &self,
+        group_id: &[u8],
+        invite_nonce: [u8; 16],
+    ) -> Result<KeyPackage, MlsError> {
+        let membership = MembershipCredential {
+            device_id: self.device_id,
+            group_id: group_id.to_vec(),
+            invite_nonce,
+        };
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(membership.encode()).into(),
+            signature_key: self.signer.public().into(),
+        };
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities())
+            .build(CIPHERSUITE, &self.provider, &self.signer, credential)
+            .map_err(proto)?;
+        Ok(bundle.key_package().clone())
+    }
+
+    /// Sign raw bytes with this device's MLS leaf key (used for invite tokens).
+    pub(crate) fn sign_raw(&self, payload: &[u8]) -> Result<[u8; 64], MlsError> {
+        use openmls_traits::signatures::Signer;
+        let sig = self
+            .signer
+            .sign(payload)
+            .map_err(|e| MlsError::Protocol(format!("{e:?}")))?;
+        sig.as_slice()
+            .try_into()
+            .map_err(|_| MlsError::Internal("unexpected signature length"))
     }
 
     pub(crate) fn provider(&self) -> &OpenMlsRustCrypto {

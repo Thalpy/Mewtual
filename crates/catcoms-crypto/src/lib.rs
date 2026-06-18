@@ -23,7 +23,7 @@ pub mod ids;
 pub mod keystore;
 
 pub use cert::{CertError, CertSigner, DeviceCert, DeviceRevocation, Roster, RosterConfig};
-pub use identity::{verify, AccountKeypair, DeviceKeypair};
+pub use identity::{verify, verify_with_public_bytes, AccountKeypair, DeviceKeypair};
 pub use ids::{DeviceId, UserId};
 pub use keystore::{
     requires_passphrase_confirmation, seal, unseal, Dek, InMemoryKeyStore, KeyHierarchy, KeyTier,

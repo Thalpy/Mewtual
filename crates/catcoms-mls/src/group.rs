@@ -12,6 +12,7 @@ use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::config::{create_config, join_config};
 use crate::device::MlsDevice;
+use crate::invite::{membership_from_key_package, InviteError, InviteLedger, InviteToken};
 use crate::{proto, MlsError};
 
 /// The result of processing an inbound MLS message.
@@ -74,6 +75,84 @@ impl ServerGroup {
             .merge_pending_commit(device.provider())
             .map_err(proto)?;
         welcome.tls_serialize_detached().map_err(proto)
+    }
+
+    /// Mint a single-use, device-bound invite to this group, signed by `inviter`
+    /// (who must be a current member). `invite_nonce` must be unique per invite.
+    pub fn mint_invite(
+        &self,
+        inviter: &MlsDevice,
+        invite_nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+    ) -> Result<InviteToken, MlsError> {
+        let payload = InviteToken::signing_payload(
+            &self.group_id(),
+            &inviter.device_id(),
+            &invite_nonce,
+            expires_at_ms,
+            &bootstrap,
+        );
+        let signature = inviter.sign_raw(&payload)?;
+        Ok(InviteToken {
+            group_id: self.group_id(),
+            inviter_device_id: inviter.device_id(),
+            invite_nonce,
+            expires_at_ms,
+            bootstrap,
+            signature,
+        })
+    }
+
+    /// Admit a device using a single-use invite. Validates, in order: the token
+    /// targets this group; the inviter is a current member and signed the token;
+    /// the invite is fresh (not expired/revoked/used); and the joiner's KeyPackage
+    /// credential is bound to exactly `(this group, invite_nonce)`. On success the
+    /// nonce is consumed and the serialized Welcome is returned.
+    pub fn add_member_via_invite(
+        &mut self,
+        inviter: &MlsDevice,
+        key_package: KeyPackage,
+        token: &InviteToken,
+        ledger: &mut InviteLedger,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, MlsError> {
+        let group_id = self.group_id();
+        if token.group_id != group_id {
+            return Err(InviteError::WrongGroup.into());
+        }
+        ledger.check(token, now_ms)?;
+
+        // The inviter must be a current member; verify the token under their key.
+        let inviter_pk = self
+            .member_pubkey(&token.inviter_device_id)
+            .ok_or(InviteError::InviterNotMember)?;
+        if !token.verify(&inviter_pk) {
+            return Err(InviteError::BadSignature.into());
+        }
+
+        // The joiner's KeyPackage credential must bind to this group + nonce, and
+        // its device id must content-address its own leaf signature key.
+        let membership = membership_from_key_package(&key_package)?;
+        let leaf_pk = key_package.leaf_node().signature_key().as_slice();
+        if membership.group_id != group_id
+            || membership.invite_nonce != token.invite_nonce
+            || DeviceId::from_public_key_bytes(leaf_pk) != membership.device_id
+        {
+            return Err(InviteError::CredentialMismatch.into());
+        }
+
+        let welcome = self.add_member(inviter, key_package)?;
+        ledger.consume(token.invite_nonce)?;
+        Ok(welcome)
+    }
+
+    /// The raw signature public key of a current member, by device id.
+    fn member_pubkey(&self, device_id: &DeviceId) -> Option<Vec<u8>> {
+        self.group
+            .members()
+            .find(|m| DeviceId::from_public_key_bytes(&m.signature_key) == *device_id)
+            .map(|m| m.signature_key)
     }
 
     /// Remove the member with `target` device id and merge the commit (this

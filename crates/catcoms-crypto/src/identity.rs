@@ -115,6 +115,19 @@ pub fn verify(vk: &VerifyingKey, msg: &[u8], sig: &[u8; 64]) -> bool {
     vk.verify_strict(msg, &Signature::from_bytes(sig)).is_ok()
 }
 
+/// Verify an Ed25519 signature given the signer's public key as raw bytes (e.g.
+/// an MLS leaf signature key handed back by openmls). Returns false if the bytes
+/// are not a valid 32-byte public key.
+pub fn verify_with_public_bytes(public_key: &[u8], msg: &[u8], sig: &[u8; 64]) -> bool {
+    let Ok(arr): Result<[u8; 32], _> = public_key.try_into() else {
+        return false;
+    };
+    let Ok(vk) = VerifyingKey::from_bytes(&arr) else {
+        return false;
+    };
+    verify(&vk, msg, sig)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +158,16 @@ mod tests {
         let b = DeviceKeypair::generate(&mut rng(2));
         let sig = a.sign(b"hello");
         assert!(!verify(&b.verifying_key(), b"hello", &sig));
+    }
+
+    #[test]
+    fn verify_with_public_bytes_matches_typed_verify() {
+        let kp = DeviceKeypair::generate(&mut rng(1));
+        let sig = kp.sign(b"payload");
+        let pk = kp.verifying_key();
+        assert!(verify_with_public_bytes(pk.as_bytes(), b"payload", &sig));
+        assert!(!verify_with_public_bytes(pk.as_bytes(), b"payl0ad", &sig));
+        assert!(!verify_with_public_bytes(b"too short", b"payload", &sig));
     }
 
     #[test]

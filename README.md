@@ -29,7 +29,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 0 | Workspace, `Clock`/`Transport` seams, canonical wire format, CI | done |
 | 1 | Device identity + unified key hierarchy | done |
 | 2 | MLS group core (local) | done |
-| 3 | Single-use device-bound invites | planned |
+| 3 | Single-use device-bound invites | done |
 | 4 | CRDT replication (inner-signed ops, proposal/commit, snapshot catch-up) | planned |
 | 5 | Storage & retention | planned |
 | 6 | Real mesh (libp2p, relay, discovery) | planned |

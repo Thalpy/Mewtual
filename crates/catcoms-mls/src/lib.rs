@@ -18,12 +18,14 @@ pub mod channel;
 pub mod config;
 pub mod device;
 pub mod group;
+pub mod invite;
 
 use thiserror::Error;
 
 pub use config::CIPHERSUITE;
 pub use device::MlsDevice;
 pub use group::{Incoming, ServerGroup};
+pub use invite::{InviteError, InviteLedger, InviteToken, MembershipCredential};
 
 /// Errors from MLS operations.
 #[derive(Debug, Error)]
@@ -37,6 +39,9 @@ pub enum MlsError {
     /// No member with the requested device id is in the group.
     #[error("no such member in the group")]
     MemberNotFound,
+    /// An invite admission was rejected.
+    #[error(transparent)]
+    Invite(#[from] InviteError),
     /// An internal invariant was violated.
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),
