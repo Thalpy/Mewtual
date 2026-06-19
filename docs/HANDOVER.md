@@ -114,8 +114,9 @@ protocol already works, only CLI plumbing remains).
 | 6d-2b (2) | **all-members apply-time Add-binding validation** (every member rejects an Add not bound to this group / its own leaf key) | ✅ this commit |
 | 6d-2b (3…) | by-value proposal batching · history-derived single-use · committer-decoupled admission | planned |
 | 6e (1) | **full stack over real libp2p** — join handshake + encrypted catch-up over `MeshService` (Noise + request/response) | ✅ `f1d2713` |
-| 6e (2) | **multi-process `catcomsctl serve`/`join` over TCP** — two OS processes, real sockets, verified | ✅ this commit |
-| 6e (3…) | relay v2 + DCUtR (NAT traversal) · rendezvous · eclipse-resistance · blob-fetch padding | planned |
+| 6e (2) | **multi-process `catcomsctl serve`/`join` over TCP** — two OS processes, real sockets, verified | ✅ `73904f1` |
+| 6e (3a) | **relay infrastructure** — relay-capable swarm (relay-client + DCUtR + identify) + relay server; a client reserves a circuit slot | ✅ this commit |
+| 6e (3b…) | circuit-dial end-to-end (`serve --relay`/`join` via circuit) · DCUtR hole-punch · rendezvous · eclipse-resistance · blob-fetch padding | planned — see [`design-6e-relay.md`](design-6e-relay.md) |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |

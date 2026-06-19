@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use catcoms_net::MeshService;
+use catcoms_net::{build_memory_relay_swarm, build_memory_swarm, run_relay, MeshService};
 use catcoms_rt::{MeshTransport, ProtocolId, Topic, TransportEvent};
 use libp2p::Multiaddr;
 
@@ -138,4 +138,49 @@ async fn two_tcp_nodes_connect_and_request_response() {
 
     assert_eq!(&reply[..], b"pong");
     a_responder.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_reserves_a_circuit_slot_on_a_relay() {
+    // A relay-server node forwards circuit traffic for clients behind NAT.
+    let relay_addr: Multiaddr = "/memory/999001".parse().unwrap();
+    let mut relay_swarm = build_memory_relay_swarm();
+    let relay_id = *relay_swarm.local_peer_id();
+    relay_swarm.listen_on(relay_addr.clone()).unwrap();
+    let relay_task = tokio::spawn(run_relay(relay_swarm));
+
+    // A client connects to the relay, then reserves a slot by listening on its
+    // circuit address.
+    let client = MeshService::spawn(build_memory_swarm());
+    client.dial(relay_addr.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(_)) = client.next_event().await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("client did not connect to the relay");
+
+    let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_id}/p2p-circuit")
+        .parse()
+        .unwrap();
+    client.listen_on(circuit).await.unwrap();
+
+    // The granted reservation surfaces as a `…/p2p-circuit` listen address.
+    let got = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match client.next_listen_addr().await {
+                Some(addr) if addr.to_string().contains("p2p-circuit") => return addr,
+                Some(_) => continue,
+                None => panic!("actor stopped"),
+            }
+        }
+    })
+    .await
+    .expect("relay reservation was not granted");
+    assert!(got.to_string().contains("p2p-circuit"));
+
+    relay_task.abort();
 }

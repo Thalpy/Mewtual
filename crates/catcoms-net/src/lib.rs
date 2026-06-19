@@ -33,8 +33,8 @@ use libp2p::core::upgrade::Version;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    gossipsub, noise, request_response, tcp, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder,
-    Transport,
+    dcutr, gossipsub, identify, noise, ping, relay, request_response, tcp, yamux, Multiaddr,
+    StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -136,7 +136,12 @@ impl request_response::Codec for BytesCodec {
 
 // ----- behaviour & swarm construction ---------------------------------------
 
-/// The mesh node's libp2p behaviours.
+/// The protocol string advertised by `identify`.
+const IDENTIFY_PROTO: &str = "/catcoms/id/1";
+
+/// The mesh node's libp2p behaviours. `relay_client` + `dcutr` + `identify` give
+/// NAT traversal: a node can reserve a slot on a relay, be dialed via a circuit
+/// address, and then hole-punch to a direct connection.
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct MeshBehaviour {
@@ -144,11 +149,18 @@ pub struct MeshBehaviour {
     pub gossipsub: gossipsub::Behaviour,
     /// Addressed request/response.
     pub request_response: request_response::Behaviour<BytesCodec>,
+    /// Relay-client: reserve a slot on a relay; be reachable via a circuit address.
+    pub relay_client: relay::client::Behaviour,
+    /// Direct Connection Upgrade through Relay (hole punching).
+    pub dcutr: dcutr::Behaviour,
+    /// Address discovery (observed external address; required by DCUtR).
+    pub identify: identify::Behaviour,
 }
 
 impl MeshBehaviour {
     fn new(
         key: &libp2p::identity::Keypair,
+        relay_client: relay::client::Behaviour,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(key.clone()),
@@ -162,14 +174,36 @@ impl MeshBehaviour {
             )],
             request_response::Config::default(),
         );
+        let dcutr = dcutr::Behaviour::new(key.public().to_peer_id());
+        let identify = identify::Behaviour::new(identify::Config::new(
+            IDENTIFY_PROTO.to_string(),
+            key.public(),
+        ));
         Ok(Self {
             gossipsub,
             request_response,
+            relay_client,
+            dcutr,
+            identify,
         })
     }
 }
 
-/// Build a swarm over the in-memory transport (deterministic local testing).
+/// A relay **server**'s behaviours: forward circuit traffic between peers that
+/// cannot connect directly. Never sees plaintext (Noise + MLS ciphertext only).
+#[derive(NetworkBehaviour)]
+#[allow(missing_debug_implementations)]
+pub struct RelayBehaviour {
+    /// The circuit-relay-v2 server.
+    pub relay: relay::Behaviour,
+    /// Address discovery for clients reserving slots.
+    pub identify: identify::Behaviour,
+    /// Keep-alive.
+    pub ping: ping::Behaviour,
+}
+
+/// Build a swarm over the in-memory transport (deterministic local testing),
+/// relay-client capable.
 pub fn build_memory_swarm() -> Swarm<MeshBehaviour> {
     SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -180,12 +214,14 @@ pub fn build_memory_swarm() -> Swarm<MeshBehaviour> {
                 .multiplex(yamux::Config::default())
         })
         .expect("memory transport")
+        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .expect("relay client")
         .with_behaviour(MeshBehaviour::new)
         .expect("behaviour")
         .build()
 }
 
-/// Build a swarm over TCP (Noise + yamux) for real networking.
+/// Build a swarm over TCP (Noise + yamux), relay-client capable, for real networking.
 pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
     let swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -195,10 +231,89 @@ pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
             yamux::Config::default,
         )
         .map_err(|e| NetError::Build(e.to_string()))?
+        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .map_err(|e| NetError::Build(e.to_string()))?
         .with_behaviour(MeshBehaviour::new)
         .map_err(|e| NetError::Build(e.to_string()))?
         .build();
     Ok(swarm)
+}
+
+/// Build a TCP **relay-server** swarm (forwards circuit traffic for clients behind
+/// NAT). Run it with [`run_relay`].
+pub fn build_relay_swarm() -> Result<Swarm<RelayBehaviour>, NetError> {
+    let swarm = SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .with_behaviour(relay_behaviour)
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .build();
+    Ok(swarm)
+}
+
+/// Build a relay-server swarm over the in-memory transport (deterministic tests).
+pub fn build_memory_relay_swarm() -> Swarm<RelayBehaviour> {
+    SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_other_transport(|key| {
+            MemoryTransport::default()
+                .upgrade(Version::V1)
+                .authenticate(noise::Config::new(key).expect("noise config"))
+                .multiplex(yamux::Config::default())
+        })
+        .expect("memory transport")
+        .with_behaviour(relay_behaviour)
+        .expect("relay behaviour")
+        .build()
+}
+
+fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour {
+    RelayBehaviour {
+        relay: relay::Behaviour::new(key.public().to_peer_id(), relay::Config::default()),
+        identify: identify::Behaviour::new(identify::Config::new(
+            IDENTIFY_PROTO.to_string(),
+            key.public(),
+        )),
+        ping: ping::Behaviour::default(),
+    }
+}
+
+/// Run a relay-server swarm's event loop: forward circuit traffic indefinitely.
+/// (Relays only ever route Noise + MLS ciphertext — zero-knowledge.)
+///
+/// Each bound listen address is registered as an **external address** so granted
+/// reservations carry a usable relayed address (otherwise a client's circuit
+/// listener closes with `NoAddressesInReservation`). A production relay on a
+/// public IP behind 0.0.0.0 should additionally have its real public address added
+/// — pass it via [`run_relay_with_external`].
+pub async fn run_relay(swarm: Swarm<RelayBehaviour>) {
+    run_relay_with_external(swarm, Vec::new()).await
+}
+
+/// Like [`run_relay`] but also advertises each address in `external` (e.g. the
+/// relay's real public `/ip4/.../tcp/...` when listening on `0.0.0.0`).
+pub async fn run_relay_with_external(mut swarm: Swarm<RelayBehaviour>, external: Vec<Multiaddr>) {
+    for addr in external {
+        swarm.add_external_address(addr);
+    }
+    loop {
+        match swarm.select_next_some().await {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                // Advertise the bound address so reservations can hand it to clients.
+                swarm.add_external_address(address.clone());
+                tracing::info!(%address, "relay listening");
+            }
+            SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(e)) => {
+                tracing::debug!(?e, "relay event");
+            }
+            _ => {}
+        }
+    }
 }
 
 // ----- mapping helpers -------------------------------------------------------
@@ -226,6 +341,10 @@ enum Command {
         data: Bytes,
         reply: oneshot::Sender<Result<Bytes, TransportError>>,
     },
+    /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
+    Listen(Multiaddr),
+    /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
+    Dial(Multiaddr),
 }
 
 type InboundResponses = FuturesUnordered<
@@ -318,6 +437,16 @@ impl Actor {
                     let _ = reply.send(Err(TransportError::Unreachable(peer)));
                 }
             },
+            Command::Listen(addr) => {
+                if let Err(e) = self.swarm.listen_on(addr.clone()) {
+                    tracing::warn!(%addr, error = %e, "listen failed");
+                }
+            }
+            Command::Dial(addr) => {
+                if let Err(e) = self.swarm.dial(addr.clone()) {
+                    tracing::warn!(%addr, error = %e, "dial failed");
+                }
+            }
         }
     }
 
@@ -480,9 +609,28 @@ impl MeshService {
     }
 
     /// Await the next bound listen address (e.g. to learn the real port when
-    /// listening on `/ip4/127.0.0.1/tcp/0`). Returns `None` once the actor stops.
+    /// listening on `/ip4/127.0.0.1/tcp/0`, or the circuit address once a relay
+    /// reservation is granted). Returns `None` once the actor stops.
     pub async fn next_listen_addr(&self) -> Option<Multiaddr> {
         self.listen_rx.lock().await.recv().await
+    }
+
+    /// Start listening on `addr` at runtime. Used to **reserve a relay slot** by
+    /// listening on `<relay>/p2p/<relay-id>/p2p-circuit`; the granted circuit
+    /// address then arrives via [`MeshService::next_listen_addr`].
+    pub async fn listen_on(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Listen(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Dial `addr` at runtime (e.g. a relay, before reserving a circuit on it).
+    pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Dial(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
     }
 
     /// Build a memory-transport node that listens on `listen` and dials `dial`,
