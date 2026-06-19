@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use catcoms_net::{build_memory_relay_swarm, build_memory_swarm, run_relay, MeshService};
+use catcoms_net::{
+    build_memory_relay_swarm, build_memory_swarm, build_relay_swarm, phase0_peer_id, run_relay,
+    MeshService,
+};
 use catcoms_rt::{MeshTransport, ProtocolId, Topic, TransportEvent};
 use libp2p::Multiaddr;
 
@@ -182,5 +185,93 @@ async fn client_reserves_a_circuit_slot_on_a_relay() {
     .expect("relay reservation was not granted");
     assert!(got.to_string().contains("p2p-circuit"));
 
+    relay_task.abort();
+}
+
+/// 6e-3c: **DCUtR hole-punch.** A joiner reaches a server *through a relay*, then
+/// DCUtR upgrades that relayed link to a **direct** connection. Real NAT can't be
+/// exercised in-process, so this uses TCP loopback (all three nodes are directly
+/// dialable) and asserts the *upgrade event path* fires — the same mechanism that,
+/// behind real NATs, moves traffic off the relay once the hole is punched. Mirrors
+/// `libp2p-dcutr`'s own `connect` test, but driven through `MeshService` and the
+/// `next_direct_upgrade()` surface. Loopback hole-punching works because `identify`
+/// translates the relay-observed address into each node's real listen port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relayed_connection_upgrades_to_direct_via_dcutr() {
+    use futures::StreamExt as _;
+    use libp2p::swarm::SwarmEvent;
+
+    // --- Relay (TCP loopback). Capture its bound address, then run it. ---
+    let mut relay_swarm = build_relay_swarm().unwrap();
+    let relay_id = *relay_swarm.local_peer_id();
+    relay_swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .unwrap();
+    let relay_addr: Multiaddr = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = relay_swarm.select_next_some().await
+            {
+                relay_swarm.add_external_address(address.clone());
+                return address;
+            }
+        }
+    })
+    .await
+    .expect("relay did not bind a listen address");
+    let relay_task = tokio::spawn(run_relay(relay_swarm));
+
+    // --- Server: listens directly (the eventual direct link) and reserves a circuit
+    //     slot on the relay. ---
+    let (server, server_id) =
+        MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+    server.dial(relay_addr.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(_)) = server.next_event().await {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("server did not connect to the relay");
+
+    let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_id}/p2p-circuit")
+        .parse()
+        .unwrap();
+    server.listen_on(circuit).await.unwrap();
+    let server_circuit_addr = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match server.next_listen_addr().await {
+                Some(a) if a.to_string().contains("p2p-circuit") => return a,
+                Some(_) => continue,
+                None => panic!("server actor stopped"),
+            }
+        }
+    })
+    .await
+    .expect("server's circuit reservation was not granted");
+
+    // --- Joiner: listens directly (so the server can dial it back during the
+    //     simultaneous-open) and dials the server's circuit address (via the relay). ---
+    let (joiner, _joiner_id) = MeshService::new_tcp(
+        Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()),
+        std::slice::from_ref(&server_circuit_addr),
+    )
+    .unwrap();
+
+    // The relayed connection forms first; DCUtR then upgrades it to a direct one,
+    // surfaced (on the dialer) via `next_direct_upgrade`.
+    let upgraded = tokio::time::timeout(Duration::from_secs(40), joiner.next_direct_upgrade())
+        .await
+        .expect("DCUtR did not upgrade the relayed connection within the timeout")
+        .expect("joiner actor stopped");
+    assert_eq!(
+        upgraded,
+        phase0_peer_id(&server_id),
+        "the upgraded peer should be the server"
+    );
+
+    // Keep the server handle alive until the assertion (dropping it stops its actor).
+    drop(server);
     relay_task.abort();
 }

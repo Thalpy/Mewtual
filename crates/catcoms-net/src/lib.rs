@@ -12,9 +12,14 @@
 //! with a live map back to the real PeerId for dialing), and topics are
 //! hex-encoded so arbitrary (blinded) topic bytes are valid gossipsub topics.
 //!
-//! Still to come in later mesh sub-blocks: circuit-relay v2 + DCUtR hole-punching,
-//! the authenticated rendezvous, eclipse-resistant discovery, and the
-//! anti-entropy / proposal-commit protocols layered on top of this transport.
+//! Circuit-relay v2 (reserve a slot, be dialed via a circuit address) and DCUtR
+//! hole-punching (upgrade a relayed link to a direct one) are wired in: a relayed
+//! connection automatically attempts a direct upgrade, and the upgrade is surfaced
+//! via [`MeshService::next_direct_upgrade`].
+//!
+//! Still to come in later mesh sub-blocks: the authenticated rendezvous,
+//! eclipse-resistant discovery, and the anti-entropy / proposal-commit protocols
+//! layered on top of this transport.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -30,6 +35,7 @@ use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
+use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
@@ -341,6 +347,13 @@ pub fn target_peer_in_multiaddr(addr: &Multiaddr) -> Option<libp2p::PeerId> {
     target
 }
 
+/// Whether a multiaddr is a relay-circuit address (`…/p2p-circuit/…`). A connection
+/// established over such an address is relayed; DCUtR then tries to upgrade it to a
+/// direct one.
+fn is_relayed(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| p == Protocol::P2pCircuit)
+}
+
 fn to_ident(topic: &Topic) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(hex::encode(topic.as_bytes()))
 }
@@ -375,6 +388,8 @@ struct Actor {
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     listen_tx: mpsc::Sender<Multiaddr>,
+    /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
+    upgrade_tx: mpsc::Sender<PeerId>,
     peers: HashMap<PeerId, libp2p::PeerId>,
     pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
     pending_publish: Vec<(Topic, Bytes)>,
@@ -494,14 +509,21 @@ impl Actor {
                 tracing::info!(%address, "listening");
                 let _ = self.listen_tx.try_send(address);
             }
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                tracing::debug!(peer = %peer_id, "connection established");
+            SwarmEvent::ConnectionEstablished {
+                peer_id, endpoint, ..
+            } => {
+                let relayed = is_relayed(endpoint.get_remote_address());
+                tracing::debug!(peer = %peer_id, relayed, "connection established");
                 let peer = to_peer(&peer_id);
-                self.peers.insert(peer, peer_id);
-                let _ = self
-                    .event_tx
-                    .send(TransportEvent::PeerConnected(peer))
-                    .await;
+                // Only surface `PeerConnected` on the *first* connection to a peer;
+                // a DCUtR upgrade opens a second (direct) connection to a peer we
+                // already know, and must not look like a new peer to layers above.
+                if self.peers.insert(peer, peer_id).is_none() {
+                    let _ = self
+                        .event_tx
+                        .send(TransportEvent::PeerConnected(peer))
+                        .await;
+                }
             }
             SwarmEvent::ConnectionClosed {
                 peer_id,
@@ -579,6 +601,31 @@ impl Actor {
                     let _ = reply.send(Err(TransportError::Closed));
                 }
             }
+            // DCUtR hole-punch result. On success the relayed link has been upgraded
+            // to a direct connection (a fresh `ConnectionEstablished` to the same
+            // peer); surface it for diagnostics. On failure the connection stays
+            // relayed — still fully functional, just routed through the relay.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::Dcutr(dcutr::Event {
+                remote_peer_id,
+                result,
+            })) => match result {
+                Ok(conn) => {
+                    tracing::info!(peer = %remote_peer_id, ?conn, "DCUtR hole-punch succeeded — connection upgraded to direct");
+                    let _ = self.upgrade_tx.try_send(to_peer(&remote_peer_id));
+                }
+                Err(e) => {
+                    tracing::debug!(peer = %remote_peer_id, error = %e, "DCUtR hole-punch failed — staying relayed");
+                }
+            },
+            // identify drives DCUtR's external-address candidates (and a relay learns
+            // a client's addresses through it). Noisy; trace only.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::Identify(e)) => {
+                tracing::trace!(?e, "identify event");
+            }
+            // Relay-client lifecycle (reservation accepted/expired, circuit opened).
+            SwarmEvent::Behaviour(MeshBehaviourEvent::RelayClient(e)) => {
+                tracing::debug!(?e, "relay-client event");
+            }
             _ => {}
         }
     }
@@ -593,6 +640,7 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
+    upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
 }
 
 // `Command` holds a oneshot sender; keep it out of `Debug`.
@@ -609,11 +657,13 @@ impl MeshService {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
+        let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let actor = Actor {
             swarm,
             cmd_rx,
             event_tx,
             listen_tx,
+            upgrade_tx,
             peers: HashMap::new(),
             pending_req: HashMap::new(),
             pending_publish: Vec::new(),
@@ -624,6 +674,7 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
+            upgrade_rx: Mutex::new(upgrade_rx),
         }
     }
 
@@ -632,6 +683,14 @@ impl MeshService {
     /// reservation is granted). Returns `None` once the actor stops.
     pub async fn next_listen_addr(&self) -> Option<Multiaddr> {
         self.listen_rx.lock().await.recv().await
+    }
+
+    /// Await the next peer whose relayed connection DCUtR **upgraded to a direct
+    /// one** (NAT hole-punch success). Diagnostics/observability only — the upgrade
+    /// is transparent to the layers above (the peer stays the same `PeerId`, traffic
+    /// just moves off the relay). Returns `None` once the actor stops.
+    pub async fn next_direct_upgrade(&self) -> Option<PeerId> {
+        self.upgrade_rx.lock().await.recv().await
     }
 
     /// Start listening on `addr` at runtime. Used to **reserve a relay slot** by

@@ -37,8 +37,10 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 6c | Network join handshake (inviter-authenticated, single-use over the wire) | done |
 | 6d-1a | Membership commit propagation (single designated committer) — multi-member join converges | done |
 | 6d-1b | Missed-commit recovery (commit catch-up + ordered replay, peer discovery) + past-epoch key window | done |
-| 6d-2 | Concurrent-commit fork resolution + full proposal/commit linearization | planned |
-| 6e | Relay v2 + DCUtR, rendezvous, eclipse-resistance | planned |
+| 6d-2 | Fork resolution + single-serializer membership (convergence-safe; concurrent-committer path fenced off until I1) | done |
+| 6e-1/2 | Full stack over real libp2p; multi-process `serve`/`join` over TCP | done |
+| 6e-3a/b/c | Circuit relay v2 (reserve + dial-through) + DCUtR hole-punch (NAT traversal) | done |
+| 6e-3d | Rendezvous discovery + eclipse-resistance | planned |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |

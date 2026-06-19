@@ -76,10 +76,16 @@ handle `relay_client`/`dcutr`/`identify` events (mostly logging + surfacing
   circuit address; `join` dials it. **Test:** relay + server + joiner over the
   memory transport, server reachable *only* via the circuit address (no direct
   addr advertised), joiner completes `request_join` + catch-up through the relay.
-- **6e-3c — DCUtR hole punch.** Wire dcutr/identify; surface the upgraded direct
-  connection. **Test:** assert a direct connection forms after a relayed one (a
-  contrived two-listener setup; real NAT can't be unit-tested, so assert the
-  upgrade event path, not true NAT traversal).
+- **6e-3c — DCUtR hole punch. ✅ done.** `dcutr`/`identify` are wired into
+  `MeshBehaviour`; a relayed connection auto-attempts a direct upgrade (no trigger
+  code — the behaviour fires on any `is_relayed` connection, fed candidate addresses
+  by `identify`'s `NewExternalAddrCandidate`). The `Actor` logs the result and, on
+  success, surfaces the upgraded peer via `MeshService::next_direct_upgrade()`;
+  `PeerConnected` is deduped so the second (direct) connection doesn't look like a new
+  peer. **Test:** `relayed_connection_upgrades_to_direct_via_dcutr` — relay + server +
+  joiner over **TCP loopback** (identify's address translation makes loopback
+  hole-punch work); asserts the joiner observes the DCUtR `Ok` upgrade to the server.
+  Real NAT is still a manual/staging check, per the honest-limits note below.
 - **6e-3d — rendezvous discovery + eclipse resistance.** Rendezvous server +
   client registration/discovery under blinded namespaces; ≥2 rendezvous, member
   peer-exchange, roster-size sanity check.

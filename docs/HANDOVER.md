@@ -4,12 +4,15 @@ Authoritative current-state document. Read this first, then
 [`INTERFACES.md`](INTERFACES.md) (the API/seam schema) and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) (decisions + the adversarial-review fixes).
 
-## Status (as of 2026-06-18)
+## Status (as of 2026-06-19)
 
-- **Phases 0 → 6d-1b complete.** 116 tests passing.
+- **Phases 0 → 6e-3c complete.** 136 tests passing.
 - Toolchain pinned **Rust 1.89.0** (`rust-toolchain.toml`; automerge 0.10 needs it).
-- 9 library crates + 1 binary; everything is tested deterministically **on one
-  machine** (N in-process nodes over an in-memory transport).
+- 9 library crates + 1 binary. The protocol layers are tested deterministically with
+  N in-process nodes over an in-memory transport; the mesh is *additionally* tested
+  over **real libp2p** — the memory transport (real swarms/Noise/req-resp), TCP
+  loopback (real sockets, multi-process `serve`/`join`), a circuit relay, and a DCUtR
+  hole-punch upgrade.
 - Local-only repo (`git init`'d, no remote). Commits are linear on `main`,
   one per phase/block.
 
@@ -116,8 +119,9 @@ protocol already works, only CLI plumbing remains).
 | 6e (1) | **full stack over real libp2p** — join handshake + encrypted catch-up over `MeshService` (Noise + request/response) | ✅ `f1d2713` |
 | 6e (2) | **multi-process `catcomsctl serve`/`join` over TCP** — two OS processes, real sockets, verified | ✅ `73904f1` |
 | 6e (3a) | **relay infrastructure** — relay-capable swarm (relay-client + DCUtR + identify) + relay server; a client reserves a circuit slot | ✅ `84827b1` |
-| 6e (3b) | **end-to-end through a relay** — `catcomsctl relay`; `serve --relay` reserves + advertises the circuit address; `join` dials it. Verified across 3 real processes | ✅ this commit |
-| 6e (3c…) | DCUtR hole-punch (upgrade relayed→direct) · rendezvous discovery · eclipse-resistance · blob-fetch padding | planned — see [`design-6e-relay.md`](design-6e-relay.md) |
+| 6e (3b) | **end-to-end through a relay** — `catcomsctl relay`; `serve --relay` reserves + advertises the circuit address; `join` dials it. Verified across 3 real processes | ✅ `2f196b1` |
+| 6e (3c) | **DCUtR hole-punch** — a relayed link auto-upgrades to a direct one; the upgrade is surfaced via `MeshService::next_direct_upgrade()`. TCP-loopback test asserts the upgrade event path | ✅ this commit |
+| 6e (3d…) | rendezvous discovery · eclipse-resistance · blob-fetch padding | planned — see [`design-6e-relay.md`](design-6e-relay.md) |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
@@ -226,8 +230,11 @@ convergence is closed (a published decision-record / barrier, 6d-3). Re-read
 - **Persistent sealed MLS storage** is deferred: each device uses openmls's
   in-memory provider; tying group state to the Phase-1 `mls_seal_key` + SQLCipher
   (and the local metadata index) is platform/storage-phase work.
-- **Metadata**: who-talks-to-whom, timing, group sizes, and (once DCUtR hole-punches)
-  member IPs are the dominant residual — mitigated, not eliminated. See ARCHITECTURE §3.
+- **Metadata**: who-talks-to-whom, timing, group sizes, and — now that DCUtR
+  hole-punching is active — the member IPs that a successful upgrade reveals to the
+  peer are the dominant residual. Mitigated, not eliminated (≥2 relays, cover traffic,
+  and staying relayed are future levers). A relay only ever sees Noise+MLS ciphertext.
+  See ARCHITECTURE §3.
 - **Per-peer rate limiting / off-actor offload** of join work: a hardening follow-up.
 - **`tracing` retrofit** for the earlier crypto/storage crates: deferred (user OK'd).
 
