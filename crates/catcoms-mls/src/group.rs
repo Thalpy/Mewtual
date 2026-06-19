@@ -389,6 +389,23 @@ impl ServerGroup {
                 Ok(Incoming::Application(app.into_bytes()))
             }
             ProcessedMessageContent::StagedCommitMessage(staged) => {
+                // Defense in depth: every member independently validates that any
+                // Add in this commit carries a credential bound to THIS group and
+                // content-addressing its own leaf key — so a malicious committer
+                // cannot inject an unbound or cross-group device. (Single-use nonce
+                // enforcement stays with the admitting committer's ledger; this is
+                // the binding check every applier can make without the invite token.)
+                let group_id = self.group_id();
+                for add in staged.add_proposals() {
+                    let key_package = add.add_proposal().key_package();
+                    let membership = membership_from_key_package(key_package)?;
+                    let leaf_pk = key_package.leaf_node().signature_key().as_slice();
+                    if membership.group_id != group_id
+                        || DeviceId::from_public_key_bytes(leaf_pk) != membership.device_id
+                    {
+                        return Err(InviteError::CredentialMismatch.into());
+                    }
+                }
                 self.group
                     .merge_staged_commit(device.provider(), *staged)
                     .map_err(proto)?;

@@ -176,6 +176,46 @@ fn members_at_the_same_epoch_agree_on_the_base_authenticator() {
 }
 
 #[test]
+fn every_member_rejects_an_add_with_a_cross_group_credential() {
+    // Membership integrity must not rest on trusting the committer: an honest
+    // member independently rejects an Add whose credential is bound to a *different*
+    // group, even though the (malicious) committer produced a structurally valid
+    // MLS commit. Defends against a compromised committer injecting an outsider.
+    let alice = MlsDevice::generate().unwrap();
+    let mut alice_group = ServerGroup::create(&alice).unwrap();
+    let bob = MlsDevice::generate().unwrap();
+    let welcome = alice_group
+        .add_member(&alice, bob.key_package().unwrap())
+        .unwrap()
+        .welcome;
+    let mut bob_group = ServerGroup::join(&bob, &welcome).unwrap();
+    assert_eq!(bob_group.epoch(), 1);
+
+    // Alice (malicious) adds Dave with a KeyPackage credential bound to ANOTHER
+    // group. openmls accepts it (the binding is an application-level invariant), and
+    // Alice merges it locally.
+    let other_group_id = vec![7u8; 32];
+    let dave = MlsDevice::generate().unwrap();
+    let dave_kp = dave
+        .key_package_for_invite(&other_group_id, [9u8; 16])
+        .unwrap();
+    let outcome = alice_group.add_member(&alice, dave_kp).unwrap();
+
+    // Bob, applying the same commit, rejects it and does not advance.
+    let result = bob_group.process_incoming(&bob, &outcome.commit);
+    assert!(
+        result.is_err(),
+        "a cross-group-bound Add must be rejected on apply by every member"
+    );
+    assert_eq!(
+        bob_group.epoch(),
+        1,
+        "Bob did not advance on the rejected commit"
+    );
+    assert!(!bob_group.contains_device(&dave.device_id()));
+}
+
+#[test]
 fn removing_a_member_rotates_the_epoch_and_locks_them_out() {
     let (alice, mut alice_group, bob, bob_group) = two_member_group();
 
