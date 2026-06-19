@@ -11,7 +11,7 @@ use std::time::Duration;
 use automerge::transaction::Transactable;
 use automerge::{ReadDoc, ROOT};
 use catcoms_mls::{MlsDevice, ServerGroup};
-use catcoms_net::MeshService;
+use catcoms_net::{build_memory_relay_swarm, run_relay, MeshService};
 use catcoms_rt::{MeshTransport, OsCryptoRng, SystemClock, TransportEvent};
 use catcoms_sync::ChannelSync;
 use catcoms_wire::DocType;
@@ -19,6 +19,21 @@ use libp2p::Multiaddr;
 use tokio::time::timeout;
 
 const CHANNEL: u128 = 1;
+
+/// Await a `…/p2p-circuit` listen address from a relay reservation.
+async fn await_circuit_addr(mesh: &MeshService) -> Multiaddr {
+    timeout(Duration::from_secs(15), async {
+        loop {
+            match mesh.next_listen_addr().await {
+                Some(a) if a.to_string().contains("p2p-circuit") => return a,
+                Some(_) => continue,
+                None => panic!("actor stopped"),
+            }
+        }
+    })
+    .await
+    .expect("relay reservation not granted")
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_device_joins_and_converges_over_libp2p() {
@@ -99,4 +114,106 @@ async fn fresh_device_joins_and_converges_over_libp2p() {
     assert_eq!(greeting.as_deref(), Some("welcome over libp2p"));
 
     alice_loop.abort();
+}
+
+/// 6e-3b: a joiner reaches a server it can only contact **through a relay** — the
+/// server reserves a circuit slot, advertises that circuit address, and the joiner
+/// dials it (routed by the relay). The MLS join + encrypted catch-up then run over
+/// the relayed connection, unchanged. This is the NAT-traversal path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn joins_a_server_only_reachable_through_a_relay() {
+    catcoms_log::init_test();
+
+    // A relay-server node.
+    let relay_addr: Multiaddr = "/memory/990100".parse().unwrap();
+    let mut relay_swarm = build_memory_relay_swarm();
+    let relay_id = *relay_swarm.local_peer_id();
+    relay_swarm.listen_on(relay_addr.clone()).unwrap();
+    let relay_task = tokio::spawn(run_relay(relay_swarm));
+
+    // The server reserves a circuit slot on the relay and advertises that address.
+    // It deliberately does NOT listen on any direct address, so the joiner can only
+    // reach it via the relay.
+    let s_mesh = MeshService::new_memory(None, std::slice::from_ref(&relay_addr)).unwrap();
+    let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_id}/p2p-circuit")
+        .parse()
+        .unwrap();
+    s_mesh.listen_on(circuit).await.unwrap();
+    let server_circuit_addr = await_circuit_addr(&s_mesh).await;
+    let s_peer = s_mesh.local_peer();
+
+    let server = MlsDevice::generate().unwrap();
+    let server_group = ServerGroup::create(&server).unwrap();
+    let mut ssy = ChannelSync::new(
+        s_mesh,
+        server_group,
+        server,
+        OsCryptoRng,
+        Box::new(SystemClock),
+    );
+    ssy.subscribe_control().await.unwrap();
+    ssy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    ssy.post(DocType::Channel, CHANNEL, |d| {
+        d.put(ROOT, "greeting", "reached via relay")
+    })
+    .await
+    .unwrap();
+    // The invite's bootstrap is the server's *circuit* address.
+    let invite = ssy
+        .mint_invite([8u8; 16], u64::MAX, vec![server_circuit_addr.to_string()])
+        .unwrap();
+    let server_loop = tokio::spawn(async move { while ssy.run_once().await.unwrap_or(false) {} });
+
+    // The joiner dials the server's circuit address (routed through the relay).
+    let j_mesh = MeshService::new_memory(None, std::slice::from_ref(&server_circuit_addr)).unwrap();
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = j_mesh.next_event().await {
+                if p == s_peer {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("joiner did not connect to the server through the relay");
+
+    let joiner = MlsDevice::generate().unwrap();
+    let joiner_group = timeout(
+        Duration::from_secs(20),
+        catcoms_sync::request_join(&j_mesh, s_peer, &joiner, &invite),
+    )
+    .await
+    .expect("join timed out")
+    .expect("joined through the relay");
+    assert_eq!(joiner_group.epoch(), 1);
+
+    let mut jsy = ChannelSync::new(
+        j_mesh,
+        joiner_group,
+        joiner,
+        OsCryptoRng,
+        Box::new(SystemClock),
+    );
+    jsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    let applied = timeout(
+        Duration::from_secs(20),
+        jsy.request_catchup(s_peer, DocType::Channel, CHANNEL),
+    )
+    .await
+    .expect("catch-up timed out")
+    .expect("catch-up succeeded");
+    assert_eq!(applied, 1);
+
+    let greeting = jsy
+        .doc(DocType::Channel, CHANNEL)
+        .unwrap()
+        .doc()
+        .get(ROOT, "greeting")
+        .unwrap()
+        .map(|(v, _)| v.into_string().unwrap());
+    assert_eq!(greeting.as_deref(), Some("reached via relay"));
+
+    server_loop.abort();
+    relay_task.abort();
 }

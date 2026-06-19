@@ -322,6 +322,25 @@ fn to_peer(p: &libp2p::PeerId) -> PeerId {
     PeerId::new(*blake3::hash(&p.to_bytes()).as_bytes())
 }
 
+/// The Phase-0 [`PeerId`] for a libp2p peer (a BLAKE3 of its bytes) — how every
+/// layer above the transport addresses it.
+pub fn phase0_peer_id(p: &libp2p::PeerId) -> PeerId {
+    to_peer(p)
+}
+
+/// The **target** peer of a multiaddr: the last `/p2p/<id>` component. For a relay
+/// circuit address `…/p2p/<relay>/p2p-circuit/p2p/<target>` this is the target (not
+/// the relay); for a direct `…/p2p/<peer>` it is that peer.
+pub fn target_peer_in_multiaddr(addr: &Multiaddr) -> Option<libp2p::PeerId> {
+    let mut target = None;
+    for proto in addr.iter() {
+        if let libp2p::multiaddr::Protocol::P2p(id) = proto {
+            target = Some(id);
+        }
+    }
+    target
+}
+
 fn to_ident(topic: &Topic) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(hex::encode(topic.as_bytes()))
 }

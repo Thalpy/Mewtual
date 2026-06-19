@@ -99,6 +99,18 @@ cargo run -p catcomsctl -- join --invite-file invite.txt
 The joiner dials the server over TCP, does the Noise + MLS join handshake, and
 catches up the encrypted channel — the whole stack between separate processes.
 
+**Through a relay** (NAT traversal — the joiner never connects to the server
+directly; a zero-knowledge relay forwards ciphertext between them):
+
+```sh
+# Terminal 1 — a relay (prints its dialable /ip4/.../tcp/4000/p2p/<id>):
+cargo run -p catcomsctl -- relay --port 4000
+# Terminal 2 — serve, reserving a circuit slot on the relay:
+cargo run -p catcomsctl -- serve --relay /ip4/<relay-ip>/tcp/4000/p2p/<relay-id>
+# Terminal 3 — join (dials the relayed circuit address from the invite):
+cargo run -p catcomsctl -- join
+```
+
 Diagnostics use the `tracing` facade. `--debug` writes a verbose
 `debug_log_<timestamp>.txt`; console verbosity is set with `RUST_LOG`
 (e.g. `RUST_LOG=catcoms_sync=trace cargo run -p catcomsctl -- demo`).

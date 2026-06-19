@@ -15,7 +15,7 @@ use std::time::Duration;
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
-use catcoms_net::MeshService;
+use catcoms_net::{build_relay_swarm, run_relay, MeshService};
 use catcoms_rt::{
     Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
     TransportEvent,
@@ -68,6 +68,17 @@ enum Command {
         /// Host advertised in the bootstrap address (use the server's reachable IP).
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// Reserve a circuit slot on this relay and advertise the relayed address
+        /// (for reachability behind NAT). e.g. /ip4/1.2.3.4/tcp/4000/p2p/<relay-id>.
+        #[arg(long)]
+        relay: Option<String>,
+    },
+    /// Run a zero-knowledge circuit-relay-v2 server: forward Noise+MLS ciphertext
+    /// between peers that cannot connect directly. Print its dialable address.
+    Relay {
+        /// TCP port to listen on.
+        #[arg(long, default_value_t = 4000)]
+        port: u16,
     },
     /// Join a server using an invite file written by `serve`, over real libp2p, then
     /// catch up the channel and print it.
@@ -93,17 +104,78 @@ async fn main() -> Result<(), Box<dyn Error>> {
             port,
             invite_file,
             host,
-        } => run_serve(port, invite_file, host).await?,
+            relay,
+        } => run_serve(port, invite_file, host, relay).await?,
         Command::Join { invite_file } => run_join(invite_file).await?,
+        Command::Relay { port } => run_relay_node(port).await?,
     }
     Ok(())
 }
 
-/// Found a server over real libp2p TCP, write a join invite, and serve forever.
-async fn run_serve(port: u16, invite_file: PathBuf, host: String) -> Result<(), Box<dyn Error>> {
+/// Run a circuit-relay-v2 server node.
+async fn run_relay_node(port: u16) -> Result<(), Box<dyn Error>> {
     let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    let (mesh, libp2p_id) = MeshService::new_tcp(Some(listen), &[])?;
-    let bootstrap = format!("/ip4/{host}/tcp/{port}/p2p/{libp2p_id}");
+    let mut swarm = build_relay_swarm()?;
+    let relay_id = *swarm.local_peer_id();
+    swarm
+        .listen_on(listen)
+        .map_err(|e| format!("relay listen failed: {e}"))?;
+    println!("== CatComs relay ==");
+    println!("[relay] running on tcp/{port} (peer {relay_id})");
+    println!("[relay] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{relay_id}");
+    println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
+    run_relay(swarm).await; // runs until the process is killed
+    Ok(())
+}
+
+/// Found a server over real libp2p TCP, write a join invite, and serve forever.
+/// With `--relay`, also reserve a circuit slot and advertise the relayed address so
+/// joiners behind NAT can reach the server through the relay.
+async fn run_serve(
+    port: u16,
+    invite_file: PathBuf,
+    host: String,
+    relay: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+    let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
+    let relay_dial: Vec<Multiaddr> = match &relay {
+        Some(r) => vec![r.parse().map_err(|e| format!("bad --relay address: {e}"))?],
+        None => Vec::new(),
+    };
+    let (mesh, libp2p_id) = MeshService::new_tcp(Some(listen), &relay_dial)?;
+
+    // Bootstrap addresses advertised in the invite: the direct address, plus (if a
+    // relay was given) the relayed circuit address once the reservation is granted.
+    let mut bootstrap = vec![format!("/ip4/{host}/tcp/{port}/p2p/{libp2p_id}")];
+    if let Some(r) = &relay {
+        // Wait for the relay connection (TCP+Noise+identify) before reserving, so
+        // the relay-client transport has a connection to reserve over.
+        timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(TransportEvent::PeerConnected(_)) = mesh.next_event().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .map_err(|_| "could not connect to the relay")?;
+        let circuit: Multiaddr = format!("{r}/p2p-circuit").parse()?;
+        mesh.listen_on(circuit).await?;
+        let circuit_addr = timeout(Duration::from_secs(20), async {
+            loop {
+                match mesh.next_listen_addr().await {
+                    Some(a) if a.to_string().contains("p2p-circuit") => return Some(a),
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await
+        .map_err(|_| "relay reservation timed out")?
+        .ok_or("relay reservation failed")?;
+        println!("[serve] reserved relay circuit: {circuit_addr}");
+        bootstrap.insert(0, circuit_addr.to_string()); // prefer the relayed address
+    }
 
     let server = MlsDevice::generate()?;
     let server_group = ServerGroup::create(&server)?;
@@ -126,13 +198,15 @@ async fn run_serve(port: u16, invite_file: PathBuf, host: String) -> Result<(), 
     .await?;
 
     let now = SystemClock.now_ms();
-    let invite = sync.mint_invite(random_nonce(), now + 3_600_000, vec![bootstrap.clone()])?;
+    let invite = sync.mint_invite(random_nonce(), now + 3_600_000, bootstrap.clone())?;
     let blob = hex::encode(invite.encode());
     tokio::fs::write(&invite_file, &blob).await?;
 
     println!("== CatComs server ==");
     println!("[serve] listening on tcp/{port} (peer {libp2p_id})");
-    println!("[serve] bootstrap: {bootstrap}");
+    for b in &bootstrap {
+        println!("[serve] bootstrap: {b}");
+    }
     println!("[serve] invite written to {}", invite_file.display());
     println!("[serve] serving — run `catcomsctl join` elsewhere; Ctrl-C to stop\n");
 
@@ -150,22 +224,30 @@ async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
         .first()
         .ok_or("invite carries no bootstrap address")?;
     let addr: Multiaddr = boot.parse()?;
+    // The server's peer id is the LAST /p2p/ component (past the relay, for a
+    // circuit address), so we wait for the SERVER specifically — not the relay we
+    // hop through to reach it.
+    let server_lp =
+        catcoms_net::target_peer_in_multiaddr(&addr).ok_or("bootstrap address has no peer id")?;
+    let inviter = catcoms_net::phase0_peer_id(&server_lp);
     println!("== CatComs join ==");
     println!("[join] dialing {addr}");
 
     let (mesh, _) = MeshService::new_tcp(None, std::slice::from_ref(&addr))?;
 
-    // Wait for the libp2p connection to the server before requesting.
-    let inviter = timeout(Duration::from_secs(20), async {
+    // Wait for the connection to the SERVER (possibly via a relay hop).
+    timeout(Duration::from_secs(20), async {
         loop {
             if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                break p;
+                if p == inviter {
+                    break;
+                }
             }
         }
     })
     .await
     .map_err(|_| "timed out connecting to the server")?;
-    println!("[join] connected; requesting to join…");
+    println!("[join] connected to the server; requesting to join…");
 
     let device = MlsDevice::generate()?;
     let group = timeout(

@@ -115,8 +115,9 @@ protocol already works, only CLI plumbing remains).
 | 6d-2b (3…) | by-value proposal batching · history-derived single-use · committer-decoupled admission | planned |
 | 6e (1) | **full stack over real libp2p** — join handshake + encrypted catch-up over `MeshService` (Noise + request/response) | ✅ `f1d2713` |
 | 6e (2) | **multi-process `catcomsctl serve`/`join` over TCP** — two OS processes, real sockets, verified | ✅ `73904f1` |
-| 6e (3a) | **relay infrastructure** — relay-capable swarm (relay-client + DCUtR + identify) + relay server; a client reserves a circuit slot | ✅ this commit |
-| 6e (3b…) | circuit-dial end-to-end (`serve --relay`/`join` via circuit) · DCUtR hole-punch · rendezvous · eclipse-resistance · blob-fetch padding | planned — see [`design-6e-relay.md`](design-6e-relay.md) |
+| 6e (3a) | **relay infrastructure** — relay-capable swarm (relay-client + DCUtR + identify) + relay server; a client reserves a circuit slot | ✅ `84827b1` |
+| 6e (3b) | **end-to-end through a relay** — `catcomsctl relay`; `serve --relay` reserves + advertises the circuit address; `join` dials it. Verified across 3 real processes | ✅ this commit |
+| 6e (3c…) | DCUtR hole-punch (upgrade relayed→direct) · rendezvous discovery · eclipse-resistance · blob-fetch padding | planned — see [`design-6e-relay.md`](design-6e-relay.md) |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
