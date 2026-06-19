@@ -15,7 +15,9 @@ use std::time::Duration;
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
-use catcoms_net::{build_relay_swarm, run_relay, MeshService};
+use catcoms_net::{
+    build_relay_swarm, build_rendezvous_swarm, run_relay, run_rendezvous, MeshService,
+};
 use catcoms_rt::{
     Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
     TransportEvent,
@@ -80,6 +82,13 @@ enum Command {
         #[arg(long, default_value_t = 4000)]
         port: u16,
     },
+    /// Run a zero-knowledge rendezvous server: members register their signed peer
+    /// records under blinded namespaces and discover each other. Print its address.
+    Rendezvous {
+        /// TCP port to listen on.
+        #[arg(long, default_value_t = 5000)]
+        port: u16,
+    },
     /// Join a server using an invite file written by `serve`, over real libp2p, then
     /// catch up the channel and print it.
     Join {
@@ -108,6 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } => run_serve(port, invite_file, host, relay).await?,
         Command::Join { invite_file } => run_join(invite_file).await?,
         Command::Relay { port } => run_relay_node(port).await?,
+        Command::Rendezvous { port } => run_rendezvous_node(port).await?,
     }
     Ok(())
 }
@@ -125,6 +135,22 @@ async fn run_relay_node(port: u16) -> Result<(), Box<dyn Error>> {
     println!("[relay] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{relay_id}");
     println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
     run_relay(swarm).await; // runs until the process is killed
+    Ok(())
+}
+
+/// Run a rendezvous server node.
+async fn run_rendezvous_node(port: u16) -> Result<(), Box<dyn Error>> {
+    let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
+    let mut swarm = build_rendezvous_swarm()?;
+    let rz_id = *swarm.local_peer_id();
+    swarm
+        .listen_on(listen)
+        .map_err(|e| format!("rendezvous listen failed: {e}"))?;
+    println!("== CatComs rendezvous ==");
+    println!("[rendezvous] running on tcp/{port} (peer {rz_id})");
+    println!("[rendezvous] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{rz_id}");
+    println!("[rendezvous] members register/discover under blinded namespaces; Ctrl-C to stop");
+    run_rendezvous(swarm).await; // runs until the process is killed
     Ok(())
 }
 

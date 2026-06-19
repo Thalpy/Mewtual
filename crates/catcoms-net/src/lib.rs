@@ -39,8 +39,8 @@ use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    dcutr, gossipsub, identify, noise, ping, relay, request_response, tcp, yamux, Multiaddr,
-    StreamProtocol, Swarm, SwarmBuilder, Transport,
+    connection_limits, dcutr, gossipsub, identify, noise, ping, relay, rendezvous,
+    request_response, tcp, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -317,6 +317,100 @@ pub async fn run_relay_with_external(mut swarm: Swarm<RelayBehaviour>, external:
             SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(e)) => {
                 tracing::debug!(?e, "relay event");
             }
+            _ => {}
+        }
+    }
+}
+
+// ----- rendezvous server -----------------------------------------------------
+
+/// A rendezvous **server**'s behaviours: members register their (signed) peer
+/// records under a blinded namespace and discover each other, without the server
+/// learning group identity or content. Zero-knowledge like the relay — it only sees
+/// opaque namespace strings and signed peer records (member addresses + a TTL).
+#[derive(NetworkBehaviour)]
+#[allow(missing_debug_implementations)]
+pub struct RendezvousBehaviour {
+    /// The rendezvous registration/discovery protocol.
+    pub rendezvous: rendezvous::server::Behaviour,
+    /// Address discovery (lets a registering client learn its observed address).
+    pub identify: identify::Behaviour,
+    /// Keep-alive.
+    pub ping: ping::Behaviour,
+    /// Connection caps so a registration/discovery flood cannot exhaust the server.
+    pub connection_limits: connection_limits::Behaviour,
+}
+
+fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour {
+    // Storage caps bound a registration flood; the spec-recommended TTL band (2h–72h)
+    // is the default. A per-PeerId request-rate token bucket is a hardening follow-up.
+    let config = rendezvous::server::Config::default()
+        .with_max_registration_per_peer(128)
+        .with_max_registration_total(16_384)
+        .with_max_stored_cookies(4_096);
+    RendezvousBehaviour {
+        rendezvous: rendezvous::server::Behaviour::new(config),
+        identify: identify::Behaviour::new(identify::Config::new(
+            IDENTIFY_PROTO.to_string(),
+            key.public(),
+        )),
+        ping: ping::Behaviour::default(),
+        connection_limits: connection_limits::Behaviour::new(
+            connection_limits::ConnectionLimits::default()
+                .with_max_pending_incoming(Some(64))
+                .with_max_established_incoming(Some(4_096))
+                .with_max_established_per_peer(Some(8)),
+        ),
+    }
+}
+
+/// Build a TCP rendezvous-server swarm. Run it with [`run_rendezvous`].
+pub fn build_rendezvous_swarm() -> Result<Swarm<RendezvousBehaviour>, NetError> {
+    let swarm = SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .with_behaviour(rendezvous_behaviour)
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .build();
+    Ok(swarm)
+}
+
+/// Build a rendezvous-server swarm over the in-memory transport (deterministic tests).
+pub fn build_memory_rendezvous_swarm() -> Swarm<RendezvousBehaviour> {
+    SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_other_transport(|key| {
+            MemoryTransport::default()
+                .upgrade(Version::V1)
+                .authenticate(noise::Config::new(key).expect("noise config"))
+                .multiplex(yamux::Config::default())
+        })
+        .expect("memory transport")
+        .with_behaviour(rendezvous_behaviour)
+        .expect("rendezvous behaviour")
+        .build()
+}
+
+/// Run a rendezvous-server swarm's event loop indefinitely: register members and
+/// answer discovery under blinded namespaces. The server never learns group identity
+/// or content — only opaque namespace strings and signed peer records.
+pub async fn run_rendezvous(mut swarm: Swarm<RendezvousBehaviour>) {
+    loop {
+        match swarm.select_next_some().await {
+            SwarmEvent::NewListenAddr { address, .. } => {
+                tracing::info!(%address, "rendezvous listening");
+            }
+            SwarmEvent::Behaviour(RendezvousBehaviourEvent::Rendezvous(e)) => match &e {
+                rendezvous::server::Event::PeerRegistered { peer, .. } => {
+                    tracing::info!(%peer, "rendezvous: peer registered");
+                }
+                _ => tracing::debug!(?e, "rendezvous event"),
+            },
             _ => {}
         }
     }
