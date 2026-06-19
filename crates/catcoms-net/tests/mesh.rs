@@ -87,3 +87,55 @@ async fn two_mesh_nodes_gossip_and_request_response() {
 
     a_responder.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_tcp_nodes_connect_and_request_response() {
+    // Real OS sockets: `new_tcp` listens on an ephemeral loopback port; the bound
+    // address is discovered via `next_listen_addr`, then dialed by a second node.
+    let (a, _a_id) =
+        MeshService::new_tcp(Some("/ip4/127.0.0.1/tcp/0".parse().unwrap()), &[]).unwrap();
+    let a = Arc::new(a);
+    let a_addr = tokio::time::timeout(Duration::from_secs(10), a.next_listen_addr())
+        .await
+        .expect("listen-addr timeout")
+        .expect("a bound a listen address");
+
+    let (b, _b_id) = MeshService::new_tcp(None, std::slice::from_ref(&a_addr)).unwrap();
+
+    // A answers every request with "pong".
+    let a_responder = {
+        let a = Arc::clone(&a);
+        tokio::spawn(async move {
+            while let Some(event) = a.next_event().await {
+                if let TransportEvent::Request {
+                    data, responder, ..
+                } = event
+                {
+                    assert_eq!(&data[..], b"ping");
+                    responder.respond(Bytes::from_static(b"pong"));
+                }
+            }
+        })
+    };
+
+    // B: on connect, send a request over the TCP connection.
+    let reply = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(peer)) = b.next_event().await {
+                return b
+                    .request(
+                        peer,
+                        ProtocolId("/catcoms/rr/1"),
+                        Bytes::from_static(b"ping"),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    })
+    .await
+    .expect("tcp request/response timed out");
+
+    assert_eq!(&reply[..], b"pong");
+    a_responder.abort();
+}

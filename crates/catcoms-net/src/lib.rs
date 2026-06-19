@@ -236,6 +236,7 @@ struct Actor {
     swarm: Swarm<MeshBehaviour>,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
+    listen_tx: mpsc::Sender<Multiaddr>,
     peers: HashMap<PeerId, libp2p::PeerId>,
     pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
     pending_publish: Vec<(Topic, Bytes)>,
@@ -343,6 +344,7 @@ impl Actor {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "listening");
+                let _ = self.listen_tx.try_send(address);
             }
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 tracing::debug!(peer = %peer_id, "connection established");
@@ -442,6 +444,7 @@ pub struct MeshService {
     local: PeerId,
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
+    listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
 }
 
 // `Command` holds a oneshot sender; keep it out of `Debug`.
@@ -457,10 +460,12 @@ impl MeshService {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
+        let (listen_tx, listen_rx) = mpsc::channel(16);
         let actor = Actor {
             swarm,
             cmd_rx,
             event_tx,
+            listen_tx,
             peers: HashMap::new(),
             pending_req: HashMap::new(),
             pending_publish: Vec::new(),
@@ -470,7 +475,14 @@ impl MeshService {
             local,
             cmd_tx,
             event_rx: Mutex::new(event_rx),
+            listen_rx: Mutex::new(listen_rx),
         }
+    }
+
+    /// Await the next bound listen address (e.g. to learn the real port when
+    /// listening on `/ip4/127.0.0.1/tcp/0`). Returns `None` once the actor stops.
+    pub async fn next_listen_addr(&self) -> Option<Multiaddr> {
+        self.listen_rx.lock().await.recv().await
     }
 
     /// Build a memory-transport node that listens on `listen` and dials `dial`,
