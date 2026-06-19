@@ -566,6 +566,7 @@ dependencies = [
  "automerge",
  "catcoms-log",
  "catcoms-mls",
+ "catcoms-net",
  "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",
@@ -573,6 +574,7 @@ dependencies = [
  "catcoms-wire",
  "clap",
  "hex",
+ "libp2p",
  "tokio",
  "tracing",
 ]

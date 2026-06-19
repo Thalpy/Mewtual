@@ -489,6 +489,29 @@ impl MeshService {
         }
         Ok(Self::spawn(swarm))
     }
+
+    /// Build a **TCP** node that listens on `listen` and dials `dial`, then spawn
+    /// it. Also returns this node's libp2p `PeerId` so the caller can advertise a
+    /// dialable `/…/p2p/<id>` bootstrap address (e.g. inside an invite). Real
+    /// cross-process / cross-machine networking.
+    pub fn new_tcp(
+        listen: Option<Multiaddr>,
+        dial: &[Multiaddr],
+    ) -> Result<(Self, libp2p::PeerId), NetError> {
+        let mut swarm = build_tcp_swarm()?;
+        let libp2p_id = *swarm.local_peer_id();
+        if let Some(addr) = listen {
+            swarm
+                .listen_on(addr)
+                .map_err(|e| NetError::Listen(e.to_string()))?;
+        }
+        for addr in dial {
+            swarm
+                .dial(addr.clone())
+                .map_err(|e| NetError::Dial(e.to_string()))?;
+        }
+        Ok((Self::spawn(swarm), libp2p_id))
+    }
 }
 
 #[async_trait]

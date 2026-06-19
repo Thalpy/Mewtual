@@ -17,11 +17,13 @@ catcoms-mls = { path = "../../crates/catcoms-mls" }
 catcoms-replication = { path = "../../crates/catcoms-replication" }
 catcoms-storage = { path = "../../crates/catcoms-storage" }
 catcoms-sync = { path = "../../crates/catcoms-sync" }
+catcoms-net = { path = "../../crates/catcoms-net" }
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs"] }
 clap = { version = "4", features = ["derive"] }
 automerge = "0.10"
 hex = "0.4"
+libp2p = { version = "0.56", features = ["tokio"] }
 
 [lints]
 workspace = true

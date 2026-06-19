@@ -10,14 +10,21 @@
 
 use std::error::Error;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
-use catcoms_rt::{Clock, Hub, MemNetwork, OsCryptoRng, PeerId, RngCore, SystemClock};
+use catcoms_net::MeshService;
+use catcoms_rt::{
+    Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
+    TransportEvent,
+};
 use catcoms_sync::{ChannelSync, SyncStats};
 use catcoms_wire::DocType;
 use clap::{Parser, Subcommand};
+use libp2p::Multiaddr;
+use tokio::time::timeout;
 
 /// The channel all demo messages go to.
 const GENERAL: u128 = 1;
@@ -49,6 +56,26 @@ enum Command {
     /// and self-heals via ordered commit catch-up. A scriptable debug harness for
     /// the recovery path.
     Recover,
+    /// Found a server, listen on TCP over real libp2p, write a join invite to a
+    /// file, and serve indefinitely. Pair with `join` from another process/machine.
+    Serve {
+        /// TCP port to listen on.
+        #[arg(long, default_value_t = 9000)]
+        port: u16,
+        /// Where to write the (hex) invite token.
+        #[arg(long, default_value = "catcoms-invite.txt")]
+        invite_file: PathBuf,
+        /// Host advertised in the bootstrap address (use the server's reachable IP).
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+    },
+    /// Join a server using an invite file written by `serve`, over real libp2p, then
+    /// catch up the channel and print it.
+    Join {
+        /// The (hex) invite file written by `serve`.
+        #[arg(long, default_value = "catcoms-invite.txt")]
+        invite_file: PathBuf,
+    },
     /// Print the version.
     Version,
 }
@@ -62,7 +89,104 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Version => println!("catcomsctl {}", env!("CARGO_PKG_VERSION")),
         Command::Demo => run_demo(cli.stats).await?,
         Command::Recover => run_recover(cli.stats).await?,
+        Command::Serve {
+            port,
+            invite_file,
+            host,
+        } => run_serve(port, invite_file, host).await?,
+        Command::Join { invite_file } => run_join(invite_file).await?,
     }
+    Ok(())
+}
+
+/// Found a server over real libp2p TCP, write a join invite, and serve forever.
+async fn run_serve(port: u16, invite_file: PathBuf, host: String) -> Result<(), Box<dyn Error>> {
+    let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
+    let (mesh, libp2p_id) = MeshService::new_tcp(Some(listen), &[])?;
+    let bootstrap = format!("/ip4/{host}/tcp/{port}/p2p/{libp2p_id}");
+
+    let server = MlsDevice::generate()?;
+    let server_group = ServerGroup::create(&server)?;
+    let mut sync = ChannelSync::new(
+        mesh,
+        server_group,
+        server,
+        OsCryptoRng,
+        Box::new(SystemClock),
+    );
+    sync.subscribe_control().await?;
+    sync.open_channel(DocType::Channel, GENERAL).await?;
+    sync.post(DocType::Channel, GENERAL, |d| {
+        append_message(
+            d,
+            "server",
+            "Welcome! You joined a CatComs server over libp2p.",
+        )
+    })
+    .await?;
+
+    let now = SystemClock.now_ms();
+    let invite = sync.mint_invite(random_nonce(), now + 3_600_000, vec![bootstrap.clone()])?;
+    let blob = hex::encode(invite.encode());
+    tokio::fs::write(&invite_file, &blob).await?;
+
+    println!("== CatComs server ==");
+    println!("[serve] listening on tcp/{port} (peer {libp2p_id})");
+    println!("[serve] bootstrap: {bootstrap}");
+    println!("[serve] invite written to {}", invite_file.display());
+    println!("[serve] serving — run `catcomsctl join` elsewhere; Ctrl-C to stop\n");
+
+    // Serve indefinitely: admit joiners, answer catch-up, apply membership commits.
+    while sync.run_once().await? {}
+    Ok(())
+}
+
+/// Join a server from an invite file over real libp2p, catch up, and print the chat.
+async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
+    let blob = tokio::fs::read_to_string(&invite_file).await?;
+    let invite = InviteToken::decode(&hex::decode(blob.trim())?)?;
+    let boot = invite
+        .bootstrap
+        .first()
+        .ok_or("invite carries no bootstrap address")?;
+    let addr: Multiaddr = boot.parse()?;
+    println!("== CatComs join ==");
+    println!("[join] dialing {addr}");
+
+    let (mesh, _) = MeshService::new_tcp(None, std::slice::from_ref(&addr))?;
+
+    // Wait for the libp2p connection to the server before requesting.
+    let inviter = timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                break p;
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out connecting to the server")?;
+    println!("[join] connected; requesting to join…");
+
+    let device = MlsDevice::generate()?;
+    let group = timeout(
+        Duration::from_secs(20),
+        catcoms_sync::request_join(&mesh, inviter, &device, &invite),
+    )
+    .await
+    .map_err(|_| "join timed out")??;
+    println!("[join] joined the server (epoch {})", group.epoch());
+
+    let mut sync = ChannelSync::new(mesh, group, device, OsCryptoRng, Box::new(SystemClock));
+    sync.open_channel(DocType::Channel, GENERAL).await?;
+    let applied = timeout(
+        Duration::from_secs(20),
+        sync.request_catchup(inviter, DocType::Channel, GENERAL),
+    )
+    .await
+    .map_err(|_| "catch-up timed out")??;
+    println!("[join] caught up {applied} message(s):\n");
+    print_transcript("server", &sync);
+    println!("\n[OK] joined and converged over libp2p");
     Ok(())
 }
 
@@ -109,7 +233,7 @@ fn append_message(doc: &mut AutoCommit, author: &str, text: &str) -> Result<(), 
 }
 
 /// Print the channel transcript from one member's converged view.
-fn print_transcript(label: &str, sync: &ChannelSync<MemNetwork, OsCryptoRng>) {
+fn print_transcript<T: MeshTransport>(label: &str, sync: &ChannelSync<T, OsCryptoRng>) {
     println!("--- {label}'s view ---");
     let Some(enc) = sync.doc(DocType::Channel, GENERAL) else {
         println!("  (no channel)");

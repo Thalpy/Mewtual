@@ -81,12 +81,23 @@ mints a single-use invite, Bob redeems it and joins the MLS group, both open a
 channel over the mesh, and exchange end-to-end-encrypted chat that converges.
 
 ```sh
-cargo run -p catcomsctl -- demo                       # full end-to-end demo
+cargo run -p catcomsctl -- demo                       # full end-to-end demo (in-process)
 cargo run -p catcomsctl -- recover --stats            # 6d-1b: miss a membership commit and self-heal
 cargo run -p catcomsctl -- --debug demo               # + writes logs/debug_log_<timestamp>.txt
 cargo run -p catcomsctl -- --stats demo               # print per-node SyncStats diagnostics
-cargo run -p catcomsctl -- --debug --log-dir /tmp demo
 ```
+
+**Over real networking** (two OS processes, real libp2p TCP):
+
+```sh
+# Terminal 1 — found a server, write an invite, and serve:
+cargo run -p catcomsctl -- serve --port 9000 --invite-file invite.txt
+# Terminal 2 (or another machine, with --host <server-ip>) — join it:
+cargo run -p catcomsctl -- join --invite-file invite.txt
+```
+
+The joiner dials the server over TCP, does the Noise + MLS join handshake, and
+catches up the encrypted channel — the whole stack between separate processes.
 
 Diagnostics use the `tracing` facade. `--debug` writes a verbose
 `debug_log_<timestamp>.txt`; console verbosity is set with `RUST_LOG`
