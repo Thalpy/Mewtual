@@ -24,7 +24,7 @@
 //! (here a single designated committer serializes membership changes).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use automerge::{AutoCommit, AutomergeError};
@@ -145,11 +145,10 @@ struct StagedJoin {
     joiner: PeerId,
     /// The single-use invite nonce, consumed only on a winning merge.
     nonce: [u8; 16],
-    /// The openmls Welcome for the joiner.
+    /// The openmls Welcome for the joiner. The inviter signature over the join
+    /// transcript is (re)computed at resolution time, where the routing transfer it
+    /// must bind has been sealed (post-merge epoch) — not here at stage time.
     welcome: Vec<u8>,
-    /// Our (inviter) signature over the join transcript, so the joiner can
-    /// authenticate the Welcome.
-    welcome_sig: [u8; 64],
 }
 
 /// Our own staged commit within a contest.
@@ -237,12 +236,20 @@ enum CatchupTask {
 
 /// The transcript the admitter signs (and the joiner verifies) to authenticate a
 /// Welcome: binds the Welcome bytes to the specific invite (group + nonce).
-fn join_transcript(group_id: &[u8], invite_nonce: &[u8; 16], welcome: &[u8]) -> Vec<u8> {
+fn join_transcript(
+    group_id: &[u8],
+    invite_nonce: &[u8; 16],
+    welcome: &[u8],
+    sealed_routing: &[u8],
+) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_str(JOIN_RESP_DOMAIN).expect("label fits");
     e.put_bytes(group_id).expect("group id fits");
     e.put_bytes(invite_nonce).expect("16 fits");
     e.put_bytes(welcome).expect("welcome fits");
+    // Bind the sealed routing transfer so a relay cannot strip or corrupt it to
+    // force the joiner onto a wrong (local L=0) routing baseline.
+    e.put_bytes(sealed_routing).expect("sealed routing fits");
     e.finish()
 }
 
@@ -392,37 +399,38 @@ impl std::fmt::Debug for RoutingState {
 
 /// Open a sealed routing transfer received in a join response: derive the shared
 /// transfer key from the just-joined group (the joiner is now at the seal epoch),
-/// unseal, and decode. Any failure (absent/invalid/forged) yields an empty state so
-/// the joiner simply keeps its local `L = 0` rather than adopting bad routing.
-fn open_routing_transfer(group: &ServerGroup, device: &MlsDevice, sealed: &[u8]) -> RoutingState {
+/// unseal, and decode.
+///
+/// An **absent** transfer (empty — the founder admitting its first member, or a seal
+/// that failed) yields an empty state so the joiner keeps its local `L = 0`. A
+/// **present but unopenable** transfer is a hard error, not a silent `L = 0`: the
+/// inviter signature has already authenticated these bytes (see `finish_join`), so a
+/// non-empty blob that fails to unseal/decode is a real version/encoding fault that
+/// would otherwise mis-route the joiner onto a wrong baseline.
+fn open_routing_transfer(
+    group: &ServerGroup,
+    device: &MlsDevice,
+    sealed: &[u8],
+) -> Result<RoutingState, SyncError> {
     if sealed.is_empty() {
-        return RoutingState::default();
+        return Ok(RoutingState::default());
     }
-    let key = match group.routing_transfer_key(device) {
-        Ok(k) => k,
-        Err(_) => return RoutingState::default(),
-    };
-    let blob = match decode_sealed(sealed) {
-        Ok(b) => b,
-        Err(_) => return RoutingState::default(),
-    };
-    let plaintext = match unseal(&key, &blob) {
-        Ok(p) => Zeroizing::new(p),
-        Err(_) => {
-            tracing::warn!("routing transfer failed to unseal; keeping local L=0");
-            return RoutingState::default();
-        }
-    };
-    match decode_routing_state(&plaintext) {
-        Ok((label, secrets)) => RoutingState {
-            label,
-            secrets: secrets
-                .into_iter()
-                .map(|(slot, s)| (slot, Zeroizing::new(s)))
-                .collect(),
-        },
-        Err(_) => RoutingState::default(),
-    }
+    let key = group
+        .routing_transfer_key(device)
+        .map_err(|_| SyncError::JoinRejected)?;
+    let blob = decode_sealed(sealed)?;
+    let plaintext = unseal(&key, &blob).map(Zeroizing::new).map_err(|_| {
+        tracing::warn!("authenticated routing transfer failed to unseal; rejecting join");
+        SyncError::JoinRejected
+    })?;
+    let (label, secrets) = decode_routing_state(&plaintext)?;
+    Ok(RoutingState {
+        label,
+        secrets: secrets
+            .into_iter()
+            .map(|(slot, s)| (slot, Zeroizing::new(s)))
+            .collect(),
+    })
 }
 
 /// The transcript a member signs to request a removal (binds the request to the
@@ -522,27 +530,37 @@ pub enum SyncError {
     Malformed,
 }
 
-/// The blinded gossip topic for a document: `BLAKE3(label ‖ group_id ‖ type ‖ id)`.
-/// Only members (who know the random group id) can compute it.
-fn channel_topic(group_id: &[u8], doc_type: DocType, doc_id: u128) -> Topic {
-    let mut h = blake3::Hasher::new();
-    h.update(b"catcoms/topic/v1");
+/// The blinded gossip topic for a document at routing label `slot`, **keyed** under
+/// that label's routing secret (`ns_secret_slot`): `BLAKE3_keyed(ns_secret_slot,
+/// "…/topic/v2" ‖ group_id ‖ slot ‖ type ‖ id)`. Keyed (not just group-id-hashed,
+/// v1) so a non-member holding an invite — which carries `group_id` in the clear —
+/// cannot compute it; binding `slot` rotates it on every member removal (§2.5).
+fn channel_topic(
+    ns_secret: &[u8; 32],
+    group_id: &[u8],
+    doc_type: DocType,
+    doc_id: u128,
+    slot: u64,
+) -> Topic {
+    let mut h = blake3::Hasher::new_keyed(ns_secret);
+    h.update(b"catcoms/topic/v2");
     h.update(group_id);
+    h.update(&slot.to_be_bytes());
     h.update(&doc_type.tag().to_be_bytes());
     h.update(&doc_id.to_be_bytes());
     Topic::new(h.finalize().as_bytes().to_vec())
 }
 
-/// The per-group **control** topic carrying membership commits. Stable per group
-/// (independent of epoch), so it survives the epoch bumps a membership change
-/// causes.
-fn control_topic(group_id: &[u8]) -> Topic {
-    let mut h = blake3::Hasher::new();
-    // v2: the control envelope is a tagged union (see CTRL_* tags) and CommitRecord
-    // carries a committer signature; v1 and v2 nodes deliberately do not share a
-    // topic (a hard wire cutover — acceptable pre-release).
-    h.update(b"catcoms/control/v2");
+/// The per-group **control** topic carrying membership commits at routing label
+/// `slot`, keyed under `ns_secret_slot` (v3). Like the channel topic it is
+/// member-only and rotates on removal; commit delivery across a rotation is handled
+/// by publishing a removal commit on the pre-rotation topic and a grandfathered
+/// subscription window.
+fn control_topic(ns_secret: &[u8; 32], group_id: &[u8], slot: u64) -> Topic {
+    let mut h = blake3::Hasher::new_keyed(ns_secret);
+    h.update(b"catcoms/control/v3");
     h.update(group_id);
+    h.update(&slot.to_be_bytes());
     Topic::new(h.finalize().as_bytes().to_vec())
 }
 
@@ -790,7 +808,23 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     clock: Box<dyn Clock + Send>,
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
+    /// The **current** routing label's control topic (where this node publishes
+    /// commits). Recomputed whenever the routing label changes.
     control_topic: Topic,
+    /// All control topics this node currently accepts inbound (the current label
+    /// plus grandfathered ones) — used to tell a control message from a doc op on
+    /// the gossip path. A subset of `routing_subs`.
+    control_topics: HashSet<Topic>,
+    /// Every routing-derived topic (control + per-doc, across the grandfather
+    /// window) this node is currently subscribed to, so a label rotation can
+    /// subscribe the new topics and unsubscribe the ones that aged out.
+    routing_subs: HashSet<Topic>,
+    /// Whether the control topic has been subscribed (`subscribe_control`), so a
+    /// resync re-subscribes it across a rotation.
+    control_subscribed: bool,
+    /// A routing-label rotation happened; re-sync subscriptions on the next tick
+    /// (subscribing is async, rotation is not).
+    needs_resync: bool,
     config: SyncConfig,
     /// Membership commits queued for the control topic (drained in async run_once).
     outbox: Vec<(Topic, Vec<u8>)>,
@@ -847,7 +881,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         rng: R,
         clock: Box<dyn Clock + Send>,
     ) -> Self {
-        let control_topic = control_topic(&group.group_id());
         let mut this = Self {
             transport,
             group,
@@ -856,7 +889,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             clock,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
-            control_topic,
+            // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
+            control_topic: Topic::new(Vec::<u8>::new()),
+            control_topics: HashSet::new(),
+            routing_subs: HashSet::new(),
+            control_subscribed: false,
+            needs_resync: false,
             config: SyncConfig::default(),
             outbox: Vec::new(),
             commit_log: VecDeque::new(),
@@ -906,8 +944,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Subscribe to this group's control topic so the member receives membership
     /// commits. Call once after construction (and after joining).
     pub async fn subscribe_control(&mut self) -> Result<(), SyncError> {
-        self.transport.subscribe(self.control_topic.clone()).await?;
-        Ok(())
+        self.control_subscribed = true;
+        self.resync_subscriptions().await
     }
 
     /// The current epoch (for tests / diagnostics).
@@ -945,15 +983,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.docs
             .entry(key)
             .or_insert_with(|| EncryptedDoc::new(doc_type, doc_id, &actor));
-        let topic = channel_topic(&self.group.group_id(), doc_type, doc_id);
         tracing::info!(
             ?doc_type,
             doc_id,
             epoch = self.group.epoch(),
             "open channel"
         );
-        self.transport.subscribe(topic).await?;
-        Ok(())
+        // Subscribe this doc's topic(s) across the grandfather window.
+        self.resync_subscriptions().await
     }
 
     /// Apply a local edit to a document and broadcast the resulting sealed op.
@@ -969,7 +1006,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let key = (doc_type, doc_id);
         let doc = self.docs.get_mut(&key).ok_or(SyncError::NoSuchDoc)?;
         let sealed = doc.edit(&self.device, &self.group, &mut self.rng, edit)?;
-        let topic = channel_topic(&self.group.group_id(), doc_type, doc_id);
+        // Publish on the current routing label's channel topic.
+        let topic = self
+            .channel_topic_for(doc_type, doc_id, self.routing_label)
+            .ok_or(SyncError::NoSuchDoc)?;
         let bytes = sealed.encode();
         tracing::debug!(
             ?doc_type,
@@ -988,6 +1028,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
         // Flush any queued membership-commit broadcasts (retries previous failures).
         self.drain_outbox().await;
+        // Apply any routing-label rotation from a previous tick: subscribe the new
+        // label's topics and drop the ones that aged out of the grandfather window.
+        self.resync_if_needed().await;
         // Resolve a fork-resolution contest whose window has closed FIRST (local
         // work) — ahead of recovery, so a tick spent on catch-up can never stretch
         // the contest window (I4), then deliver any provisional Welcome it produced.
@@ -1007,11 +1050,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             None => Ok(false),
             Some(TransportEvent::Gossip { topic, from, data }) => {
                 self.remember_peer(from);
-                if topic == self.control_topic {
+                if self.control_topics.contains(&topic) {
                     self.on_control(&data);
                     // The designated committer may have queued a commit in response
-                    // to a remove request — fan it out now.
+                    // to a remove request — fan it out now, then apply any rotation
+                    // the commit triggered before the next tick.
                     self.drain_outbox().await;
+                    self.resync_if_needed().await;
                 } else {
                     self.on_gossip(&data);
                 }
@@ -1034,6 +1079,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Some(TransportEvent::PeerConnected(peer)) => {
                 self.remember_peer(peer);
+                // A freshly-connected peer is a catch-up source; proactively probe in
+                // case we fell behind while the live topic was outside our window
+                // (commit catch-up is point-to-point, so it works off-topic). Deduped,
+                // and skipped on the committer (it never lags and must keep serving).
+                self.maybe_probe_for_missed_commits();
                 Ok(true)
             }
             Some(_) => Ok(true),
@@ -1282,6 +1332,122 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let cutoff = self.routing_label.saturating_sub(2);
         self.routing_secrets.retain(|label, _| *label >= cutoff);
+        self.recompute_topics();
+    }
+
+    /// Recompute the cached control topic(s) from the current routing-label window.
+    /// The current label drives `control_topic` (where we publish); the whole window
+    /// drives `control_topics` (what we accept inbound). Called after any change to
+    /// the routing label or secrets.
+    fn recompute_topics(&mut self) {
+        if let Some(current) = self.control_topic_for(self.routing_label) {
+            self.control_topic = current;
+        }
+        self.control_topics = self
+            .window_labels()
+            .filter_map(|slot| self.control_topic_for(slot))
+            .collect();
+    }
+
+    /// The routing labels currently in the grandfather window (those with a retained
+    /// secret): the current label down to `L-2`.
+    fn window_labels(&self) -> impl Iterator<Item = u64> {
+        let lowest = self.routing_label.saturating_sub(2);
+        (lowest..=self.routing_label).rev()
+    }
+
+    /// The control topic for routing label `slot`, or `None` if its secret is no
+    /// longer retained.
+    fn control_topic_for(&self, slot: u64) -> Option<Topic> {
+        let secret = self.routing_secrets.get(&slot)?;
+        Some(control_topic(secret, &self.group.group_id(), slot))
+    }
+
+    /// The channel topic for `(doc_type, doc_id)` at routing label `slot`.
+    fn channel_topic_for(&self, doc_type: DocType, doc_id: u128, slot: u64) -> Option<Topic> {
+        let secret = self.routing_secrets.get(&slot)?;
+        Some(channel_topic(
+            secret,
+            &self.group.group_id(),
+            doc_type,
+            doc_id,
+            slot,
+        ))
+    }
+
+    /// Every routing-derived topic this node should be subscribed to: the control
+    /// topics (if control was subscribed) and each open doc's topics, across the
+    /// grandfather window — so a member up to two removals behind is still heard.
+    fn desired_routing_topics(&self) -> HashSet<Topic> {
+        let mut set = HashSet::new();
+        for slot in self.window_labels() {
+            if self.control_subscribed {
+                if let Some(t) = self.control_topic_for(slot) {
+                    set.insert(t);
+                }
+            }
+            for (doc_type, doc_id) in self.docs.keys() {
+                if let Some(t) = self.channel_topic_for(*doc_type, *doc_id, slot) {
+                    set.insert(t);
+                }
+            }
+        }
+        set
+    }
+
+    /// Subscribe the routing topics that should now be subscribed and unsubscribe
+    /// those that aged out of the window, so subscriptions track the current label.
+    async fn resync_subscriptions(&mut self) -> Result<(), SyncError> {
+        let desired = self.desired_routing_topics();
+        for topic in desired.difference(&self.routing_subs) {
+            self.transport.subscribe(topic.clone()).await?;
+        }
+        for topic in self.routing_subs.difference(&desired) {
+            self.transport.unsubscribe(topic.clone()).await?;
+        }
+        self.routing_subs = desired;
+        Ok(())
+    }
+
+    /// Enqueue a proactive, topic-independent commit catch-up unless this node is the
+    /// designated committer. Rotation made topics label-specific, so a non-committer
+    /// that has fallen behind no longer receives the live topic and would have no
+    /// reactive recovery trigger; commit catch-up is point-to-point, so it recovers
+    /// us regardless of how far behind we are (bounded by a serving peer's commit-log
+    /// window). The committer is the serializer and never lags — and probing from it
+    /// would stall its serve loop on a mid-join peer. Triggered on `PeerConnected`
+    /// (the realistic recovery moment: startup / reconnect to a live peer); a
+    /// continuously-connected node that silently falls behind is the documented
+    /// residual, mitigated by point-to-point catch-up + the later discovery slices.
+    fn maybe_probe_for_missed_commits(&mut self) {
+        if !self.is_designated_committer() {
+            self.enqueue_commit_catchup(self.group.epoch());
+        }
+    }
+
+    /// Whether this node is the group's single designated committer (lowest leaf
+    /// index) — the serializer that produces every commit and so never lags.
+    fn is_designated_committer(&self) -> bool {
+        matches!(
+            (
+                self.group.member_leaf_index(&self.device.device_id()),
+                self.group.designated_committer_index(),
+            ),
+            (Some(i), Some(c)) if i == c
+        )
+    }
+
+    /// Apply a pending subscription resync flagged by a routing-label rotation,
+    /// clearing the flag (and re-arming it if the transport call fails).
+    async fn resync_if_needed(&mut self) {
+        if !self.needs_resync {
+            return;
+        }
+        self.needs_resync = false;
+        if let Err(e) = self.resync_subscriptions().await {
+            tracing::warn!(error = %e, "failed to resync subscriptions after rotation");
+            self.needs_resync = true;
+        }
     }
 
     /// Advance the routing label and snapshot the post-removal-epoch secret.
@@ -1290,7 +1456,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// converge on the same `L` and the same `ns_secret_L`.
     fn rotate_routing_secret(&mut self) {
         self.routing_label += 1;
-        self.capture_routing_secret();
+        self.capture_routing_secret(); // also recomputes the cached control topics
+        self.needs_resync = true; // re-subscribe to the new label's topics next tick
         tracing::debug!(
             label = self.routing_label,
             "routing secret rotated (member removed)"
@@ -1389,6 +1556,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.routing_label = routing.label;
         self.routing_secrets = routing.secrets.into_iter().collect();
+        // Clamp to the live {L-2, L-1, L} window: a transfer may carry up to
+        // MAX_ROUTING_SECRETS entries, but only the window is a valid live invariant
+        // (don't keep out-of-window key material a malicious inviter padded in).
+        let cutoff = self.routing_label.saturating_sub(2);
+        self.routing_secrets
+            .retain(|l, _| *l >= cutoff && *l <= self.routing_label);
+        self.recompute_topics();
         tracing::debug!(
             label = self.routing_label,
             secrets = self.routing_secrets.len(),
@@ -1626,9 +1800,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let payload = if we_won && advanced {
                 let _ = self.ledger.consume(join.nonce);
                 // We just merged the staged Add, so we are at the exact epoch the
-                // joiner's Welcome lands them on — seal the routing state here.
+                // joiner's Welcome lands them on — seal the routing state and sign
+                // the transcript binding it (the joiner verifies both together).
                 let sealed_routing = self.seal_routing_state();
-                encode_welcome_push(&join.welcome, &join.welcome_sig, &sealed_routing)
+                let transcript = join_transcript(
+                    &self.group.group_id(),
+                    &join.nonce,
+                    &join.welcome,
+                    &sealed_routing,
+                );
+                match self.device.sign(&transcript) {
+                    Ok(welcome_sig) => {
+                        encode_welcome_push(&join.welcome, &welcome_sig, &sealed_routing)
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "could not sign Welcome push");
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new() // empty => rejected; the joiner retries
             };
@@ -1853,14 +2042,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         self.evict_past_keys();
-        // The epoch has advanced past the removal: snapshot the new routing secret
-        // (the removed member can no longer export it) and rotate the namespace.
+        // Publish the removal commit on the PRE-rotation control topic — where the
+        // members being removed-from are still subscribed — *then* rotate the label
+        // (the removed member cannot export the post-removal routing secret).
+        let publish_topic = self.control_topic.clone();
         self.rotate_routing_secret();
         self.record_commit(record.clone());
         self.stats.commits_applied += 1;
         let mut framed = vec![CTRL_COMMIT];
         framed.extend_from_slice(&record.encode());
-        self.outbox.push((self.control_topic.clone(), framed));
+        self.outbox.push((publish_topic, framed));
         tracing::info!(
             epoch = self.group.epoch(),
             "committer removed a member (single-serializer)"
@@ -2268,14 +2459,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let mut framed = vec![CTRL_COMMIT];
             framed.extend_from_slice(&record.encode());
             self.outbox.push((self.control_topic.clone(), framed));
-            let transcript =
-                join_transcript(&invite.group_id, &invite.invite_nonce, &outcome.welcome);
-            let signature = self.device.sign(&transcript).ok()?;
-            tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
             // Transfer the routing state to the joiner, sealed under the shared
             // post-join epoch key (the Welcome lands them on this exact epoch, so the
-            // seal/open epochs match — no race).
+            // seal/open epochs match — no race). Seal first so the inviter signature
+            // can bind it.
             let sealed_routing = self.seal_routing_state();
+            let transcript = join_transcript(
+                &invite.group_id,
+                &invite.invite_nonce,
+                &outcome.welcome,
+                &sealed_routing,
+            );
+            let signature = self.device.sign(&transcript).ok()?;
+            tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
             let mut resp = vec![JOIN_READY];
             resp.extend_from_slice(&encode_join_resp(
                 &outcome.welcome,
@@ -2296,14 +2492,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let staged = self.group.stage_add(&self.device, key_package).ok()?;
         let welcome = staged.welcome.clone()?; // an Add always carries a Welcome
         let record = self.sign_staged_record(&staged);
-        let welcome_sig = self
-            .device
-            .sign(&join_transcript(
-                &invite.group_id,
-                &invite.invite_nonce,
-                &welcome,
-            ))
-            .ok()?;
         self.pending = Some(PendingResolve {
             epoch: staged.commit_epoch,
             best: record.clone(),
@@ -2314,7 +2502,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     joiner: from,
                     nonce: invite.invite_nonce,
                     welcome,
-                    welcome_sig,
                 }),
                 removed: false,
             }),
@@ -2409,9 +2596,14 @@ fn finish_join(
     signature: &[u8; 64],
     sealed_routing: &[u8],
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
-    let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, welcome);
+    let transcript = join_transcript(
+        &invite.group_id,
+        &invite.invite_nonce,
+        welcome,
+        sealed_routing,
+    );
     if !invite.verify_inviter_signature(&transcript, signature) {
-        tracing::warn!("Welcome was not signed by the invite's inviter");
+        tracing::warn!("Welcome was not signed by the invite's inviter (or transfer tampered)");
         return Err(SyncError::JoinRejected);
     }
     let group = ServerGroup::join(device, welcome)?;
@@ -2421,8 +2613,9 @@ fn finish_join(
         return Err(SyncError::JoinRejected);
     }
     // We are now at the post-join epoch the inviter sealed the routing state under,
-    // so we can open it and adopt the group's routing label/secrets.
-    let routing = open_routing_transfer(&group, device, sealed_routing);
+    // so we can open it and adopt the group's routing label/secrets. A present but
+    // unopenable transfer (signature already verified) is a hard error.
+    let routing = open_routing_transfer(&group, device, sealed_routing)?;
     tracing::info!(epoch = group.epoch(), "joined server via invite");
     Ok((group, routing))
 }
@@ -2487,6 +2680,26 @@ mod tests {
     fn commit_catchup_request_roundtrips_through_codec() {
         let bytes = encode_commit_catchup_req(42);
         assert_eq!(decode_commit_catchup_req(&bytes).unwrap(), 42);
+    }
+
+    #[test]
+    fn topics_are_keyed_by_the_routing_secret_and_bound_to_the_label() {
+        let secret = [7u8; 32];
+        let gid = b"group-id-123";
+        let ctrl = control_topic(&secret, gid, 0);
+        // A1: the topic depends on ns_secret (member-only), so an invite-holder who
+        // knows only group_id computes a different value and cannot derive it.
+        assert_ne!(ctrl, control_topic(&[8u8; 32], gid, 0));
+        // Bound to the routing label, so it rotates on each removal.
+        assert_ne!(ctrl, control_topic(&secret, gid, 1));
+        // Channel topics: keyed, label-bound, per-doc separated, and never equal to
+        // the (domain-separated) control topic.
+        let ch = channel_topic(&secret, gid, DocType::Channel, 1, 0);
+        assert_ne!(ch, ctrl);
+        assert_ne!(ch, channel_topic(&[8u8; 32], gid, DocType::Channel, 1, 0));
+        assert_ne!(ch, channel_topic(&secret, gid, DocType::Channel, 1, 1));
+        assert_ne!(ch, channel_topic(&secret, gid, DocType::Channel, 2, 0));
+        assert_ne!(ch, channel_topic(&secret, gid, DocType::Wiki, 1, 0));
     }
 
     #[test]

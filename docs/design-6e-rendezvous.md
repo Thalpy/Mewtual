@@ -147,3 +147,40 @@ per the project convention.
    must advance `L` identically on the inbound apply path, not just the local committer.
 5. **Detector defaults** (grace 30s / `min_reach` 0.20) are guesses; tune against memory-transport
    timings + a staging run; surface as `EclipseConfig`, not hard-coded.
+
+## 6e-3d-2 (A1 close) — adversarial review outcome
+
+A 4-agent review (delivery-correctness / transfer-crypto / A1-eclipse → synthesis) **verified
+against the code**: A1 is genuinely closed (every topic + namespace derivation is BLAKE3-keyed
+under `ns_secret_L`; no residual plain-hash of `group_id`), the transfer integrity binding is sound
+on both join paths, seal/open epochs provably match, and the rotation converges (all four apply
+paths advance `L` identically). One **blocking HIGH** was found and **fixed before commit**:
+
+- **HIGH — rotation + purely-reactive recovery.** Topics became label-specific, but recovery only
+  fired on a commit *received on a subscribed topic*; a node ≥3 removals behind falls outside its
+  `{L-2,L-1,L}` window and silently stalls. **Fix (landed):** a proactive, topic-independent commit
+  catch-up (`maybe_probe_for_missed_commits`) on **`PeerConnected`** (startup / reconnect — the
+  realistic recovery moments), **guarded to non-committers** (the serializer never lags, and probing
+  from it would stall its serve loop on a mid-join peer — this guard is why the naive version broke
+  the libp2p join tests). It is deliberately *not* fired from `resync_subscriptions`: that
+  synchronous catch-up would deadlock the sequential in-memory test harness (a probed peer must be
+  concurrently serving). A continuously-connected node that silently falls behind is the documented
+  residual (mitigated by the manual point-to-point catch-up primitive + the later discovery slices).
+- Also folded in: `adopt_routing_state` re-clamps to the live window (don't keep inviter-padded
+  out-of-window key material); a present-but-unopenable transfer is now a hard join error (the
+  signature already authenticated it) instead of a silent `L=0`.
+
+**Deferred non-blocking follow-ups** (review-confirmed, bounded; address in hardening / later slices):
+- **MED** — a malicious *legitimate* inviter can ship a valid-but-wrong routing label/secrets,
+  routing-eclipsing the joiner. Bounded by "the inviter already controls admission"; **no clean
+  independent anchor exists** (the joiner cannot re-derive a past removal-epoch secret — that's the
+  whole point of the transfer). Mitigated by the eclipse-resistance slices (≥2 sources, PEX).
+- **MED** — a removed member can spam grandfathered topics until eviction; eviction is counted in
+  removals, so the window is unbounded in wall-clock under slow cadence. Fix later: time-bound the
+  grandfather window + a pre-auth per-source rate limit on control ingress. (Content still fails
+  auth/AEAD — availability only.)
+- **LOW batch (hygiene):** AAD-bind the routing seal (`group_id‖nonce‖epoch`); zeroize the bare
+  `[u8;32]` decode/seal intermediates; length-prefix `group_id` inside the topic hashers; optionally
+  pad the transfer plaintext to a constant length (it currently leaks the 1/2/3 retained-secret
+  count). Plus regression tests: a 3-behind member's posts are dropped then a proactive probe closes
+  the gap; a fork loser that staged a Remove while the winner was an Add rotates 0 times.

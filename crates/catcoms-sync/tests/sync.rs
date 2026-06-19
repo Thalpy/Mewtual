@@ -1284,3 +1284,37 @@ async fn a_member_joining_after_a_removal_converges_via_the_transfer() {
         "a post-removal joiner converges on the current namespace"
     );
 }
+
+// --- 6e-3d-2b: topics re-keyed from ns_secret_L (closes A1) -----------------
+
+#[tokio::test]
+async fn channel_delivery_survives_a_topic_rotation_on_removal() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let (mut s, ids) = build_members(&hub, &clock, 3).await;
+
+    // Alice and Bob open #general and converge on a first post (label-0 topic).
+    s[0].open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    s[1].open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    s[0].post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "before", "1"))
+        .await
+        .unwrap();
+    assert!(s[1].run_once().await.unwrap());
+    assert_eq!(get_str(&s[1], "before").as_deref(), Some("1"));
+
+    // Remove Carol: the routing label rotates, so the channel + control topics change.
+    s[1].request_remove(&ids[2]).await.unwrap();
+    assert!(s[0].run_once().await.unwrap()); // Alice commits + rotates + resubscribes
+    assert!(s[1].run_once().await.unwrap()); // Bob applies + rotates + resubscribes
+    assert_eq!(s[0].routing_label(), 1);
+    assert_eq!(s[1].routing_label(), 1);
+
+    // Alice posts on the NEW (label-1) channel topic; Bob, re-subscribed across the
+    // rotation, still receives it.
+    s[0].post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "after", "2"))
+        .await
+        .unwrap();
+    assert!(s[1].run_once().await.unwrap());
+    assert_eq!(get_str(&s[1], "after").as_deref(), Some("2"));
+}
