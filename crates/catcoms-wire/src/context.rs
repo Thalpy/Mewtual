@@ -35,6 +35,12 @@ pub enum DocType {
     MemberRoles = 6,
     /// The file index (fileshare browser metadata).
     FileIndex = 7,
+    /// Network-routing identifiers (blinded gossipsub topics + rendezvous
+    /// namespaces). Has no content document of its own — it only ever feeds the
+    /// **metadata** exporter label to derive the per-removal routing secret
+    /// (`ns_secret_L`). Kept a distinct `DocType` so that derivation is
+    /// domain-separated from every content document by the injective context.
+    Routing = 8,
 }
 
 impl DocType {
@@ -53,6 +59,7 @@ impl DocType {
             5 => DocType::InviteLedger,
             6 => DocType::MemberRoles,
             7 => DocType::FileIndex,
+            8 => DocType::Routing,
             _ => return None,
         })
     }
@@ -93,6 +100,30 @@ mod tests {
             exporter_context(DocType::FileIndex, 0),
             [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
+        // Routing (tag 8), id = 0 — the network-routing derivation context.
+        assert_eq!(
+            exporter_context(DocType::Routing, 0),
+            [0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
+        );
+    }
+
+    #[test]
+    fn from_tag_roundtrips_every_variant() {
+        for dt in [
+            DocType::Channel,
+            DocType::Wiki,
+            DocType::Status,
+            DocType::Calendar,
+            DocType::InviteLedger,
+            DocType::MemberRoles,
+            DocType::FileIndex,
+            DocType::Routing,
+        ] {
+            assert_eq!(DocType::from_tag(dt.tag()), Some(dt));
+        }
+        // Unknown tags decode to None (stable: 0 and the first unused value).
+        assert_eq!(DocType::from_tag(0), None);
+        assert_eq!(DocType::from_tag(9), None);
     }
 
     #[test]

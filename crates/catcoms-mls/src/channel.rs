@@ -51,4 +51,17 @@ impl ServerGroup {
             .try_into()
             .map_err(|_| MlsError::Internal("unexpected exported secret length"))
     }
+
+    /// Derive the 32-byte **routing** secret for the current epoch — the single
+    /// secret from which the per-removal routing label (`ns_secret_L`: blinded
+    /// gossipsub topics + rendezvous namespaces) is keyed. This is just the
+    /// metadata secret under the dedicated [`DocType::Routing`] context, so it is
+    /// domain-separated from every per-document metadata secret.
+    ///
+    /// openmls only exports the *current* epoch's secret; the routing layer
+    /// snapshots this value at each member **removal** to build the rotation
+    /// history (a removed member cannot export the post-removal epoch's secret).
+    pub fn routing_metadata_secret(&self, device: &MlsDevice) -> Result<[u8; KEY_LEN], MlsError> {
+        self.metadata_secret(device, DocType::Routing, 0)
+    }
 }

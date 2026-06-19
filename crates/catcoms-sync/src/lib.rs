@@ -30,7 +30,9 @@ use std::fmt;
 use automerge::{AutoCommit, AutomergeError};
 use bytes::Bytes;
 use catcoms_crypto::{verify_with_public_bytes, DeviceId};
-use catcoms_mls::{serialize_key_package, InviteLedger, InviteToken, MlsDevice, ServerGroup};
+use catcoms_mls::{
+    serialize_key_package, Incoming, InviteLedger, InviteToken, MlsDevice, ServerGroup,
+};
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent};
 use catcoms_wire::{Decoder, DocType, Encoder};
@@ -155,6 +157,9 @@ struct MyStaged {
     /// Present if the staged commit is an admission (then resolution pushes the
     /// Welcome on a win or a rejection on a loss).
     join: Option<StagedJoin>,
+    /// Whether our staged commit removes a member — so a win rotates the routing
+    /// secret (`ns_secret_L`) just like the inbound apply path does.
+    removed: bool,
 }
 
 #[derive(Debug)]
@@ -676,6 +681,21 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// sealed under a just-superseded epoch still opens. Bounded and zeroized on
     /// eviction. Keyed by `(doc_type, doc_id, epoch)`.
     past_keys: BTreeMap<(DocType, u128, u64), Zeroizing<[u8; 32]>>,
+    /// Member-**removal** counter `L` — the routing label. Advanced (only) when a
+    /// commit removes a member; unchanged by Adds/Updates/application posts. The
+    /// blinded gossip topics and rendezvous namespaces derive from the routing
+    /// secret snapshotted at the current `L`, so they rotate **only on removal**
+    /// (ARCHITECTURE §2.5). NOTE: a member joining after removals must receive the
+    /// label and the snapshots via the join/catch-up transfer (6e-3d-9) — a fresh
+    /// node locally initialises `L = 0`, which is only correct for the founder until
+    /// that transfer lands.
+    routing_label: u64,
+    /// The routing secret (`ns_secret_L`) snapshotted at each removal, retained for
+    /// the current and two previous labels `{L-2, L-1, L}` so a member one or two
+    /// removals behind is still discoverable during the transition. Zeroized on
+    /// eviction. openmls only exports the *current* epoch's secret, so this history
+    /// is captured at the post-removal epoch (a removed member can never export it).
+    routing_secrets: BTreeMap<u64, Zeroizing<[u8; 32]>>,
     /// Recently-seen peers (from gossip/requests/connections), used as catch-up
     /// sources — there is no `DeviceId → PeerId` directory yet.
     known_peers: VecDeque<PeerId>,
@@ -705,7 +725,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         clock: Box<dyn Clock + Send>,
     ) -> Self {
         let control_topic = control_topic(&group.group_id());
-        Self {
+        let mut this = Self {
             transport,
             group,
             device,
@@ -719,13 +739,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             commit_log: VecDeque::new(),
             pending_commits: BTreeMap::new(),
             past_keys: BTreeMap::new(),
+            routing_label: 0,
+            routing_secrets: BTreeMap::new(),
             known_peers: VecDeque::new(),
             catchup_queue: Vec::new(),
             failed_catchup_peers: VecDeque::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             stats: SyncStats::default(),
-        }
+        };
+        // Seed the L=0 routing secret from the current epoch. (For a member who
+        // joins after removals this baseline is corrected by the join transfer in
+        // 6e-3d-9; the founder is correct from genesis.)
+        this.capture_routing_secret();
+        this
     }
 
     /// Override the recovery/key-window bounds (defaults to [`SyncConfig::default`]).
@@ -1090,6 +1117,99 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.past_keys.retain(|(_, _, epoch), _| *epoch >= cutoff);
     }
 
+    // --- routing label (ns_secret_L) ----------------------------------------
+    //
+    // The gossip topics and rendezvous namespaces derive from the routing secret
+    // snapshotted at the current removal-count `L`. They therefore rotate ONLY on
+    // member removal (ARCHITECTURE §2.5), not on every commit — even though the
+    // underlying MLS exporter secret changes each epoch — because we read the
+    // *snapshot* at `L`, not the live current secret.
+
+    /// Snapshot the current-epoch routing secret into slot `routing_label`,
+    /// retaining only `{L-2, L-1, L}` (older labels zeroized on drop). Called at
+    /// construction (L=0) and after each removal advances `L`.
+    fn capture_routing_secret(&mut self) {
+        match self.group.routing_metadata_secret(&self.device) {
+            Ok(secret) => {
+                self.routing_secrets
+                    .insert(self.routing_label, Zeroizing::new(secret));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, label = self.routing_label, "could not snapshot routing secret");
+            }
+        }
+        let cutoff = self.routing_label.saturating_sub(2);
+        self.routing_secrets.retain(|label, _| *label >= cutoff);
+    }
+
+    /// Advance the routing label and snapshot the post-removal-epoch secret.
+    /// Invoked once per applied commit that removed a member — on the local
+    /// committer path and on every member's inbound apply path — so all members
+    /// converge on the same `L` and the same `ns_secret_L`.
+    fn rotate_routing_secret(&mut self) {
+        self.routing_label += 1;
+        self.capture_routing_secret();
+        tracing::debug!(
+            label = self.routing_label,
+            "routing secret rotated (member removed)"
+        );
+    }
+
+    /// React to an applied inbound commit: rotate the routing secret iff it removed
+    /// a member. (The local committer path calls [`Self::rotate_routing_secret`]
+    /// directly, since `commit_remove_now` is always a removal.)
+    fn note_commit_applied(&mut self, incoming: &Incoming) {
+        if matches!(incoming, Incoming::CommitApplied { removed: true }) {
+            self.rotate_routing_secret();
+        }
+    }
+
+    /// The current removal counter `L` (diagnostics / tests).
+    pub fn routing_label(&self) -> u64 {
+        self.routing_label
+    }
+
+    /// Derive the rendezvous namespace for this group at routing label `slot`, as
+    /// seen by the rendezvous node `rz_peer` (its libp2p peer-id bytes). Returns
+    /// `None` if that label's secret is no longer retained.
+    ///
+    /// `namespace = "catcoms1-" ‖ hex(BLAKE3_keyed(ns_secret_slot,
+    /// "…/ns/v1" ‖ group_id ‖ slot ‖ rz_peer)[..20])`. The per-rendezvous binding
+    /// (`rz_peer`) gives each rendezvous a string unique to itself, so two
+    /// colluding rendezvous cannot join their logs on an identical namespace.
+    fn derive_namespace(&self, rz_peer: &[u8], slot: u64) -> Option<String> {
+        let secret = self.routing_secrets.get(&slot)?;
+        let mut h = blake3::Hasher::new_keyed(secret);
+        h.update(b"catcoms/rendezvous/ns/v1");
+        h.update(&self.group.group_id());
+        h.update(&slot.to_be_bytes());
+        h.update(rz_peer);
+        let hash = h.finalize();
+        let hex = hash.to_hex();
+        // 20 bytes / 160 bits of the keyed hash is ample collision resistance and
+        // keeps the namespace short (49 ASCII bytes, well under the 255-byte cap).
+        Some(format!("catcoms1-{}", &hex.as_str()[..40]))
+    }
+
+    /// The rendezvous namespace(s) to register under / discover across for this
+    /// group at this rendezvous: the current label first, then every still-retained
+    /// grandfathered label (`{L-1, L-2}`), so a member up to two removals behind is
+    /// still found during the transition. A **removed** member cannot compute the
+    /// current namespace (it never snapshots the post-removal secret). Each is
+    /// ≤ 255 bytes, so `Namespace::new` accepts it.
+    pub fn rendezvous_namespaces(&self, rz_peer: &[u8]) -> Vec<String> {
+        let lowest = self.routing_label.saturating_sub(2);
+        let mut out = Vec::new();
+        for slot in (lowest..=self.routing_label).rev() {
+            if let Some(ns) = self.derive_namespace(rz_peer, slot) {
+                if !out.contains(&ns) {
+                    out.push(ns);
+                }
+            }
+        }
+        out
+    }
+
     /// Append a commit to the retained log (so this node can serve catch-up),
     /// bounded by `max_commit_log`.
     fn record_commit(&mut self, record: CommitRecord) {
@@ -1160,6 +1280,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mine = MyStaged {
             commit_id: record.commit_id(),
             join: None,
+            removed: true,
         };
         self.pending = Some(PendingResolve {
             epoch: staged.commit_epoch,
@@ -1261,11 +1382,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let p = self.pending.take().expect("checked some");
         let winner_id = p.best.commit_id();
         let we_won = p.mine.as_ref().map(|m| m.commit_id) == Some(winner_id);
+        let i_removed = p.mine.as_ref().map(|m| m.removed).unwrap_or(false);
         self.snapshot_epoch_keys();
         let advanced = match &p.mine {
             Some(_) if we_won => match self.group.merge_staged_self(&self.device) {
                 // We won: merge our own staged commit.
-                Ok(()) => true,
+                Ok(()) => {
+                    if i_removed {
+                        self.rotate_routing_secret();
+                    }
+                    true
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "merge of winning staged commit failed");
                     false
@@ -1281,7 +1408,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .group
                     .process_incoming(&self.device, &p.best.mls_commit)
                 {
-                    Ok(_) => true,
+                    Ok(inc) => {
+                        self.note_commit_applied(&inc);
+                        true
+                    }
                     Err(e) => {
                         tracing::error!(error = %e, "applying the fork winner failed");
                         false
@@ -1293,7 +1423,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .process_incoming(&self.device, &p.best.mls_commit)
             {
                 // Pure applier: apply the winner.
-                Ok(_) => true,
+                Ok(inc) => {
+                    self.note_commit_applied(&inc);
+                    true
+                }
                 Err(e) => {
                     tracing::error!(error = %e, "applying the fork winner failed");
                     false
@@ -1346,8 +1479,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .group
             .process_incoming(&self.device, &record.mls_commit)
         {
-            Ok(_) => {
+            Ok(inc) => {
                 self.evict_past_keys();
+                self.note_commit_applied(&inc);
                 self.record_commit(record.clone());
                 self.stats.commits_applied += 1;
                 tracing::info!(
@@ -1530,6 +1664,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         self.evict_past_keys();
+        // The epoch has advanced past the removal: snapshot the new routing secret
+        // (the removed member can no longer export it) and rotate the namespace.
+        self.rotate_routing_secret();
         self.record_commit(record.clone());
         self.stats.commits_applied += 1;
         let mut framed = vec![CTRL_COMMIT];
@@ -1982,6 +2119,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     welcome,
                     welcome_sig,
                 }),
+                removed: false,
             }),
         });
         let mut framed = vec![CTRL_COMMIT];

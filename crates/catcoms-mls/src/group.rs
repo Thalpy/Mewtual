@@ -48,8 +48,14 @@ pub struct StagedOutcome {
 pub enum Incoming {
     /// A decrypted application-message payload.
     Application(Vec<u8>),
-    /// A commit was processed and merged (group state advanced).
-    CommitApplied,
+    /// A commit was processed and merged (group state advanced). `removed` is true
+    /// iff the commit contained at least one Remove proposal — the signal the
+    /// routing layer uses to rotate the per-removal metadata secret (`ns_secret_L`)
+    /// identically on every member, not just the local committer.
+    CommitApplied {
+        /// Whether this commit removed at least one member.
+        removed: bool,
+    },
     /// A proposal or other control message was processed (no payload).
     Other,
 }
@@ -406,10 +412,13 @@ impl ServerGroup {
                         return Err(InviteError::CredentialMismatch.into());
                     }
                 }
+                // Inspect the staged commit for Remove proposals *before* the merge
+                // consumes it — every member uses this to rotate `ns_secret_L`.
+                let removed = staged.remove_proposals().next().is_some();
                 self.group
                     .merge_staged_commit(device.provider(), *staged)
                     .map_err(proto)?;
-                Ok(Incoming::CommitApplied)
+                Ok(Incoming::CommitApplied { removed })
             }
             _ => Ok(Incoming::Other),
         }

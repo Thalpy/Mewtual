@@ -1138,3 +1138,120 @@ async fn catch_up_transfers_history_over_request_response() {
     assert_eq!(get_str(&bsy, "h1").as_deref(), Some("one"));
     assert_eq!(get_str(&bsy, "h2").as_deref(), Some("two"));
 }
+
+// --- 6e-3d-1: routing label (ns_secret_L) + rendezvous namespaces ------------
+//
+// The blinded gossip topics and rendezvous namespaces rotate only on member
+// *removal* (ARCHITECTURE §2.5). These exercise the pure derivation + the
+// removal-indexed snapshot store; cross-joiner baseline (L=0) convergence needs
+// the join transfer (6e-3d-9), so they assert the *current* namespace converges
+// among members who share a removal, not the grandfathered baseline.
+
+/// Two stand-in rendezvous peer ids — the namespace is bound per-rendezvous.
+const RZ: &[u8] = b"catcoms-rendezvous-node-one-0001";
+const RZ2: &[u8] = b"catcoms-rendezvous-node-two-0002";
+
+#[tokio::test]
+async fn routing_namespace_rotates_only_on_member_removal() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    // Alice(0)=committer, Bob(1)=requester+applier, Carol(2)=removal target.
+    let (mut s, ids) = build_members(&hub, &clock, 3).await;
+
+    // Two Adds built the group; neither rotated the routing label.
+    for sync in &s {
+        assert_eq!(
+            sync.routing_label(),
+            0,
+            "Adds/Updates must not rotate the routing label"
+        );
+    }
+    let before = s[0].rendezvous_namespaces(RZ);
+    assert_eq!(before.len(), 1, "only the current namespace exists at L=0");
+    // The namespace is bound per-rendezvous (colluding rendezvous can't join logs).
+    assert_ne!(
+        before[0],
+        s[0].rendezvous_namespaces(RZ2)[0],
+        "the namespace must differ per rendezvous node"
+    );
+
+    // Remove Carol: Bob requests, Alice (committer) commits, Bob applies. This
+    // exercises both rotation paths — the local committer (commit_remove_now) and
+    // the inbound apply (note_commit_applied via process_incoming).
+    s[1].request_remove(&ids[2]).await.unwrap();
+    assert!(s[0].run_once().await.unwrap()); // Alice commits the removal
+    assert!(s[1].run_once().await.unwrap()); // Bob applies the broadcast commit
+
+    // The removal rotated L to 1 on both remaining members, identically.
+    assert_eq!(s[0].routing_label(), 1, "committer rotated on removal");
+    assert_eq!(s[1].routing_label(), 1, "applier rotated on removal");
+    let a = s[0].rendezvous_namespaces(RZ);
+    let b = s[1].rendezvous_namespaces(RZ);
+    assert_eq!(
+        a[0], b[0],
+        "remaining members converge on the post-removal namespace"
+    );
+    assert_ne!(a[0], before[0], "the namespace changed on the removal");
+    assert_eq!(a.len(), 2, "current + one grandfathered namespace at L=1");
+
+    // Carol, removed, never advanced her label and cannot compute the post-removal
+    // namespace — her advertised set excludes it.
+    assert_eq!(s[2].routing_label(), 0);
+    assert!(
+        !s[2].rendezvous_namespaces(RZ).contains(&a[0]),
+        "a removed member cannot compute the post-removal namespace"
+    );
+}
+
+#[tokio::test]
+async fn grandfathered_namespaces_are_bounded_to_two_windows() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    // Alice(0)=committer, Bob(1)=requester+applier, members 2/3/4 are removal
+    // targets. Driving only Alice and Bob avoids the multi-applier gossip-ordering
+    // dance (a non-requester also receives the broadcast request, needing an extra
+    // tick); Bob, the requester, receives only the commit, so one tick each.
+    let (mut s, ids) = build_members(&hub, &clock, 5).await;
+    let ns_l0 = s[0].rendezvous_namespaces(RZ)[0].clone();
+
+    // Three successive removals; Bob requests, Alice commits, Bob applies each.
+    for target in [4usize, 3, 2] {
+        s[1].request_remove(&ids[target]).await.unwrap();
+        assert!(s[0].run_once().await.unwrap()); // Alice commits
+        assert!(s[1].run_once().await.unwrap()); // Bob applies
+    }
+
+    assert_eq!(s[0].routing_label(), 3, "three removals advanced L to 3");
+    let ns = s[0].rendezvous_namespaces(RZ);
+    assert_eq!(
+        ns.len(),
+        3,
+        "the window is bounded to the current + two grandfathered labels"
+    );
+    // All three retained namespaces are distinct.
+    assert_ne!(ns[0], ns[1]);
+    assert_ne!(ns[1], ns[2]);
+    assert_ne!(ns[0], ns[2]);
+    // The L=0 namespace has aged out of the window (evicted + zeroized).
+    assert!(
+        !ns.contains(&ns_l0),
+        "the oldest label is evicted past the two-window bound"
+    );
+}
+
+#[tokio::test]
+async fn distinct_groups_derive_distinct_namespaces() {
+    catcoms_log::init_test();
+    let clock = ManualClock::new(1_000);
+    let hub_a = Hub::new();
+    let (sa, _) = build_members(&hub_a, &clock, 1).await; // founder-only group A
+    let hub_b = Hub::new();
+    let (sb, _) = build_members(&hub_b, &clock, 1).await; // founder-only group B
+    assert_ne!(
+        sa[0].rendezvous_namespaces(RZ)[0],
+        sb[0].rendezvous_namespaces(RZ)[0],
+        "two distinct groups must never collide on a rendezvous namespace"
+    );
+}
