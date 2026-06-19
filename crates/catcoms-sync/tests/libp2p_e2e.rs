@@ -81,7 +81,7 @@ async fn fresh_device_joins_and_converges_over_libp2p() {
     .expect("Bob did not connect to Alice");
 
     let bob = MlsDevice::generate().unwrap();
-    let bob_group = timeout(
+    let (bob_group, bob_routing) = timeout(
         Duration::from_secs(20),
         catcoms_sync::request_join(&*b_mesh, a_peer, &bob, &invite),
     )
@@ -94,7 +94,14 @@ async fn fresh_device_joins_and_converges_over_libp2p() {
     // Bob is now a member; build his sync node over the same connection and catch up
     // Alice's channel history (request/response — no gossip-mesh formation needed).
     let b_mesh = Arc::try_unwrap(b_mesh).expect("sole owner");
-    let mut bsy = ChannelSync::new(b_mesh, bob_group, bob, OsCryptoRng, Box::new(SystemClock));
+    let mut bsy = ChannelSync::new_joined(
+        b_mesh,
+        bob_group,
+        bob,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        bob_routing,
+    );
     bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
 
     let applied = timeout(
@@ -179,7 +186,7 @@ async fn joins_a_server_only_reachable_through_a_relay() {
     .expect("joiner did not connect to the server through the relay");
 
     let joiner = MlsDevice::generate().unwrap();
-    let joiner_group = timeout(
+    let (joiner_group, joiner_routing) = timeout(
         Duration::from_secs(20),
         catcoms_sync::request_join(&j_mesh, s_peer, &joiner, &invite),
     )
@@ -188,12 +195,13 @@ async fn joins_a_server_only_reachable_through_a_relay() {
     .expect("joined through the relay");
     assert_eq!(joiner_group.epoch(), 1);
 
-    let mut jsy = ChannelSync::new(
+    let mut jsy = ChannelSync::new_joined(
         j_mesh,
         joiner_group,
         joiner,
         OsCryptoRng,
         Box::new(SystemClock),
+        joiner_routing,
     );
     jsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
     let applied = timeout(

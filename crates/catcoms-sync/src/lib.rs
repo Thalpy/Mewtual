@@ -29,7 +29,7 @@ use std::fmt;
 
 use automerge::{AutoCommit, AutomergeError};
 use bytes::Bytes;
-use catcoms_crypto::{verify_with_public_bytes, DeviceId};
+use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
 use catcoms_mls::{
     serialize_key_package, Incoming, InviteLedger, InviteToken, MlsDevice, ServerGroup,
 };
@@ -56,6 +56,9 @@ const KIND_WELCOME: u8 = 3;
 const JOIN_PENDING: u8 = 0;
 /// Join-response status byte: the Welcome (and signature) follow inline.
 const JOIN_READY: u8 = 1;
+/// Defensive cap on the number of routing secrets a join transfer may carry — the
+/// store only ever holds the current label plus two grandfathered ones.
+const MAX_ROUTING_SECRETS: usize = 8;
 /// Control requests (join/catch-up) are small; reject anything larger up front.
 const MAX_CONTROL_REQUEST: usize = 64 * 1024;
 /// Ceiling on a catch-up **response** accepted from a (untrusted) serving peer,
@@ -296,11 +299,130 @@ fn decode_authed_request(bytes: &[u8]) -> Result<AuthedRequest, SyncError> {
     Ok((inner, pubkey, timestamp_ms, signature))
 }
 
-fn encode_join_resp(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
+/// Decoded join response: `(welcome, inviter signature, sealed routing transfer)`.
+type JoinResp = (Vec<u8>, [u8; 64], Vec<u8>);
+/// Decoded routing state: the label and the retained `(slot, ns_secret)` pairs.
+type RoutingStateParts = (u64, Vec<(u64, [u8; 32])>);
+
+fn encode_join_resp(welcome: &[u8], signature: &[u8; 64], sealed_routing: &[u8]) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_bytes(welcome).expect("welcome fits");
     e.put_bytes(signature).expect("64 fits");
+    // The routing-state transfer (slice 6e-3d-2): the admitting member's `ns_secret_L`
+    // history, sealed under the shared post-join epoch key. Empty if absent.
+    e.put_bytes(sealed_routing).expect("sealed routing fits");
     e.finish()
+}
+
+/// Wire-encode a [`SealedBlob`] (nonce ‖ ciphertext) for transport.
+fn encode_sealed(blob: &SealedBlob) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(&blob.nonce).expect("nonce fits");
+    e.put_bytes(&blob.ciphertext).expect("ciphertext fits");
+    e.finish()
+}
+
+fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let nonce: [u8; 24] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let ciphertext = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok(SealedBlob { nonce, ciphertext })
+}
+
+/// Encode the routing state to seal for a joiner: the label `L` followed by every
+/// retained `(slot, ns_secret_slot)`.
+fn encode_routing_state(label: u64, secrets: &[(u64, [u8; 32])]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_u64(label);
+    e.put_u32(secrets.len() as u32);
+    for (slot, secret) in secrets {
+        e.put_u64(*slot);
+        e.put_bytes(secret).expect("32 fits");
+    }
+    e.finish()
+}
+
+fn decode_routing_state(bytes: &[u8]) -> Result<RoutingStateParts, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let label = d.get_u64().map_err(|_| SyncError::Malformed)?;
+    let count = d.get_u32().map_err(|_| SyncError::Malformed)? as usize;
+    if count > MAX_ROUTING_SECRETS {
+        return Err(SyncError::Malformed);
+    }
+    let mut secrets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let slot = d.get_u64().map_err(|_| SyncError::Malformed)?;
+        let secret: [u8; 32] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        secrets.push((slot, secret));
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((label, secrets))
+}
+
+/// The routing state (`L` + the retained `ns_secret_L` history) transferred from an
+/// admitting member to a joiner during the join handshake, so the joiner derives the
+/// **same** blinded topics and rendezvous namespaces as the rest of the group
+/// (a fresh node cannot re-derive past removal-epoch secrets on its own). Returned
+/// by [`request_join`]; consumed by [`ChannelSync::new_joined`]. An empty state
+/// (no transfer present) leaves the joiner on its locally-initialised `L = 0`.
+#[derive(Default)]
+pub struct RoutingState {
+    label: u64,
+    secrets: Vec<(u64, Zeroizing<[u8; 32]>)>,
+}
+
+impl std::fmt::Debug for RoutingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the secrets.
+        f.debug_struct("RoutingState")
+            .field("label", &self.label)
+            .field("secrets", &self.secrets.len())
+            .finish()
+    }
+}
+
+/// Open a sealed routing transfer received in a join response: derive the shared
+/// transfer key from the just-joined group (the joiner is now at the seal epoch),
+/// unseal, and decode. Any failure (absent/invalid/forged) yields an empty state so
+/// the joiner simply keeps its local `L = 0` rather than adopting bad routing.
+fn open_routing_transfer(group: &ServerGroup, device: &MlsDevice, sealed: &[u8]) -> RoutingState {
+    if sealed.is_empty() {
+        return RoutingState::default();
+    }
+    let key = match group.routing_transfer_key(device) {
+        Ok(k) => k,
+        Err(_) => return RoutingState::default(),
+    };
+    let blob = match decode_sealed(sealed) {
+        Ok(b) => b,
+        Err(_) => return RoutingState::default(),
+    };
+    let plaintext = match unseal(&key, &blob) {
+        Ok(p) => Zeroizing::new(p),
+        Err(_) => {
+            tracing::warn!("routing transfer failed to unseal; keeping local L=0");
+            return RoutingState::default();
+        }
+    };
+    match decode_routing_state(&plaintext) {
+        Ok((label, secrets)) => RoutingState {
+            label,
+            secrets: secrets
+                .into_iter()
+                .map(|(slot, s)| (slot, Zeroizing::new(s)))
+                .collect(),
+        },
+        Err(_) => RoutingState::default(),
+    }
 }
 
 /// The transcript a member signs to request a removal (binds the request to the
@@ -358,13 +480,13 @@ fn decode_remove_request(bytes: &[u8]) -> Result<RemoveRequest, SyncError> {
 
 /// Encode the committer→joiner Welcome push payload (a winning staged admission):
 /// `[JOIN_READY] ‖ welcome ‖ signature`.
-fn encode_welcome_push(welcome: &[u8], signature: &[u8; 64]) -> Vec<u8> {
+fn encode_welcome_push(welcome: &[u8], signature: &[u8; 64], sealed_routing: &[u8]) -> Vec<u8> {
     let mut out = vec![JOIN_READY];
-    out.extend_from_slice(&encode_join_resp(welcome, signature));
+    out.extend_from_slice(&encode_join_resp(welcome, signature, sealed_routing));
     out
 }
 
-fn decode_join_resp(bytes: &[u8]) -> Result<(Vec<u8>, [u8; 64]), SyncError> {
+fn decode_join_resp(bytes: &[u8]) -> Result<JoinResp, SyncError> {
     let mut d = Decoder::new(bytes);
     let welcome = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
     let signature: [u8; 64] = d
@@ -372,8 +494,9 @@ fn decode_join_resp(bytes: &[u8]) -> Result<(Vec<u8>, [u8; 64]), SyncError> {
         .map_err(|_| SyncError::Malformed)?
         .try_into()
         .map_err(|_| SyncError::Malformed)?;
+    let sealed_routing = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((welcome, signature))
+    Ok((welcome, signature, sealed_routing))
 }
 
 /// Errors from channel synchronization.
@@ -748,10 +871,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             welcome_outbox: Vec::new(),
             stats: SyncStats::default(),
         };
-        // Seed the L=0 routing secret from the current epoch. (For a member who
-        // joins after removals this baseline is corrected by the join transfer in
-        // 6e-3d-9; the founder is correct from genesis.)
+        // Seed the L=0 routing secret from the current epoch. Correct for the
+        // founder; a member that joined an existing group instead adopts the
+        // transferred routing state via `new_joined` (the locally-seeded value is
+        // then replaced).
         this.capture_routing_secret();
+        this
+    }
+
+    /// Build a synchronizer for a member that **joined** an existing group, adopting
+    /// the routing state ([`RoutingState`]) transferred in the join response so it
+    /// derives the same blinded topics and rendezvous namespaces as the group. Use
+    /// this (not [`ChannelSync::new`]) for the `ServerGroup` returned by
+    /// [`request_join`]; an empty transfer falls back to a local `L = 0`.
+    pub fn new_joined(
+        transport: T,
+        group: ServerGroup,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        routing: RoutingState,
+    ) -> Self {
+        let mut this = Self::new(transport, group, device, rng, clock);
+        this.adopt_routing_state(routing);
         this
     }
 
@@ -1210,6 +1352,50 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         out
     }
 
+    /// Seal this member's routing state (`L` + the retained `ns_secret_L` history)
+    /// for a peer joining at the **current** epoch, under the shared routing-transfer
+    /// key both will derive. Returned empty (no transfer) if the key or seal fails —
+    /// the joiner then keeps its local `L = 0` (correct only for the founder).
+    /// Call at the post-merge epoch the joiner's Welcome lands them on.
+    fn seal_routing_state(&mut self) -> Vec<u8> {
+        let key = match self.group.routing_transfer_key(&self.device) {
+            Ok(k) => k,
+            Err(e) => {
+                tracing::warn!(error = %e, "no routing-transfer key; sending no transfer");
+                return Vec::new();
+            }
+        };
+        let secrets: Vec<(u64, [u8; 32])> = self
+            .routing_secrets
+            .iter()
+            .map(|(slot, s)| (*slot, **s))
+            .collect();
+        let plaintext = Zeroizing::new(encode_routing_state(self.routing_label, &secrets));
+        match seal(&key, &plaintext, &mut self.rng) {
+            Ok(blob) => encode_sealed(&blob),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not seal routing transfer");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Adopt a routing state transferred at join (replacing the locally-initialised
+    /// `L = 0`), so this joiner derives the same topics and namespaces as the group.
+    /// A no-op for an empty transfer (keeps the local baseline).
+    fn adopt_routing_state(&mut self, routing: RoutingState) {
+        if routing.secrets.is_empty() {
+            return;
+        }
+        self.routing_label = routing.label;
+        self.routing_secrets = routing.secrets.into_iter().collect();
+        tracing::debug!(
+            label = self.routing_label,
+            secrets = self.routing_secrets.len(),
+            "adopted transferred routing state"
+        );
+    }
+
     /// Append a commit to the retained log (so this node can serve catch-up),
     /// bounded by `max_commit_log`.
     fn record_commit(&mut self, record: CommitRecord) {
@@ -1439,7 +1625,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if let Some(join) = p.mine.and_then(|m| m.join) {
             let payload = if we_won && advanced {
                 let _ = self.ledger.consume(join.nonce);
-                encode_welcome_push(&join.welcome, &join.welcome_sig)
+                // We just merged the staged Add, so we are at the exact epoch the
+                // joiner's Welcome lands them on — seal the routing state here.
+                let sealed_routing = self.seal_routing_state();
+                encode_welcome_push(&join.welcome, &join.welcome_sig, &sealed_routing)
             } else {
                 Vec::new() // empty => rejected; the joiner retries
             };
@@ -2083,8 +2272,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 join_transcript(&invite.group_id, &invite.invite_nonce, &outcome.welcome);
             let signature = self.device.sign(&transcript).ok()?;
             tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
+            // Transfer the routing state to the joiner, sealed under the shared
+            // post-join epoch key (the Welcome lands them on this exact epoch, so the
+            // seal/open epochs match — no race).
+            let sealed_routing = self.seal_routing_state();
             let mut resp = vec![JOIN_READY];
-            resp.extend_from_slice(&encode_join_resp(&outcome.welcome, &signature));
+            resp.extend_from_slice(&encode_join_resp(
+                &outcome.welcome,
+                &signature,
+                &sealed_routing,
+            ));
             return Some(resp);
         }
 
@@ -2170,7 +2367,7 @@ pub async fn request_join<T: MeshTransport>(
     inviter: PeerId,
     device: &MlsDevice,
     invite: &InviteToken,
-) -> Result<ServerGroup, SyncError> {
+) -> Result<(ServerGroup, RoutingState), SyncError> {
     // Authenticate the pasted invite itself (signature + pubkey binds device id).
     if !invite.verify_self() {
         tracing::warn!("invite failed self-verification");
@@ -2190,8 +2387,8 @@ pub async fn request_join<T: MeshTransport>(
     match resp.split_first() {
         // Synchronous admission (single-committer): the Welcome is inline.
         Some((&JOIN_READY, rest)) => {
-            let (welcome, signature) = decode_join_resp(rest)?;
-            finish_join(device, invite, &welcome, &signature)
+            let (welcome, signature, sealed_routing) = decode_join_resp(rest)?;
+            finish_join(device, invite, &welcome, &signature, &sealed_routing)
         }
         // Staged admission (concurrent committers): the inviter will *push* the
         // signed Welcome once its staged commit wins and merges. Await it.
@@ -2210,7 +2407,8 @@ fn finish_join(
     invite: &InviteToken,
     welcome: &[u8],
     signature: &[u8; 64],
-) -> Result<ServerGroup, SyncError> {
+    sealed_routing: &[u8],
+) -> Result<(ServerGroup, RoutingState), SyncError> {
     let transcript = join_transcript(&invite.group_id, &invite.invite_nonce, welcome);
     if !invite.verify_inviter_signature(&transcript, signature) {
         tracing::warn!("Welcome was not signed by the invite's inviter");
@@ -2222,8 +2420,11 @@ fn finish_join(
         tracing::warn!("joined group id does not match the invite");
         return Err(SyncError::JoinRejected);
     }
+    // We are now at the post-join epoch the inviter sealed the routing state under,
+    // so we can open it and adopt the group's routing label/secrets.
+    let routing = open_routing_transfer(&group, device, sealed_routing);
     tracing::info!(epoch = group.epoch(), "joined server via invite");
-    Ok(group)
+    Ok((group, routing))
 }
 
 /// Await the committer's provisional-Welcome push (`KIND_WELCOME`) for a staged
@@ -2233,7 +2434,7 @@ async fn await_welcome_push<T: MeshTransport>(
     transport: &T,
     device: &MlsDevice,
     invite: &InviteToken,
-) -> Result<ServerGroup, SyncError> {
+) -> Result<(ServerGroup, RoutingState), SyncError> {
     loop {
         match transport.next_event().await {
             Some(TransportEvent::Request {
@@ -2242,8 +2443,8 @@ async fn await_welcome_push<T: MeshTransport>(
                 responder.respond(Bytes::new()); // ack the push
                 match data[1..].split_first() {
                     Some((&JOIN_READY, body)) => {
-                        let (welcome, signature) = decode_join_resp(body)?;
-                        return finish_join(device, invite, &welcome, &signature);
+                        let (welcome, signature, sealed_routing) = decode_join_resp(body)?;
+                        return finish_join(device, invite, &welcome, &signature, &sealed_routing);
                     }
                     // Empty body => the committer lost; rejected.
                     _ => return Err(SyncError::JoinRejected),
@@ -2360,12 +2561,14 @@ mod tests {
             request_join(&bob_net, alice_peer, &bob, &invite_b),
             asy.run_once(),
         );
-        let mut bsy = ChannelSync::new(
+        let (bob_group, bob_routing) = bob_joined.unwrap();
+        let mut bsy = ChannelSync::new_joined(
             bob_net,
-            bob_joined.unwrap(),
+            bob_group,
             bob,
             ChaCha20Rng::seed_from_u64(2),
             Box::new(ManualClock::new(1_000)),
+            bob_routing,
         );
 
         // Carol joins (Alice 1->2): Alice produces a genuine commit at epoch 1.

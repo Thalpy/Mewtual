@@ -104,12 +104,14 @@ async fn build_members(
             catcoms_sync::request_join(&net, founder_peer, &dev, &invite),
             syncs[0].run_once(),
         );
-        let mut new_sync = ChannelSync::new(
+        let (group, routing) = joined.unwrap();
+        let mut new_sync = ChannelSync::new_joined(
             net,
-            joined.unwrap(),
+            group,
             dev,
             rng(1 + i as u64),
             Box::new(clock.clone()),
+            routing,
         );
         new_sync.subscribe_control().await.unwrap();
         syncs.push(new_sync);
@@ -126,6 +128,19 @@ async fn build_members(
         );
     }
     (syncs, ids)
+}
+
+/// Build a joiner's `ChannelSync` from a `request_join` result, adopting the
+/// transferred routing state so it derives the same topics/namespaces as the group.
+fn joined_sync(
+    net: MemNetwork,
+    joined: Result<(ServerGroup, catcoms_sync::RoutingState), catcoms_sync::SyncError>,
+    device: MlsDevice,
+    rng: ChaCha20Rng,
+    clock: ManualClock,
+) -> ChannelSync<MemNetwork, ChaCha20Rng> {
+    let (group, routing) = joined.expect("joined");
+    ChannelSync::new_joined(net, group, device, rng, Box::new(clock), routing)
 }
 
 /// The fork-resolution config: concurrent committers up to `rank`, with `window`.
@@ -207,17 +222,18 @@ async fn fresh_device_joins_via_invite_over_the_transport() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite),
         asy.run_once(),
     );
-    let bob_group = joined.expect("bob joined");
+    let (bob_group, bob_routing) = joined.expect("bob joined");
     assert_eq!(bob_group.epoch(), 1);
     assert!(bob_group.contains_device(&bob.device_id()));
 
     // Bob is now a member: he and Alice converge on a channel.
-    let mut bsy = ChannelSync::new(
+    let mut bsy = ChannelSync::new_joined(
         bob_net,
         bob_group,
         bob,
         rng(2),
         Box::new(ManualClock::new(1_000)),
+        bob_routing,
     );
     asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
     bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
@@ -330,13 +346,7 @@ async fn multi_member_join_propagates_to_existing_members() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_joined.unwrap(),
-        bob,
-        rng(2),
-        Box::new(ManualClock::new(1_000)),
-    );
+    let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
     bsy.subscribe_control().await.unwrap();
     assert_eq!(asy.epoch(), 1);
     assert_eq!(bsy.epoch(), 1);
@@ -349,12 +359,12 @@ async fn multi_member_join_propagates_to_existing_members() {
         catcoms_sync::request_join(&carol_net, alice_peer, &carol, &invite_c),
         asy.run_once(),
     );
-    let mut csy = ChannelSync::new(
+    let mut csy = joined_sync(
         carol_net,
-        carol_joined.unwrap(),
+        carol_joined,
         carol,
         rng(3),
-        Box::new(ManualClock::new(1_000)),
+        ManualClock::new(1_000),
     );
     csy.subscribe_control().await.unwrap();
     assert_eq!(asy.epoch(), 2);
@@ -401,13 +411,7 @@ async fn a_non_committer_cannot_admit() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_joined.unwrap(),
-        bob,
-        rng(2),
-        Box::new(ManualClock::new(1_000)),
-    );
+    let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
 
     // Bob invites Carol and tries to admit her — refused, Bob is not the committer.
     let invite_c = bsy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
@@ -452,13 +456,7 @@ async fn op_sealed_before_an_epoch_advance_still_opens() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_joined.unwrap(),
-        bob,
-        rng(2),
-        Box::new(ManualClock::new(1_000)),
-    );
+    let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
     asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
     bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
     assert_eq!(asy.epoch(), 1);
@@ -524,13 +522,7 @@ async fn op_past_the_key_window_falls_back_to_doc_catchup() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_joined.unwrap(),
-        bob,
-        rng(2),
-        Box::new(ManualClock::new(1_000)),
-    );
+    let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
     asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
     bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
 
@@ -646,13 +638,7 @@ async fn missed_commits_recover_in_order_via_commit_catchup() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_joined.unwrap(),
-        bob,
-        rng(2),
-        Box::new(ManualClock::new(1_000)),
-    );
+    let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
     assert_eq!(bsy.epoch(), 1);
 
     // Carol then Dave join via Alice (1->2, 2->3). Bob is NOT subscribed to the
@@ -704,13 +690,7 @@ async fn out_of_order_commit_auto_recovers_through_run_once() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_joined.unwrap(),
-        bob,
-        rng(2),
-        Box::new(ManualClock::new(1_000)),
-    );
+    let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
 
     // Carol joins (1->2) while Bob is still off the control topic — he misses it.
     let carol = MlsDevice::generate().unwrap();
@@ -782,13 +762,7 @@ async fn concurrent_removes_resolve_to_a_single_winner() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &inv_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_g.unwrap(),
-        bob,
-        rng(2),
-        Box::new(clock.clone()),
-    );
+    let mut bsy = joined_sync(bob_net, bob_g, bob, rng(2), clock.clone());
     bsy.subscribe_control().await.unwrap();
 
     let carol = MlsDevice::generate().unwrap();
@@ -877,13 +851,7 @@ async fn uncontested_staged_remove_merges_after_the_window() {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &inv_b),
         asy.run_once(),
     );
-    let mut bsy = ChannelSync::new(
-        bob_net,
-        bob_g.unwrap(),
-        bob,
-        rng(2),
-        Box::new(clock.clone()),
-    );
+    let mut bsy = joined_sync(bob_net, bob_g, bob, rng(2), clock.clone());
     bsy.subscribe_control().await.unwrap();
 
     let carol = MlsDevice::generate().unwrap();
@@ -1078,7 +1046,7 @@ async fn staged_join_admits_via_the_welcome_push() {
         }
     );
 
-    let bob_group = bob_result.expect("bob joined via the two-phase staged path");
+    let (bob_group, _) = bob_result.expect("bob joined via the two-phase staged path");
     assert_eq!(bob_group.epoch(), 1);
     assert!(bob_group.contains_device(&bob.device_id()));
     assert_eq!(s[0].epoch(), 1, "the staged admission merged");
@@ -1253,5 +1221,66 @@ async fn distinct_groups_derive_distinct_namespaces() {
         sa[0].rendezvous_namespaces(RZ)[0],
         sb[0].rendezvous_namespaces(RZ)[0],
         "two distinct groups must never collide on a rendezvous namespace"
+    );
+}
+
+// --- 6e-3d-2: routing-state transfer on join -------------------------------
+//
+// A joiner captures a different L=0 baseline than the founder (the routing secret
+// is epoch-specific), so without the transfer it would derive a different
+// namespace. `build_members` builds joiners via `new_joined`, which adopts the
+// routing state sealed into the join response — so they converge.
+
+#[tokio::test]
+async fn a_joiner_adopts_the_routing_state_and_converges_on_the_namespace() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    // Alice founds at epoch 0; Bob joins at epoch 1 (a different local baseline).
+    let (s, _ids) = build_members(&hub, &clock, 2).await;
+    assert_eq!(s[0].routing_label(), 0);
+    assert_eq!(s[1].routing_label(), 0);
+    assert_eq!(
+        s[0].rendezvous_namespaces(RZ),
+        s[1].rendezvous_namespaces(RZ),
+        "a joiner that adopted the transfer derives the founder's namespace"
+    );
+}
+
+#[tokio::test]
+async fn a_member_joining_after_a_removal_converges_via_the_transfer() {
+    catcoms_log::init_test();
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_000);
+    let alice_peer = PeerId::from_u64(1);
+    // Alice(0)=committer, Bob(1)=requester, Carol(2)=target.
+    let (mut s, ids) = build_members(&hub, &clock, 3).await;
+
+    // Remove Carol: the group advances to L=1 with a post-removal ns_secret that a
+    // *future* joiner cannot derive on its own (it was never at that epoch).
+    s[1].request_remove(&ids[2]).await.unwrap();
+    assert!(s[0].run_once().await.unwrap());
+    assert!(s[1].run_once().await.unwrap());
+    assert_eq!(s[0].routing_label(), 1);
+
+    // Dave joins *after* the removal; the transfer carries L=1 and the post-removal
+    // secret, so he converges on the current namespace despite never being present.
+    let dave = MlsDevice::generate().unwrap();
+    let invite = s[0].mint_invite([9u8; 16], u64::MAX, vec![]).unwrap();
+    let dave_net = hub.join(PeerId::from_u64(99));
+    let (dave_joined, _) = tokio::join!(
+        catcoms_sync::request_join(&dave_net, alice_peer, &dave, &invite),
+        s[0].run_once(),
+    );
+    let dsy = joined_sync(dave_net, dave_joined, dave, rng(99), clock.clone());
+    assert_eq!(
+        dsy.routing_label(),
+        1,
+        "Dave adopted the post-removal label via the transfer"
+    );
+    assert_eq!(
+        dsy.rendezvous_namespaces(RZ)[0],
+        s[0].rendezvous_namespaces(RZ)[0],
+        "a post-removal joiner converges on the current namespace"
     );
 }

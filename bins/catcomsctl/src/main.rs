@@ -250,7 +250,7 @@ async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
     println!("[join] connected to the server; requesting to join…");
 
     let device = MlsDevice::generate()?;
-    let group = timeout(
+    let (group, routing) = timeout(
         Duration::from_secs(20),
         catcoms_sync::request_join(&mesh, inviter, &device, &invite),
     )
@@ -258,7 +258,14 @@ async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
     .map_err(|_| "join timed out")??;
     println!("[join] joined the server (epoch {})", group.epoch());
 
-    let mut sync = ChannelSync::new(mesh, group, device, OsCryptoRng, Box::new(SystemClock));
+    let mut sync = ChannelSync::new_joined(
+        mesh,
+        group,
+        device,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        routing,
+    );
     sync.open_channel(DocType::Channel, GENERAL).await?;
     let applied = timeout(
         Duration::from_secs(20),
@@ -466,8 +473,15 @@ async fn run_recover(stats: bool) -> Result<(), Box<dyn Error>> {
         catcoms_sync::request_join(&bob_net, alice_peer, &bob, &invite_b),
         alice_sync.run_once(),
     );
-    let mut bob_sync =
-        ChannelSync::new(bob_net, bob_group?, bob, OsCryptoRng, Box::new(SystemClock));
+    let (bob_group, bob_routing) = bob_group?;
+    let mut bob_sync = ChannelSync::new_joined(
+        bob_net,
+        bob_group,
+        bob,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        bob_routing,
+    );
     println!(
         "[2] Bob joined (Alice epoch {}, Bob epoch {}) -- Bob is offline for control",
         alice_sync.epoch(),
