@@ -64,4 +64,16 @@ impl ServerGroup {
     pub fn routing_metadata_secret(&self, device: &MlsDevice) -> Result<[u8; KEY_LEN], MlsError> {
         self.metadata_secret(device, DocType::Routing, 0)
     }
+
+    /// Derive the 32-byte **routing-transfer wrap key** for the current epoch — the
+    /// symmetric key under which a member seals the routing state (`L` + the
+    /// `ns_secret_L` history) for a peer joining at this same epoch. Both the
+    /// admitting member (after merging the Add) and the joiner (after processing the
+    /// Welcome) are at the same epoch and so derive the identical key; an outsider
+    /// (relay/observer), lacking the group secrets, cannot. Domain-separated from
+    /// [`ServerGroup::routing_metadata_secret`] by a distinct context id, so it is
+    /// never equal to any `ns_secret_L`.
+    pub fn routing_transfer_key(&self, device: &MlsDevice) -> Result<[u8; KEY_LEN], MlsError> {
+        self.metadata_secret(device, DocType::Routing, 1)
+    }
 }

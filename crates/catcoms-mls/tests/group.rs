@@ -79,6 +79,39 @@ fn members_agree_on_channel_keys_and_separate_channels_differ() {
 }
 
 #[test]
+fn members_agree_on_routing_secrets_which_are_domain_separated() {
+    let (alice, alice_group, bob, bob_group) = two_member_group();
+
+    // Both members at the same epoch derive the same routing secret (the source of
+    // ns_secret_L) and the same routing-transfer wrap key.
+    let a_ns = alice_group.routing_metadata_secret(&alice).unwrap();
+    let b_ns = bob_group.routing_metadata_secret(&bob).unwrap();
+    assert_eq!(
+        a_ns, b_ns,
+        "members must agree on the routing metadata secret"
+    );
+
+    let a_xfer = alice_group.routing_transfer_key(&alice).unwrap();
+    let b_xfer = bob_group.routing_transfer_key(&bob).unwrap();
+    assert_eq!(
+        a_xfer, b_xfer,
+        "members must agree on the routing-transfer key"
+    );
+
+    // The transfer key is domain-separated from the routing secret (so it is never
+    // equal to any ns_secret_L) and from per-document content/metadata keys.
+    assert_ne!(a_ns, a_xfer, "routing secret and transfer key must differ");
+    let a_meta = alice_group
+        .metadata_secret(&alice, DocType::Channel, 1)
+        .unwrap();
+    assert_ne!(
+        a_ns, a_meta,
+        "routing secret is domain-separated from doc metadata"
+    );
+    assert_ne!(a_xfer, a_meta);
+}
+
+#[test]
 fn application_message_roundtrips_between_members() {
     let (alice, mut alice_group, bob, mut bob_group) = two_member_group();
 
