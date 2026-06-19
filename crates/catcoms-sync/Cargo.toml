@@ -21,9 +21,11 @@ zeroize = "1"
 [dev-dependencies]
 catcoms-log = { path = "../catcoms-log" }
 catcoms-crypto = { path = "../catcoms-crypto" }
+catcoms-net = { path = "../catcoms-net" }
 rand_chacha = "0.3"
 rand_core = "0.6"
-tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+libp2p = { version = "0.56", features = ["tokio"] }
 
 [lints]
 workspace = true

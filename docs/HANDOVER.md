@@ -113,7 +113,8 @@ protocol already works, only CLI plumbing remains).
 | 6d-2b (1) | **single-serializer remove** (members *request*; the designated committer alone commits) — the convergence-safe model, on by default | ✅ `63ac788` |
 | 6d-2b (2) | **all-members apply-time Add-binding validation** (every member rejects an Add not bound to this group / its own leaf key) | ✅ this commit |
 | 6d-2b (3…) | by-value proposal batching · history-derived single-use · committer-decoupled admission | planned |
-| 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
+| 6e (1) | **full stack over real libp2p** — join handshake + encrypted catch-up over `MeshService` (Noise + request/response), not just the in-memory hub | ✅ this commit |
+| 6e (2…) | multi-process `catcomsctl serve`/`join` over TCP · relay v2 + DCUtR · rendezvous · eclipse-resistance · blob-fetch padding | planned |
 | 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
 | 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
