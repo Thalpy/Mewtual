@@ -52,9 +52,16 @@ pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoRespon
 ```
 Implementations:
 - **`MemNetwork`** (tests): `let hub = Hub::new(); let net = hub.join(PeerId::from_u64(n));`
-- **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)`;
-  `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p PeerId, hex-encodes
-  topics, queues+retries publishes until a subscriber appears.
+- **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
+  `new_tcp(...)`; `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p
+  PeerId, hex-encodes topics, queues+retries publishes until a subscriber appears.
+  - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
+    circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
+    `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
+  - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
+    `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
+    surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
+    **never auto-dialed** — a higher layer decides whether to dial.
 
 ### `SecureKeyStore` — at-rest DEK protection, tiered  *(catcoms-crypto)*
 ```rust
@@ -208,16 +215,18 @@ pub enum BlobState { Available, EvictedRefetchable, MissingNoHolder, Unknown }
 
 ```rust
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
-  new(transport:T, group:ServerGroup, device:MlsDevice, rng:R, clock:Box<dyn Clock + Send>) -> Self;
+  new(transport:T, group:ServerGroup, device:MlsDevice, rng:R, clock:Box<dyn Clock + Send>) -> Self;  // founder
+  new_joined(transport, group, device, rng, clock, routing:RoutingState) -> Self;  // a JOINER: adopts the transferred routing state (6e-3d-2a)
   set_config(SyncConfig);                                  // override recovery/key-window bounds
-  async subscribe_control() -> Result<()>;                 // receive membership commits
-  epoch() -> u64;   stats() -> SyncStats;                  // SyncStats = diagnostic counters + gauges
+  async subscribe_control() -> Result<()>;                 // receive membership commits (member-only topic)
+  epoch() -> u64;   routing_label() -> u64;   stats() -> SyncStats;
+  rendezvous_namespaces(rz_peer:&[u8]) -> Vec<String>;     // blinded namespaces to register/discover under (current + grandfathered)
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
-  async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe blinded topic
+  async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
-  async run_once() -> Result<bool>;                        // drain outbox + recovery; then handle ONE event; early-returns if a catch-up fired
+  async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // document history catch-up
-  async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay)
+  async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay, SIGNED response)
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;
 
 // Bounds (all hard caps; Default suits a desktop node). past:8, commit_log:256,
@@ -227,18 +236,24 @@ pub struct SyncConfig { max_past_epochs:u64, max_commit_log:usize, max_pending_c
 pub struct SyncStats { commits_applied, commits_buffered, commits_served, commit_catchups_requested,
                        ops_ingested, ops_recovered_past_epoch, ops_dropped_future_epoch, ops_dropped_old_epoch,
                        doc_catchups_requested, requests_rejected: u64,
-                       /* gauges: */ past_keys_retained, pending_commits, commit_log_len, known_peers: usize }
+                       /* gauges: */ past_keys_retained, pending_commits, commit_log_len,
+                       known_peers /*untrusted candidates*/, member_peers /*proven members*/ : usize }
+
+// RoutingState: the routing label L + retained ns_secret_L history, transferred to a
+// joiner in the join response (sealed, signature-bound). Opaque; pass to new_joined.
+pub struct RoutingState;
 
 pub async fn request_join<T: MeshTransport>(transport:&T, inviter:PeerId, device:&MlsDevice, invite:&InviteToken)
-    -> Result<ServerGroup, SyncError>;   // join over the wire; authenticates the inviter + rechecks group_id
+    -> Result<(ServerGroup, RoutingState), SyncError>;  // join over the wire; authenticates the inviter (binds the sealed routing transfer) + rechecks group_id
 ```
 
 **Recovery internals (private to `catcoms-sync`, for orientation):** `commit_log`
 (VecDeque, served to peers) · `pending_commits` (BTreeMap, out-of-order buffer,
 ordered replay when the gap fills) · `past_keys` (BTreeMap `(DocType,doc_id,epoch)`
-→ `Zeroizing<[u8;32]>`, captured by `snapshot_epoch_keys` *before* each advance,
-evicted past `max_past_epochs`) · `known_peers` (VecDeque, MRU catch-up sources) ·
-`catchup_queue` (deferred `Commits{from_epoch}` / `Doc{type,id}` work).
+→ `Zeroizing<[u8;32]>`, captured by `snapshot_epoch_keys` *before* each advance) ·
+`routing_secrets` (BTreeMap `L → Zeroizing<[u8;32]>`, `{L-2,L-1,L}`, the source of the
+blinded topics + namespaces) · **two-pool peers:** `known_peers` (untrusted candidates)
+vs `member_peers` (promoted via a verifying *signed* catch-up; preferred) · `catchup_queue`.
 
 ---
 

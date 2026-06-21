@@ -40,7 +40,10 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 6d-2 | Fork resolution + single-serializer membership (convergence-safe; concurrent-committer path fenced off until I1) | done |
 | 6e-1/2 | Full stack over real libp2p; multi-process `serve`/`join` over TCP | done |
 | 6e-3a/b/c | Circuit relay v2 (reserve + dial-through) + DCUtR hole-punch (NAT traversal) | done |
-| 6e-3d | Rendezvous discovery + eclipse-resistance | planned |
+| 6e-3d-1/2 | Per-removal routing secret + member-only rotating gossip topics + join-time transfer (closes the pre-existing topic-disclosure bug) | done |
+| 6e-3d-3/4 | Zero-knowledge rendezvous server + client (register/discover, no auto-dial) | done |
+| 6e-3d-5 | Signed catch-up responses + two-pool peer model (catch-up source trust) | done |
+| 6e-3d-6…9 | Discovery policy (membership tag + dial budget) · member PEX · eclipse detector · invite rewiring | planned |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |

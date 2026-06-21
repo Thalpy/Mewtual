@@ -4,15 +4,20 @@ Authoritative current-state document. Read this first, then
 [`INTERFACES.md`](INTERFACES.md) (the API/seam schema) and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) (decisions + the adversarial-review fixes).
 
-## Status (as of 2026-06-19)
+## Status (as of 2026-06-22)
 
-- **Phases 0 → 6e-3c complete.** 136 tests passing.
+- **Phases 0 → 6e-3c complete; 6e-3d (rendezvous discovery + eclipse-resistance) in
+  progress — slices 1–5 of 9 done.** 151 tests passing.
+- Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
+  **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
+  `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
+  catch-up source-trust hole). See [`design-6e-rendezvous.md`](design-6e-rendezvous.md).
 - Toolchain pinned **Rust 1.89.0** (`rust-toolchain.toml`; automerge 0.10 needs it).
 - 9 library crates + 1 binary. The protocol layers are tested deterministically with
   N in-process nodes over an in-memory transport; the mesh is *additionally* tested
   over **real libp2p** — the memory transport (real swarms/Noise/req-resp), TCP
-  loopback (real sockets, multi-process `serve`/`join`), a circuit relay, and a DCUtR
-  hole-punch upgrade.
+  loopback (real sockets, multi-process `serve`/`join`), a circuit relay, a DCUtR
+  hole-punch upgrade, and a rendezvous register→discover.
 - Local-only repo (`git init`'d, no remote). Commits are linear on `main`,
   one per phase/block.
 
@@ -37,10 +42,10 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2 — **read them; they constrai
 | `catcoms-mls` | MLS group core (openmls 0.8): `MlsDevice`, `ServerGroup` (create/add/remove/process/epoch/`channel_secret`), single-use device-bound `InviteToken` + `InviteLedger`, `AddOutcome`, `designated_committer`. |
 | `catcoms-replication` | Encrypted CRDT docs (automerge 0.10): inner-signed `SignedOp`, `SealedOp` (per-epoch channel-key sealing), `EncryptedDoc` (edit/ingest/catch-up). |
 | `catcoms-storage` | Content-addressed `Cid` blob stores (mem + fs); per-file encryption (`FileRef`, per-file wrap nonce); `RetentionIndex` (3-scope expiry, GC with decorrelated eviction + `HolderOracle` probe). |
-| `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux); tracing-instrumented. |
-| `catcoms-sync` | `ChannelSync`: replication + membership over the transport — blinded topics, live gossip, doc catch-up, the network **join handshake**, membership **commit propagation**, **missed-commit recovery** (commit catch-up + ordered replay), a bounded zeroized **past-epoch key window**, and `SyncStats` diagnostics. |
+| `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`). Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` and are **never auto-dialed**. `connection_limits` on every swarm. Tracing-instrumented. |
+| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (the routing label `L`), with a grandfathered re-subscription window. The network **join handshake** now also transfers the **routing state** (sealed, signature-bound) so joiners derive the same topics/namespaces. Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** + a **two-pool peer model** (untrusted candidates vs verified `member_peers`); a bounded zeroized **past-epoch key window**; `rendezvous_namespaces()`; and `SyncStats`. |
 | `catcoms-log` | `tracing` subscriber init; `init_debug(debug, dir)` writes `debug_log_<ts>.txt`. |
-| `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end; `recover` drives the 6d-1b miss-and-heal path; `--debug` writes a debug log; `--stats` prints each node's `SyncStats`. |
+| `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes; `recover` drives the 6d-1b miss-and-heal path; `--debug`/`--stats`. |
 
 ## Build / verify ritual (run before every commit)
 
@@ -62,16 +67,20 @@ $out = cargo test --all 2>&1 | Out-String
 ## Dev loop
 
 ```sh
-cargo run -p catcomsctl -- demo                 # found server -> invite -> join -> E2E chat -> converge
+cargo run -p catcomsctl -- demo                 # in-process: found -> invite -> join -> E2E chat -> converge
 cargo run -p catcomsctl -- recover --stats      # 6d-1b: a member misses a commit and self-heals
-cargo run -p catcomsctl -- --debug demo         # + logs/debug_log_<ts>.txt
 cargo run -p catcomsctl -- --stats demo         # print per-node SyncStats counters
 RUST_LOG=catcoms_sync=trace cargo run -p catcomsctl -- demo
+# Real multi-process over libp2p (terminals 1+2; add --host <ip> to cross machines):
+cargo run -p catcomsctl -- serve --port 9000 --invite-file invite.txt
+cargo run -p catcomsctl -- join  --invite-file invite.txt
+# NAT traversal + discovery infra (each runs until Ctrl-C):
+cargo run -p catcomsctl -- relay --port 4000        # zero-knowledge circuit relay
+cargo run -p catcomsctl -- rendezvous --port 5000   # zero-knowledge rendezvous
 ```
-The second bot (per the user) exercises the CLI; success = exit 0 + the `[OK]` line.
-The demo runs both members **in one process** over the in-memory transport — it is
-not yet two real OS processes (that needs the same join path over libp2p TCP; the
-protocol already works, only CLI plumbing remains).
+`demo` runs both members in one process over the in-memory transport; `serve`/`join`
+run the *same* join + catch-up path across **separate OS processes over real libp2p
+TCP** (verified, incl. through a relay).
 
 ## Working conventions (important — keep doing these)
 
@@ -114,101 +123,71 @@ protocol already works, only CLI plumbing remains).
 | 6d-2a (2b) | sync-layer fork resolution (commit_id tie-break + contest window) | ✅ `939eb41` |
 | 6d-2a (2c) | two-phase staged-Add join (provisional Welcome push) + review fixes I2–I6 | ✅ `42f9b7f` |
 | 6d-2b (1) | **single-serializer remove** (members *request*; the designated committer alone commits) — the convergence-safe model, on by default | ✅ `63ac788` |
-| 6d-2b (2) | **all-members apply-time Add-binding validation** (every member rejects an Add not bound to this group / its own leaf key) | ✅ this commit |
+| 6d-2b (2) | **all-members apply-time Add-binding validation** (every member rejects an Add not bound to this group / its own leaf key) | ✅ `0a1a276` |
 | 6d-2b (3…) | by-value proposal batching · history-derived single-use · committer-decoupled admission | planned |
 | 6e (1) | **full stack over real libp2p** — join handshake + encrypted catch-up over `MeshService` (Noise + request/response) | ✅ `f1d2713` |
 | 6e (2) | **multi-process `catcomsctl serve`/`join` over TCP** — two OS processes, real sockets, verified | ✅ `73904f1` |
 | 6e (3a) | **relay infrastructure** — relay-capable swarm (relay-client + DCUtR + identify) + relay server; a client reserves a circuit slot | ✅ `84827b1` |
 | 6e (3b) | **end-to-end through a relay** — `catcomsctl relay`; `serve --relay` reserves + advertises the circuit address; `join` dials it. Verified across 3 real processes | ✅ `2f196b1` |
-| 6e (3c) | **DCUtR hole-punch** — a relayed link auto-upgrades to a direct one; the upgrade is surfaced via `MeshService::next_direct_upgrade()`. TCP-loopback test asserts the upgrade event path | ✅ this commit |
-| 6e (3d…) | rendezvous discovery · eclipse-resistance · blob-fetch padding | planned — see [`design-6e-relay.md`](design-6e-relay.md) |
-| 6e | relay v2 + DCUtR, rendezvous, eclipse-resistance, blob-fetch padding | planned |
-| 7 | end-to-end local integration over real sockets + security suite; multi-process `catcomsctl serve`/`join` | planned |
+| 6e (3c) | **DCUtR hole-punch** — a relayed link auto-upgrades to a direct one; the upgrade is surfaced via `MeshService::next_direct_upgrade()`. TCP-loopback test asserts the upgrade event path | ✅ `7173e5e` |
+| 6e-3d | **rendezvous discovery + eclipse-resistance** — 9 slices; design contract in [`design-6e-rendezvous.md`](design-6e-rendezvous.md) (`bd5e0d1`) | in progress (1–5/9) |
+| 6e-3d-1 | per-removal routing secret `ns_secret_L` + `rendezvous_namespaces()` (rotate on removal; removed-member exclusion) | ✅ `eb6a952` |
+| 6e-3d-2a | routing-state **transfer on join** (sealed, epoch-keyed) so joiners converge on topics/namespaces | ✅ `cb5c168` (prep `837bd4f`) |
+| 6e-3d-2b | **re-key gossip topics from `ns_secret_L`** (member-only, rotate on removal) — **closes A1**; adversarially reviewed | ✅ `1d9e3f2` |
+| 6e-3d-3 | zero-knowledge **rendezvous server** + `catcomsctl rendezvous` | ✅ `924df09` |
+| 6e-3d-4 | **rendezvous client** in `MeshBehaviour` (register/discover, surfaced, **no auto-dial**) + `connection_limits` | ✅ `fe1ed2a` |
+| 6e-3d-5 | **signed catch-up responses + two-pool peer model** — **Sybil-C1** source-trust; adversarially reviewed | ✅ `726691b` |
+| 6e-3d-6…9 | DiscoveryPolicy (pre-dial membership tag + capped dial budget) · member PEX · advisory eclipse detector + cache · invite rewiring + end-to-end | planned (security-critical; each adversarially reviewed) |
+| 7 | end-to-end local integration over real sockets + security suite | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, security review | planned |
 
-### Done in 6d-1b (this commit)
-Against the already-present data model (no rewrite), `catcoms-sync` now recovers
-from missed membership commits and from ops that cross an epoch boundary:
-- **`KIND_COMMIT_CATCHUP`** request/response (`serve_commit_catchup` /
-  `request_commit_catchup` / internal `do_commit_catchup`) over the existing RR
-  protocol; a bounded `commit_log` (VecDeque) any member can serve from.
-- **Out-of-order commit buffering + ordered replay**: a future commit goes into
-  `pending_commits` (BTreeMap, gap-bounded by `max_commit_gap`, size-bounded by
-  `max_pending_commits`), triggers a commit catch-up, and successors drain in
-  epoch order. The linearization key is `commit_epoch == current`.
-- **Past-epoch channel-key window**: `snapshot_epoch_keys` captures every open
-  doc's `channel_secret` *before* each advance into `past_keys`
-  (`Zeroizing<[u8;32]>`, evicted+zeroized past `max_past_epochs`), so an op sealed
-  just before the boundary opens via `EncryptedDoc::ingest_with_key` instead of
-  dropping. Older/future ops fall back to auto-queued doc/commit catch-up.
-- **Peer discovery**: `remember_peer` retains inbound `Gossip.from`/`Request.from`/
-  `PeerConnected` (bounded) as catch-up sources — there is still no `DeviceId→PeerId`
-  map. `run_once` early-returns after performing catch-up work so a recovery tick
-  doesn't block on a fresh event. A peer that answers a commit catch-up without
-  filling the gap is excluded from the next attempt (`failed_catchup_peers`) so one
-  bad/stale source can't dead-end recovery.
-- **Diagnostics**: `SyncStats` counters/gauges via `ChannelSync::stats()`; the CLI
-  `recover` subcommand + `--stats` flag exercise and print them.
+### Earlier blocks (history)
+6d-1b (missed-commit recovery + past-epoch key window) and 6d-2 (fork resolution +
+the convergence-safe single-serializer membership model) are complete; their details
+live in the commit messages and [`design-6d2.md`](design-6d2.md). The default config
+stays **single designated committer** — the concurrent-committer / fork path is OFF
+by default (`max_committer_rank=0`) pending **I1** (a wall-clock contest window can
+converge honest nodes differently under async timing); re-read `design-6d2.md` before
+touching it.
 
-This block was **adversarially reviewed** (background `Workflow`, 37 agents) and the
-confirmed findings folded in before commit:
-- **Catch-up endpoints are members-only**: both `serve_catchup` and
-  `serve_commit_catchup` now require the requester to prove **current group
-  membership** — the request carries the requester's MLS leaf pubkey + a fresh
-  timestamp + a signature over `(domain ‖ group_id ‖ kind ‖ body ‖ pubkey ‖ ts)`,
-  verified against `group.contains_device` + a freshness window. Blocks outsiders
-  from harvesting group_id / member device-ids / history. (Residual: within-window
-  replay of a captured signed request — closed by the Noise transport in production;
-  a server-issued nonce challenge is the full fix, tied to the 6e/authenticated-peer
-  work.)
-- **Hard response bounds on the serving side** too (`MAX_CONTROL_RESPONSE`, served as
-  a contiguous prefix) — not just the requester side.
-- **`committer_device` validated** against `designated_committer()` on the apply path
-  (single-committer enforced inbound, not only at admission).
-- Past-epoch key copies re-wrapped in `Zeroizing`; `ingest_with_key` asserts the
-  epoch; `catchup_queue`/`outbox` gained explicit caps.
+## 6e-3d — current focus (rendezvous discovery + eclipse-resistance)
 
-### 6d-2 — in progress (see [`design-6d2.md`](design-6d2.md))
-The full design (openmls-0.8.1-verified, adversarially reviewed) is in
-[`design-6d2.md`](design-6d2.md). **Read it before continuing 6d-2.** Key decision:
-the fork tie-break gates on an **authorized signed committer** (not leaf-index
-equality — that rejected the fork *winner*), and `base_authenticator`
-(`epoch_authenticator()`) distinguishes a shallow same-base fork from deep
-divergence.
+**Read [`design-6e-rendezvous.md`](design-6e-rendezvous.md) before continuing** — the
+9-slice contract from a 7-agent design+review workflow, plus the per-slice
+adversarial-review outcomes (2b and 3d-5 are recorded there).
 
-Done: signed `CommitRecord` (`base_authenticator` + `committer_sig`) +
-`authorize_committer` gate + control topic v2 (`09d4cc5`); MLS stage/merge/abort
-primitives (`e577a11`); the sync-layer fork resolution — `commit_id` tie-break,
-`PendingResolve` contest window, loser `abort_staged` + apply-winner (`939eb41`); and
-the **two-phase staged-Add join** — `serve_join` stages under `max_committer_rank>=1`
-and pushes the signed Welcome (`KIND_WELCOME`) to the joiner only after its commit
-wins and merges (this commit).
+**Goal:** members find each other with no hard-coded bootstrap addresses, and an
+attacker cannot isolate (eclipse) a member. Everything is built on a per-removal
+routing secret `ns_secret_L`:
 
-**The whole concurrent-committer path is feature-flagged OFF by default
-(`max_committer_rank=0`).** The adversarial review (see `design-6d2.md` "Adversarial
-review of the 6d-2a implementation") found the default path safe but the opt-in path
-**must-not-be-enabled** until **I1** is resolved: a wall-clock contest window can
-converge two honest nodes to different winners under real async timing. I2/I3/I4/I6
-are fixed; **I1 is the gate**.
+- **Foundation (3d-1/2a/2b, done).** `ns_secret_L` is snapshotted at each member
+  **removal** (counter `L`), retained `{L-2,L-1,L}` in `ChannelSync`. The blinded
+  gossip topics **and** rendezvous namespaces both derive from it (keyed BLAKE3), so a
+  non-member can't compute them and they **rotate on removal** (forward secrecy for
+  routing metadata). Because the secret is epoch-specific, the **join handshake
+  transfers it** (sealed, bound into the inviter signature) so every member — founder,
+  joiner, *post-removal* joiner — derives identical topics. Re-keying the topics
+  **closed the pre-existing A1 CRITICAL**.
+- **Discovery (3d-3/4, done).** A zero-knowledge rendezvous **server** (`catcomsctl
+  rendezvous`) and a **client** in `MeshBehaviour`: register a signed peer record under
+  a blinded namespace, discover others. Discovered records are **surfaced, never
+  auto-dialed** — the dial decision (and eclipse-resistance) lives a layer up.
+- **Source trust (3d-5, done).** Commit catch-up responses are now **signed** by the
+  responder's MLS leaf key, bound to the request; a **two-pool** model separates
+  untrusted candidates from verified `member_peers`. **Closed Sybil-C1.**
 
-**6d-2b started — the single-serializer model (the convergence-safe answer to I1).**
-Insight: if only the **designated committer** ever commits and other members just
-*request* changes, there are no concurrent commits, so I1 cannot arise — and it works
-under the **default** config (no flag, no contest window). Done: `request_remove` —
-any member broadcasts a signed `CTRL_REMOVE_REQUEST`; the designated committer
-authenticates it (current member + fresh signature) and performs a synchronous remove
-(`commit_remove_now`), fanning out the commit. Distributed removes, safely, with one
-serializer.
-
-**Next (6d-2b cont.):** generalize to by-value proposal *packing/batching*
-(`CommitBuilder.propose_*`/`add_proposals`, confirmed in 0.8.1) so a committer can
-bundle several requests into one commit; the replicated single-use ledger; and
-joiner-nonce binding. The opt-in concurrent-committer path (`max_committer_rank>=1`,
-the 6d-2a contest) stays the **failover** mechanism only and remains OFF until its I1
-convergence is closed (a published decision-record / barrier, 6d-3). Re-read
-`design-6d2.md` first.
+**Remaining (3d-6…9, planned, security-critical → each adversarially reviewed):**
+- **3d-6 `DiscoveryPolicy`** (a new pure `catcoms-discovery` crate): the **pre-dial
+  membership tag** (deferred from 3d-5 — the "where the tag rides" question resolves
+  here) + a Clock-paced **capped dial budget** + cross-rendezvous union/freshness. Also
+  absorbs the 3d-5 review's deferred hardening — a per-request **nonce** + an **epoch
+  bind** in the catch-up transcripts (anti-replay) and the candidate-flood / cold-start
+  fix.
+- **3d-7** member **PEX** · **3d-8** advisory **eclipse detector** + cross-session
+  cache · **3d-9** invite rewiring (`rendezvous: Vec<String>`, INVITE_DOMAIN bump) +
+  end-to-end + pre-join `join_ns`.
 
 ## Known limitations / deferred (the security-relevant ones)
 
@@ -219,31 +198,50 @@ convergence is closed (a published decision-record / barrier, 6d-3). Re-read
   catch-up — a full snapshot rejoin (deferred) is required; the gap is logged and a
   bad source is excluded, but exhausting all sources surfaces only a warning (a
   recovery *event* to the app is a follow-up).
-- **Catch-up request auth is replay-bounded, not replay-proof.** A captured signed
-  catch-up request can be replayed within `MAX_REQUEST_AGE_MS` (60s). The Noise
-  transport confines the request to the server's own session in production; the full
-  fix (a server-issued nonce challenge, or a `DeviceId→PeerId` binding to the
-  authenticated peer identity) lands with 6e.
+- **Catch-up auth is replay-bounded, not replay-proof.** Catch-up *responses* are now
+  signed by a current member and bound to the request (6e-3d-5), and requests carry a
+  fresh signed timestamp — but both still rest on `req_ts` uniqueness within
+  `MAX_REQUEST_AGE_MS` (60s), not a per-request nonce. A per-request **nonce** + an
+  **epoch bind** in both transcripts land in **6e-3d-6** (the only effect of the
+  current gap is a *transient* mis-preference; applied records are independently
+  committer-authorized, so no junk state). The Noise transport confines requests to the
+  peer's own session in production.
+- **6e-3d discovery (in progress).** Discovery infrastructure (rendezvous server +
+  client) is in, but the **eclipse-resistance policy is not yet built**: discovered
+  records are surfaced but the **pre-dial membership tag, the capped dial budget, member
+  PEX, and the advisory eclipse detector are 6e-3d-6…8**. Until then an untrusted-
+  candidate connect-flood can evict an honest peer from the bounded candidate set on a
+  cold-start node (availability only — the two-pool model keeps trust intact). See
+  [`design-6e-rendezvous.md`](design-6e-rendezvous.md) for the full residual list.
 - **A forged future `CommitRecord`** on the control topic is bounded (gap +
   buffer caps, deduped catch-up) and fails MLS verification at apply time. Per-peer
   rate limiting + exponential catch-up backoff are a hardening follow-up.
 - **Persistent sealed MLS storage** is deferred: each device uses openmls's
   in-memory provider; tying group state to the Phase-1 `mls_seal_key` + SQLCipher
   (and the local metadata index) is platform/storage-phase work.
-- **Metadata**: who-talks-to-whom, timing, group sizes, and — now that DCUtR
-  hole-punching is active — the member IPs that a successful upgrade reveals to the
-  peer are the dominant residual. Mitigated, not eliminated (≥2 relays, cover traffic,
-  and staying relayed are future levers). A relay only ever sees Noise+MLS ciphertext.
-  See ARCHITECTURE §3.
+- **Metadata** is the dominant residual: who-talks-to-whom, timing, group sizes, the
+  member IPs a DCUtR upgrade reveals to the peer, and — now — a **rendezvous** node
+  learning `namespace ↔ IP ↔ timing` for the registration TTL (a higher-value target
+  than a relay; querying ≥2 rendezvous doubles the operators who see it). Per-rendezvous
+  namespace diversification removes the cross-operator join key; rotation-on-removal
+  limits long-term linkage but leaks a removal-cadence signal. Mitigated, not eliminated
+  (≥2 relays/rendezvous, cover traffic, staying relayed). Relays/rendezvous only ever
+  see Noise+MLS ciphertext / opaque namespaces. See ARCHITECTURE §3.
 - **Per-peer rate limiting / off-actor offload** of join work: a hardening follow-up.
 - **`tracing` retrofit** for the earlier crypto/storage crates: deferred (user OK'd).
 
 ## Where the design/review outputs live
 
-The big pre-implementation design pass and the per-protocol adversarial reviews ran
-as background `Workflow`s; their structured output is under the session's
-`tasks/<id>.output` and `tool-results/`. The load-bearing conclusions are distilled
-into `ARCHITECTURE.md` §2 (initial corrections) and §4a/§4b (join + propagation), and
-into the memory files. If continuing 6d-2, re-read the linearization design/review
-(committer = lowest **leaf index** not device id; fork-recovery topology; nonce→joiner
-binding).
+Design passes and adversarial reviews run as background `Workflow`s; their structured
+output is under the session's `tasks/<id>.output`. The load-bearing conclusions are
+distilled into the design docs and the memory files — **read the design doc for the
+block you're touching**:
+- `ARCHITECTURE.md` §1–§2 — the four locked decisions + the initial corrections;
+  §4a/§4b — join + commit propagation; §3 — honest residual risks.
+- [`design-6d2.md`](design-6d2.md) — fork resolution / single-serializer membership
+  (committer = lowest **leaf index**; the **I1** gate keeping concurrent committers off).
+- [`design-6e-relay.md`](design-6e-relay.md) — relay-v2 + DCUtR.
+- [`design-6e-rendezvous.md`](design-6e-rendezvous.md) — **the active block**:
+  rendezvous discovery + eclipse-resistance, the 9-slice contract, and the recorded
+  per-slice adversarial-review outcomes (A1/2b and Sybil-C1/3d-5) with their deferred
+  follow-ups.
