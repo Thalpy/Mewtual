@@ -15,11 +15,15 @@
 //! Circuit-relay v2 (reserve a slot, be dialed via a circuit address) and DCUtR
 //! hole-punching (upgrade a relayed link to a direct one) are wired in: a relayed
 //! connection automatically attempts a direct upgrade, and the upgrade is surfaced
-//! via [`MeshService::next_direct_upgrade`].
+//! via [`MeshService::next_direct_upgrade`]. A rendezvous **client** is wired too:
+//! [`MeshService::rendezvous_register`]/[`MeshService::rendezvous_discover`] register
+//! under and discover blinded namespaces; discovered records are *surfaced*
+//! ([`MeshService::next_discovered`]) but **never auto-dialed** — a higher layer
+//! decides whether to dial (where eclipse-resistance lives).
 //!
-//! Still to come in later mesh sub-blocks: the authenticated rendezvous,
-//! eclipse-resistant discovery, and the anti-entropy / proposal-commit protocols
-//! layered on top of this transport.
+//! Still to come in later mesh sub-blocks: the member-verifiable discovery tag +
+//! eclipse-resistant discovery policy, and the anti-entropy / proposal-commit
+//! protocols layered on top of this transport.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -63,6 +67,37 @@ pub enum NetError {
     /// Failed to dial a peer.
     #[error("dial error: {0}")]
     Dial(String),
+    /// A rendezvous register/discover could not be issued (bad namespace, or the
+    /// transport actor has stopped).
+    #[error("rendezvous error: {0}")]
+    Rendezvous(String),
+}
+
+/// A peer record surfaced by a rendezvous **discovery** — the (signed) peer id and
+/// the addresses it advertised, under a blinded namespace. The transport only
+/// *surfaces* these; it never auto-dials them (a higher layer decides whether and
+/// when to dial, which is where eclipse-resistance lives).
+#[derive(Debug, Clone)]
+pub struct Discovered {
+    /// The discovered peer (the signer of the record — authenticity is verified by
+    /// libp2p when decoding the signed peer record).
+    pub peer: libp2p::PeerId,
+    /// The addresses the peer advertised.
+    pub addresses: Vec<Multiaddr>,
+    /// The namespace it was discovered under.
+    pub namespace: String,
+}
+
+/// Confirmation that our own peer record was **registered** at a rendezvous node,
+/// with the granted TTL (the caller schedules re-registration before it expires).
+#[derive(Debug, Clone)]
+pub struct Registered {
+    /// The namespace we registered under.
+    pub namespace: String,
+    /// The granted time-to-live, in seconds.
+    pub ttl: u64,
+    /// The rendezvous node that granted it.
+    pub rendezvous_node: libp2p::PeerId,
 }
 
 // ----- request/response codec ------------------------------------------------
@@ -161,6 +196,11 @@ pub struct MeshBehaviour {
     pub dcutr: dcutr::Behaviour,
     /// Address discovery (observed external address; required by DCUtR).
     pub identify: identify::Behaviour,
+    /// Rendezvous client: register our (signed) peer record under a blinded namespace
+    /// and discover other members, without hard-coded bootstrap addresses.
+    pub rendezvous_client: rendezvous::client::Behaviour,
+    /// Connection caps so a discovery/registration flood cannot exhaust us.
+    pub connection_limits: connection_limits::Behaviour,
 }
 
 impl MeshBehaviour {
@@ -185,12 +225,20 @@ impl MeshBehaviour {
             IDENTIFY_PROTO.to_string(),
             key.public(),
         ));
+        let rendezvous_client = rendezvous::client::Behaviour::new(key.clone());
+        let connection_limits = connection_limits::Behaviour::new(
+            connection_limits::ConnectionLimits::default()
+                .with_max_pending_incoming(Some(64))
+                .with_max_established_per_peer(Some(8)),
+        );
         Ok(Self {
             gossipsub,
             request_response,
             relay_client,
             dcutr,
             identify,
+            rendezvous_client,
+            connection_limits,
         })
     }
 }
@@ -471,6 +519,17 @@ enum Command {
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
     Dial(Multiaddr),
+    /// Register our peer record under `namespace` at the rendezvous node `rz_node`
+    /// (must already be connected to it). Deferred until we have an external address.
+    RendezvousRegister {
+        namespace: rendezvous::Namespace,
+        rz_node: libp2p::PeerId,
+    },
+    /// Discover peers under `namespace` from the rendezvous node `rz_node`.
+    RendezvousDiscover {
+        namespace: rendezvous::Namespace,
+        rz_node: libp2p::PeerId,
+    },
 }
 
 type InboundResponses = FuturesUnordered<
@@ -484,6 +543,13 @@ struct Actor {
     listen_tx: mpsc::Sender<Multiaddr>,
     /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
     upgrade_tx: mpsc::Sender<PeerId>,
+    /// Rendezvous-discovered peer records, surfaced but never auto-dialed. Unbounded
+    /// so candidates are never dropped (they feed higher-layer security counters).
+    discovered_tx: mpsc::UnboundedSender<Discovered>,
+    /// Our own successful registrations (with the granted TTL).
+    registered_tx: mpsc::UnboundedSender<Registered>,
+    /// Registrations deferred until we have a confirmed external address to advertise.
+    pending_registers: Vec<(rendezvous::Namespace, libp2p::PeerId)>,
     peers: HashMap<PeerId, libp2p::PeerId>,
     pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
     pending_publish: Vec<(Topic, Bytes)>,
@@ -575,6 +641,44 @@ impl Actor {
                     tracing::warn!(%addr, error = %e, "dial failed");
                 }
             }
+            Command::RendezvousRegister { namespace, rz_node } => {
+                // Defer until we have an external address to advertise; flushed on
+                // the next confirmed external address (e.g. a circuit reservation).
+                self.pending_registers.push((namespace, rz_node));
+                self.flush_pending_registers();
+            }
+            Command::RendezvousDiscover { namespace, rz_node } => {
+                tracing::debug!(%rz_node, namespace = %namespace, "rendezvous discover");
+                self.swarm.behaviour_mut().rendezvous_client.discover(
+                    Some(namespace),
+                    None,
+                    None,
+                    rz_node,
+                );
+            }
+        }
+    }
+
+    /// Issue any deferred rendezvous registrations now that we may have an external
+    /// address. A register that still has no external address stays queued.
+    fn flush_pending_registers(&mut self) {
+        let pending = std::mem::take(&mut self.pending_registers);
+        for (namespace, rz_node) in pending {
+            match self.swarm.behaviour_mut().rendezvous_client.register(
+                namespace.clone(),
+                rz_node,
+                None,
+            ) {
+                Ok(()) => {
+                    tracing::debug!(%rz_node, namespace = %namespace, "rendezvous register issued");
+                }
+                Err(rendezvous::client::RegisterError::NoExternalAddresses) => {
+                    self.pending_registers.push((namespace, rz_node)); // retry later
+                }
+                Err(e) => {
+                    tracing::warn!(error = ?e, "rendezvous register failed");
+                }
+            }
         }
     }
 
@@ -598,10 +702,25 @@ impl Actor {
         event: SwarmEvent<MeshBehaviourEvent>,
         inbound: &mut InboundResponses,
     ) {
+        // Opportunistically retry deferred registrations: an external address may
+        // have become available (and propagated to the behaviour) since the last try.
+        if !self.pending_registers.is_empty() {
+            self.flush_pending_registers();
+        }
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "listening");
+                // A granted relay-circuit reservation is how a NAT'd node becomes
+                // reachable; confirm it as an external address so rendezvous
+                // registrations advertise it, then flush any deferred registrations.
+                if is_relayed(&address) {
+                    self.swarm.add_external_address(address.clone());
+                    self.flush_pending_registers();
+                }
                 let _ = self.listen_tx.try_send(address);
+            }
+            SwarmEvent::ExternalAddrConfirmed { .. } => {
+                self.flush_pending_registers();
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
@@ -720,6 +839,48 @@ impl Actor {
             SwarmEvent::Behaviour(MeshBehaviourEvent::RelayClient(e)) => {
                 tracing::debug!(?e, "relay-client event");
             }
+            // Rendezvous client: surface discovered records (NEVER auto-dial them) and
+            // our own registrations; log failures/expiry for the caller to react to.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::RendezvousClient(e)) => match e {
+                rendezvous::client::Event::Discovered { registrations, .. } => {
+                    for reg in registrations {
+                        let _ = self.discovered_tx.send(Discovered {
+                            peer: reg.record.peer_id(),
+                            addresses: reg.record.addresses().to_vec(),
+                            namespace: reg.namespace.to_string(),
+                        });
+                    }
+                }
+                rendezvous::client::Event::Registered {
+                    rendezvous_node,
+                    ttl,
+                    namespace,
+                } => {
+                    tracing::info!(%rendezvous_node, namespace = %namespace, ttl, "rendezvous registered");
+                    let _ = self.registered_tx.send(Registered {
+                        namespace: namespace.to_string(),
+                        ttl,
+                        rendezvous_node,
+                    });
+                }
+                rendezvous::client::Event::RegisterFailed {
+                    rendezvous_node,
+                    error,
+                    ..
+                } => {
+                    tracing::warn!(%rendezvous_node, ?error, "rendezvous registration refused");
+                }
+                rendezvous::client::Event::DiscoverFailed {
+                    rendezvous_node,
+                    error,
+                    ..
+                } => {
+                    tracing::warn!(%rendezvous_node, ?error, "rendezvous discovery failed");
+                }
+                rendezvous::client::Event::Expired { peer } => {
+                    tracing::debug!(%peer, "rendezvous registration expired");
+                }
+            },
             _ => {}
         }
     }
@@ -735,6 +896,8 @@ pub struct MeshService {
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
+    discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
+    registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
 }
 
 // `Command` holds a oneshot sender; keep it out of `Debug`.
@@ -752,12 +915,17 @@ impl MeshService {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
+        let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
+        let (registered_tx, registered_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             swarm,
             cmd_rx,
             event_tx,
             listen_tx,
             upgrade_tx,
+            discovered_tx,
+            registered_tx,
+            pending_registers: Vec::new(),
             peers: HashMap::new(),
             pending_req: HashMap::new(),
             pending_publish: Vec::new(),
@@ -769,6 +937,8 @@ impl MeshService {
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
             upgrade_rx: Mutex::new(upgrade_rx),
+            discovered_rx: Mutex::new(discovered_rx),
+            registered_rx: Mutex::new(registered_rx),
         }
     }
 
@@ -785,6 +955,52 @@ impl MeshService {
     /// just moves off the relay). Returns `None` once the actor stops.
     pub async fn next_direct_upgrade(&self) -> Option<PeerId> {
         self.upgrade_rx.lock().await.recv().await
+    }
+
+    /// Register our (signed) peer record under `namespace` at the rendezvous node
+    /// `rz_node` — we must already be connected to it (e.g. dialed via its multiaddr).
+    /// The registration is **deferred** internally until we have an external address
+    /// to advertise (a direct listen address or a relay-circuit reservation); the
+    /// granted TTL surfaces via [`MeshService::next_registered`].
+    pub async fn rendezvous_register(
+        &self,
+        namespace: &str,
+        rz_node: libp2p::PeerId,
+    ) -> Result<(), NetError> {
+        let namespace = rendezvous::Namespace::new(namespace.to_owned())
+            .map_err(|_| NetError::Rendezvous("namespace too long".into()))?;
+        self.cmd_tx
+            .send(Command::RendezvousRegister { namespace, rz_node })
+            .await
+            .map_err(|_| NetError::Rendezvous("transport closed".into()))
+    }
+
+    /// Discover peers under `namespace` from the rendezvous node `rz_node`. Discovered
+    /// records surface via [`MeshService::next_discovered`] and are **never
+    /// auto-dialed** — a higher layer decides whether/when to dial (eclipse-resistance).
+    pub async fn rendezvous_discover(
+        &self,
+        namespace: &str,
+        rz_node: libp2p::PeerId,
+    ) -> Result<(), NetError> {
+        let namespace = rendezvous::Namespace::new(namespace.to_owned())
+            .map_err(|_| NetError::Rendezvous("namespace too long".into()))?;
+        self.cmd_tx
+            .send(Command::RendezvousDiscover { namespace, rz_node })
+            .await
+            .map_err(|_| NetError::Rendezvous("transport closed".into()))
+    }
+
+    /// Await the next rendezvous-discovered peer record. Surfaced only — the transport
+    /// never auto-dials it. Returns `None` once the actor stops.
+    pub async fn next_discovered(&self) -> Option<Discovered> {
+        self.discovered_rx.lock().await.recv().await
+    }
+
+    /// Await the next confirmation that our own record was registered at a rendezvous
+    /// (with the granted TTL). Returns `None` once the actor stops.
+    pub async fn next_registered(&self) -> Option<Registered> {
+        self.registered_rx.lock().await.recv().await
     }
 
     /// Start listening on `addr` at runtime. Used to **reserve a relay slot** by
