@@ -184,3 +184,29 @@ paths advance `L` identically). One **blocking HIGH** was found and **fixed befo
   pad the transfer plaintext to a constant length (it currently leaks the 1/2/3 retained-secret
   count). Plus regression tests: a 3-behind member's posts are dropped then a proactive probe closes
   the gap; a fork loser that staged a Remove while the winner was an Add rotates 0 times.
+
+## 6e-3d-5 (Sybil-C1) — adversarial review outcome
+
+A 4-agent review verified against the code: **sound to commit, no blocking defect.** Integrity
+was never at risk (commit records are committer-authorized at apply time; ops are inner-signed) —
+the entire residual surface is **availability**. The signed commit-catch-up response is verified
+against the current roster and bound to `(group_id, requester pubkey, req_ts, bundle)` before any
+trust or `member_peers` promotion. **Folded in:** demote a since-removed member from `member_peers`
+the moment its response fails the roster gate (closes the only genuinely-new regression — an
+ex-member front-running honest sources every gap); plus `member_peers` in `SyncStats`.
+
+**Deferred to 6e-3d-6** (non-blocking, review-confirmed):
+- **MED** — a per-request **nonce** + an **epoch bind** in both catch-up transcripts. Anti-replay
+  currently rests on `req_ts` clock uniqueness: a same-millisecond collision could *transiently*
+  promote a Sybil (the applied records are still committer-authorized, so no junk — only transient
+  preference). Add a 16-byte RNG nonce to the request, bind it + `epoch` in both transcripts, and
+  verify the echoed nonce.
+- **MED (the deferred half of Sybil-C1)** — an untrusted-candidate **connect-flood** can evict an
+  honest peer from the 64-cap `known_peers` for a node with empty `member_peers` (cold start /
+  first reconnect). The real fix is this slice's deferred pre-dial **membership-tag filter + dial
+  budget** (6e-3d-6). Interim hardening: cap untrusted-candidate fan-out per recovery; segregate
+  "served real traffic" from "merely connected"; persist/re-seed `member_peers` across restarts.
+- **LOW** — a removed member can still serve/verify during a *local-lag* window before the
+  removing node applies the removal (inherent to a roster-relative check; bounded, self-heals on
+  apply). And a junk response during a gap-less proactive probe isn't failed-listed (not a
+  regression; identical to pre-slice).

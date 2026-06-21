@@ -84,6 +84,10 @@ const MAX_REQUEST_AGE_MS: u64 = 60_000;
 const CATCHUP_AUTH_DOMAIN: &str = "catcoms/catchup-auth/v1";
 /// Domain separator for the admitter's signature over a join response.
 const JOIN_RESP_DOMAIN: &str = "catcoms/join-resp/v1";
+/// Domain separator for a **responder's** signature over a commit-catch-up response,
+/// proving the served bundle came from a current member (6e-3d-5). Binds the bundle
+/// to the requester's key + the request timestamp so it cannot be replayed.
+const CATCHUP_RESP_DOMAIN: &str = "catcoms/catchup-resp/v1";
 
 /// Tunable bounds for the recovery/key-window machinery. Every field is a hard
 /// cap on memory the node will spend on out-of-order recovery, so a peer cannot
@@ -220,8 +224,11 @@ pub struct SyncStats {
     pub pending_commits: usize,
     /// Gauge: membership commits currently retained to serve catch-up.
     pub commit_log_len: usize,
-    /// Gauge: peers currently known as catch-up sources.
+    /// Gauge: untrusted catch-up **candidate** peers currently known.
     pub known_peers: usize,
+    /// Gauge: **proven member** catch-up sources currently known (promoted via a
+    /// verified signed catch-up — the trusted pool).
+    pub member_peers: usize,
 }
 
 /// Deferred recovery work, performed on the next async drain in [`ChannelSync::run_once`]
@@ -271,6 +278,54 @@ fn catchup_auth_transcript(
     e.put_bytes(requester_pubkey).expect("pubkey fits");
     e.put_u64(timestamp_ms);
     e.finish()
+}
+
+/// The transcript a **responder** signs over a commit-catch-up bundle, binding it to
+/// the group, the requester's key, the request timestamp (anti-replay), and the
+/// bundle bytes — so the requester can verify the bundle was served by a member.
+fn catchup_resp_transcript(
+    group_id: &[u8],
+    requester_pubkey: &[u8],
+    request_ts_ms: u64,
+    bundle: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(CATCHUP_RESP_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(request_ts_ms);
+    e.put_bytes(bundle).expect("bundle fits");
+    e.finish()
+}
+
+/// Frame a signed commit-catch-up response: `responder_pubkey ‖ sig ‖ bundle`.
+fn encode_signed_commit_resp(
+    responder_pubkey: &[u8],
+    signature: &[u8; 64],
+    bundle: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(responder_pubkey).expect("pubkey fits");
+    e.put_bytes(signature).expect("64 fits");
+    e.put_bytes(bundle).expect("bundle fits");
+    e.finish()
+}
+
+/// A parsed signed commit-catch-up response: `(responder pubkey, signature, bundle)`.
+type SignedCommitResp = (Vec<u8>, [u8; 64], Vec<u8>);
+
+/// Parse a signed commit-catch-up response into `(responder pubkey, signature, bundle)`.
+fn decode_signed_commit_resp(bytes: &[u8]) -> Result<SignedCommitResp, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let signature: [u8; 64] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let bundle = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((pubkey, signature, bundle))
 }
 
 /// Frame an authenticated catch-up request body: `inner ‖ pubkey ‖ ts ‖ sig`.
@@ -853,9 +908,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// eviction. openmls only exports the *current* epoch's secret, so this history
     /// is captured at the post-removal epoch (a removed member can never export it).
     routing_secrets: BTreeMap<u64, Zeroizing<[u8; 32]>>,
-    /// Recently-seen peers (from gossip/requests/connections), used as catch-up
-    /// sources — there is no `DeviceId → PeerId` directory yet.
+    /// Recently-seen peers (from gossip/requests/connections) — UNTRUSTED catch-up
+    /// **candidates**: a Noise handshake is not group membership, so these may be
+    /// Sybils. Tried only as a fallback, and a junk/unsigned reply is rejected.
     known_peers: VecDeque<PeerId>,
+    /// Peers that served a **signed** commit catch-up verifying against the roster —
+    /// proven current members (6e-3d-5). Preferred as catch-up sources, so a flood of
+    /// un-handshaked candidates cannot crowd out a known-good source (the Sybil-C1
+    /// fix). Bounded by `max_known_peers`.
+    member_peers: VecDeque<PeerId>,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Peers that recently answered a commit catch-up without filling the gap;
@@ -903,6 +964,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             routing_label: 0,
             routing_secrets: BTreeMap::new(),
             known_peers: VecDeque::new(),
+            member_peers: VecDeque::new(),
             catchup_queue: Vec::new(),
             failed_catchup_peers: VecDeque::new(),
             pending: None,
@@ -960,6 +1022,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         s.pending_commits = self.pending_commits.len();
         s.commit_log_len = self.commit_log.len();
         s.known_peers = self.known_peers.len();
+        s.member_peers = self.member_peers.len();
         s
     }
 
@@ -1185,13 +1248,43 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.failed_catchup_peers.retain(|f| *f != peer);
     }
 
-    /// Pick the most-recently-seen peer that has not just failed to fill a gap.
+    /// Pick a catch-up source: a **proven member** (verified via a signed catch-up)
+    /// first, falling back to an untrusted candidate to bootstrap — so a flood of
+    /// un-handshaked candidates cannot crowd out a known-good source. Skips peers that
+    /// just failed to fill a gap.
     fn pick_catchup_peer(&self) -> Option<PeerId> {
-        self.known_peers
+        self.member_peers
             .iter()
             .rev()
             .find(|p| !self.failed_catchup_peers.contains(p))
+            .or_else(|| {
+                self.known_peers
+                    .iter()
+                    .rev()
+                    .find(|p| !self.failed_catchup_peers.contains(p))
+            })
             .copied()
+    }
+
+    /// Record `peer` as a proven current member (it served a signed catch-up that
+    /// verified against the roster). Most-recent-wins, bounded by `max_known_peers`,
+    /// and un-marked as failed so it is eligible again.
+    fn promote_member_peer(&mut self, peer: PeerId) {
+        self.failed_catchup_peers.retain(|p| *p != peer);
+        if let Some(pos) = self.member_peers.iter().position(|p| *p == peer) {
+            self.member_peers.remove(pos);
+        }
+        self.member_peers.push_back(peer);
+        while self.member_peers.len() > self.config.max_known_peers {
+            self.member_peers.pop_front();
+        }
+    }
+
+    /// Remove `peer` from the trusted member pool — e.g. its response showed it is no
+    /// longer in the roster (a removed member), so it must stop being preferred as a
+    /// catch-up source.
+    fn demote_member_peer(&mut self, peer: PeerId) {
+        self.member_peers.retain(|p| *p != peer);
     }
 
     /// Mark `peer` as having answered a catch-up without filling the gap, so the
@@ -1237,20 +1330,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Build an authenticated catch-up request: `[kind] ‖ inner ‖ pubkey ‖ ts ‖ sig`,
     /// where the signature is this member's proof it is currently in the group.
-    fn build_authed_request(&self, kind: u8, inner: &[u8]) -> Result<Vec<u8>, SyncError> {
+    /// Build a signed catch-up request, returning the framed bytes and the timestamp
+    /// it was signed with (so the caller can later verify a responder's signed reply
+    /// is bound to this exact request).
+    fn build_authed_request(&self, kind: u8, inner: &[u8]) -> Result<(Vec<u8>, u64), SyncError> {
         let pubkey = self.device.public_key_bytes();
         let ts = self.clock.now_ms();
         let transcript = catchup_auth_transcript(&self.group.group_id(), kind, inner, &pubkey, ts);
         let signature = self.device.sign(&transcript)?;
         let mut out = vec![kind];
         out.extend_from_slice(&encode_authed_request(inner, &pubkey, ts, &signature));
-        Ok(out)
+        Ok((out, ts))
     }
 
     /// Verify an inbound authenticated catch-up request and return its inner body
     /// iff the requester proved current group membership with a fresh signature.
     /// Counts a rejection in [`SyncStats`]. `kind` is the matched request kind.
-    fn authenticate_request(&mut self, kind: u8, data: &[u8]) -> Option<Vec<u8>> {
+    /// Returns `(inner body, requester pubkey, request timestamp)` on success — the
+    /// pubkey + ts let a serving handler bind its signed reply to this request.
+    fn authenticate_request(&mut self, kind: u8, data: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u64)> {
         let (inner, pubkey, ts, signature) = match decode_authed_request(data) {
             Ok(parts) => parts,
             Err(_) => {
@@ -1278,7 +1376,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.stats.requests_rejected += 1;
             return None;
         }
-        Some(inner)
+        Some((inner, pubkey, ts))
     }
 
     /// Snapshot the channel keys for every open document at the **current** epoch,
@@ -2119,7 +2217,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_type: DocType,
         doc_id: u128,
     ) -> Result<usize, SyncError> {
-        let req = self.build_authed_request(KIND_CATCHUP, &encode_catchup_req(doc_type, doc_id))?;
+        let (req, _ts) =
+            self.build_authed_request(KIND_CATCHUP, &encode_catchup_req(doc_type, doc_id))?;
         tracing::debug!(?doc_type, doc_id, ?peer, "request doc catch-up");
         self.stats.doc_catchups_requested += 1;
         let resp = self
@@ -2165,7 +2264,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         from_epoch: u64,
     ) -> Result<usize, SyncError> {
-        let req =
+        let (req, req_ts) =
             self.build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(from_epoch))?;
         tracing::debug!(from_epoch, ?peer, "request commit catch-up");
         self.stats.commit_catchups_requested += 1;
@@ -2183,8 +2282,37 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             );
             return Err(SyncError::Malformed);
         }
-        let records = decode_commit_bundle(&resp)?;
+        // The response must be signed by a current member, bound to THIS request — so
+        // an un-handshaked peer cannot feed us a trusted bundle or be promoted as a
+        // catch-up source (6e-3d-5, the Sybil-C1 fix). Anti-replay binds to the
+        // request timestamp; a per-request nonce + an epoch bind are a 6e-3d-6
+        // follow-up. An invalid response fills no gap, so the drain marks it failed.
+        let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(&resp)?;
         let group_id = self.group.group_id();
+        let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
+        let my_pubkey = self.device.public_key_bytes();
+        let transcript = catchup_resp_transcript(&group_id, &my_pubkey, req_ts, &bundle);
+        if !self.group.contains_device(&responder) {
+            // Not in the current roster (e.g. a since-removed member): demote it from
+            // the trusted pool so it is no longer preferred, and reject the bundle.
+            self.demote_member_peer(peer);
+            tracing::warn!(
+                ?peer,
+                "commit catch-up response from a non-member; demoted + rejected"
+            );
+            return Ok(0);
+        }
+        if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
+            tracing::warn!(
+                ?peer,
+                "commit catch-up response signature invalid; rejected"
+            );
+            return Ok(0);
+        }
+        // The responder proved current membership: trust the bundle and promote it to
+        // the verified catch-up-source pool.
+        self.promote_member_peer(peer);
+        let records = decode_commit_bundle(&bundle)?;
         let mut applied = 0;
         for record in records {
             if record.group_id != group_id {
@@ -2344,7 +2472,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// group membership (the bundle, though sealed, still carries member-only
     /// framing/metadata, so it is members-only).
     fn serve_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let inner = self.authenticate_request(KIND_CATCHUP, data)?;
+        let (inner, _pubkey, _ts) = self.authenticate_request(KIND_CATCHUP, data)?;
         let (doc_type, doc_id) = decode_catchup_req(&inner).ok()?;
         let doc = self.docs.get(&(doc_type, doc_id))?;
         match doc.export_catchup(&self.group, &self.device, &mut self.rng) {
@@ -2374,7 +2502,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// commit log, in epoch order — only to a proven current member (the records'
     /// framing reveals group id + member device ids, so this is members-only).
     fn serve_commit_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let inner = self.authenticate_request(KIND_COMMIT_CATCHUP, data)?;
+        let (inner, req_pubkey, req_ts) = self.authenticate_request(KIND_COMMIT_CATCHUP, data)?;
         let from_epoch = decode_commit_catchup_req(&inner).ok()?;
         // Take a contiguous prefix from `from_epoch` that fits the byte budget.
         let mut records: Vec<CommitRecord> = Vec::new();
@@ -2397,7 +2525,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.stats.commits_served += 1;
         tracing::debug!(from_epoch, count = records.len(), "serving commit catch-up");
-        Some(encode_commit_bundle(&records))
+        // Sign the bundle as a current member, bound to this requester + request, so
+        // the requester can verify it came from a member before trusting it (and
+        // promote us as a catch-up source). An attacker who is not in the roster
+        // cannot produce a verifying signature.
+        let bundle = encode_commit_bundle(&records);
+        let transcript =
+            catchup_resp_transcript(&self.group.group_id(), &req_pubkey, req_ts, &bundle);
+        let signature = self.device.sign(&transcript).ok()?;
+        Some(encode_signed_commit_resp(
+            &self.device.public_key_bytes(),
+            &signature,
+            &bundle,
+        ))
     }
 
     /// Admit a joiner from a join request. Cheap, KeyPackage-independent checks run
@@ -2830,6 +2970,100 @@ mod tests {
             ChaCha20Rng::seed_from_u64(0),
             Box::new(ManualClock::new(1_000)),
         )
+    }
+
+    #[test]
+    fn signed_commit_response_roundtrips_through_codec() {
+        let bundle = b"opaque-bundle-bytes".to_vec();
+        let pubkey = vec![7u8; 32];
+        let sig = [9u8; 64];
+        let (p, s, b) =
+            decode_signed_commit_resp(&encode_signed_commit_resp(&pubkey, &sig, &bundle)).unwrap();
+        assert_eq!(p, pubkey);
+        assert_eq!(s, sig);
+        assert_eq!(b, bundle);
+    }
+
+    #[test]
+    fn a_commit_catchup_response_verifies_only_from_a_current_member_bound_to_the_request() {
+        // 6e-3d-5: the Sybil-C1 gate — a served catch-up bundle is trusted only if a
+        // current member signed it for THIS request.
+        let alice = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&alice).unwrap();
+        let mallory = MlsDevice::generate().unwrap(); // not in the group
+
+        let gid = group.group_id();
+        let requester_pubkey = vec![1u8; 32];
+        let req_ts = 1_234u64;
+        let bundle = b"a-bundle".to_vec();
+        let transcript = catchup_resp_transcript(&gid, &requester_pubkey, req_ts, &bundle);
+
+        // Accepted: Alice is a member and her signature over this transcript verifies.
+        let alice_sig = alice.sign(&transcript).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(verify_with_public_bytes(
+            &alice.public_key_bytes(),
+            &transcript,
+            &alice_sig
+        ));
+
+        // Rejected: Mallory's signature is cryptographically valid, but she is NOT in
+        // the roster — the membership check (contains_device) drops it.
+        let mallory_sig = mallory.sign(&transcript).unwrap();
+        assert!(verify_with_public_bytes(
+            &mallory.public_key_bytes(),
+            &transcript,
+            &mallory_sig
+        ));
+        assert!(!group.contains_device(&mallory.device_id()));
+
+        // Rejected: a tampered bundle breaks the signature.
+        let tampered = catchup_resp_transcript(&gid, &requester_pubkey, req_ts, b"tampered");
+        assert!(!verify_with_public_bytes(
+            &alice.public_key_bytes(),
+            &tampered,
+            &alice_sig
+        ));
+
+        // Rejected: replaying the reply against a different request (different ts)
+        // breaks the binding, so a captured response cannot be reused.
+        let other_request = catchup_resp_transcript(&gid, &requester_pubkey, req_ts + 1, &bundle);
+        assert!(!verify_with_public_bytes(
+            &alice.public_key_bytes(),
+            &other_request,
+            &alice_sig
+        ));
+    }
+
+    #[test]
+    fn pick_catchup_peer_prefers_a_proven_member_over_an_untrusted_candidate() {
+        let mut node = solo_node();
+        node.remember_peer(PeerId::from_u64(1)); // untrusted candidate
+        node.promote_member_peer(PeerId::from_u64(2)); // proven member
+        assert_eq!(
+            node.pick_catchup_peer(),
+            Some(PeerId::from_u64(2)),
+            "a proven member is preferred over a candidate"
+        );
+        // With the member failed, fall back to the candidate (bootstrap is preserved).
+        node.note_failed_catchup_peer(PeerId::from_u64(2));
+        assert_eq!(node.pick_catchup_peer(), Some(PeerId::from_u64(1)));
+    }
+
+    #[test]
+    fn a_demoted_member_is_no_longer_preferred() {
+        // A member that was promoted but has since been removed from the roster is
+        // demoted (review fix), so it stops front-running honest sources every gap.
+        let mut node = solo_node();
+        node.remember_peer(PeerId::from_u64(1)); // candidate
+        node.promote_member_peer(PeerId::from_u64(2)); // proven member
+        assert_eq!(node.pick_catchup_peer(), Some(PeerId::from_u64(2)));
+        node.demote_member_peer(PeerId::from_u64(2));
+        assert_eq!(
+            node.pick_catchup_peer(),
+            Some(PeerId::from_u64(1)),
+            "a demoted ex-member is no longer preferred"
+        );
     }
 
     #[test]
