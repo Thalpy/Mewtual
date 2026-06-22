@@ -73,7 +73,8 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8q | **relay-circuit founding** — reserve a circuit on a relay node so NAT'd peers connect with no port-forward (zero-config NAT traversal) | done |
 | 8r/8s | **security-review hardening** — adversarial review of 8m–8q (no blocking findings); bounded avatar fetching + size-bounded blob store; [User Guide](docs/USER_GUIDE.md) | done |
 | 8t | **status feed** — a per-server post stream (announcements/activity) + Status panel in the UI | done |
-| 8… | rendezvous discovery in the UI · wiki · **disk persistence then per-file encryption-at-rest** (paired) · chunked large-file transfer · last-copy-safe blob retention | planned |
+| 8u | **wiki** — per-server collaborative pages (name→body map doc) + a Chat/Wiki view toggle with a page list + editor | done |
+| 8… | rendezvous discovery in the UI · **disk persistence then per-file encryption-at-rest** (paired) · chunked large-file transfer · last-copy-safe blob retention · char-level wiki merge | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |
