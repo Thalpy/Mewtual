@@ -175,6 +175,7 @@ TCP** (verified, incl. through a relay).
 | 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`) — found/open/send/read over the actor bridge; both halves compile (WebView manually verified) | ✅ `7c5f72e` |
 | 8c | **invite + join in the desktop UI** — found mints a single-use invite (loopback bootstrap); a second instance pastes it, dials, joins, and converges (two instances can talk over real TCP) | ✅ `61f2ec3` |
 | 8d | **multi-channel** — name-addressed channels (`catcoms-app::channel_id`); channel-list sidebar + "join #channel" + per-channel view/unread in the UI | ✅ `d2ec4d3` |
+| 8e | **member roster + chat polish** — live Members panel (device-id fingerprints + "you"), own-message bubbles | ✅ `e77a33d` |
 | 8… | discovery/relay wiring in the UI · multi-server · fileshare browser · status · wiki | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |

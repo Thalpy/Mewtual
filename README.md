@@ -57,6 +57,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`): found → #general → send/read | done |
 | 8c | **invite + join in the UI** — two app instances talk over real TCP (found → copy invite → paste/join) | done |
 | 8d | **multi-channel** — IRC-style name-addressed channels + channel-list sidebar | done |
+| 8e | **member roster + chat polish** — live Members panel + own-message bubbles | done |
 | 8… | discovery/relay in the UI · multi-server · fileshare · status · wiki | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
