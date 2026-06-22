@@ -239,6 +239,80 @@ fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
     Some(Cid::from_bytes(arr))
 }
 
+// --- fileshare: a per-server file index --------------------------------------
+//
+// One shared CRDT document per server (`DocType::FileIndex`, id `FILE_INDEX_DOC`): an
+// append-only list of file entries `{ name, size, mime, cid, author }`. The bytes live in
+// the blob store and are fetched on demand over the mesh (8l); only the small metadata
+// gossips in the (encrypted) index. NOTE: blobs are stored plaintext at rest and served
+// members-only — per-file encryption-at-rest (`catcoms-storage::seal_file`) is a hardening
+// follow-up; the index metadata is already confidential (it is an encrypted CRDT doc).
+
+/// The reserved document id for the per-server file index.
+const FILE_INDEX_DOC: u128 = 0;
+const FILES: &str = "files";
+const F_NAME: &str = "name";
+const F_SIZE: &str = "size";
+const F_MIME: &str = "mime";
+const F_CID: &str = "cid";
+const F_AUTHOR: &str = "author";
+
+/// Maximum file size accepted by [`Server::add_file`]. Bounded by what the blob-fetch
+/// response cap supports in one shot; larger files need chunked transfer (a fileshare
+/// follow-up).
+pub const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
+
+/// One shared file as the UI sees it. `cid` is the content address (raw bytes) used to
+/// download the blob; `author` is the uploader's device fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    /// The file's display name.
+    pub name: String,
+    /// Size in bytes.
+    pub size: u64,
+    /// MIME type (best-effort; may be empty).
+    pub mime: String,
+    /// Content address of the file's bytes in the blob store (raw 32 bytes).
+    pub cid: Vec<u8>,
+    /// The uploader's device fingerprint.
+    pub author: String,
+}
+
+/// Append a file entry to the index document.
+fn write_file_entry(doc: &mut AutoCommit, e: &FileEntry) -> Result<(), AutomergeError> {
+    let list = match doc.get(ROOT, FILES)? {
+        Some((Value::Object(ObjType::List), id)) => id,
+        _ => doc.put_object(ROOT, FILES, ObjType::List)?,
+    };
+    let index = doc.length(&list);
+    let entry = doc.insert_object(&list, index, ObjType::Map)?;
+    doc.put(&entry, F_NAME, e.name.as_str())?;
+    doc.put(&entry, F_SIZE, e.size as i64)?;
+    doc.put(&entry, F_MIME, e.mime.as_str())?;
+    doc.put(&entry, F_CID, ScalarValue::Bytes(e.cid.clone()))?;
+    doc.put(&entry, F_AUTHOR, e.author.as_str())?;
+    Ok(())
+}
+
+/// Materialize the file index document into the UI's file list.
+fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
+    let mut out = Vec::new();
+    if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, FILES) {
+        for i in 0..doc.length(&list) {
+            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
+                out.push(FileEntry {
+                    name: str_field(doc, &entry, F_NAME),
+                    size: int_field(doc, &entry, F_SIZE),
+                    mime: str_field(doc, &entry, F_MIME),
+                    cid: bytes_field(doc, &entry, F_CID),
+                    author: str_field(doc, &entry, F_AUTHOR),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Read a `Bytes` scalar field (empty if absent or another type).
 fn bytes_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> Vec<u8> {
     match doc.get(obj, key) {
@@ -429,6 +503,70 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
         }
         Ok(fetched)
+    }
+
+    /// Open (create/subscribe) the per-server file index document. Call once after
+    /// founding/joining (alongside `subscribe_control`/`open_profiles`).
+    pub async fn open_files(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::FileIndex, FILE_INDEX_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// Share a file: store its bytes in the blob store and add an index entry (gossiped to
+    /// the group). Returns the file's content address. Rejects files over [`MAX_FILE_BYTES`].
+    pub async fn add_file(
+        &mut self,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<Cid, AppError> {
+        if bytes.len() > MAX_FILE_BYTES {
+            return Err(AppError::Invalid(format!(
+                "file too large: {} bytes (max {MAX_FILE_BYTES})",
+                bytes.len()
+            )));
+        }
+        let cid = self.sync.put_blob(bytes)?;
+        let entry = FileEntry {
+            name: name.to_string(),
+            size: bytes.len() as u64,
+            mime: mime.to_string(),
+            cid: cid.as_bytes().to_vec(),
+            author: self.my_fingerprint(),
+        };
+        self.sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                write_file_entry(d, &entry)
+            })
+            .await?;
+        Ok(cid)
+    }
+
+    /// The shared files listed in the index (metadata only; bytes are fetched on download).
+    pub fn files(&self) -> Vec<FileEntry> {
+        self.sync
+            .doc(DocType::FileIndex, FILE_INDEX_DOC)
+            .map(|d| read_file_entries(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Download a shared file's bytes by content address — fetching the blob from the best
+    /// known peer if not already held. `None` if it could not be obtained.
+    pub async fn download_file(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>, AppError> {
+        if !self.sync.has_blob(cid) {
+            self.sync.request_blob_best(cid).await?;
+        }
+        Ok(self.sync.get_blob(cid))
+    }
+
+    /// Catch up the file index document from `peer` (e.g. right after joining).
+    pub async fn request_files_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::FileIndex, FILE_INDEX_DOC)
+            .await?)
     }
 
     /// Catch up the profile document from `peer` (e.g. right after joining).
@@ -698,6 +836,43 @@ mod tests {
         };
         assert!(matches!(
             alice.set_profile(p).await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_file_is_added_listed_and_downloaded_locally() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        assert!(alice.files().is_empty());
+
+        let data = b"the quick brown fox".to_vec();
+        let cid = alice
+            .add_file("notes.txt", "text/plain", &data)
+            .await
+            .unwrap();
+
+        let files = alice.files();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "notes.txt");
+        assert_eq!(files[0].size, data.len() as u64);
+        assert_eq!(files[0].mime, "text/plain");
+        assert_eq!(files[0].cid, cid.as_bytes().to_vec());
+        assert_eq!(files[0].author, alice.my_fingerprint());
+
+        // The uploader already holds the bytes.
+        assert_eq!(alice.download_file(&cid).await.unwrap(), Some(data));
+    }
+
+    #[tokio::test]
+    async fn an_oversize_file_is_rejected() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let big = vec![0u8; MAX_FILE_BYTES + 1];
+        assert!(matches!(
+            alice
+                .add_file("big.bin", "application/octet-stream", &big)
+                .await,
             Err(AppError::Invalid(_))
         ));
     }

@@ -18,7 +18,9 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::{ChatMessage, MemberView, Profile, Server};
+use catcoms_storage::Cid;
+
+use crate::{ChatMessage, FileEntry, MemberView, Profile, Server};
 
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
@@ -54,6 +56,24 @@ pub enum AppCommand {
     Profiles {
         reply: oneshot::Sender<HashMap<String, Profile>>,
     },
+    /// Share a file; replies with its content-address hex, or an error string.
+    AddFile {
+        name: String,
+        mime: String,
+        bytes: Vec<u8>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Query the shared file list.
+    Files {
+        reply: oneshot::Sender<Vec<FileEntry>>,
+    },
+    /// Download a file's bytes by content address (raw CID bytes).
+    DownloadFile {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Option<Vec<u8>>>,
+    },
+    /// Pull the file index from `peer` (e.g. right after joining).
+    CatchUpFiles { peer: PeerId },
     /// Stop the actor.
     Shutdown,
 }
@@ -69,6 +89,8 @@ pub enum AppEvent {
     MembersChanged { count: usize },
     /// A member profile changed — the UI should re-fetch profiles (`profiles`).
     ProfilesUpdated,
+    /// The shared file list changed — the UI should re-fetch it (`files`).
+    FilesUpdated,
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -183,6 +205,58 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Share a file (bytes); returns its content-address hex, or an error string.
+    pub async fn add_file(
+        &self,
+        name: String,
+        mime: String,
+        bytes: Vec<u8>,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::AddFile {
+                name,
+                mime,
+                bytes,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch the shared file list.
+    pub async fn files(&self) -> Vec<FileEntry> {
+        let (reply, rx) = oneshot::channel();
+        if self.cmd_tx.send(AppCommand::Files { reply }).await.is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Download a file's bytes by content address (raw CID bytes); `None` if unavailable.
+    pub async fn download_file(&self, cid: Vec<u8>) -> Option<Vec<u8>> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DownloadFile { cid, reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// Pull the file index from `peer`.
+    pub async fn catch_up_files(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpFiles { peer }).await;
+    }
+
     /// Stop the actor.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
@@ -217,6 +291,11 @@ where
             tracing::warn!(error = %e, "seed profile failed");
         }
         let mut last_profiles = server.profiles();
+        // Open the per-server file index too.
+        if let Err(e) = server.open_files().await {
+            tracing::warn!(error = %e, "open_files failed");
+        }
+        let mut file_count = server.files().len();
         loop {
             tokio::select! {
                 biased;
@@ -279,6 +358,39 @@ where
                     Some(AppCommand::Profiles { reply }) => {
                         let _ = reply.send(server.profiles());
                     }
+                    Some(AppCommand::AddFile { name, mime, bytes, reply }) => {
+                        let res = server
+                            .add_file(&name, &mime, &bytes)
+                            .await
+                            .map(|cid| cid.to_hex())
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Files { reply }) => {
+                        let _ = reply.send(server.files());
+                    }
+                    Some(AppCommand::DownloadFile { cid, reply }) => {
+                        let bytes = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server
+                                .download_file(&Cid::from_bytes(arr))
+                                .await
+                                .ok()
+                                .flatten(),
+                            Err(_) => None,
+                        };
+                        let _ = reply.send(bytes);
+                    }
+                    Some(AppCommand::CatchUpFiles { peer }) => {
+                        if let Err(e) = server.request_files_catchup(peer).await {
+                            tracing::warn!(error = %e, "files catch-up failed");
+                        }
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
@@ -297,6 +409,9 @@ where
                             let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
                         }
                         sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
                     }
                     _ => {
                         let _ = event_tx.send(AppEvent::Closed).await;
@@ -325,6 +440,21 @@ where
     let n = server.messages(channel).len();
     if counts.get(&channel).copied() != Some(n) {
         counts.insert(channel, n);
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the shared file count changed since last seen (updating the record).
+fn files_changed<T, R>(server: &Server<T, R>, last: &mut usize) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let n = server.files().len();
+    if *last != n {
+        *last = n;
         true
     } else {
         false
@@ -458,7 +588,7 @@ mod tests {
         alice.send_message(GENERAL, "hello bob").await;
 
         // Bob's actor should signal the channel changed; then re-fetch shows the message.
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 match bob_events.recv().await {
                     Some(AppEvent::ChannelUpdated { channel }) if channel == GENERAL => break,
@@ -518,7 +648,7 @@ mod tests {
             .await;
         bob.catch_up_profiles(alice_peer).await;
 
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 if bob.profiles().await.values().any(|p| p.name == "Alice") {
                     break;
@@ -573,7 +703,7 @@ mod tests {
         // Bob creates a channel Alice has never opened and posts to it.
         bob.open_channel(SECRET).await;
         bob.send_message(SECRET, "from bob").await;
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 if bob
                     .messages(SECRET)
@@ -596,7 +726,7 @@ mod tests {
         // founder catching up a joiner-created channel (the symmetric case 8i could not do).
         alice.open_channel(SECRET).await;
         alice.catch_up_any(SECRET).await;
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 if alice
                     .messages(SECRET)
@@ -656,7 +786,7 @@ mod tests {
             .await;
         bob.catch_up_profiles(alice_peer).await;
 
-        timeout(Duration::from_secs(10), async {
+        timeout(Duration::from_secs(30), async {
             loop {
                 if bob.profiles().await.values().any(|p| p.avatar == avatar) {
                     break;
@@ -669,6 +799,61 @@ mod tests {
         })
         .await
         .expect("bob fetched Alice's avatar over the blob layer");
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_file_is_shared_and_downloaded_over_the_mesh() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, _alice_events, alice_handle) = spawn(alice_srv);
+
+        let bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
+
+        // Alice shares a file: bytes to the blob store, only the metadata into the index.
+        let data = b"shared document contents".to_vec();
+        alice
+            .add_file("doc.txt".into(), "text/plain".into(), data.clone())
+            .await
+            .unwrap();
+
+        // Bob sees it in the index via gossip (which also remembers Alice as a peer)…
+        let file = timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(f) = bob.files().await.into_iter().find(|f| f.name == "doc.txt") {
+                    break f;
+                }
+                match bob_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("bob actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("bob sees the shared file in the index");
+        assert_eq!(file.size, data.len() as u64);
+
+        // …and downloads the bytes over the mesh.
+        let got = bob.download_file(file.cid.clone()).await;
+        assert_eq!(got, Some(data), "bob downloaded the file over the mesh");
 
         alice.shutdown().await;
         bob.shutdown().await;

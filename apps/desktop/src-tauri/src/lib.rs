@@ -56,6 +56,17 @@ struct UiProfile {
     avatar: String,
 }
 
+/// A shared file as serialized to the frontend. `cid` is the hex content address used to
+/// download it.
+#[derive(Serialize, Clone)]
+struct UiFile {
+    name: String,
+    size: u64,
+    mime: String,
+    cid: String,
+    author: String,
+}
+
 /// Forward an actor's event stream to the frontend as Tauri events.
 fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
@@ -70,6 +81,9 @@ fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
                 }
                 AppEvent::ProfilesUpdated => {
                     let _ = app.emit("profiles-updated", ());
+                }
+                AppEvent::FilesUpdated => {
+                    let _ = app.emit("files-updated", ());
                 }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ());
@@ -178,6 +192,7 @@ async fn join_server(
     actor.open_channel(general).await;
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
+    actor.catch_up_files(inviter).await;
     forward_events(app, events);
     *state.actor.lock().await = Some(actor);
     Ok(general.to_string())
@@ -284,6 +299,59 @@ async fn get_profiles(state: State<'_, AppState>) -> Result<Vec<UiProfile>, Stri
         .collect())
 }
 
+/// Share a file (base64-encoded bytes); returns its content-address hex.
+#[tauri::command]
+async fn add_file(
+    state: State<'_, AppState>,
+    name: String,
+    mime: String,
+    data: String,
+) -> Result<String, String> {
+    let bytes = B64
+        .decode(data.as_bytes())
+        .map_err(|e| format!("bad file data: {e}"))?;
+    let guard = state.actor.lock().await;
+    let Some(actor) = guard.as_ref() else {
+        return Err("no server".into());
+    };
+    actor.add_file(name, mime, bytes).await
+}
+
+/// The shared file list (metadata; bytes are fetched on download).
+#[tauri::command]
+async fn get_files(state: State<'_, AppState>) -> Result<Vec<UiFile>, String> {
+    let guard = state.actor.lock().await;
+    let Some(actor) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    Ok(actor
+        .files()
+        .await
+        .into_iter()
+        .map(|f| UiFile {
+            name: f.name,
+            size: f.size,
+            mime: f.mime,
+            cid: hex::encode(&f.cid),
+            author: f.author,
+        })
+        .collect())
+}
+
+/// Download a shared file by content-address hex; returns base64-encoded bytes.
+#[tauri::command]
+async fn download_file(state: State<'_, AppState>, cid: String) -> Result<String, String> {
+    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    let guard = state.actor.lock().await;
+    let Some(actor) = guard.as_ref() else {
+        return Err("no server".into());
+    };
+    match actor.download_file(raw).await {
+        Some(bytes) => Ok(B64.encode(&bytes)),
+        None => Err("file unavailable (no peer has it yet)".into()),
+    }
+}
+
 /// Send a chat message to a channel (by id).
 #[tauri::command]
 async fn send_message(
@@ -333,6 +401,9 @@ pub fn run() {
             get_members,
             set_profile,
             get_profiles,
+            add_file,
+            get_files,
+            download_file,
             send_message,
             get_messages
         ])

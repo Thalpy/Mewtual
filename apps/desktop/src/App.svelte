@@ -7,6 +7,7 @@
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
+  type UiFile = { name: string; size: number; mime: string; cid: string; author: string };
 
   let mode = $state<"start" | "app">("start");
   let busy = $state(false);
@@ -27,6 +28,8 @@
   let members = $state(1);
   let roster = $state<Member[]>([]);
   let profiles = $state<Record<string, Prof>>({});
+  let files = $state<UiFile[]>([]);
+  let uploading = $state(false);
 
   // The local device's fingerprint (the roster entry flagged `you`).
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
@@ -78,6 +81,7 @@
       await refresh();
       await refreshMembers();
       await refreshProfiles();
+      await refreshFiles();
     } catch (e) {
       error = String(e);
     } finally {
@@ -100,6 +104,7 @@
       await refresh();
       await refreshMembers();
       await refreshProfiles();
+      await refreshFiles();
     } catch (e) {
       error = String(e);
     } finally {
@@ -187,6 +192,61 @@
     }
   }
 
+  function fmtSize(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  async function refreshFiles() {
+    try {
+      files = await invoke<UiFile[]>("get_files");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function uploadFile(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    uploading = true;
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onerror = () => reject(new Error("could not read file"));
+        reader.onload = () => {
+          const r = reader.result;
+          resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
+        };
+        reader.readAsDataURL(file);
+      });
+      await invoke("add_file", {
+        name: file.name,
+        mime: file.type || "application/octet-stream",
+        data: base64,
+      });
+      await refreshFiles();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      uploading = false;
+    }
+  }
+
+  async function downloadFile(f: UiFile) {
+    try {
+      const base64 = await invoke<string>("download_file", { cid: f.cid });
+      const a = document.createElement("a");
+      a.href = `data:${f.mime || "application/octet-stream"};base64,${base64}`;
+      a.download = f.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function saveProfile() {
     try {
       await invoke("set_profile", {
@@ -239,6 +299,7 @@
         refreshMembers();
       }),
       listen("profiles-updated", () => refreshProfiles()),
+      listen("files-updated", () => refreshFiles()),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
   });
@@ -359,6 +420,26 @@
             Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
           </p>
           <button onclick={saveProfile}>Save profile</button>
+        </details>
+
+        <details class="files-panel">
+          <summary>Files <span class="muted">({files.length})</span></summary>
+          <label class="upload">
+            <span class="muted">{uploading ? "Uploading…" : "Share a file"}</span>
+            <input type="file" disabled={uploading} onchange={(e) => uploadFile(e.currentTarget.files)} />
+          </label>
+          <ul class="file-list">
+            {#each files as f}
+              <li>
+                <button class="file-name" title={"from " + nameOf(f.author)} onclick={() => downloadFile(f)}>
+                  ↓ {f.name}
+                </button>
+                <span class="muted file-size">{fmtSize(f.size)}</span>
+              </li>
+            {:else}
+              <li class="muted">No files shared yet.</li>
+            {/each}
+          </ul>
         </details>
 
         {#if invite}
