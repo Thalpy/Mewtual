@@ -48,6 +48,21 @@ pub struct ChatMessage {
     pub text: String,
 }
 
+/// Deterministically derive a channel's document id from its **name**, so any two
+/// members who open the same channel name converge on the same channel — IRC-style name
+/// addressing, with no shared channel registry. Names are normalized (trimmed +
+/// lowercased), so "General" and " general " address the same channel. The id is scoped
+/// to the channel name only; the *group* scoping happens at the topic layer (the topic
+/// mixes in the group's `ns_secret_L` + `group_id`), so the same name in different
+/// servers stays isolated.
+pub fn channel_id(name: &str) -> u128 {
+    let mut h = blake3::Hasher::new();
+    h.update(b"catcoms/channel-name/v1");
+    h.update(name.trim().to_lowercase().as_bytes());
+    let bytes = h.finalize();
+    u128::from_be_bytes(bytes.as_bytes()[..16].try_into().expect("16 bytes"))
+}
+
 // --- the canonical channel-document schema ----------------------------------
 // A channel doc is `{ messages: [ { author: str, text: str } ] }`.
 
@@ -273,6 +288,15 @@ mod tests {
             "alice",
         )
         .unwrap()
+    }
+
+    #[test]
+    fn channel_id_is_deterministic_normalized_and_distinct() {
+        // Same name (modulo case/whitespace) → same id, so members converge.
+        assert_eq!(channel_id("general"), channel_id(" General "));
+        assert_eq!(channel_id("Random"), channel_id("random"));
+        // Distinct names → distinct ids.
+        assert_ne!(channel_id("general"), channel_id("random"));
     }
 
     #[tokio::test]

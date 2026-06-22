@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use catcoms_app::{spawn, AppEvent, Server, ServerActor};
+use catcoms_app::{channel_id, spawn, AppEvent, Server, ServerActor};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
@@ -18,9 +18,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
-
-/// The default channel id (the UI exposes one channel for now).
-const GENERAL: u128 = 1;
 
 /// App state managed by Tauri: the running server actor, plus (for a founder) the
 /// single-use invite to share.
@@ -43,7 +40,8 @@ fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
         while let Some(ev) = events.recv().await {
             match ev {
                 AppEvent::ChannelUpdated { channel } => {
-                    let _ = app.emit("channel-updated", channel);
+                    // Channel ids are u128 — send as a string (JS numbers lose precision).
+                    let _ = app.emit("channel-updated", channel.to_string());
                 }
                 AppEvent::MembersChanged { count } => {
                     let _ = app.emit("members-changed", count);
@@ -64,7 +62,7 @@ async fn found_server(
     app: AppHandle,
     state: State<'_, AppState>,
     display_name: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let listen: Multiaddr = "/ip4/127.0.0.1/tcp/0"
         .parse()
         .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
@@ -92,11 +90,12 @@ async fn found_server(
         .map_err(|e| e.to_string())?;
     *state.invite.lock().await = Some(hex::encode(invite.encode()));
 
+    let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
-    actor.open_channel(GENERAL).await;
+    actor.open_channel(general).await;
     forward_events(app, events);
     *state.actor.lock().await = Some(actor);
-    Ok(())
+    Ok(general.to_string())
 }
 
 /// Join an existing server by pasting its invite: decode it, dial the bootstrap
@@ -107,7 +106,7 @@ async fn join_server(
     state: State<'_, AppState>,
     invite_hex: String,
     display_name: String,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
     let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
     let boot = invite
@@ -149,12 +148,24 @@ async fn join_server(
     .await
     .map_err(|e| e.to_string())?;
 
+    let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
-    actor.open_channel(GENERAL).await;
-    actor.catch_up(inviter, GENERAL).await;
+    actor.open_channel(general).await;
+    actor.catch_up(inviter, general).await;
     forward_events(app, events);
     *state.actor.lock().await = Some(actor);
-    Ok(())
+    Ok(general.to_string())
+}
+
+/// Open (create/subscribe) a channel by name; returns its id. Members who open the same
+/// name converge on the same channel.
+#[tauri::command]
+async fn open_channel(state: State<'_, AppState>, name: String) -> Result<String, String> {
+    let id = channel_id(&name);
+    if let Some(actor) = state.actor.lock().await.as_ref() {
+        actor.open_channel(id).await;
+    }
+    Ok(id.to_string())
 }
 
 /// The single-use invite to share (founder only); `None` for a joiner.
@@ -163,24 +174,33 @@ async fn get_invite(state: State<'_, AppState>) -> Result<Option<String>, String
     Ok(state.invite.lock().await.clone())
 }
 
-/// Send a chat message to #general.
+/// Send a chat message to a channel (by id).
 #[tauri::command]
-async fn send_message(state: State<'_, AppState>, text: String) -> Result<(), String> {
+async fn send_message(
+    state: State<'_, AppState>,
+    channel: String,
+    text: String,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     if let Some(actor) = state.actor.lock().await.as_ref() {
-        actor.send_message(GENERAL, text).await;
+        actor.send_message(id, text).await;
     }
     Ok(())
 }
 
-/// Read #general's current messages.
+/// Read a channel's current messages (by id).
 #[tauri::command]
-async fn get_messages(state: State<'_, AppState>) -> Result<Vec<UiMessage>, String> {
+async fn get_messages(
+    state: State<'_, AppState>,
+    channel: String,
+) -> Result<Vec<UiMessage>, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let guard = state.actor.lock().await;
     let Some(actor) = guard.as_ref() else {
         return Ok(Vec::new());
     };
     Ok(actor
-        .messages(GENERAL)
+        .messages(id)
         .await
         .into_iter()
         .map(|m| UiMessage {
@@ -197,6 +217,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             found_server,
             join_server,
+            open_channel,
             get_invite,
             send_message,
             get_messages

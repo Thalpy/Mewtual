@@ -12,6 +12,7 @@ catcoms-mls = { path = "../catcoms-mls" }
 catcoms-sync = { path = "../catcoms-sync" }
 catcoms-wire = { path = "../catcoms-wire" }
 automerge = "0.10"
+blake3 = "1"
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros"] }
