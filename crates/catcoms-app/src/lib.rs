@@ -14,6 +14,8 @@
 //! [`Server::sync_once`]. The background run-loop + live event stream and multi-server
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
+use std::collections::HashMap;
+
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, Value, ROOT};
 use catcoms_crypto::DeviceId;
@@ -37,12 +39,13 @@ pub enum AppError {
     Mls(#[from] MlsError),
 }
 
-/// One chat message as the UI sees it. The `author` is a **display label** the sender
-/// chose; the cryptographic author is the device that inner-signed the underlying op
-/// (mapping device → display name is a later product concern).
+/// One chat message as the UI sees it. The `author` is the sender's **device
+/// fingerprint** (the key its [`Profile`] is stored under); the UI resolves it to a
+/// display name + styling at render time, so a profile change updates all of that
+/// member's messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
-    /// The sender's chosen display name.
+    /// The author's device fingerprint (resolve to a name/style via [`Server::profiles`]).
     pub author: String,
     /// The message text.
     pub text: String,
@@ -109,6 +112,68 @@ fn str_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
         .flatten()
         .and_then(|(v, _)| v.into_string().ok())
         .unwrap_or_default()
+}
+
+// --- member profiles --------------------------------------------------------
+//
+// One shared CRDT document per server (`DocType::Profile`, id `PROFILE_DOC`), a map
+// keyed by member **device fingerprint** → `{ name, color, font, effect }`. Each member
+// writes only their *own* fingerprint's entry by convention (the op is inner-signed by
+// the author's device; enforcing "an op may only touch the author's own key" is a later
+// hardening — a malicious member overwriting another's profile is low-stakes and
+// detectable, not a confidentiality/integrity break).
+
+/// The reserved document id for the per-server profile document.
+const PROFILE_DOC: u128 = 0;
+const P_NAME: &str = "name";
+const P_COLOR: &str = "color";
+const P_FONT: &str = "font";
+const P_EFFECT: &str = "effect";
+
+/// A member's customizable profile. Extensible (an avatar/display-picture field is a
+/// later slice — it needs content-addressed image storage).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Profile {
+    /// Chosen display name.
+    pub name: String,
+    /// Name/text color (a CSS color string, e.g. `#4f8cff`).
+    pub color: String,
+    /// A UI font key (e.g. `system` | `serif` | `mono`).
+    pub font: String,
+    /// A text-effect key (e.g. `none` | `rainbow` | `wave` | `pulse`).
+    pub effect: String,
+}
+
+/// Write a member's own profile entry into the profile document.
+fn write_profile(doc: &mut AutoCommit, fp: &str, p: &Profile) -> Result<(), AutomergeError> {
+    let entry = match doc.get(ROOT, fp)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(ROOT, fp, ObjType::Map)?,
+    };
+    doc.put(&entry, P_NAME, p.name.as_str())?;
+    doc.put(&entry, P_COLOR, p.color.as_str())?;
+    doc.put(&entry, P_FONT, p.font.as_str())?;
+    doc.put(&entry, P_EFFECT, p.effect.as_str())?;
+    Ok(())
+}
+
+/// Materialize the profile document into a `fingerprint -> Profile` map.
+fn read_profiles(doc: &AutoCommit) -> HashMap<String, Profile> {
+    let mut out = HashMap::new();
+    for fp in doc.keys(ROOT) {
+        if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(ROOT, &fp) {
+            out.insert(
+                fp,
+                Profile {
+                    name: str_field(doc, &entry, P_NAME),
+                    color: str_field(doc, &entry, P_COLOR),
+                    font: str_field(doc, &entry, P_FONT),
+                    effect: str_field(doc, &entry, P_EFFECT),
+                },
+            );
+        }
+    }
+    out
 }
 
 /// A UI-facing view of one **server** (one [`ChannelSync`] over a group). Wraps the
@@ -189,15 +254,58 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Send a chat message to a channel (authored as this server's display name).
+    /// Send a chat message to a channel. The message is **authored by this device's
+    /// fingerprint**; the display name + styling are resolved from the author's profile
+    /// at render time (so a profile change updates all of that member's messages).
     pub async fn send_message(&mut self, channel: u128, text: &str) -> Result<(), AppError> {
-        let author = self.display_name.clone();
+        let author = self.my_fingerprint();
         self.sync
             .post(DocType::Channel, channel, |d| {
                 append_message(d, &author, text)
             })
             .await?;
         Ok(())
+    }
+
+    /// This device's short fingerprint (the key its messages + profile are stored under).
+    pub fn my_fingerprint(&self) -> String {
+        fingerprint(&self.device_id)
+    }
+
+    /// Open (create/subscribe) the per-server profile document. Call once after
+    /// founding/joining (alongside `subscribe_control`).
+    pub async fn open_profiles(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::Profile, PROFILE_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// Set this member's own profile (writes the local fingerprint's entry).
+    pub async fn set_profile(&mut self, profile: Profile) -> Result<(), AppError> {
+        let fp = self.my_fingerprint();
+        self.sync
+            .post(DocType::Profile, PROFILE_DOC, |d| {
+                write_profile(d, &fp, &profile)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// All known member profiles, keyed by device fingerprint.
+    pub fn profiles(&self) -> HashMap<String, Profile> {
+        self.sync
+            .doc(DocType::Profile, PROFILE_DOC)
+            .map(|d| read_profiles(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Catch up the profile document from `peer` (e.g. right after joining).
+    pub async fn request_profiles_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Profile, PROFILE_DOC)
+            .await?)
     }
 
     /// The current materialized messages in a channel (empty if it is not open).
@@ -350,7 +458,8 @@ mod tests {
 
         let msgs = alice.messages(GENERAL);
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].author, "alice");
+        // Messages are authored by device fingerprint; the name resolves from the profile.
+        assert_eq!(msgs[0].author, alice.my_fingerprint());
         assert_eq!(msgs[0].text, "hello world");
         assert_eq!(alice.member_count(), 1);
         assert_eq!(alice.display_name(), "alice");
@@ -412,6 +521,26 @@ mod tests {
         let msgs = bob.messages(GENERAL);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "welcome!");
-        assert_eq!(msgs[0].author, "alice");
+        // Authored by Alice's device fingerprint (the name resolves from her profile).
+        assert_eq!(msgs[0].author, alice.my_fingerprint());
+    }
+
+    #[tokio::test]
+    async fn a_member_profile_is_set_and_read_back() {
+        let mut alice = founder();
+        alice.open_profiles().await.unwrap();
+        assert!(alice.profiles().is_empty());
+
+        let p = Profile {
+            name: "Alice".into(),
+            color: "#ff5577".into(),
+            font: "serif".into(),
+            effect: "rainbow".into(),
+        };
+        alice.set_profile(p.clone()).await.unwrap();
+
+        let profiles = alice.profiles();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles.get(&alice.my_fingerprint()), Some(&p));
     }
 }

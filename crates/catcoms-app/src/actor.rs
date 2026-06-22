@@ -18,7 +18,7 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::{ChatMessage, MemberView, Server};
+use crate::{ChatMessage, MemberView, Profile, Server};
 
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
@@ -44,6 +44,14 @@ pub enum AppCommand {
     Members {
         reply: oneshot::Sender<Vec<MemberView>>,
     },
+    /// Set this member's own profile (name + styling).
+    SetProfile { profile: Profile },
+    /// Pull the profile document from `peer` (e.g. right after joining).
+    CatchUpProfiles { peer: PeerId },
+    /// Query all known member profiles, keyed by fingerprint.
+    Profiles {
+        reply: oneshot::Sender<HashMap<String, Profile>>,
+    },
     /// Stop the actor.
     Shutdown,
 }
@@ -57,6 +65,8 @@ pub enum AppEvent {
     ChannelUpdated { channel: u128 },
     /// The roster size changed (a member joined or was removed).
     MembersChanged { count: usize },
+    /// A member profile changed — the UI should re-fetch profiles (`profiles`).
+    ProfilesUpdated,
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -142,6 +152,30 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Set this member's own profile (a `ProfilesUpdated` event follows).
+    pub async fn set_profile(&self, profile: Profile) {
+        let _ = self.cmd_tx.send(AppCommand::SetProfile { profile }).await;
+    }
+
+    /// Pull the profile document from `peer`.
+    pub async fn catch_up_profiles(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpProfiles { peer }).await;
+    }
+
+    /// Fetch all known member profiles, keyed by fingerprint.
+    pub async fn profiles(&self) -> HashMap<String, Profile> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Profiles { reply })
+            .await
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Stop the actor.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
@@ -162,6 +196,20 @@ where
     let handle = tokio::spawn(async move {
         let mut counts: HashMap<u128, usize> = HashMap::new();
         let mut members = server.member_count();
+        // Open the per-server profile document and seed this member's name from the
+        // display name, so the roster/messages show a name immediately (the user can
+        // customize color/font/effect later via SetProfile).
+        if let Err(e) = server.open_profiles().await {
+            tracing::warn!(error = %e, "open_profiles failed");
+        }
+        let seed = Profile {
+            name: server.display_name().to_string(),
+            ..Profile::default()
+        };
+        if let Err(e) = server.set_profile(seed).await {
+            tracing::warn!(error = %e, "seed profile failed");
+        }
+        let mut last_profiles = server.profiles();
         loop {
             tokio::select! {
                 biased;
@@ -201,6 +249,25 @@ where
                     Some(AppCommand::Members { reply }) => {
                         let _ = reply.send(server.members_view());
                     }
+                    Some(AppCommand::SetProfile { profile }) => {
+                        if let Err(e) = server.set_profile(profile).await {
+                            tracing::warn!(error = %e, "set_profile failed");
+                        }
+                        if profiles_changed(&server, &mut last_profiles) {
+                            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CatchUpProfiles { peer }) => {
+                        if let Err(e) = server.request_profiles_catchup(peer).await {
+                            tracing::warn!(error = %e, "profiles catch-up failed");
+                        }
+                        if profiles_changed(&server, &mut last_profiles) {
+                            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Profiles { reply }) => {
+                        let _ = reply.send(server.profiles());
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
@@ -217,6 +284,9 @@ where
                         if mc != members {
                             members = mc;
                             let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
+                        }
+                        if profiles_changed(&server, &mut last_profiles) {
+                            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
                         }
                     }
                     _ => {
@@ -246,6 +316,22 @@ where
     let n = server.messages(channel).len();
     if counts.get(&channel).copied() != Some(n) {
         counts.insert(channel, n);
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the profile document changed since last seen (updating the record). Compares
+/// the materialized map; profiles are small, so this is cheap to run per tick.
+fn profiles_changed<T, R>(server: &Server<T, R>, last: &mut HashMap<String, Profile>) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.profiles();
+    if now != *last {
+        *last = now;
         true
     } else {
         false
@@ -346,10 +432,73 @@ mod tests {
 
         let msgs = bob.messages(GENERAL).await;
         assert!(
-            msgs.iter()
-                .any(|m| m.text == "hello bob" && m.author == "alice"),
+            msgs.iter().any(|m| m.text == "hello bob"),
             "bob converged on Alice's message: {msgs:?}"
         );
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_actors_converge_on_profiles() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, _alice_events, alice_handle) = spawn(alice_srv);
+
+        let bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
+
+        // Alice customizes her profile; Bob catches the profile document up and converges
+        // (the distinctive capitalized "Alice" + effect proves it is her *custom* profile,
+        // not just the seeded lowercase display name).
+        alice
+            .set_profile(Profile {
+                name: "Alice".into(),
+                color: "#ffcc00".into(),
+                font: "serif".into(),
+                effect: "wave".into(),
+            })
+            .await;
+        bob.catch_up_profiles(alice_peer).await;
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if bob.profiles().await.values().any(|p| p.name == "Alice") {
+                    break;
+                }
+                match bob_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("bob actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("bob did not converge on Alice's profile");
+
+        let alice_profile = bob
+            .profiles()
+            .await
+            .into_values()
+            .find(|p| p.name == "Alice")
+            .expect("Alice's profile present");
+        assert_eq!(alice_profile.effect, "wave");
+        assert_eq!(alice_profile.font, "serif");
 
         alice.shutdown().await;
         bob.shutdown().await;

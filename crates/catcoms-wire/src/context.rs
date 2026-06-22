@@ -41,6 +41,9 @@ pub enum DocType {
     /// (`ns_secret_L`). Kept a distinct `DocType` so that derivation is
     /// domain-separated from every content document by the injective context.
     Routing = 8,
+    /// Per-member profiles (display name, color, font, text effect) — a single
+    /// shared CRDT document per server keyed by member device fingerprint.
+    Profile = 9,
 }
 
 impl DocType {
@@ -60,6 +63,7 @@ impl DocType {
             6 => DocType::MemberRoles,
             7 => DocType::FileIndex,
             8 => DocType::Routing,
+            9 => DocType::Profile,
             _ => return None,
         })
     }
@@ -105,6 +109,11 @@ mod tests {
             exporter_context(DocType::Routing, 0),
             [0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
+        // Profile (tag 9), id = 0 — the per-member profile document.
+        assert_eq!(
+            exporter_context(DocType::Profile, 0),
+            [0x00, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
+        );
     }
 
     #[test]
@@ -118,12 +127,13 @@ mod tests {
             DocType::MemberRoles,
             DocType::FileIndex,
             DocType::Routing,
+            DocType::Profile,
         ] {
             assert_eq!(DocType::from_tag(dt.tag()), Some(dt));
         }
         // Unknown tags decode to None (stable: 0 and the first unused value).
         assert_eq!(DocType::from_tag(0), None);
-        assert_eq!(DocType::from_tag(9), None);
+        assert_eq!(DocType::from_tag(10), None);
     }
 
     #[test]
