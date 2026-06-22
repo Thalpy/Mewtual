@@ -11,10 +11,12 @@ Authoritative current-state document. Read this first, then
   TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
   done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
   **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
-  desktop app** (`apps/desktop`, 8b-2 … 8h) wired to the stack — found a server, mint a
+  desktop app** (`apps/desktop`, 8b-2 … 8k) wired to the stack — found a server, mint a
   single-use invite, a second instance joins via paste, **multiple name-addressed
-  channels**, a live roster, and **customizable member profiles** (name/color/font/
-  animated effect/**avatar**, shared + converging). **197 tests passing** (the GUI
+  channels** (with symmetric history catch-up + timestamps + auto-scroll), a live roster,
+  and **customizable member profiles** (name/color/font/animated effect/**avatar**,
+  shared + converging). Underneath, **8l** adds **content-addressed blob fetch over the
+  mesh** (the foundation for large avatars + fileshare). **200 tests passing** (the GUI
   WebView is the one manually-verified surface; both halves compile). **The desktop app is currently
   loopback-only** — it works between windows on one machine; connecting peers across a
   network needs the discovery/relay-in-the-UI slice (not yet built). See Known
@@ -180,8 +182,11 @@ TCP** (verified, incl. through a relay).
 | 8f | **member profiles (backend)** — `DocType::Profile` (tag 9) + a shared per-server profile doc `{name,color,font,effect}` keyed by device fingerprint; messages now authored by fingerprint (name/style resolved from the author's profile at render time); actor seeds/serves/converges profiles | ✅ `bcf61db` |
 | 8g | **profile editor + rich rendering** — "Your profile" editor (name, color, font, animated effect); roster + message authors resolve fingerprint → profile (rainbow colour-wave / wave / pulse); own-message keys on local fingerprint | ✅ `612965f` |
 | 8h | **member avatars** — `Profile.avatar` (inline bytes in the profile doc, `MAX_AVATAR_BYTES` = 64 KiB; base64 across IPC); UI canvas-downscales to a 128px JPEG; circular avatars in roster + messages with an initials fallback | ✅ `9e9b878` |
-| 8i | **per-channel history catch-up** — the bridge remembers the join peer (`catchup_peer`); opening any channel catches it up from that peer (joiner side), so ad-hoc channels show backlog, not just live. Asymmetry: a founder opening a joiner-created channel still relies on live gossip (symmetric/any-peer catch-up = later) | ✅ `ec3fc90` |
-| 8… | discovery/relay wiring in the UI · multi-server · fileshare browser · status · wiki · **blob-store avatars** (move large/animated/shared images off the profile doc onto content-addressed mesh fetch) | planned |
+| 8i | **per-channel history catch-up** — the bridge remembers the join peer (`catchup_peer`); opening any channel catches it up from that peer (joiner side), so ad-hoc channels show backlog, not just live. Asymmetry: a founder opening a joiner-created channel still relies on live gossip (superseded by 8j) | ✅ `ec3fc90` |
+| 8j | **symmetric (any-peer) catch-up** — `ChannelSync::request_catchup_best` (+ `now_ms`) catches up from the best known peer (proven member, else any known peer); `Server::request_channel_catchup_any` + actor `CatchUpAny`; bridge `open_channel` uses it (dropped `catchup_peer`). Either side gets the backlog of a channel the other created | ✅ `479da21` |
+| 8k | **chat UX polish** — messages carry a clock-stamped `ts` (canonical schema + `ChatMessage.ts`, stamped via `ChannelSync::now_ms`); UI shows HH:MM + auto-scrolls to newest | ✅ `f202530` |
+| 8l | **content-addressed blob fetch over the mesh** — `ChannelSync` holds a `BlobStore`; `KIND_BLOB_FETCH` request/response (members-only, responder-signed/bound, 16 MiB cap, **per-requester rate limit** — folded from adversarial review since blob is the strongest amplifier); `put/get/has_blob`, `request_blob(_best)`. Re-hashes served bytes vs the requested CID before storing (no cache-poisoning). Foundation for large avatars + fileshare | ✅ `e0c3c8e` |
+| 8… | wire avatars onto blob fetch (CID in profile, not inline) · fileshare browser (file-index doc + UI) · discovery/relay wiring in the UI · multi-server · status · wiki | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 

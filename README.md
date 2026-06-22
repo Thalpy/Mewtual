@@ -62,7 +62,10 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8g | **profile editor + rich rendering** — customize name/color/font/animated effect; roster + messages resolve fingerprint → profile | done |
 | 8h | **member avatars** — small inline display pictures (canvas-downscaled, capped); circular avatars in roster + messages, initials fallback | done |
 | 8i | **per-channel history catch-up** — a joiner catches up the backlog of any channel it opens (not just #general) from the peer it joined through | done |
-| 8… | discovery/relay in the UI · multi-server · fileshare · status · wiki | planned |
+| 8j | **symmetric (any-peer) catch-up** — either side pulls the backlog of a channel the other created (best known peer) | done |
+| 8k | **chat UX polish** — message timestamps (clock-stamped) + auto-scroll to newest | done |
+| 8l | **content-addressed blob fetch over the mesh** — `KIND_BLOB_FETCH` (members-only, signed, capped, rate-limited); the foundation for large avatars + fileshare | done |
+| 8… | wire avatars onto blob fetch · fileshare browser · discovery/relay in the UI · multi-server · status · wiki | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |
