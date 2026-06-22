@@ -204,18 +204,30 @@ async fn register_server(
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
 /// loopback), found the group, mint a single-use invite carrying the reachable address(es),
 /// spawn the actor, and register it. `advertise` is an optional user-supplied reachable
-/// address (LAN or public IP, or a relay circuit multiaddr); blank = same-machine.
+/// address (LAN or public IP); `relay` is an optional relay-node multiaddr — when given, we
+/// reserve a circuit there and put the **relayed** address first in the invite, so a joiner
+/// reaches us through the relay with **no port-forward** (zero-config NAT traversal).
 #[tauri::command]
 async fn found_server(
     app: AppHandle,
     state: State<'_, AppState>,
     display_name: String,
     advertise: String,
+    relay: String,
 ) -> Result<FoundResult, String> {
     let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
         .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
-    let (mesh, libp2p_id) = MeshService::new_tcp(Some(listen), &[]).map_err(|e| e.to_string())?;
+    let relay = relay.trim().to_string();
+    let relay_dial: Vec<Multiaddr> = if relay.is_empty() {
+        Vec::new()
+    } else {
+        vec![relay
+            .parse()
+            .map_err(|e: libp2p::multiaddr::Error| format!("bad relay address: {e}"))?]
+    };
+    let (mesh, libp2p_id) =
+        MeshService::new_tcp(Some(listen), &relay_dial).map_err(|e| e.to_string())?;
 
     // Discover the OS-assigned port; advertise loopback (same-machine) plus the user's
     // reachable address if given, so the invite works for same-machine, LAN, or internet.
@@ -228,6 +240,38 @@ async fn found_server(
     let mut bootstrap = vec![format!("/ip4/127.0.0.1/tcp/{port}/p2p/{id}")];
     if !advertise.trim().is_empty() {
         bootstrap.push(build_advertised(&advertise, port, &id)?);
+    }
+
+    // Reserve a relay circuit and prefer the relayed address (NAT traversal, no port-forward).
+    if !relay.is_empty() {
+        // Wait for the relay connection before reserving (the relay-client transport needs
+        // a live connection to reserve over).
+        timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(TransportEvent::PeerConnected(_)) = mesh.next_event().await {
+                    break;
+                }
+            }
+        })
+        .await
+        .map_err(|_| "could not connect to the relay".to_string())?;
+        let circuit: Multiaddr = format!("{relay}/p2p-circuit")
+            .parse()
+            .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
+        mesh.listen_on(circuit).await.map_err(|e| e.to_string())?;
+        let circuit_addr = timeout(Duration::from_secs(20), async {
+            loop {
+                match mesh.next_listen_addr().await {
+                    Some(a) if a.to_string().contains("p2p-circuit") => return Some(a),
+                    Some(_) => continue,
+                    None => return None,
+                }
+            }
+        })
+        .await
+        .map_err(|_| "relay reservation timed out".to_string())?
+        .ok_or_else(|| "relay reservation failed".to_string())?;
+        bootstrap.insert(0, circuit_addr.to_string()); // prefer the relayed address
     }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;

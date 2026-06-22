@@ -30,6 +30,7 @@
   let error = $state("");
   let displayName = $state("me");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
+  let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
   let joinInvite = $state(""); // pasted invite (joiner)
   let copied = $state(false);
   let newChannel = $state("");
@@ -86,7 +87,7 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("found_server", { displayName, advertise });
+      const r = await invoke<Found>("found_server", { displayName, advertise, relay });
       addServer(r, displayName);
     } catch (e) {
       error = String(e);
@@ -390,6 +391,13 @@
             same-machine only.
           </span>
           <input bind:value={advertise} placeholder="LAN/public IP (optional)" />
+        </label>
+        <label class="field">
+          <span class="muted">
+            Relay address (optional) — paste a relay node's multiaddr to be reachable over
+            the internet with no port-forward (zero-config NAT traversal).
+          </span>
+          <input bind:value={relay} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
         </label>
       </details>
       <button onclick={found} disabled={busy}>
