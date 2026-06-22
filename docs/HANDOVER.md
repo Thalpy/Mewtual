@@ -197,7 +197,8 @@ TCP** (verified, incl. through a relay).
 | 8t | **status feed** — per-server post stream on `DocType::Status` (reuses the message schema): `open_status`/`post_status`/`statuses`/`request_status_catchup`; actor `PostStatus`/`Statuses`/`CatchUpStatus` + `StatusUpdated`; bridge + a "Status" UI panel | ✅ `64d3812` |
 | 8u | **wiki** — one per-server `DocType::Wiki` doc (map page→body): `open_wiki`/`wiki_pages`/`read_wiki_page`/`write_wiki_page`/`request_wiki_catchup`; actor `WikiPages`/`ReadWikiPage`/`WriteWikiPage`/`CatchUpWiki` + `WikiUpdated` (full-map change tracking); bridge + a Chat/Wiki main-pane toggle (page list + editor, dirty-flag preserves in-progress edits) | ✅ `e6091aa` |
 | 8v | **char-level wiki merge** — page bodies are automerge `Text` (`update_text` diff-splice); concurrent same-page edits merge char-by-char. + reworked a flaky file-convergence test to deterministic request/response catch-up (MemNetwork emits no `PeerConnected`, so gossip/peer-discovery timing was racy; the blob fetch itself is tested at the sync layer) | ✅ `1f61599` |
-| 8… | rendezvous auto-discovery in the UI · **disk persistence then per-file encryption-at-rest** (paired — see Known limitations) · chunked large-file transfer · last-copy-safe blob retention | planned |
+| 9 | **disk persistence + encryption-at-rest** — designed in [`design-persistence.md`](design-persistence.md) (9a keystore → 9b blobs → 9c sealed MLS `StorageProvider` → 9d docs → 9e sync-state → 9f registry/reload → 9g transport → 9h per-file encryption); each slice security-reviewed | designed, not started |
+| 8… | rendezvous auto-discovery in the UI · chunked large-file transfer · last-copy-safe blob retention | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 
@@ -290,7 +291,10 @@ routing secret `ns_secret_L`:
   copy of a blob; evicted blobs are re-fetchable only while a holder is online). Wiring the
   `catcoms-storage` retention engine (never-evict-last-copy + on-disk store) is the follow-up.
 - **No disk persistence yet → per-file encryption-at-rest is premature (analysis, not
-  implemented).** The desktop app keeps everything **in RAM** (`MemoryBlobStore`, in-memory
+  implemented).** Full design + slice plan: [`design-persistence.md`](design-persistence.md)
+  (pivotal constraint: openmls 0.8 has no group snapshot, so persistence needs a sealed
+  on-disk `StorageProvider`; the keystore already has the at-rest primitives). The desktop
+  app keeps everything **in RAM** (`MemoryBlobStore`, in-memory
   MLS/group state) — restart loses all servers. So there is currently **no disk "at rest"**
   to protect; the earlier "files plaintext at rest" note was about the in-memory cache, not
   disk. Per-file encryption-at-rest was investigated and **deliberately deferred**: with

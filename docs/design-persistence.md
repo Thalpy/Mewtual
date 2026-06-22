@@ -1,0 +1,135 @@
+# Disk persistence + encryption-at-rest — design
+
+Status: **design / not yet implemented.** This scopes the work into reviewable, security-
+critical slices. The desktop app is currently **entirely in-memory** (`MemoryBlobStore`,
+in-memory MLS/group state) — closing it loses every server. This design is the gate for
+both "survive restart" and meaningful per-file encryption-at-rest (see the encryption note
+in [`HANDOVER.md`](HANDOVER.md)).
+
+## Goals / non-goals
+
+**Goals.** A member's **servers, channels, member profiles, files, status, wiki** survive an
+app restart; the persisted state is **encrypted at rest**; the app can **read history
+offline** (no peer needed to see what you already have).
+
+**Non-goals (first cut).** Cross-device sync of one identity (multi-device); cloud backup;
+key escrow/recovery. A forgotten passphrase = data loss, by design.
+
+## What must persist
+
+Per server (one MLS group):
+
+- **Device identity** — the `SignatureKeyPair` private key (`MlsDevice`, `device.rs:26`).
+  Everything else in `MlsDevice` (credential, `device_id`) re-derives from it.
+- **MLS group state** — the ratchet tree, epoch secrets, pending commits. *(The hard part —
+  see below.)*
+- **CRDT documents** — `EncryptedDoc` per `(DocType, doc_id)`: an automerge `AutoCommit` +
+  the signed-op log (`doc.rs:24`). Channels, profile, file-index, status, wiki.
+- **`ChannelSync` durable state** (`lib.rs:1257`): `commit_log`, `routing_label` +
+  `routing_secrets` (`Zeroizing`), `peer_records`, `ledger`. (The rest — transport, topics,
+  caches, rate-limit maps — is transient and rebuilt.)
+- **Blob store** — avatars + downloaded files (`FsBlobStore`, already on disk by CID).
+
+App-level:
+
+- **Server registry** — the set of servers (their on-disk location, the founder's invite,
+  the display name) + which to reload on startup.
+- **Peer addresses** — to re-dial on reload (P2P has no DHT here yet).
+
+## The pivotal constraint: openmls has no group snapshot
+
+The `MlsGroup` (wrapped by `ServerGroup`, `group.rs:64`) is backed by `OpenMlsRustCrypto`'s
+**in-memory `MemoryStorage`** (`device.rs:36`). openmls 0.8 has **no `MlsGroup::save()/load()`**
+— the group state lives only in that provider's storage. Two ways to persist it:
+
+- **A. Persistent `StorageProvider` (recommended).** openmls reads/writes all group state
+  through the `StorageProvider` trait. Implement a **sealed, on-disk** provider (a key→value
+  store where each value is `seal`ed under `mls_seal_key`). The group then "just persists" —
+  no replay, no snapshot API needed. Cost: a correct openmls storage provider is the single
+  biggest, most delicate piece (it must satisfy openmls's read-your-writes + key lifecycle
+  expectations); it needs its own tests against openmls.
+- **B. Commit-log replay (fallback).** Persist the `commit_log` (+ the device, + a joiner's
+  Welcome) and **rebuild** the group on startup by replaying commits. Simpler storage, but
+  group reconstruction is fragile and slow, and openmls doesn't expose a clean "apply this
+  historical commit to a fresh group" path. Use only if A proves intractable.
+
+**Decision: pursue A.** The sealed on-disk `StorageProvider` is the clean long-term answer
+and the at-rest sealing falls out of it for free (every stored value is sealed).
+
+## At-rest sealing (already have the primitives)
+
+`catcoms-crypto` provides the whole hierarchy (`keystore.rs`):
+
+- **Root `Dek`** (32 bytes) → `KeyHierarchy` with `db_key()` / `mls_seal_key()` / `blob_key()`
+  (HKDF-Expand subkeys, `keystore.rs:154`).
+- **`seal`/`unseal`** = XChaCha20-Poly1305, 24-byte random nonce per seal (`keystore.rs:121`).
+- **`SecureKeyStore`** seals the root `Dek` itself: `PassphraseKeyStore` (Argon2id, **implemented**),
+  `InMemoryKeyStore` (test), and a `KeyTier` ladder (Hardware/OsSoftware/Passphrase/None) with
+  **downgrade detection** (`requires_passphrase_confirmation`). OS-keychain/hardware tiers are
+  enum-ready but not yet implemented — **passphrase is the at-rest protection for v1.**
+
+So: on startup the user supplies a **passphrase** → unseal the `Dek` → derive `KeyHierarchy`.
+MLS storage sealed under `mls_seal_key`, docs + sync-state under `db_key`, blobs under
+`blob_key` (or per-file via the file-wrap-key, slice 9h).
+
+## Transport re-establishment on reload (P2P)
+
+Restoring state is necessary but not sufficient — connections are gone. On reload:
+
+- **Founder** — re-bind + re-advertise exactly like founding; other members re-dial it. No
+  reconnection logic needed; the invite's bootstrap still points here (if the address is
+  stable) — a changed LAN/public IP needs a fresh invite (already true today).
+- **Joiner** — must reconnect. Persist the **dialable peer addresses** (the signed
+  `peer_records` already carry member multiaddrs) and **re-dial on startup**; reconnect as
+  peers come online. Rendezvous re-discovery (the deferred networking slice) is the better
+  long-term answer. Until a peer is reachable, the joiner **reads its persisted history
+  offline** — which is itself a real win.
+
+## Slice breakdown
+
+Each slice is **security-critical** (handles secret material at rest) → adversarial review
+before commit, per project discipline. Suggested order:
+
+| Slice | What | Risk |
+|------|------|------|
+| **9a** | **Keystore wiring** — startup prompts a passphrase; `PassphraseKeyStore` seals/unseals the `Dek`; derive `KeyHierarchy`. App data dir per OS. | low–med (UX + key handling) |
+| **9b** | **Blob persistence** — swap `MemoryBlobStore` for a sealing `FsBlobStore` (each blob `seal`ed under `blob_key`); content-addressed by **plaintext** CID so the mesh fetch still works (seal at the disk boundary, not the wire). | med |
+| **9c** | **Persistent MLS `StorageProvider`** — sealed on-disk KV under `mls_seal_key`; `MlsDevice`/`ServerGroup` use it; group + signer persist. **The big one** — own test suite vs openmls. | **high** |
+| **9d** | **Doc persistence** — save/load `EncryptedDoc` (`AutoCommit::save()` + the signed-op log) sealed under `db_key`; `ChannelSync` restores its `docs` map. | med |
+| **9e** | **Sync-state persistence** — `commit_log`, `routing_label`/`routing_secrets`, `peer_records`, `ledger` → a sealed snapshot; reload reconstitutes `ChannelSync` (with a fresh transport). | med–high (secrets) |
+| **9f** | **Registry + reload-on-startup** — persist the server set; on launch, reload each server from disk and spawn its actor; the rail shows them without re-joining. | med |
+| **9g** | **Transport re-establishment** — persist + re-dial peer addresses; reconnect handling; offline-read works meanwhile. | med |
+| **9h** | **Per-file encryption-at-rest** — now that the keystore + persistence exist: mint a **stable per-group file-wrap-key** at founding, transfer it at join **like `RoutingState`** (sealed under `routing_transfer_key`, `lib.rs:2373`), and use `seal_file`/`open_file` so blobs are ciphertext keyed by the **ciphertext** CID, the wrapped key in the (encrypted) file index. | **high** (key mgmt + join handshake) |
+
+9a–9f deliver "survive restart, encrypted at rest." 9g makes a reloaded joiner reconnect.
+9h is the file-encryption follow-up that was correctly deferred until persistence exists.
+
+## Threat model (be honest in the UI)
+
+**At-rest encryption protects against:** a stolen disk / laptop, a leaked backup or
+cloud-synced app-data folder, another OS user reading your files. The passphrase (Argon2id)
+gates the `Dek`; without it the on-disk state is opaque.
+
+**It does NOT protect against:** a live process compromise (RAM has the unsealed keys while
+running), malware running as you, a keylogger capturing the passphrase, or a compromised OS.
+This is the same envelope as Signal/desktop messengers — at-rest, not anti-malware.
+
+## Open questions / risks
+
+- **openmls `StorageProvider` correctness** (9c) is the principal risk — get it wrong and the
+  group silently corrupts. Needs property tests + round-trip tests against openmls operations.
+- **On-disk format versioning / migration** — tag every sealed blob with a version.
+- **Atomic writes** — write-temp-then-rename to survive a crash mid-write; never leave a
+  half-written group store.
+- **Passphrase UX** — prompt on launch; "forgot" = data loss (no recovery in v1). Consider an
+  OS-keychain tier (`KeyTier::OsSoftware`) later so the passphrase isn't needed every launch.
+- **Concurrency** — multiple servers persisting concurrently; a per-server lock / single
+  writer.
+
+## Files this touches
+
+`crates/catcoms-crypto/src/keystore.rs` (keystore, already built), `crates/catcoms-mls`
+(device + group provider, 9c), `crates/catcoms-replication/src/doc.rs` (doc save/load, 9d),
+`crates/catcoms-sync/src/lib.rs` (`ChannelSync` snapshot + `FsBlobStore` wiring, 9b/9e),
+`crates/catcoms-storage/src/blob.rs` (sealing blob store, 9b), `crates/catcoms-app` +
+`apps/desktop/src-tauri` (registry, reload, passphrase prompt, 9a/9f/9g).
