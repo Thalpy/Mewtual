@@ -35,6 +35,7 @@ use catcoms_mls::{
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent};
+use catcoms_storage::{BlobStore, Cid, MemoryBlobStore, StorageError};
 use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -55,6 +56,21 @@ const KIND_WELCOME: u8 = 3;
 /// member for the signed peer records it knows, so members supply each other with
 /// dialable peers without any rendezvous (defeats single-rendezvous omission).
 const KIND_PEX: u8 = 4;
+/// Request kind: **blob fetch** by content address (8l) — a member asks another member
+/// for a content-addressed blob (avatars, files), so large/shared binaries move off the
+/// gossiped documents onto on-demand mesh fetch. Members-only and signed, like catch-up.
+const KIND_BLOB_FETCH: u8 = 5;
+/// Ceiling on a blob **response** accepted from a serving peer before storing. The blob's
+/// content address is re-verified on store (so a wrong blob is rejected regardless); this
+/// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
+const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
+/// Minimum interval (ms, injected clock) between blob responses *served* to the same
+/// requesting **member** — a rate limit, since a 32-byte CID request can elicit a
+/// response up to `MAX_BLOB_RESPONSE` (the strongest amplifier in the system) plus a
+/// per-request signature. Mirrors `MIN_PEX_INTERVAL_MS`. (A bytes-budget / chunked
+/// anti-entropy for large blobs is deferred to the fileshare slice — see
+/// `MAX_CATCHUP_RESPONSE`.)
+const MIN_BLOB_INTERVAL_MS: u64 = 200;
 /// Cap on peer records returned in one PEX response / retained locally.
 const MAX_PEX_ENTRIES: usize = 64;
 /// Cap on dialable addresses carried per peer record.
@@ -115,6 +131,9 @@ const PEX_RESP_DOMAIN: &str = "catcoms/pex-resp/v1";
 /// member binds its dialable addresses + seq to its device key), so a PEX responder
 /// can only relay records peers signed themselves — it cannot forge a peer's address.
 const PEER_RECORD_DOMAIN: &str = "catcoms/peer-record/v1";
+/// Domain separator for a **responder's** signature over a blob-fetch response (8l) —
+/// same binding shape as the catch-up/PEX responses, distinct domain.
+const BLOB_FETCH_RESP_DOMAIN: &str = "catcoms/blob-fetch-resp/v1";
 
 /// Tunable bounds for the recovery/key-window machinery. Every field is a hard
 /// cap on memory the node will spend on out-of-order recovery, so a peer cannot
@@ -377,6 +396,47 @@ fn pex_resp_transcript(
         req_epoch,
         bundle,
     )
+}
+
+/// The responder transcript for a blob-fetch response (8l). Same binding shape as the
+/// catch-up/PEX responses (binds the blob to the requester's key + request), distinct
+/// domain — so a response cannot be lifted into another protocol or replayed.
+fn blob_fetch_resp_transcript(
+    group_id: &[u8],
+    requester_pubkey: &[u8],
+    request_ts_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    blob: &[u8],
+) -> Vec<u8> {
+    signed_resp_transcript(
+        BLOB_FETCH_RESP_DOMAIN,
+        group_id,
+        requester_pubkey,
+        request_ts_ms,
+        nonce,
+        req_epoch,
+        blob,
+    )
+}
+
+/// Encode a blob-fetch request inner body: just the 32-byte content address.
+fn encode_blob_fetch_req(cid: &Cid) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(cid.as_bytes()).expect("32 fits");
+    e.finish()
+}
+
+/// Decode a blob-fetch request inner body into its content address.
+fn decode_blob_fetch_req(bytes: &[u8]) -> Result<Cid, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let cid_bytes: [u8; 32] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok(Cid::from_bytes(cid_bytes))
 }
 
 /// Frame a signed commit-catch-up response: `responder_pubkey ‖ sig ‖ bundle`.
@@ -680,6 +740,9 @@ pub enum SyncError {
     /// An MLS-layer error.
     #[error(transparent)]
     Mls(#[from] catcoms_mls::MlsError),
+    /// A blob-store error (content-addressed storage).
+    #[error(transparent)]
+    Storage(#[from] StorageError),
     /// The requested document is not open here.
     #[error("document not open")]
     NoSuchDoc,
@@ -1273,6 +1336,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// transport connection, so multiple connections cannot multiply the rate).
     /// Bounded by `max_known_peers`.
     pex_served_at: HashMap<DeviceId, u64>,
+    /// Per-requesting-**device** timestamp of the last blob response served, for the blob
+    /// rate limit (same keying + bounding as `pex_served_at`).
+    blob_served_at: HashMap<DeviceId, u64>,
+    /// Content-addressed blob store for binaries fetched/served over the mesh (8l) —
+    /// avatars and, later, fileshare. An in-memory store by default; a persistent store
+    /// can be injected later. Boxed (not a generic param) so it does not ripple through
+    /// `Server<T, R>` and the actor.
+    blobs: Box<dyn BlobStore + Send>,
     /// Diagnostic counters (see [`SyncStats`]).
     stats: SyncStats,
 }
@@ -1316,6 +1387,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             welcome_outbox: Vec::new(),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
+            blob_served_at: HashMap::new(),
+            blobs: Box::new(MemoryBlobStore::new()),
             stats: SyncStats::default(),
         };
         // Seed the L=0 routing secret from the current epoch. Correct for the
@@ -2939,6 +3012,87 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Store a blob locally, returning its content address (8l).
+    pub fn put_blob(&mut self, bytes: &[u8]) -> Result<Cid, SyncError> {
+        Ok(self.blobs.put(bytes)?)
+    }
+
+    /// Fetch a locally-held blob by content address (`None` if not held).
+    pub fn get_blob(&self, cid: &Cid) -> Option<Vec<u8>> {
+        self.blobs.get(cid).ok().flatten()
+    }
+
+    /// Whether a blob is held locally.
+    pub fn has_blob(&self, cid: &Cid) -> bool {
+        self.blobs.has(cid)
+    }
+
+    /// Fetch a blob by content address from `peer`, verify it, and store it. Returns
+    /// `Ok(true)` if fetched (or already held), `Ok(false)` if the peer did not have it.
+    /// The response is members-only and signed (bound to this request); the served bytes
+    /// are re-hashed against the requested address before storing, so a member cannot
+    /// substitute different bytes under it.
+    pub async fn request_blob(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        cid: &Cid,
+    ) -> Result<bool, SyncError> {
+        if self.blobs.has(cid) {
+            return Ok(true);
+        }
+        let (req, auth) =
+            self.build_authed_request(KIND_BLOB_FETCH, &encode_blob_fetch_req(cid))?;
+        let resp = self
+            .transport
+            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+            .await?;
+        if resp.is_empty() {
+            return Ok(false); // the peer did not have this blob
+        }
+        if resp.len() > MAX_BLOB_RESPONSE {
+            tracing::warn!(bytes = resp.len(), "oversized blob response dropped");
+            return Err(SyncError::Malformed);
+        }
+        let (responder_pubkey, signature, blob) = decode_signed_commit_resp(&resp)?;
+        // The responder must be a current member, and the signature must bind this blob to
+        // our exact request (key + ts + nonce + epoch).
+        let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
+        if !self.group.contains_device(&responder) {
+            return Err(SyncError::Malformed);
+        }
+        let transcript = blob_fetch_resp_transcript(
+            &self.group.group_id(),
+            &self.device.public_key_bytes(),
+            auth.ts,
+            &auth.nonce,
+            auth.epoch,
+            &blob,
+        );
+        if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
+            tracing::warn!("blob response signature invalid; dropped");
+            return Err(SyncError::Malformed);
+        }
+        // Verify the served bytes hash to the address we asked for *before* storing them.
+        if Cid::of(&blob) != *cid {
+            tracing::warn!("served blob content-address mismatch; dropped");
+            return Err(SyncError::Malformed);
+        }
+        self.blobs.put(&blob)?;
+        Ok(true)
+    }
+
+    /// Fetch a blob from the **best known peer** (a proven member, else any known peer).
+    /// `Ok(false)` if there is no peer to ask, or the peer did not have it.
+    pub async fn request_blob_best(&mut self, cid: &Cid) -> Result<bool, SyncError> {
+        if self.blobs.has(cid) {
+            return Ok(true);
+        }
+        match self.pick_catchup_peer() {
+            Some(peer) => self.request_blob(peer, cid).await,
+            None => Ok(false),
+        }
+    }
+
     /// Request missed membership commits from `peer` starting at `from_epoch` and
     /// replay them in order. Returns the number of commits applied. This is the
     /// recovery path for a member that missed a control-topic broadcast.
@@ -3187,8 +3341,70 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.serve_commit_catchup(rest).unwrap_or_default()
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
+            Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(rest).unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    /// Record that we served a blob to requester `device` at `now`, for the rate limit;
+    /// bound the map by evicting the stalest entry (mirrors `note_pex_served`).
+    fn note_blob_served(&mut self, device: DeviceId, now: u64) {
+        self.blob_served_at.insert(device, now);
+        while self.blob_served_at.len() > self.config.max_known_peers {
+            let victim = self
+                .blob_served_at
+                .iter()
+                .min_by_key(|(_, &t)| t)
+                .map(|(p, _)| *p);
+            match victim {
+                Some(v) => {
+                    self.blob_served_at.remove(&v);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Serve a content-addressed blob — only to a proven current member, rate-limited per
+    /// requester (blob is the strongest amplifier), signing the response bound to the
+    /// requester's request. An empty response means not held (or rate-limited).
+    fn serve_blob_fetch(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_BLOB_FETCH, data)?;
+        let requester = DeviceId::from_public_key_bytes(&req_pubkey);
+        let now = self.clock.now_ms();
+        if let Some(&last) = self.blob_served_at.get(&requester) {
+            if now.saturating_sub(last) < MIN_BLOB_INTERVAL_MS {
+                tracing::trace!("blob fetch rate-limited; serving empty");
+                return Some(Vec::new());
+            }
+        }
+        let cid = decode_blob_fetch_req(&inner).ok()?;
+        let blob = self.blobs.get(&cid).ok()??;
+        if blob.len() > MAX_BLOB_RESPONSE {
+            tracing::warn!(
+                bytes = blob.len(),
+                "held blob exceeds response budget; not served"
+            );
+            return None;
+        }
+        let transcript = blob_fetch_resp_transcript(
+            &self.group.group_id(),
+            &req_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            &blob,
+        );
+        let signature = self.device.sign(&transcript).ok()?;
+        // Only the expensive serve path (a held blob, read + signed) counts toward the
+        // rate limit; a miss is cheap and not throttled.
+        self.note_blob_served(requester, now);
+        tracing::debug!(bytes = blob.len(), "serving blob");
+        Some(encode_signed_commit_resp(
+            &self.device.public_key_bytes(),
+            &signature,
+            &blob,
+        ))
     }
 
     /// Serve a document's history — but only to a requester that proved current
@@ -4160,6 +4376,54 @@ mod tests {
         assert!(alice.peer_record(&carol_id).is_some());
         // Discovery candidates only — no catch-up-source promotion.
         assert_eq!(alice.stats().member_peers, 0);
+    }
+
+    #[tokio::test]
+    async fn a_blob_is_fetched_from_a_member_over_the_mesh() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+
+        // An address no member holds → Ok(false), not an error.
+        let missing = Cid::of(b"no member holds this");
+        let (got, _) = tokio::join!(bob.request_blob(alice_peer, &missing), alice.run_once());
+        assert!(!got.unwrap(), "a blob no peer holds returns false");
+        assert!(!bob.has_blob(&missing));
+
+        // Alice holds a content-addressed blob (e.g. an avatar); Bob fetches it by address.
+        let data = b"a content-addressed blob the gossip docs should not carry".to_vec();
+        let cid = alice.put_blob(&data).unwrap();
+        assert!(!bob.has_blob(&cid));
+        let (fetched, _) = tokio::join!(bob.request_blob(alice_peer, &cid), alice.run_once());
+        assert!(fetched.unwrap(), "Bob fetched the blob from a member");
+        assert_eq!(bob.get_blob(&cid), Some(data));
+        assert!(bob.has_blob(&cid), "and it is now held locally");
+    }
+
+    #[tokio::test]
+    async fn blob_serving_is_rate_limited_per_requester() {
+        // The injected clock is fixed in the test harness, so two serves land within
+        // MIN_BLOB_INTERVAL_MS — the second is throttled to an empty reply.
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+
+        let cid1 = alice.put_blob(b"blob one").unwrap();
+        let cid2 = alice.put_blob(b"blob two").unwrap();
+
+        let (f1, _) = tokio::join!(bob.request_blob(alice_peer, &cid1), alice.run_once());
+        assert!(f1.unwrap(), "first blob served");
+
+        let (f2, _) = tokio::join!(bob.request_blob(alice_peer, &cid2), alice.run_once());
+        assert!(
+            !f2.unwrap(),
+            "a second blob within the interval is rate-limited"
+        );
+        assert!(!bob.has_blob(&cid2));
     }
 
     #[tokio::test]
