@@ -452,6 +452,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcoms-discovery"
+version = "0.0.0"
+dependencies = [
+ "catcoms-rt",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "tracing",
+]
+
+[[package]]
 name = "catcoms-log"
 version = "0.0.0"
 dependencies = [

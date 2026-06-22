@@ -1,0 +1,17 @@
+[package]
+name = "catcoms-discovery"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+catcoms-rt = { path = "../catcoms-rt" }
+tracing.workspace = true
+
+[dev-dependencies]
+rand_chacha = "0.3"
+rand_core = "0.6"
+
+[lints]
+workspace = true

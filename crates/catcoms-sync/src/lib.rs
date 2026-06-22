@@ -262,13 +262,17 @@ fn join_transcript(
 
 /// The transcript a requester signs to prove it is a current member when asking
 /// for catch-up, binding the proof to the group, the request kind + body, the
-/// requester's own key, and a freshness timestamp.
+/// requester's own key, a freshness timestamp, a **per-request nonce** (anti-replay,
+/// closing the same-millisecond-`ts` collision window), and the requester's **epoch**
+/// at request time (so a captured request cannot be replayed into a later state).
 fn catchup_auth_transcript(
     group_id: &[u8],
     kind: u8,
     inner: &[u8],
     requester_pubkey: &[u8],
     timestamp_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
 ) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_str(CATCHUP_AUTH_DOMAIN).expect("label fits");
@@ -277,16 +281,22 @@ fn catchup_auth_transcript(
     e.put_bytes(inner).expect("inner fits");
     e.put_bytes(requester_pubkey).expect("pubkey fits");
     e.put_u64(timestamp_ms);
+    e.put_bytes(nonce).expect("16 fits");
+    e.put_u64(req_epoch);
     e.finish()
 }
 
 /// The transcript a **responder** signs over a commit-catch-up bundle, binding it to
-/// the group, the requester's key, the request timestamp (anti-replay), and the
-/// bundle bytes — so the requester can verify the bundle was served by a member.
+/// the group, the requester's key, the request timestamp, the request's **nonce** and
+/// **epoch** (so a captured response cannot be replayed against a *different* request,
+/// even one issued in the same millisecond), and the bundle bytes — so the requester
+/// can verify the bundle was served by a member for *this exact* request.
 fn catchup_resp_transcript(
     group_id: &[u8],
     requester_pubkey: &[u8],
     request_ts_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
     bundle: &[u8],
 ) -> Vec<u8> {
     let mut e = Encoder::new();
@@ -294,6 +304,8 @@ fn catchup_resp_transcript(
     e.put_bytes(group_id).expect("group id fits");
     e.put_bytes(requester_pubkey).expect("pubkey fits");
     e.put_u64(request_ts_ms);
+    e.put_bytes(nonce).expect("16 fits");
+    e.put_u64(req_epoch);
     e.put_bytes(bundle).expect("bundle fits");
     e.finish()
 }
@@ -328,37 +340,62 @@ fn decode_signed_commit_resp(bytes: &[u8]) -> Result<SignedCommitResp, SyncError
     Ok((pubkey, signature, bundle))
 }
 
-/// Frame an authenticated catch-up request body: `inner ‖ pubkey ‖ ts ‖ sig`.
+/// Frame an authenticated catch-up request body: `inner ‖ pubkey ‖ ts ‖ nonce ‖
+/// req_epoch ‖ sig`.
 fn encode_authed_request(
     inner: &[u8],
     requester_pubkey: &[u8],
     timestamp_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
     signature: &[u8; 64],
 ) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_bytes(inner).expect("inner fits");
     e.put_bytes(requester_pubkey).expect("pubkey fits");
     e.put_u64(timestamp_ms);
+    e.put_bytes(nonce).expect("16 fits");
+    e.put_u64(req_epoch);
     e.put_bytes(signature).expect("64 fits");
     e.finish()
 }
 
-/// A parsed authenticated request: `(inner body, requester pubkey, timestamp, signature)`.
-type AuthedRequest = (Vec<u8>, Vec<u8>, u64, [u8; 64]);
+/// A parsed authenticated request: `(inner body, requester pubkey, timestamp, nonce,
+/// req_epoch, signature)`.
+type AuthedRequest = (Vec<u8>, Vec<u8>, u64, [u8; 16], u64, [u8; 64]);
 
-/// Parse an authenticated catch-up request body into `(inner, pubkey, ts, sig)`.
+/// Parse an authenticated catch-up request body into
+/// `(inner, pubkey, ts, nonce, req_epoch, sig)`.
 fn decode_authed_request(bytes: &[u8]) -> Result<AuthedRequest, SyncError> {
     let mut d = Decoder::new(bytes);
     let inner = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
     let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
     let timestamp_ms = d.get_u64().map_err(|_| SyncError::Malformed)?;
+    let nonce: [u8; 16] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let req_epoch = d.get_u64().map_err(|_| SyncError::Malformed)?;
     let signature: [u8; 64] = d
         .get_bytes()
         .map_err(|_| SyncError::Malformed)?
         .try_into()
         .map_err(|_| SyncError::Malformed)?;
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((inner, pubkey, timestamp_ms, signature))
+    Ok((inner, pubkey, timestamp_ms, nonce, req_epoch, signature))
+}
+
+/// Metadata a requester retains about a signed catch-up request (and a serving
+/// handler recovers from one), so a responder's signed reply can be bound to *this
+/// exact* request: the freshness timestamp, a per-request random nonce, and the
+/// requester's epoch at request time. The nonce + epoch close the same-millisecond
+/// `ts`-collision replay window the 6e-3d-5 review flagged.
+#[derive(Debug, Clone, Copy)]
+struct RequestAuth {
+    ts: u64,
+    nonce: [u8; 16],
+    epoch: u64,
 }
 
 /// Decoded join response: `(welcome, inviter signature, sealed routing transfer)`.
@@ -597,13 +634,19 @@ fn channel_topic(
     doc_id: u128,
     slot: u64,
 ) -> Topic {
-    let mut h = blake3::Hasher::new_keyed(ns_secret);
-    h.update(b"catcoms/topic/v2");
-    h.update(group_id);
-    h.update(&slot.to_be_bytes());
-    h.update(&doc_type.tag().to_be_bytes());
-    h.update(&doc_id.to_be_bytes());
-    Topic::new(h.finalize().as_bytes().to_vec())
+    // Canonical, length-prefixed preimage (the Encoder frames every variable field)
+    // so no two distinct (group_id, slot, type, id) tuples can collide into one topic.
+    let mut e = Encoder::new();
+    e.put_str("catcoms/topic/v2").expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_u64(slot);
+    e.put_u16(doc_type.tag());
+    e.put_u128(doc_id);
+    Topic::new(
+        blake3::keyed_hash(ns_secret, &e.finish())
+            .as_bytes()
+            .to_vec(),
+    )
 }
 
 /// The per-group **control** topic carrying membership commits at routing label
@@ -612,11 +655,66 @@ fn channel_topic(
 /// by publishing a removal commit on the pre-rotation topic and a grandfathered
 /// subscription window.
 fn control_topic(ns_secret: &[u8; 32], group_id: &[u8], slot: u64) -> Topic {
-    let mut h = blake3::Hasher::new_keyed(ns_secret);
-    h.update(b"catcoms/control/v3");
-    h.update(group_id);
-    h.update(&slot.to_be_bytes());
-    Topic::new(h.finalize().as_bytes().to_vec())
+    let mut e = Encoder::new();
+    e.put_str("catcoms/control/v3").expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_u64(slot);
+    Topic::new(
+        blake3::keyed_hash(ns_secret, &e.finish())
+            .as_bytes()
+            .to_vec(),
+    )
+}
+
+/// Domain separator for the pre-dial member-verifiable registration tag (6e-3d-6).
+const RZ_TAG_DOMAIN: &str = "catcoms/rz-tag/v1";
+
+/// The member-only registration **tag** a discoverer recomputes (it holds
+/// `ns_secret_L`) to confirm a discovered record was published by a real member at
+/// routing label `slot`, *before* spending a dial on it. It binds the registrant's
+/// libp2p `peer_id` and its signed record `seq` so:
+///
+/// - a **non-member** (no `ns_secret_L`) cannot forge one — a leaked/guessed-namespace
+///   Sybil flood is one rejected hash, **no dial**;
+/// - a **colluding rendezvous** cannot graft a real member's tag onto an injected
+///   Sybil record — the Sybil's `peer_id` differs, so the bound tag will not verify; and
+/// - a **removed** member's `L-1` tag is rejected by a discoverer who has applied the
+///   removal (it derives the tag under the new `ns_secret_L`).
+///
+/// It rides as a registrant-signed synthetic address in the libp2p `PeerRecord`
+/// (carried + verified end-to-end in 6e-3d-9; this is the cryptographic primitive).
+fn routing_membership_tag(
+    ns_secret: &[u8; 32],
+    group_id: &[u8],
+    rz_peer: &[u8],
+    slot: u64,
+    peer_id: &[u8],
+    seq: u64,
+) -> [u8; 16] {
+    // Canonical, length-prefixed preimage: framing rz_peer and peer_id makes their
+    // boundary unambiguous, so a colluding rendezvous cannot shift bytes between them
+    // to graft a real member's tag onto a Sybil with a different peer id.
+    let mut e = Encoder::new();
+    e.put_str(RZ_TAG_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_u64(slot);
+    e.put_bytes(rz_peer).expect("rz peer fits");
+    e.put_bytes(peer_id).expect("peer id fits");
+    e.put_u64(seq);
+    let hash = blake3::keyed_hash(ns_secret, &e.finish());
+    let mut tag = [0u8; 16];
+    tag.copy_from_slice(&hash.as_bytes()[..16]);
+    tag
+}
+
+/// Constant-time equality for a 16-byte tag (no early-out on the first differing byte,
+/// so a verifier leaks no timing signal about how much of a forged tag matched).
+fn ct_eq_16(a: &[u8; 16], b: &[u8; 16]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..16 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
 }
 
 /// Control-topic envelope tags (first byte of every control message). New op kinds
@@ -1328,28 +1426,50 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.catchup_queue.push(task);
     }
 
-    /// Build an authenticated catch-up request: `[kind] ‖ inner ‖ pubkey ‖ ts ‖ sig`,
-    /// where the signature is this member's proof it is currently in the group.
-    /// Build a signed catch-up request, returning the framed bytes and the timestamp
-    /// it was signed with (so the caller can later verify a responder's signed reply
-    /// is bound to this exact request).
-    fn build_authed_request(&self, kind: u8, inner: &[u8]) -> Result<(Vec<u8>, u64), SyncError> {
+    /// Build an authenticated catch-up request: `[kind] ‖ inner ‖ pubkey ‖ ts ‖
+    /// nonce ‖ req_epoch ‖ sig`, where the signature is this member's proof it is
+    /// currently in the group. Returns the framed bytes and the request's
+    /// [`RequestAuth`] (ts/nonce/epoch) so the caller can later verify a responder's
+    /// signed reply is bound to this exact request (anti-replay).
+    fn build_authed_request(
+        &mut self,
+        kind: u8,
+        inner: &[u8],
+    ) -> Result<(Vec<u8>, RequestAuth), SyncError> {
         let pubkey = self.device.public_key_bytes();
         let ts = self.clock.now_ms();
-        let transcript = catchup_auth_transcript(&self.group.group_id(), kind, inner, &pubkey, ts);
+        let mut nonce = [0u8; 16];
+        self.rng.fill_bytes(&mut nonce);
+        let epoch = self.group.epoch();
+        let transcript = catchup_auth_transcript(
+            &self.group.group_id(),
+            kind,
+            inner,
+            &pubkey,
+            ts,
+            &nonce,
+            epoch,
+        );
         let signature = self.device.sign(&transcript)?;
         let mut out = vec![kind];
-        out.extend_from_slice(&encode_authed_request(inner, &pubkey, ts, &signature));
-        Ok((out, ts))
+        out.extend_from_slice(&encode_authed_request(
+            inner, &pubkey, ts, &nonce, epoch, &signature,
+        ));
+        Ok((out, RequestAuth { ts, nonce, epoch }))
     }
 
     /// Verify an inbound authenticated catch-up request and return its inner body
     /// iff the requester proved current group membership with a fresh signature.
     /// Counts a rejection in [`SyncStats`]. `kind` is the matched request kind.
-    /// Returns `(inner body, requester pubkey, request timestamp)` on success — the
-    /// pubkey + ts let a serving handler bind its signed reply to this request.
-    fn authenticate_request(&mut self, kind: u8, data: &[u8]) -> Option<(Vec<u8>, Vec<u8>, u64)> {
-        let (inner, pubkey, ts, signature) = match decode_authed_request(data) {
+    /// Returns `(inner body, requester pubkey, [`RequestAuth`])` on success — the
+    /// pubkey + auth metadata let a serving handler bind its signed reply to this
+    /// exact request (the nonce + epoch close the same-millisecond replay window).
+    fn authenticate_request(
+        &mut self,
+        kind: u8,
+        data: &[u8],
+    ) -> Option<(Vec<u8>, Vec<u8>, RequestAuth)> {
+        let (inner, pubkey, ts, nonce, req_epoch, signature) = match decode_authed_request(data) {
             Ok(parts) => parts,
             Err(_) => {
                 self.stats.requests_rejected += 1;
@@ -1370,13 +1490,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.stats.requests_rejected += 1;
             return None;
         }
-        let transcript = catchup_auth_transcript(&self.group.group_id(), kind, &inner, &pubkey, ts);
+        let transcript = catchup_auth_transcript(
+            &self.group.group_id(),
+            kind,
+            &inner,
+            &pubkey,
+            ts,
+            &nonce,
+            req_epoch,
+        );
         if !verify_with_public_bytes(&pubkey, &transcript, &signature) {
             tracing::warn!("catch-up request signature invalid; refused");
             self.stats.requests_rejected += 1;
             return None;
         }
-        Some((inner, pubkey, ts))
+        Some((
+            inner,
+            pubkey,
+            RequestAuth {
+                ts,
+                nonce,
+                epoch: req_epoch,
+            },
+        ))
     }
 
     /// Snapshot the channel keys for every open document at the **current** epoch,
@@ -1586,12 +1722,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// colluding rendezvous cannot join their logs on an identical namespace.
     fn derive_namespace(&self, rz_peer: &[u8], slot: u64) -> Option<String> {
         let secret = self.routing_secrets.get(&slot)?;
-        let mut h = blake3::Hasher::new_keyed(secret);
-        h.update(b"catcoms/rendezvous/ns/v1");
-        h.update(&self.group.group_id());
-        h.update(&slot.to_be_bytes());
-        h.update(rz_peer);
-        let hash = h.finalize();
+        // Canonical, length-prefixed preimage (matches the topic + tag hashers) so the
+        // group_id ‖ rz_peer boundary is unambiguous.
+        let mut e = Encoder::new();
+        e.put_str("catcoms/rendezvous/ns/v1").expect("label fits");
+        e.put_bytes(&self.group.group_id()).expect("group id fits");
+        e.put_u64(slot);
+        e.put_bytes(rz_peer).expect("rz peer fits");
+        let hash = blake3::keyed_hash(secret, &e.finish());
         let hex = hash.to_hex();
         // 20 bytes / 160 bits of the keyed hash is ample collision resistance and
         // keeps the namespace short (49 ASCII bytes, well under the 255-byte cap).
@@ -1615,6 +1753,62 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         out
+    }
+
+    /// Map a discovered namespace string back to its routing label, if it is one this
+    /// node currently registers/discovers under (current or grandfathered). Used to
+    /// know which `ns_secret_slot` a discovered record's tag must verify under.
+    fn namespace_slot(&self, rz_peer: &[u8], namespace: &str) -> Option<u64> {
+        let lowest = self.routing_label.saturating_sub(2);
+        (lowest..=self.routing_label)
+            .rev()
+            .find(|&slot| self.derive_namespace(rz_peer, slot).as_deref() == Some(namespace))
+    }
+
+    /// The member-verifiable registration tag THIS node attaches when registering its
+    /// own record `(peer_id, seq)` under routing label `slot` at rendezvous `rz_peer`.
+    /// `None` if that label's routing secret is no longer retained. See
+    /// [`routing_membership_tag`].
+    pub fn membership_tag(
+        &self,
+        rz_peer: &[u8],
+        slot: u64,
+        peer_id: &[u8],
+        seq: u64,
+    ) -> Option<[u8; 16]> {
+        let secret = self.routing_secrets.get(&slot)?;
+        Some(routing_membership_tag(
+            secret,
+            &self.group.group_id(),
+            rz_peer,
+            slot,
+            peer_id,
+            seq,
+        ))
+    }
+
+    /// Verify a discovered record's registration tag **before dialing** it: resolve
+    /// the routing label from the namespace it was discovered under (current or
+    /// grandfathered), recompute the tag under that label's `ns_secret`, and
+    /// constant-time compare. Fails closed for a namespace this node does not
+    /// recognise (an attacker's, or a label outside the grandfather window) and for a
+    /// tag bound to a different `peer_id`/`seq`. This is the input to the
+    /// `DiscoveryPolicy`'s `tag_verified` flag.
+    pub fn verify_membership_tag(
+        &self,
+        rz_peer: &[u8],
+        namespace: &str,
+        peer_id: &[u8],
+        seq: u64,
+        tag: &[u8; 16],
+    ) -> bool {
+        let Some(slot) = self.namespace_slot(rz_peer, namespace) else {
+            return false;
+        };
+        match self.membership_tag(rz_peer, slot, peer_id, seq) {
+            Some(expected) => ct_eq_16(&expected, tag),
+            None => false,
+        }
     }
 
     /// Seal this member's routing state (`L` + the retained `ns_secret_L` history)
@@ -2217,7 +2411,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_type: DocType,
         doc_id: u128,
     ) -> Result<usize, SyncError> {
-        let (req, _ts) =
+        let (req, _auth) =
             self.build_authed_request(KIND_CATCHUP, &encode_catchup_req(doc_type, doc_id))?;
         tracing::debug!(?doc_type, doc_id, ?peer, "request doc catch-up");
         self.stats.doc_catchups_requested += 1;
@@ -2264,7 +2458,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: PeerId,
         from_epoch: u64,
     ) -> Result<usize, SyncError> {
-        let (req, req_ts) =
+        let (req, req_auth) =
             self.build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(from_epoch))?;
         tracing::debug!(from_epoch, ?peer, "request commit catch-up");
         self.stats.commit_catchups_requested += 1;
@@ -2284,14 +2478,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         // The response must be signed by a current member, bound to THIS request — so
         // an un-handshaked peer cannot feed us a trusted bundle or be promoted as a
-        // catch-up source (6e-3d-5, the Sybil-C1 fix). Anti-replay binds to the
-        // request timestamp; a per-request nonce + an epoch bind are a 6e-3d-6
-        // follow-up. An invalid response fills no gap, so the drain marks it failed.
+        // catch-up source (6e-3d-5, the Sybil-C1 fix). Anti-replay binds the response
+        // to the request timestamp **and** a per-request nonce + the requester epoch
+        // (6e-3d-6, below), closing the same-millisecond `ts`-collision window — so a
+        // captured member response cannot be replayed against a different request. An
+        // invalid response fills no gap, so the drain marks it failed.
         let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(&resp)?;
         let group_id = self.group.group_id();
         let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
         let my_pubkey = self.device.public_key_bytes();
-        let transcript = catchup_resp_transcript(&group_id, &my_pubkey, req_ts, &bundle);
+        // Reconstruct the response transcript with OUR remembered request metadata
+        // (ts/nonce/epoch). A relay that tampered the nonce in transit makes the
+        // responder sign a different transcript than we reconstruct → verify fails.
+        let transcript = catchup_resp_transcript(
+            &group_id,
+            &my_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            &bundle,
+        );
         if !self.group.contains_device(&responder) {
             // Not in the current roster (e.g. a since-removed member): demote it from
             // the trusted pool so it is no longer preferred, and reject the bundle.
@@ -2472,7 +2678,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// group membership (the bundle, though sealed, still carries member-only
     /// framing/metadata, so it is members-only).
     fn serve_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (inner, _pubkey, _ts) = self.authenticate_request(KIND_CATCHUP, data)?;
+        let (inner, _pubkey, _auth) = self.authenticate_request(KIND_CATCHUP, data)?;
         let (doc_type, doc_id) = decode_catchup_req(&inner).ok()?;
         let doc = self.docs.get(&(doc_type, doc_id))?;
         match doc.export_catchup(&self.group, &self.device, &mut self.rng) {
@@ -2502,7 +2708,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// commit log, in epoch order — only to a proven current member (the records'
     /// framing reveals group id + member device ids, so this is members-only).
     fn serve_commit_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let (inner, req_pubkey, req_ts) = self.authenticate_request(KIND_COMMIT_CATCHUP, data)?;
+        let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_COMMIT_CATCHUP, data)?;
         let from_epoch = decode_commit_catchup_req(&inner).ok()?;
         // Take a contiguous prefix from `from_epoch` that fits the byte budget.
         let mut records: Vec<CommitRecord> = Vec::new();
@@ -2530,8 +2736,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // promote us as a catch-up source). An attacker who is not in the roster
         // cannot produce a verifying signature.
         let bundle = encode_commit_bundle(&records);
-        let transcript =
-            catchup_resp_transcript(&self.group.group_id(), &req_pubkey, req_ts, &bundle);
+        let transcript = catchup_resp_transcript(
+            &self.group.group_id(),
+            &req_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            &bundle,
+        );
         let signature = self.device.sign(&transcript).ok()?;
         Some(encode_signed_commit_resp(
             &self.device.public_key_bytes(),
@@ -2995,8 +3207,11 @@ mod tests {
         let gid = group.group_id();
         let requester_pubkey = vec![1u8; 32];
         let req_ts = 1_234u64;
+        let nonce = [9u8; 16];
+        let req_epoch = 3u64;
         let bundle = b"a-bundle".to_vec();
-        let transcript = catchup_resp_transcript(&gid, &requester_pubkey, req_ts, &bundle);
+        let transcript =
+            catchup_resp_transcript(&gid, &requester_pubkey, req_ts, &nonce, req_epoch, &bundle);
 
         // Accepted: Alice is a member and her signature over this transcript verifies.
         let alice_sig = alice.sign(&transcript).unwrap();
@@ -3018,7 +3233,14 @@ mod tests {
         assert!(!group.contains_device(&mallory.device_id()));
 
         // Rejected: a tampered bundle breaks the signature.
-        let tampered = catchup_resp_transcript(&gid, &requester_pubkey, req_ts, b"tampered");
+        let tampered = catchup_resp_transcript(
+            &gid,
+            &requester_pubkey,
+            req_ts,
+            &nonce,
+            req_epoch,
+            b"tampered",
+        );
         assert!(!verify_with_public_bytes(
             &alice.public_key_bytes(),
             &tampered,
@@ -3027,12 +3249,65 @@ mod tests {
 
         // Rejected: replaying the reply against a different request (different ts)
         // breaks the binding, so a captured response cannot be reused.
-        let other_request = catchup_resp_transcript(&gid, &requester_pubkey, req_ts + 1, &bundle);
+        let other_ts = catchup_resp_transcript(
+            &gid,
+            &requester_pubkey,
+            req_ts + 1,
+            &nonce,
+            req_epoch,
+            &bundle,
+        );
         assert!(!verify_with_public_bytes(
             &alice.public_key_bytes(),
-            &other_request,
+            &other_ts,
             &alice_sig
         ));
+
+        // Rejected: a DIFFERENT nonce (same ts) — the 6e-3d-6 anti-replay bind that
+        // closes the same-millisecond `ts`-collision window — also breaks the binding.
+        let other_nonce = catchup_resp_transcript(
+            &gid,
+            &requester_pubkey,
+            req_ts,
+            &[10u8; 16],
+            req_epoch,
+            &bundle,
+        );
+        assert!(!verify_with_public_bytes(
+            &alice.public_key_bytes(),
+            &other_nonce,
+            &alice_sig
+        ));
+
+        // Rejected: a different requester epoch breaks the binding too.
+        let other_epoch = catchup_resp_transcript(
+            &gid,
+            &requester_pubkey,
+            req_ts,
+            &nonce,
+            req_epoch + 1,
+            &bundle,
+        );
+        assert!(!verify_with_public_bytes(
+            &alice.public_key_bytes(),
+            &other_epoch,
+            &alice_sig
+        ));
+    }
+
+    #[test]
+    fn an_authed_request_roundtrips_with_its_nonce_and_epoch() {
+        // The framed request carries the nonce + req_epoch verbatim so the verifier
+        // can reconstruct the exact transcript (6e-3d-6).
+        let inner = b"inner-body".to_vec();
+        let pubkey = vec![2u8; 32];
+        let ts = 77u64;
+        let nonce = [5u8; 16];
+        let epoch = 9u64;
+        let sig = [3u8; 64];
+        let framed = encode_authed_request(&inner, &pubkey, ts, &nonce, epoch, &sig);
+        let (i, p, t, n, e, s) = decode_authed_request(&framed).unwrap();
+        assert_eq!((i, p, t, n, e, s), (inner, pubkey, ts, nonce, epoch, sig));
     }
 
     #[test]
@@ -3064,6 +3339,57 @@ mod tests {
             Some(PeerId::from_u64(1)),
             "a demoted ex-member is no longer preferred"
         );
+    }
+
+    #[test]
+    fn a_membership_tag_binds_the_secret_label_and_peer() {
+        // 6e-3d-6 pre-dial tag: only a member (holding ns_secret_L) can produce a tag
+        // that verifies, and it is bound to the registrant's peer id + seq.
+        let node = solo_node();
+        let rz = b"rendezvous-peer-id-bytes";
+        let namespaces = node.rendezvous_namespaces(rz);
+        let namespace = namespaces.first().expect("a namespace at L=0").clone();
+        let peer = b"member-libp2p-peer-id";
+        let seq = 5u64;
+        let tag = node.membership_tag(rz, 0, peer, seq).expect("tag at L=0");
+
+        // The member that produced it verifies its own tag.
+        assert!(node.verify_membership_tag(rz, &namespace, peer, seq, &tag));
+        // Bound to the peer id: a different peer id does not verify (defeats a
+        // colluding rendezvous grafting a real tag onto a Sybil record).
+        assert!(!node.verify_membership_tag(rz, &namespace, b"a-different-peer", seq, &tag));
+        // Bound to the record seq.
+        assert!(!node.verify_membership_tag(rz, &namespace, peer, seq + 1, &tag));
+        // A flipped tag bit fails (constant-time compare still rejects).
+        let mut bad = tag;
+        bad[0] ^= 0x01;
+        assert!(!node.verify_membership_tag(rz, &namespace, peer, seq, &bad));
+        // A namespace this node does not recognise fails closed (no dial on junk).
+        assert!(!node.verify_membership_tag(rz, "catcoms1-0000000000", peer, seq, &tag));
+
+        // A DIFFERENT group (different ns_secret) cannot verify this tag, even handed
+        // the namespace string — it derives a different namespace, so it doesn't even
+        // recognise this one (fails closed), and could never recompute the tag.
+        let other = solo_node();
+        assert!(!other.verify_membership_tag(rz, &namespace, peer, seq, &tag));
+    }
+
+    #[test]
+    fn membership_tag_preimage_is_canonical_across_field_boundaries() {
+        // Length-prefixing makes the rz_peer ‖ peer_id boundary unambiguous: shifting a
+        // byte from one field to the other yields a different tag, so a colluding
+        // rendezvous cannot graft a real member's tag onto a Sybil by choosing a
+        // boundary-confusable (rz_peer, peer_id) split.
+        let secret = [3u8; 32];
+        let gid = b"group-id";
+        // rz_peer and peer_id are the only two adjacent variable-length fields, so they
+        // are the boundary a colluding rendezvous would target. (rz_peer="AB",
+        // peer_id="CD") and (rz_peer="A", peer_id="BCD") share an identical raw
+        // concatenation but are distinct fields — length-prefixing keeps the tags
+        // distinct (a raw-concat hash would collide them).
+        let a = routing_membership_tag(&secret, gid, b"AB", 0, b"CD", 7);
+        let b = routing_membership_tag(&secret, gid, b"A", 0, b"BCD", 7);
+        assert_ne!(a, b, "rz_peer/peer_id boundary must be unambiguous");
     }
 
     #[test]
