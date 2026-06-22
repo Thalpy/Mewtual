@@ -555,6 +555,7 @@ dependencies = [
  "blake3",
  "bytes",
  "catcoms-crypto",
+ "catcoms-discovery",
  "catcoms-log",
  "catcoms-mls",
  "catcoms-net",
@@ -583,6 +584,7 @@ name = "catcomsctl"
 version = "0.0.0"
 dependencies = [
  "automerge",
+ "catcoms-discovery",
  "catcoms-log",
  "catcoms-mls",
  "catcoms-net",

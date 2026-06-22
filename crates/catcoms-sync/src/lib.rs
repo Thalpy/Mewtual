@@ -929,6 +929,32 @@ fn ct_eq_16(a: &[u8; 16], b: &[u8; 16]) -> bool {
     diff == 0
 }
 
+/// Domain separator for the pre-join rendezvous namespace.
+const JOIN_NS_DOMAIN: &str = "catcoms/join-rz/v1";
+
+/// The **pre-join** rendezvous namespace a joiner can compute from the invite alone
+/// (6e-3d-9), so it can discover the inviter at a rendezvous **without a hard-coded
+/// server address** — before it holds any group exporter secret. Keyed off the invite
+/// nonce (stretched to 32 bytes), bound to the group and the specific rendezvous node:
+///
+/// `join_ns = "catcoms1-" ‖ hex(BLAKE3_keyed(derive_key(nonce),
+///   "…/join-rz/v1" ‖ group_id ‖ rz_peer)[..20])`.
+///
+/// Its secrecy is bounded by the invite's — an invite-holder can compute it, which is
+/// acceptable for a single-use bootstrap rendezvous point. The inviter registers under
+/// it pre-join; once joined, the member switches to the secret, rotation-aware
+/// [`ChannelSync::rendezvous_namespaces`]. Both sides derive the identical string.
+pub fn join_namespace(group_id: &[u8], invite_nonce: &[u8; 16], rz_peer: &[u8]) -> String {
+    // Stretch the 16-byte nonce to a 32-byte keying key (the "HKDF" of the design).
+    let key = blake3::derive_key("catcoms/join-rz/hkdf/v1", invite_nonce);
+    let mut e = Encoder::new();
+    e.put_str(JOIN_NS_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(rz_peer).expect("rz peer fits");
+    let hash = blake3::keyed_hash(&key, &e.finish());
+    format!("catcoms1-{}", &hash.to_hex().as_str()[..40])
+}
+
 /// Control-topic envelope tags (first byte of every control message). New op kinds
 /// (further proposals, revocations) land in later 6d-2 sub-blocks.
 const CTRL_COMMIT: u8 = 0;
@@ -1358,6 +1384,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(self
             .group
             .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?)
+    }
+
+    /// Mint an invite that also carries zero-knowledge **rendezvous** infra addresses
+    /// (6e-3d-9), so a joiner can discover this server under the pre-join
+    /// [`join_namespace`] without a hard-coded address. The rendezvous set is bound
+    /// into the inviter signature.
+    pub fn mint_invite_with_rendezvous(
+        &self,
+        invite_nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+        rendezvous: Vec<String>,
+    ) -> Result<InviteToken, SyncError> {
+        Ok(self.group.mint_invite_with_rendezvous(
+            &self.device,
+            invite_nonce,
+            expires_at_ms,
+            bootstrap,
+            rendezvous,
+        )?)
     }
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
@@ -2999,6 +3045,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.transport.local_peer()
     }
 
+    /// Borrow the underlying transport, so the **discovery/dial layer** — which lives
+    /// *above* `ChannelSync` (the net Actor never auto-dials; the dial decision and
+    /// eclipse-resistance are a layer up) — can drive rendezvous register/discover and
+    /// dial discovered peers. `ChannelSync` itself never dials.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// Whether `device` is a current member of this group (for tests/diagnostics).
     pub fn contains_member(&self, device: &DeviceId) -> bool {
         self.group.contains_device(device)
@@ -3775,6 +3829,24 @@ mod tests {
             Some(PeerId::from_u64(1)),
             "a demoted ex-member is no longer preferred"
         );
+    }
+
+    #[test]
+    fn join_namespace_is_invite_derivable_and_per_rendezvous() {
+        // 6e-3d-9: a joiner derives this from the invite alone (no group secret), and
+        // it matches what the inviter registers under.
+        let gid = b"group-id-abc";
+        let nonce = [3u8; 16];
+        let (rz1, rz2) = (b"rendezvous-one", b"rendezvous-two");
+        let ns1 = join_namespace(gid, &nonce, rz1);
+        assert_eq!(ns1, join_namespace(gid, &nonce, rz1), "deterministic");
+        // Per-rendezvous diversification + binding to nonce and group.
+        assert_ne!(ns1, join_namespace(gid, &nonce, rz2));
+        assert_ne!(ns1, join_namespace(gid, &[4u8; 16], rz1));
+        assert_ne!(ns1, join_namespace(b"other-group", &nonce, rz1));
+        // Well-formed, short namespace (well under the 255-byte rendezvous cap).
+        assert!(ns1.starts_with("catcoms1-"));
+        assert!(ns1.len() <= 255);
     }
 
     #[test]

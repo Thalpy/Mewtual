@@ -159,6 +159,7 @@ fn invite_from_a_non_member_is_rejected() {
         invite_nonce: nonce(1),
         expires_at_ms: SOON,
         bootstrap: vec![],
+        rendezvous: vec![],
         signature: [0u8; 64],
     };
 
@@ -187,4 +188,34 @@ fn token_encode_decode_roundtrips() {
         .unwrap();
     let decoded = InviteToken::decode(&token.encode()).unwrap();
     assert_eq!(decoded, token);
+}
+
+#[test]
+fn token_with_rendezvous_roundtrips_and_binds_the_set() {
+    let (alice, group) = founded();
+    let token = group
+        .mint_invite_with_rendezvous(
+            &alice,
+            nonce(4),
+            SOON,
+            vec!["/dns/seed.example/tcp/9000/p2p/seedid".into()],
+            vec![
+                "/dns/rz1.example/tcp/5000/p2p/rzone".into(),
+                "/dns/rz2.example/tcp/5000/p2p/rztwo".into(),
+            ],
+        )
+        .unwrap();
+    assert!(token.verify_self());
+    let decoded = InviteToken::decode(&token.encode()).unwrap();
+    assert_eq!(decoded, token, "the rendezvous vector round-trips");
+    assert_eq!(decoded.rendezvous.len(), 2);
+
+    // The rendezvous set is bound into the signature: substituting an entry breaks it.
+    let mut tampered = token.clone();
+    tampered.rendezvous[0] = "/dns/evil.example/tcp/5000/p2p/evilid".into();
+    assert!(!tampered.verify_self());
+    // Stripping an entry likewise breaks it — a relay cannot remove a rendezvous.
+    let mut stripped = token.clone();
+    stripped.rendezvous.pop();
+    assert!(!stripped.verify_self());
 }

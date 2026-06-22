@@ -14,15 +14,17 @@ use std::time::Duration;
 
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
+use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
 use catcoms_net::{
-    build_relay_swarm, build_rendezvous_swarm, run_relay, run_rendezvous, MeshService,
+    build_relay_swarm, build_rendezvous_swarm, phase0_peer_id, run_relay, run_rendezvous,
+    validate_rendezvous_addrs, MeshService,
 };
 use catcoms_rt::{
     Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
     TransportEvent,
 };
-use catcoms_sync::{ChannelSync, SyncStats};
+use catcoms_sync::{join_namespace, ChannelSync, SyncStats};
 use catcoms_wire::DocType;
 use clap::{Parser, Subcommand};
 use libp2p::Multiaddr;
@@ -74,6 +76,11 @@ enum Command {
         /// (for reachability behind NAT). e.g. /ip4/1.2.3.4/tcp/4000/p2p/<relay-id>.
         #[arg(long)]
         relay: Option<String>,
+        /// Register at this rendezvous (a direct /ip4|dns/.../p2p/<id> multiaddr) under
+        /// the invite's pre-join `join_ns`, so a joiner can discover this server with no
+        /// hard-coded address (the invite then carries the rendezvous, not a bootstrap).
+        #[arg(long)]
+        rendezvous: Option<String>,
     },
     /// Run a zero-knowledge circuit-relay-v2 server: forward Noise+MLS ciphertext
     /// between peers that cannot connect directly. Print its dialable address.
@@ -114,7 +121,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             invite_file,
             host,
             relay,
-        } => run_serve(port, invite_file, host, relay).await?,
+            rendezvous,
+        } => run_serve(port, invite_file, host, relay, rendezvous).await?,
         Command::Join { invite_file } => run_join(invite_file).await?,
         Command::Relay { port } => run_relay_node(port).await?,
         Command::Rendezvous { port } => run_rendezvous_node(port).await?,
@@ -162,7 +170,18 @@ async fn run_serve(
     invite_file: PathBuf,
     host: String,
     relay: Option<String>,
+    rendezvous: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
+    // Validate a rendezvous address up front (reject circuit / no-peer-id / duplicate).
+    let rz_target = match &rendezvous {
+        Some(rz) => Some(
+            validate_rendezvous_addrs(std::slice::from_ref(rz))?
+                .into_iter()
+                .next()
+                .expect("one validated target"),
+        ),
+        None => None,
+    };
     let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
     let relay_dial: Vec<Multiaddr> = match &relay {
         Some(r) => vec![r.parse().map_err(|e| format!("bad --relay address: {e}"))?],
@@ -224,9 +243,51 @@ async fn run_serve(
     .await?;
 
     let now = SystemClock.now_ms();
-    let invite = sync.mint_invite(random_nonce(), now + 3_600_000, bootstrap.clone())?;
+    let nonce = random_nonce();
+    let invite = match &rz_target {
+        Some(t) => sync.mint_invite_with_rendezvous(
+            nonce,
+            now + 3_600_000,
+            bootstrap.clone(),
+            vec![t.addr.to_string()],
+        )?,
+        None => sync.mint_invite(nonce, now + 3_600_000, bootstrap.clone())?,
+    };
     let blob = hex::encode(invite.encode());
     tokio::fs::write(&invite_file, &blob).await?;
+
+    // If a rendezvous was given, connect to it and register the server under the
+    // invite's pre-join join_ns (so a joiner discovers us with no hard-coded address)
+    // and under our steady-state member namespace(s).
+    if let Some(t) = &rz_target {
+        let rz_phase0 = phase0_peer_id(&t.peer);
+        sync.transport().dial(t.addr.clone()).await?;
+        timeout(Duration::from_secs(20), async {
+            loop {
+                match sync.transport().next_event().await {
+                    Some(TransportEvent::PeerConnected(p)) if p == rz_phase0 => break,
+                    Some(_) => continue,
+                    None => break,
+                }
+            }
+        })
+        .await
+        .map_err(|_| "could not connect to the rendezvous")?;
+        sync.transport()
+            .add_external_address(format!("/ip4/{host}/tcp/{port}").parse()?)
+            .await?;
+        let join_ns = join_namespace(&invite.group_id, &invite.invite_nonce, &t.peer.to_bytes());
+        sync.transport()
+            .rendezvous_register(&join_ns, t.peer)
+            .await?;
+        for ns in sync.rendezvous_namespaces(&t.peer.to_bytes()) {
+            sync.transport().rendezvous_register(&ns, t.peer).await?;
+        }
+        println!(
+            "[serve] registered at rendezvous {} (join_ns + member namespace)",
+            t.peer
+        );
+    }
 
     println!("== CatComs server ==");
     println!("[serve] listening on tcp/{port} (peer {libp2p_id})");
@@ -242,43 +303,121 @@ async fn run_serve(
 }
 
 /// Join a server from an invite file over real libp2p, catch up, and print the chat.
+/// If the invite carries `rendezvous` addresses, discover the inviter there (no
+/// hard-coded server address); otherwise dial the bootstrap address directly.
 async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
     let blob = tokio::fs::read_to_string(&invite_file).await?;
     let invite = InviteToken::decode(&hex::decode(blob.trim())?)?;
+    // Authenticate the pasted token LOCALLY before acting on any of its fields — dialing
+    // its (attacker-nameable) rendezvous addresses or deriving join_ns from its group_id
+    // and nonce. request_join re-verifies the Welcome too, but failing fast here keeps a
+    // forged token from spending dial budget or leaking join interest to a rendezvous.
+    if !invite.verify_self() {
+        return Err("invite failed self-verification (forged or corrupt token)".into());
+    }
+    println!("== CatComs join ==");
+    if !invite.rendezvous.is_empty() {
+        return run_join_via_rendezvous(invite).await;
+    }
+
     let boot = invite
         .bootstrap
         .first()
-        .ok_or("invite carries no bootstrap address")?;
+        .ok_or("invite carries neither a rendezvous nor a bootstrap address")?;
     let addr: Multiaddr = boot.parse()?;
     // The server's peer id is the LAST /p2p/ component (past the relay, for a
     // circuit address), so we wait for the SERVER specifically — not the relay we
     // hop through to reach it.
     let server_lp =
         catcoms_net::target_peer_in_multiaddr(&addr).ok_or("bootstrap address has no peer id")?;
-    let inviter = catcoms_net::phase0_peer_id(&server_lp);
-    println!("== CatComs join ==");
+    let inviter = phase0_peer_id(&server_lp);
     println!("[join] dialing {addr}");
-
     let (mesh, _) = MeshService::new_tcp(None, std::slice::from_ref(&addr))?;
+    wait_for_peer(&mesh, inviter, "the server").await?;
+    join_and_converge(mesh, inviter, &invite).await
+}
 
-    // Wait for the connection to the SERVER (possibly via a relay hop).
+/// Discover the inviter at a rendezvous under the invite's pre-join `join_ns`, let the
+/// `DiscoveryPolicy` decide what to dial (the net Actor never auto-dials), dial it, and
+/// join — with no hard-coded server address.
+async fn run_join_via_rendezvous(invite: InviteToken) -> Result<(), Box<dyn Error>> {
+    let targets = validate_rendezvous_addrs(&invite.rendezvous)?;
+    let rz = targets
+        .into_iter()
+        .next()
+        .ok_or("invite has no rendezvous address")?;
+    let rz_phase0 = phase0_peer_id(&rz.peer);
+    println!("[join] discovering the inviter via rendezvous {}", rz.peer);
+
+    let (mesh, _) = MeshService::new_tcp(None, std::slice::from_ref(&rz.addr))?;
+    wait_for_peer(&mesh, rz_phase0, "the rendezvous").await?;
+
+    let join_ns = join_namespace(&invite.group_id, &invite.invite_nonce, &rz.peer.to_bytes());
+    mesh.rendezvous_discover(&join_ns, rz.peer).await?;
+    let discovered = timeout(Duration::from_secs(20), mesh.next_discovered())
+        .await
+        .map_err(|_| "rendezvous discovery timed out")?
+        .ok_or("rendezvous discovery returned nothing")?;
+    let inviter = phase0_peer_id(&discovered.peer);
+
+    // The DiscoveryPolicy is the only thing that decides what to dial (no auto-dial).
+    let mut policy = DiscoveryPolicy::with_config(PolicyConfig::default());
+    let candidate = Candidate {
+        peer: discovered.peer.to_bytes(),
+        addresses: discovered.addresses.iter().map(|a| a.to_string()).collect(),
+        source: Source::Rendezvous(rz.peer.to_bytes()),
+        seq: 1,
+        tag_verified: false,
+    };
+    let mut rng = OsCryptoRng;
+    let dialed = policy
+        .plan(vec![candidate], 2, &SystemClock, &mut rng)
+        .into_iter()
+        .next()
+        .ok_or("the discovery policy offered no peer to dial")?;
+    println!(
+        "[join] discovered the inviter; dialing {:?}",
+        dialed.addresses
+    );
+    for a in &dialed.addresses {
+        mesh.dial(a.parse()?).await?;
+    }
+    wait_for_peer(&mesh, inviter, "the server").await?;
+    join_and_converge(mesh, inviter, &invite).await
+}
+
+/// Block (with a timeout) until `mesh` reports a connection to `target`.
+async fn wait_for_peer(
+    mesh: &MeshService,
+    target: PeerId,
+    what: &str,
+) -> Result<(), Box<dyn Error>> {
     timeout(Duration::from_secs(20), async {
         loop {
             if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == inviter {
-                    break;
+                if p == target {
+                    return;
                 }
             }
         }
     })
     .await
-    .map_err(|_| "timed out connecting to the server")?;
-    println!("[join] connected to the server; requesting to join…");
+    .map_err(|_| format!("timed out connecting to {what}"))?;
+    Ok(())
+}
 
+/// Once connected to `inviter`, run the MLS join handshake, build the sync node, catch
+/// up the channel, and print the converged transcript.
+async fn join_and_converge(
+    mesh: MeshService,
+    inviter: PeerId,
+    invite: &InviteToken,
+) -> Result<(), Box<dyn Error>> {
+    println!("[join] connected; requesting to join…");
     let device = MlsDevice::generate()?;
     let (group, routing) = timeout(
         Duration::from_secs(20),
-        catcoms_sync::request_join(&mesh, inviter, &device, &invite),
+        catcoms_sync::request_join(&mesh, inviter, &device, invite),
     )
     .await
     .map_err(|_| "join timed out")??;

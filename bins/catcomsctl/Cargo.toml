@@ -18,6 +18,7 @@ catcoms-replication = { path = "../../crates/catcoms-replication" }
 catcoms-storage = { path = "../../crates/catcoms-storage" }
 catcoms-sync = { path = "../../crates/catcoms-sync" }
 catcoms-net = { path = "../../crates/catcoms-net" }
+catcoms-discovery = { path = "../../crates/catcoms-discovery" }
 tracing.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "fs"] }
 clap = { version = "4", features = ["derive"] }

@@ -51,6 +51,10 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Max request/response frame size.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+/// Cap on discovered records surfaced from a single rendezvous Discover response, so a
+/// hostile rendezvous cannot flood the never-dropping discovered queue (the higher
+/// layer ranks/dials with its own bounds, but those sit downstream of this queue).
+const MAX_DISCOVERED_PER_RESPONSE: usize = 128;
 
 /// The request/response protocol id (anti-entropy / blob fetch).
 const RR_PROTOCOL: &str = "/catcoms/rr/1";
@@ -496,6 +500,59 @@ fn is_relayed(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| p == Protocol::P2pCircuit)
 }
 
+/// A validated rendezvous infra target: a direct (non-circuit) multiaddr and its peer id.
+#[derive(Debug, Clone)]
+pub struct RendezvousTarget {
+    /// The dialable rendezvous multiaddr.
+    pub addr: Multiaddr,
+    /// The rendezvous node's libp2p peer id.
+    pub peer: libp2p::PeerId,
+}
+
+/// Validate an invite's `rendezvous` addresses (6e-3d-9): each must parse as a
+/// multiaddr, be **direct** (never a `/p2p-circuit` — a circuit rendezvous would route
+/// discovery through a relay), and carry a `/p2p/<id>`; and the peer ids must be
+/// **distinct**. The distinct-PeerId check catches accidental-duplicate misconfig
+/// **only** — it is *not* anti-collusion, so two secretly-cooperating rendezvous still
+/// count as ≤ 1 trust root in the eclipse layer regardless. Returns the parsed targets
+/// (in order) on success, so the caller can register/discover/dial against them.
+pub fn validate_rendezvous_addrs(addrs: &[String]) -> Result<Vec<RendezvousTarget>, NetError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(addrs.len());
+    for s in addrs {
+        let addr: Multiaddr = s
+            .parse()
+            .map_err(|e| NetError::Rendezvous(format!("bad rendezvous multiaddr {s:?}: {e}")))?;
+        if is_relayed(&addr) {
+            return Err(NetError::Rendezvous(format!(
+                "rendezvous address must be direct, not a circuit: {s:?}"
+            )));
+        }
+        // Require EXACTLY ONE `/p2p/` stanza: zero is undialable, and more than one is a
+        // relay-chain / malformed address that `target_peer_in_multiaddr` would silently
+        // resolve to the last id (a confusion vector).
+        let p2p_count = addr
+            .iter()
+            .filter(|p| matches!(p, Protocol::P2p(_)))
+            .count();
+        if p2p_count != 1 {
+            return Err(NetError::Rendezvous(format!(
+                "rendezvous address must carry exactly one /p2p/ id: {s:?}"
+            )));
+        }
+        let peer = target_peer_in_multiaddr(&addr).ok_or_else(|| {
+            NetError::Rendezvous(format!("rendezvous address has no peer id: {s:?}"))
+        })?;
+        if !seen.insert(peer) {
+            return Err(NetError::Rendezvous(format!(
+                "duplicate rendezvous PeerId {peer} (addresses must name distinct nodes)"
+            )));
+        }
+        out.push(RendezvousTarget { addr, peer });
+    }
+    Ok(out)
+}
+
 fn to_ident(topic: &Topic) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(hex::encode(topic.as_bytes()))
 }
@@ -519,6 +576,11 @@ enum Command {
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
     Dial(Multiaddr),
+    /// Advertise `addr` as an external (reachable) address — for a node with a
+    /// directly-reachable address (a public IP, or a memory listener in tests) that
+    /// does not need a relay circuit to be registerable at a rendezvous. Flushes any
+    /// deferred registrations.
+    AddExternalAddress(Multiaddr),
     /// Register our peer record under `namespace` at the rendezvous node `rz_node`
     /// (must already be connected to it). Deferred until we have an external address.
     RendezvousRegister {
@@ -640,6 +702,12 @@ impl Actor {
                 if let Err(e) = self.swarm.dial(addr.clone()) {
                     tracing::warn!(%addr, error = %e, "dial failed");
                 }
+            }
+            Command::AddExternalAddress(addr) => {
+                tracing::debug!(%addr, "add external address");
+                self.swarm.add_external_address(addr);
+                // A registration may have been waiting on exactly this.
+                self.flush_pending_registers();
             }
             Command::RendezvousRegister { namespace, rz_node } => {
                 // Defer until we have an external address to advertise; flushed on
@@ -843,12 +911,24 @@ impl Actor {
             // our own registrations; log failures/expiry for the caller to react to.
             SwarmEvent::Behaviour(MeshBehaviourEvent::RendezvousClient(e)) => match e {
                 rendezvous::client::Event::Discovered { registrations, .. } => {
-                    for reg in registrations {
+                    // Cap records ingested per Discover response so a hostile rendezvous
+                    // cannot flood the (unbounded, never-dropping) discovered queue — it
+                    // sits upstream of the DiscoveryPolicy's dial budget, so that budget
+                    // alone does not bound it. The dropped tail is logged.
+                    let total = registrations.len();
+                    for reg in registrations.into_iter().take(MAX_DISCOVERED_PER_RESPONSE) {
                         let _ = self.discovered_tx.send(Discovered {
                             peer: reg.record.peer_id(),
                             addresses: reg.record.addresses().to_vec(),
                             namespace: reg.namespace.to_string(),
                         });
+                    }
+                    if total > MAX_DISCOVERED_PER_RESPONSE {
+                        tracing::warn!(
+                            total,
+                            cap = MAX_DISCOVERED_PER_RESPONSE,
+                            "rendezvous Discover response capped; dropped the surplus records"
+                        );
                     }
                 }
                 rendezvous::client::Event::Registered {
@@ -1017,6 +1097,17 @@ impl MeshService {
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
             .send(Command::Dial(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Advertise `addr` as an external (reachable) address, so a node with a directly-
+    /// reachable address can register at a rendezvous **without** a relay circuit
+    /// (a publicly-reachable server, or a memory listener in tests). Flushes any
+    /// registration that was deferred for lack of an external address.
+    pub async fn add_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::AddExternalAddress(addr))
             .await
             .map_err(|_| TransportError::Closed)
     }

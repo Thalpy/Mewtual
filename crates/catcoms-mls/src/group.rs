@@ -172,12 +172,40 @@ impl ServerGroup {
 
     /// Mint a single-use, device-bound invite to this group, signed by `inviter`
     /// (who must be a current member). `invite_nonce` must be unique per invite.
+    /// Carries no rendezvous infra addresses (`bootstrap`-only); see
+    /// [`ServerGroup::mint_invite_with_rendezvous`] for the discovery-enabled form.
     pub fn mint_invite(
         &self,
         inviter: &MlsDevice,
         invite_nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
+    ) -> Result<InviteToken, MlsError> {
+        self.mint_invite_with_rendezvous(
+            inviter,
+            invite_nonce,
+            expires_at_ms,
+            bootstrap,
+            Vec::new(),
+        )
+    }
+
+    /// Mint an invite that also carries zero-knowledge **rendezvous** infra addresses
+    /// (6e-3d-9), so a joiner can discover the inviter under the pre-join `join_ns`
+    /// without a hard-coded server address. The rendezvous set is bound into the
+    /// inviter signature (a relay cannot strip or substitute it).
+    ///
+    /// The set is signed **verbatim**, so the caller should validate it first with
+    /// `catcoms_net::validate_rendezvous_addrs` (reject `/p2p-circuit`, require a
+    /// `/p2p/` id, distinct PeerIds) — that lives in `catcoms-net` where multiaddrs
+    /// parse, and an invalid set minted here would otherwise fail only at the joiner.
+    pub fn mint_invite_with_rendezvous(
+        &self,
+        inviter: &MlsDevice,
+        invite_nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+        rendezvous: Vec<String>,
     ) -> Result<InviteToken, MlsError> {
         let inviter_public_key = inviter.public_key_bytes();
         let payload = InviteToken::signing_payload(
@@ -187,6 +215,7 @@ impl ServerGroup {
             &invite_nonce,
             expires_at_ms,
             &bootstrap,
+            &rendezvous,
         );
         let signature = inviter.sign_raw(&payload)?;
         Ok(InviteToken {
@@ -196,6 +225,7 @@ impl ServerGroup {
             invite_nonce,
             expires_at_ms,
             bootstrap,
+            rendezvous,
             signature,
         })
     }

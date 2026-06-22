@@ -17,6 +17,26 @@ use libp2p::core::upgrade::Version;
 use libp2p::swarm::SwarmEvent;
 use libp2p::{noise, rendezvous, yamux, Multiaddr, Swarm, SwarmBuilder, Transport};
 
+#[test]
+fn rendezvous_address_validation_rejects_circuits_and_duplicates() {
+    use catcoms_net::validate_rendezvous_addrs;
+    let p1 = libp2p::PeerId::random();
+    let p2 = libp2p::PeerId::random();
+    let a1 = format!("/ip4/1.2.3.4/tcp/5000/p2p/{p1}");
+    let a2 = format!("/ip4/5.6.7.8/tcp/5000/p2p/{p2}");
+    // Two distinct direct addresses validate and parse to their peer ids.
+    let ok = validate_rendezvous_addrs(&[a1.clone(), a2]).unwrap();
+    assert_eq!(ok.len(), 2);
+    assert_eq!(ok[0].peer, p1);
+    // The same PeerId twice is rejected (misconfig guard).
+    assert!(validate_rendezvous_addrs(&[a1.clone(), a1.clone()]).is_err());
+    // A /p2p-circuit address is rejected (rendezvous must be direct).
+    let circuit = format!("/ip4/1.2.3.4/tcp/4000/p2p/{p1}/p2p-circuit/p2p/{p2}");
+    assert!(validate_rendezvous_addrs(&[circuit]).is_err());
+    // An address with no peer id is rejected.
+    assert!(validate_rendezvous_addrs(&["/ip4/1.2.3.4/tcp/5000".to_string()]).is_err());
+}
+
 /// A minimal memory-transport swarm whose only behaviour is the rendezvous client.
 fn build_rendezvous_client() -> Swarm<rendezvous::client::Behaviour> {
     SwarmBuilder::with_new_identity()

@@ -24,8 +24,13 @@ use catcoms_wire::{Decoder, Encoder};
 use openmls::prelude::*;
 use thiserror::Error;
 
-const INVITE_DOMAIN: &str = "catcoms/invite/v1";
+// Bumped v1 -> v2 in 6e-3d-9 (hard cutover, pre-release) when the token gained the
+// `rendezvous` vector: the signed payload shape changed, so a v1 token never verifies
+// against v2 and vice versa.
+const INVITE_DOMAIN: &str = "catcoms/invite/v2";
 const MEMBERSHIP_DOMAIN: &str = "catcoms/membership/v1";
+/// Defensive cap on each of the two invite address vectors (bootstrap, rendezvous).
+const MAX_INVITE_ADDRS: u32 = 64;
 
 /// Why an invite admission was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -129,8 +134,16 @@ pub struct InviteToken {
     pub invite_nonce: [u8; 16],
     /// Expiry (ms since epoch); compared against an injected clock.
     pub expires_at_ms: u64,
-    /// Bootstrap/rendezvous hints (opaque multiaddr strings for now).
+    /// Optional single inviter-seed bootstrap hint (an opaque multiaddr string). Since
+    /// 6e-3d-9 this shrinks to a seed; discovery rides `rendezvous` + the pre-join
+    /// `join_ns` instead, so a joiner needs no hard-coded server address.
     pub bootstrap: Vec<String>,
+    /// Zero-knowledge **rendezvous** infra multiaddrs (≥2 recommended, distinct PeerIds,
+    /// direct — never `/p2p-circuit`). The joiner registers/discovers under the pre-join
+    /// `join_ns` at these to find the inviter; each is credited as ≤1 eclipse trust root
+    /// (the distinct-PeerId check is misconfig defence, not anti-collusion). Validation
+    /// (reject circuit, distinct PeerIds) lives in `catcoms-net` where multiaddrs parse.
+    pub rendezvous: Vec<String>,
     /// Inviter's Ed25519 signature over the canonical unsigned encoding.
     pub signature: [u8; 64],
 }
@@ -144,6 +157,7 @@ fn write_unsigned(
     invite_nonce: &[u8; 16],
     expires_at_ms: u64,
     bootstrap: &[String],
+    rendezvous: &[String],
 ) {
     e.put_str(INVITE_DOMAIN).expect("label fits");
     e.put_bytes(group_id).expect("group id fits");
@@ -155,10 +169,17 @@ fn write_unsigned(
     for addr in bootstrap {
         e.put_str(addr).expect("addr fits");
     }
+    // Length-prefixed second vector (round-trip + tamper tested). Bound into the
+    // signature so a relay cannot strip or substitute the rendezvous set.
+    e.put_u32(rendezvous.len() as u32);
+    for addr in rendezvous {
+        e.put_str(addr).expect("addr fits");
+    }
 }
 
 impl InviteToken {
     /// The canonical bytes that the inviter signs.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn signing_payload(
         group_id: &[u8],
         inviter_device_id: &DeviceId,
@@ -166,6 +187,7 @@ impl InviteToken {
         invite_nonce: &[u8; 16],
         expires_at_ms: u64,
         bootstrap: &[String],
+        rendezvous: &[String],
     ) -> Vec<u8> {
         let mut e = Encoder::new();
         write_unsigned(
@@ -176,6 +198,7 @@ impl InviteToken {
             invite_nonce,
             expires_at_ms,
             bootstrap,
+            rendezvous,
         );
         e.finish()
     }
@@ -190,6 +213,7 @@ impl InviteToken {
             &self.invite_nonce,
             self.expires_at_ms,
             &self.bootstrap,
+            &self.rendezvous,
         );
         verify_with_public_bytes(inviter_public_key, &payload, &self.signature)
     }
@@ -222,6 +246,7 @@ impl InviteToken {
             &self.invite_nonce,
             self.expires_at_ms,
             &self.bootstrap,
+            &self.rendezvous,
         );
         e.put_bytes(&self.signature).expect("64 fits");
         e.finish()
@@ -248,9 +273,23 @@ impl InviteToken {
             .map_err(|_| InviteError::Malformed)?;
         let expires_at_ms = d.get_u64().map_err(|_| InviteError::Malformed)?;
         let addr_count = d.get_u32().map_err(|_| InviteError::Malformed)?;
+        // Cap both address-vector counts up front (an invite carries at most a seed +
+        // a handful of rendezvous). The Decoder already bounds each read against the
+        // remaining bytes, so this is consistency/hardening, mirroring the bundle codecs.
+        if addr_count > MAX_INVITE_ADDRS {
+            return Err(InviteError::Malformed);
+        }
         let mut bootstrap = Vec::new();
         for _ in 0..addr_count {
             bootstrap.push(d.get_str().map_err(|_| InviteError::Malformed)?.to_string());
+        }
+        let rz_count = d.get_u32().map_err(|_| InviteError::Malformed)?;
+        if rz_count > MAX_INVITE_ADDRS {
+            return Err(InviteError::Malformed);
+        }
+        let mut rendezvous = Vec::new();
+        for _ in 0..rz_count {
+            rendezvous.push(d.get_str().map_err(|_| InviteError::Malformed)?.to_string());
         }
         let signature: [u8; 64] = d
             .get_bytes()
@@ -265,6 +304,7 @@ impl InviteToken {
             invite_nonce,
             expires_at_ms,
             bootstrap,
+            rendezvous,
             signature,
         })
     }
@@ -361,6 +401,7 @@ mod tests {
             invite_nonce: [1u8; 16],
             expires_at_ms: 1000,
             bootstrap: vec![],
+            rendezvous: vec![],
             signature: [0u8; 64],
         };
         assert_eq!(ledger.check(&token, 500), Ok(()));

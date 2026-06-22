@@ -22,6 +22,7 @@ zeroize = "1"
 catcoms-log = { path = "../catcoms-log" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-net = { path = "../catcoms-net" }
+catcoms-discovery = { path = "../catcoms-discovery" }
 rand_chacha = "0.3"
 rand_core = "0.6"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
