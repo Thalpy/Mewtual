@@ -43,6 +43,8 @@
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   let uploading = $state(false);
+  let statuses = $state<Msg[]>([]);
+  let statusDraft = $state("");
 
   // Profile editor.
   let pName = $state("");
@@ -124,7 +126,14 @@
     activeServerId = id;
     const s = servers.find((x) => x.id === id);
     if (s) s.dot = false;
-    await Promise.all([refresh(), refreshMembers(), refreshProfiles(), refreshFiles(), refreshInvite()]);
+    await Promise.all([
+      refresh(),
+      refreshMembers(),
+      refreshProfiles(),
+      refreshFiles(),
+      refreshStatuses(),
+      refreshInvite(),
+    ]);
   }
 
   async function leaveServer(id: number) {
@@ -192,6 +201,24 @@
     if (activeServerId === null) return;
     try {
       files = await invoke<UiFile[]>("get_files", { server: activeServerId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function refreshStatuses() {
+    if (activeServerId === null) return;
+    try {
+      statuses = await invoke<Msg[]>("get_statuses", { server: activeServerId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function postStatus() {
+    const text = statusDraft.trim();
+    if (!text || activeServerId === null) return;
+    statusDraft = "";
+    try {
+      await invoke("post_status", { server: activeServerId, text });
     } catch (e) {
       error = String(e);
     }
@@ -338,6 +365,9 @@
       }),
       listen<{ server: number }>("files-updated", (e) => {
         if (e.payload.server === activeServerId) refreshFiles();
+      }),
+      listen<{ server: number }>("status-updated", (e) => {
+        if (e.payload.server === activeServerId) refreshStatuses();
       }),
       listen<{ server: number }>("server-closed", (e) => {
         servers = servers.filter((s) => s.id !== e.payload.server);
@@ -520,6 +550,26 @@
               </li>
             {:else}
               <li class="muted">No files shared yet.</li>
+            {/each}
+          </ul>
+        </details>
+
+        <details class="status-panel">
+          <summary>Status <span class="muted">({statuses.length})</span></summary>
+          <form onsubmit={(e) => { e.preventDefault(); postStatus(); }}>
+            <input bind:value={statusDraft} placeholder="Post a status…" />
+          </form>
+          <ul class="status-list">
+            {#each statuses as s}
+              <li>
+                <span class="status-head">
+                  {@render nameTag(s.author)}
+                  <span class="time">{fmtTime(s.ts)}</span>
+                </span>
+                <span class="status-text">{s.text}</span>
+              </li>
+            {:else}
+              <li class="muted">No status posts yet.</li>
             {/each}
           </ul>
         </details>

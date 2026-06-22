@@ -255,6 +255,8 @@ fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
 
 /// The reserved document id for the per-server file index.
 const FILE_INDEX_DOC: u128 = 0;
+/// The reserved document id for the per-server status feed (`DocType::Status`).
+const STATUS_DOC: u128 = 0;
 const FILES: &str = "files";
 const F_NAME: &str = "name";
 const F_SIZE: &str = "size";
@@ -586,6 +588,42 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
+    /// Open (create/subscribe) the per-server **status feed** — a server-wide stream of
+    /// short posts (announcements/activity), reusing the canonical message schema on its
+    /// own document. Call once after founding/joining.
+    pub async fn open_status(&mut self) -> Result<(), AppError> {
+        self.sync.open_channel(DocType::Status, STATUS_DOC).await?;
+        Ok(())
+    }
+
+    /// Post to the status feed (authored by this device's fingerprint, clock-stamped).
+    pub async fn post_status(&mut self, text: &str) -> Result<(), AppError> {
+        let author = self.my_fingerprint();
+        let ts = self.sync.now_ms();
+        self.sync
+            .post(DocType::Status, STATUS_DOC, |d| {
+                append_message(d, &author, text, ts)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// The current status feed (oldest-first; the UI shows newest at the top).
+    pub fn statuses(&self) -> Vec<ChatMessage> {
+        self.sync
+            .doc(DocType::Status, STATUS_DOC)
+            .map(|d| read_messages(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Catch up the status feed from `peer` (e.g. right after joining).
+    pub async fn request_status_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Status, STATUS_DOC)
+            .await?)
+    }
+
     /// Catch up the profile document from `peer` (e.g. right after joining).
     pub async fn request_profiles_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
         Ok(self
@@ -879,6 +917,19 @@ mod tests {
 
         // The uploader already holds the bytes.
         assert_eq!(alice.download_file(&cid).await.unwrap(), Some(data));
+    }
+
+    #[tokio::test]
+    async fn a_status_is_posted_and_read() {
+        let mut alice = founder();
+        alice.open_status().await.unwrap();
+        assert!(alice.statuses().is_empty());
+        alice.post_status("server is live").await.unwrap();
+        let feed = alice.statuses();
+        assert_eq!(feed.len(), 1);
+        assert_eq!(feed[0].text, "server is live");
+        assert_eq!(feed[0].author, alice.my_fingerprint());
+        assert_eq!(feed[0].ts, 1_000);
     }
 
     #[tokio::test]

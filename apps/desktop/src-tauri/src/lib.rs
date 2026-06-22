@@ -134,6 +134,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
                 }
+                AppEvent::StatusUpdated => {
+                    let _ = app.emit("status-updated", ServerEvt { server });
+                }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
                     break;
@@ -359,6 +362,7 @@ async fn join_server(
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
     actor.catch_up_files(inviter).await;
+    actor.catch_up_status(inviter).await;
     let server_id = register_server(&app, &state, actor, events, None).await;
     Ok(FoundResult {
         server: server_id,
@@ -526,6 +530,31 @@ async fn download_file(
     }
 }
 
+/// Post to the server status feed.
+#[tauri::command]
+async fn post_status(state: State<'_, AppState>, server: u64, text: String) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.post_status(text).await;
+    Ok(())
+}
+
+/// The server status feed (newest-first).
+#[tauri::command]
+async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiMessage>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .statuses()
+        .await
+        .into_iter()
+        .rev()
+        .map(|m| UiMessage {
+            author: m.author,
+            text: m.text,
+            ts: m.ts,
+        })
+        .collect())
+}
+
 /// Send a chat message to a channel (by id).
 #[tauri::command]
 async fn send_message(
@@ -577,6 +606,8 @@ pub fn run() {
             add_file,
             get_files,
             download_file,
+            post_status,
+            get_statuses,
             send_message,
             get_messages
         ])

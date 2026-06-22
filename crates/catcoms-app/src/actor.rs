@@ -74,6 +74,14 @@ pub enum AppCommand {
     },
     /// Pull the file index from `peer` (e.g. right after joining).
     CatchUpFiles { peer: PeerId },
+    /// Post to the server status feed.
+    PostStatus { text: String },
+    /// Query the status feed.
+    Statuses {
+        reply: oneshot::Sender<Vec<ChatMessage>>,
+    },
+    /// Pull the status feed from `peer` (e.g. right after joining).
+    CatchUpStatus { peer: PeerId },
     /// Stop the actor.
     Shutdown,
 }
@@ -91,6 +99,8 @@ pub enum AppEvent {
     ProfilesUpdated,
     /// The shared file list changed — the UI should re-fetch it (`files`).
     FilesUpdated,
+    /// The status feed changed — the UI should re-fetch it (`statuses`).
+    StatusUpdated,
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -257,6 +267,33 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpFiles { peer }).await;
     }
 
+    /// Post to the status feed (a `StatusUpdated` event follows).
+    pub async fn post_status(&self, text: impl Into<String>) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::PostStatus { text: text.into() })
+            .await;
+    }
+
+    /// Fetch the status feed.
+    pub async fn statuses(&self) -> Vec<ChatMessage> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Statuses { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the status feed from `peer`.
+    pub async fn catch_up_status(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpStatus { peer }).await;
+    }
+
     /// Stop the actor.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
@@ -296,6 +333,11 @@ where
             tracing::warn!(error = %e, "open_files failed");
         }
         let mut file_count = server.files().len();
+        // …and the status feed.
+        if let Err(e) = server.open_status().await {
+            tracing::warn!(error = %e, "open_status failed");
+        }
+        let mut status_count = server.statuses().len();
         loop {
             tokio::select! {
                 biased;
@@ -391,6 +433,25 @@ where
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
+                    Some(AppCommand::PostStatus { text }) => {
+                        if let Err(e) = server.post_status(&text).await {
+                            tracing::warn!(error = %e, "post_status failed");
+                        }
+                        if status_changed(&server, &mut status_count) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Statuses { reply }) => {
+                        let _ = reply.send(server.statuses());
+                    }
+                    Some(AppCommand::CatchUpStatus { peer }) => {
+                        if let Err(e) = server.request_status_catchup(peer).await {
+                            tracing::warn!(error = %e, "status catch-up failed");
+                        }
+                        if status_changed(&server, &mut status_count) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
@@ -411,6 +472,9 @@ where
                         sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                        if status_changed(&server, &mut status_count) {
+                            let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
                     _ => {
@@ -453,6 +517,21 @@ where
     R: CryptoRngCore,
 {
     let n = server.files().len();
+    if *last != n {
+        *last = n;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the status feed count changed since last seen (updating the record).
+fn status_changed<T, R>(server: &Server<T, R>, last: &mut usize) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let n = server.statuses().len();
     if *last != n {
         *last = n;
         true
