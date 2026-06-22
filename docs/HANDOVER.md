@@ -7,8 +7,9 @@ Authoritative current-state document. Read this first, then
 ## Status (as of 2026-06-22)
 
 - **Phases 0 → 6e-3d COMPLETE** (the full rendezvous-discovery + eclipse-resistance
-  block, all 9 slices); **Phase 7 in progress** — 7a (full-stack end-to-end over real
-  TCP sockets) and 7b (consolidated security suite) done. **186 tests passing.**
+  block, all 9 slices); **Phase 7 in progress** — all three networking paths now proven
+  end-to-end over **real TCP sockets** (7a direct, 7c rendezvous-discovered, 7d
+  relayed) + the consolidated security suite (7b). **188 tests passing.**
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
@@ -156,7 +157,9 @@ TCP** (verified, incl. through a relay).
 | 6e-3d-9 | **invite rewiring** (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join **`join_ns`** + `serve --rendezvous`/`join` **discover→dial→join** end-to-end; reviewed SOUND | ✅ `f31a0c7` |
 | 7a | **full-stack end-to-end over real TCP sockets** — founder binds an ephemeral loopback port; a fresh device dials it over real OS sockets, runs the MLS join, and converges | ✅ `798b50f` |
 | 7b | **consolidated security suite** — threat-model → where-proven map + cross-layer scenarios (`an_eclipse_caution_never_gates_a_removal`, `a_removed_member_is_excluded_from_the_rotated_namespace`) | ✅ `ec5638e` |
-| 7… | remaining Phase-7 integration (relayed/rendezvous paths over TCP, broader security scenarios) | planned |
+| 7c | **rendezvous discovery bootstrap over real TCP** — joiner discovers the inviter under `join_ns` and joins with no hard-coded address, over OS sockets | ✅ `a168c1d` |
+| 7d | **relayed full-stack join over real TCP** — server reachable only via a circuit relay; join + catch-up over the relayed connection (NAT traversal) | ✅ `0c2a6d8` |
+| 7… | remaining Phase-7 integration (broader adversarial scenarios; DCUtR-upgraded full-stack path) | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, security review | planned |
@@ -177,12 +180,14 @@ from a 7-agent design+review workflow, plus the per-slice adversarial-review out
 (2b, 3d-5, and 3d-6…9 are all recorded there). All 9 slices are done.
 
 **Phase 7** (end-to-end local integration over real sockets + consolidated security
-suite) is **in progress**: 7a added a full-stack join+converge over real TCP loopback
-(`catcoms-sync/tests/tcp_e2e.rs`); 7b added the security suite
-(`catcoms-sync/tests/security.rs`) — a threat-model → where-proven map plus the
-cross-layer scenarios (eclipse-never-gates-a-removal; removed-member-excluded-from-the-
-rotated-namespace). Remaining Phase-7 work: relayed/rendezvous paths exercised over TCP
-and broader adversarial scenarios.
+suite) is **well advanced**. All three networking paths are now proven end-to-end over
+**real TCP loopback sockets** (not just the libp2p memory transport): **direct**
+(`tcp_e2e.rs`, 7a), **rendezvous-discovered** with no hard-coded address
+(`tcp_rendezvous_e2e.rs`, 7c), and **relayed** NAT-traversal (`tcp_relay_e2e.rs`, 7d).
+The consolidated security suite (`security.rs`, 7b) maps the threat model to where each
+property is proven and adds the cross-layer scenarios (eclipse-never-gates-a-removal;
+removed-member-excluded-from-the-rotated-namespace). Remaining Phase-7 work: broader
+adversarial scenarios and a DCUtR-upgraded full-stack path.
 
 **Goal:** members find each other with no hard-coded bootstrap addresses, and an
 attacker cannot isolate (eclipse) a member. Everything is built on a per-removal
