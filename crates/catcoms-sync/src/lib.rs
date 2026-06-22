@@ -2923,6 +2923,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(applied)
     }
 
+    /// Catch a document up from the **best known peer** — a proven member first, falling
+    /// back to any known peer (see [`Self::pick_catchup_peer`]). Returns `Ok(0)` if there
+    /// is no peer to ask yet. Unlike [`Self::request_catchup`] (which targets a specific
+    /// peer, e.g. the inviter), this works for any member with a populated peer pool — so
+    /// either side can pull the backlog of a channel the other created.
+    pub async fn request_catchup_best(
+        &mut self,
+        doc_type: DocType,
+        doc_id: u128,
+    ) -> Result<usize, SyncError> {
+        match self.pick_catchup_peer() {
+            Some(peer) => self.request_catchup(peer, doc_type, doc_id).await,
+            None => Ok(0),
+        }
+    }
+
     /// Request missed membership commits from `peer` starting at `from_epoch` and
     /// replay them in order. Returns the number of commits applied. This is the
     /// recovery path for a member that missed a control-topic broadcast.
@@ -3043,6 +3059,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// This member's transport peer id.
     pub fn local_peer(&self) -> catcoms_rt::PeerId {
         self.transport.local_peer()
+    }
+
+    /// The current time in epoch-millis from the injected clock (no ambient time). Used by
+    /// the product layer to stamp content (e.g. message timestamps).
+    pub fn now_ms(&self) -> u64 {
+        self.clock.now_ms()
     }
 
     /// Borrow the underlying transport, so the **discovery/dial layer** — which lives

@@ -434,6 +434,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
+    /// Catch a channel up from the **best known peer** (a proven member, else any known
+    /// peer) — no need to name a peer. Lets either side pull the backlog of a channel the
+    /// other created. Returns `Ok(0)` if there is no peer to ask yet.
+    pub async fn request_channel_catchup_any(&mut self, channel: u128) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup_best(DocType::Channel, channel)
+            .await?)
+    }
+
     /// Borrow the underlying [`ChannelSync`] (for the bridge layer / advanced use such
     /// as rendezvous registration via its transport).
     pub fn sync(&self) -> &ChannelSync<T, R> {

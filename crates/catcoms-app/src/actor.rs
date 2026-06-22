@@ -33,6 +33,8 @@ pub enum AppCommand {
     SendMessage { channel: u128, text: String },
     /// Pull a channel's history from `peer` (e.g. right after joining).
     CatchUp { peer: PeerId, channel: u128 },
+    /// Pull a channel's history from the best known peer (no peer named).
+    CatchUpAny { channel: u128 },
     /// Query a channel's current materialized messages.
     Messages {
         channel: u128,
@@ -108,6 +110,11 @@ impl ServerActor {
             .cmd_tx
             .send(AppCommand::CatchUp { peer, channel })
             .await;
+    }
+
+    /// Pull a channel's history from the best known peer (no peer named).
+    pub async fn catch_up_any(&self, channel: u128) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpAny { channel }).await;
     }
 
     /// Fetch a channel's current messages.
@@ -235,6 +242,14 @@ where
                     Some(AppCommand::CatchUp { peer, channel }) => {
                         if let Err(e) = server.request_channel_catchup(peer, channel).await {
                             tracing::warn!(error = %e, channel, "catch-up failed");
+                        }
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
+                    Some(AppCommand::CatchUpAny { channel }) => {
+                        if let Err(e) = server.request_channel_catchup_any(channel).await {
+                            tracing::warn!(error = %e, channel, "any-peer catch-up failed");
                         }
                         if channel_changed(&server, channel, &mut counts) {
                             let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
@@ -500,6 +515,80 @@ mod tests {
             .expect("Alice's profile present");
         assert_eq!(alice_profile.effect, "wave");
         assert_eq!(alice_profile.font, "serif");
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_founder_catches_up_a_channel_the_joiner_created() {
+        const SECRET: u128 = 0xBEEF;
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
+
+        // Bob creates a channel Alice has never opened and posts to it.
+        bob.open_channel(SECRET).await;
+        bob.send_message(SECRET, "from bob").await;
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if bob
+                    .messages(SECRET)
+                    .await
+                    .iter()
+                    .any(|m| m.text == "from bob")
+                {
+                    break;
+                }
+                match bob_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("bob actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("bob has his own message");
+
+        // Alice opens the same channel and pulls the backlog with no named peer — the
+        // founder catching up a joiner-created channel (the symmetric case 8i could not do).
+        alice.open_channel(SECRET).await;
+        alice.catch_up_any(SECRET).await;
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if alice
+                    .messages(SECRET)
+                    .await
+                    .iter()
+                    .any(|m| m.text == "from bob")
+                {
+                    break;
+                }
+                match alice_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("alice actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("alice caught up the joiner-created channel from the best peer");
 
         alice.shutdown().await;
         bob.shutdown().await;
