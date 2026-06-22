@@ -74,7 +74,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8r/8s | **security-review hardening** — adversarial review of 8m–8q (no blocking findings); bounded avatar fetching + size-bounded blob store; [User Guide](docs/USER_GUIDE.md) | done |
 | 8t | **status feed** — a per-server post stream (announcements/activity) + Status panel in the UI | done |
 | 8u/8v | **wiki** — per-server collaborative pages (name→body map doc) + Chat/Wiki view toggle (page list + editor); page bodies are automerge `Text`, so concurrent edits merge **char-by-char** (8v) | done |
-| 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), 8 slices. 9a key vault + 9b sealing blob store + 9c snapshottable MLS state (the pivotal slice; adversarially reviewed) done; next doc/sync-state persistence + reload | in progress |
+| 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), 8 slices. 9a–9d done (key vault, sealing blob store, snapshottable MLS state — adversarially reviewed, doc persistence); next sync-state assembly/sealing + reload | in progress |
 | 8… | rendezvous discovery in the UI · chunked large-file transfer · last-copy-safe blob retention | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
