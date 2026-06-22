@@ -50,6 +50,33 @@ impl MlsDevice {
         })
     }
 
+    /// Reconstruct a device from a `provider` whose storage has been **restored** from a
+    /// snapshot (Phase 9c) — the signature keypair + key/group state already live in that
+    /// storage. The signer is read back from storage; the credential + device id re-derive
+    /// from its public key. See [`crate::persist`].
+    pub(crate) fn restore(
+        provider: OpenMlsRustCrypto,
+        public_key: &[u8],
+    ) -> Result<Self, MlsError> {
+        let signer = SignatureKeyPair::read(
+            provider.storage(),
+            public_key,
+            CIPHERSUITE.signature_algorithm(),
+        )
+        .ok_or(MlsError::Internal("signer missing from restored storage"))?;
+        let device_id = DeviceId::from_public_key_bytes(signer.public());
+        let credential = CredentialWithKey {
+            credential: BasicCredential::new(device_id.as_bytes().to_vec()).into(),
+            signature_key: signer.public().into(),
+        };
+        Ok(Self {
+            provider,
+            signer,
+            credential,
+            device_id,
+        })
+    }
+
     /// This device's content-addressed id.
     pub fn device_id(&self) -> DeviceId {
         self.device_id

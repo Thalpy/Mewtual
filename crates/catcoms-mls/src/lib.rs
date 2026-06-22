@@ -19,6 +19,7 @@ pub mod config;
 pub mod device;
 pub mod group;
 pub mod invite;
+pub mod persist;
 
 use thiserror::Error;
 
@@ -26,6 +27,7 @@ pub use config::CIPHERSUITE;
 pub use device::{serialize_key_package, MlsDevice};
 pub use group::{AddOutcome, Incoming, ServerGroup, StagedOutcome};
 pub use invite::{InviteError, InviteLedger, InviteToken, MembershipCredential};
+pub use persist::{restore_server, snapshot_server};
 
 /// Errors from MLS operations.
 #[derive(Debug, Error)]

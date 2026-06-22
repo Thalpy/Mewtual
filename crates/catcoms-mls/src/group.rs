@@ -94,6 +94,17 @@ impl ServerGroup {
         Ok(Self { group })
     }
 
+    /// Reconstruct a group from a `device` whose provider storage was **restored** from a
+    /// snapshot (Phase 9c). `group_id` is the value from [`ServerGroup::group_id`]. See
+    /// [`crate::persist`].
+    pub(crate) fn load(device: &MlsDevice, group_id: &[u8]) -> Result<Self, MlsError> {
+        let gid = GroupId::from_slice(group_id);
+        let group = MlsGroup::load(device.provider().storage(), &gid)
+            .map_err(|e| MlsError::Protocol(format!("{e:?}")))?
+            .ok_or(MlsError::Internal("group missing from restored storage"))?;
+        Ok(Self { group })
+    }
+
     /// Add `key_package`'s device and merge the commit. Returns the [`AddOutcome`]:
     /// the Welcome for the joiner, **and** the serialized Commit (which previously
     /// was discarded) so it can be fanned out to existing members, plus the epoch

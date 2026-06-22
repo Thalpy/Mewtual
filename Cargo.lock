@@ -507,6 +507,7 @@ dependencies = [
  "openmls_traits",
  "thiserror 2.0.18",
  "tls_codec",
+ "zeroize",
 ]
 
 [[package]]

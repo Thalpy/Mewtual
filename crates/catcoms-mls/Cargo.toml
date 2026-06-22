@@ -15,6 +15,7 @@ blake3 = "1"
 openmls_basic_credential = "0.5"
 openmls_traits = "0.5"
 tls_codec = { version = "0.4", features = ["derive", "std"] }
+zeroize = "1"
 
 [lints]
 workspace = true
