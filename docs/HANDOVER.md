@@ -171,6 +171,7 @@ TCP** (verified, incl. through a relay).
 | 8b-1 | **async event-stream actor** — `spawn(server)` → commands in / events out (ChannelUpdated, MembersChanged); the substrate the Tauri bridge drives | ✅ `c73929c` |
 | 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`) — found/open/send/read over the actor bridge; both halves compile (WebView manually verified) | ✅ `7c5f72e` |
 | 8c | **invite + join in the desktop UI** — found mints a single-use invite (loopback bootstrap); a second instance pastes it, dials, joins, and converges (two instances can talk over real TCP) | ✅ `61f2ec3` |
+| 8d | **multi-channel** — name-addressed channels (`catcoms-app::channel_id`); channel-list sidebar + "join #channel" + per-channel view/unread in the UI | ✅ `d2ec4d3` |
 | 8… | discovery/relay wiring in the UI · multi-server · fileshare browser · status · wiki | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
