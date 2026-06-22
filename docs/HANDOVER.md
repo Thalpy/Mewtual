@@ -11,11 +11,11 @@ Authoritative current-state document. Read this first, then
   TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
   done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
   **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
-  desktop app** (`apps/desktop`, 8b-2 … 8g) wired to the stack — found a server, mint a
+  desktop app** (`apps/desktop`, 8b-2 … 8h) wired to the stack — found a server, mint a
   single-use invite, a second instance joins via paste, **multiple name-addressed
   channels**, a live roster, and **customizable member profiles** (name/color/font/
-  animated effect, shared + converging). **196 tests passing** (the GUI WebView is the
-  one manually-verified surface; both halves compile). **The desktop app is currently
+  animated effect/**avatar**, shared + converging). **197 tests passing** (the GUI
+  WebView is the one manually-verified surface; both halves compile). **The desktop app is currently
   loopback-only** — it works between windows on one machine; connecting peers across a
   network needs the discovery/relay-in-the-UI slice (not yet built). See Known
   limitations.
@@ -179,7 +179,8 @@ TCP** (verified, incl. through a relay).
 | 8e | **member roster + chat polish** — live Members panel (device-id fingerprints + "you"), own-message bubbles | ✅ `e77a33d` |
 | 8f | **member profiles (backend)** — `DocType::Profile` (tag 9) + a shared per-server profile doc `{name,color,font,effect}` keyed by device fingerprint; messages now authored by fingerprint (name/style resolved from the author's profile at render time); actor seeds/serves/converges profiles | ✅ `bcf61db` |
 | 8g | **profile editor + rich rendering** — "Your profile" editor (name, color, font, animated effect); roster + message authors resolve fingerprint → profile (rainbow colour-wave / wave / pulse); own-message keys on local fingerprint | ✅ `612965f` |
-| 8… | discovery/relay wiring in the UI · multi-server · fileshare browser · status · wiki · **shared avatar/display-picture** (needs content-addressed image storage) | planned |
+| 8h | **member avatars** — `Profile.avatar` (inline bytes in the profile doc, `MAX_AVATAR_BYTES` = 64 KiB; base64 across IPC); UI canvas-downscales to a 128px JPEG; circular avatars in roster + messages with an initials fallback | ✅ `9e9b878` |
+| 8… | discovery/relay wiring in the UI · multi-server · fileshare browser · status · wiki · **blob-store avatars** (move large/animated/shared images off the profile doc onto content-addressed mesh fetch) | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 

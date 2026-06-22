@@ -60,6 +60,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8e | **member roster + chat polish** — live Members panel + own-message bubbles | done |
 | 8f | **member profiles (backend)** — shared `DocType::Profile` doc (name/color/font/effect), messages authored by device fingerprint | done |
 | 8g | **profile editor + rich rendering** — customize name/color/font/animated effect; roster + messages resolve fingerprint → profile | done |
+| 8h | **member avatars** — small inline display pictures (canvas-downscaled, capped); circular avatars in roster + messages, initials fallback | done |
 | 8… | discovery/relay in the UI · multi-server · fileshare · status · wiki | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
