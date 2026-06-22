@@ -67,7 +67,8 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8l | **content-addressed blob fetch over the mesh** — `KIND_BLOB_FETCH` (members-only, signed, capped, rate-limited); the foundation for large avatars + fileshare | done |
 | 8m | **avatars over the blob layer** — profile carries the avatar's CID, not inline bytes; fetched on demand over the mesh | done |
 | 8n | **fileshare browser** — per-server file index + upload/list/download (bytes via the blob mesh); Files panel in the UI | done |
-| 8… | discovery/relay in the UI · multi-server · status · wiki · per-file encryption-at-rest · chunked large-file transfer | planned |
+| 8o | **cross-network founding/joining** — bind all interfaces + advertise a reachable address (LAN/public IP); joining dials all bootstrap addresses | done |
+| 8… | relay-circuit + rendezvous in the UI (zero-config NAT traversal) · multi-server · status · wiki · per-file encryption-at-rest · chunked large-file transfer | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |

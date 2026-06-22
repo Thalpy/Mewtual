@@ -17,11 +17,13 @@ Authoritative current-state document. Read this first, then
   **customizable member profiles** (name/color/font/animated effect/**avatar**, shared +
   converging), and a **fileshare browser**. Underneath, **8l** adds **content-addressed
   blob fetch over the mesh**, and **8m/8n** build avatars + fileshare on it (binaries
-  travel by content address, fetched on demand — not inline in gossip). **204 tests
-  passing** (the GUI WebView is the one manually-verified surface; both halves compile). **The desktop app is currently
-  loopback-only** — it works between windows on one machine; connecting peers across a
-  network needs the discovery/relay-in-the-UI slice (not yet built). See Known
-  limitations.
+  travel by content address, fetched on demand — not inline in gossip). **8o** makes the
+  app **cross-network**: founding binds all interfaces and advertises a reachable address,
+  joining dials every bootstrap address — so two machines on a LAN connect out of the box
+  (founder enters their LAN IP), and the internet works with a port-forwarded public IP.
+  **204 tests passing** (the GUI WebView is the one manually-verified surface; both halves
+  compile). Zero-config NAT traversal (relay-circuit + rendezvous in the UI) is the next
+  network slice. See Known limitations.
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
@@ -189,7 +191,8 @@ TCP** (verified, incl. through a relay).
 | 8l | **content-addressed blob fetch over the mesh** — `ChannelSync` holds a `BlobStore`; `KIND_BLOB_FETCH` request/response (members-only, responder-signed/bound, 16 MiB cap, **per-requester rate limit** — folded from adversarial review since blob is the strongest amplifier); `put/get/has_blob`, `request_blob(_best)`. Re-hashes served bytes vs the requested CID before storing (no cache-poisoning). Foundation for large avatars + fileshare | ✅ `e0c3c8e` |
 | 8m | **avatars over the blob layer** — the profile doc stores the avatar's `avatar_cid` (not inline bytes); `set_profile` puts the blob, `profiles()` resolves the CID against the local store, the actor proactively `fetch_missing_avatars` (always-try, since the holder-peer is often only known after the profile arrives) and re-emits. Public `Profile.avatar` (bytes) unchanged, so bridge/UI untouched | ✅ `5bc31f4` |
 | 8n | **fileshare browser** — per-server file index (`DocType::FileIndex`): `add_file`/`files`/`download_file`/`open_files`/`request_files_catchup` + `FileEntry`; actor `AddFile`/`Files`/`DownloadFile`/`CatchUpFiles` + `FilesUpdated`; bridge base64↔CID-hex; UI "Files" panel (upload/list/download). Blobs plaintext-at-rest, members-only — `seal_file` encryption-at-rest + chunked transfer deferred | ✅ `66b06ce` |
-| 8… | discovery/relay wiring in the UI · multi-server · status · wiki · per-file encryption-at-rest (`seal_file`) · chunked large-file transfer | planned |
+| 8o | **cross-network founding/joining** — bind `0.0.0.0`; founder advertises a reachable address (LAN/public IP, `host:port`, or relay-circuit multiaddr) in the invite; joining dials **all** bootstrap addresses. Same-machine/LAN/port-forwarded internet all work. Pure `tcp_port`/`build_advertised` helpers unit-tested | ✅ `2ba19d3` |
+| 8… | **relay-circuit + rendezvous in the UI** (zero-config NAT traversal) · multi-server · status · wiki · per-file encryption-at-rest (`seal_file`) · chunked large-file transfer | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 
@@ -258,10 +261,12 @@ routing secret `ns_secret_L`:
 
 ## Known limitations / deferred (the security-relevant ones)
 
-- **Desktop app is loopback-only + dev/release build distinction (Phase 8).** The
-  `apps/desktop` bridge founds servers on `127.0.0.1` and mints invites carrying a
-  loopback bootstrap address, so two instances only connect on the **same machine**.
-  Connecting peers across a network is the deferred **discovery/relay-in-the-UI** slice
+- **Desktop networking: LAN/advertised works (8o); zero-config NAT traversal + dev/release
+  build distinction.** The `apps/desktop` bridge binds all interfaces and the founder
+  advertises a reachable address (LAN/public IP, `host:port`, or a relay-circuit multiaddr);
+  joining dials every bootstrap address. So **same-machine** (blank), **LAN** (founder's
+  LAN IP), and **internet via a port-forwarded public IP** all work.
+  Zero-config NAT traversal (no port-forward) is the deferred **relay-in-the-UI** slice
   (the protocol already supports it — Phase 7 proves direct/relayed/rendezvous over real
   TCP; it is just not wired into `found`/`join` yet). Two routes when built: a
   port-forwarded public IP, or a public relay (the proper NAT-traversal path). Also: a

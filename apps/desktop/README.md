@@ -49,14 +49,22 @@ npm run tauri build -- --no-bundle    # exe at src-tauri/target/release/
 The release exe still needs the **WebView2 runtime** on the target PC (default on
 Windows 11; a free installer for older Windows).
 
-## Current limitation: loopback only
+## Networking
 
-The bridge currently founds servers on `127.0.0.1` and the invite carries a loopback
-bootstrap address, so two instances only connect on the **same machine**. Connecting
-peers across a network is a deferred slice — the protocol already supports it (Phase 7
-proves direct/relayed/rendezvous joins over real TCP); it just is not yet wired into the
-desktop `found`/`join`. When built, the two routes are a port-forwarded public IP or a
-public **relay** (the proper NAT-traversal path, no router config for either peer).
+The app founds on all interfaces (`0.0.0.0`) and the founder can advertise a **reachable
+address** in the start screen's "Network" field:
+
+- **Same machine** — leave it blank (the invite carries a loopback address).
+- **Same LAN** — enter your LAN IP (e.g. `192.168.1.5`); the other machine pastes the
+  invite and connects.
+- **Over the internet** — enter a **port-forwarded public IP** (or `host:port` if the
+  forwarded port differs from the bound one), and forward that TCP port on your router.
+
+Joining dials **every** address in the invite, so the reachable one wins.
+
+**Deferred:** zero-config NAT traversal (no port-forward) — wiring the relay-circuit
+reservation + rendezvous discovery the CLI already has (Phase 7 proves them over real TCP)
+into the desktop `found`/`join`.
 
 ## Layout
 
