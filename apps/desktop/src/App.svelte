@@ -8,19 +8,30 @@
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
   type UiFile = { name: string; size: number; mime: string; cid: string; author: string };
+  type Found = { server: number; channel: string };
 
-  let mode = $state<"start" | "app">("start");
+  // One server in the rail (each its own encrypted group). Per-server UI state lives here;
+  // messages/roster/profiles/files are loaded for the active server on switch + events.
+  type ServerState = {
+    id: number;
+    name: string;
+    channels: Channel[];
+    active: string; // active channel id
+    unread: string[]; // channel ids with unread
+    invite: string; // founder's invite ("" for a joiner)
+    dot: boolean; // activity while not the active server
+  };
+
+  let servers = $state<ServerState[]>([]);
+  let activeServerId = $state<number | null>(null);
+  let showAdd = $state(false); // showing the found/join form to add a server
+
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
-  let invite = $state(""); // the invite to share (founder)
   let joinInvite = $state(""); // pasted invite (joiner)
   let copied = $state(false);
-
-  let channels = $state<Channel[]>([]);
-  let active = $state(""); // active channel id
-  let unread = $state<Set<string>>(new Set());
   let newChannel = $state("");
 
   let messages = $state<Msg[]>([]);
@@ -32,30 +43,19 @@
   let files = $state<UiFile[]>([]);
   let uploading = $state(false);
 
-  // The local device's fingerprint (the roster entry flagged `you`).
-  let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
-
   // Profile editor.
   let pName = $state("");
   let pColor = $state("#4f8cff");
   let pFont = $state("system");
   let pEffect = $state("none");
-  let pAvatar = $state(""); // base64 JPEG ("" = none)
+  let pAvatar = $state("");
+
+  let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
+  let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
 
   function activeName(): string {
-    return channels.find((c) => c.id === active)?.name ?? "";
+    return cur?.channels.find((c) => c.id === cur?.active)?.name ?? "";
   }
-
-  function fmtTime(ts: number): string {
-    return ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
-  }
-
-  // Keep the message list pinned to the newest as messages arrive / the channel switches.
-  $effect(() => {
-    void messages;
-    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
-  });
-
   function nameOf(fp: string): string {
     return profiles[fp]?.name?.trim() || fp;
   }
@@ -68,21 +68,26 @@
   function colorStyle(color: string): string {
     return color ? `color:${color}` : "";
   }
+  function fmtTime(ts: number): string {
+    return ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  }
+  function fmtSize(n: number): string {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  $effect(() => {
+    void messages;
+    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
 
   async function found() {
     busy = true;
     error = "";
     try {
-      const id = await invoke<string>("found_server", { displayName, advertise });
-      invite = (await invoke<string | null>("get_invite")) ?? "";
-      channels = [{ id, name: "general" }];
-      active = id;
-      pName = displayName;
-      mode = "app";
-      await refresh();
-      await refreshMembers();
-      await refreshProfiles();
-      await refreshFiles();
+      const r = await invoke<Found>("found_server", { displayName, advertise });
+      addServer(r, displayName);
     } catch (e) {
       error = String(e);
     } finally {
@@ -94,18 +99,9 @@
     busy = true;
     error = "";
     try {
-      const id = await invoke<string>("join_server", {
-        inviteHex: joinInvite.trim(),
-        displayName,
-      });
-      channels = [{ id, name: "general" }];
-      active = id;
-      pName = displayName;
-      mode = "app";
-      await refresh();
-      await refreshMembers();
-      await refreshProfiles();
-      await refreshFiles();
+      const r = await invoke<Found>("join_server", { inviteHex: joinInvite.trim(), displayName });
+      addServer(r, displayName);
+      joinInvite = "";
     } catch (e) {
       error = String(e);
     } finally {
@@ -113,13 +109,43 @@
     }
   }
 
+  function addServer(r: Found, name: string) {
+    servers = [
+      ...servers,
+      { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false },
+    ];
+    showAdd = false;
+    pName = name;
+    switchServer(r.server);
+  }
+
+  async function switchServer(id: number) {
+    activeServerId = id;
+    const s = servers.find((x) => x.id === id);
+    if (s) s.dot = false;
+    await Promise.all([refresh(), refreshMembers(), refreshProfiles(), refreshFiles(), refreshInvite()]);
+  }
+
+  async function leaveServer(id: number) {
+    try {
+      await invoke("leave_server", { server: id });
+    } catch (e) {
+      error = String(e);
+    }
+    servers = servers.filter((s) => s.id !== id);
+    if (activeServerId === id) {
+      if (servers.length) switchServer(servers[0].id);
+      else activeServerId = null;
+    }
+  }
+
   async function addChannel() {
     const name = newChannel.trim().replace(/^#/, "");
-    if (!name) return;
+    if (!name || activeServerId === null) return;
     newChannel = "";
     try {
-      const id = await invoke<string>("open_channel", { name });
-      if (!channels.some((c) => c.id === id)) channels = [...channels, { id, name }];
+      const id = await invoke<string>("open_channel", { server: activeServerId, name });
+      if (cur && !cur.channels.some((c) => c.id === id)) cur.channels.push({ id, name });
       switchTo(id);
     } catch (e) {
       error = String(e);
@@ -127,34 +153,33 @@
   }
 
   function switchTo(id: string) {
-    active = id;
-    if (unread.has(id)) {
-      unread.delete(id);
-      unread = new Set(unread);
-    }
+    if (!cur) return;
+    cur.active = id;
+    cur.unread = cur.unread.filter((c) => c !== id);
     refresh();
   }
 
   async function refresh() {
-    if (!active) return;
+    if (!cur || !cur.active || activeServerId === null) return;
     try {
-      messages = await invoke<Msg[]>("get_messages", { channel: active });
+      messages = await invoke<Msg[]>("get_messages", { server: activeServerId, channel: cur.active });
     } catch (e) {
       error = String(e);
     }
   }
-
   async function refreshMembers() {
+    if (activeServerId === null) return;
     try {
-      roster = await invoke<Member[]>("get_members");
+      roster = await invoke<Member[]>("get_members", { server: activeServerId });
+      members = roster.length;
     } catch (e) {
       error = String(e);
     }
   }
-
   async function refreshProfiles() {
+    if (activeServerId === null) return;
     try {
-      const list = await invoke<Prof[]>("get_profiles");
+      const list = await invoke<Prof[]>("get_profiles", { server: activeServerId });
       const map: Record<string, Prof> = {};
       for (const p of list) map[p.fingerprint] = p;
       profiles = map;
@@ -162,10 +187,25 @@
       error = String(e);
     }
   }
+  async function refreshFiles() {
+    if (activeServerId === null) return;
+    try {
+      files = await invoke<UiFile[]>("get_files", { server: activeServerId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function refreshInvite() {
+    if (!cur || activeServerId === null) return;
+    try {
+      cur.invite = (await invoke<string | null>("get_invite", { server: activeServerId })) ?? "";
+    } catch (e) {
+      error = String(e);
+    }
+  }
 
-  // Downscale a picked image to a 128px square JPEG and keep its base64 (the editor draft).
-  async function loadAvatar(files: FileList | null) {
-    const file = files?.[0];
+  async function loadAvatar(fileList: FileList | null) {
+    const file = fileList?.[0];
     if (!file) return;
     try {
       const url = URL.createObjectURL(file);
@@ -193,15 +233,18 @@
     }
   }
 
-  function fmtSize(n: number): string {
-    if (n < 1024) return `${n} B`;
-    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  }
-
-  async function refreshFiles() {
+  async function saveProfile() {
+    if (activeServerId === null) return;
     try {
-      files = await invoke<UiFile[]>("get_files");
+      await invoke("set_profile", {
+        server: activeServerId,
+        name: pName.trim() || displayName,
+        color: pColor,
+        font: pFont,
+        effect: pEffect,
+        avatar: pAvatar,
+      });
+      await refreshProfiles();
     } catch (e) {
       error = String(e);
     }
@@ -209,7 +252,7 @@
 
   async function uploadFile(fileList: FileList | null) {
     const file = fileList?.[0];
-    if (!file) return;
+    if (!file || activeServerId === null) return;
     uploading = true;
     try {
       const base64 = await new Promise<string>((resolve, reject) => {
@@ -222,6 +265,7 @@
         reader.readAsDataURL(file);
       });
       await invoke("add_file", {
+        server: activeServerId,
         name: file.name,
         mime: file.type || "application/octet-stream",
         data: base64,
@@ -235,8 +279,9 @@
   }
 
   async function downloadFile(f: UiFile) {
+    if (activeServerId === null) return;
     try {
-      const base64 = await invoke<string>("download_file", { cid: f.cid });
+      const base64 = await invoke<string>("download_file", { server: activeServerId, cid: f.cid });
       const a = document.createElement("a");
       a.href = `data:${f.mime || "application/octet-stream"};base64,${base64}`;
       a.download = f.name;
@@ -248,35 +293,21 @@
     }
   }
 
-  async function saveProfile() {
-    try {
-      await invoke("set_profile", {
-        name: pName.trim() || displayName,
-        color: pColor,
-        font: pFont,
-        effect: pEffect,
-        avatar: pAvatar,
-      });
-      await refreshProfiles();
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
   async function send() {
     const text = draft.trim();
-    if (!text || !active) return;
+    if (!text || !cur || !cur.active || activeServerId === null) return;
     draft = "";
     try {
-      await invoke("send_message", { channel: active, text });
+      await invoke("send_message", { server: activeServerId, channel: cur.active, text });
     } catch (e) {
       error = String(e);
     }
   }
 
   async function copyInvite() {
+    if (!cur) return;
     try {
-      await navigator.clipboard.writeText(invite);
+      await navigator.clipboard.writeText(cur.invite);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {
@@ -286,21 +317,34 @@
 
   onMount(() => {
     const subs: Promise<UnlistenFn>[] = [
-      listen<string>("channel-updated", (e) => {
-        const id = e.payload;
-        if (id === active) {
+      listen<{ server: number; channel: string }>("channel-updated", (e) => {
+        const { server, channel } = e.payload;
+        if (server === activeServerId && channel === cur?.active) {
           refresh();
-        } else if (channels.some((c) => c.id === id)) {
-          unread.add(id);
-          unread = new Set(unread);
+          return;
+        }
+        const s = servers.find((x) => x.id === server);
+        if (s && s.channels.some((c) => c.id === channel)) {
+          if (!s.unread.includes(channel)) s.unread.push(channel);
+          if (server !== activeServerId) s.dot = true;
         }
       }),
-      listen<number>("members-changed", (e) => {
-        members = e.payload;
-        refreshMembers();
+      listen<{ server: number; count: number }>("members-changed", (e) => {
+        if (e.payload.server === activeServerId) refreshMembers();
       }),
-      listen("profiles-updated", () => refreshProfiles()),
-      listen("files-updated", () => refreshFiles()),
+      listen<{ server: number }>("profiles-updated", (e) => {
+        if (e.payload.server === activeServerId) refreshProfiles();
+      }),
+      listen<{ server: number }>("files-updated", (e) => {
+        if (e.payload.server === activeServerId) refreshFiles();
+      }),
+      listen<{ server: number }>("server-closed", (e) => {
+        servers = servers.filter((s) => s.id !== e.payload.server);
+        if (activeServerId === e.payload.server) {
+          activeServerId = servers.length ? servers[0].id : null;
+          if (activeServerId !== null) switchServer(activeServerId);
+        }
+      }),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
   });
@@ -327,9 +371,12 @@
 {/snippet}
 
 <main>
-  {#if mode === "start"}
+  {#if servers.length === 0 || showAdd}
     <div class="start">
       <h1>CatComs</h1>
+      {#if showAdd && servers.length}
+        <button class="ghost" onclick={() => (showAdd = false)}>← back</button>
+      {/if}
       <label class="field">
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
@@ -356,14 +403,29 @@
     </div>
   {:else}
     <div class="app">
+      <nav class="rail">
+        {#each servers as s}
+          <button
+            class="server-icon"
+            class:active={s.id === activeServerId}
+            title={s.name}
+            onclick={() => switchServer(s.id)}
+          >
+            {s.name.slice(0, 1).toUpperCase()}
+            {#if s.dot}<span class="rail-dot">●</span>{/if}
+          </button>
+        {/each}
+        <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
+      </nav>
+
       <aside class="sidebar">
         <h3>Channels</h3>
         <ul class="channel-list">
-          {#each channels as c}
+          {#each cur?.channels ?? [] as c}
             <li>
-              <button class:active={c.id === active} onclick={() => switchTo(c.id)}>
+              <button class:active={c.id === cur?.active} onclick={() => switchTo(c.id)}>
                 #{c.name}
-                {#if unread.has(c.id)}<span class="dot">●</span>{/if}
+                {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
               </button>
             </li>
           {/each}
@@ -454,13 +516,19 @@
           </ul>
         </details>
 
-        {#if invite}
+        {#if cur?.invite}
           <details>
             <summary>Invite someone</summary>
             <p class="muted">Single-use — open a second window and paste it:</p>
-            <textarea readonly rows="3" value={invite}></textarea>
+            <textarea readonly rows="3" value={cur.invite}></textarea>
             <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
           </details>
+        {/if}
+
+        {#if activeServerId !== null}
+          <button class="ghost leave" onclick={() => activeServerId !== null && leaveServer(activeServerId)}>
+            Leave server
+          </button>
         {/if}
       </aside>
 

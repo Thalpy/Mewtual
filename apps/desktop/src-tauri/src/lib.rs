@@ -1,12 +1,14 @@
 //! The Tauri command/event bridge — a thin shell over the `catcoms-app` event-stream
-//! actor (slices 8b-2 / 8c). The frontend `invoke`s these commands and `listen`s for the
-//! forwarded events; all the real work lives in the tested `catcoms-app` actor, which
-//! itself wraps the protocol stack. The GUI never touches MLS or automerge.
+//! actors. The frontend `invoke`s these commands and `listen`s for the forwarded events;
+//! all the real work lives in the tested `catcoms-app` actor, which itself wraps the
+//! protocol stack. The GUI never touches MLS or automerge.
 //!
-//! Scope: found a server (and mint a single-use invite carrying its loopback address),
-//! or join an existing server by pasting that invite; then #general — send + read
-//! messages. The discovery/relay wiring and multi-server are later slices.
+//! Multi-server (8p): the app can run several servers at once. Each is a separate
+//! `Server`/actor (its own MLS group + transport + event stream); the bridge keys them by
+//! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
+//! every forwarded event is tagged with its server id so the UI routes it correctly.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -22,12 +24,36 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
-/// App state managed by Tauri: the running server actor, plus (for a founder) the
-/// single-use invite to share.
+/// One running server: its actor handle and the single-use invite to share (founder only).
+/// The display name for the rail is tracked by the UI (it knows what it founded/joined).
+struct ServerEntry {
+    actor: ServerActor,
+    invite: Option<String>,
+}
+
+/// App state managed by Tauri: every running server keyed by a bridge-assigned id.
 #[derive(Default)]
 struct AppState {
-    actor: Mutex<Option<ServerActor>>,
-    invite: Mutex<Option<String>>,
+    servers: Mutex<HashMap<u64, ServerEntry>>,
+    next_id: Mutex<u64>,
+}
+
+/// Clone out the actor for `server` (so we never hold the servers lock across an await).
+async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+    state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .map(|e| e.actor.clone())
+        .ok_or_else(|| "unknown server".to_string())
+}
+
+/// Result of founding/joining: the new server's id plus its `#general` channel id.
+#[derive(Serialize, Clone)]
+struct FoundResult {
+    server: u64,
+    channel: String,
 }
 
 /// A chat message as serialized to the frontend.
@@ -68,26 +94,48 @@ struct UiFile {
     author: String,
 }
 
-/// Forward an actor's event stream to the frontend as Tauri events.
-fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
+// Event payloads — every event is tagged with its server id.
+#[derive(Serialize, Clone)]
+struct ChannelEvt {
+    server: u64,
+    channel: String,
+}
+#[derive(Serialize, Clone)]
+struct CountEvt {
+    server: u64,
+    count: usize,
+}
+#[derive(Serialize, Clone)]
+struct ServerEvt {
+    server: u64,
+}
+
+/// Forward one server actor's event stream to the frontend, tagging each with `server`.
+fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
             match ev {
                 AppEvent::ChannelUpdated { channel } => {
                     // Channel ids are u128 — send as a string (JS numbers lose precision).
-                    let _ = app.emit("channel-updated", channel.to_string());
+                    let _ = app.emit(
+                        "channel-updated",
+                        ChannelEvt {
+                            server,
+                            channel: channel.to_string(),
+                        },
+                    );
                 }
                 AppEvent::MembersChanged { count } => {
-                    let _ = app.emit("members-changed", count);
+                    let _ = app.emit("members-changed", CountEvt { server, count });
                 }
                 AppEvent::ProfilesUpdated => {
-                    let _ = app.emit("profiles-updated", ());
+                    let _ = app.emit("profiles-updated", ServerEvt { server });
                 }
                 AppEvent::FilesUpdated => {
-                    let _ = app.emit("files-updated", ());
+                    let _ = app.emit("files-updated", ServerEvt { server });
                 }
                 AppEvent::Closed => {
-                    let _ = app.emit("server-closed", ());
+                    let _ = app.emit("server-closed", ServerEvt { server });
                     break;
                 }
             }
@@ -130,17 +178,40 @@ fn build_advertised(input: &str, port: u16, peer_id: &str) -> Result<String, Str
     Ok(format!("/ip4/{host}/tcp/{p}/p2p/{peer_id}"))
 }
 
+/// Insert a freshly-spawned server into the registry, forward its events, and return the
+/// new server id.
+async fn register_server(
+    app: &AppHandle,
+    state: &AppState,
+    actor: ServerActor,
+    events: mpsc::Receiver<AppEvent>,
+    invite: Option<String>,
+) -> u64 {
+    let id = {
+        let mut n = state.next_id.lock().await;
+        *n += 1;
+        *n
+    };
+    forward_events(app.clone(), id, events);
+    state
+        .servers
+        .lock()
+        .await
+        .insert(id, ServerEntry { actor, invite });
+    id
+}
+
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
 /// loopback), found the group, mint a single-use invite carrying the reachable address(es),
-/// spawn the actor, and forward its events. `advertise` is an optional user-supplied
-/// reachable address (LAN or public IP, or a relay circuit multiaddr); blank = same-machine.
+/// spawn the actor, and register it. `advertise` is an optional user-supplied reachable
+/// address (LAN or public IP, or a relay circuit multiaddr); blank = same-machine.
 #[tauri::command]
 async fn found_server(
     app: AppHandle,
     state: State<'_, AppState>,
     display_name: String,
     advertise: String,
-) -> Result<String, String> {
+) -> Result<FoundResult, String> {
     let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
         .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
@@ -172,25 +243,27 @@ async fn found_server(
     let invite = server
         .mint_invite(nonce, expires, bootstrap)
         .map_err(|e| e.to_string())?;
-    *state.invite.lock().await = Some(hex::encode(invite.encode()));
+    let invite_hex = hex::encode(invite.encode());
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
-    forward_events(app, events);
-    *state.actor.lock().await = Some(actor);
-    Ok(general.to_string())
+    let server_id = register_server(&app, &state, actor, events, Some(invite_hex)).await;
+    Ok(FoundResult {
+        server: server_id,
+        channel: general.to_string(),
+    })
 }
 
-/// Join an existing server by pasting its invite: decode it, dial the bootstrap
-/// address, run the MLS join, then catch up #general.
+/// Join an existing server by pasting its invite: decode it, dial all bootstrap addresses,
+/// run the MLS join, then catch up #general / profiles / files.
 #[tauri::command]
 async fn join_server(
     app: AppHandle,
     state: State<'_, AppState>,
     invite_hex: String,
     display_name: String,
-) -> Result<String, String> {
+) -> Result<FoundResult, String> {
     let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
     let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
     // Dial every bootstrap address the invite carries — loopback (same machine), a LAN IP,
@@ -242,38 +315,53 @@ async fn join_server(
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
     actor.catch_up_files(inviter).await;
-    forward_events(app, events);
-    *state.actor.lock().await = Some(actor);
-    Ok(general.to_string())
+    let server_id = register_server(&app, &state, actor, events, None).await;
+    Ok(FoundResult {
+        server: server_id,
+        channel: general.to_string(),
+    })
+}
+
+/// Leave a server: shut down its actor and drop it from the registry.
+#[tauri::command]
+async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
+    if let Some(entry) = state.servers.lock().await.remove(&server) {
+        entry.actor.shutdown().await;
+    }
+    Ok(())
 }
 
 /// Open (create/subscribe) a channel by name; returns its id. Members who open the same
 /// name converge on the same channel. The channel is also caught up from the best known
-/// peer, so opening a channel that already has history shows the backlog — symmetric, so
-/// either side gets the backlog of a channel the other created.
+/// peer, so opening a channel that already has history shows the backlog.
 #[tauri::command]
-async fn open_channel(state: State<'_, AppState>, name: String) -> Result<String, String> {
+async fn open_channel(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+) -> Result<String, String> {
     let id = channel_id(&name);
-    if let Some(actor) = state.actor.lock().await.as_ref() {
-        actor.open_channel(id).await;
-        actor.catch_up_any(id).await;
-    }
+    let actor = actor_of(&state, server).await?;
+    actor.open_channel(id).await;
+    actor.catch_up_any(id).await;
     Ok(id.to_string())
 }
 
 /// The single-use invite to share (founder only); `None` for a joiner.
 #[tauri::command]
-async fn get_invite(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    Ok(state.invite.lock().await.clone())
+async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
+    Ok(state
+        .servers
+        .lock()
+        .await
+        .get(&server)
+        .and_then(|e| e.invite.clone()))
 }
 
 /// The current roster (member fingerprints; `you` marks the local device).
 #[tauri::command]
-async fn get_members(state: State<'_, AppState>) -> Result<Vec<UiMember>, String> {
-    let guard = state.actor.lock().await;
-    let Some(actor) = guard.as_ref() else {
-        return Ok(Vec::new());
-    };
+async fn get_members(state: State<'_, AppState>, server: u64) -> Result<Vec<UiMember>, String> {
+    let actor = actor_of(&state, server).await?;
     Ok(actor
         .members()
         .await
@@ -290,6 +378,7 @@ async fn get_members(state: State<'_, AppState>) -> Result<Vec<UiMember>, String
 #[tauri::command]
 async fn set_profile(
     state: State<'_, AppState>,
+    server: u64,
     name: String,
     color: String,
     font: String,
@@ -308,27 +397,23 @@ async fn set_profile(
             avatar.len()
         ));
     }
-    if let Some(actor) = state.actor.lock().await.as_ref() {
-        actor
-            .set_profile(Profile {
-                name,
-                color,
-                font,
-                effect,
-                avatar,
-            })
-            .await;
-    }
+    let actor = actor_of(&state, server).await?;
+    actor
+        .set_profile(Profile {
+            name,
+            color,
+            font,
+            effect,
+            avatar,
+        })
+        .await;
     Ok(())
 }
 
 /// All known member profiles (keyed by fingerprint).
 #[tauri::command]
-async fn get_profiles(state: State<'_, AppState>) -> Result<Vec<UiProfile>, String> {
-    let guard = state.actor.lock().await;
-    let Some(actor) = guard.as_ref() else {
-        return Ok(Vec::new());
-    };
+async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiProfile>, String> {
+    let actor = actor_of(&state, server).await?;
     Ok(actor
         .profiles()
         .await
@@ -352,6 +437,7 @@ async fn get_profiles(state: State<'_, AppState>) -> Result<Vec<UiProfile>, Stri
 #[tauri::command]
 async fn add_file(
     state: State<'_, AppState>,
+    server: u64,
     name: String,
     mime: String,
     data: String,
@@ -359,20 +445,14 @@ async fn add_file(
     let bytes = B64
         .decode(data.as_bytes())
         .map_err(|e| format!("bad file data: {e}"))?;
-    let guard = state.actor.lock().await;
-    let Some(actor) = guard.as_ref() else {
-        return Err("no server".into());
-    };
+    let actor = actor_of(&state, server).await?;
     actor.add_file(name, mime, bytes).await
 }
 
 /// The shared file list (metadata; bytes are fetched on download).
 #[tauri::command]
-async fn get_files(state: State<'_, AppState>) -> Result<Vec<UiFile>, String> {
-    let guard = state.actor.lock().await;
-    let Some(actor) = guard.as_ref() else {
-        return Ok(Vec::new());
-    };
+async fn get_files(state: State<'_, AppState>, server: u64) -> Result<Vec<UiFile>, String> {
+    let actor = actor_of(&state, server).await?;
     Ok(actor
         .files()
         .await
@@ -389,12 +469,13 @@ async fn get_files(state: State<'_, AppState>) -> Result<Vec<UiFile>, String> {
 
 /// Download a shared file by content-address hex; returns base64-encoded bytes.
 #[tauri::command]
-async fn download_file(state: State<'_, AppState>, cid: String) -> Result<String, String> {
+async fn download_file(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<String, String> {
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
-    let guard = state.actor.lock().await;
-    let Some(actor) = guard.as_ref() else {
-        return Err("no server".into());
-    };
+    let actor = actor_of(&state, server).await?;
     match actor.download_file(raw).await {
         Some(bytes) => Ok(B64.encode(&bytes)),
         None => Err("file unavailable (no peer has it yet)".into()),
@@ -405,13 +486,13 @@ async fn download_file(state: State<'_, AppState>, cid: String) -> Result<String
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
+    server: u64,
     channel: String,
     text: String,
 ) -> Result<(), String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    if let Some(actor) = state.actor.lock().await.as_ref() {
-        actor.send_message(id, text).await;
-    }
+    let actor = actor_of(&state, server).await?;
+    actor.send_message(id, text).await;
     Ok(())
 }
 
@@ -419,13 +500,11 @@ async fn send_message(
 #[tauri::command]
 async fn get_messages(
     state: State<'_, AppState>,
+    server: u64,
     channel: String,
 ) -> Result<Vec<UiMessage>, String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let guard = state.actor.lock().await;
-    let Some(actor) = guard.as_ref() else {
-        return Ok(Vec::new());
-    };
+    let actor = actor_of(&state, server).await?;
     Ok(actor
         .messages(id)
         .await
@@ -445,6 +524,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             found_server,
             join_server,
+            leave_server,
             open_channel,
             get_invite,
             get_members,

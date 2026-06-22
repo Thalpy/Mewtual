@@ -34,6 +34,66 @@ main {
   min-height: 0;
 }
 
+.rail {
+  width: 56px;
+  flex-shrink: 0;
+  background: #15171a;
+  border-right: 1px solid #3a3d44;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  overflow-y: auto;
+}
+
+.server-icon {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #2a2d33;
+  color: #cdd2da;
+  font-weight: 700;
+  font-size: 1rem;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.server-icon:hover {
+  background: #34527e;
+}
+
+.server-icon.active {
+  background: #4f8cff;
+  color: white;
+}
+
+.server-icon.add {
+  background: transparent;
+  border: 1px dashed #555;
+  color: #9aa0aa;
+  font-size: 1.2rem;
+}
+
+.rail-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  color: #4f8cff;
+  font-size: 0.7rem;
+}
+
+.leave {
+  margin-top: auto;
+  font-size: 0.8rem;
+}
+
 .sidebar {
   width: 220px;
   flex-shrink: 0;
