@@ -46,6 +46,14 @@
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
 
+  // Wiki (main-pane view toggles between chat and wiki).
+  let view = $state<"chat" | "wiki">("chat");
+  let wikiPages = $state<string[]>([]);
+  let activeWikiPage = $state("");
+  let wikiBody = $state("");
+  let newWikiPage = $state("");
+  let wikiDirty = $state(false); // unsaved edits in the open page (avoid clobbering on live updates)
+
   // Profile editor.
   let pName = $state("");
   let pColor = $state("#4f8cff");
@@ -126,6 +134,11 @@
     activeServerId = id;
     const s = servers.find((x) => x.id === id);
     if (s) s.dot = false;
+    // Each server has its own wiki; reset the wiki view to the new server's.
+    view = "chat";
+    activeWikiPage = "";
+    wikiBody = "";
+    wikiDirty = false;
     await Promise.all([
       refresh(),
       refreshMembers(),
@@ -219,6 +232,56 @@
     statusDraft = "";
     try {
       await invoke("post_status", { server: activeServerId, text });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function switchView(v: "chat" | "wiki") {
+    view = v;
+    if (v === "wiki") refreshWiki();
+  }
+  async function refreshWiki() {
+    if (activeServerId === null) return;
+    try {
+      wikiPages = await invoke<string[]>("get_wiki_pages", { server: activeServerId });
+      // Reload the open page only if it still exists and the user isn't mid-edit.
+      if (activeWikiPage && !wikiDirty && wikiPages.includes(activeWikiPage)) {
+        wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name: activeWikiPage });
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function openWikiPage(name: string) {
+    if (activeServerId === null) return;
+    try {
+      wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+      activeWikiPage = name;
+      wikiDirty = false;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function createWikiPage() {
+    const name = newWikiPage.trim();
+    if (!name || activeServerId === null) return;
+    newWikiPage = "";
+    try {
+      if (!wikiPages.includes(name)) {
+        await invoke("save_wiki_page", { server: activeServerId, name, body: "" });
+        await refreshWiki();
+      }
+      await openWikiPage(name);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function saveWikiPage() {
+    if (!activeWikiPage || activeServerId === null) return;
+    try {
+      await invoke("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
+      wikiDirty = false;
     } catch (e) {
       error = String(e);
     }
@@ -368,6 +431,9 @@
       }),
       listen<{ server: number }>("status-updated", (e) => {
         if (e.payload.server === activeServerId) refreshStatuses();
+      }),
+      listen<{ server: number }>("wiki-updated", (e) => {
+        if (e.payload.server === activeServerId && view === "wiki") refreshWiki();
       }),
       listen<{ server: number }>("server-closed", (e) => {
         servers = servers.filter((s) => s.id !== e.payload.server);
@@ -591,25 +657,55 @@
       </aside>
 
       <section class="channel">
-        <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
-        <ul class="messages" bind:this={messagesEl}>
-          {#each messages as m}
-            <li class:own={m.author === myFp}>
-              <span class="author">
-                {@render avatarTag(m.author)}
-                {@render nameTag(m.author)}
-                <span class="time">{fmtTime(m.ts)}</span>
-              </span>
-              <span class="text">{m.text}</span>
-            </li>
-          {:else}
-            <li class="muted">No messages yet — say hello.</li>
-          {/each}
-        </ul>
-        <form class="composer" onsubmit={(e) => { e.preventDefault(); send(); }}>
-          <input bind:value={draft} placeholder={"Message #" + activeName()} />
-          <button type="submit">Send</button>
-        </form>
+        <div class="view-tabs">
+          <button class:active={view === "chat"} onclick={() => switchView("chat")}>Chat</button>
+          <button class:active={view === "wiki"} onclick={() => switchView("wiki")}>Wiki</button>
+        </div>
+
+        {#if view === "chat"}
+          <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
+          <ul class="messages" bind:this={messagesEl}>
+            {#each messages as m}
+              <li class:own={m.author === myFp}>
+                <span class="author">
+                  {@render avatarTag(m.author)}
+                  {@render nameTag(m.author)}
+                  <span class="time">{fmtTime(m.ts)}</span>
+                </span>
+                <span class="text">{m.text}</span>
+              </li>
+            {:else}
+              <li class="muted">No messages yet — say hello.</li>
+            {/each}
+          </ul>
+          <form class="composer" onsubmit={(e) => { e.preventDefault(); send(); }}>
+            <input bind:value={draft} placeholder={"Message #" + activeName()} />
+            <button type="submit">Send</button>
+          </form>
+        {:else}
+          <div class="wiki">
+            <div class="wiki-pages">
+              {#each wikiPages as p}
+                <button class:active={p === activeWikiPage} onclick={() => openWikiPage(p)}>{p}</button>
+              {:else}
+                <span class="muted">No pages yet.</span>
+              {/each}
+              <form onsubmit={(e) => { e.preventDefault(); createWikiPage(); }}>
+                <input bind:value={newWikiPage} placeholder="+ new page" />
+              </form>
+            </div>
+            {#if activeWikiPage}
+              <div class="wiki-editor">
+                <h2>{activeWikiPage} {#if wikiDirty}<span class="muted">· unsaved</span>{/if}</h2>
+                <textarea bind:value={wikiBody} oninput={() => (wikiDirty = true)} rows="16"
+                  placeholder="Write this page…"></textarea>
+                <button onclick={saveWikiPage} disabled={!wikiDirty}>Save page</button>
+              </div>
+            {:else}
+              <p class="muted wiki-empty">Select a page on the left, or create one.</p>
+            {/if}
+          </div>
+        {/if}
         {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
       </section>
     </div>

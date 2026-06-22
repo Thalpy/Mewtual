@@ -137,6 +137,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::StatusUpdated => {
                     let _ = app.emit("status-updated", ServerEvt { server });
                 }
+                AppEvent::WikiUpdated => {
+                    let _ = app.emit("wiki-updated", ServerEvt { server });
+                }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
                     break;
@@ -363,6 +366,7 @@ async fn join_server(
     actor.catch_up_profiles(inviter).await;
     actor.catch_up_files(inviter).await;
     actor.catch_up_status(inviter).await;
+    actor.catch_up_wiki(inviter).await;
     let server_id = register_server(&app, &state, actor, events, None).await;
     Ok(FoundResult {
         server: server_id,
@@ -555,6 +559,37 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .collect())
 }
 
+/// The wiki page names (sorted).
+#[tauri::command]
+async fn get_wiki_pages(state: State<'_, AppState>, server: u64) -> Result<Vec<String>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.wiki_pages().await)
+}
+
+/// Read a wiki page's body.
+#[tauri::command]
+async fn get_wiki_page(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+) -> Result<String, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.read_wiki_page(name).await)
+}
+
+/// Create or update a wiki page.
+#[tauri::command]
+async fn save_wiki_page(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+    body: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.write_wiki_page(name, body).await;
+    Ok(())
+}
+
 /// Send a chat message to a channel (by id).
 #[tauri::command]
 async fn send_message(
@@ -608,6 +643,9 @@ pub fn run() {
             download_file,
             post_status,
             get_statuses,
+            get_wiki_pages,
+            get_wiki_page,
+            save_wiki_page,
             send_message,
             get_messages
         ])

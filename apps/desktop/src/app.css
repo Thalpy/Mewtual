@@ -469,6 +469,87 @@ select {
   word-break: break-word;
 }
 
+.view-tabs {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.view-tabs button {
+  background: transparent;
+  color: #cdd2da;
+  font-weight: 500;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #3a3d44;
+}
+
+.view-tabs button.active {
+  background: #34527e;
+  color: white;
+  border-color: #34527e;
+}
+
+.wiki {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  gap: 0.75rem;
+}
+
+.wiki-pages {
+  width: 160px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  border-right: 1px solid #3a3d44;
+  padding-right: 0.5rem;
+}
+
+.wiki-pages button {
+  background: transparent;
+  color: #cdd2da;
+  font-weight: 500;
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wiki-pages button:hover {
+  background: #2a2d33;
+}
+
+.wiki-pages button.active {
+  background: #34527e;
+  color: white;
+}
+
+.wiki-editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.wiki-editor textarea {
+  flex: 1;
+  resize: none;
+  word-break: normal;
+  font-family: inherit;
+  line-height: 1.4;
+}
+
+.wiki-editor button {
+  align-self: flex-start;
+}
+
+.wiki-empty {
+  margin: auto;
+}
+
 .avatar {
   width: 22px;
   height: 22px;

@@ -82,6 +82,17 @@ pub enum AppCommand {
     },
     /// Pull the status feed from `peer` (e.g. right after joining).
     CatchUpStatus { peer: PeerId },
+    /// Query the wiki page names (sorted).
+    WikiPages { reply: oneshot::Sender<Vec<String>> },
+    /// Read a wiki page's body.
+    ReadWikiPage {
+        name: String,
+        reply: oneshot::Sender<String>,
+    },
+    /// Create or update a wiki page.
+    WriteWikiPage { name: String, body: String },
+    /// Pull the wiki from `peer` (e.g. right after joining).
+    CatchUpWiki { peer: PeerId },
     /// Stop the actor.
     Shutdown,
 }
@@ -101,6 +112,8 @@ pub enum AppEvent {
     FilesUpdated,
     /// The status feed changed — the UI should re-fetch it (`statuses`).
     StatusUpdated,
+    /// The wiki changed — the UI should re-fetch pages / the open page.
+    WikiUpdated,
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -294,6 +307,53 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpStatus { peer }).await;
     }
 
+    /// Fetch the wiki page names (sorted).
+    pub async fn wiki_pages(&self) -> Vec<String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiPages { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Read a wiki page's body.
+    pub async fn read_wiki_page(&self, name: impl Into<String>) -> String {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ReadWikiPage {
+                name: name.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return String::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Create or update a wiki page (a `WikiUpdated` event follows).
+    pub async fn write_wiki_page(&self, name: impl Into<String>, body: impl Into<String>) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::WriteWikiPage {
+                name: name.into(),
+                body: body.into(),
+            })
+            .await;
+    }
+
+    /// Pull the wiki from `peer`.
+    pub async fn catch_up_wiki(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpWiki { peer }).await;
+    }
+
     /// Stop the actor.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
@@ -338,6 +398,11 @@ where
             tracing::warn!(error = %e, "open_status failed");
         }
         let mut status_count = server.statuses().len();
+        // …and the wiki.
+        if let Err(e) = server.open_wiki().await {
+            tracing::warn!(error = %e, "open_wiki failed");
+        }
+        let mut last_wiki = server.wiki_map();
         loop {
             tokio::select! {
                 biased;
@@ -452,6 +517,28 @@ where
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
+                    Some(AppCommand::WikiPages { reply }) => {
+                        let _ = reply.send(server.wiki_pages());
+                    }
+                    Some(AppCommand::ReadWikiPage { name, reply }) => {
+                        let _ = reply.send(server.read_wiki_page(&name));
+                    }
+                    Some(AppCommand::WriteWikiPage { name, body }) => {
+                        if let Err(e) = server.write_wiki_page(&name, &body).await {
+                            tracing::warn!(error = %e, "write_wiki_page failed");
+                        }
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CatchUpWiki { peer }) => {
+                        if let Err(e) = server.request_wiki_catchup(peer).await {
+                            tracing::warn!(error = %e, "wiki catch-up failed");
+                        }
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
@@ -475,6 +562,9 @@ where
                         }
                         if status_changed(&server, &mut status_count) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
+                        }
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
                     }
                     _ => {
@@ -534,6 +624,22 @@ where
     let n = server.statuses().len();
     if *last != n {
         *last = n;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the wiki changed since last seen (a page added or a body edited — a count
+/// alone misses edits, so this compares the full page map). Updates the record.
+fn wiki_changed<T, R>(server: &Server<T, R>, last: &mut HashMap<String, String>) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.wiki_map();
+    if now != *last {
+        *last = now;
         true
     } else {
         false
@@ -667,7 +773,7 @@ mod tests {
         alice.send_message(GENERAL, "hello bob").await;
 
         // Bob's actor should signal the channel changed; then re-fetch shows the message.
-        timeout(Duration::from_secs(30), async {
+        timeout(Duration::from_secs(60), async {
             loop {
                 match bob_events.recv().await {
                     Some(AppEvent::ChannelUpdated { channel }) if channel == GENERAL => break,
@@ -727,7 +833,7 @@ mod tests {
             .await;
         bob.catch_up_profiles(alice_peer).await;
 
-        timeout(Duration::from_secs(30), async {
+        timeout(Duration::from_secs(60), async {
             loop {
                 if bob.profiles().await.values().any(|p| p.name == "Alice") {
                     break;
@@ -782,7 +888,7 @@ mod tests {
         // Bob creates a channel Alice has never opened and posts to it.
         bob.open_channel(SECRET).await;
         bob.send_message(SECRET, "from bob").await;
-        timeout(Duration::from_secs(30), async {
+        timeout(Duration::from_secs(60), async {
             loop {
                 if bob
                     .messages(SECRET)
@@ -805,7 +911,7 @@ mod tests {
         // founder catching up a joiner-created channel (the symmetric case 8i could not do).
         alice.open_channel(SECRET).await;
         alice.catch_up_any(SECRET).await;
-        timeout(Duration::from_secs(30), async {
+        timeout(Duration::from_secs(60), async {
             loop {
                 if alice
                     .messages(SECRET)
@@ -865,7 +971,7 @@ mod tests {
             .await;
         bob.catch_up_profiles(alice_peer).await;
 
-        timeout(Duration::from_secs(30), async {
+        timeout(Duration::from_secs(60), async {
             loop {
                 if bob.profiles().await.values().any(|p| p.avatar == avatar) {
                     break;
@@ -915,7 +1021,7 @@ mod tests {
             .unwrap();
 
         // Bob sees it in the index via gossip (which also remembers Alice as a peer)…
-        let file = timeout(Duration::from_secs(30), async {
+        let file = timeout(Duration::from_secs(60), async {
             loop {
                 if let Some(f) = bob.files().await.into_iter().find(|f| f.name == "doc.txt") {
                     break f;

@@ -257,6 +257,27 @@ fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
 const FILE_INDEX_DOC: u128 = 0;
 /// The reserved document id for the per-server status feed (`DocType::Status`).
 const STATUS_DOC: u128 = 0;
+/// The reserved document id for the per-server wiki (`DocType::Wiki`) — one doc that is a
+/// map of page name → page body.
+const WIKI_DOC: u128 = 0;
+
+/// Write a wiki page's body (a last-writer-wins register; concurrent edits to the *same*
+/// page converge to one, edits to different pages are independent). Char-level merge via an
+/// automerge `Text` body is a later refinement.
+fn write_wiki_page(doc: &mut AutoCommit, name: &str, body: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, name, body)?;
+    Ok(())
+}
+
+/// Materialize the wiki document into a `page name -> body` map.
+fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for key in doc.keys(ROOT) {
+        let body = str_field(doc, &ROOT, &key);
+        out.insert(key, body);
+    }
+    out
+}
 const FILES: &str = "files";
 const F_NAME: &str = "name";
 const F_SIZE: &str = "size";
@@ -624,6 +645,53 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
+    /// Open (create/subscribe) the per-server **wiki** document. Call once after
+    /// founding/joining.
+    pub async fn open_wiki(&mut self) -> Result<(), AppError> {
+        self.sync.open_channel(DocType::Wiki, WIKI_DOC).await?;
+        Ok(())
+    }
+
+    /// The full wiki as a `page name -> body` map.
+    pub fn wiki_map(&self) -> HashMap<String, String> {
+        self.sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| read_wiki_map(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// The wiki's page names, sorted.
+    pub fn wiki_pages(&self) -> Vec<String> {
+        let mut pages: Vec<String> = self.wiki_map().into_keys().collect();
+        pages.sort();
+        pages
+    }
+
+    /// A wiki page's body (empty if the page does not exist).
+    pub fn read_wiki_page(&self, name: &str) -> String {
+        self.wiki_map().get(name).cloned().unwrap_or_default()
+    }
+
+    /// Create or update a wiki page (last-writer-wins on the body).
+    pub async fn write_wiki_page(&mut self, name: &str, body: &str) -> Result<(), AppError> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(AppError::Invalid("empty wiki page name".into()));
+        }
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| write_wiki_page(d, &name, body))
+            .await?;
+        Ok(())
+    }
+
+    /// Catch up the wiki from `peer` (e.g. right after joining).
+    pub async fn request_wiki_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Wiki, WIKI_DOC)
+            .await?)
+    }
+
     /// Catch up the profile document from `peer` (e.g. right after joining).
     pub async fn request_profiles_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
         Ok(self
@@ -930,6 +998,35 @@ mod tests {
         assert_eq!(feed[0].text, "server is live");
         assert_eq!(feed[0].author, alice.my_fingerprint());
         assert_eq!(feed[0].ts, 1_000);
+    }
+
+    #[tokio::test]
+    async fn a_wiki_page_is_written_and_read() {
+        let mut alice = founder();
+        alice.open_wiki().await.unwrap();
+        assert!(alice.wiki_pages().is_empty());
+
+        alice
+            .write_wiki_page("Home", "Welcome to the wiki")
+            .await
+            .unwrap();
+        alice.write_wiki_page("Rules", "Be nice").await.unwrap();
+        assert_eq!(
+            alice.wiki_pages(),
+            vec!["Home".to_string(), "Rules".to_string()]
+        );
+        assert_eq!(alice.read_wiki_page("Home"), "Welcome to the wiki");
+
+        // Editing a page overwrites its body (last-writer-wins); page count unchanged.
+        alice.write_wiki_page("Home", "Updated text").await.unwrap();
+        assert_eq!(alice.read_wiki_page("Home"), "Updated text");
+        assert_eq!(alice.wiki_pages().len(), 2);
+
+        // A blank page name is rejected.
+        assert!(matches!(
+            alice.write_wiki_page("  ", "x").await,
+            Err(AppError::Invalid(_))
+        ));
     }
 
     #[tokio::test]
