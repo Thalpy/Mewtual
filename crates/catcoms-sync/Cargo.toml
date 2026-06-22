@@ -27,6 +27,7 @@ rand_chacha = "0.3"
 rand_core = "0.6"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 libp2p = { version = "0.56", features = ["tokio"] }
+futures.workspace = true
 
 [lints]
 workspace = true

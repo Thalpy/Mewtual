@@ -562,6 +562,7 @@ dependencies = [
  "catcoms-replication",
  "catcoms-rt",
  "catcoms-wire",
+ "futures",
  "libp2p",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
