@@ -14,7 +14,7 @@ use base64::Engine;
 use catcoms_app::{channel_id, spawn, AppEvent, Profile, Server, ServerActor, MAX_AVATAR_BYTES};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
-use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
+use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
 use libp2p::Multiaddr;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -27,6 +27,10 @@ use tokio::time::timeout;
 struct AppState {
     actor: Mutex<Option<ServerActor>>,
     invite: Mutex<Option<String>>,
+    /// The peer we joined through (a joiner only). New channels we open are caught up from
+    /// it, so opening a channel that already has history shows the backlog, not just live
+    /// messages. `None` for a founder (who already holds the history it created).
+    catchup_peer: Mutex<Option<PeerId>>,
 }
 
 /// A chat message as serialized to the frontend.
@@ -178,17 +182,23 @@ async fn join_server(
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
     forward_events(app, events);
+    *state.catchup_peer.lock().await = Some(inviter);
     *state.actor.lock().await = Some(actor);
     Ok(general.to_string())
 }
 
 /// Open (create/subscribe) a channel by name; returns its id. Members who open the same
-/// name converge on the same channel.
+/// name converge on the same channel. If we joined through a peer, the channel is also
+/// caught up from it, so opening a channel that already has history shows the backlog.
 #[tauri::command]
 async fn open_channel(state: State<'_, AppState>, name: String) -> Result<String, String> {
     let id = channel_id(&name);
+    let peer = *state.catchup_peer.lock().await;
     if let Some(actor) = state.actor.lock().await.as_ref() {
         actor.open_channel(id).await;
+        if let Some(peer) = peer {
+            actor.catch_up(peer, id).await;
+        }
     }
     Ok(id.to_string())
 }
