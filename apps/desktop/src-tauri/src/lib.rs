@@ -259,6 +259,21 @@ async fn persist_registry(state: &AppState) {
     }
 }
 
+/// Attach the per-server sealing blob store (Phase 9h) if the vault is unlocked, so files +
+/// avatars persist encrypted at rest (keyed by the stable group id, so a reloaded server
+/// finds its blobs). Best-effort: a locked store or an error leaves the in-memory default.
+/// Must run before any blob is added (i.e. before `spawn`).
+async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, OsCryptoRng>) {
+    let guard = state.store.lock().await;
+    if let Some(store) = guard.as_ref() {
+        let key = hex::encode(server.group_id());
+        match store.blob_store(&key) {
+            Ok(blobs) => server.set_blob_store(blobs),
+            Err(e) => eprintln!("attach blob store failed: {e}"),
+        }
+    }
+}
+
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
 /// loopback), found the group, mint a single-use invite carrying the reachable address(es),
 /// spawn the actor, and register it. `advertise` is an optional user-supplied reachable
@@ -337,6 +352,7 @@ async fn found_server(
     let mut server = Server::found(mesh, device, OsCryptoRng, Box::new(SystemClock), display_name)
         .map_err(|e| e.to_string())?;
     server.subscribe_control().await.map_err(|e| e.to_string())?;
+    attach_blob_store(&state, &mut server).await;
 
     // Mint a single-use invite (1h) carrying the bootstrap address.
     let mut nonce = [0u8; 16];
@@ -404,7 +420,7 @@ async fn join_server(
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
-    let server = Server::join(
+    let mut server = Server::join(
         mesh,
         device,
         OsCryptoRng,
@@ -415,6 +431,7 @@ async fn join_server(
     )
     .await
     .map_err(|e| e.to_string())?;
+    attach_blob_store(&state, &mut server).await;
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
@@ -739,6 +756,7 @@ async fn reload_one(
     )
     .map_err(|e| e.to_string())?;
     server.subscribe_control().await.map_err(|e| e.to_string())?;
+    attach_blob_store(state, &mut server).await;
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);

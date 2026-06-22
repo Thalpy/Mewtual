@@ -1534,6 +1534,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.device.device_id()
     }
 
+    /// This server's MLS group id (stable across restarts) — used to key the on-disk blob
+    /// store directory, so a reloaded server finds its sealed blobs.
+    pub fn group_id(&self) -> Vec<u8> {
+        self.group.group_id()
+    }
+
+    /// Replace the blob store (default in-memory) — e.g. with a persistent, sealing on-disk
+    /// store (Phase 9h). Inject this right after construction, before any blob is added.
+    pub fn set_blob_store(&mut self, blobs: Box<dyn BlobStore + Send>) {
+        self.blobs = blobs;
+    }
+
     /// Build a synchronizer for a member that **joined** an existing group, adopting
     /// the routing state ([`RoutingState`]) transferred in the join response so it
     /// derives the same blinded topics and rendezvous namespaces as the group. Use

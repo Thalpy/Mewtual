@@ -14,8 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use catcoms_crypto::{seal, unseal, KeyHierarchy, SealedBlob};
-use catcoms_rt::CryptoRngCore;
-use catcoms_storage::open_or_create_vault;
+use catcoms_rt::{CryptoRngCore, OsCryptoRng};
+use catcoms_storage::{open_or_create_vault, BlobStore, SealingBlobStore};
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
@@ -97,6 +97,16 @@ impl ServerStore {
     ) -> Result<(), AppError> {
         let sealed = seal(&self.keys.db_key()?, &encode_registry(records), rng)?;
         atomic_write(&self.registry_path(), &frame(&sealed))
+    }
+
+    /// A persistent, sealing blob store for a server (Phase 9h) at `<dir>/blobs/<key>`, where
+    /// `key` is the server's stable group id (hex). Every blob is sealed at rest under the
+    /// vault's `blob_key` (content-addressed by plaintext CID, so the mesh fetch is
+    /// unchanged); the bytes survive restart and are opaque without the passphrase.
+    pub fn blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
+        let dir = self.dir.join("blobs").join(key);
+        let store = SealingBlobStore::open(dir, self.keys.blob_key()?, OsCryptoRng)?;
+        Ok(Box::new(store))
     }
 
     /// Read + unseal the registry (empty if none yet).
@@ -230,5 +240,34 @@ mod tests {
 
         // A WRONG passphrase cannot open the existing vault (and never re-inits it).
         assert!(ServerStore::open(dir.path(), b"wrong passphrase", &mut rng).is_err());
+    }
+
+    #[test]
+    fn blob_store_persists_and_seals_blobs_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(0);
+
+        // Seal a blob to disk under one server's group key.
+        let cid = {
+            let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+            let mut blobs = store.blob_store("group-abc").unwrap();
+            blobs.put(b"file contents").unwrap()
+        };
+
+        // Reopen with the right passphrase → the blob is still there (unseals correctly),
+        // proving file bytes survive restart encrypted at rest.
+        let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+        let blobs = store.blob_store("group-abc").unwrap();
+        assert_eq!(
+            blobs.get(&cid).unwrap().as_deref(),
+            Some(&b"file contents"[..])
+        );
+        // A different server's store doesn't see it (separate directory).
+        assert!(store
+            .blob_store("group-xyz")
+            .unwrap()
+            .get(&cid)
+            .unwrap()
+            .is_none());
     }
 }

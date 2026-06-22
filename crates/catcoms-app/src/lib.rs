@@ -21,7 +21,7 @@ use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
-use catcoms_storage::Cid;
+use catcoms_storage::{BlobStore, Cid};
 pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{request_join, ChannelSync, SyncError};
 use catcoms_wire::DocType;
@@ -462,6 +462,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
         })
+    }
+
+    /// This server's MLS group id (stable across restarts) — keys its on-disk blob directory.
+    pub fn group_id(&self) -> Vec<u8> {
+        self.sync.group_id()
+    }
+
+    /// Attach a persistent, sealing blob store (Phase 9h) so files + avatars survive restart
+    /// encrypted at rest. Call right after founding/joining/restoring, before any avatar or
+    /// file is added.
+    pub fn set_blob_store(&mut self, blobs: Box<dyn BlobStore + Send>) {
+        self.sync.set_blob_store(blobs);
     }
 
     /// Subscribe to membership commits (call once after founding/joining).
