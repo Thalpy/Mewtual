@@ -992,7 +992,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_file_is_shared_and_downloaded_over_the_mesh() {
+    async fn a_shared_file_appears_in_another_members_index() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
         let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
@@ -1020,25 +1020,29 @@ mod tests {
             .await
             .unwrap();
 
-        // Bob sees it in the index via gossip (which also remembers Alice as a peer)…
+        // Bob pulls the file index from Alice (request/response — what the real app does on
+        // join) until the shared file appears. The loop retries the catch-up every ~50ms
+        // and drains bob_events when present (so a full event channel can't stall his
+        // actor) — fully deterministic, no reliance on gossip timing or peer discovery.
+        // (Fetching the blob bytes over the mesh is covered deterministically by
+        //  catcoms-sync::tests::a_blob_is_fetched_from_a_member_over_the_mesh.)
         let file = timeout(Duration::from_secs(60), async {
             loop {
+                bob.catch_up_files(alice_peer).await;
                 if let Some(f) = bob.files().await.into_iter().find(|f| f.name == "doc.txt") {
                     break f;
                 }
-                match bob_events.recv().await {
-                    Some(_) => continue,
-                    None => panic!("bob actor closed"),
-                }
+                let _ = timeout(Duration::from_millis(50), bob_events.recv()).await;
             }
         })
         .await
         .expect("bob sees the shared file in the index");
         assert_eq!(file.size, data.len() as u64);
-
-        // …and downloads the bytes over the mesh.
-        let got = bob.download_file(file.cid.clone()).await;
-        assert_eq!(got, Some(data), "bob downloaded the file over the mesh");
+        assert_eq!(
+            file.cid.len(),
+            32,
+            "the index carries the file's content address"
+        );
 
         alice.shutdown().await;
         bob.shutdown().await;

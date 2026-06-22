@@ -261,20 +261,28 @@ const STATUS_DOC: u128 = 0;
 /// map of page name → page body.
 const WIKI_DOC: u128 = 0;
 
-/// Write a wiki page's body (a last-writer-wins register; concurrent edits to the *same*
-/// page converge to one, edits to different pages are independent). Char-level merge via an
-/// automerge `Text` body is a later refinement.
+/// Write a wiki page's body. Each page body is an automerge **`Text`** object, so concurrent
+/// edits to the *same* page **merge character-by-character** (a real collaborative CRDT
+/// document), not last-writer-wins. `update_text` diffs the stored text against `body` and
+/// splices the minimal change, so two members' edits both survive on convergence.
 fn write_wiki_page(doc: &mut AutoCommit, name: &str, body: &str) -> Result<(), AutomergeError> {
-    doc.put(ROOT, name, body)?;
+    let text = match doc.get(ROOT, name)? {
+        Some((Value::Object(ObjType::Text), id)) => id,
+        _ => doc.put_object(ROOT, name, ObjType::Text)?,
+    };
+    doc.update_text(&text, body)?;
     Ok(())
 }
 
-/// Materialize the wiki document into a `page name -> body` map.
+/// Materialize the wiki document into a `page name -> body` map (each body a `Text` object).
 fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for key in doc.keys(ROOT) {
-        let body = str_field(doc, &ROOT, &key);
-        out.insert(key, body);
+        if let Ok(Some((Value::Object(ObjType::Text), id))) = doc.get(ROOT, &key) {
+            if let Ok(body) = doc.text(&id) {
+                out.insert(key, body);
+            }
+        }
     }
     out
 }
@@ -1017,7 +1025,7 @@ mod tests {
         );
         assert_eq!(alice.read_wiki_page("Home"), "Welcome to the wiki");
 
-        // Editing a page overwrites its body (last-writer-wins); page count unchanged.
+        // Editing a page replaces its body (a sequential edit); page count unchanged.
         alice.write_wiki_page("Home", "Updated text").await.unwrap();
         assert_eq!(alice.read_wiki_page("Home"), "Updated text");
         assert_eq!(alice.wiki_pages().len(), 2);
@@ -1027,6 +1035,23 @@ mod tests {
             alice.write_wiki_page("  ", "x").await,
             Err(AppError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn wiki_page_bodies_merge_character_by_character() {
+        // Two members concurrently edit the SAME page in non-overlapping places; both
+        // edits survive on convergence (a real CRDT merge, not last-writer-wins).
+        let mut base = AutoCommit::new();
+        write_wiki_page(&mut base, "P", "Hello world").unwrap();
+        let mut a = base.fork();
+        let mut b = base.fork();
+        write_wiki_page(&mut a, "P", "Hello dear world").unwrap(); // inserted "dear "
+        write_wiki_page(&mut b, "P", "Hello world!").unwrap(); // appended "!"
+        a.merge(&mut b).unwrap();
+        assert_eq!(
+            read_wiki_map(&a).get("P").map(String::as_str),
+            Some("Hello dear world!")
+        );
     }
 
     #[tokio::test]
