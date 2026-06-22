@@ -16,7 +16,7 @@ use automerge::{ActorId, AutoCommit};
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_rt::CryptoRngCore;
-use catcoms_wire::DocType;
+use catcoms_wire::{Decoder, DocType, Encoder};
 
 use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
@@ -53,6 +53,52 @@ impl EncryptedDoc {
     /// Number of ops in this document's log.
     pub fn op_count(&self) -> usize {
         self.log.len()
+    }
+
+    /// Serialize this document for persistence (Phase 9d): the materialized automerge state
+    /// plus the signed-op log (the log carries the per-op signatures the automerge state
+    /// does not, so a restored member can still serve catch-up). The `applied` dedup set is
+    /// rebuilt from the log on restore. **Secret** — holds plaintext document content; the
+    /// persistence layer seals it under `db_key` before it touches disk.
+    pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
+        let doc_bytes = self.doc.save();
+        let count = u32::try_from(self.log.len()).map_err(|_| ReplError::Malformed)?;
+        let mut e = Encoder::new();
+        e.put_u16(self.doc_type.tag());
+        e.put_u128(self.doc_id);
+        e.put_bytes(&doc_bytes).map_err(|_| ReplError::Malformed)?;
+        e.put_u32(count);
+        for op in &self.log {
+            e.put_bytes(&op.encode())
+                .map_err(|_| ReplError::Malformed)?;
+        }
+        Ok(e.finish())
+    }
+
+    /// Reconstruct a document from a [`EncryptedDoc::snapshot`] blob.
+    pub fn restore(bytes: &[u8]) -> Result<Self, ReplError> {
+        let mut d = Decoder::new(bytes);
+        let tag = d.get_u16().map_err(|_| ReplError::Malformed)?;
+        let doc_type = DocType::from_tag(tag).ok_or(ReplError::Malformed)?;
+        let doc_id = d.get_u128().map_err(|_| ReplError::Malformed)?;
+        let doc_bytes = d.get_bytes().map_err(|_| ReplError::Malformed)?;
+        let doc = AutoCommit::load(doc_bytes).map_err(|e| ReplError::Automerge(e.to_string()))?;
+        let count = d.get_u32().map_err(|_| ReplError::Malformed)?;
+        let mut log = Vec::new();
+        let mut applied = HashSet::new();
+        for _ in 0..count {
+            let op = SignedOp::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?;
+            applied.insert(op.hash());
+            log.push(op);
+        }
+        d.finish().map_err(|_| ReplError::Malformed)?;
+        Ok(Self {
+            doc_type,
+            doc_id,
+            doc,
+            log,
+            applied,
+        })
     }
 
     /// Apply a local edit, returning a [`SealedOp`] to broadcast. The closure
@@ -202,5 +248,47 @@ impl fmt::Debug for EncryptedDoc {
             .field("doc_id", &self.doc_id)
             .field("ops", &self.log.len())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use automerge::transaction::Transactable;
+    use automerge::{ReadDoc, ROOT};
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
+
+    #[test]
+    fn snapshot_round_trips_a_document() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let mut doc = EncryptedDoc::new(DocType::Channel, 7, &device.device_id());
+        doc.edit(&device, &group, &mut rng, |d| d.put(ROOT, "k", "v1"))
+            .unwrap();
+        doc.edit(&device, &group, &mut rng, |d| d.put(ROOT, "k", "v2"))
+            .unwrap();
+        let ops = doc.op_count();
+
+        // Snapshot, then restore from the bytes.
+        let snap = doc.snapshot().unwrap();
+        let mut restored = EncryptedDoc::restore(&snap).unwrap();
+
+        // Materialized state survives…
+        assert_eq!(restored.op_count(), ops);
+        let v = restored.doc().get(ROOT, "k").unwrap().unwrap().0;
+        assert_eq!(v.into_string().unwrap(), "v2");
+        // …and the restored log still re-exports for catch-up (per-op signatures intact).
+        assert_eq!(
+            restored
+                .export_catchup(&group, &device, &mut rng)
+                .unwrap()
+                .len(),
+            ops
+        );
+        // Re-snapshotting the restored doc is stable, and garbage is rejected.
+        assert!(EncryptedDoc::restore(&restored.snapshot().unwrap()).is_ok());
+        assert!(EncryptedDoc::restore(b"garbage").is_err());
     }
 }
