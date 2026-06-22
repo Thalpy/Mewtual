@@ -285,6 +285,21 @@ routing secret `ns_secret_L`:
   persistence) and the FIFO eviction is **not holder-probe-aware** (it can drop the last
   copy of a blob; evicted blobs are re-fetchable only while a holder is online). Wiring the
   `catcoms-storage` retention engine (never-evict-last-copy + on-disk store) is the follow-up.
+- **No disk persistence yet → per-file encryption-at-rest is premature (analysis, not
+  implemented).** The desktop app keeps everything **in RAM** (`MemoryBlobStore`, in-memory
+  MLS/group state) — restart loses all servers. So there is currently **no disk "at rest"**
+  to protect; the earlier "files plaintext at rest" note was about the in-memory cache, not
+  disk. Per-file encryption-at-rest was investigated and **deliberately deferred**: with
+  blobs in RAM, sealing them would put ciphertext next to the wrap-key in the same process
+  memory (zero benefit) while requiring the riskiest change in the system — transferring a
+  new stable key through the **join handshake**. The mechanics rule out shortcuts (ops are
+  sealed **per-epoch**, catch-up **re-seals under the current epoch**, and there is **no
+  stable group secret**), so the correct design is a **stable per-group file-wrap-key minted
+  at founding and transferred at join like `RoutingState`**, used with
+  `catcoms-storage::seal_file`/`open_file`. **Sequencing: disk persistence first** (blobs +
+  group state to disk, the state sealed under the device keystore `catcoms-crypto::Dek`/
+  `KeyHierarchy`), **then** per-file encryption as a paired, reviewed slice. Doing the
+  encryption before persistence is security theater.
 - **Network admission is single-committer-only** (only the lowest-leaf-index member
   admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
 - **Commit catch-up needs a peer that still holds the commit.** A member behind by

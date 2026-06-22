@@ -149,8 +149,10 @@ files — they share nothing.
 
 - **Metadata.** Peers and relays you connect to can observe *that* you're communicating
   (connection timing, IP addresses), even though they can't read *what*.
-- **Files & avatars at rest.** Stored unencrypted in your local cache (in transit they're
-  encrypted and members-only). At-rest encryption is planned.
+- **Nothing persists yet.** The app keeps everything **in memory** — closing it loses your
+  servers, channels, and cached files (you re-found or re-join with an invite). In transit,
+  content is encrypted and served members-only. Disk persistence (and encrypting it at rest)
+  is planned together; until then there's no on-disk cache to protect.
 - **Display names aren't identities.** A name/color/avatar is whatever a member sets;
   members are cryptographically identified by their **device fingerprint** (shown in the
   Members list), not their chosen name. Two members could pick the same name.
