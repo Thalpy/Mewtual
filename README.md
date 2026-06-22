@@ -51,7 +51,7 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 7b | Consolidated **security suite** (threat-model map + cross-layer adversarial scenarios) | done |
 | 7c | **Rendezvous-discovered** join over real TCP (no hard-coded server address) | done |
 | 7d | **Relayed** full-stack join over real TCP (NAT traversal; server reachable only via a relay) | done |
-| 7… | Remaining Phase-7 integration (broader adversarial scenarios, DCUtR-upgraded full path) | planned |
+| 7e | **DCUtR-upgraded** full-stack path over real TCP (relayed join hole-punches to a direct link) | done |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |
