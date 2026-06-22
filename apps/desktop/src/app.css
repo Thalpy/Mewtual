@@ -1,0 +1,80 @@
+:root {
+  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+  color: #e6e6e6;
+  background: #1b1d21;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  height: 100vh;
+}
+
+h1,
+h2 {
+  margin: 0.25rem 0;
+}
+
+input {
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #3a3d44;
+  background: #24262b;
+  color: inherit;
+  font-size: 0.95rem;
+}
+
+button {
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  border: none;
+  background: #4f8cff;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #3b78ec;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem;
+  border: 1px solid #3a3d44;
+  border-radius: 8px;
+  background: #1f2126;
+}
+
+.messages li {
+  padding: 0.25rem 0;
+}
+
+.composer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.composer input {
+  flex: 1;
+}
+
+.muted {
+  color: #9aa0aa;
+  font-size: 0.85rem;
+}
