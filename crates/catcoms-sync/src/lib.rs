@@ -31,7 +31,8 @@ use automerge::{AutoCommit, AutomergeError};
 use bytes::Bytes;
 use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
 use catcoms_mls::{
-    serialize_key_package, Incoming, InviteLedger, InviteToken, MlsDevice, ServerGroup,
+    restore_server, serialize_key_package, snapshot_server, Incoming, InviteLedger, InviteToken,
+    MlsDevice, ServerGroup,
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent};
@@ -1397,6 +1398,105 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // then replaced).
         this.capture_routing_secret();
         this
+    }
+
+    /// Serialize this synchronizer's **durable** state into one blob for disk persistence
+    /// (Phase 9e): the MLS state ([`snapshot_server`]), every [`EncryptedDoc`], the routing
+    /// label + secrets, the invite ledger, the retained commit log, and the known peer
+    /// records. The transient state (transport, topics, subscription flags, caches,
+    /// rate-limit maps, blob store) is rebuilt on [`ChannelSync::restore`]. **Secret** — it
+    /// holds the signer private key, group secrets, routing secrets and plaintext document
+    /// content; the registry seals it under the vault key before it touches disk (9f).
+    pub fn snapshot(&mut self) -> Result<Zeroizing<Vec<u8>>, SyncError> {
+        let mls = snapshot_server(&self.device, &self.group)?;
+        // `routing` carries the live routing secrets in the clear — zeroize the intermediate
+        // (the returned blob is already `Zeroizing`).
+        let routing = {
+            let secrets: Vec<(u64, [u8; 32])> = self
+                .routing_secrets
+                .iter()
+                .map(|(l, s)| (*l, **s))
+                .collect();
+            Zeroizing::new(encode_routing_state(self.routing_label, &secrets))
+        };
+        let ledger = self.ledger.snapshot();
+
+        let mut e = Encoder::new();
+        let oversize = || SyncError::Malformed;
+        e.put_bytes(&mls).map_err(|_| oversize())?;
+        e.put_bytes(&routing).map_err(|_| oversize())?;
+        e.put_bytes(&ledger).map_err(|_| oversize())?;
+        e.put_u32(self.docs.len() as u32);
+        for doc in self.docs.values_mut() {
+            let snap = doc.snapshot()?;
+            e.put_bytes(&snap).map_err(|_| oversize())?;
+        }
+        e.put_u32(self.commit_log.len() as u32);
+        for rec in &self.commit_log {
+            e.put_bytes(&rec.encode()).map_err(|_| oversize())?;
+        }
+        e.put_u32(self.peer_records.len() as u32);
+        for desc in self.peer_records.values() {
+            e.put_bytes(&desc.encode()).map_err(|_| oversize())?;
+        }
+        Ok(Zeroizing::new(e.finish()))
+    }
+
+    /// Reconstruct a synchronizer from a [`ChannelSync::snapshot`] blob plus a **fresh**
+    /// transport/rng/clock (connections do not persist — the caller re-dials, Phase 9g). The
+    /// MLS device + group, documents, routing state, ledger, commit log and peer records are
+    /// restored; the node then subscribes + resyncs at runtime exactly like a fresh one.
+    pub fn restore(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+    ) -> Result<Self, SyncError> {
+        let bad = || SyncError::Malformed;
+        let mut d = Decoder::new(snapshot);
+        let mls = d.get_bytes().map_err(|_| bad())?.to_vec();
+        let routing_bytes = d.get_bytes().map_err(|_| bad())?.to_vec();
+        let ledger_bytes = d.get_bytes().map_err(|_| bad())?.to_vec();
+        let doc_count = d.get_u32().map_err(|_| bad())?;
+        let mut doc_snaps = Vec::new();
+        for _ in 0..doc_count {
+            doc_snaps.push(d.get_bytes().map_err(|_| bad())?.to_vec());
+        }
+        let commit_count = d.get_u32().map_err(|_| bad())?;
+        let mut commit_log = VecDeque::new();
+        for _ in 0..commit_count {
+            commit_log.push_back(CommitRecord::decode(d.get_bytes().map_err(|_| bad())?)?);
+        }
+        let peer_count = d.get_u32().map_err(|_| bad())?;
+        let mut peer_records = HashMap::new();
+        for _ in 0..peer_count {
+            let desc = PeerDescriptor::decode(d.get_bytes().map_err(|_| bad())?)?;
+            let id = DeviceId::from_public_key_bytes(&desc.device_pubkey);
+            peer_records.insert(id, desc);
+        }
+        d.finish().map_err(|_| bad())?;
+
+        // Reconstruct the MLS device + group, then build a base synchronizer and override its
+        // durable state. `new` re-derives an L=0 routing secret from the (post-restore) epoch;
+        // `adopt_routing_state` then replaces it with the persisted label + secrets.
+        let (device, group) = restore_server(&mls)?;
+        let mut this = Self::new(transport, group, device, rng, clock);
+        let (label, secrets) = decode_routing_state(&routing_bytes)?;
+        this.adopt_routing_state(RoutingState {
+            label,
+            secrets: secrets
+                .into_iter()
+                .map(|(l, s)| (l, Zeroizing::new(s)))
+                .collect(),
+        });
+        this.ledger = InviteLedger::restore(&ledger_bytes).map_err(|_| SyncError::Malformed)?;
+        for snap in &doc_snaps {
+            let doc = EncryptedDoc::restore(snap)?;
+            this.docs.insert((doc.doc_type(), doc.doc_id()), doc);
+        }
+        this.commit_log = commit_log;
+        this.peer_records = peer_records;
+        Ok(this)
     }
 
     /// Build a synchronizer for a member that **joined** an existing group, adopting
@@ -3915,6 +4015,51 @@ mod tests {
             ChaCha20Rng::seed_from_u64(0),
             Box::new(ManualClock::new(1_000)),
         )
+    }
+
+    #[tokio::test]
+    async fn channel_sync_snapshot_round_trips_durable_state() {
+        use automerge::{transaction::Transactable, ROOT};
+        let mut node = solo_node();
+        let gid = node.group.group_id();
+        let epoch = node.group.epoch();
+
+        node.open_channel(DocType::Channel, 1).await.unwrap();
+        node.post(DocType::Channel, 1, |d| d.put(ROOT, "k", "v"))
+            .await
+            .unwrap();
+        node.ledger.consume([7u8; 16]).unwrap();
+        let ops = node.doc(DocType::Channel, 1).unwrap().op_count();
+        let label = node.routing_label;
+        let control_topic = node.control_topic.clone();
+
+        // Snapshot, then restore onto a FRESH transport (connections don't persist).
+        let snap = node.snapshot().unwrap();
+        let hub = Hub::new();
+        let restored = ChannelSync::restore(
+            &snap,
+            hub.join(PeerId::from_u64(2)),
+            ChaCha20Rng::seed_from_u64(0),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+
+        // MLS group, documents, routing label, and the invite ledger all survive…
+        assert_eq!(restored.group.group_id(), gid);
+        assert_eq!(restored.group.epoch(), epoch);
+        assert_eq!(restored.routing_label, label);
+        // The restored node recomputes the SAME blinded control topic (routing survived).
+        assert_eq!(restored.control_topic, control_topic);
+        assert_eq!(restored.doc(DocType::Channel, 1).unwrap().op_count(), ops);
+        assert!(restored.ledger.is_consumed(&[7u8; 16]));
+        // …and a corrupt snapshot is rejected.
+        assert!(ChannelSync::restore(
+            b"garbage",
+            hub.join(PeerId::from_u64(3)),
+            ChaCha20Rng::seed_from_u64(0),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .is_err());
     }
 
     #[test]

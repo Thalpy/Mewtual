@@ -50,6 +50,16 @@ impl EncryptedDoc {
         &self.doc
     }
 
+    /// This document's type (for re-keying a restored doc in the sync layer's map).
+    pub fn doc_type(&self) -> DocType {
+        self.doc_type
+    }
+
+    /// This document's id.
+    pub fn doc_id(&self) -> u128 {
+        self.doc_id
+    }
+
     /// Number of ops in this document's log.
     pub fn op_count(&self) -> usize {
         self.log.len()

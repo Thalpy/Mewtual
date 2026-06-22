@@ -362,11 +362,72 @@ impl InviteLedger {
         }
         Ok(())
     }
+
+    /// Serialize the ledger (consumed + revoked nonces) for persistence (Phase 9e). The
+    /// single-use guarantee must survive restart, so the inviter persists this — otherwise
+    /// a restart would forget which invites were spent and a single-use invite could be
+    /// redeemed again.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_u32(self.consumed.len() as u32);
+        for n in &self.consumed {
+            e.put_bytes(n).expect("16 fits");
+        }
+        e.put_u32(self.revoked.len() as u32);
+        for n in &self.revoked {
+            e.put_bytes(n).expect("16 fits");
+        }
+        e.finish()
+    }
+
+    /// Reconstruct a ledger from a [`InviteLedger::snapshot`] blob.
+    pub fn restore(bytes: &[u8]) -> Result<Self, InviteError> {
+        let mut d = Decoder::new(bytes);
+        let mut consumed = HashSet::new();
+        let c = d.get_u32().map_err(|_| InviteError::Malformed)?;
+        for _ in 0..c {
+            let n: [u8; 16] = d
+                .get_bytes()
+                .map_err(|_| InviteError::Malformed)?
+                .try_into()
+                .map_err(|_| InviteError::Malformed)?;
+            consumed.insert(n);
+        }
+        let mut revoked = HashSet::new();
+        let r = d.get_u32().map_err(|_| InviteError::Malformed)?;
+        for _ in 0..r {
+            let n: [u8; 16] = d
+                .get_bytes()
+                .map_err(|_| InviteError::Malformed)?
+                .try_into()
+                .map_err(|_| InviteError::Malformed)?;
+            revoked.insert(n);
+        }
+        d.finish().map_err(|_| InviteError::Malformed)?;
+        Ok(Self { consumed, revoked })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ledger_snapshot_round_trips_consumed_and_revoked() {
+        // The single-use guarantee must survive restart: both the consumed and revoked
+        // nonce sets round-trip (9e).
+        let mut led = InviteLedger::new();
+        led.consume([1u8; 16]).unwrap();
+        led.consume([2u8; 16]).unwrap();
+        led.revoke([3u8; 16]);
+
+        let restored = InviteLedger::restore(&led.snapshot()).unwrap();
+        assert!(restored.is_consumed(&[1u8; 16]));
+        assert!(restored.is_consumed(&[2u8; 16]));
+        assert!(restored.is_revoked(&[3u8; 16]));
+        assert!(!restored.is_consumed(&[9u8; 16]));
+        assert!(InviteLedger::restore(b"x").is_err());
+    }
 
     #[test]
     fn membership_credential_roundtrips() {
