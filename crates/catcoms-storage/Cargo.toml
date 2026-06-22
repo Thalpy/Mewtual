@@ -12,6 +12,7 @@ catcoms-wire = { path = "../catcoms-wire" }
 thiserror.workspace = true
 blake3 = "1"
 hex = "0.4"
+zeroize = "1"
 
 [dev-dependencies]
 rand_chacha = "0.3"

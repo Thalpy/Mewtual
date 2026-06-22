@@ -26,7 +26,7 @@ pub mod vault;
 
 use thiserror::Error;
 
-pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore};
+pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
 pub use cid::Cid;
 pub use filecrypto::{open_file, seal_file, FileRef};
 pub use retention::{

@@ -4,6 +4,10 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
+use catcoms_crypto::{seal, unseal, SealedBlob};
+use catcoms_rt::CryptoRngCore;
+use zeroize::Zeroizing;
+
 use crate::cid::Cid;
 use crate::StorageError;
 
@@ -187,9 +191,120 @@ impl BlobStore for FsBlobStore {
     }
 }
 
+/// A filesystem blob store that **seals each blob at rest** (Phase 9b). Externally it is a
+/// normal [`BlobStore`] keyed by the **plaintext** content address — so the mesh fetch (which
+/// addresses blobs by plaintext CID) is unchanged — but on disk every blob is XChaCha20-
+/// Poly1305-sealed under a key (the keystore's `blob_key`). A stolen disk yields only
+/// ciphertext; the sealing is at the disk boundary, not on the wire. The file is named by
+/// the plaintext CID; its contents are `nonce ‖ sealed-plaintext`. Both the AEAD tag and a
+/// re-hash of the plaintext (against the requested CID) are checked on read.
+pub struct SealingBlobStore<R: CryptoRngCore> {
+    dir: PathBuf,
+    key: Zeroizing<[u8; 32]>,
+    rng: R,
+}
+
+impl<R: CryptoRngCore> SealingBlobStore<R> {
+    /// Open (creating if needed) a sealing store rooted at `dir`, sealing under `key`.
+    pub fn open(dir: impl AsRef<Path>, key: [u8; 32], rng: R) -> Result<Self, StorageError> {
+        let dir = dir.as_ref().to_path_buf();
+        std::fs::create_dir_all(&dir).map_err(|e| StorageError::Io(e.to_string()))?;
+        Ok(Self {
+            dir,
+            key: Zeroizing::new(key),
+            rng,
+        })
+    }
+
+    fn path(&self, cid: &Cid) -> PathBuf {
+        self.dir.join(cid.to_hex())
+    }
+}
+
+// Manual Debug (for any `R`) that redacts the sealing key and the RNG.
+impl<R: CryptoRngCore> std::fmt::Debug for SealingBlobStore<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealingBlobStore")
+            .field("dir", &self.dir)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Frame a sealed blob for disk: `nonce(24) ‖ ciphertext`.
+fn encode_sealed(s: &SealedBlob) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.nonce.len() + s.ciphertext.len());
+    out.extend_from_slice(&s.nonce);
+    out.extend_from_slice(&s.ciphertext);
+    out
+}
+
+/// Parse a sealed blob from disk bytes.
+fn decode_sealed(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
+    if bytes.len() <= 24 {
+        return Err(StorageError::Malformed);
+    }
+    let nonce: [u8; 24] = bytes[..24].try_into().expect("length checked");
+    Ok(SealedBlob {
+        nonce,
+        ciphertext: bytes[24..].to_vec(),
+    })
+}
+
+impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
+    fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
+        let cid = Cid::of(bytes);
+        let path = self.path(&cid);
+        if !path.exists() {
+            let sealed = seal(&self.key, bytes, &mut self.rng)?;
+            std::fs::write(&path, encode_sealed(&sealed))
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+        }
+        Ok(cid)
+    }
+
+    fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StorageError> {
+        let path = self.path(cid);
+        match std::fs::read(&path) {
+            Ok(encoded) => {
+                let sealed = decode_sealed(&encoded)?;
+                let plaintext = unseal(&self.key, &sealed)?;
+                verify(cid, plaintext).map(Some)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::Io(e.to_string())),
+        }
+    }
+
+    fn has(&self, cid: &Cid) -> bool {
+        self.path(cid).exists()
+    }
+
+    fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
+        let path = self.path(cid);
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(StorageError::Io(e.to_string())),
+        }
+    }
+
+    fn cids(&self) -> Vec<Cid> {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter_map(|name| Cid::from_hex(&name))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::SeedableRng;
 
     fn store_roundtrip(store: &mut dyn BlobStore) {
         let cid = store.put(b"some bytes").unwrap();
@@ -242,5 +357,45 @@ mod tests {
         // Corrupt the file on disk under its CID name.
         std::fs::write(dir.path().join(cid.to_hex()), b"tampered!").unwrap();
         assert!(matches!(store.get(&cid), Err(StorageError::CidMismatch)));
+    }
+
+    #[test]
+    fn sealing_store_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        store_roundtrip(
+            &mut SealingBlobStore::open(dir.path(), [3u8; 32], ChaCha20Rng::seed_from_u64(1))
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn sealing_store_encrypts_at_rest_and_needs_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = [7u8; 32];
+        let mut store =
+            SealingBlobStore::open(dir.path(), key, ChaCha20Rng::seed_from_u64(1)).unwrap();
+        let plaintext = b"secret file contents that must not hit disk in the clear".to_vec();
+        let cid = store.put(&plaintext).unwrap();
+        assert_eq!(cid, Cid::of(&plaintext), "addressed by the plaintext CID");
+
+        // On disk: sealed — the plaintext never appears.
+        let on_disk = std::fs::read(dir.path().join(cid.to_hex())).unwrap();
+        assert!(
+            !on_disk
+                .windows(plaintext.len())
+                .any(|w| w == &plaintext[..]),
+            "the plaintext must not appear on disk"
+        );
+
+        // get → plaintext; a fresh store with the same key reads it back (persistence).
+        assert_eq!(store.get(&cid).unwrap(), Some(plaintext.clone()));
+        let store2 =
+            SealingBlobStore::open(dir.path(), key, ChaCha20Rng::seed_from_u64(9)).unwrap();
+        assert_eq!(store2.get(&cid).unwrap(), Some(plaintext));
+
+        // Wrong key → authenticated-decryption failure (never silent garbage).
+        let store3 =
+            SealingBlobStore::open(dir.path(), [9u8; 32], ChaCha20Rng::seed_from_u64(2)).unwrap();
+        assert!(store3.get(&cid).is_err());
     }
 }
