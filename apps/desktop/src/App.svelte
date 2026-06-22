@@ -5,10 +5,13 @@
 
   type Msg = { author: string; text: string };
 
-  let founded = $state(false);
+  let mode = $state<"start" | "channel">("start");
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
+  let invite = $state(""); // the invite to share (founder)
+  let joinInvite = $state(""); // pasted invite (joiner)
+  let copied = $state(false);
   let messages = $state<Msg[]>([]);
   let draft = $state("");
   let members = $state(1);
@@ -18,7 +21,22 @@
     error = "";
     try {
       await invoke("found_server", { displayName });
-      founded = true;
+      invite = (await invoke<string | null>("get_invite")) ?? "";
+      mode = "channel";
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function join() {
+    busy = true;
+    error = "";
+    try {
+      await invoke("join_server", { inviteHex: joinInvite.trim(), displayName });
+      mode = "channel";
       await refresh();
     } catch (e) {
       error = String(e);
@@ -46,6 +64,16 @@
     }
   }
 
+  async function copyInvite() {
+    try {
+      await navigator.clipboard.writeText(invite);
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    } catch {
+      // Clipboard may be unavailable in the webview — the textarea allows manual copy.
+    }
+  }
+
   onMount(() => {
     const subs: Promise<UnlistenFn>[] = [
       listen("channel-updated", () => refresh()),
@@ -56,15 +84,38 @@
 </script>
 
 <main>
-  {#if !founded}
+  {#if mode === "start"}
     <h1>CatComs</h1>
-    <p class="muted">Found a server to start an end-to-end-encrypted channel.</p>
-    <input bind:value={displayName} placeholder="display name" />
+    <label class="field">
+      <span class="muted">Display name</span>
+      <input bind:value={displayName} placeholder="display name" />
+    </label>
+
     <button onclick={found} disabled={busy}>
-      {busy ? "Founding…" : "Found a server"}
+      {busy ? "Working…" : "Found a server"}
     </button>
+
+    <hr />
+
+    <p class="muted">…or join an existing server with an invite:</p>
+    <textarea
+      bind:value={joinInvite}
+      rows="3"
+      placeholder="paste invite here"
+    ></textarea>
+    <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
   {:else}
     <h2>#general <span class="muted">· {members} member(s)</span></h2>
+
+    {#if invite}
+      <details>
+        <summary>Invite someone</summary>
+        <p class="muted">Share this single-use invite, then open a second CatComs window and paste it:</p>
+        <textarea readonly rows="3" value={invite}></textarea>
+        <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
+      </details>
+    {/if}
+
     <ul class="messages">
       {#each messages as m}
         <li><b>{m.author}:</b> {m.text}</li>
@@ -72,6 +123,7 @@
         <li class="muted">No messages yet — say hello.</li>
       {/each}
     </ul>
+
     <form
       class="composer"
       onsubmit={(e) => {

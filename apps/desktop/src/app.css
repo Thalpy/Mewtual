@@ -27,13 +27,50 @@ h2 {
   margin: 0.25rem 0;
 }
 
-input {
+input,
+textarea {
   padding: 0.5rem 0.6rem;
   border-radius: 6px;
   border: 1px solid #3a3d44;
   background: #24262b;
   color: inherit;
   font-size: 0.95rem;
+  font-family: inherit;
+  width: 100%;
+}
+
+textarea {
+  resize: vertical;
+  word-break: break-all;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+hr {
+  width: 100%;
+  border: none;
+  border-top: 1px solid #3a3d44;
+  margin: 0.5rem 0;
+}
+
+details {
+  border: 1px solid #3a3d44;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  background: #1f2126;
+}
+
+details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+details > * {
+  margin-top: 0.5rem;
 }
 
 button {
