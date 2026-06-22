@@ -238,6 +238,101 @@ button:hover {
   border-radius: 4px;
 }
 
+/* --- member profile styling ------------------------------------------------ */
+
+.name {
+  font-weight: 600;
+}
+
+.font-serif {
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.font-mono {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+@keyframes fx-rainbow {
+  to {
+    background-position: 200% center;
+  }
+}
+
+/* "Colour wave": a moving gradient clipped to the text. */
+.fx-rainbow {
+  background-image: linear-gradient(90deg, #ff5f6d, #ffc371, #3ad1ff, #b984ff, #ff5f6d);
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent !important;
+  -webkit-text-fill-color: transparent;
+  animation: fx-rainbow 3s linear infinite;
+}
+
+@keyframes fx-wave {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+.fx-wave {
+  display: inline-block;
+  animation: fx-wave 1.2s ease-in-out infinite;
+}
+
+@keyframes fx-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.fx-pulse {
+  animation: fx-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-rainbow,
+  .fx-wave,
+  .fx-pulse {
+    animation: none;
+  }
+}
+
+select {
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #3a3d44;
+  background: #24262b;
+  color: inherit;
+  font-size: 0.9rem;
+  font-family: inherit;
+  width: 100%;
+}
+
+.field.row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.profile-editor input[type="color"] {
+  width: 48px;
+  height: 28px;
+  padding: 2px;
+}
+
+.preview {
+  margin: 0.4rem 0;
+}
+
 .composer {
   display: flex;
   gap: 0.5rem;

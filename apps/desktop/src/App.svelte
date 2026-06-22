@@ -5,6 +5,8 @@
 
   type Msg = { author: string; text: string };
   type Channel = { id: string; name: string };
+  type Member = { fingerprint: string; you: boolean };
+  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string };
 
   let mode = $state<"start" | "app">("start");
   let busy = $state(false);
@@ -22,10 +24,33 @@
   let messages = $state<Msg[]>([]);
   let draft = $state("");
   let members = $state(1);
-  let roster = $state<{ fingerprint: string; you: boolean }[]>([]);
+  let roster = $state<Member[]>([]);
+  let profiles = $state<Record<string, Prof>>({});
+
+  // The local device's fingerprint (the roster entry flagged `you`).
+  let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
+
+  // Profile editor.
+  let pName = $state("");
+  let pColor = $state("#4f8cff");
+  let pFont = $state("system");
+  let pEffect = $state("none");
 
   function activeName(): string {
     return channels.find((c) => c.id === active)?.name ?? "";
+  }
+
+  function nameOf(fp: string): string {
+    return profiles[fp]?.name?.trim() || fp;
+  }
+  function fontClass(font: string): string {
+    return font === "serif" ? "font-serif" : font === "mono" ? "font-mono" : "";
+  }
+  function fxClass(effect: string): string {
+    return effect && effect !== "none" ? `fx-${effect}` : "";
+  }
+  function colorStyle(color: string): string {
+    return color ? `color:${color}` : "";
   }
 
   async function found() {
@@ -36,9 +61,11 @@
       invite = (await invoke<string | null>("get_invite")) ?? "";
       channels = [{ id, name: "general" }];
       active = id;
+      pName = displayName;
       mode = "app";
       await refresh();
       await refreshMembers();
+      await refreshProfiles();
     } catch (e) {
       error = String(e);
     } finally {
@@ -56,9 +83,11 @@
       });
       channels = [{ id, name: "general" }];
       active = id;
+      pName = displayName;
       mode = "app";
       await refresh();
       await refreshMembers();
+      await refreshProfiles();
     } catch (e) {
       error = String(e);
     } finally {
@@ -99,7 +128,40 @@
 
   async function refreshMembers() {
     try {
-      roster = await invoke<{ fingerprint: string; you: boolean }[]>("get_members");
+      roster = await invoke<Member[]>("get_members");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function refreshProfiles() {
+    try {
+      const list = await invoke<Prof[]>("get_profiles");
+      const map: Record<string, Prof> = {};
+      for (const p of list) map[p.fingerprint] = p;
+      profiles = map;
+      // Seed the editor from my own stored profile (once it exists).
+      const mine = profiles[myFp];
+      if (mine) {
+        if (mine.name) pName = mine.name;
+        if (mine.color) pColor = mine.color;
+        if (mine.font) pFont = mine.font;
+        if (mine.effect) pEffect = mine.effect;
+      }
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function saveProfile() {
+    try {
+      await invoke("set_profile", {
+        name: pName.trim() || displayName,
+        color: pColor,
+        font: pFont,
+        effect: pEffect,
+      });
+      await refreshProfiles();
     } catch (e) {
       error = String(e);
     }
@@ -141,10 +203,20 @@
         members = e.payload;
         refreshMembers();
       }),
+      listen("profiles-updated", () => refreshProfiles()),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
   });
 </script>
+
+{#snippet styledName(name: string, color: string, font: string, effect: string)}
+  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color)}>{name}</span>
+{/snippet}
+
+{#snippet nameTag(fp: string)}
+  {@const p = profiles[fp]}
+  {@render styledName(nameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
+{/snippet}
 
 <main>
   {#if mode === "start"}
@@ -185,13 +257,46 @@
           <h3>Members <span class="muted">({members})</span></h3>
           <ul>
             {#each roster as m}
-              <li>
-                <span class="fp">{m.fingerprint}</span>
+              <li title={m.fingerprint}>
+                {@render nameTag(m.fingerprint)}
                 {#if m.you}<span class="you-badge">you</span>{/if}
               </li>
             {/each}
           </ul>
         </div>
+
+        <details class="profile-editor">
+          <summary>Your profile</summary>
+          <label class="field">
+            <span class="muted">Name</span>
+            <input bind:value={pName} placeholder="display name" />
+          </label>
+          <label class="field row">
+            <span class="muted">Color</span>
+            <input type="color" bind:value={pColor} />
+          </label>
+          <label class="field">
+            <span class="muted">Font</span>
+            <select bind:value={pFont}>
+              <option value="system">System</option>
+              <option value="serif">Serif</option>
+              <option value="mono">Mono</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="muted">Effect</span>
+            <select bind:value={pEffect}>
+              <option value="none">None</option>
+              <option value="rainbow">Rainbow wave</option>
+              <option value="wave">Wave</option>
+              <option value="pulse">Pulse</option>
+            </select>
+          </label>
+          <p class="preview">
+            Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
+          </p>
+          <button onclick={saveProfile}>Save profile</button>
+        </details>
 
         {#if invite}
           <details>
@@ -207,8 +312,8 @@
         <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
         <ul class="messages">
           {#each messages as m}
-            <li class:own={m.author === displayName}>
-              <span class="author">{m.author}</span>
+            <li class:own={m.author === myFp}>
+              <span class="author">{@render nameTag(m.author)}</span>
               <span class="text">{m.text}</span>
             </li>
           {:else}

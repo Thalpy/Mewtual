@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use catcoms_app::{channel_id, spawn, AppEvent, Server, ServerActor};
+use catcoms_app::{channel_id, spawn, AppEvent, Profile, Server, ServerActor};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
@@ -41,6 +41,16 @@ struct UiMember {
     you: bool,
 }
 
+/// A member profile as serialized to the frontend (keyed by fingerprint).
+#[derive(Serialize, Clone)]
+struct UiProfile {
+    fingerprint: String,
+    name: String,
+    color: String,
+    font: String,
+    effect: String,
+}
+
 /// Forward an actor's event stream to the frontend as Tauri events.
 fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
@@ -52,6 +62,9 @@ fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
                 }
                 AppEvent::MembersChanged { count } => {
                     let _ = app.emit("members-changed", count);
+                }
+                AppEvent::ProfilesUpdated => {
+                    let _ = app.emit("profiles-updated", ());
                 }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ());
@@ -159,6 +172,7 @@ async fn join_server(
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
     actor.catch_up(inviter, general).await;
+    actor.catch_up_profiles(inviter).await;
     forward_events(app, events);
     *state.actor.lock().await = Some(actor);
     Ok(general.to_string())
@@ -195,6 +209,49 @@ async fn get_members(state: State<'_, AppState>) -> Result<Vec<UiMember>, String
         .map(|m| UiMember {
             fingerprint: m.fingerprint,
             you: m.is_self,
+        })
+        .collect())
+}
+
+/// Set this member's own profile (name + styling).
+#[tauri::command]
+async fn set_profile(
+    state: State<'_, AppState>,
+    name: String,
+    color: String,
+    font: String,
+    effect: String,
+) -> Result<(), String> {
+    if let Some(actor) = state.actor.lock().await.as_ref() {
+        actor
+            .set_profile(Profile {
+                name,
+                color,
+                font,
+                effect,
+            })
+            .await;
+    }
+    Ok(())
+}
+
+/// All known member profiles (keyed by fingerprint).
+#[tauri::command]
+async fn get_profiles(state: State<'_, AppState>) -> Result<Vec<UiProfile>, String> {
+    let guard = state.actor.lock().await;
+    let Some(actor) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    Ok(actor
+        .profiles()
+        .await
+        .into_iter()
+        .map(|(fingerprint, p)| UiProfile {
+            fingerprint,
+            name: p.name,
+            color: p.color,
+            font: p.font,
+            effect: p.effect,
         })
         .collect())
 }
@@ -245,6 +302,8 @@ pub fn run() {
             open_channel,
             get_invite,
             get_members,
+            set_profile,
+            get_profiles,
             send_message,
             get_messages
         ])
