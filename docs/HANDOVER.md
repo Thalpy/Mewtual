@@ -11,10 +11,13 @@ Authoritative current-state document. Read this first, then
   TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
   done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
   **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
-  desktop app** (`apps/desktop`, 8b-2/8c) wired to the stack — found a server, mint a
-  single-use invite, and a second instance pastes it to join and converge (two windows
-  talk over real TCP). **193 tests passing** (the GUI WebView is the one
-  manually-verified surface; both halves compile).
+  desktop app** (`apps/desktop`, 8b-2 … 8d) wired to the stack — found a server, mint a
+  single-use invite, a second instance joins via paste, **multiple name-addressed
+  channels**, live chat. **194 tests passing** (the GUI WebView is the one
+  manually-verified surface; both halves compile). **The desktop app is currently
+  loopback-only** — it works between windows on one machine; connecting peers across a
+  network needs the discovery/relay-in-the-UI slice (not yet built). See Known
+  limitations.
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
@@ -241,6 +244,17 @@ routing secret `ns_secret_L`:
 
 ## Known limitations / deferred (the security-relevant ones)
 
+- **Desktop app is loopback-only + dev/release build distinction (Phase 8).** The
+  `apps/desktop` bridge founds servers on `127.0.0.1` and mints invites carrying a
+  loopback bootstrap address, so two instances only connect on the **same machine**.
+  Connecting peers across a network is the deferred **discovery/relay-in-the-UI** slice
+  (the protocol already supports it — Phase 7 proves direct/relayed/rendezvous over real
+  TCP; it is just not wired into `found`/`join` yet). Two routes when built: a
+  port-forwarded public IP, or a public relay (the proper NAT-traversal path). Also: a
+  **`cargo build` (debug) exe is a dev build** that loads the UI from the Vite dev server
+  (`localhost:1420`) and shows "can't reach the page" on any machine without it — to
+  distribute, build a release exe with the frontend embedded
+  (`npm run build && npm run tauri build -- --no-bundle`; needs WebView2 on the target).
 - **Network admission is single-committer-only** (only the lowest-leaf-index member
   admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
 - **Commit catch-up needs a peer that still holds the commit.** A member behind by

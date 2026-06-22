@@ -34,8 +34,29 @@ npm run tauri dev
 Found in window 1, copy the invite, paste + **Join** in window 2; both see each
 other's messages over real TCP loopback. Don't close terminal 1 while window 2 is open.
 
-For a self-contained build (no dev server needed), `npm run build && npm run tauri
-build` produces a release exe with the frontend embedded.
+## Distributing the app
+
+**Do not send a debug exe** (`target/debug/...`). A debug build is a *dev* build: it
+loads the UI from the Vite dev server (`http://localhost:1420`), so on any other machine
+the window shows an Edge **"can't reach the page"** error. Build a self-contained
+**release** exe with the frontend embedded:
+
+```sh
+npm run build
+npm run tauri build -- --no-bundle    # exe at src-tauri/target/release/
+```
+
+The release exe still needs the **WebView2 runtime** on the target PC (default on
+Windows 11; a free installer for older Windows).
+
+## Current limitation: loopback only
+
+The bridge currently founds servers on `127.0.0.1` and the invite carries a loopback
+bootstrap address, so two instances only connect on the **same machine**. Connecting
+peers across a network is a deferred slice — the protocol already supports it (Phase 7
+proves direct/relayed/rendezvous joins over real TCP); it just is not yet wired into the
+desktop `found`/`join`. When built, the two routes are a port-forwarded public IP or a
+public **relay** (the proper NAT-traversal path, no router config for either peer).
 
 ## Layout
 
