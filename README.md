@@ -18,7 +18,8 @@ system. Mental model: **Signal + federation**.
   Windows and Android.
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, the security
-corrections from the adversarial review, and the phased roadmap.
+corrections from the adversarial review, and the phased roadmap. **Using the desktop
+app?** Start with the [**User Guide**](docs/USER_GUIDE.md).
 
 ## Status
 
