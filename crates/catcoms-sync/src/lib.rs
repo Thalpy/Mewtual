@@ -36,7 +36,10 @@ use catcoms_mls::{
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent};
-use catcoms_storage::{BlobStore, Cid, MemoryBlobStore, StorageError};
+use catcoms_storage::{
+    open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
+    StorageError,
+};
 use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -597,16 +600,50 @@ fn decode_routing_state(bytes: &[u8]) -> Result<RoutingStateParts, SyncError> {
     Ok((label, secrets))
 }
 
+/// The join-time transfer plaintext sealed under `routing_transfer_key`: the routing state
+/// **and** the group's stable file-wrap key (Phase 9h), so a joiner derives the same topics
+/// *and* can open group files. Framed `len-prefixed routing ‖ 32-byte key`.
+fn encode_join_transfer(
+    label: u64,
+    secrets: &[(u64, [u8; 32])],
+    file_wrap_key: &[u8; 32],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(&encode_routing_state(label, secrets))
+        .expect("routing fits");
+    e.put_bytes(file_wrap_key).expect("32 fits");
+    e.finish()
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32]), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let routing = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    let (label, secrets) = decode_routing_state(routing)?;
+    let fwk: [u8; 32] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((label, secrets, fwk))
+}
+
 /// The routing state (`L` + the retained `ns_secret_L` history) transferred from an
 /// admitting member to a joiner during the join handshake, so the joiner derives the
 /// **same** blinded topics and rendezvous namespaces as the rest of the group
 /// (a fresh node cannot re-derive past removal-epoch secrets on its own). Returned
-/// by [`request_join`]; consumed by [`ChannelSync::new_joined`]. An empty state
-/// (no transfer present) leaves the joiner on its locally-initialised `L = 0`.
+/// by [`request_join`]; consumed by [`ChannelSync::new_joined`]. It also carries the group's
+/// stable file-wrap key (Phase 9h). An empty state (only an inviter-side seal error post-9h)
+/// leaves the joiner on its local `L = 0` with no file key.
 #[derive(Default)]
 pub struct RoutingState {
     label: u64,
     secrets: Vec<(u64, Zeroizing<[u8; 32]>)>,
+    /// The group's stable file-wrap key (Phase 9h), transferred to the joiner alongside the
+    /// routing secrets. `None` for an absent/empty transfer (the joiner then cannot open
+    /// group files until it obtains the key).
+    file_wrap_key: Option<[u8; 32]>,
 }
 
 impl std::fmt::Debug for RoutingState {
@@ -623,9 +660,11 @@ impl std::fmt::Debug for RoutingState {
 /// transfer key from the just-joined group (the joiner is now at the seal epoch),
 /// unseal, and decode.
 ///
-/// An **absent** transfer (empty — the founder admitting its first member, or a seal
-/// that failed) yields an empty state so the joiner keeps its local `L = 0`. A
-/// **present but unopenable** transfer is a hard error, not a silent `L = 0`: the
+/// An **absent** transfer (empty — now only an inviter-side seal/key-derivation **error**,
+/// since post-9h a normal transfer always carries the file-wrap key + L=0 routing secret)
+/// yields an empty state, so the joiner keeps its local `L = 0` and **no** file key (it then
+/// cannot share/open group files until it rejoins). A **present but unopenable** transfer is a
+/// hard error, not a silent `L = 0`: the
 /// inviter signature has already authenticated these bytes (see `finish_join`), so a
 /// non-empty blob that fails to unseal/decode is a real version/encoding fault that
 /// would otherwise mis-route the joiner onto a wrong baseline.
@@ -645,13 +684,14 @@ fn open_routing_transfer(
         tracing::warn!("authenticated routing transfer failed to unseal; rejecting join");
         SyncError::JoinRejected
     })?;
-    let (label, secrets) = decode_routing_state(&plaintext)?;
+    let (label, secrets, file_wrap_key) = decode_join_transfer(&plaintext)?;
     Ok(RoutingState {
         label,
         secrets: secrets
             .into_iter()
             .map(|(slot, s)| (slot, Zeroizing::new(s)))
             .collect(),
+        file_wrap_key: Some(file_wrap_key),
     })
 }
 
@@ -1337,6 +1377,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// eviction. openmls only exports the *current* epoch's secret, so this history
     /// is captured at the post-removal epoch (a removed member can never export it).
     routing_secrets: BTreeMap<u64, Zeroizing<[u8; 32]>>,
+    /// The group's **stable** file-wrap key (Phase 9h): minted random at founding, transferred
+    /// to each joiner alongside the routing state, and never rotated — so a late joiner can
+    /// open *all* files (a per-epoch key would lock it out of files sealed under past epochs,
+    /// the same problem the routing transfer solves). Files seal a fresh per-file content key
+    /// wrapped under this. Zeroized; persisted in the snapshot. All-zero until set.
+    file_wrap_key: Zeroizing<[u8; 32]>,
     /// Recently-seen peers (from gossip/requests/connections) — UNTRUSTED catch-up
     /// **candidates**: a Noise handshake is not group membership, so these may be
     /// Sybils. Tried only as a fallback, and a junk/unsigned reply is rejected.
@@ -1385,15 +1431,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         transport: T,
         group: ServerGroup,
         device: MlsDevice,
-        rng: R,
+        mut rng: R,
         clock: Box<dyn Clock + Send>,
     ) -> Self {
+        // Mint this group's stable file-wrap key (Phase 9h). A founder keeps it; a joiner
+        // replaces it with the transferred one via `adopt_routing_state`.
+        let mut file_wrap_key = Zeroizing::new([0u8; 32]);
+        rng.fill_bytes(file_wrap_key.as_mut());
         let mut this = Self {
             transport,
             group,
             device,
             rng,
             clock,
+            file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
@@ -1468,6 +1519,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for desc in self.peer_records.values() {
             e.put_bytes(&desc.encode()).map_err(|_| oversize())?;
         }
+        // 9h: the stable file-wrap key, appended LAST so `peer_addrs_from_snapshot` (which
+        // stops after the peer records) is unaffected.
+        e.put_bytes(&*self.file_wrap_key).map_err(|_| oversize())?;
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -1503,11 +1557,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let id = DeviceId::from_public_key_bytes(&desc.device_pubkey);
             peer_records.insert(id, desc);
         }
+        let file_wrap_key: [u8; 32] = d
+            .get_bytes()
+            .map_err(|_| bad())?
+            .try_into()
+            .map_err(|_| bad())?;
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
         // durable state. `new` re-derives an L=0 routing secret from the (post-restore) epoch;
-        // `adopt_routing_state` then replaces it with the persisted label + secrets.
+        // `adopt_routing_state` then replaces it with the persisted label + secrets. The
+        // file-wrap key is persisted separately (appended last), so the routing struct here
+        // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
         let mut this = Self::new(transport, group, device, rng, clock);
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
@@ -1517,7 +1578,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .into_iter()
                 .map(|(l, s)| (l, Zeroizing::new(s)))
                 .collect(),
+            file_wrap_key: None,
         });
+        this.file_wrap_key = Zeroizing::new(file_wrap_key);
         this.ledger = InviteLedger::restore(&ledger_bytes).map_err(|_| SyncError::Malformed)?;
         for snap in &doc_snaps {
             let doc = EncryptedDoc::restore(snap)?;
@@ -1546,6 +1609,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs = blobs;
     }
 
+    /// Encrypt a file under this group's stable file-wrap key (Phase 9h). Returns its
+    /// [`FileRef`] (to record in the encrypted file index) and the ciphertext blob to store +
+    /// share over the mesh. The ciphertext is content-addressed by its own CID; only members
+    /// holding the group file-wrap key can open it (end-to-end, not just at rest).
+    pub fn seal_file(
+        &mut self,
+        plaintext: &[u8],
+        mime: &str,
+    ) -> Result<(FileRef, Vec<u8>), SyncError> {
+        Ok(seal_file_fn(
+            plaintext,
+            mime,
+            &self.file_wrap_key,
+            &mut self.rng,
+        )?)
+    }
+
+    /// Open a ciphertext blob produced by [`ChannelSync::seal_file`], given its [`FileRef`].
+    pub fn open_file(&self, stored: &[u8], file_ref: &FileRef) -> Result<Vec<u8>, SyncError> {
+        Ok(open_file_fn(stored, file_ref, &self.file_wrap_key)?)
+    }
+
+    /// Whether this node holds a (non-zero) group file-wrap key yet (a joiner has it only
+    /// after adopting the join transfer).
+    pub fn has_file_key(&self) -> bool {
+        *self.file_wrap_key != [0u8; 32]
+    }
+
     /// Build a synchronizer for a member that **joined** an existing group, adopting
     /// the routing state ([`RoutingState`]) transferred in the join response so it
     /// derives the same blinded topics and rendezvous namespaces as the group. Use
@@ -1560,6 +1651,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         routing: RoutingState,
     ) -> Self {
         let mut this = Self::new(transport, group, device, rng, clock);
+        // A joiner has NO group file-wrap key of its own — only the founder mints one. Zero
+        // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
+        // false (and `add_file` refuses), rather than a wrong random key that would silently
+        // seal files no other member could open. A successful transfer installs the real key.
+        this.file_wrap_key = Zeroizing::new([0u8; 32]);
         this.adopt_routing_state(routing);
         this
     }
@@ -2530,7 +2626,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .map(|(slot, s)| (*slot, **s))
             .collect();
-        let plaintext = Zeroizing::new(encode_routing_state(self.routing_label, &secrets));
+        let plaintext = Zeroizing::new(encode_join_transfer(
+            self.routing_label,
+            &secrets,
+            &self.file_wrap_key,
+        ));
         match seal(&key, &plaintext, &mut self.rng) {
             Ok(blob) => encode_sealed(&blob),
             Err(e) => {
@@ -2544,6 +2644,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `L = 0`), so this joiner derives the same topics and namespaces as the group.
     /// A no-op for an empty transfer (keeps the local baseline).
     fn adopt_routing_state(&mut self, routing: RoutingState) {
+        // Adopt the transferred file-wrap key first (Phase 9h) — independent of the routing
+        // secrets, so the joiner shares the group's file key even at the L=0 baseline.
+        if let Some(k) = routing.file_wrap_key {
+            self.file_wrap_key = Zeroizing::new(k);
+        }
         if routing.secrets.is_empty() {
             return;
         }
@@ -4135,6 +4240,72 @@ mod tests {
         assert!(peer_addrs_from_snapshot(&node2.snapshot().unwrap())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn the_join_transfer_carries_the_file_wrap_key() {
+        // 9h: the transfer plaintext bundles the routing state AND the group file-wrap key.
+        let secrets = vec![(0u64, [3u8; 32])];
+        let fwk = [7u8; 32];
+        let (label, got_secrets, got_fwk) =
+            decode_join_transfer(&encode_join_transfer(5, &secrets, &fwk)).unwrap();
+        assert_eq!(label, 5);
+        assert_eq!(got_secrets, secrets);
+        assert_eq!(got_fwk, fwk);
+    }
+
+    #[test]
+    fn files_seal_open_under_the_group_key_and_the_key_survives_a_snapshot() {
+        // 9h: a file sealed under the group file-wrap key opens back; the key persists across
+        // a snapshot (so a reloaded node still opens files); a different key cannot open it.
+        let mut node = solo_node();
+        assert!(node.has_file_key());
+        let (fref, stored) = node.seal_file(b"secret document", "text/plain").unwrap();
+        assert_eq!(node.open_file(&stored, &fref).unwrap(), b"secret document");
+
+        // Snapshot → restore preserves the file-wrap key.
+        let snap = node.snapshot().unwrap();
+        let hub = Hub::new();
+        let restored = ChannelSync::restore(
+            &snap,
+            hub.join(PeerId::from_u64(9)),
+            ChaCha20Rng::seed_from_u64(0),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.open_file(&stored, &fref).unwrap(),
+            b"secret document"
+        );
+
+        // A node holding a different key cannot open it.
+        let mut other = solo_node();
+        other.file_wrap_key = Zeroizing::new([1u8; 32]);
+        assert!(other.open_file(&stored, &fref).is_err());
+    }
+
+    #[test]
+    fn adopting_a_transfer_installs_the_file_wrap_key_so_a_joiner_opens_the_founders_file() {
+        // 9h end-to-end (local): a founder seals a file; a joiner that adopts the routing
+        // transfer (which now carries the founder's file-wrap key) can open it.
+        let mut founder = solo_node();
+        let (fref, stored) = founder.seal_file(b"hi from alice", "text/plain").unwrap();
+        let founder_key = *founder.file_wrap_key;
+
+        let mut joiner = solo_node();
+        joiner.file_wrap_key = Zeroizing::new([0u8; 32]); // pretend it has no key yet
+        assert!(joiner.open_file(&stored, &fref).is_err());
+
+        joiner.adopt_routing_state(RoutingState {
+            label: 0,
+            secrets: Vec::new(), // even with no routing secrets, the key is installed
+            file_wrap_key: Some(founder_key),
+        });
+        assert_eq!(
+            joiner.open_file(&stored, &fref).unwrap(),
+            b"hi from alice",
+            "the joiner opens the founder's file with the transferred key"
+        );
     }
 
     #[test]

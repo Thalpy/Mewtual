@@ -21,7 +21,7 @@ use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
-use catcoms_storage::{BlobStore, Cid};
+use catcoms_storage::{BlobStore, Cid, FileRef};
 pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{request_join, ChannelSync, SyncError};
 use catcoms_wire::DocType;
@@ -300,61 +300,74 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
 }
 const FILES: &str = "files";
 const F_NAME: &str = "name";
-const F_SIZE: &str = "size";
-const F_MIME: &str = "mime";
-const F_CID: &str = "cid";
 const F_AUTHOR: &str = "author";
+// 9h: the encoded FileRef (ciphertext CID + wrapped per-file key + plaintext CID + size +
+// mime). The file's bytes are stored/shared as ciphertext keyed by the ciphertext CID; only
+// members with the group file-wrap key can open it. Size/mime/cid are read back from here.
+const F_REF: &str = "ref";
 
 /// Maximum file size accepted by [`Server::add_file`]. Bounded by what the blob-fetch
 /// response cap supports in one shot; larger files need chunked transfer (a fileshare
 /// follow-up).
 pub const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
 
-/// One shared file as the UI sees it. `cid` is the content address (raw bytes) used to
-/// download the blob; `author` is the uploader's device fingerprint.
+/// One shared file as the UI sees it. `cid` is the **ciphertext** content address (raw bytes)
+/// used to download the blob; `author` is the uploader's device fingerprint. The file's bytes
+/// are end-to-end encrypted under the group file-wrap key (Phase 9h).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     /// The file's display name.
     pub name: String,
-    /// Size in bytes.
+    /// Plaintext size in bytes.
     pub size: u64,
     /// MIME type (best-effort; may be empty).
     pub mime: String,
-    /// Content address of the file's bytes in the blob store (raw 32 bytes).
+    /// Content address of the **ciphertext** blob (raw 32 bytes) — the download handle.
     pub cid: Vec<u8>,
     /// The uploader's device fingerprint.
     pub author: String,
+    /// The encoded [`FileRef`] (wrapped per-file key + addresses) needed to decrypt. Carried
+    /// in the encrypted index; not forwarded to the UI.
+    pub file_ref: Vec<u8>,
 }
 
-/// Append a file entry to the index document.
-fn write_file_entry(doc: &mut AutoCommit, e: &FileEntry) -> Result<(), AutomergeError> {
+/// Append a file entry (name + author + encoded `FileRef`) to the index document.
+fn write_file_entry(
+    doc: &mut AutoCommit,
+    name: &str,
+    author: &str,
+    file_ref: &[u8],
+) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, FILES)? {
         Some((Value::Object(ObjType::List), id)) => id,
         _ => doc.put_object(ROOT, FILES, ObjType::List)?,
     };
     let index = doc.length(&list);
     let entry = doc.insert_object(&list, index, ObjType::Map)?;
-    doc.put(&entry, F_NAME, e.name.as_str())?;
-    doc.put(&entry, F_SIZE, e.size as i64)?;
-    doc.put(&entry, F_MIME, e.mime.as_str())?;
-    doc.put(&entry, F_CID, ScalarValue::Bytes(e.cid.clone()))?;
-    doc.put(&entry, F_AUTHOR, e.author.as_str())?;
+    doc.put(&entry, F_NAME, name)?;
+    doc.put(&entry, F_AUTHOR, author)?;
+    doc.put(&entry, F_REF, ScalarValue::Bytes(file_ref.to_vec()))?;
     Ok(())
 }
 
-/// Materialize the file index document into the UI's file list.
+/// Materialize the file index document into the UI's file list (size/mime/cid come from the
+/// decoded `FileRef`; entries with a malformed ref are skipped).
 fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
     let mut out = Vec::new();
     if let Ok(Some((Value::Object(ObjType::List), list))) = doc.get(ROOT, FILES) {
         for i in 0..doc.length(&list) {
             if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
-                out.push(FileEntry {
-                    name: str_field(doc, &entry, F_NAME),
-                    size: int_field(doc, &entry, F_SIZE),
-                    mime: str_field(doc, &entry, F_MIME),
-                    cid: bytes_field(doc, &entry, F_CID),
-                    author: str_field(doc, &entry, F_AUTHOR),
-                });
+                let ref_bytes = bytes_field(doc, &entry, F_REF);
+                if let Ok(fref) = FileRef::decode(&ref_bytes) {
+                    out.push(FileEntry {
+                        name: str_field(doc, &entry, F_NAME),
+                        author: str_field(doc, &entry, F_AUTHOR),
+                        size: fref.size,
+                        mime: fref.mime.clone(),
+                        cid: fref.ciphertext_cid.as_bytes().to_vec(),
+                        file_ref: ref_bytes,
+                    });
+                }
             }
         }
     }
@@ -626,17 +639,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 bytes.len()
             )));
         }
-        let cid = self.sync.put_blob(bytes)?;
-        let entry = FileEntry {
-            name: name.to_string(),
-            size: bytes.len() as u64,
-            mime: mime.to_string(),
-            cid: cid.as_bytes().to_vec(),
-            author: self.my_fingerprint(),
-        };
+        if !self.sync.has_file_key() {
+            return Err(AppError::Invalid(
+                "no group file key yet (still joining?)".into(),
+            ));
+        }
+        // 9h: seal the file under the group file-wrap key; store + share the ciphertext, keyed
+        // by its ciphertext CID. The (encrypted) index carries the FileRef needed to decrypt.
+        let author = self.my_fingerprint();
+        let (file_ref, ciphertext) = self.sync.seal_file(bytes, mime)?;
+        let cid = self.sync.put_blob(&ciphertext)?;
+        let ref_bytes = file_ref.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(d, &entry)
+                write_file_entry(d, name, &author, &ref_bytes)
             })
             .await?;
         Ok(cid)
@@ -650,13 +666,27 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .unwrap_or_default()
     }
 
-    /// Download a shared file's bytes by content address — fetching the blob from the best
-    /// known peer if not already held. `None` if it could not be obtained.
+    /// Download + decrypt a shared file by its ciphertext content address — fetching the
+    /// ciphertext blob from the best known peer if not already held, then opening it under the
+    /// group file-wrap key (Phase 9h). `None` if the blob could not be obtained or no index
+    /// entry matches the CID.
     pub async fn download_file(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>, AppError> {
+        let Some(entry) = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
+        else {
+            return Ok(None);
+        };
+        let file_ref = FileRef::decode(&entry.file_ref)
+            .map_err(|_| AppError::Invalid("corrupt file ref".into()))?;
         if !self.sync.has_blob(cid) {
             self.sync.request_blob_best(cid).await?;
         }
-        Ok(self.sync.get_blob(cid))
+        let Some(ciphertext) = self.sync.get_blob(cid) else {
+            return Ok(None);
+        };
+        Ok(Some(self.sync.open_file(&ciphertext, &file_ref)?))
     }
 
     /// Catch up the file index document from `peer` (e.g. right after joining).
