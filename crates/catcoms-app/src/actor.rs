@@ -473,6 +473,7 @@ mod tests {
                 color: "#ffcc00".into(),
                 font: "serif".into(),
                 effect: "wave".into(),
+                ..Default::default()
             })
             .await;
         bob.catch_up_profiles(alice_peer).await;

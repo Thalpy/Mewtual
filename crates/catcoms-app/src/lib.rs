@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use automerge::transaction::Transactable;
-use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, Value, ROOT};
+use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
@@ -37,6 +37,9 @@ pub enum AppError {
     /// An MLS-layer error (e.g. founding a group).
     #[error(transparent)]
     Mls(#[from] MlsError),
+    /// A product-layer validation error (e.g. an over-large avatar).
+    #[error("{0}")]
+    Invalid(String),
 }
 
 /// One chat message as the UI sees it. The `author` is the sender's **device
@@ -129,9 +132,15 @@ const P_NAME: &str = "name";
 const P_COLOR: &str = "color";
 const P_FONT: &str = "font";
 const P_EFFECT: &str = "effect";
+const P_AVATAR: &str = "avatar";
 
-/// A member's customizable profile. Extensible (an avatar/display-picture field is a
-/// later slice — it needs content-addressed image storage).
+/// Maximum embedded-avatar size. Avatars live **inline** in the profile document (so they
+/// gossip + converge with the rest of the profile), so they are deliberately small — the
+/// UI downscales to a ~128px JPEG (a few KB). Large/animated/shared images are a later
+/// slice that moves them to the content-addressed blob store and fetches over the mesh.
+pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
+
+/// A member's customizable profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profile {
     /// Chosen display name.
@@ -142,6 +151,9 @@ pub struct Profile {
     pub font: String,
     /// A text-effect key (e.g. `none` | `rainbow` | `wave` | `pulse`).
     pub effect: String,
+    /// A small inline avatar image (raw bytes; empty = none). Capped at
+    /// [`MAX_AVATAR_BYTES`]; the UI produces a downscaled JPEG.
+    pub avatar: Vec<u8>,
 }
 
 /// Write a member's own profile entry into the profile document.
@@ -154,6 +166,7 @@ fn write_profile(doc: &mut AutoCommit, fp: &str, p: &Profile) -> Result<(), Auto
     doc.put(&entry, P_COLOR, p.color.as_str())?;
     doc.put(&entry, P_FONT, p.font.as_str())?;
     doc.put(&entry, P_EFFECT, p.effect.as_str())?;
+    doc.put(&entry, P_AVATAR, ScalarValue::Bytes(p.avatar.clone()))?;
     Ok(())
 }
 
@@ -169,11 +182,23 @@ fn read_profiles(doc: &AutoCommit) -> HashMap<String, Profile> {
                     color: str_field(doc, &entry, P_COLOR),
                     font: str_field(doc, &entry, P_FONT),
                     effect: str_field(doc, &entry, P_EFFECT),
+                    avatar: bytes_field(doc, &entry, P_AVATAR),
                 },
             );
         }
     }
     out
+}
+
+/// Read a `Bytes` scalar field (empty if absent or another type).
+fn bytes_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> Vec<u8> {
+    match doc.get(obj, key) {
+        Ok(Some((Value::Scalar(s), _))) => match s.as_ref() {
+            ScalarValue::Bytes(b) => b.clone(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
 }
 
 /// A UI-facing view of one **server** (one [`ChannelSync`] over a group). Wraps the
@@ -281,8 +306,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Set this member's own profile (writes the local fingerprint's entry).
+    /// Set this member's own profile (writes the local fingerprint's entry). Rejects an
+    /// avatar larger than [`MAX_AVATAR_BYTES`].
     pub async fn set_profile(&mut self, profile: Profile) -> Result<(), AppError> {
+        if profile.avatar.len() > MAX_AVATAR_BYTES {
+            return Err(AppError::Invalid(format!(
+                "avatar too large: {} bytes (max {MAX_AVATAR_BYTES})",
+                profile.avatar.len()
+            )));
+        }
         let fp = self.my_fingerprint();
         self.sync
             .post(DocType::Profile, PROFILE_DOC, |d| {
@@ -536,11 +568,27 @@ mod tests {
             color: "#ff5577".into(),
             font: "serif".into(),
             effect: "rainbow".into(),
+            avatar: vec![0xff, 0xd8, 0xff, 0x00, 1, 2, 3], // stand-in JPEG bytes
         };
         alice.set_profile(p.clone()).await.unwrap();
 
         let profiles = alice.profiles();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles.get(&alice.my_fingerprint()), Some(&p));
+    }
+
+    #[tokio::test]
+    async fn an_oversize_avatar_is_rejected() {
+        let mut alice = founder();
+        alice.open_profiles().await.unwrap();
+        let p = Profile {
+            name: "Alice".into(),
+            avatar: vec![0u8; MAX_AVATAR_BYTES + 1],
+            ..Default::default()
+        };
+        assert!(matches!(
+            alice.set_profile(p).await,
+            Err(AppError::Invalid(_))
+        ));
     }
 }

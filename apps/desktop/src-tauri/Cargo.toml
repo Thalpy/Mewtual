@@ -20,6 +20,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 libp2p = { version = "0.56", features = ["tokio"] }
 hex = "0.4"
+base64 = "0.22"
 catcoms-app = { path = "../../../crates/catcoms-app" }
 catcoms-mls = { path = "../../../crates/catcoms-mls" }
 catcoms-net = { path = "../../../crates/catcoms-net" }

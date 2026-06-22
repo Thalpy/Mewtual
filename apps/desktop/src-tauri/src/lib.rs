@@ -9,7 +9,9 @@
 
 use std::time::Duration;
 
-use catcoms_app::{channel_id, spawn, AppEvent, Profile, Server, ServerActor};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
+use catcoms_app::{channel_id, spawn, AppEvent, Profile, Server, ServerActor, MAX_AVATAR_BYTES};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
@@ -41,7 +43,8 @@ struct UiMember {
     you: bool,
 }
 
-/// A member profile as serialized to the frontend (keyed by fingerprint).
+/// A member profile as serialized to the frontend (keyed by fingerprint). `avatar` is
+/// base64-encoded JPEG bytes (empty = no avatar).
 #[derive(Serialize, Clone)]
 struct UiProfile {
     fingerprint: String,
@@ -49,6 +52,7 @@ struct UiProfile {
     color: String,
     font: String,
     effect: String,
+    avatar: String,
 }
 
 /// Forward an actor's event stream to the frontend as Tauri events.
@@ -213,7 +217,8 @@ async fn get_members(state: State<'_, AppState>) -> Result<Vec<UiMember>, String
         .collect())
 }
 
-/// Set this member's own profile (name + styling).
+/// Set this member's own profile (name + styling + optional avatar). `avatar` is
+/// base64-encoded JPEG bytes (empty = no avatar).
 #[tauri::command]
 async fn set_profile(
     state: State<'_, AppState>,
@@ -221,7 +226,20 @@ async fn set_profile(
     color: String,
     font: String,
     effect: String,
+    avatar: String,
 ) -> Result<(), String> {
+    let avatar = if avatar.is_empty() {
+        Vec::new()
+    } else {
+        B64.decode(avatar.as_bytes())
+            .map_err(|e| format!("bad avatar: {e}"))?
+    };
+    if avatar.len() > MAX_AVATAR_BYTES {
+        return Err(format!(
+            "avatar too large: {} bytes (max {MAX_AVATAR_BYTES})",
+            avatar.len()
+        ));
+    }
     if let Some(actor) = state.actor.lock().await.as_ref() {
         actor
             .set_profile(Profile {
@@ -229,6 +247,7 @@ async fn set_profile(
                 color,
                 font,
                 effect,
+                avatar,
             })
             .await;
     }
@@ -252,6 +271,11 @@ async fn get_profiles(state: State<'_, AppState>) -> Result<Vec<UiProfile>, Stri
             color: p.color,
             font: p.font,
             effect: p.effect,
+            avatar: if p.avatar.is_empty() {
+                String::new()
+            } else {
+                B64.encode(&p.avatar)
+            },
         })
         .collect())
 }

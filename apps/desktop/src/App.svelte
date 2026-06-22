@@ -6,7 +6,7 @@
   type Msg = { author: string; text: string };
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
-  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string };
+  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
 
   let mode = $state<"start" | "app">("start");
   let busy = $state(false);
@@ -35,6 +35,7 @@
   let pColor = $state("#4f8cff");
   let pFont = $state("system");
   let pEffect = $state("none");
+  let pAvatar = $state(""); // base64 JPEG ("" = none)
 
   function activeName(): string {
     return channels.find((c) => c.id === active)?.name ?? "";
@@ -140,16 +141,38 @@
       const map: Record<string, Prof> = {};
       for (const p of list) map[p.fingerprint] = p;
       profiles = map;
-      // Seed the editor from my own stored profile (once it exists).
-      const mine = profiles[myFp];
-      if (mine) {
-        if (mine.name) pName = mine.name;
-        if (mine.color) pColor = mine.color;
-        if (mine.font) pFont = mine.font;
-        if (mine.effect) pEffect = mine.effect;
-      }
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  // Downscale a picked image to a 128px square JPEG and keep its base64 (the editor draft).
+  async function loadAvatar(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve(null);
+        img.onerror = () => reject(new Error("could not load image"));
+        img.src = url;
+      });
+      const size = 128;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const scale = Math.max(size / img.width, size / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      }
+      URL.revokeObjectURL(url);
+      pAvatar = canvas.toDataURL("image/jpeg", 0.8).split(",")[1] ?? "";
+    } catch (err) {
+      error = String(err);
     }
   }
 
@@ -160,6 +183,7 @@
         color: pColor,
         font: pFont,
         effect: pEffect,
+        avatar: pAvatar,
       });
       await refreshProfiles();
     } catch (e) {
@@ -218,6 +242,17 @@
   {@render styledName(nameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
 {/snippet}
 
+{#snippet avatarTag(fp: string)}
+  {@const p = profiles[fp]}
+  {#if p?.avatar}
+    <img class="avatar" src={"data:image/jpeg;base64," + p.avatar} alt="" />
+  {:else}
+    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+      {nameOf(fp).slice(0, 1).toUpperCase()}
+    </span>
+  {/if}
+{/snippet}
+
 <main>
   {#if mode === "start"}
     <div class="start">
@@ -258,6 +293,7 @@
           <ul>
             {#each roster as m}
               <li title={m.fingerprint}>
+                {@render avatarTag(m.fingerprint)}
                 {@render nameTag(m.fingerprint)}
                 {#if m.you}<span class="you-badge">you</span>{/if}
               </li>
@@ -292,6 +328,22 @@
               <option value="pulse">Pulse</option>
             </select>
           </label>
+          <div class="field">
+            <span class="muted">Avatar</span>
+            <div class="avatar-row">
+              {#if pAvatar}
+                <img class="avatar lg" src={"data:image/jpeg;base64," + pAvatar} alt="" />
+              {:else}
+                <span class="avatar lg fallback" style={`background:${pColor}`}>
+                  {(pName || displayName).slice(0, 1).toUpperCase()}
+                </span>
+              {/if}
+              <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
+              {#if pAvatar}
+                <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
+              {/if}
+            </div>
+          </div>
           <p class="preview">
             Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
           </p>
@@ -313,7 +365,10 @@
         <ul class="messages">
           {#each messages as m}
             <li class:own={m.author === myFp}>
-              <span class="author">{@render nameTag(m.author)}</span>
+              <span class="author">
+                {@render avatarTag(m.author)}
+                {@render nameTag(m.author)}
+              </span>
               <span class="text">{m.text}</span>
             </li>
           {:else}

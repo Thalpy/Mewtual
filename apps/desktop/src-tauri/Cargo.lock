@@ -578,6 +578,7 @@ dependencies = [
 name = "catcoms-desktop"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "catcoms-app",
  "catcoms-mls",
  "catcoms-net",

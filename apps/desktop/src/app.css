@@ -333,6 +333,64 @@ select {
   margin: 0.4rem 0;
 }
 
+.avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+  vertical-align: middle;
+}
+
+.avatar.fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #fff;
+  background: #4f8cff;
+  text-transform: uppercase;
+}
+
+.avatar.lg {
+  width: 44px;
+  height: 44px;
+  font-size: 1.2rem;
+}
+
+.avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.avatar-row input[type="file"] {
+  font-size: 0.78rem;
+  width: auto;
+  flex: 1;
+  min-width: 120px;
+}
+
+.messages .author {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+button.ghost {
+  background: transparent;
+  border: 1px solid #3a3d44;
+  color: #cdd2da;
+  font-weight: 500;
+  padding: 0.3rem 0.6rem;
+}
+
+button.ghost:hover {
+  background: #2a2d33;
+}
+
 .composer {
   display: flex;
   gap: 0.5rem;
