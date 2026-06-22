@@ -13,29 +13,35 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use catcoms_app::{channel_id, spawn, AppEvent, Profile, Server, ServerActor, MAX_AVATAR_BYTES};
+use catcoms_app::{
+    channel_id, spawn, AppEvent, Profile, Server, ServerActor, ServerRecord, ServerStore,
+    MAX_AVATAR_BYTES,
+};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
-/// One running server: its actor handle and the single-use invite to share (founder only).
-/// The display name for the rail is tracked by the UI (it knows what it founded/joined).
+/// One running server: its actor handle, the single-use invite to share (founder only), and
+/// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
     actor: ServerActor,
     invite: Option<String>,
+    name: String,
 }
 
-/// App state managed by Tauri: every running server keyed by a bridge-assigned id.
+/// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
+/// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
     next_id: Mutex<u64>,
+    store: Mutex<Option<ServerStore>>,
 }
 
 /// Clone out the actor for `server` (so we never hold the servers lock across an await).
@@ -192,6 +198,7 @@ async fn register_server(
     actor: ServerActor,
     events: mpsc::Receiver<AppEvent>,
     invite: Option<String>,
+    name: String,
 ) -> u64 {
     let id = {
         let mut n = state.next_id.lock().await;
@@ -203,8 +210,53 @@ async fn register_server(
         .servers
         .lock()
         .await
-        .insert(id, ServerEntry { actor, invite });
+        .insert(id, ServerEntry { actor, invite, name });
     id
+}
+
+/// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
+/// store, a stopped actor, or an I/O error is logged, not fatal — the app keeps running).
+async fn persist_server(state: &AppState, server: u64) {
+    let actor = match actor_of(state, server).await {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let bytes = match actor.snapshot().await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("persist: snapshot of server {server} failed: {e}");
+            return;
+        }
+    };
+    let guard = state.store.lock().await;
+    if let Some(store) = guard.as_ref() {
+        let mut rng = OsCryptoRng;
+        if let Err(e) = store.save_server(server, &bytes, &mut rng) {
+            eprintln!("persist: sealing server {server} failed: {e}");
+        }
+    }
+}
+
+/// Re-seal the registry (the set of servers + their names/invites) to disk.
+async fn persist_registry(state: &AppState) {
+    let records: Vec<ServerRecord> = {
+        let servers = state.servers.lock().await;
+        servers
+            .iter()
+            .map(|(id, e)| ServerRecord {
+                id: *id,
+                display_name: e.name.clone(),
+                invite: e.invite.clone().unwrap_or_default(),
+            })
+            .collect()
+    };
+    let guard = state.store.lock().await;
+    if let Some(store) = guard.as_ref() {
+        let mut rng = OsCryptoRng;
+        if let Err(e) = store.save_registry(&records, &mut rng) {
+            eprintln!("persist: sealing registry failed: {e}");
+        }
+    }
 }
 
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
@@ -281,6 +333,7 @@ async fn found_server(
     }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
+    let name = display_name.clone();
     let mut server = Server::found(mesh, device, OsCryptoRng, Box::new(SystemClock), display_name)
         .map_err(|e| e.to_string())?;
     server.subscribe_control().await.map_err(|e| e.to_string())?;
@@ -298,7 +351,10 @@ async fn found_server(
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
-    let server_id = register_server(&app, &state, actor, events, Some(invite_hex)).await;
+    let server_id = register_server(&app, &state, actor, events, Some(invite_hex), name).await;
+    // Seal the new server + the registry to disk (if the store is unlocked).
+    persist_server(&state, server_id).await;
+    persist_registry(&state).await;
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -347,6 +403,7 @@ async fn join_server(
     .map_err(|_| "timed out connecting to the server".to_string())?;
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
+    let name = display_name.clone();
     let server = Server::join(
         mesh,
         device,
@@ -367,7 +424,10 @@ async fn join_server(
     actor.catch_up_files(inviter).await;
     actor.catch_up_status(inviter).await;
     actor.catch_up_wiki(inviter).await;
-    let server_id = register_server(&app, &state, actor, events, None).await;
+    let server_id = register_server(&app, &state, actor, events, None, name).await;
+    // Seal the joined server + the registry to disk (if the store is unlocked).
+    persist_server(&state, server_id).await;
+    persist_registry(&state).await;
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -380,6 +440,16 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
     if let Some(entry) = state.servers.lock().await.remove(&server) {
         entry.actor.shutdown().await;
     }
+    // Drop the sealed snapshot + re-seal the (now smaller) registry.
+    {
+        let guard = state.store.lock().await;
+        if let Some(store) = guard.as_ref() {
+            if let Err(e) = store.remove_server(server) {
+                eprintln!("leave: removing sealed server {server} failed: {e}");
+            }
+        }
+    }
+    persist_registry(&state).await;
     Ok(())
 }
 
@@ -459,6 +529,7 @@ async fn set_profile(
             avatar,
         })
         .await;
+    persist_server(&state, server).await;
     Ok(())
 }
 
@@ -498,7 +569,9 @@ async fn add_file(
         .decode(data.as_bytes())
         .map_err(|e| format!("bad file data: {e}"))?;
     let actor = actor_of(&state, server).await?;
-    actor.add_file(name, mime, bytes).await
+    let cid = actor.add_file(name, mime, bytes).await?;
+    persist_server(&state, server).await;
+    Ok(cid)
 }
 
 /// The shared file list (metadata; bytes are fetched on download).
@@ -539,6 +612,7 @@ async fn download_file(
 async fn post_status(state: State<'_, AppState>, server: u64, text: String) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
     actor.post_status(text).await;
+    persist_server(&state, server).await;
     Ok(())
 }
 
@@ -587,6 +661,7 @@ async fn save_wiki_page(
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
     actor.write_wiki_page(name, body).await;
+    persist_server(&state, server).await;
     Ok(())
 }
 
@@ -601,6 +676,7 @@ async fn send_message(
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
     actor.send_message(id, text).await;
+    persist_server(&state, server).await;
     Ok(())
 }
 
@@ -625,11 +701,118 @@ async fn get_messages(
         .collect())
 }
 
+/// One server reloaded from disk, returned to the UI to repopulate the rail.
+#[derive(Serialize, Clone)]
+struct ReloadedServer {
+    server: u64,
+    name: String,
+    invite: String,
+    channel: String,
+}
+
+/// Reload one sealed server from disk onto a fresh transport and register it under its
+/// on-disk id. The reloaded node reads its history immediately (offline); peers re-dial as
+/// they come online (Phase 9g). A founder whose address changed re-mints a fresh invite.
+async fn reload_one(
+    app: &AppHandle,
+    state: &AppState,
+    snapshot: &[u8],
+    record: &ServerRecord,
+) -> Result<(), String> {
+    let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
+        .parse()
+        .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
+    let no_relay: Vec<Multiaddr> = Vec::new();
+    let (mesh, _id) = MeshService::new_tcp(Some(listen), &no_relay).map_err(|e| e.to_string())?;
+    let mut server = Server::restore(
+        snapshot,
+        mesh,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        &record.display_name,
+    )
+    .map_err(|e| e.to_string())?;
+    server.subscribe_control().await.map_err(|e| e.to_string())?;
+
+    let general = channel_id("general");
+    let (actor, events, _task) = spawn(server);
+    actor.open_channel(general).await;
+    // Register under the SAME id as on disk (don't allocate a new one).
+    forward_events(app.clone(), record.id, events);
+    state.servers.lock().await.insert(
+        record.id,
+        ServerEntry {
+            actor,
+            invite: if record.invite.is_empty() {
+                None
+            } else {
+                Some(record.invite.clone())
+            },
+            name: record.display_name.clone(),
+        },
+    );
+    Ok(())
+}
+
+/// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
+/// at launch. A wrong passphrase fails (the vault won't open); a first-ever launch just
+/// creates the vault and returns no servers. Returns the reloaded servers for the rail.
+#[tauri::command]
+async fn unlock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    passphrase: String,
+) -> Result<Vec<ReloadedServer>, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("vault");
+    let mut rng = OsCryptoRng;
+    let store =
+        ServerStore::open(&dir, passphrase.as_bytes(), &mut rng).map_err(|e| e.to_string())?;
+    let records = store.load_registry().map_err(|e| e.to_string())?;
+
+    let mut reloaded = Vec::new();
+    let mut max_id = 0u64;
+    for record in &records {
+        let bytes = match store.load_server(record.id) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("unlock: loading server {} failed: {e}", record.id);
+                continue;
+            }
+        };
+        if let Err(e) = reload_one(&app, &state, &bytes, record).await {
+            eprintln!("unlock: restoring server {} failed: {e}", record.id);
+            continue;
+        }
+        max_id = max_id.max(record.id);
+        reloaded.push(ReloadedServer {
+            server: record.id,
+            name: record.display_name.clone(),
+            invite: record.invite.clone(),
+            channel: channel_id("general").to_string(),
+        });
+    }
+
+    // Keep the unlocked store, and ensure new servers get ids past the reloaded ones.
+    *state.store.lock().await = Some(store);
+    {
+        let mut n = state.next_id.lock().await;
+        if *n < max_id {
+            *n = max_id;
+        }
+    }
+    Ok(reloaded)
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            unlock,
             found_server,
             join_server,
             leave_server,

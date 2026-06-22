@@ -9,6 +9,7 @@
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
   type UiFile = { name: string; size: number; mime: string; cid: string; author: string };
   type Found = { server: number; channel: string };
+  type Reloaded = { server: number; name: string; invite: string; channel: string };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
@@ -25,6 +26,13 @@
   let servers = $state<ServerState[]>([]);
   let activeServerId = $state<number | null>(null);
   let showAdd = $state(false); // showing the found/join form to add a server
+
+  // Persistence (9f): a passphrase gate. On launch the app is locked until the user enters
+  // their passphrase, which unlocks the on-disk vault and reloads their servers (or, on
+  // first run, sets the passphrase and starts empty).
+  let locked = $state(true);
+  let passphrase = $state("");
+  let unlocking = $state(false);
 
   let busy = $state(false);
   let error = $state("");
@@ -92,6 +100,29 @@
     void messages;
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   });
+
+  // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
+  // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
+  async function unlock() {
+    unlocking = true;
+    error = "";
+    try {
+      const reloaded = await invoke<Reloaded[]>("unlock", { passphrase });
+      for (const r of reloaded) {
+        servers = [
+          ...servers,
+          { id: r.server, name: r.name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: r.invite, dot: false },
+        ];
+      }
+      locked = false;
+      passphrase = "";
+      if (servers.length) switchServer(servers[0].id);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      unlocking = false;
+    }
+  }
 
   async function found() {
     busy = true;
@@ -468,7 +499,30 @@
 {/snippet}
 
 <main>
-  {#if servers.length === 0 || showAdd}
+  {#if locked}
+    <div class="start">
+      <h1>CatComs</h1>
+      <p class="muted">
+        Enter your passphrase to unlock your servers. On first run, the passphrase you
+        choose here encrypts everything at rest — there is no recovery if you forget it.
+      </p>
+      <label class="field">
+        <span class="muted">Passphrase</span>
+        <!-- svelte-ignore a11y_autofocus -->
+        <input
+          type="password"
+          bind:value={passphrase}
+          onkeydown={(e) => e.key === "Enter" && passphrase && unlock()}
+          placeholder="passphrase"
+          autofocus
+        />
+      </label>
+      {#if error}<p class="error">{error}</p>{/if}
+      <button onclick={unlock} disabled={unlocking || !passphrase}>
+        {unlocking ? "Unlocking…" : "Unlock"}
+      </button>
+    </div>
+  {:else if servers.length === 0 || showAdd}
     <div class="start">
       <h1>CatComs</h1>
       {#if showAdd && servers.length}
