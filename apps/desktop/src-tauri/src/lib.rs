@@ -15,6 +15,7 @@ use catcoms_app::{channel_id, spawn, AppEvent, Profile, Server, ServerActor, MAX
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
+use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
@@ -94,25 +95,69 @@ fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
     });
 }
 
-/// Found a new server: bind a loopback TCP port, found the group, mint a single-use
-/// invite carrying that address, spawn the actor, and forward its events.
+/// Extract the TCP port from a multiaddr (the OS-assigned listen port).
+fn tcp_port(addr: &Multiaddr) -> Option<u16> {
+    addr.iter().find_map(|p| match p {
+        Protocol::Tcp(port) => Some(port),
+        _ => None,
+    })
+}
+
+/// Build a dialable bootstrap multiaddr from a user-entered reachable address, so peers on
+/// a LAN or the internet can join. Accepts a bare IPv4 (`1.2.3.4` — uses the bound `port`),
+/// `host:port` (e.g. a forwarded port), or a full multiaddr starting with `/` (e.g. a relay
+/// circuit address). Appends this node's `/p2p/<id>` if absent. (IPv4/multiaddr only; a
+/// hostname would need `/dns4/`.)
+fn build_advertised(input: &str, port: u16, peer_id: &str) -> Result<String, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("empty address".into());
+    }
+    if input.starts_with('/') {
+        return Ok(if input.contains("/p2p/") {
+            input.to_string()
+        } else {
+            format!("{input}/p2p/{peer_id}")
+        });
+    }
+    let (host, p) = match input.rsplit_once(':') {
+        Some((h, ps)) => (h, ps.parse().map_err(|_| format!("bad port in '{input}'"))?),
+        None => (input, port),
+    };
+    if host.is_empty() {
+        return Err(format!("bad address '{input}'"));
+    }
+    Ok(format!("/ip4/{host}/tcp/{p}/p2p/{peer_id}"))
+}
+
+/// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
+/// loopback), found the group, mint a single-use invite carrying the reachable address(es),
+/// spawn the actor, and forward its events. `advertise` is an optional user-supplied
+/// reachable address (LAN or public IP, or a relay circuit multiaddr); blank = same-machine.
 #[tauri::command]
 async fn found_server(
     app: AppHandle,
     state: State<'_, AppState>,
     display_name: String,
+    advertise: String,
 ) -> Result<String, String> {
-    let listen: Multiaddr = "/ip4/127.0.0.1/tcp/0"
+    let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
         .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
     let (mesh, libp2p_id) = MeshService::new_tcp(Some(listen), &[]).map_err(|e| e.to_string())?;
 
-    // Discover the OS-assigned port and build a dialable bootstrap address.
+    // Discover the OS-assigned port; advertise loopback (same-machine) plus the user's
+    // reachable address if given, so the invite works for same-machine, LAN, or internet.
     let bound = timeout(Duration::from_secs(10), mesh.next_listen_addr())
         .await
         .map_err(|_| "listen-addr timeout".to_string())?
         .ok_or_else(|| "transport stopped".to_string())?;
-    let bootstrap = format!("{bound}/p2p/{libp2p_id}");
+    let port = tcp_port(&bound).ok_or_else(|| "no bound TCP port".to_string())?;
+    let id = libp2p_id.to_string();
+    let mut bootstrap = vec![format!("/ip4/127.0.0.1/tcp/{port}/p2p/{id}")];
+    if !advertise.trim().is_empty() {
+        bootstrap.push(build_advertised(&advertise, port, &id)?);
+    }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let mut server = Server::found(mesh, device, OsCryptoRng, Box::new(SystemClock), display_name)
@@ -125,7 +170,7 @@ async fn found_server(
     rng.fill_bytes(&mut nonce);
     let expires = SystemClock.now_ms() + 3_600_000;
     let invite = server
-        .mint_invite(nonce, expires, vec![bootstrap])
+        .mint_invite(nonce, expires, bootstrap)
         .map_err(|e| e.to_string())?;
     *state.invite.lock().await = Some(hex::encode(invite.encode()));
 
@@ -148,19 +193,23 @@ async fn join_server(
 ) -> Result<String, String> {
     let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
     let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
-    let boot = invite
+    // Dial every bootstrap address the invite carries — loopback (same machine), a LAN IP,
+    // or a public/relayed address; whichever reaches the inviter first wins.
+    let addrs: Vec<Multiaddr> = invite
         .bootstrap
-        .first()
-        .ok_or_else(|| "invite carries no bootstrap address".to_string())?;
-    let addr: Multiaddr = boot
-        .parse()
-        .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
-    let inviter_lp =
-        target_peer_in_multiaddr(&addr).ok_or_else(|| "bootstrap has no peer id".to_string())?;
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if addrs.is_empty() {
+        return Err("invite carries no usable bootstrap address".to_string());
+    }
+    let inviter_lp = addrs
+        .iter()
+        .find_map(target_peer_in_multiaddr)
+        .ok_or_else(|| "bootstrap has no peer id".to_string())?;
     let inviter = phase0_peer_id(&inviter_lp);
 
-    let (mesh, _id) = MeshService::new_tcp(None, std::slice::from_ref(&addr))
-        .map_err(|e| e.to_string())?;
+    let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
     // Wait for the connection to the inviter before requesting the join.
     timeout(Duration::from_secs(20), async {
         loop {
@@ -409,4 +458,43 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CatComs desktop app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_port_is_extracted() {
+        let a: Multiaddr = "/ip4/192.168.1.5/tcp/54321".parse().unwrap();
+        assert_eq!(tcp_port(&a), Some(54321));
+        let b: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
+        assert_eq!(tcp_port(&b), Some(0));
+    }
+
+    #[test]
+    fn advertised_address_forms() {
+        let id = "12D3KooWfakepeerid";
+        // Bare IPv4 uses the bound port.
+        assert_eq!(
+            build_advertised("203.0.113.7", 9000, id).unwrap(),
+            format!("/ip4/203.0.113.7/tcp/9000/p2p/{id}")
+        );
+        // host:port overrides the port (e.g. a forwarded port).
+        assert_eq!(
+            build_advertised("203.0.113.7:5678", 9000, id).unwrap(),
+            format!("/ip4/203.0.113.7/tcp/5678/p2p/{id}")
+        );
+        // A full multiaddr without /p2p/ gets ours appended.
+        assert_eq!(
+            build_advertised("/ip4/198.51.100.1/tcp/1", 9000, id).unwrap(),
+            format!("/ip4/198.51.100.1/tcp/1/p2p/{id}")
+        );
+        // A full multiaddr that already carries /p2p/ (e.g. a relay circuit) is used as-is.
+        let circuit = "/ip4/198.51.100.1/tcp/4000/p2p/RELAY/p2p-circuit";
+        assert_eq!(build_advertised(circuit, 9000, id).unwrap(), circuit);
+        // Empty / malformed are rejected.
+        assert!(build_advertised("", 9000, id).is_err());
+        assert!(build_advertised("1.2.3.4:notaport", 9000, id).is_err());
+    }
 }

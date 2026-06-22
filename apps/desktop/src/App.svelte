@@ -13,6 +13,7 @@
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
+  let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let invite = $state(""); // the invite to share (founder)
   let joinInvite = $state(""); // pasted invite (joiner)
   let copied = $state(false);
@@ -72,7 +73,7 @@
     busy = true;
     error = "";
     try {
-      const id = await invoke<string>("found_server", { displayName });
+      const id = await invoke<string>("found_server", { displayName, advertise });
       invite = (await invoke<string | null>("get_invite")) ?? "";
       channels = [{ id, name: "general" }];
       active = id;
@@ -333,6 +334,17 @@
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
       </label>
+      <details>
+        <summary>Network (optional)</summary>
+        <label class="field">
+          <span class="muted">
+            Reachable address so others can join over a network — your LAN IP (e.g.
+            192.168.1.5), or a public IP / host:port if port-forwarded. Leave blank for
+            same-machine only.
+          </span>
+          <input bind:value={advertise} placeholder="LAN/public IP (optional)" />
+        </label>
+      </details>
       <button onclick={found} disabled={busy}>
         {busy ? "Working…" : "Found a server"}
       </button>
