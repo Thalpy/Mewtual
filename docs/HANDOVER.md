@@ -6,8 +6,9 @@ Authoritative current-state document. Read this first, then
 
 ## Status (as of 2026-06-22)
 
-- **Phases 0 → 6e-3d COMPLETE — the full rendezvous-discovery + eclipse-resistance
-  block (all 9 slices) is done.** 183 tests passing.
+- **Phases 0 → 6e-3d COMPLETE** (the full rendezvous-discovery + eclipse-resistance
+  block, all 9 slices); **Phase 7 in progress** — 7a (full-stack end-to-end over real
+  TCP sockets) and 7b (consolidated security suite) done. **186 tests passing.**
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
@@ -153,7 +154,9 @@ TCP** (verified, incl. through a relay).
 | 6e-3d-7 | **member PEX** (`KIND_PEX`, self-signed `PeerDescriptor`, responder-signed, capped/rate-limited); reviewed (blocking receive-cap DoS fixed) | ✅ `762ef63` |
 | 6e-3d-8 | **advisory eclipse detector** (D/R/S, hysteresis, never gates) + **cross-session address cache** (tamper-detected); reviewed (blocking timing-oracle fixed) | ✅ `ca8493f` |
 | 6e-3d-9 | **invite rewiring** (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join **`join_ns`** + `serve --rendezvous`/`join` **discover→dial→join** end-to-end; reviewed SOUND | ✅ `f31a0c7` |
-| 7 | end-to-end local integration over real sockets + security suite | planned |
+| 7a | **full-stack end-to-end over real TCP sockets** — founder binds an ephemeral loopback port; a fresh device dials it over real OS sockets, runs the MLS join, and converges | ✅ `798b50f` |
+| 7b | **consolidated security suite** — threat-model → where-proven map + cross-layer scenarios (`an_eclipse_caution_never_gates_a_removal`, `a_removed_member_is_excluded_from_the_rotated_namespace`) | ✅ `ec5638e` |
+| 7… | remaining Phase-7 integration (relayed/rendezvous paths over TCP, broader security scenarios) | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, security review | planned |
@@ -171,8 +174,15 @@ touching it.
 
 **Read [`design-6e-rendezvous.md`](design-6e-rendezvous.md)** — the 9-slice contract
 from a 7-agent design+review workflow, plus the per-slice adversarial-review outcomes
-(2b, 3d-5, and 3d-6…9 are all recorded there). All 9 slices are done; the next focus is
-**Phase 7** (end-to-end local integration + security suite).
+(2b, 3d-5, and 3d-6…9 are all recorded there). All 9 slices are done.
+
+**Phase 7** (end-to-end local integration over real sockets + consolidated security
+suite) is **in progress**: 7a added a full-stack join+converge over real TCP loopback
+(`catcoms-sync/tests/tcp_e2e.rs`); 7b added the security suite
+(`catcoms-sync/tests/security.rs`) — a threat-model → where-proven map plus the
+cross-layer scenarios (eclipse-never-gates-a-removal; removed-member-excluded-from-the-
+rotated-namespace). Remaining Phase-7 work: relayed/rendezvous paths exercised over TCP
+and broader adversarial scenarios.
 
 **Goal:** members find each other with no hard-coded bootstrap addresses, and an
 attacker cannot isolate (eclipse) a member. Everything is built on a per-removal

@@ -47,7 +47,9 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 6e-3d-7 | Member PEX (`KIND_PEX`): members supply each other dialable signed peer records (members-only, responder-signed, capped/rate-limited) | done |
 | 6e-3d-8 | Advisory eclipse detector (D/R/S, hysteresis, never gates) + cross-session address cache (tamper-detected on load) | done |
 | 6e-3d-9 | Invite rewiring (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join `join_ns` + `serve --rendezvous`/`join` discover→dial→join (no hard-coded address) | done |
-| 7 | End-to-end local integration | planned |
+| 7a | Full-stack end-to-end over **real TCP sockets** (MLS join + channel converge over OS sockets) | done |
+| 7b | Consolidated **security suite** (threat-model map + cross-layer adversarial scenarios) | done |
+| 7… | Remaining Phase-7 integration (relayed/rendezvous over TCP, broader security scenarios) | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |
