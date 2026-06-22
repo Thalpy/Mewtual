@@ -22,6 +22,7 @@ use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
 use catcoms_storage::Cid;
+pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{request_join, ChannelSync, SyncError};
 use catcoms_wire::DocType;
 use thiserror::Error;

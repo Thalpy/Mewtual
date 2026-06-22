@@ -14,8 +14,8 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
-    channel_id, spawn, AppEvent, Profile, Server, ServerActor, ServerRecord, ServerStore,
-    MAX_AVATAR_BYTES,
+    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Profile, Server, ServerActor,
+    ServerRecord, ServerStore, MAX_AVATAR_BYTES,
 };
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
@@ -722,8 +722,14 @@ async fn reload_one(
     let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
         .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
-    let no_relay: Vec<Multiaddr> = Vec::new();
-    let (mesh, _id) = MeshService::new_tcp(Some(listen), &no_relay).map_err(|e| e.to_string())?;
+    // 9g: dial the last-known peers (from the persisted peer records) at construction, so a
+    // reloaded joiner reconnects on its own as those peers come online.
+    let redial: Vec<Multiaddr> = peer_addrs_from_snapshot(snapshot)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    let (mesh, _id) = MeshService::new_tcp(Some(listen), &redial).map_err(|e| e.to_string())?;
     let mut server = Server::restore(
         snapshot,
         mesh,

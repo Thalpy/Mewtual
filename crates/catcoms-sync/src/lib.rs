@@ -869,6 +869,35 @@ impl PeerDescriptor {
     }
 }
 
+/// Extract the dialable peer addresses from a [`ChannelSync::snapshot`] blob **without a full
+/// restore** (Phase 9g), so a reloading node can dial its last-known peers at transport
+/// construction and reconnect on its own. Mirrors the snapshot framing
+/// (`mls ‖ routing ‖ ledger ‖ docs ‖ commit_log ‖ peer_records`); kept next to the encoders
+/// it must track. Returns an empty list (not an error) for a node that knew no peers.
+pub fn peer_addrs_from_snapshot(snapshot: &[u8]) -> Result<Vec<String>, SyncError> {
+    let bad = || SyncError::Malformed;
+    let mut d = Decoder::new(snapshot);
+    // Skip the leading length-prefixed sections: MLS, routing, ledger.
+    for _ in 0..3 {
+        d.get_bytes().map_err(|_| bad())?;
+    }
+    // Skip the docs and the commit log (both `u32 count ‖ len-prefixed entries`).
+    for _ in 0..2 {
+        let count = d.get_u32().map_err(|_| bad())?;
+        for _ in 0..count {
+            d.get_bytes().map_err(|_| bad())?;
+        }
+    }
+    // Read the peer records and collect their addresses.
+    let peer_count = d.get_u32().map_err(|_| bad())?;
+    let mut addrs = Vec::new();
+    for _ in 0..peer_count {
+        let desc = PeerDescriptor::decode(d.get_bytes().map_err(|_| bad())?)?;
+        addrs.extend(desc.addresses);
+    }
+    Ok(addrs)
+}
+
 /// Frame a PEX bundle: `u32 count ‖ len-prefixed PeerDescriptors`.
 fn encode_pex_bundle(records: &[PeerDescriptor]) -> Vec<u8> {
     let mut e = Encoder::new();
@@ -4066,6 +4095,34 @@ mod tests {
             Box::new(ManualClock::new(1_000)),
         )
         .is_err());
+    }
+
+    #[test]
+    fn peer_addresses_are_extractable_from_a_snapshot_for_redial() {
+        // 9g: a reloading node pulls its last-known peer multiaddrs out of the snapshot to
+        // dial them at transport construction — without a full restore.
+        let mut node = solo_node();
+        node.peer_records.insert(
+            DeviceId::from_bytes([5u8; 32]),
+            PeerDescriptor {
+                device_pubkey: vec![5u8; 32],
+                peer_id: [1u8; 32],
+                addresses: vec!["/ip4/1.2.3.4/tcp/9/p2p/X".to_string()],
+                seq: 1,
+                signature: [0u8; 64],
+            },
+        );
+        let snap = node.snapshot().unwrap();
+        assert_eq!(
+            peer_addrs_from_snapshot(&snap).unwrap(),
+            vec!["/ip4/1.2.3.4/tcp/9/p2p/X".to_string()]
+        );
+
+        // A node that knew no peers extracts cleanly to an empty list (not an error).
+        let mut node2 = solo_node();
+        assert!(peer_addrs_from_snapshot(&node2.snapshot().unwrap())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
