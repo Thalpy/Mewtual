@@ -92,8 +92,8 @@ before commit, per project discipline. Suggested order:
 
 | Slice | What | Risk |
 |------|------|------|
-| **9a** | **Keystore wiring** — startup prompts a passphrase; `PassphraseKeyStore` seals/unseals the `Dek`; derive `KeyHierarchy`. App data dir per OS. | low–med (UX + key handling) |
-| **9b** | **Blob persistence** — swap `MemoryBlobStore` for a sealing `FsBlobStore` (each blob `seal`ed under `blob_key`); content-addressed by **plaintext** CID so the mesh fetch still works (seal at the disk boundary, not the wire). | med |
+| **9a ✅** | **Key vault** (`catcoms-storage::open_or_create_vault`) — passphrase-sealed root `Dek` on disk (`PassphraseKeyStore` Argon2id + sealed file) → `KeyHierarchy`. *Done — wiring the startup passphrase prompt into the app is part of 9f.* | low–med (UX + key handling) |
+| **9b ✅** | **Sealing blob store** (`catcoms-storage::SealingBlobStore`) — every blob `seal`ed at rest under `blob_key`; content-addressed by **plaintext** CID so the mesh fetch is unchanged (seal at the disk boundary, not the wire). *Done — wiring it into `ChannelSync` per server is part of 9e/9f.* | med |
 | **9c** | **Persistent MLS `StorageProvider`** — sealed on-disk KV under `mls_seal_key`; `MlsDevice`/`ServerGroup` use it; group + signer persist. **The big one** — own test suite vs openmls. | **high** |
 | **9d** | **Doc persistence** — save/load `EncryptedDoc` (`AutoCommit::save()` + the signed-op log) sealed under `db_key`; `ChannelSync` restores its `docs` map. | med |
 | **9e** | **Sync-state persistence** — `commit_log`, `routing_label`/`routing_secrets`, `peer_records`, `ledger` → a sealed snapshot; reload reconstitutes `ChannelSync` (with a fresh transport). | med–high (secrets) |
