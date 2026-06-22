@@ -1,6 +1,7 @@
 //! Content-addressed blob storage.
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::cid::Cid;
@@ -33,23 +34,67 @@ fn verify(cid: &Cid, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
     }
 }
 
-/// An in-memory blob store.
-#[derive(Debug, Default)]
+/// Default in-memory blob budget (128 MiB). Bounds how much fetched content (avatars,
+/// downloaded files) a node caches, so a member spamming large blobs cannot make peers grow
+/// without bound. This is a simple **size-bounded FIFO** interim — evicted blobs stay
+/// re-fetchable by CID; the full holder-probe retention engine (never-evict-last-copy) is
+/// a follow-up.
+pub const DEFAULT_BLOB_BUDGET: usize = 128 * 1024 * 1024;
+
+/// An in-memory, size-bounded blob store (FIFO eviction past the byte budget).
+#[derive(Debug)]
 pub struct MemoryBlobStore {
     blobs: HashMap<Cid, Vec<u8>>,
+    /// Insertion order, for FIFO eviction.
+    order: VecDeque<Cid>,
+    total_bytes: usize,
+    max_bytes: usize,
+}
+
+impl Default for MemoryBlobStore {
+    fn default() -> Self {
+        Self::with_budget(DEFAULT_BLOB_BUDGET)
+    }
 }
 
 impl MemoryBlobStore {
-    /// A new, empty store.
+    /// A new, empty store with the [`DEFAULT_BLOB_BUDGET`].
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A new, empty store bounded to `max_bytes` of blob content.
+    pub fn with_budget(max_bytes: usize) -> Self {
+        Self {
+            blobs: HashMap::new(),
+            order: VecDeque::new(),
+            total_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    /// Evict the oldest blobs until under budget (keeping at least the most recent, so a
+    /// single over-budget blob is still stored).
+    fn evict_to_budget(&mut self) {
+        while self.total_bytes > self.max_bytes && self.order.len() > 1 {
+            if let Some(old) = self.order.pop_front() {
+                if let Some(b) = self.blobs.remove(&old) {
+                    self.total_bytes -= b.len();
+                }
+            }
+        }
     }
 }
 
 impl BlobStore for MemoryBlobStore {
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
-        self.blobs.entry(cid).or_insert_with(|| bytes.to_vec());
+        if let Entry::Vacant(e) = self.blobs.entry(cid) {
+            e.insert(bytes.to_vec()); // consumes the entry, ending the `blobs` borrow
+            self.total_bytes += bytes.len();
+            self.order.push_back(cid);
+            self.evict_to_budget();
+        }
         Ok(cid)
     }
 
@@ -65,7 +110,13 @@ impl BlobStore for MemoryBlobStore {
     }
 
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
-        Ok(self.blobs.remove(cid).is_some())
+        if let Some(b) = self.blobs.remove(cid) {
+            self.total_bytes -= b.len();
+            self.order.retain(|c| c != cid);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     fn cids(&self) -> Vec<Cid> {
@@ -157,6 +208,24 @@ mod tests {
     #[test]
     fn memory_store_roundtrips() {
         store_roundtrip(&mut MemoryBlobStore::new());
+    }
+
+    #[test]
+    fn memory_store_evicts_oldest_over_budget() {
+        let mut store = MemoryBlobStore::with_budget(20);
+        let a = store.put(b"aaaaaaaaaa").unwrap(); // 10 bytes
+        let b = store.put(b"bbbbbbbbbb").unwrap(); // 10 bytes — total 20, at budget
+        assert!(store.has(&a) && store.has(&b));
+        let c = store.put(b"cccccccccc").unwrap(); // 10 bytes — over budget, evicts oldest (a)
+        assert!(!store.has(&a), "the oldest blob is evicted past the budget");
+        assert!(store.has(&b) && store.has(&c));
+        // Re-putting an existing blob does not double-count toward the budget.
+        store.put(b"cccccccccc").unwrap();
+        assert!(store.has(&b) && store.has(&c));
+        // Deleting frees budget so a new blob does not evict.
+        assert!(store.delete(&b).unwrap());
+        let d = store.put(b"dddddddddd").unwrap();
+        assert!(store.has(&c) && store.has(&d));
     }
 
     #[test]

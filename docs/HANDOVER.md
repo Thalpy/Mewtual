@@ -277,14 +277,14 @@ routing secret `ns_secret_L`:
   (`localhost:1420`) and shows "can't reach the page" on any machine without it — to
   distribute, build a release exe with the frontend embedded
   (`npm run build && npm run tauri build -- --no-bundle`; needs WebView2 on the target).
-- **Blob store is in-memory + unbounded (8l/8m/8n).** `ChannelSync` holds a
-  `MemoryBlobStore` with no eviction/persistence, so fetched avatars + downloaded files
-  accumulate for the process lifetime; a member spamming the file index makes every
-  downloader grow without bound (a memory-over-time DoS, gated by the per-requester serve
-  rate-limit). An LRU/size budget (or wiring the `catcoms-storage` retention engine in) is
-  a follow-up. From the 8m–8q security review (no blocking findings; the slices reuse the
-  reviewed-secure blob/MLS/Noise layers — `fetch_missing_avatars` is now per-pass bounded,
-  8r).
+- **Blob store: size-bounded interim, not yet last-copy-safe (8l/8m/8n/8s).** From the
+  8m–8q security review (no blocking findings; the slices reuse the reviewed-secure
+  blob/MLS/Noise layers — `fetch_missing_avatars` is per-pass bounded, 8r). `MemoryBlobStore`
+  is now **size-bounded** (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO** eviction, 8s) so fetched
+  avatars/files no longer grow without bound — but it is still **in-memory** (no
+  persistence) and the FIFO eviction is **not holder-probe-aware** (it can drop the last
+  copy of a blob; evicted blobs are re-fetchable only while a holder is online). Wiring the
+  `catcoms-storage` retention engine (never-evict-last-copy + on-disk store) is the follow-up.
 - **Network admission is single-committer-only** (only the lowest-leaf-index member
   admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
 - **Commit catch-up needs a peer that still holds the commit.** A member behind by
