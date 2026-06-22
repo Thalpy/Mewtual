@@ -11,8 +11,9 @@ Authoritative current-state document. Read this first, then
   TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
   done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
   **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
-  desktop app** (`apps/desktop`, 8b-2) wired to the stack — found a server, open
-  #general, send/see messages. **193 tests passing** (the GUI WebView is the one
+  desktop app** (`apps/desktop`, 8b-2/8c) wired to the stack — found a server, mint a
+  single-use invite, and a second instance pastes it to join and converge (two windows
+  talk over real TCP). **193 tests passing** (the GUI WebView is the one
   manually-verified surface; both halves compile).
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
@@ -169,7 +170,8 @@ TCP** (verified, incl. through a relay).
 | 8a | **`catcoms-app` product model** — UI-facing `Server` facade + canonical chat-message schema (the typed boundary the GUI is built against) | ✅ `1332051` |
 | 8b-1 | **async event-stream actor** — `spawn(server)` → commands in / events out (ChannelUpdated, MembersChanged); the substrate the Tauri bridge drives | ✅ `c73929c` |
 | 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`) — found/open/send/read over the actor bridge; both halves compile (WebView manually verified) | ✅ `7c5f72e` |
-| 8… | join-via-invite + discovery wiring in the UI · multi-server · fileshare browser · status · wiki | planned |
+| 8c | **invite + join in the desktop UI** — found mints a single-use invite (loopback bootstrap); a second instance pastes it, dials, joins, and converges (two instances can talk over real TCP) | ✅ `61f2ec3` |
+| 8… | discovery/relay wiring in the UI · multi-server · fileshare browser · status · wiki | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 
