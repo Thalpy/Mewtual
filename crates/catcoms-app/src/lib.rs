@@ -159,6 +159,11 @@ const P_AVATAR_CID: &str = "avatar_cid";
 /// JPEG produces.
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 
+/// Max avatar blobs fetched per [`Server::fetch_missing_avatars`] pass — bounds how long
+/// one pass (each fetch a blocking mesh round-trip) can stall the actor, so avatar churn by
+/// a malicious member cannot freeze peers' event loops.
+const MAX_AVATAR_FETCHES_PER_PASS: usize = 8;
+
 /// A member's customizable profile. `avatar` is the **resolved image bytes** (empty if
 /// unset, or not yet fetched from the mesh); on the wire the profile document carries only
 /// the avatar's content address.
@@ -486,7 +491,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Fetch any referenced avatar blobs we do not yet hold from the best known peer.
     /// Returns how many were newly fetched (so the caller can re-render). Call after the
-    /// profile document changes (e.g. on join/convergence).
+    /// profile document changes (e.g. on join/convergence). Fetches at most
+    /// [`MAX_AVATAR_FETCHES_PER_PASS`] missing avatars per call — since each fetch is a
+    /// blocking mesh round-trip, this bounds how long a single pass can stall the actor, so
+    /// a member churning many distinct avatar CIDs cannot freeze peers' event loops (the
+    /// remainder are picked up on subsequent ticks).
     pub async fn fetch_missing_avatars(&mut self) -> Result<usize, AppError> {
         let cids: Vec<Cid> = self
             .sync
@@ -497,8 +506,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .filter_map(|r| parse_avatar_cid(&r.avatar_cid))
             .collect();
         let mut fetched = 0;
+        let mut attempts = 0;
         for cid in cids {
-            if !self.sync.has_blob(&cid) && self.sync.request_blob_best(&cid).await? {
+            if self.sync.has_blob(&cid) {
+                continue; // cheap; does not count toward the per-pass budget
+            }
+            if attempts >= MAX_AVATAR_FETCHES_PER_PASS {
+                break;
+            }
+            attempts += 1;
+            if self.sync.request_blob_best(&cid).await? {
                 fetched += 1;
             }
         }
