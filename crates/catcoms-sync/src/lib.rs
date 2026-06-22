@@ -51,6 +51,26 @@ const KIND_COMMIT_CATCHUP: u8 = 2;
 /// Request kind: committer→joiner Welcome delivery once a *staged* admission
 /// resolves — the provisional-Welcome push for the two-phase join (6d-2a).
 const KIND_WELCOME: u8 = 3;
+/// Request kind: member **peer exchange** (PEX, 6e-3d-7) — a member asks another
+/// member for the signed peer records it knows, so members supply each other with
+/// dialable peers without any rendezvous (defeats single-rendezvous omission).
+const KIND_PEX: u8 = 4;
+/// Cap on peer records returned in one PEX response / retained locally.
+const MAX_PEX_ENTRIES: usize = 64;
+/// Cap on dialable addresses carried per peer record.
+const MAX_PEX_ADDRESSES: usize = 8;
+/// Minimum interval (ms, on the injected clock) between PEX responses served to the
+/// same requesting **member** — a rate limit so PEX cannot be used to amplify traffic.
+const MIN_PEX_INTERVAL_MS: u64 = 1_000;
+/// Cap on a single dialable address string in a peer record. Any real multiaddr is
+/// far shorter; rejecting longer ones bounds the bytes a record can carry.
+const MAX_PEX_ADDR_LEN: usize = 256;
+/// Tight ceiling on a PEX **response** accepted from a serving member. A response is
+/// at most `MAX_PEX_ENTRIES` records, each bounded by `MAX_PEX_ADDRESSES` ×
+/// `MAX_PEX_ADDR_LEN`; 512 KiB is generous headroom. Far smaller than the 16 MiB
+/// catch-up ceiling — a member cannot make us decode/verify an arbitrarily large
+/// bundle (the receive-side bound matching the serve-side `take(MAX_PEX_ENTRIES)`).
+const MAX_PEX_RESPONSE: usize = 512 * 1024;
 /// Join-response status byte: the admission was staged and is awaiting the
 /// fork-resolution window; the Welcome is pushed later (see `KIND_WELCOME`).
 const JOIN_PENDING: u8 = 0;
@@ -88,6 +108,13 @@ const JOIN_RESP_DOMAIN: &str = "catcoms/join-resp/v1";
 /// proving the served bundle came from a current member (6e-3d-5). Binds the bundle
 /// to the requester's key + the request timestamp so it cannot be replayed.
 const CATCHUP_RESP_DOMAIN: &str = "catcoms/catchup-resp/v1";
+/// Domain separator for a **responder's** signature over a PEX response bundle
+/// (6e-3d-7) — same shape as the commit-catch-up response binding, distinct domain.
+const PEX_RESP_DOMAIN: &str = "catcoms/pex-resp/v1";
+/// Domain separator for a peer's **self-signature** over its own peer record (a
+/// member binds its dialable addresses + seq to its device key), so a PEX responder
+/// can only relay records peers signed themselves — it cannot forge a peer's address.
+const PEER_RECORD_DOMAIN: &str = "catcoms/peer-record/v1";
 
 /// Tunable bounds for the recovery/key-window machinery. Every field is a hard
 /// cap on memory the node will spend on out-of-order recovery, so a peer cannot
@@ -286,12 +313,14 @@ fn catchup_auth_transcript(
     e.finish()
 }
 
-/// The transcript a **responder** signs over a commit-catch-up bundle, binding it to
-/// the group, the requester's key, the request timestamp, the request's **nonce** and
-/// **epoch** (so a captured response cannot be replayed against a *different* request,
-/// even one issued in the same millisecond), and the bundle bytes — so the requester
-/// can verify the bundle was served by a member for *this exact* request.
-fn catchup_resp_transcript(
+/// A **responder's** signature transcript over a served bundle (commit catch-up or
+/// PEX), binding it to a `domain`, the group, the requester's key, the request
+/// timestamp, the request's **nonce** and **epoch** (so a captured response cannot be
+/// replayed against a *different* request, even one issued in the same millisecond),
+/// and the bundle bytes — so the requester can verify the bundle was served by a
+/// member for *this exact* request.
+fn signed_resp_transcript(
+    domain: &str,
     group_id: &[u8],
     requester_pubkey: &[u8],
     request_ts_ms: u64,
@@ -300,7 +329,7 @@ fn catchup_resp_transcript(
     bundle: &[u8],
 ) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_str(CATCHUP_RESP_DOMAIN).expect("label fits");
+    e.put_str(domain).expect("label fits");
     e.put_bytes(group_id).expect("group id fits");
     e.put_bytes(requester_pubkey).expect("pubkey fits");
     e.put_u64(request_ts_ms);
@@ -308,6 +337,46 @@ fn catchup_resp_transcript(
     e.put_u64(req_epoch);
     e.put_bytes(bundle).expect("bundle fits");
     e.finish()
+}
+
+/// The responder transcript for a commit-catch-up bundle (6e-3d-5/6).
+fn catchup_resp_transcript(
+    group_id: &[u8],
+    requester_pubkey: &[u8],
+    request_ts_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    bundle: &[u8],
+) -> Vec<u8> {
+    signed_resp_transcript(
+        CATCHUP_RESP_DOMAIN,
+        group_id,
+        requester_pubkey,
+        request_ts_ms,
+        nonce,
+        req_epoch,
+        bundle,
+    )
+}
+
+/// The responder transcript for a PEX bundle (6e-3d-7).
+fn pex_resp_transcript(
+    group_id: &[u8],
+    requester_pubkey: &[u8],
+    request_ts_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    bundle: &[u8],
+) -> Vec<u8> {
+    signed_resp_transcript(
+        PEX_RESP_DOMAIN,
+        group_id,
+        requester_pubkey,
+        request_ts_ms,
+        nonce,
+        req_epoch,
+        bundle,
+    )
 }
 
 /// Frame a signed commit-catch-up response: `responder_pubkey ‖ sig ‖ bundle`.
@@ -620,6 +689,149 @@ pub enum SyncError {
     /// A sync message was malformed.
     #[error("malformed sync message")]
     Malformed,
+}
+
+/// A member's **self-signed, dialable peer record**, exchanged via PEX (6e-3d-7). The
+/// member binds its transport `peer_id` and dialable `addresses` (plus a monotonic
+/// `seq` for freshness) to its **device key**, so a PEX responder can only relay
+/// records peers signed themselves — it cannot forge a peer's address — and a
+/// recipient can confirm the record describes a current group member (the signer's
+/// device id is in the roster) before treating it as a dial candidate.
+///
+/// NOTE for the discovery bridge (6e-3d-9): `seq` is a per-**device** counter, and the
+/// authenticated identity is `device_pubkey`. When turning records into
+/// `catcoms-discovery` `Candidate`s, key the candidate (and its anti-replay seq) on the
+/// **device id**, not the self-asserted `peer_id` — two records could claim the same
+/// `peer_id`, so keying on `peer_id` would let one member pin another's freshness.
+/// `peer_id`/`addresses` are the dial target only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDescriptor {
+    /// The member's device public key (roster lookup + self-signature verification).
+    pub device_pubkey: Vec<u8>,
+    /// Its transport peer id (the dial target).
+    pub peer_id: [u8; 32],
+    /// Dialable multiaddr strings (opaque here; capped by `MAX_PEX_ADDRESSES`).
+    pub addresses: Vec<String>,
+    /// Monotonic per-device sequence number (freshness; never a server TTL).
+    pub seq: u64,
+    /// The device's signature over the canonical payload.
+    pub signature: [u8; 64],
+}
+
+/// The canonical bytes a peer signs over its own record (length-prefixed, so no two
+/// distinct records collide).
+fn peer_record_signing_payload(
+    device_pubkey: &[u8],
+    peer_id: &[u8; 32],
+    addresses: &[String],
+    seq: u64,
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(PEER_RECORD_DOMAIN).expect("label fits");
+    e.put_bytes(device_pubkey).expect("pubkey fits");
+    e.put_bytes(peer_id).expect("32 fits");
+    e.put_u64(seq);
+    e.put_u32(addresses.len() as u32);
+    for a in addresses {
+        e.put_str(a).expect("addr fits");
+    }
+    e.finish()
+}
+
+impl PeerDescriptor {
+    /// Verify the record's self-signature: the embedded device key signed its
+    /// `(peer_id, addresses, seq)`. (Membership — that the signer is in the roster —
+    /// is checked separately by the ingesting node.)
+    pub fn verify_self(&self) -> bool {
+        let payload = peer_record_signing_payload(
+            &self.device_pubkey,
+            &self.peer_id,
+            &self.addresses,
+            self.seq,
+        );
+        verify_with_public_bytes(&self.device_pubkey, &payload, &self.signature)
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_bytes(&self.device_pubkey).expect("pubkey fits");
+        e.put_bytes(&self.peer_id).expect("32 fits");
+        e.put_u64(self.seq);
+        e.put_u32(self.addresses.len() as u32);
+        for a in &self.addresses {
+            e.put_str(a).expect("addr fits");
+        }
+        e.put_bytes(&self.signature).expect("64 fits");
+        e.finish()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, SyncError> {
+        let mut d = Decoder::new(bytes);
+        let device_pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+        let peer_id: [u8; 32] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        let seq = d.get_u64().map_err(|_| SyncError::Malformed)?;
+        let count = d.get_u32().map_err(|_| SyncError::Malformed)? as usize;
+        // Bound the address count up front so a forged length cannot drive a long loop.
+        if count > MAX_PEX_ADDRESSES {
+            return Err(SyncError::Malformed);
+        }
+        let mut addresses = Vec::with_capacity(count);
+        for _ in 0..count {
+            let addr = d.get_str().map_err(|_| SyncError::Malformed)?;
+            // Bound each address string so a record cannot smuggle megabytes of bytes
+            // (the count cap alone bounds the number, not the per-string length).
+            if addr.len() > MAX_PEX_ADDR_LEN {
+                return Err(SyncError::Malformed);
+            }
+            addresses.push(addr.to_string());
+        }
+        let signature: [u8; 64] = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        d.finish().map_err(|_| SyncError::Malformed)?;
+        Ok(Self {
+            device_pubkey,
+            peer_id,
+            addresses,
+            seq,
+            signature,
+        })
+    }
+}
+
+/// Frame a PEX bundle: `u32 count ‖ len-prefixed PeerDescriptors`.
+fn encode_pex_bundle(records: &[PeerDescriptor]) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_u32(records.len() as u32);
+    for r in records {
+        e.put_bytes(&r.encode()).expect("record fits");
+    }
+    e.finish()
+}
+
+fn decode_pex_bundle(bytes: &[u8]) -> Result<Vec<PeerDescriptor>, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let count = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    // A legitimate PEX response carries at most MAX_PEX_ENTRIES records (the serve
+    // side caps at exactly that). Reject a larger claim BEFORE the per-record decode
+    // + signature-verify loop, so a hostile member cannot pack a giant bundle to
+    // force ~count Ed25519 verifications on the requester (member-on-member CPU DoS).
+    if count as usize > MAX_PEX_ENTRIES {
+        return Err(SyncError::Malformed);
+    }
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let raw = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+        out.push(PeerDescriptor::decode(raw)?);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok(out)
 }
 
 /// The blinded gossip topic for a document at routing label `slot`, **keyed** under
@@ -1026,6 +1238,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
     /// staged admission resolves: `(joiner, payload)` drained in `run_once`.
     welcome_outbox: Vec<(PeerId, Vec<u8>)>,
+    /// Known **member** peer records (this node's own + those learned via PEX), each
+    /// self-signed by a current member. The discovery layer turns these into
+    /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
+    peer_records: HashMap<DeviceId, PeerDescriptor>,
+    /// Per-requesting-**device** timestamp of the last PEX response served, for the
+    /// PEX rate limit (keyed on the authenticated requester identity, not the
+    /// transport connection, so multiple connections cannot multiply the rate).
+    /// Bounded by `max_known_peers`.
+    pex_served_at: HashMap<DeviceId, u64>,
     /// Diagnostic counters (see [`SyncStats`]).
     stats: SyncStats,
 }
@@ -1067,6 +1288,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             failed_catchup_peers: VecDeque::new(),
             pending: None,
             welcome_outbox: Vec::new(),
+            peer_records: HashMap::new(),
+            pex_served_at: HashMap::new(),
             stats: SyncStats::default(),
         };
         // Seed the L=0 routing secret from the current epoch. Correct for the
@@ -1809,6 +2032,218 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some(expected) => ct_eq_16(&expected, tag),
             None => false,
         }
+    }
+
+    // --- member peer exchange (PEX, 6e-3d-7) ---------------------------------
+
+    /// Publish (or refresh) THIS node's own signed peer record with its dialable
+    /// `addresses` and a monotonic `seq`, so it can be shared with other members via
+    /// PEX. Signed by this device key; stored among the known records. Over-long
+    /// addresses are dropped and the list is truncated to `MAX_PEX_ADDRESSES`; `seq`
+    /// must be below `u64::MAX` (the top value is reserved so a node can always
+    /// publish a fresher record later).
+    pub fn publish_self_record(
+        &mut self,
+        mut addresses: Vec<String>,
+        seq: u64,
+    ) -> Result<(), SyncError> {
+        if seq == u64::MAX {
+            return Err(SyncError::Malformed);
+        }
+        addresses.retain(|a| a.len() <= MAX_PEX_ADDR_LEN);
+        addresses.truncate(MAX_PEX_ADDRESSES);
+        let device_pubkey = self.device.public_key_bytes();
+        let peer_id = *self.transport.local_peer().as_bytes();
+        let payload = peer_record_signing_payload(&device_pubkey, &peer_id, &addresses, seq);
+        let signature = self.device.sign(&payload)?;
+        let desc = PeerDescriptor {
+            device_pubkey,
+            peer_id,
+            addresses,
+            seq,
+            signature,
+        };
+        self.peer_records.insert(self.device.device_id(), desc);
+        Ok(())
+    }
+
+    /// This node's own published peer record, if any (to share / for tests).
+    pub fn self_record(&self) -> Option<&PeerDescriptor> {
+        self.peer_records.get(&self.device.device_id())
+    }
+
+    /// A known member's peer record, if learned (for the discovery layer / tests).
+    pub fn peer_record(&self, device: &DeviceId) -> Option<&PeerDescriptor> {
+        self.peer_records.get(device)
+    }
+
+    /// Every known member peer record (the discovery layer turns these into
+    /// PEX-sourced dial candidates).
+    pub fn known_peer_records(&self) -> Vec<PeerDescriptor> {
+        self.peer_records.values().cloned().collect()
+    }
+
+    /// Verify and store a peer record: its **self-signature** must be valid **and**
+    /// its signer must be a current group member. Returns `true` only when it adds a
+    /// *newly-known* member (a refresh of an existing device, a stale-`seq` record, an
+    /// invalid signature, or a non-member returns `false`). Used by PEX ingestion and
+    /// by the net layer to feed discovered records — a record never bypasses these two
+    /// checks, so a PEX responder cannot fabricate a peer's address or inject a Sybil.
+    pub fn ingest_peer_record(&mut self, desc: PeerDescriptor) -> bool {
+        if desc.seq == u64::MAX
+            || desc.addresses.len() > MAX_PEX_ADDRESSES
+            || desc.addresses.iter().any(|a| a.len() > MAX_PEX_ADDR_LEN)
+        {
+            return false;
+        }
+        // Cheap roster check BEFORE the Ed25519 self-signature verify, so a record
+        // naming a non-member is dropped without spending a signature verification.
+        let device = DeviceId::from_public_key_bytes(&desc.device_pubkey);
+        if !self.group.contains_device(&device) {
+            tracing::trace!("dropping peer record from a non-member");
+            return false;
+        }
+        if !desc.verify_self() {
+            tracing::trace!("dropping peer record with an invalid self-signature");
+            return false;
+        }
+        let is_new = !self.peer_records.contains_key(&device);
+        let store = match self.peer_records.get(&device) {
+            Some(existing) => desc.seq > existing.seq, // keep the freshest by signed seq
+            None => true,
+        };
+        if store {
+            self.peer_records.insert(device, desc);
+            self.bound_peer_records();
+        }
+        is_new
+    }
+
+    /// Bound the known-records map to `MAX_PEX_ENTRIES`, never evicting our own record.
+    fn bound_peer_records(&mut self) {
+        let own = self.device.device_id();
+        while self.peer_records.len() > MAX_PEX_ENTRIES {
+            let victim = self.peer_records.keys().find(|d| **d != own).cloned();
+            match victim {
+                Some(v) => {
+                    self.peer_records.remove(&v);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Record that we served a PEX response to requester `device` at `now`, for the
+    /// rate limit; bound the map by evicting the stalest entry.
+    fn note_pex_served(&mut self, device: DeviceId, now: u64) {
+        self.pex_served_at.insert(device, now);
+        while self.pex_served_at.len() > self.config.max_known_peers {
+            let victim = self
+                .pex_served_at
+                .iter()
+                .min_by_key(|(_, &t)| t)
+                .map(|(p, _)| *p);
+            match victim {
+                Some(v) => {
+                    self.pex_served_at.remove(&v);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Ask `peer` (a member) for the signed peer records it knows (PEX). The response
+    /// must be signed by a current member and bound to this request (anti-replay, like
+    /// commit catch-up); each entry is then independently verified + membership-checked
+    /// by [`Self::ingest_peer_record`]. Returns the number of *newly-known* members
+    /// learned. A non-member / unsigned / replayed response yields `0`.
+    pub async fn request_pex(&mut self, peer: PeerId) -> Result<usize, SyncError> {
+        let (req, req_auth) = self.build_authed_request(KIND_PEX, &[])?;
+        let resp = self
+            .transport
+            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+            .await?;
+        if resp.is_empty() {
+            return Ok(0);
+        }
+        if resp.len() > MAX_PEX_RESPONSE {
+            tracing::warn!(bytes = resp.len(), "oversized PEX response dropped");
+            return Err(SyncError::Malformed);
+        }
+        // The outer (responder_pubkey ‖ sig ‖ bundle) framing is shared with commit
+        // catch-up; the bundle is PEX-specific and the transcript uses the PEX domain.
+        let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(&resp)?;
+        let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
+        if !self.group.contains_device(&responder) {
+            tracing::warn!(?peer, "PEX response from a non-member; rejected");
+            return Ok(0);
+        }
+        let my_pubkey = self.device.public_key_bytes();
+        let transcript = pex_resp_transcript(
+            &self.group.group_id(),
+            &my_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            &bundle,
+        );
+        if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
+            tracing::warn!(?peer, "PEX response signature invalid; rejected");
+            return Ok(0);
+        }
+        let records = decode_pex_bundle(&bundle)?;
+        let mut learned = 0;
+        for r in records {
+            if self.ingest_peer_record(r) {
+                learned += 1;
+            }
+        }
+        tracing::debug!(learned, "applied PEX response");
+        Ok(learned)
+    }
+
+    /// Serve a PEX request: only to a proven current member (the membership-authed
+    /// gate), rate-limited per requester, returning a responder-signed bundle of up to
+    /// `MAX_PEX_ENTRIES` known member records bound to this request.
+    fn serve_pex(&mut self, _from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (_inner, req_pubkey, req_auth) = self.authenticate_request(KIND_PEX, data)?;
+        let requester = DeviceId::from_public_key_bytes(&req_pubkey);
+        let now = self.clock.now_ms();
+        if let Some(&last) = self.pex_served_at.get(&requester) {
+            if now.saturating_sub(last) < MIN_PEX_INTERVAL_MS {
+                tracing::trace!("PEX rate-limited; serving empty");
+                return Some(Vec::new());
+            }
+        }
+        self.note_pex_served(requester, now);
+        // Serve only records whose signer is STILL a current member (don't relay a
+        // removed member's stale address even before its record is evicted).
+        let records: Vec<PeerDescriptor> = self
+            .peer_records
+            .iter()
+            .filter(|(device, _)| self.group.contains_device(device))
+            .map(|(_, rec)| rec.clone())
+            .take(MAX_PEX_ENTRIES)
+            .collect();
+        if records.is_empty() {
+            return Some(Vec::new());
+        }
+        let bundle = encode_pex_bundle(&records);
+        let transcript = pex_resp_transcript(
+            &self.group.group_id(),
+            &req_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            &bundle,
+        );
+        let signature = self.device.sign(&transcript).ok()?;
+        tracing::debug!(count = records.len(), "serving PEX");
+        Some(encode_signed_commit_resp(
+            &self.device.public_key_bytes(),
+            &signature,
+            &bundle,
+        ))
     }
 
     /// Seal this member's routing state (`L` + the retained `ns_secret_L` history)
@@ -2670,6 +3105,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&KIND_COMMIT_CATCHUP, rest)) => {
                 self.serve_commit_catchup(rest).unwrap_or_default()
             }
+            Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -3454,5 +3890,231 @@ mod tests {
         assert_eq!(node.known_peers.len(), 3);
         // The most-recently-seen peer is chosen for catch-up.
         assert_eq!(node.pick_catchup_peer(), Some(PeerId::from_u64(9)));
+    }
+
+    // --- member PEX (6e-3d-7) ------------------------------------------------
+
+    type Member = ChannelSync<MemNetwork, ChaCha20Rng>;
+
+    /// Build a converged `n`-member group over one hub: `members[0]` is the founder
+    /// (full roster), each subsequent member joins in turn (so the **last** joiner's
+    /// Welcome carries the full roster). Returns the members and their device ids,
+    /// aligned by index.
+    async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
+        assert!(n >= 1);
+        let hub = Hub::new();
+        let founder = MlsDevice::generate().unwrap();
+        let founder_id = founder.device_id();
+        let fgroup = ServerGroup::create(&founder).unwrap();
+        let fpeer = PeerId::from_u64(1);
+        let mut founder_sync = ChannelSync::new(
+            hub.join(fpeer),
+            fgroup,
+            founder,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let mut members = Vec::new();
+        let mut ids = vec![founder_id];
+        for i in 2..=n {
+            let dev = MlsDevice::generate().unwrap();
+            ids.push(dev.device_id());
+            let invite = founder_sync
+                .mint_invite([i as u8; 16], 10_000, vec![])
+                .unwrap();
+            let net = hub.join(PeerId::from_u64(i));
+            let (joined, _) = tokio::join!(
+                request_join(&net, fpeer, &dev, &invite),
+                founder_sync.run_once(),
+            );
+            let (group, routing) = joined.unwrap();
+            members.push(ChannelSync::new_joined(
+                net,
+                group,
+                dev,
+                ChaCha20Rng::seed_from_u64(i),
+                Box::new(ManualClock::new(1_000)),
+                routing,
+            ));
+        }
+        members.insert(0, founder_sync);
+        (hub, members, ids)
+    }
+
+    #[test]
+    fn peer_descriptor_roundtrips_and_self_verifies() {
+        let mut node = solo_node();
+        node.publish_self_record(vec!["/ip4/1.2.3.4/tcp/9".into()], 5)
+            .unwrap();
+        let rec = node.self_record().unwrap().clone();
+        assert!(rec.verify_self(), "a freshly-signed record self-verifies");
+        assert_eq!(PeerDescriptor::decode(&rec.encode()).unwrap(), rec);
+        // Tampering any signed field breaks the self-signature.
+        let mut tampered = rec.clone();
+        tampered.seq += 1;
+        assert!(!tampered.verify_self());
+    }
+
+    #[test]
+    fn pex_bundle_decoder_rejects_an_oversized_count() {
+        // The receive-side count cap (MAX_PEX_ENTRIES) bounds verify work: a forged
+        // header claiming more is rejected BEFORE the per-record decode/verify loop, so
+        // a hostile member cannot force ~count Ed25519 verifications (the 3d-7 review's
+        // blocking CPU-DoS).
+        let mut over = Encoder::new();
+        over.put_u32(MAX_PEX_ENTRIES as u32 + 1);
+        assert!(matches!(
+            decode_pex_bundle(&over.finish()),
+            Err(SyncError::Malformed)
+        ));
+        let mut absurd = Encoder::new();
+        absurd.put_u32(u32::MAX);
+        assert!(matches!(
+            decode_pex_bundle(&absurd.finish()),
+            Err(SyncError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn peer_descriptor_decode_rejects_an_overlong_address() {
+        let long = "x".repeat(MAX_PEX_ADDR_LEN + 1);
+        let mut e = Encoder::new();
+        e.put_bytes(&[1u8; 32]).unwrap(); // device_pubkey
+        e.put_bytes(&[2u8; 32]).unwrap(); // peer_id
+        e.put_u64(1); // seq
+        e.put_u32(1); // address count
+        e.put_str(&long).unwrap();
+        e.put_bytes(&[0u8; 64]).unwrap(); // signature
+        assert!(matches!(
+            PeerDescriptor::decode(&e.finish()),
+            Err(SyncError::Malformed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn ingest_peer_record_requires_a_member_and_a_valid_signature() {
+        let (_hub, mut members, _ids) = build_members(2).await;
+        let mut it = members.drain(..);
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        drop(it);
+
+        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+            .unwrap();
+        // Bob is a member of Alice's roster and his record self-verifies → accepted.
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+
+        // A record signed by a NON-member is dropped even though its self-signature
+        // is valid (the signer is not in the roster).
+        let mallory = MlsDevice::generate().unwrap();
+        let addrs = vec!["/ip4/6.6.6.6/tcp/6".into()];
+        let payload =
+            peer_record_signing_payload(&mallory.public_key_bytes(), &[9u8; 32], &addrs, 1);
+        let mal = PeerDescriptor {
+            device_pubkey: mallory.public_key_bytes(),
+            peer_id: [9u8; 32],
+            addresses: addrs,
+            seq: 1,
+            signature: mallory.sign(&payload).unwrap(),
+        };
+        assert!(mal.verify_self(), "Mallory's self-signature is valid…");
+        assert!(!alice.ingest_peer_record(mal), "…but she is not a member");
+
+        // A member record with a tampered signature is dropped.
+        let mut bad = bob.self_record().unwrap().clone();
+        bad.signature[0] ^= 0xFF;
+        assert!(!alice.ingest_peer_record(bad));
+
+        // PEX ingestion never promotes anyone to the trusted catch-up pool.
+        assert_eq!(alice.stats().member_peers, 0);
+    }
+
+    #[tokio::test]
+    async fn pex_round_trip_learns_a_third_member_through_a_second() {
+        // M1 (Alice, founder) asks M2 (Carol, last joiner with the full roster) for
+        // its peer records, and learns M3 (Bob) — members supply each other with peers.
+        let (_hub, members, ids) = build_members(3).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let bob_id = ids[1];
+        let carol_id = ids[2];
+
+        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+            .unwrap();
+        carol
+            .publish_self_record(vec!["/ip4/10.0.0.3/tcp/1".into()], 1)
+            .unwrap();
+        // Carol already knows Bob's record (she joined after him, so Bob is in her
+        // roster); seed it so she can relay it.
+        assert!(carol.ingest_peer_record(bob.self_record().unwrap().clone()));
+
+        let carol_peer = carol.local_peer();
+        let (learned, _) = tokio::join!(alice.request_pex(carol_peer), carol.run_once());
+        let learned = learned.unwrap();
+        assert_eq!(learned, 2, "Alice learned Carol's own record + Bob's");
+        assert!(
+            alice.peer_record(&bob_id).is_some(),
+            "Alice learned M3 (Bob) via PEX through M2 (Carol)"
+        );
+        assert!(alice.peer_record(&carol_id).is_some());
+        // Discovery candidates only — no catch-up-source promotion.
+        assert_eq!(alice.stats().member_peers, 0);
+    }
+
+    #[tokio::test]
+    async fn pex_to_a_non_member_is_rejected() {
+        let mut alice = solo_node();
+        alice
+            .publish_self_record(vec!["/ip4/10.0.0.1/tcp/1".into()], 1)
+            .unwrap();
+        let gid = alice.group.group_id();
+        // A non-member crafts a syntactically-valid authed PEX request; Alice's
+        // membership gate refuses it (no records leaked) and counts the rejection.
+        let mallory = MlsDevice::generate().unwrap();
+        let inner: &[u8] = &[];
+        let (ts, nonce, epoch) = (1_000u64, [0u8; 16], 0u64);
+        let transcript = catchup_auth_transcript(
+            &gid,
+            KIND_PEX,
+            inner,
+            &mallory.public_key_bytes(),
+            ts,
+            &nonce,
+            epoch,
+        );
+        let sig = mallory.sign(&transcript).unwrap();
+        let body =
+            encode_authed_request(inner, &mallory.public_key_bytes(), ts, &nonce, epoch, &sig);
+        let before = alice.stats().requests_rejected;
+        assert!(alice.serve_pex(PeerId::from_u64(99), &body).is_none());
+        assert_eq!(alice.stats().requests_rejected, before + 1);
+    }
+
+    #[tokio::test]
+    async fn pex_is_rate_limited_per_requester() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        alice
+            .publish_self_record(vec!["/ip4/10.0.0.1/tcp/1".into()], 1)
+            .unwrap();
+        let bob_peer = bob.local_peer();
+        // Bob (a member) signs a PEX request; strip the leading kind byte for serve_pex.
+        let (req, _auth) = bob.build_authed_request(KIND_PEX, &[]).unwrap();
+        let body = &req[1..];
+        let first = alice.serve_pex(bob_peer, body);
+        assert!(
+            matches!(&first, Some(b) if !b.is_empty()),
+            "the first PEX is served"
+        );
+        let second = alice.serve_pex(bob_peer, body);
+        assert_eq!(
+            second,
+            Some(Vec::new()),
+            "a second PEX within the interval is rate-limited to an empty reply"
+        );
     }
 }
