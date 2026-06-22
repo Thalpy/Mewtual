@@ -3,7 +3,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
 
-  type Msg = { author: string; text: string };
+  type Msg = { author: string; text: string; ts: number };
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
@@ -22,6 +22,7 @@
   let newChannel = $state("");
 
   let messages = $state<Msg[]>([]);
+  let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   let draft = $state("");
   let members = $state(1);
   let roster = $state<Member[]>([]);
@@ -40,6 +41,16 @@
   function activeName(): string {
     return channels.find((c) => c.id === active)?.name ?? "";
   }
+
+  function fmtTime(ts: number): string {
+    return ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  }
+
+  // Keep the message list pinned to the newest as messages arrive / the channel switches.
+  $effect(() => {
+    void messages;
+    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
 
   function nameOf(fp: string): string {
     return profiles[fp]?.name?.trim() || fp;
@@ -362,12 +373,13 @@
 
       <section class="channel">
         <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
-        <ul class="messages">
+        <ul class="messages" bind:this={messagesEl}>
           {#each messages as m}
             <li class:own={m.author === myFp}>
               <span class="author">
                 {@render avatarTag(m.author)}
                 {@render nameTag(m.author)}
+                <span class="time">{fmtTime(m.ts)}</span>
               </span>
               <span class="text">{m.text}</span>
             </li>

@@ -34,6 +34,7 @@ struct AppState {
 struct UiMessage {
     author: String,
     text: String,
+    ts: u64,
 }
 
 /// A roster member as serialized to the frontend.
@@ -315,6 +316,7 @@ async fn get_messages(
         .map(|m| UiMessage {
             author: m.author,
             text: m.text,
+            ts: m.ts,
         })
         .collect())
 }

@@ -52,6 +52,8 @@ pub struct ChatMessage {
     pub author: String,
     /// The message text.
     pub text: String,
+    /// Send time in epoch-millis (the sender's injected clock; `0` if absent).
+    pub ts: u64,
 }
 
 /// Deterministically derive a channel's document id from its **name**, so any two
@@ -75,12 +77,14 @@ pub fn channel_id(name: &str) -> u128 {
 const MESSAGES: &str = "messages";
 const AUTHOR: &str = "author";
 const TEXT: &str = "text";
+const TS: &str = "ts";
 
-/// Append a `{author, text}` message to a channel document (the canonical edit).
+/// Append a `{author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
     doc: &mut AutoCommit,
     author: &str,
     text: &str,
+    ts: u64,
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, MESSAGES)? {
         Some((Value::Object(ObjType::List), id)) => id,
@@ -90,6 +94,7 @@ pub fn append_message(
     let msg = doc.insert_object(&list, index, ObjType::Map)?;
     doc.put(&msg, AUTHOR, author)?;
     doc.put(&msg, TEXT, text)?;
+    doc.put(&msg, TS, ts as i64)?;
     Ok(())
 }
 
@@ -102,6 +107,7 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
                 out.push(ChatMessage {
                     author: str_field(doc, &msg, AUTHOR),
                     text: str_field(doc, &msg, TEXT),
+                    ts: int_field(doc, &msg, TS),
                 });
             }
         }
@@ -115,6 +121,18 @@ fn str_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
         .flatten()
         .and_then(|(v, _)| v.into_string().ok())
         .unwrap_or_default()
+}
+
+/// Read an integer scalar field as `u64` (`0` if absent or another type).
+fn int_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> u64 {
+    match doc.get(obj, key) {
+        Ok(Some((Value::Scalar(s), _))) => match s.as_ref() {
+            ScalarValue::Int(i) => *i as u64,
+            ScalarValue::Uint(u) => *u,
+            _ => 0,
+        },
+        _ => 0,
+    }
 }
 
 // --- member profiles --------------------------------------------------------
@@ -284,9 +302,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// at render time (so a profile change updates all of that member's messages).
     pub async fn send_message(&mut self, channel: u128, text: &str) -> Result<(), AppError> {
         let author = self.my_fingerprint();
+        let ts = self.sync.now_ms();
         self.sync
             .post(DocType::Channel, channel, |d| {
-                append_message(d, &author, text)
+                append_message(d, &author, text, ts)
             })
             .await?;
         Ok(())
@@ -503,6 +522,7 @@ mod tests {
         // Messages are authored by device fingerprint; the name resolves from the profile.
         assert_eq!(msgs[0].author, alice.my_fingerprint());
         assert_eq!(msgs[0].text, "hello world");
+        assert_eq!(msgs[0].ts, 1_000, "stamped from the injected clock");
         assert_eq!(alice.member_count(), 1);
         assert_eq!(alice.display_name(), "alice");
         let roster = alice.members_view();

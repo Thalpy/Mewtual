@@ -379,6 +379,13 @@ select {
   gap: 0.35rem;
 }
 
+.messages .time {
+  font-size: 0.62rem;
+  color: #777e8a;
+  font-weight: 400;
+  margin-left: 0.4rem;
+}
+
 button.ghost {
   background: transparent;
   border: 1px solid #3a3d44;
