@@ -6,13 +6,14 @@ Authoritative current-state document. Read this first, then
 
 ## Status (as of 2026-06-22)
 
-- **Phases 0 → 7 COMPLETE.** 6e-3d (the full rendezvous-discovery + eclipse-resistance
-  block, all 9 slices) and **Phase 7** (end-to-end local integration over real sockets +
-  consolidated security suite) are done. **Every networking + NAT-traversal path is
-  proven end-to-end over real TCP sockets** — direct (7a), rendezvous-discovered (7c),
-  relayed (7d), and DCUtR-upgraded relayed→direct (7e) — alongside the consolidated
-  security suite (7b). **189 tests passing.** Next: **Phase 8** (Tauri desktop product
-  model + UI).
+- **Phases 0 → 7 COMPLETE; Phase 8 (product model + Tauri desktop UI) in progress.**
+  6e-3d and Phase 7 (every networking + NAT-traversal path proven end-to-end over real
+  TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
+  done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
+  **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
+  desktop app** (`apps/desktop`, 8b-2) wired to the stack — found a server, open
+  #general, send/see messages. **193 tests passing** (the GUI WebView is the one
+  manually-verified surface; both halves compile).
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
@@ -57,7 +58,9 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2 — **read them; they constrai
 | `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`). Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` (per-response capped) and are **never auto-dialed**. `add_external_address()` (register without a relay), `validate_rendezvous_addrs()` (reject circuit / require one `/p2p/` / distinct PeerIds). `connection_limits` on every swarm. Tracing-instrumented. |
 | `catcoms-discovery` | **Pure** eclipse-resistance layer (no I/O, no ambient time/RNG). `DiscoveryPolicy` ranks discovered candidates into a bounded, Clock-paced/RNG-jittered **dial plan** (the only thing that decides what to dial): member-tag-verified → multi-rendezvous-corroborated → cache → junk-last, ≤1 root/rendezvous, roster-clamped, seq-freshness. Advisory `EclipseDetector` (D/R/S + hysteresis; never gates). Cross-session `AddressCache` (proven members, RNG-jittered eviction, BLAKE3 keyed integrity tag → tamper-detected on load; SQLCipher backing deferred). |
 | `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: `rendezvous_namespaces()`, the pre-dial **member tag** (`membership_tag`/`verify_membership_tag`), **member PEX** (`PeerDescriptor`, `request_pex`/`publish_self_record`/`ingest_peer_record`/`known_peer_records`), the pre-join **`join_namespace()`**, and `transport()` (so the discovery/dial layer above can drive register/discover/dial). `SyncStats`. |
+| `catcoms-app` | **Product model** — the UI-facing facade over the stack (so a GUI never touches MLS/automerge). `Server<T,R>` (found/join/open_channel/send_message/messages/members/invite), the canonical chat-message schema (`append_message`/`read_messages`), and the async **event-stream actor** (`spawn` → `ServerActor` commands + `AppEvent` stream: `ChannelUpdated`/`MembersChanged`/`Closed`). |
 | `catcoms-log` | `tracing` subscriber init; `init_debug(debug, dir)` writes `debug_log_<ts>.txt`. |
+| `apps/desktop` | **Tauri 2 + Svelte 5 desktop app** (its own cargo workspace, excluded from the root). A thin `#[tauri::command]` bridge (`src-tauri`) over the `catcoms-app` actor + a Svelte frontend. Found a server, #general, send/read. The WebView is the one manually-verified surface; `npm install && npm run tauri dev`. |
 | `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes; `recover` drives the 6d-1b miss-and-heal path; `--debug`/`--stats`. |
 
 ## Build / verify ritual (run before every commit)
@@ -163,7 +166,10 @@ TCP** (verified, incl. through a relay).
 | 7c | **rendezvous discovery bootstrap over real TCP** — joiner discovers the inviter under `join_ns` and joins with no hard-coded address, over OS sockets | ✅ `a168c1d` |
 | 7d | **relayed full-stack join over real TCP** — server reachable only via a circuit relay; join + catch-up over the relayed connection (NAT traversal) | ✅ `0c2a6d8` |
 | 7e | **DCUtR-upgraded full-stack path over real TCP** — a relayed join that hole-punches to a direct link (`next_direct_upgrade`), driven through a complete join + converge | ✅ `ff4c63f` |
-| 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
+| 8a | **`catcoms-app` product model** — UI-facing `Server` facade + canonical chat-message schema (the typed boundary the GUI is built against) | ✅ `1332051` |
+| 8b-1 | **async event-stream actor** — `spawn(server)` → commands in / events out (ChannelUpdated, MembersChanged); the substrate the Tauri bridge drives | ✅ `c73929c` |
+| 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`) — found/open/send/read over the actor bridge; both halves compile (WebView manually verified) | ✅ `7c5f72e` |
+| 8… | join-via-invite + discovery wiring in the UI · multi-server · fileshare browser · status · wiki | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 

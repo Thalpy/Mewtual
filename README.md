@@ -52,6 +52,10 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 7c | **Rendezvous-discovered** join over real TCP (no hard-coded server address) | done |
 | 7d | **Relayed** full-stack join over real TCP (NAT traversal; server reachable only via a relay) | done |
 | 7e | **DCUtR-upgraded** full-stack path over real TCP (relayed join hole-punches to a direct link) | done |
+| 8a | `catcoms-app` **product model** (UI-facing `Server` facade + canonical message schema) | done |
+| 8b-1 | async **event-stream actor** (commands in / events out) | done |
+| 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`): found → #general → send/read | done |
+| 8… | join-via-invite + discovery in the UI · multi-server · fileshare · status · wiki | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |
@@ -79,10 +83,15 @@ crates/
   catcoms-discovery  pure eclipse-resistance: DiscoveryPolicy (ranked, bounded dial
                   plan; the only thing that decides what to dial), advisory eclipse
                   detector, cross-session address cache (no I/O, no ambient time/RNG)
+  catcoms-app     the UI-facing product model: Server facade, canonical chat-message
+                  schema, and the async event-stream actor (commands in / events out)
   catcoms-log     tracing/diagnostics init for binaries and tests (RUST_LOG) +
                   toggleable debug-to-file (debug_log_<timestamp>.txt)
 bins/
   catcomsctl      dev CLI driving the whole stack (`demo`), with --debug file logs
+apps/
+  desktop         Tauri 2 + Svelte 5 desktop app over the catcoms-app actor bridge
+                  (its own cargo workspace; `npm install && npm run tauri dev`)
 ```
 More crates (`catcoms-core`, `catcoms-harness`) land with their phases.
 
