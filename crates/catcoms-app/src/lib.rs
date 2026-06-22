@@ -23,6 +23,9 @@ use catcoms_sync::{request_join, ChannelSync, SyncError};
 use catcoms_wire::DocType;
 use thiserror::Error;
 
+mod actor;
+pub use actor::{spawn, AppCommand, AppEvent, ServerActor};
+
 /// Errors surfaced to the UI/product layer.
 #[derive(Debug, Error)]
 pub enum AppError {
