@@ -61,7 +61,11 @@ Implementations:
   - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
     `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
-    **never auto-dialed** — a higher layer decides whether to dial.
+    **never auto-dialed** — a higher layer (`catcoms-discovery`) decides whether to dial;
+    the surfaced-record queue is per-Discover-response capped. `add_external_address(addr)`
+    lets a directly-reachable node register without a relay. `dial(addr)` dials at runtime.
+    Free fn `validate_rendezvous_addrs(&[String]) -> Vec<RendezvousTarget>` (reject
+    `/p2p-circuit`, require exactly one `/p2p/`, distinct PeerIds).
 
 ### `SecureKeyStore` — at-rest DEK protection, tiered  *(catcoms-crypto)*
 ```rust
@@ -149,6 +153,7 @@ pub struct ServerGroup;   // one MLS group == one server
   add_member_via_invite(&mut, &MlsDevice, KeyPackage, &InviteToken, &mut InviteLedger, now_ms) -> Result<AddOutcome>;
   remove_member(&mut, &MlsDevice, &DeviceId) -> Result<()>;
   mint_invite(&MlsDevice, nonce:[u8;16], expires_at_ms, bootstrap:Vec<String>) -> Result<InviteToken>;
+  mint_invite_with_rendezvous(&MlsDevice, nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // pre-validate via catcoms_net::validate_rendezvous_addrs
   designated_committer() -> Option<DeviceId>;   // lowest leaf index
   is_designated_committer(&MlsDevice) -> bool;
   create_application_message(&mut, &MlsDevice, &[u8]) -> Result<Vec<u8>>;
@@ -159,10 +164,12 @@ pub struct ServerGroup;   // one MLS group == one server
 pub struct AddOutcome { pub welcome:Vec<u8>, pub commit:Vec<u8>, pub commit_epoch:u64 }
 pub enum Incoming { Application(Vec<u8>), CommitApplied, Other }
 
-pub struct InviteToken {           // pasteable, single-use, device-bound capability
+pub struct InviteToken {           // pasteable, single-use, device-bound capability (INVITE_DOMAIN v2)
     pub group_id:Vec<u8>, pub inviter_device_id:DeviceId, pub inviter_public_key:Vec<u8>,
-    pub invite_nonce:[u8;16], pub expires_at_ms:u64, pub bootstrap:Vec<String>, pub signature:[u8;64] }
-  encode()->Vec<u8>; decode(&[u8])->Result<Self>;
+    pub invite_nonce:[u8;16], pub expires_at_ms:u64, pub bootstrap:Vec<String>,
+    pub rendezvous:Vec<String>,    // 6e-3d-9: signature-bound rendezvous infra multiaddrs
+    pub signature:[u8;64] }
+  encode()->Vec<u8>; decode(&[u8])->Result<Self>;   // both address vectors length-prefixed + capped
   verify(inviter_pubkey)->bool;  verify_self()->bool;  verify_inviter_signature(msg, &[u8;64])->bool;
 pub struct MembershipCredential { device_id, group_id, invite_nonce }  encode()/decode();  // the MLS leaf credential binding
 pub struct InviteLedger;  new(); revoke(nonce); is_consumed(&nonce); is_revoked(&nonce);
@@ -222,12 +229,27 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   epoch() -> u64;   routing_label() -> u64;   stats() -> SyncStats;
   rendezvous_namespaces(rz_peer:&[u8]) -> Vec<String>;     // blinded namespaces to register/discover under (current + grandfathered)
   mint_invite(nonce:[u8;16], expires_at_ms, bootstrap) -> Result<InviteToken>;
+  mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous:Vec<String>) -> Result<InviteToken>;  // 6e-3d-9
   async open_channel(DocType, doc_id) -> Result<()>;       // create doc + subscribe its ns_secret_L-keyed topic
   async post(DocType, doc_id, FnOnce(&mut AutoCommit)->Result<(),AutomergeError>) -> Result<()>;  // edit + gossip
   async run_once() -> Result<bool>;                        // drain outbox + recovery + sub-resync; then handle ONE event
   async request_catchup(peer:PeerId, DocType, doc_id) -> Result<usize>;        // document history catch-up
   async request_commit_catchup(peer:PeerId, from_epoch:u64) -> Result<usize>;  // missed-commit recovery (ordered replay, SIGNED response)
-  doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;
+  // 6e-3d-6 pre-dial member tag (keyed by ns_secret_L): a discoverer rejects a Sybil/forged record before dialing.
+  membership_tag(rz_peer:&[u8], slot:u64, peer_id:&[u8], seq:u64) -> Option<[u8;16]>;
+  verify_membership_tag(rz_peer:&[u8], namespace:&str, peer_id:&[u8], seq:u64, tag:&[u8;16]) -> bool;
+  // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
+  publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
+  async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
+
+// 6e-3d-9 free fn: the pre-join rendezvous namespace, derivable from the invite ALONE
+// (BLAKE3-keyed off derive_key(invite_nonce), bound to group + rz_peer) — so a joiner
+// discovers the inviter with no group secret and no hard-coded address.
+pub fn join_namespace(group_id:&[u8], invite_nonce:&[u8;16], rz_peer:&[u8]) -> String;
+// A member's self-signed, dialable peer record (PEX entry / discovery candidate).
+pub struct PeerDescriptor { pub device_pubkey:Vec<u8>, pub peer_id:[u8;32], pub addresses:Vec<String>, pub seq:u64, pub signature:[u8;64] }
+  verify_self() -> bool;
 
 // Bounds (all hard caps; Default suits a desktop node). past:8, commit_log:256,
 // pending:256, gap:1024, peers:64, catchup_queue:256, outbox:256.
@@ -257,34 +279,67 @@ vs `member_peers` (promoted via a verifying *signed* catch-up; preferred) · `ca
 
 ---
 
+## 6b. Discovery & eclipse-resistance  *(catcoms-discovery — pure, no I/O, no ambient time/RNG)*
+
+```rust
+// The ONLY thing that decides what to dial; the net Actor never auto-dials. Ranks
+// candidates into a bounded dial plan and consumes a Clock-paced, RNG-jittered budget.
+pub struct DiscoveryPolicy;  new() / with_config(PolicyConfig);  remaining_budget()->u32;
+  plan(candidates:Vec<Candidate>, roster_size:usize, &dyn Clock, &mut impl CryptoRngCore) -> Vec<PlannedDial>;
+  // ranking: tag-verified member > multi-rendezvous corroboration > cache > raw junk (never dropped);
+  // ≤1 trust root/rendezvous; round-robin interleave; roster clamp; seq-freshness (drop stale/replayed).
+pub enum Source { Rendezvous(PeerKey), Pex(PeerKey), Cache }   pub type PeerKey = Vec<u8>;
+pub struct Candidate { peer:PeerKey, addresses:Vec<String>, source:Source, seq:u64, tag_verified:bool }  // seq MUST be from a verified PeerRecord
+pub struct PlannedDial { peer:PeerKey, addresses:Vec<String> }
+pub struct PolicyConfig { dial_budget, window_ms, jitter_ms, roster_headroom, min_dial_slots, max_addresses, max_tracked_peers }
+
+// Advisory eclipse warning — NEVER gates messaging or a Remove (it has no gate path).
+pub struct EclipseDetector;  new(EclipseConfig);  level()->EclipseLevel;  observe(EclipseObservation, &dyn Clock)->EclipseLevel;
+pub enum EclipseLevel { Ok, Caution }
+pub struct EclipseObservation { roster_size /*R*/, reachable_devices /*D, incl self*/, trust_roots /*S*/ : usize }
+pub struct EclipseConfig { roster_floor, min_reach:f64, min_sources, grace_ms, clear_ms }  // suspect = R>floor && (D-1)/(R-1)<min_reach && S<min_sources, hysteretic
+
+// Cross-session cache of proven members (first-contact eclipse). SQLCipher backing deferred.
+pub struct AddressCache;  new(CacheConfig);  insert(CachedPeer, &mut impl CryptoRngCore);  get(&PeerKey)->Option<&CachedPeer>;  candidates()->Vec<CachedPeer>;
+  to_bytes(&[u8;32])->Vec<u8>;  from_bytes(&[u8], &[u8;32], CacheConfig)->Result<Self,CacheError>;  // BLAKE3 keyed tag → tamper-detected (constant-time) on load
+pub struct CachedPeer { peer:PeerKey /*device id*/, addresses:Vec<String>, seq:u64, record:Vec<u8> }
+```
+
+---
+
 ## 7. Wire formats & protocol kinds (the on-wire schema)
 
 All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wire`).
 
-- **Channel op topic** (gossip): `BLAKE3("catcoms/topic/v1" ‖ group_id ‖ u16 doc_type ‖ u128 doc_id)`.
-- **Control topic** (gossip, membership commits): `BLAKE3("catcoms/control/v1" ‖ group_id)` (stable per group).
+- **Routing-keyed derivations** (6e-3d): every gossip topic + rendezvous string is now
+  `BLAKE3_keyed(ns_secret_L, …)` over a **canonical length-prefixed** preimage (so an
+  invite-holding non-member can't compute them; they rotate on member **removal** via the
+  label `L`). Channel topic: `keyed(ns_secret_L, "catcoms/topic/v2" ‖ group_id ‖ u64 slot ‖ u16 type ‖ u128 id)`.
+  Control topic: `keyed(ns_secret_L, "catcoms/control/v3" ‖ group_id ‖ u64 slot)`.
+  Rendezvous namespace: `"catcoms1-" ‖ hex(keyed(ns_secret_L, "…/rendezvous/ns/v1" ‖ group_id ‖ slot ‖ rz_peer)[..20])`.
+  Pre-dial **membership tag**: `keyed(ns_secret_L, "catcoms/rz-tag/v1" ‖ group_id ‖ slot ‖ rz_peer ‖ peer_id ‖ u64 seq)[..16]`.
+  Pre-join **`join_ns`**: `"catcoms1-" ‖ hex(keyed(derive_key("…/join-rz/hkdf/v1", invite_nonce), "catcoms/join-rz/v1" ‖ group_id ‖ rz_peer)[..20])`.
 - **`SealedOp`** (gossip payload): `u16 doc_type ‖ u128 doc_id ‖ u64 epoch ‖ bytes nonce(24) ‖ bytes ciphertext`.
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
-- **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit`.
+- **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
-  - `0` KIND_CATCHUP — **authed** body (see below) wrapping `u16 doc_type ‖ u128 doc_id`; response =
-    op bundle (`u32 count ‖ len-prefixed SealedOps`), a contiguous prefix within the response budget.
-  - `1` KIND_JOIN — body `bytes invite.encode() ‖ bytes key_package`; response = `bytes welcome ‖ bytes signature(64)`
-    (the admitter signs `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome`). **Not** member-authed
-    (the joiner isn't a member yet — it carries the invite/inviter auth instead).
-  - `2` KIND_COMMIT_CATCHUP — **authed** body wrapping `u64 from_epoch`; response = `u32 count ‖ len-prefixed CommitRecords`
-    with `commit_epoch >= from_epoch`, ascending, contiguous prefix within budget (empty if none).
-    The requester replays them in order via `process_incoming` (missed-membership-commit recovery).
-  - **Authed catch-up body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes signature(64)`,
-    where `inner` is the kind's own body and the signature is over
-    `catchup_auth = "catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms`.
-    The server serves only if `requester_pubkey` content-addresses a **current member** (`group.contains_device`),
-    the timestamp is within `MAX_REQUEST_AGE_MS` (60s), and the signature verifies.
-  - Requests capped at 64 KiB (`MAX_CONTROL_REQUEST`); responses capped at 16 MiB
-    (`MAX_CATCHUP_RESPONSE` inbound, `MAX_CONTROL_RESPONSE` on the serving side);
-    bundle element counts capped (`MAX_BUNDLE_ELEMENTS`).
-- **`InviteToken`** signed payload: `"catcoms/invite/v1" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str`, then `signature(64)`.
+  - `0` KIND_CATCHUP — **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle.
+  - `1` KIND_JOIN — body `bytes invite.encode() ‖ bytes key_package`; response =
+    `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
+    `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
+  - `2` KIND_COMMIT_CATCHUP — **authed** body wrapping `u64 from_epoch`; response is **responder-signed**:
+    `bytes responder_pubkey ‖ bytes sig(64) ‖ bytes bundle`, sig over `"catcoms/catchup-resp/v1" ‖ group_id ‖ requester_pubkey ‖ u64 req_ts ‖ nonce(16) ‖ u64 req_epoch ‖ bundle`.
+  - `4` KIND_PEX (6e-3d-7) — **authed** body (empty); response responder-signed like commit catch-up but under
+    `"catcoms/pex-resp/v1"`; bundle = `u32 count(≤64) ‖ len-prefixed PeerDescriptor`s, each self-signed under `"catcoms/peer-record/v1"`.
+  - **Authed body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes nonce(16) ‖ u64 req_epoch ‖ bytes signature(64)`,
+    signature over `"catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms ‖ nonce ‖ req_epoch`.
+    Served only if `requester_pubkey` content-addresses a **current member**, the timestamp is fresh (`MAX_REQUEST_AGE_MS` 60s),
+    and the signature verifies. The per-request **nonce + epoch** (6e-3d-6) bind the responder's signed reply to *this exact*
+    request, so a captured response cannot be replayed (closes the same-ms `ts`-collision window).
+  - Caps: requests 64 KiB; responses 16 MiB (catch-up) / **512 KiB (PEX)**; bundle element counts capped.
+- **`InviteToken`** signed payload (v2): `"catcoms/invite/v2" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str ‖ u32 m ‖ m×rendezvous_str`, then `signature(64)`.
 
 ## 8. `DocType` tags (stable; only append)
-`Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7`.
-Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective).
+`Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8`.
+Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
+doc — it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.

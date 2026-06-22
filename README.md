@@ -43,7 +43,10 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 6e-3d-1/2 | Per-removal routing secret + member-only rotating gossip topics + join-time transfer (closes the pre-existing topic-disclosure bug) | done |
 | 6e-3d-3/4 | Zero-knowledge rendezvous server + client (register/discover, no auto-dial) | done |
 | 6e-3d-5 | Signed catch-up responses + two-pool peer model (catch-up source trust) | done |
-| 6e-3d-6…9 | Discovery policy (membership tag + dial budget) · member PEX · eclipse detector · invite rewiring | planned |
+| 6e-3d-6 | `catcoms-discovery` `DiscoveryPolicy` (ranked, bounded dial plan) + catch-up nonce/epoch anti-replay + pre-dial membership tag | done |
+| 6e-3d-7 | Member PEX (`KIND_PEX`): members supply each other dialable signed peer records (members-only, responder-signed, capped/rate-limited) | done |
+| 6e-3d-8 | Advisory eclipse detector (D/R/S, hysteresis, never gates) + cross-session address cache (tamper-detected on load) | done |
+| 6e-3d-9 | Invite rewiring (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join `join_ns` + `serve --rendezvous`/`join` discover→dial→join (no hard-coded address) | done |
 | 7 | End-to-end local integration | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
@@ -67,7 +70,11 @@ crates/
   catcoms-net     libp2p MeshService realizing the MeshTransport seam (gossipsub +
                   request/response over Noise+yamux)
   catcoms-sync    ChannelSync: replicate encrypted CRDT docs over any MeshTransport
-                  (blinded topics, live gossip, request/response catch-up)
+                  (blinded ns_secret_L topics, live gossip, request/response catch-up,
+                  member PEX, the pre-join join_ns, membership tags)
+  catcoms-discovery  pure eclipse-resistance: DiscoveryPolicy (ranked, bounded dial
+                  plan; the only thing that decides what to dial), advisory eclipse
+                  detector, cross-session address cache (no I/O, no ambient time/RNG)
   catcoms-log     tracing/diagnostics init for binaries and tests (RUST_LOG) +
                   toggleable debug-to-file (debug_log_<timestamp>.txt)
 bins/

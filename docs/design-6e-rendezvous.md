@@ -210,3 +210,42 @@ ex-member front-running honest sources every gap); plus `member_peers` in `SyncS
   removing node applies the removal (inherent to a roster-relative check; bounded, self-heals on
   apply). And a junk response during a gap-less proactive probe isn't failed-listed (not a
   regression; identical to pre-slice).
+
+## 6e-3d-6…9 — adversarial review outcomes (block complete)
+
+All four closing slices passed a 3-lens adversarial-review workflow (hostile lenses → synthesis,
+each verifying against the code) before commit. Summary:
+
+- **6e-3d-6 (DiscoveryPolicy + anti-replay + membership tag) — SOUND.** No blocking defect. The
+  ranking/clamp/round-robin/budget math is sound; the nonce+epoch genuinely bind a member's
+  catch-up *response* to its request (closing the same-ms `ts` window); the tag binds
+  secret+label+rz_peer+peer_id+seq with a constant-time verify that fails closed. **Folded in** the
+  one MED hygiene finding: canonicalize (length-prefix) the keyed topic/namespace/tag preimages via
+  the wire `Encoder` (closes the long-tracked "length-prefix group_id in the topic hashers" item).
+  Deferred (availability-only): a `best_seq` precondition (seq must come from a verified PeerRecord —
+  documented), the K-distinct-rendezvous round-robin scoping (documented; caller bounds the
+  rendezvous set), and `best_seq` eviction refinement.
+- **6e-3d-7 (member PEX) — one BLOCKING fixed.** `decode_pex_bundle` was element-uncapped on the
+  *receive* side (serve caps at 64) while `request_pex` ran an Ed25519 `verify_self` per record over
+  a 16 MiB response → a member-on-member CPU-DoS (~100k verifies). **Fixed:** cap the receive side at
+  `MAX_PEX_ENTRIES`, tight 512 KiB PEX response ceiling, cheap roster check before the verify.
+  **Folded in:** per-address byte cap, rate limit keyed on the authenticated requester *device* (not
+  the connection), serve-time membership filter (don't relay a removed member's stale address),
+  reserved-`seq` guard. Confirmed sound: PEX is members-only, responder-signed/anti-replayed, never
+  promotes into `member_peers`, never gates messaging; redirection is impossible.
+- **6e-3d-8 (eclipse detector + cache) — one BLOCKING fixed.** The cache integrity-tag comparison was
+  variable-time (`expected.as_bytes()` → std slice eq), a timing oracle for a colluding at-rest host
+  to forge a tag byte-by-byte. **Fixed:** compare the `blake3::Hash` against a fixed `[u8;32]` to
+  drive blake3's unconditionally-constant-time `PartialEq`. Confirmed: the detector has **no gate
+  path** (structurally cannot block a Remove — review H3), the hysteresis is flap-free and the
+  reach formula has no div-by-zero/NaN, and the cache never confers trust without a live re-proof.
+- **6e-3d-9 (invite rewiring + join_ns + discover→dial→join) — SOUND.** No blocking defect. The
+  rendezvous set is genuinely signature-bound (strip/substitute breaks `verify_self`); the v1→v2
+  domain cutover is clean; `request_join`'s Welcome-signature + group_id checks defeat a malicious
+  rendezvous redirect. **Folded in** the MED + cheap LOWs: the joiner `verify_self()`s the pasted
+  token *before* any network work (no dialing attacker-named rendezvous / leaking join interest on a
+  forgery); invite decode caps both address counts; `validate_rendezvous_addrs` requires exactly one
+  `/p2p/`; the discovered-record queue is per-Discover-response capped. Deferred (dev-tooling /
+  availability-only): Clock-paced re-registration before the rendezvous TTL (`serve` registers once);
+  multi-rendezvous `join` fall-through; `--host` DNS form; the cache's SQLCipher persistence
+  (storage-phase). **6e-3d is complete.**

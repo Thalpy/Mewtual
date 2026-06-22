@@ -6,12 +6,19 @@ Authoritative current-state document. Read this first, then
 
 ## Status (as of 2026-06-22)
 
-- **Phases 0 → 6e-3c complete; 6e-3d (rendezvous discovery + eclipse-resistance) in
-  progress — slices 1–5 of 9 done.** 151 tests passing.
+- **Phases 0 → 6e-3d COMPLETE — the full rendezvous-discovery + eclipse-resistance
+  block (all 9 slices) is done.** 183 tests passing.
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
   catch-up source-trust hole). See [`design-6e-rendezvous.md`](design-6e-rendezvous.md).
+- The four security-critical closing slices (6–9) each passed an **adversarial-review
+  workflow before commit**; one **blocking** finding was fixed in each of 3d-7 (a
+  member-on-member PEX CPU-DoS — receive-side bundle uncapped) and 3d-8 (a variable-time
+  cache integrity-tag compare — timing oracle); 3d-6 and 3d-9 were SOUND with cheap
+  hardening folded in. The whole block ends with a **memory end-to-end test**: a joiner
+  discovers the inviter at a zero-knowledge rendezvous and joins with **no hard-coded
+  server address**.
 - Toolchain pinned **Rust 1.89.0** (`rust-toolchain.toml`; automerge 0.10 needs it).
 - 9 library crates + 1 binary. The protocol layers are tested deterministically with
   N in-process nodes over an in-memory transport; the mesh is *additionally* tested
@@ -39,11 +46,12 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2 — **read them; they constrai
 | `catcoms-wire` | Canonical, injective, length-prefixed codec; domain-separated key-derivation contexts (`DocType`, `exporter_context`). |
 | `catcoms-rt` | The **seams**: `Clock`, RNG (`OsCryptoRng`/`CryptoRngCore`), and `MeshTransport` (pub/sub + request/response) with an in-memory `MemNetwork`/`Hub` for tests. |
 | `catcoms-crypto` | Content-addressed `DeviceId`/`UserId`; Ed25519 device/account keys; device-cert chains + `Roster`; the unified key hierarchy (`Dek`→HKDF subkeys), XChaCha20 `seal`/`unseal`, tiered `SecureKeyStore`. |
-| `catcoms-mls` | MLS group core (openmls 0.8): `MlsDevice`, `ServerGroup` (create/add/remove/process/epoch/`channel_secret`), single-use device-bound `InviteToken` + `InviteLedger`, `AddOutcome`, `designated_committer`. |
+| `catcoms-mls` | MLS group core (openmls 0.8): `MlsDevice`, `ServerGroup` (create/add/remove/process/epoch/`channel_secret`), single-use device-bound `InviteToken` (now `INVITE_DOMAIN` **v2**, carrying a signature-bound `rendezvous: Vec<String>`; `mint_invite_with_rendezvous`) + `InviteLedger`, `AddOutcome`, `designated_committer`. |
 | `catcoms-replication` | Encrypted CRDT docs (automerge 0.10): inner-signed `SignedOp`, `SealedOp` (per-epoch channel-key sealing), `EncryptedDoc` (edit/ingest/catch-up). |
 | `catcoms-storage` | Content-addressed `Cid` blob stores (mem + fs); per-file encryption (`FileRef`, per-file wrap nonce); `RetentionIndex` (3-scope expiry, GC with decorrelated eviction + `HolderOracle` probe). |
-| `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`). Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` and are **never auto-dialed**. `connection_limits` on every swarm. Tracing-instrumented. |
-| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (the routing label `L`), with a grandfathered re-subscription window. The network **join handshake** now also transfers the **routing state** (sealed, signature-bound) so joiners derive the same topics/namespaces. Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** + a **two-pool peer model** (untrusted candidates vs verified `member_peers`); a bounded zeroized **past-epoch key window**; `rendezvous_namespaces()`; and `SyncStats`. |
+| `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`). Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` (per-response capped) and are **never auto-dialed**. `add_external_address()` (register without a relay), `validate_rendezvous_addrs()` (reject circuit / require one `/p2p/` / distinct PeerIds). `connection_limits` on every swarm. Tracing-instrumented. |
+| `catcoms-discovery` | **Pure** eclipse-resistance layer (no I/O, no ambient time/RNG). `DiscoveryPolicy` ranks discovered candidates into a bounded, Clock-paced/RNG-jittered **dial plan** (the only thing that decides what to dial): member-tag-verified → multi-rendezvous-corroborated → cache → junk-last, ≤1 root/rendezvous, roster-clamped, seq-freshness. Advisory `EclipseDetector` (D/R/S + hysteresis; never gates). Cross-session `AddressCache` (proven members, RNG-jittered eviction, BLAKE3 keyed integrity tag → tamper-detected on load; SQLCipher backing deferred). |
+| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: `rendezvous_namespaces()`, the pre-dial **member tag** (`membership_tag`/`verify_membership_tag`), **member PEX** (`PeerDescriptor`, `request_pex`/`publish_self_record`/`ingest_peer_record`/`known_peer_records`), the pre-join **`join_namespace()`**, and `transport()` (so the discovery/dial layer above can drive register/discover/dial). `SyncStats`. |
 | `catcoms-log` | `tracing` subscriber init; `init_debug(debug, dir)` writes `debug_log_<ts>.txt`. |
 | `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes; `recover` drives the 6d-1b miss-and-heal path; `--debug`/`--stats`. |
 
@@ -77,6 +85,10 @@ cargo run -p catcomsctl -- join  --invite-file invite.txt
 # NAT traversal + discovery infra (each runs until Ctrl-C):
 cargo run -p catcomsctl -- relay --port 4000        # zero-knowledge circuit relay
 cargo run -p catcomsctl -- rendezvous --port 5000   # zero-knowledge rendezvous
+# Discovery: the server registers at a rendezvous under the invite's join_ns; the
+# joiner discovers it there and joins with NO hard-coded server address:
+cargo run -p catcomsctl -- serve --port 9000 --rendezvous /ip4/<rz-ip>/tcp/5000/p2p/<rz-id>
+cargo run -p catcomsctl -- join                     # discover -> dial (via DiscoveryPolicy) -> join
 ```
 `demo` runs both members in one process over the in-memory transport; `serve`/`join`
 run the *same* join + catch-up path across **separate OS processes over real libp2p
@@ -137,7 +149,10 @@ TCP** (verified, incl. through a relay).
 | 6e-3d-3 | zero-knowledge **rendezvous server** + `catcomsctl rendezvous` | ✅ `924df09` |
 | 6e-3d-4 | **rendezvous client** in `MeshBehaviour` (register/discover, surfaced, **no auto-dial**) + `connection_limits` | ✅ `fe1ed2a` |
 | 6e-3d-5 | **signed catch-up responses + two-pool peer model** — **Sybil-C1** source-trust; adversarially reviewed | ✅ `726691b` |
-| 6e-3d-6…9 | DiscoveryPolicy (pre-dial membership tag + capped dial budget) · member PEX · advisory eclipse detector + cache · invite rewiring + end-to-end | planned (security-critical; each adversarially reviewed) |
+| 6e-3d-6 | **`catcoms-discovery` `DiscoveryPolicy`** (pure: rank/clamp/dial-budget) + catch-up **nonce/epoch anti-replay** + pre-dial **membership tag**; reviewed SOUND | ✅ `2fedcd0` |
+| 6e-3d-7 | **member PEX** (`KIND_PEX`, self-signed `PeerDescriptor`, responder-signed, capped/rate-limited); reviewed (blocking receive-cap DoS fixed) | ✅ `762ef63` |
+| 6e-3d-8 | **advisory eclipse detector** (D/R/S, hysteresis, never gates) + **cross-session address cache** (tamper-detected); reviewed (blocking timing-oracle fixed) | ✅ `ca8493f` |
+| 6e-3d-9 | **invite rewiring** (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join **`join_ns`** + `serve --rendezvous`/`join` **discover→dial→join** end-to-end; reviewed SOUND | ✅ `f31a0c7` |
 | 7 | end-to-end local integration over real sockets + security suite | planned |
 | 8 | product model + Tauri desktop UI (channels, fileshare browser, status, wiki) | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
@@ -152,11 +167,12 @@ by default (`max_committer_rank=0`) pending **I1** (a wall-clock contest window 
 converge honest nodes differently under async timing); re-read `design-6d2.md` before
 touching it.
 
-## 6e-3d — current focus (rendezvous discovery + eclipse-resistance)
+## 6e-3d — COMPLETE (rendezvous discovery + eclipse-resistance)
 
-**Read [`design-6e-rendezvous.md`](design-6e-rendezvous.md) before continuing** — the
-9-slice contract from a 7-agent design+review workflow, plus the per-slice
-adversarial-review outcomes (2b and 3d-5 are recorded there).
+**Read [`design-6e-rendezvous.md`](design-6e-rendezvous.md)** — the 9-slice contract
+from a 7-agent design+review workflow, plus the per-slice adversarial-review outcomes
+(2b, 3d-5, and 3d-6…9 are all recorded there). All 9 slices are done; the next focus is
+**Phase 7** (end-to-end local integration + security suite).
 
 **Goal:** members find each other with no hard-coded bootstrap addresses, and an
 attacker cannot isolate (eclipse) a member. Everything is built on a per-removal
@@ -178,16 +194,21 @@ routing secret `ns_secret_L`:
   responder's MLS leaf key, bound to the request; a **two-pool** model separates
   untrusted candidates from verified `member_peers`. **Closed Sybil-C1.**
 
-**Remaining (3d-6…9, planned, security-critical → each adversarially reviewed):**
-- **3d-6 `DiscoveryPolicy`** (a new pure `catcoms-discovery` crate): the **pre-dial
-  membership tag** (deferred from 3d-5 — the "where the tag rides" question resolves
-  here) + a Clock-paced **capped dial budget** + cross-rendezvous union/freshness. Also
-  absorbs the 3d-5 review's deferred hardening — a per-request **nonce** + an **epoch
-  bind** in the catch-up transcripts (anti-replay) and the candidate-flood / cold-start
-  fix.
-- **3d-7** member **PEX** · **3d-8** advisory **eclipse detector** + cross-session
-  cache · **3d-9** invite rewiring (`rendezvous: Vec<String>`, INVITE_DOMAIN bump) +
-  end-to-end + pre-join `join_ns`.
+**Eclipse-resistance (3d-6…9, done, each adversarially reviewed):**
+- **3d-6** — pure `catcoms-discovery` `DiscoveryPolicy` (rank candidates → bounded,
+  Clock-paced/RNG-jittered dial plan; ≤1 root/rendezvous; roster clamp; seq-freshness;
+  the only thing that decides what to dial). Plus the pre-dial **membership tag** and
+  the catch-up **nonce/epoch anti-replay** (closing the 3d-5 deferred items).
+- **3d-7** — **member PEX** (`KIND_PEX`): members supply each other dialable
+  `PeerDescriptor`s without a rendezvous; responder-signed, members-only, capped +
+  rate-limited; entries are discovery candidates (never auto-promoted to the trusted
+  catch-up pool).
+- **3d-8** — advisory **`EclipseDetector`** (D/R/S + hysteresis; never gates) +
+  cross-session **`AddressCache`** (proven members, tamper-detected load).
+- **3d-9** — invite rewiring (signature-bound `rendezvous` vector, `INVITE_DOMAIN`
+  v2), pre-join **`join_namespace`**, and `serve --rendezvous`/`join`
+  **discover→dial→join** (DiscoveryPolicy-mediated) — verified by a memory end-to-end
+  test (no hard-coded server address).
 
 ## Known limitations / deferred (the security-relevant ones)
 
@@ -198,21 +219,25 @@ routing secret `ns_secret_L`:
   catch-up — a full snapshot rejoin (deferred) is required; the gap is logged and a
   bad source is excluded, but exhausting all sources surfaces only a warning (a
   recovery *event* to the app is a follow-up).
-- **Catch-up auth is replay-bounded, not replay-proof.** Catch-up *responses* are now
-  signed by a current member and bound to the request (6e-3d-5), and requests carry a
-  fresh signed timestamp — but both still rest on `req_ts` uniqueness within
-  `MAX_REQUEST_AGE_MS` (60s), not a per-request nonce. A per-request **nonce** + an
-  **epoch bind** in both transcripts land in **6e-3d-6** (the only effect of the
-  current gap is a *transient* mis-preference; applied records are independently
-  committer-authorized, so no junk state). The Noise transport confines requests to the
-  peer's own session in production.
-- **6e-3d discovery (in progress).** Discovery infrastructure (rendezvous server +
-  client) is in, but the **eclipse-resistance policy is not yet built**: discovered
-  records are surfaced but the **pre-dial membership tag, the capped dial budget, member
-  PEX, and the advisory eclipse detector are 6e-3d-6…8**. Until then an untrusted-
-  candidate connect-flood can evict an honest peer from the bounded candidate set on a
-  cold-start node (availability only — the two-pool model keeps trust intact). See
-  [`design-6e-rendezvous.md`](design-6e-rendezvous.md) for the full residual list.
+- **Catch-up auth is now nonce-bound (6e-3d-6).** Catch-up *responses* are signed by a
+  current member and bound to `(group_id, requester pubkey, req_ts, **nonce**, **epoch**,
+  bundle)`, and requests carry a fresh signed timestamp + per-request RNG nonce — so a
+  captured response cannot be replayed against a different request and the same-ms `ts`
+  collision window is closed. Residual: there is still no *server-side* seen-nonce log,
+  so a captured *request* can be re-sent within `MAX_REQUEST_AGE_MS` (60s) — harmless
+  (the member just re-serves a freshly-signed bundle; the Noise transport confines it to
+  the peer's own session). A full snapshot rejoin for a too-far-behind member is the
+  remaining recovery gap.
+- **6e-3d discovery is built (eclipse-resistance complete).** `DiscoveryPolicy`
+  (ranked, budgeted dial plan), the pre-dial membership tag, member PEX, the advisory
+  eclipse detector, and the cross-session cache are all in (6e-3d-6…9), and a joiner can
+  bootstrap via `join_ns` with no hard-coded address. Residual / deferred (all
+  availability-only, review-confirmed): the **cross-session cache is in-memory** (its
+  SQLCipher persistence is storage-phase work); `catcomsctl serve --rendezvous`
+  **registers once** and does not yet re-register before the rendezvous TTL lapses; the
+  `join` path uses the **first** rendezvous only (no multi-rendezvous fall-through yet);
+  and `--host` must be a raw IP. The net Actor never auto-dials; the dial decision and
+  all bounds live in `catcoms-discovery`.
 - **A forged future `CommitRecord`** on the control topic is bounded (gap +
   buffer caps, deduped catch-up) and fails MLS verification at apply time. Per-peer
   rate limiting + exponential catch-up backoff are a hardening follow-up.
