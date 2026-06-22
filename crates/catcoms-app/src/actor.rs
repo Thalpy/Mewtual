@@ -93,6 +93,10 @@ pub enum AppCommand {
     WriteWikiPage { name: String, body: String },
     /// Pull the wiki from `peer` (e.g. right after joining).
     CatchUpWiki { peer: PeerId },
+    /// Serialize the server's durable state for sealing to disk (Phase 9f).
+    Snapshot {
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     /// Stop the actor.
     Shutdown,
 }
@@ -174,6 +178,22 @@ impl ServerActor {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Serialize the server's durable state (to be sealed to disk by the bridge). Returns an
+    /// error string if the actor has stopped or the snapshot failed.
+    pub async fn snapshot(&self) -> Result<Vec<u8>, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Snapshot { reply })
+            .await
+            .is_err()
+        {
+            return Err("server actor stopped".into());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("server actor dropped".into()))
     }
 
     /// Fetch the current member count.
@@ -539,6 +559,9 @@ where
                             let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
                     }
+                    Some(AppCommand::Snapshot { reply }) => {
+                        let _ = reply.send(server.snapshot().map(|z| z.to_vec()).map_err(|e| e.to_string()));
+                    }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
@@ -743,6 +766,34 @@ mod tests {
 
         actor.shutdown().await;
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn the_actor_snapshots_for_persistence_and_the_bytes_restore() {
+        let hub = Hub::new();
+        let (actor, mut events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+
+        actor.open_channel(GENERAL).await;
+        actor.send_message(GENERAL, "remember me").await;
+        let _ = timeout(Duration::from_secs(5), events.recv()).await; // drain the update
+
+        let bytes = actor.snapshot().await.expect("snapshot");
+        actor.shutdown().await;
+        let _ = handle.await;
+
+        // The snapshot restores into a working Server (fresh transport) with history intact.
+        let hub2 = Hub::new();
+        let restored = Server::restore(
+            &bytes,
+            hub2.join(PeerId::from_u64(2)),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(2_000)),
+            "alice",
+        )
+        .expect("restore");
+        let msgs = restored.messages(GENERAL);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "remember me");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
