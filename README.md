@@ -58,6 +58,8 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8c | **invite + join in the UI** — two app instances talk over real TCP (found → copy invite → paste/join) | done |
 | 8d | **multi-channel** — IRC-style name-addressed channels + channel-list sidebar | done |
 | 8e | **member roster + chat polish** — live Members panel + own-message bubbles | done |
+| 8f | **member profiles (backend)** — shared `DocType::Profile` doc (name/color/font/effect), messages authored by device fingerprint | done |
+| 8g | **profile editor + rich rendering** — customize name/color/font/animated effect; roster + messages resolve fingerprint → profile | done |
 | 8… | discovery/relay in the UI · multi-server · fileshare · status · wiki | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
