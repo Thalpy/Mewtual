@@ -97,14 +97,16 @@ before commit, per project discipline. Suggested order:
 | **9c ✅** | **Snapshottable MLS state** (`catcoms-mls::snapshot_server`/`restore_server`) — openmls 0.8 has no group snapshot, so we serialize the provider's `MemoryStorage` (public KV map) + signer pubkey + group id, and reload via `MlsGroup::load` (no 40-method `StorageProvider` impl). Adversarially reviewed (no blocking findings; verified the storage snapshot captures complete group state incl. pending commits). *Done — sealing it under `mls_seal_key` + the per-server snapshot cadence is 9e/9f.* | **high** |
 | **9d ✅** | **Doc persistence** (`EncryptedDoc::snapshot`/`restore`) — `AutoCommit::save()` + the signed-op log (rebuilds the `applied` dedup set), framed with the wire codec. Per-op signatures still verified on use, so a tampered snapshot can't inject forged history. *Done — sealing under `db_key` + restoring `ChannelSync`'s `docs` map is 9e.* | med |
 | **9e ✅** | **Sync-state persistence** (`ChannelSync::snapshot`/`restore`) — assembles the MLS state (9c) + every doc (9d) + `routing_label`/`routing_secrets` + `ledger` + `commit_log` + `peer_records` into one `Zeroizing` blob; reload reconstitutes `ChannelSync` on a **fresh** transport (`adopt_routing_state` recomputes identical topics). Adversarially reviewed (no blocking findings; durable set complete, invite-ledger round-trip closes the cross-restart double-redeem). *Done — sealing the blob under the vault key + writing it to disk is 9f.* | med–high (secrets) |
-| **9f** | **Registry + reload-on-startup** — persist the server set; on launch, reload each server from disk and spawn its actor; the rail shows them without re-joining. | med |
+| **9f** | **Registry + reload-on-startup.** *Backend ✅* (`catcoms-app::store::ServerStore` — vault-sealed `servers/<id>.bin` + `registry.bin`, atomic writes, wrong-passphrase-safe; `Server::snapshot`/`restore`; end-to-end test: a real server's history survives a sealed disk round-trip read offline). *Remaining (9f-UI):* the Tauri/Svelte wiring — an actor snapshot command, save-on-change, the launch passphrase prompt, and reload-on-startup spawning each server's actor from disk. | med |
 | **9g** | **Transport re-establishment** — persist + re-dial peer addresses; reconnect handling; offline-read works meanwhile. | med |
 | **9h** | **Per-file encryption-at-rest** — now that the keystore + persistence exist: mint a **stable per-group file-wrap-key** at founding, transfer it at join **like `RoutingState`** (sealed under `routing_transfer_key`, `lib.rs:2373`), and use `seal_file`/`open_file` so blobs are ciphertext keyed by the **ciphertext** CID, the wrapped key in the (encrypted) file index. | **high** (key mgmt + join handshake) |
 
-**Progress: 9a–9e done** (vault, sealing blob store, MLS snapshot, doc snapshot, sync-state
-assembly — all tested; 9c & 9e adversarially reviewed). The remaining slices wire these into
-the app: **9f** seals the `ChannelSync` snapshot to disk + reloads on startup behind the
-passphrase prompt; **9g** re-dials; **9h** is per-file encryption.
+**Progress: 9a–9e + 9f-backend done** (vault, sealing blob store, MLS snapshot, doc snapshot,
+sync-state assembly, and the vault-sealed on-disk `ServerStore`/registry + `Server`
+snapshot/restore — all tested; 9c & 9e adversarially reviewed). A real server's full history
+now survives a sealed disk round-trip read **offline**. Remaining: **9f-UI** wires it into
+the Tauri/Svelte app (passphrase prompt + reload-on-startup); **9g** re-dials; **9h** is
+per-file encryption.
 
 9a–9f deliver "survive restart, encrypted at rest." 9g makes a reloaded joiner reconnect.
 9h is the file-encryption follow-up that was correctly deferred until persistence exists.
