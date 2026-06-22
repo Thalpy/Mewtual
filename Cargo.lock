@@ -434,6 +434,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
+name = "catcoms-app"
+version = "0.0.0"
+dependencies = [
+ "automerge",
+ "catcoms-crypto",
+ "catcoms-mls",
+ "catcoms-rt",
+ "catcoms-sync",
+ "catcoms-wire",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "catcoms-crypto"
 version = "0.0.0"
 dependencies = [

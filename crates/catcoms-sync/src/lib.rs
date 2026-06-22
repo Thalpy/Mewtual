@@ -3063,6 +3063,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.group.member_count()
     }
 
+    /// The current roster — the device ids of all members (for the UI/product layer).
+    pub fn member_ids(&self) -> Vec<DeviceId> {
+        self.group.member_device_ids()
+    }
+
     fn on_gossip(&mut self, data: &[u8]) {
         let sealed = match SealedOp::decode(data) {
             Ok(s) => s,
