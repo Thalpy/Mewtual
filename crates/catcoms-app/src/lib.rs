@@ -27,7 +27,9 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod store;
 pub use actor::{spawn, AppCommand, AppEvent, ServerActor};
+pub use store::{ServerRecord, ServerStore};
 
 /// Errors surfaced to the UI/product layer.
 #[derive(Debug, Error)]
@@ -38,6 +40,15 @@ pub enum AppError {
     /// An MLS-layer error (e.g. founding a group).
     #[error(transparent)]
     Mls(#[from] MlsError),
+    /// A keystore (seal/unseal) error at rest.
+    #[error(transparent)]
+    Keystore(#[from] catcoms_crypto::KeystoreError),
+    /// A storage-layer error (e.g. opening the on-disk vault).
+    #[error(transparent)]
+    Storage(#[from] catcoms_storage::StorageError),
+    /// A persistence I/O error (reading/writing the on-disk store).
+    #[error("persistence i/o: {0}")]
+    Io(String),
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),
@@ -421,6 +432,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let (group, routing) = request_join(&transport, inviter, &device, invite).await?;
         Ok(Self {
             sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
+            display_name: display_name.into(),
+            device_id,
+        })
+    }
+
+    /// Serialize this server's durable state for disk persistence (Phase 9f). The bytes are
+    /// **secret** (signer key, group + routing secrets, plaintext content); the
+    /// [`crate::store::ServerStore`] seals them under the vault key before writing.
+    pub fn snapshot(&mut self) -> Result<zeroize::Zeroizing<Vec<u8>>, AppError> {
+        Ok(self.sync.snapshot()?)
+    }
+
+    /// Reconstruct a server from a [`Server::snapshot`] blob plus a **fresh** transport (the
+    /// caller re-dials peers, Phase 9g). The display name comes from the registry; the device
+    /// id is re-derived from the restored MLS device.
+    pub fn restore(
+        snapshot: &[u8],
+        transport: T,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+    ) -> Result<Self, AppError> {
+        let sync = ChannelSync::restore(snapshot, transport, rng, clock)?;
+        let device_id = sync.device_id();
+        Ok(Self {
+            sync,
             display_name: display_name.into(),
             device_id,
         })
@@ -878,6 +915,56 @@ mod tests {
         assert_eq!(roster.len(), 1);
         assert!(roster[0].is_self, "the founder sees itself in the roster");
         assert_eq!(roster[0].fingerprint.len(), 8, "4-byte hex fingerprint");
+    }
+
+    #[tokio::test]
+    async fn a_server_survives_a_sealed_store_round_trip() {
+        // The full 9f loop: found → post → snapshot → seal to disk → reopen → restore →
+        // read the history back, all offline (a fresh transport, no peers).
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(7);
+
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.send_message(GENERAL, "persist me").await.unwrap();
+        let snap = alice.snapshot().unwrap();
+
+        {
+            let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+            store.save_server(42, &snap, &mut rng).unwrap();
+            store
+                .save_registry(
+                    &[ServerRecord {
+                        id: 42,
+                        display_name: "alice".into(),
+                        invite: String::new(),
+                    }],
+                    &mut rng,
+                )
+                .unwrap();
+        }
+
+        // Reopen the store, reload the server onto a FRESH transport.
+        let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+        let reg = store.load_registry().unwrap();
+        assert_eq!(reg.len(), 1);
+        let bytes = store.load_server(reg[0].id).unwrap();
+        let hub = Hub::new();
+        let restored = Server::restore(
+            &bytes,
+            hub.join(PeerId::from_u64(2)),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(2_000)),
+            &reg[0].display_name,
+        )
+        .unwrap();
+
+        // The channel history, display name and roster all survived — read offline.
+        let msgs = restored.messages(GENERAL);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "persist me");
+        assert_eq!(restored.display_name(), "alice");
+        assert_eq!(restored.member_count(), 1);
     }
 
     #[tokio::test]

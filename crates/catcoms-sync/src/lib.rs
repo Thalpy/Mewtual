@@ -1499,6 +1499,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(this)
     }
 
+    /// This node's own device id (for the product layer to re-derive its identity after a
+    /// [`ChannelSync::restore`]).
+    pub fn device_id(&self) -> DeviceId {
+        self.device.device_id()
+    }
+
     /// Build a synchronizer for a member that **joined** an existing group, adopting
     /// the routing state ([`RoutingState`]) transferred in the join response so it
     /// derives the same blinded topics and rendezvous namespaces as the group. Use
