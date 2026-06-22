@@ -18,7 +18,7 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use crate::{ChatMessage, Server};
+use crate::{ChatMessage, MemberView, Server};
 
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
@@ -40,6 +40,10 @@ pub enum AppCommand {
     },
     /// Query the current member count.
     MemberCount { reply: oneshot::Sender<usize> },
+    /// Query the roster (member fingerprints + which one is self).
+    Members {
+        reply: oneshot::Sender<Vec<MemberView>>,
+    },
     /// Stop the actor.
     Shutdown,
 }
@@ -124,6 +128,20 @@ impl ServerActor {
         rx.await.unwrap_or(0)
     }
 
+    /// Fetch the roster (member fingerprints).
+    pub async fn members(&self) -> Vec<MemberView> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Members { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Stop the actor.
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
@@ -179,6 +197,9 @@ where
                     }
                     Some(AppCommand::MemberCount { reply }) => {
                         let _ = reply.send(server.member_count());
+                    }
+                    Some(AppCommand::Members { reply }) => {
+                        let _ = reply.send(server.members_view());
                     }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;

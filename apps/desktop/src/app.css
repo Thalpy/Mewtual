@@ -169,10 +169,73 @@ button:hover {
   border: 1px solid #3a3d44;
   border-radius: 8px;
   background: #1f2126;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
 }
 
 .messages li {
-  padding: 0.25rem 0;
+  display: flex;
+  flex-direction: column;
+  max-width: 75%;
+  padding: 0.35rem 0.6rem;
+  border-radius: 10px;
+  background: #2a2d33;
+  align-self: flex-start;
+}
+
+.messages li.own {
+  align-self: flex-end;
+  background: #34527e;
+}
+
+.messages li.muted {
+  background: transparent;
+  align-self: stretch;
+  max-width: none;
+}
+
+.messages .author {
+  font-size: 0.72rem;
+  color: #9aa0aa;
+  margin-bottom: 1px;
+}
+
+.messages li.own .author {
+  color: #cdd9f5;
+}
+
+.roster h3 {
+  margin: 0.25rem 0 0.1rem;
+}
+
+.roster ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.roster li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.fp {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  color: #cdd2da;
+}
+
+.you-badge {
+  font-size: 0.65rem;
+  background: #34527e;
+  color: white;
+  padding: 0 0.3rem;
+  border-radius: 4px;
 }
 
 .composer {

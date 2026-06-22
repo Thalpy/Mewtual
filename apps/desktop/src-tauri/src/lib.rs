@@ -34,6 +34,13 @@ struct UiMessage {
     text: String,
 }
 
+/// A roster member as serialized to the frontend.
+#[derive(Serialize, Clone)]
+struct UiMember {
+    fingerprint: String,
+    you: bool,
+}
+
 /// Forward an actor's event stream to the frontend as Tauri events.
 fn forward_events(app: AppHandle, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
@@ -174,6 +181,24 @@ async fn get_invite(state: State<'_, AppState>) -> Result<Option<String>, String
     Ok(state.invite.lock().await.clone())
 }
 
+/// The current roster (member fingerprints; `you` marks the local device).
+#[tauri::command]
+async fn get_members(state: State<'_, AppState>) -> Result<Vec<UiMember>, String> {
+    let guard = state.actor.lock().await;
+    let Some(actor) = guard.as_ref() else {
+        return Ok(Vec::new());
+    };
+    Ok(actor
+        .members()
+        .await
+        .into_iter()
+        .map(|m| UiMember {
+            fingerprint: m.fingerprint,
+            you: m.is_self,
+        })
+        .collect())
+}
+
 /// Send a chat message to a channel (by id).
 #[tauri::command]
 async fn send_message(
@@ -219,6 +244,7 @@ pub fn run() {
             join_server,
             open_channel,
             get_invite,
+            get_members,
             send_message,
             get_messages
         ])

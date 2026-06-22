@@ -116,6 +116,26 @@ fn str_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
 pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     sync: ChannelSync<T, R>,
     display_name: String,
+    device_id: DeviceId,
+}
+
+/// A UI-facing view of one member: a short device-id **fingerprint** (display names are
+/// not shared on the wire yet, so the roster identifies members by their content-
+/// addressed device id) and whether it is **this** device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberView {
+    /// Short hex fingerprint of the member's device id (first 4 bytes).
+    pub fingerprint: String,
+    /// Whether this is the local device.
+    pub is_self: bool,
+}
+
+/// A short hex fingerprint (first 4 bytes) of a device id, for display.
+fn fingerprint(id: &DeviceId) -> String {
+    id.as_bytes()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
@@ -127,10 +147,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         clock: Box<dyn Clock + Send>,
         display_name: impl Into<String>,
     ) -> Result<Self, AppError> {
+        let device_id = device.device_id();
         let group = ServerGroup::create(&device)?;
         Ok(Self {
             sync: ChannelSync::new(transport, group, device, rng, clock),
             display_name: display_name.into(),
+            device_id,
         })
     }
 
@@ -146,10 +168,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         inviter: PeerId,
         invite: &InviteToken,
     ) -> Result<Self, AppError> {
+        let device_id = device.device_id();
         let (group, routing) = request_join(&transport, inviter, &device, invite).await?;
         Ok(Self {
             sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
             display_name: display_name.into(),
+            device_id,
         })
     }
 
@@ -210,6 +234,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// The roster — device ids of all current members.
     pub fn members(&self) -> Vec<DeviceId> {
         self.sync.member_ids()
+    }
+
+    /// The roster as UI-facing [`MemberView`]s (fingerprint + whether it is this device).
+    pub fn members_view(&self) -> Vec<MemberView> {
+        let me = self.device_id;
+        self.sync
+            .member_ids()
+            .into_iter()
+            .map(|id| MemberView {
+                fingerprint: fingerprint(&id),
+                is_self: id == me,
+            })
+            .collect()
+    }
+
+    /// This device's content-addressed id.
+    pub fn device_id(&self) -> DeviceId {
+        self.device_id
     }
 
     /// The current member count.
@@ -312,6 +354,10 @@ mod tests {
         assert_eq!(msgs[0].text, "hello world");
         assert_eq!(alice.member_count(), 1);
         assert_eq!(alice.display_name(), "alice");
+        let roster = alice.members_view();
+        assert_eq!(roster.len(), 1);
+        assert!(roster[0].is_self, "the founder sees itself in the roster");
+        assert_eq!(roster[0].fingerprint.len(), 8, "4-byte hex fingerprint");
     }
 
     #[tokio::test]

@@ -22,6 +22,7 @@
   let messages = $state<Msg[]>([]);
   let draft = $state("");
   let members = $state(1);
+  let roster = $state<{ fingerprint: string; you: boolean }[]>([]);
 
   function activeName(): string {
     return channels.find((c) => c.id === active)?.name ?? "";
@@ -37,6 +38,7 @@
       active = id;
       mode = "app";
       await refresh();
+      await refreshMembers();
     } catch (e) {
       error = String(e);
     } finally {
@@ -56,6 +58,7 @@
       active = id;
       mode = "app";
       await refresh();
+      await refreshMembers();
     } catch (e) {
       error = String(e);
     } finally {
@@ -94,6 +97,14 @@
     }
   }
 
+  async function refreshMembers() {
+    try {
+      roster = await invoke<{ fingerprint: string; you: boolean }[]>("get_members");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function send() {
     const text = draft.trim();
     if (!text || !active) return;
@@ -126,7 +137,10 @@
           unread = new Set(unread);
         }
       }),
-      listen<number>("members-changed", (e) => (members = e.payload)),
+      listen<number>("members-changed", (e) => {
+        members = e.payload;
+        refreshMembers();
+      }),
     ];
     return () => subs.forEach((p) => p.then((un) => un()));
   });
@@ -167,6 +181,18 @@
           <input bind:value={newChannel} placeholder="join #channel…" />
         </form>
 
+        <div class="roster">
+          <h3>Members <span class="muted">({members})</span></h3>
+          <ul>
+            {#each roster as m}
+              <li>
+                <span class="fp">{m.fingerprint}</span>
+                {#if m.you}<span class="you-badge">you</span>{/if}
+              </li>
+            {/each}
+          </ul>
+        </div>
+
         {#if invite}
           <details>
             <summary>Invite someone</summary>
@@ -181,7 +207,10 @@
         <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
         <ul class="messages">
           {#each messages as m}
-            <li><b>{m.author}:</b> {m.text}</li>
+            <li class:own={m.author === displayName}>
+              <span class="author">{m.author}</span>
+              <span class="text">{m.text}</span>
+            </li>
           {:else}
             <li class="muted">No messages yet — say hello.</li>
           {/each}
