@@ -68,7 +68,9 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8m | **avatars over the blob layer** — profile carries the avatar's CID, not inline bytes; fetched on demand over the mesh | done |
 | 8n | **fileshare browser** — per-server file index + upload/list/download (bytes via the blob mesh); Files panel in the UI | done |
 | 8o | **cross-network founding/joining** — bind all interfaces + advertise a reachable address (LAN/public IP); joining dials all bootstrap addresses | done |
-| 8… | relay-circuit + rendezvous in the UI (zero-config NAT traversal) · multi-server · status · wiki · per-file encryption-at-rest · chunked large-file transfer | planned |
+| 8p | **multi-server** — a Discord-style server rail; be in several servers at once (each its own group/channels/roster/profiles/files) | done |
+| 8q | **relay-circuit founding** — reserve a circuit on a relay node so NAT'd peers connect with no port-forward (zero-config NAT traversal) | done |
+| 8… | rendezvous discovery in the UI · status · wiki · per-file encryption-at-rest · chunked large-file transfer | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |

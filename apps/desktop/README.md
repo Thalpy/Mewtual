@@ -60,11 +60,17 @@ address** in the start screen's "Network" field:
 - **Over the internet** — enter a **port-forwarded public IP** (or `host:port` if the
   forwarded port differs from the bound one), and forward that TCP port on your router.
 
+- **Behind NAT, no port-forward** — paste a **relay node's** multiaddr into the "Relay
+  address" field (run one with `catcomsctl relay --port 4000`, which prints its multiaddr,
+  on any reachable host). The invite then carries the relayed address and your friend joins
+  through the relay from anywhere.
+
 Joining dials **every** address in the invite, so the reachable one wins.
 
-**Deferred:** zero-config NAT traversal (no port-forward) — wiring the relay-circuit
-reservation + rendezvous discovery the CLI already has (Phase 7 proves them over real TCP)
-into the desktop `found`/`join`.
+You can also be in **several servers at once** — found/join adds a server to the left rail.
+
+**Deferred:** rendezvous auto-discovery (joining with *no* address in the invite — the CLI
+already does this over real TCP; not yet wired into the desktop `found`/`join`).
 
 ## Layout
 
