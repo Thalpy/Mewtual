@@ -65,7 +65,9 @@ Early construction, built **block-by-block with tests gating each phase**.
 | 8j | **symmetric (any-peer) catch-up** — either side pulls the backlog of a channel the other created (best known peer) | done |
 | 8k | **chat UX polish** — message timestamps (clock-stamped) + auto-scroll to newest | done |
 | 8l | **content-addressed blob fetch over the mesh** — `KIND_BLOB_FETCH` (members-only, signed, capped, rate-limited); the foundation for large avatars + fileshare | done |
-| 8… | wire avatars onto blob fetch · fileshare browser · discovery/relay in the UI · multi-server · status · wiki | planned |
+| 8m | **avatars over the blob layer** — profile carries the avatar's CID, not inline bytes; fetched on demand over the mesh | done |
+| 8n | **fileshare browser** — per-server file index + upload/list/download (bytes via the blob mesh); Files panel in the UI | done |
+| 8… | discovery/relay in the UI · multi-server · status · wiki · per-file encryption-at-rest · chunked large-file transfer | planned |
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |

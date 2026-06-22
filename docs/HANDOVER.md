@@ -11,13 +11,14 @@ Authoritative current-state document. Read this first, then
   TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
   done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
   **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
-  desktop app** (`apps/desktop`, 8b-2 … 8k) wired to the stack — found a server, mint a
+  desktop app** (`apps/desktop`, 8b-2 … 8n) wired to the stack — found a server, mint a
   single-use invite, a second instance joins via paste, **multiple name-addressed
   channels** (with symmetric history catch-up + timestamps + auto-scroll), a live roster,
-  and **customizable member profiles** (name/color/font/animated effect/**avatar**,
-  shared + converging). Underneath, **8l** adds **content-addressed blob fetch over the
-  mesh** (the foundation for large avatars + fileshare). **200 tests passing** (the GUI
-  WebView is the one manually-verified surface; both halves compile). **The desktop app is currently
+  **customizable member profiles** (name/color/font/animated effect/**avatar**, shared +
+  converging), and a **fileshare browser**. Underneath, **8l** adds **content-addressed
+  blob fetch over the mesh**, and **8m/8n** build avatars + fileshare on it (binaries
+  travel by content address, fetched on demand — not inline in gossip). **204 tests
+  passing** (the GUI WebView is the one manually-verified surface; both halves compile). **The desktop app is currently
   loopback-only** — it works between windows on one machine; connecting peers across a
   network needs the discovery/relay-in-the-UI slice (not yet built). See Known
   limitations.
@@ -186,7 +187,9 @@ TCP** (verified, incl. through a relay).
 | 8j | **symmetric (any-peer) catch-up** — `ChannelSync::request_catchup_best` (+ `now_ms`) catches up from the best known peer (proven member, else any known peer); `Server::request_channel_catchup_any` + actor `CatchUpAny`; bridge `open_channel` uses it (dropped `catchup_peer`). Either side gets the backlog of a channel the other created | ✅ `479da21` |
 | 8k | **chat UX polish** — messages carry a clock-stamped `ts` (canonical schema + `ChatMessage.ts`, stamped via `ChannelSync::now_ms`); UI shows HH:MM + auto-scrolls to newest | ✅ `f202530` |
 | 8l | **content-addressed blob fetch over the mesh** — `ChannelSync` holds a `BlobStore`; `KIND_BLOB_FETCH` request/response (members-only, responder-signed/bound, 16 MiB cap, **per-requester rate limit** — folded from adversarial review since blob is the strongest amplifier); `put/get/has_blob`, `request_blob(_best)`. Re-hashes served bytes vs the requested CID before storing (no cache-poisoning). Foundation for large avatars + fileshare | ✅ `e0c3c8e` |
-| 8… | wire avatars onto blob fetch (CID in profile, not inline) · fileshare browser (file-index doc + UI) · discovery/relay wiring in the UI · multi-server · status · wiki | planned |
+| 8m | **avatars over the blob layer** — the profile doc stores the avatar's `avatar_cid` (not inline bytes); `set_profile` puts the blob, `profiles()` resolves the CID against the local store, the actor proactively `fetch_missing_avatars` (always-try, since the holder-peer is often only known after the profile arrives) and re-emits. Public `Profile.avatar` (bytes) unchanged, so bridge/UI untouched | ✅ `5bc31f4` |
+| 8n | **fileshare browser** — per-server file index (`DocType::FileIndex`): `add_file`/`files`/`download_file`/`open_files`/`request_files_catchup` + `FileEntry`; actor `AddFile`/`Files`/`DownloadFile`/`CatchUpFiles` + `FilesUpdated`; bridge base64↔CID-hex; UI "Files" panel (upload/list/download). Blobs plaintext-at-rest, members-only — `seal_file` encryption-at-rest + chunked transfer deferred | ✅ `66b06ce` |
+| 8… | discovery/relay wiring in the UI · multi-server · status · wiki · per-file encryption-at-rest (`seal_file`) · chunked large-file transfer | planned |
 | 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 
