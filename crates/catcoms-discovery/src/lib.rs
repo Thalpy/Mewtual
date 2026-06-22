@@ -40,6 +40,12 @@ use std::collections::BTreeMap;
 
 use catcoms_rt::{Clock, CryptoRngCore};
 
+mod cache;
+mod eclipse;
+
+pub use cache::{AddressCache, CacheConfig, CacheError, CachedPeer};
+pub use eclipse::{EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservation};
+
 /// An opaque peer identifier — a libp2p `PeerId`'s bytes (or any stable id). Kept as
 /// a `Vec<u8>` so this crate stays free of a libp2p dependency and fully pure.
 pub type PeerKey = Vec<u8>;
