@@ -1,10 +1,9 @@
 # Disk persistence + encryption-at-rest — design
 
-Status: **design / not yet implemented.** This scopes the work into reviewable, security-
-critical slices. The desktop app is currently **entirely in-memory** (`MemoryBlobStore`,
-in-memory MLS/group state) — closing it loses every server. This design is the gate for
-both "survive restart" and meaningful per-file encryption-at-rest (see the encryption note
-in [`HANDOVER.md`](HANDOVER.md)).
+Status: **implemented (9a–9h ✅).** This scoped the work into reviewable, security-critical
+slices; all are done (9c, 9e, 9h-b adversarially reviewed). The desktop app persists each
+server sealed at rest under a launch passphrase, reloads on startup, re-dials peers, and
+e2e-encrypts files. The original "entirely in-memory" state is closed.
 
 ## Goals / non-goals
 
@@ -99,16 +98,19 @@ before commit, per project discipline. Suggested order:
 | **9e ✅** | **Sync-state persistence** (`ChannelSync::snapshot`/`restore`) — assembles the MLS state (9c) + every doc (9d) + `routing_label`/`routing_secrets` + `ledger` + `commit_log` + `peer_records` into one `Zeroizing` blob; reload reconstitutes `ChannelSync` on a **fresh** transport (`adopt_routing_state` recomputes identical topics). Adversarially reviewed (no blocking findings; durable set complete, invite-ledger round-trip closes the cross-restart double-redeem). *Done — sealing the blob under the vault key + writing it to disk is 9f.* | med–high (secrets) |
 | **9f ✅** | **Registry + reload-on-startup.** `catcoms-app::store::ServerStore` (vault-sealed `servers/<id>.bin` + `registry.bin`, atomic writes, wrong-passphrase-safe) + `Server::snapshot`/`restore` + the actor `Snapshot` command. Bridge: a launch **passphrase gate** (`unlock` → open vault → reload each server onto a fresh transport → repopulate the rail) and **save-on-mutation** (seal after every found/join/send/profile/file/status/wiki, remove on leave). The desktop app now survives a restart: close it, reopen, enter the passphrase, your servers + full history are back (read offline). *Caveat:* a reloaded founder gets a new port, so new joiners need a fresh invite (existing limitation); peer re-dial is 9g. | med |
 | **9g ✅** | **Transport re-establishment** — `peer_addrs_from_snapshot` extracts the persisted peer multiaddrs from a snapshot (no full restore; the `MeshTransport` trait has no dial, so the bridge needs them before building the mesh), and reload dials them as the new transport's bootstrap. A reloaded joiner reconnects to peers whose address is stable; offline-read works meanwhile. Peers that moved need rendezvous re-discovery (the deferred networking slice). | med |
-| **9h** | **Per-file encryption-at-rest** — now that the keystore + persistence exist: mint a **stable per-group file-wrap-key** at founding, transfer it at join **like `RoutingState`** (sealed under `routing_transfer_key`, `lib.rs:2373`), and use `seal_file`/`open_file` so blobs are ciphertext keyed by the **ciphertext** CID, the wrapped key in the (encrypted) file index. | **high** (key mgmt + join handshake) |
+| **9h ✅** | **Per-file encryption-at-rest** — two slices. **9h-a:** wired `SealingBlobStore` (over `FsBlobStore`) into each server under the vault `blob_key`, so files + avatars persist + are sealed at rest. **9h-b:** a **stable per-group file-wrap key** minted at founding, transferred at join **bundled into the routing transfer** (sealed under `routing_transfer_key`); `seal_file`/`open_file` so files are ciphertext keyed by the **ciphertext** CID with the wrapped key in the encrypted index — e2e, openable only by members holding the key. Adversarially reviewed (no blocking; joiner-key zeroing folded). | **high** (key mgmt + join handshake) |
 
 **Progress: 9a–9f done** — "survive restart, encrypted at rest" is delivered end-to-end: the
 vault, sealing blob store, MLS snapshot, doc snapshot, sync-state assembly, the vault-sealed
 `ServerStore`/registry, and the desktop passphrase-gate + reload-on-startup (9c & 9e
 adversarially reviewed; all Rust tested, the app verified via cargo check + svelte-check).
 Close the app, reopen, enter your passphrase → your servers + history are back, read offline.
-**9g done** too: reload dials the persisted peer addresses, so a reloaded joiner reconnects
-to peers with a stable address (offline-read works meanwhile). Remaining: **9h** per-file
-encryption-at-rest.
+**Phase 9 is complete (9a–9h).** Disk persistence + encryption-at-rest is delivered end-to-end:
+servers/channels/profiles/files/status/wiki survive a restart, sealed under a passphrase, read
+offline; a reloaded joiner re-dials its peers; files are e2e-encrypted under a stable per-group
+key (9c, 9e, 9h-b adversarially reviewed). Threat model below stands: at-rest + e2e, not
+anti-malware. Future: rotating file keys for removed-member file forward-secrecy, rendezvous
+re-discovery for moved peers, chunked large-file transfer.
 
 9a–9f deliver "survive restart, encrypted at rest." 9g makes a reloaded joiner reconnect.
 9h is the file-encryption follow-up that was correctly deferred until persistence exists.
