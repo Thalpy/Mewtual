@@ -10,6 +10,7 @@ catcoms-rt = { path = "../catcoms-rt" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-mls = { path = "../catcoms-mls" }
 catcoms-sync = { path = "../catcoms-sync" }
+catcoms-storage = { path = "../catcoms-storage" }
 catcoms-wire = { path = "../catcoms-wire" }
 automerge = "0.10"
 blake3 = "1"

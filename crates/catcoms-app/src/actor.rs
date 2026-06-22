@@ -268,17 +268,13 @@ where
                         if let Err(e) = server.set_profile(profile).await {
                             tracing::warn!(error = %e, "set_profile failed");
                         }
-                        if profiles_changed(&server, &mut last_profiles) {
-                            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
-                        }
+                        sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
                     }
                     Some(AppCommand::CatchUpProfiles { peer }) => {
                         if let Err(e) = server.request_profiles_catchup(peer).await {
                             tracing::warn!(error = %e, "profiles catch-up failed");
                         }
-                        if profiles_changed(&server, &mut last_profiles) {
-                            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
-                        }
+                        sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
                     }
                     Some(AppCommand::Profiles { reply }) => {
                         let _ = reply.send(server.profiles());
@@ -300,9 +296,7 @@ where
                             members = mc;
                             let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
                         }
-                        if profiles_changed(&server, &mut last_profiles) {
-                            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
-                        }
+                        sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
                     }
                     _ => {
                         let _ = event_tx.send(AppEvent::Closed).await;
@@ -350,6 +344,37 @@ where
         true
     } else {
         false
+    }
+}
+
+/// Emit `ProfilesUpdated` if the profile set changed, then fetch any avatar blobs not yet
+/// held from a peer and emit again if that resolved new avatars — so a member's picture
+/// renders shortly after their profile arrives (avatars travel by content address, not
+/// inline). Synchronous fetch (blocks the actor briefly per missing avatar); fine for the
+/// small downscaled avatars, a concurrent fetch is a later refinement.
+async fn sync_profiles<T, R>(
+    server: &mut Server<T, R>,
+    last_profiles: &mut HashMap<String, Profile>,
+    event_tx: &mpsc::Sender<AppEvent>,
+) where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    if profiles_changed(server, last_profiles) {
+        let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
+    }
+    // Always attempt to resolve missing avatars — the peer holding one is often only known
+    // (via gossip's remember_peer) *after* the profile already arrived by catch-up, so a
+    // change-gated fetch would never retry. Held avatars short-circuit on `has_blob`; only
+    // genuinely-missing ones hit the network. (Caching unavailable CIDs to avoid re-asking
+    // a peer that lacks one is a later refinement.)
+    match server.fetch_missing_avatars().await {
+        Ok(n) if n > 0 => {
+            let _ = profiles_changed(server, last_profiles);
+            let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
+        }
+        Err(e) => tracing::warn!(error = %e, "avatar fetch failed"),
+        _ => {}
     }
 }
 
@@ -589,6 +614,61 @@ mod tests {
         })
         .await
         .expect("alice caught up the joiner-created channel from the best peer");
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_avatar_is_fetched_over_the_blob_layer() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, _alice_events, alice_handle) = spawn(alice_srv);
+
+        let bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
+
+        // Alice sets an avatar: its bytes go to the blob store, only the CID into her
+        // profile. Bob converges her profile, then his actor fetches the avatar blob over
+        // the mesh — proving an image travels by content address, not inline in gossip.
+        let avatar = vec![0xABu8; 1234];
+        alice
+            .set_profile(Profile {
+                name: "Alice".into(),
+                avatar: avatar.clone(),
+                ..Default::default()
+            })
+            .await;
+        bob.catch_up_profiles(alice_peer).await;
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                if bob.profiles().await.values().any(|p| p.avatar == avatar) {
+                    break;
+                }
+                match bob_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("bob actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("bob fetched Alice's avatar over the blob layer");
 
         alice.shutdown().await;
         bob.shutdown().await;

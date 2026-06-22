@@ -21,6 +21,7 @@ use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
+use catcoms_storage::Cid;
 use catcoms_sync::{request_join, ChannelSync, SyncError};
 use catcoms_wire::DocType;
 use thiserror::Error;
@@ -150,15 +151,17 @@ const P_NAME: &str = "name";
 const P_COLOR: &str = "color";
 const P_FONT: &str = "font";
 const P_EFFECT: &str = "effect";
-const P_AVATAR: &str = "avatar";
+const P_AVATAR_CID: &str = "avatar_cid";
 
-/// Maximum embedded-avatar size. Avatars live **inline** in the profile document (so they
-/// gossip + converge with the rest of the profile), so they are deliberately small — the
-/// UI downscales to a ~128px JPEG (a few KB). Large/animated/shared images are a later
-/// slice that moves them to the content-addressed blob store and fetches over the mesh.
+/// Maximum avatar image size accepted by [`Server::set_profile`]. Avatars are stored by
+/// **content address** in the blob store (not inline in the gossiped profile document)
+/// and fetched on demand over the mesh; this caps the blob the UI's downscaled ~128px
+/// JPEG produces.
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 
-/// A member's customizable profile.
+/// A member's customizable profile. `avatar` is the **resolved image bytes** (empty if
+/// unset, or not yet fetched from the mesh); on the wire the profile document carries only
+/// the avatar's content address.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profile {
     /// Chosen display name.
@@ -169,13 +172,30 @@ pub struct Profile {
     pub font: String,
     /// A text-effect key (e.g. `none` | `rainbow` | `wave` | `pulse`).
     pub effect: String,
-    /// A small inline avatar image (raw bytes; empty = none). Capped at
-    /// [`MAX_AVATAR_BYTES`]; the UI produces a downscaled JPEG.
+    /// The avatar image bytes, resolved from its content address against the local blob
+    /// store (empty if unset or not yet fetched). The UI produces a downscaled JPEG.
     pub avatar: Vec<u8>,
 }
 
-/// Write a member's own profile entry into the profile document.
-fn write_profile(doc: &mut AutoCommit, fp: &str, p: &Profile) -> Result<(), AutomergeError> {
+/// An internal profile record straight from the document: the avatar is its **content
+/// address** (CID bytes), resolved to image bytes against the blob store by [`Server`].
+struct ProfileRecord {
+    name: String,
+    color: String,
+    font: String,
+    effect: String,
+    avatar_cid: Vec<u8>,
+}
+
+/// Write a member's own profile entry. The avatar is referenced by **content address**
+/// (`avatar_cid`), not stored inline — so the gossiped profile document stays tiny and the
+/// image is fetched on demand over the mesh.
+fn write_profile(
+    doc: &mut AutoCommit,
+    fp: &str,
+    p: &Profile,
+    avatar_cid: &[u8],
+) -> Result<(), AutomergeError> {
     let entry = match doc.get(ROOT, fp)? {
         Some((Value::Object(ObjType::Map), id)) => id,
         _ => doc.put_object(ROOT, fp, ObjType::Map)?,
@@ -184,28 +204,39 @@ fn write_profile(doc: &mut AutoCommit, fp: &str, p: &Profile) -> Result<(), Auto
     doc.put(&entry, P_COLOR, p.color.as_str())?;
     doc.put(&entry, P_FONT, p.font.as_str())?;
     doc.put(&entry, P_EFFECT, p.effect.as_str())?;
-    doc.put(&entry, P_AVATAR, ScalarValue::Bytes(p.avatar.clone()))?;
+    doc.put(
+        &entry,
+        P_AVATAR_CID,
+        ScalarValue::Bytes(avatar_cid.to_vec()),
+    )?;
     Ok(())
 }
 
-/// Materialize the profile document into a `fingerprint -> Profile` map.
-fn read_profiles(doc: &AutoCommit) -> HashMap<String, Profile> {
+/// Materialize the profile document into `fingerprint -> ProfileRecord` (avatars still as
+/// content addresses; [`Server::profiles`] resolves them against the blob store).
+fn read_profile_records(doc: &AutoCommit) -> HashMap<String, ProfileRecord> {
     let mut out = HashMap::new();
     for fp in doc.keys(ROOT) {
         if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(ROOT, &fp) {
             out.insert(
                 fp,
-                Profile {
+                ProfileRecord {
                     name: str_field(doc, &entry, P_NAME),
                     color: str_field(doc, &entry, P_COLOR),
                     font: str_field(doc, &entry, P_FONT),
                     effect: str_field(doc, &entry, P_EFFECT),
-                    avatar: bytes_field(doc, &entry, P_AVATAR),
+                    avatar_cid: bytes_field(doc, &entry, P_AVATAR_CID),
                 },
             );
         }
     }
     out
+}
+
+/// Parse a stored avatar content address (32 bytes) into a [`Cid`] (`None` if absent/bad).
+fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    Some(Cid::from_bytes(arr))
 }
 
 /// Read a `Bytes` scalar field (empty if absent or another type).
@@ -325,8 +356,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Set this member's own profile (writes the local fingerprint's entry). Rejects an
-    /// avatar larger than [`MAX_AVATAR_BYTES`].
+    /// Set this member's own profile (writes the local fingerprint's entry). The avatar
+    /// image (rejected if larger than [`MAX_AVATAR_BYTES`]) is stored in the blob store and
+    /// referenced by content address — the gossiped document carries only the CID.
     pub async fn set_profile(&mut self, profile: Profile) -> Result<(), AppError> {
         if profile.avatar.len() > MAX_AVATAR_BYTES {
             return Err(AppError::Invalid(format!(
@@ -334,21 +366,69 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 profile.avatar.len()
             )));
         }
+        let avatar_cid = if profile.avatar.is_empty() {
+            Vec::new()
+        } else {
+            self.sync.put_blob(&profile.avatar)?.as_bytes().to_vec()
+        };
         let fp = self.my_fingerprint();
         self.sync
             .post(DocType::Profile, PROFILE_DOC, |d| {
-                write_profile(d, &fp, &profile)
+                write_profile(d, &fp, &profile, &avatar_cid)
             })
             .await?;
         Ok(())
     }
 
-    /// All known member profiles, keyed by device fingerprint.
+    /// All known member profiles, keyed by device fingerprint. Each profile's avatar is
+    /// resolved from its content address against the **local** blob store — members whose
+    /// avatar blob has not been fetched yet (see [`Server::fetch_missing_avatars`]) come
+    /// back with an empty `avatar`.
     pub fn profiles(&self) -> HashMap<String, Profile> {
-        self.sync
+        let records = self
+            .sync
             .doc(DocType::Profile, PROFILE_DOC)
-            .map(|d| read_profiles(d.doc()))
+            .map(|d| read_profile_records(d.doc()))
+            .unwrap_or_default();
+        records
+            .into_iter()
+            .map(|(fp, r)| {
+                let avatar = parse_avatar_cid(&r.avatar_cid)
+                    .and_then(|cid| self.sync.get_blob(&cid))
+                    .unwrap_or_default();
+                (
+                    fp,
+                    Profile {
+                        name: r.name,
+                        color: r.color,
+                        font: r.font,
+                        effect: r.effect,
+                        avatar,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Fetch any referenced avatar blobs we do not yet hold from the best known peer.
+    /// Returns how many were newly fetched (so the caller can re-render). Call after the
+    /// profile document changes (e.g. on join/convergence).
+    pub async fn fetch_missing_avatars(&mut self) -> Result<usize, AppError> {
+        let cids: Vec<Cid> = self
+            .sync
+            .doc(DocType::Profile, PROFILE_DOC)
+            .map(|d| read_profile_records(d.doc()))
             .unwrap_or_default()
+            .values()
+            .filter_map(|r| parse_avatar_cid(&r.avatar_cid))
+            .collect();
+        let mut fetched = 0;
+        for cid in cids {
+            if !self.sync.has_blob(&cid) && self.sync.request_blob_best(&cid).await? {
+                fetched += 1;
+            }
+        }
+        Ok(fetched)
     }
 
     /// Catch up the profile document from `peer` (e.g. right after joining).

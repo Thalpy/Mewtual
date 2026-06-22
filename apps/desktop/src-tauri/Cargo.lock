@@ -551,6 +551,7 @@ dependencies = [
  "catcoms-crypto",
  "catcoms-mls",
  "catcoms-rt",
+ "catcoms-storage",
  "catcoms-sync",
  "catcoms-wire",
  "thiserror 2.0.18",
@@ -648,6 +649,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcoms-storage"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "catcoms-crypto",
+ "catcoms-rt",
+ "catcoms-wire",
+ "hex",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "catcoms-sync"
 version = "0.0.0"
 dependencies = [
@@ -658,6 +671,7 @@ dependencies = [
  "catcoms-mls",
  "catcoms-replication",
  "catcoms-rt",
+ "catcoms-storage",
  "catcoms-wire",
  "thiserror 2.0.18",
  "tracing",

@@ -442,6 +442,7 @@ dependencies = [
  "catcoms-crypto",
  "catcoms-mls",
  "catcoms-rt",
+ "catcoms-storage",
  "catcoms-sync",
  "catcoms-wire",
  "rand_chacha 0.3.1",
