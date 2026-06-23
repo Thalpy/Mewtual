@@ -60,7 +60,9 @@ without it.
 
 1. **Found a server** — type a display name, click **Found a server**.
 2. **Invite a friend** — open **⚙ Settings** (gear on the left rail) → **Invite someone** →
-   **Copy invite** (or use the **＋ Invite someone** button under the member list).
+   **Copy invite** (or use the **＋ Invite someone** button under the member list). Invites are
+   single-use; click **Generate new invite** any time you need a fresh one (e.g. after a
+   restart, or once the last one was used).
 3. **They join** — your friend opens CatComs, sets a passphrase, pastes the invite into the
    join box, clicks **Join**.
 
@@ -75,6 +77,16 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   and share with the maintainer) + **⚙** for Settings.
 - **Sidebar** — the server's channels and its member list (with role badges).
 - **Main pane tabs** — **Chat · Files · Status · Wiki · Profile**. Click a tab to switch.
+
+### Right-click menus & keyboard shortcuts
+- **Right-click** almost anything for quick actions: a **message** (copy text, quote, copy
+  sender), a **wiki page** (open, **post a link to it in chat**, copy link), a **file** (open
+  details, download, post to chat, copy address, delete), a **member** (copy fingerprint,
+  make/demote admin, remove — owner), or a **server icon** (copy invite, settings, leave).
+- **Keyboard**: **Enter** sends, **Shift+Enter** adds a newline; **Esc** closes the open
+  menu/panel; **Ctrl/Cmd+1–5** switch tabs; **Ctrl/Cmd+K** jumps to the message box.
+- The **member list** and **wiki page list** get a search box once they grow; server icons show
+  an **unread badge**.
 
 ### Channels
 - Every server starts with **#general**. Create/join a channel by typing its name into
@@ -110,7 +122,8 @@ Find your LAN IP with `ipconfig` (Windows) / `ip addr` (Linux). The invite carri
 address you advertise; the joiner dials all of them and the one that works wins.
 
 > After you **reopen** the app, a server comes back up on a new port, so its *old* invite may
-> no longer reach new joiners — found-time addresses can change. Members who were already
+> no longer reach new joiners — found-time addresses can change. Click **Generate new invite**
+> after reopening to mint one that carries the current address. Members who were already
 > connected are re-dialed automatically when they're reachable.
 
 ### Using a relay (no port-forwarding)
