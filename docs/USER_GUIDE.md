@@ -23,7 +23,7 @@ Send `src-tauri/target/release/catcoms-desktop` (`.exe` on Windows). The recipie
 the **WebView2 runtime** (built into Windows 11; a free installer for older Windows).
 
 > **Don't share a debug build** (`target/debug/…`). A debug build loads its UI from a local
-> dev server and shows an "can't reach the page" error on any other machine.
+> dev server and shows a "can't reach the page" error on any other machine.
 
 **For development:**
 
@@ -39,19 +39,61 @@ server is running.
 
 ---
 
-## 2. Quick start
+## 2. First launch & your passphrase
+
+On launch, CatComs asks for a **passphrase**. This isn't an account — it's the key that
+**encrypts everything on this device at rest**.
+
+- **First run:** the passphrase you type *becomes* your encryption passphrase. There is **no
+  recovery** — if you forget it, the local data is unreadable.
+- **Later runs:** type the same passphrase to unlock. Your servers, channels, history,
+  profiles, files, wiki, and roles all come back — **readable offline**, even before any
+  other member is online.
+
+Everything on disk (group state, messages, files, avatars) is sealed under this passphrase
+(Argon2id + XChaCha20-Poly1305). A stolen laptop or a copied app-data folder is opaque
+without it.
+
+---
+
+## 3. Quick start
 
 1. **Found a server** — type a display name, click **Found a server**.
-2. **Invite a friend** — open the **Invite someone** panel in the sidebar and **Copy
-   invite**.
-3. **They join** — your friend opens CatComs, pastes the invite into the join box, clicks
-   **Join**.
+2. **Invite a friend** — open **⚙ Settings** (gear on the left rail) → **Invite someone** →
+   **Copy invite** (or use the **＋ Invite someone** button under the member list).
+3. **They join** — your friend opens CatComs, sets a passphrase, pastes the invite into the
+   join box, clicks **Join**.
 
 You're now in a shared, encrypted `#general` channel. Type and send.
 
 ---
 
-## 3. Connecting across a network
+## 4. The layout
+
+- **Left rail** — your servers (one icon each) + **＋** to add one + **⚙** for Settings.
+- **Sidebar** — the server's channels and its member list (with role badges).
+- **Main pane tabs** — **Chat · Files · Status · Wiki · Profile**. Click a tab to switch.
+
+### Channels
+- Every server starts with **#general**. Create/join a channel by typing its name into
+  **join #channel…**. Anyone who opens the same name lands in the same channel.
+- A **dot** marks unread. Opening a channel pulls its **backlog** from another member.
+
+### Rich text, links & emoji (in chat, status, and the wiki)
+- **Markdown** works: `**bold**`, `*italic*`, `` `code` ``, lists, `> quotes`, links.
+- **`[[Page Name]]`** links to a wiki page (click to open; a **red** link means it doesn't
+  exist yet — click to create it).
+- **`:code:`** inserts a custom emoji (see Files → emoji below). The 😀 button in the
+  composer opens a picker.
+
+### Sharing media (drag-and-drop embeds)
+- **Drag an image, video, or audio file onto the chat box** (or use the 📎 button) and it
+  **embeds inline** in your message. The same works in the Status composer and the Wiki
+  editor. Embedded files are stored in the fileshare (under `embed/…` or `wiki/<page>/…`).
+
+---
+
+## 5. Connecting across a network
 
 When you found a server, open the **Network (optional)** section. How others reach you:
 
@@ -59,123 +101,124 @@ When you found a server, open the **Network (optional)** section. How others rea
 |---|---|
 | **Same machine** (two windows) | Nothing — leave it blank. |
 | **Same Wi-Fi / LAN** | Your **LAN IP** (e.g. `192.168.1.5`) in *Reachable address*. |
-| **Over the internet (port-forward)** | Your **public IP** (or `host:port` if the forwarded port differs) in *Reachable address*, and forward that TCP port on your router. |
+| **Over the internet (port-forward)** | Your **public IP** (or `host:port`) in *Reachable address*, and forward that TCP port. |
 | **Over the internet (no port-forward)** | A **relay** — see below. |
 
 Find your LAN IP with `ipconfig` (Windows) / `ip addr` (Linux). The invite carries every
-address you advertise, and the joiner dials all of them — the one that works wins.
+address you advertise; the joiner dials all of them and the one that works wins.
+
+> After you **reopen** the app, a server comes back up on a new port, so its *old* invite may
+> no longer reach new joiners — found-time addresses can change. Members who were already
+> connected are re-dialed automatically when they're reachable.
 
 ### Using a relay (no port-forwarding)
 
-A relay is a helper node on a reachable host that forwards **encrypted** traffic between
-two peers behind NATs. It is **zero-knowledge** — it only routes ciphertext and can never
-read your messages.
+A relay is a helper node on a reachable host that forwards **encrypted** traffic between two
+peers behind NATs. It is **zero-knowledge** — it only routes ciphertext.
 
-1. On a reachable host (a cheap VPS, or a friend's port-forwarded box), run:
-   ```sh
-   cargo run -p catcomsctl -- relay --port 4000
-   ```
-   It prints its address, e.g. `/ip4/203.0.113.9/tcp/4000/p2p/12D3KooW…`.
+1. On a reachable host, run `cargo run -p catcomsctl -- relay --port 4000`. It prints its
+   address, e.g. `/ip4/203.0.113.9/tcp/4000/p2p/12D3KooW…`.
 2. When founding, paste that into the **Relay address** field.
-3. Share the invite as usual. Your friend joins **through the relay from anywhere** — no
-   port-forwarding on either side.
+3. Share the invite as usual — your friend joins **through the relay from anywhere**.
 
 ---
 
-## 4. Channels
+## 6. Files, folders & custom emoji
 
-- Every server starts with **#general**.
-- **Create or join a channel** by typing its name into **join #channel…** in the sidebar.
-  Anyone who opens the same name lands in the same channel (no setup needed).
-- Click a channel to switch. A **dot** marks a channel with unread messages.
-- Opening a channel that already has history pulls the **backlog** from another member.
+The **Files** tab is a folder browser:
 
----
+- **Share a file here** uploads into the current folder; **＋ new folder** organises them.
+- Click a file to **download** it (fetched from a member who has it).
+- Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
+  rest, and only members can open them.
 
-## 5. Your profile
-
-Open **Your profile** in the sidebar to customize how you appear to everyone in the
-server:
-
-- **Name**, **Color**, **Font**.
-- **Effect** — an animated text style (rainbow colour-wave, wave, pulse).
-- **Avatar** — pick an image; it's downscaled to a small picture and shared with the group.
-
-Your name, color, effect, and avatar show next to your messages and in the Members list.
-Changes apply to all your messages (past and future).
+**Custom emoji** live in the `emoji/` folder. Add one in **⚙ Settings → Custom emoji**:
+type a `code` and upload an image. Then anyone types `:code:` to use it.
 
 ---
 
-## 6. Sharing files
+## 7. Wiki & status
 
-Open the **Files** panel in the sidebar:
-
-- **Share a file** — pick a file; it's stored content-addressed and listed for the group.
-- **Download** — click a file name; it's fetched from a member who has it and saved.
-
-> Files are encrypted in transit and only served to members, but are currently stored
-> **unencrypted at rest** in each member's local cache. Don't share secrets you wouldn't
-> keep in a plain folder until at-rest encryption lands.
+- **Wiki** — collaborative Markdown pages. **Read/Edit** toggle per page; `[[links]]` between
+  pages; a **Linked from** (backlinks) list; drag images/video/audio into the editor to embed
+  them. The **?** button shows in-app formatting help. Same-page edits from two members merge
+  character-by-character.
+- **Status** — a per-server feed of short posts (announcements/activity). Supports the same
+  rich text + media embeds.
 
 ---
 
-## 7. Multiple servers
+## 8. Roles & server settings
+
+Open **⚙ Settings → Server**:
+
+- The **owner** is the server's founder. Owners can **promote/demote admins** (member list);
+  roles show as badges in the sidebar.
+- **What roles do today:** the owner is cryptographically anchored (it's the group's MLS
+  committer), and an admin grant is **signed by the owner**, so a member **cannot forge** an
+  admin role — the badges are trustworthy against tampering.
+- **What roles do NOT do yet (be aware):** roles are *not* a full access-control system.
+  Everyone in a server can read everything in it (they hold the group key) — a role does not
+  restrict what a member can see. Removing/kicking a member isn't in the UI yet. Ownership
+  follows the founder, so if the founder leaves the group ownership passes to the next member.
+  Treat roles as **trusted designation + display**, not a hard permission wall.
+
+---
+
+## 9. Multiple servers
 
 You can be in **several servers at once** — the left **rail** shows them.
 
-- **Found a server** or **Join** adds one to the rail and switches to it.
-- Click an icon to switch; the **+** button opens the found/join form again.
-- A **dot** on an icon means there's new activity in that server.
-- **Leave server** (bottom of the sidebar) removes one.
+- **Found** or **Join** adds one and switches to it; **＋** opens the form again.
+- A **dot** on an icon means new activity. **⚙ Settings → Leave this server** removes one.
 
-Each server is a separate encrypted group with its own channels, members, profiles, and
-files — they share nothing.
+Each server is a separate encrypted group with its own channels, members, profiles, files,
+wiki, and roles — they share nothing.
 
 ---
 
-## 8. What's protected (and what isn't)
+## 10. What's protected (and what isn't)
 
 **Protected:**
 
-- **Message content** is end-to-end encrypted (MLS / RFC 9420) with **forward secrecy**
-  and **post-compromise security** — a compromised key can't decrypt past or (after a key
-  rotation) future messages.
-- **Membership is invite-only.** Invites are **single-use** and **bound to one device**;
-  a stolen invite can't be reused or used from another device.
-- **Relays are zero-knowledge** — they route only ciphertext and can't read content or
-  impersonate anyone (the handshake is authenticated end-to-end).
+- **Message + file content** is end-to-end encrypted (MLS / RFC 9420) with **forward secrecy**
+  and **post-compromise security**. Files are additionally encrypted under a per-group key.
+- **At rest:** everything on disk is sealed under your launch passphrase (Argon2id +
+  XChaCha20-Poly1305). A stolen disk / copied app-data folder is opaque without it.
+- **Membership is invite-only.** Invites are **single-use** and **bound to one device**.
+- **Relays are zero-knowledge** — they route only ciphertext.
+- **Admin roles can't be forged** — grants are owner-signed (§8).
 
 **Not protected / be aware:**
 
-- **Metadata.** Peers and relays you connect to can observe *that* you're communicating
-  (connection timing, IP addresses), even though they can't read *what*.
-- **Nothing persists yet.** The app keeps everything **in memory** — closing it loses your
-  servers, channels, and cached files (you re-found or re-join with an invite). In transit,
-  content is encrypted and served members-only. Disk persistence (and encrypting it at rest)
-  is planned together; until then there's no on-disk cache to protect.
-- **Display names aren't identities.** A name/color/avatar is whatever a member sets;
-  members are cryptographically identified by their **device fingerprint** (shown in the
-  Members list), not their chosen name. Two members could pick the same name.
-- **You trust whoever sent you the invite.** Joining a server means trusting the inviter
-  and the members already in it.
+- **At-rest, not anti-malware.** Encryption protects a stolen disk, not a live compromise —
+  while the app runs, keys are unsealed in memory. Same envelope as Signal-desktop. A
+  keylogger capturing your passphrase, or malware running as you, defeats it.
+- **Metadata.** Peers/relays can observe *that* you communicate (timing, IPs), not *what*.
+- **Display names aren't identities.** Members are cryptographically identified by their
+  **device fingerprint** (shown in the member list), not their chosen name.
+- **Roles aren't access control** (§8) — being a "member" vs "admin" doesn't change what
+  content you can read; everyone in the group can read the group.
+- **You trust whoever invited you** and the members already in the server.
 
 ---
 
-## 9. Limitations & troubleshooting
+## 11. Troubleshooting
 
-- **"Can't reach the page" on another machine** → you sent a *debug* build. Send a
-  **release** build (§1).
-- **Can't connect over a network** → check the founder advertised a reachable address
-  (LAN IP / public IP), the TCP port is forwarded (for the public-IP route), or use a
-  **relay** (§3). Both peers must be running while connecting.
-- **An avatar/file shows as unavailable** → the member who has it may be offline; it
+- **"Can't reach the page" on another machine** → you sent a *debug* build. Send a **release**
+  build (§1).
+- **Forgot your passphrase** → there is no recovery; the local data is unreadable. Start fresh
+  (set a new passphrase; re-found / re-join with an invite).
+- **Can't connect over a network** → check the founder advertised a reachable address, the TCP
+  port is forwarded, or use a **relay** (§5). Both peers must be running while connecting.
+- **An old invite stopped working after a restart** → the server came back on a new port; the
+  owner should share a fresh invite (§5).
+- **An avatar / file / embed shows as unavailable** → the member who has it may be offline; it
   appears once a peer holding it is reachable.
-- **No automatic peer discovery yet** → you still paste an invite to join. Discovering a
-  server with *no* address (rendezvous) is planned.
-- **Local cache grows over time** → fetched files/avatars are kept in memory for the
-  session; size-bounded eviction is planned.
+- **No automatic peer discovery yet** → you still paste an invite to join.
 
 ---
 
 For the project's architecture, security design, and roadmap, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md) and [`HANDOVER.md`](HANDOVER.md).
+[`ARCHITECTURE.md`](ARCHITECTURE.md), [`design-persistence.md`](design-persistence.md), and
+[`HANDOVER.md`](HANDOVER.md).

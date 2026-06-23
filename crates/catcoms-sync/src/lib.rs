@@ -1603,6 +1603,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.group.designated_committer()
     }
 
+    /// Sign a blob with this device's signature key (for owner-signed capability records like
+    /// role grants, Phase 10h). Verify with [`catcoms_crypto::verify_with_public_bytes`].
+    pub fn sign_blob(&self, payload: &[u8]) -> Result<[u8; 64], SyncError> {
+        Ok(self.device.sign(payload)?)
+    }
+
+    /// This device's signature public key bytes (to embed in a signed record + recompute the
+    /// signer's device id on the verifying side).
+    pub fn my_public_key(&self) -> Vec<u8> {
+        self.device.public_key_bytes()
+    }
+
     /// This server's MLS group id (stable across restarts) — used to key the on-disk blob
     /// store directory, so a reloaded server finds its sealed blobs.
     pub fn group_id(&self) -> Vec<u8> {

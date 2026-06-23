@@ -483,7 +483,7 @@ impl ServerGroup {
         self.group.epoch().as_u64()
     }
 
-    /// This group's id (random 32 bytes chosen at creation).
+    /// This group's id (openmls' random id, 16 bytes, chosen at creation).
     pub fn group_id(&self) -> Vec<u8> {
         self.group.group_id().as_slice().to_vec()
     }

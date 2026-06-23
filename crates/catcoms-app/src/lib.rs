@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
-use catcoms_crypto::DeviceId;
+use catcoms_crypto::{verify_with_public_bytes, DeviceId};
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
 use catcoms_storage::{BlobStore, Cid, FileRef};
@@ -305,32 +305,35 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
 // the **owner** is the MLS designated committer (the founder — cryptographically anchored,
 // not stored), and everyone else is a plain member.
 //
-// ENFORCEMENT BOUNDARY — read this before treating roles as a security control:
+// ENFORCEMENT (Phase 10h, hardened):
 //
-// * **Owner** is sound: it is the MLS designated committer (lowest leaf index), which only
-//   that device can act as. It is NOT sticky, however — it follows the lowest *live* leaf, so
-//   if the founder ever leaves/is removed, ownership (and `set_admin` power) silently passes to
-//   the next-lowest member. (Founder removal is not wired into the desktop app today, so this
-//   is latent.) Anchoring the owner to a recorded founder identity is a follow-up.
+// * **Owner** is the MLS designated committer (lowest leaf index) — only that device can act
+//   as committer, so the owner is cryptographically anchored, not a stored/forgeable field.
+//   It is NOT sticky: it follows the lowest *live* leaf, so if the founder ever leaves the
+//   group, ownership (and admin-granting power) passes to the next-lowest member. (Founder
+//   removal is not wired into the desktop app yet, so this is latent.) Owner-signed grants
+//   are bound to the owner's key, so a transfer naturally invalidates the old owner's grants
+//   (a new owner re-grants) — no stale-grant inheritance across owners.
 //
-// * **Admin** is *advisory*, NOT enforced. The roles doc is a plain CRDT map and inbound ops
-//   are accepted on a valid inner signature from *any* current member (no author-is-owner
-//   check). So a **modified client run by any member can write `<any-fp> → admin`** for itself
-//   or others, and every honest client will materialize + DISPLAY those grants as authoritative
-//   (role badges, the owner's settings panel). The `is_owner()` gate on `set_admin` and the
-//   role gate on `mint_invite` therefore only bind *honest* clients + the UI. **Do not treat
-//   the admin badge / settings panel as a trust boundary.** The real fix — owner-signed admin
-//   grants verified against the owner's device key at read time, plus a committer-side
-//   role re-check at join (rank-0 single-committer admission already blunts a forged invite,
-//   since only the committer admits) — is the documented hardening follow-up.
+// * **Admin** grants are **owner-signed capabilities**, verified at read: each entry stores
+//   `owner_pubkey ‖ sig`, where `sig` is the owner's signature over
+//   `domain ‖ group_id ‖ target_fp`. `read_admins` counts a grant only if the signature
+//   verifies AND the signing key's device id is the *current* owner's. So a member CANNOT
+//   forge an admin grant (no owner key) — the role badge / settings panel are now trustworthy
+//   against a malicious member writing the roles doc directly.
 //
-// Role keys are 4-byte device fingerprints (display-grade); `admin_set` filters to current
-// members so a departed grant doesn't resolve, but keying roles by the full device id (to
-// remove the residual collision surface) is part of the same follow-up.
+// Residual / documented: (a) the at-rank-0 single-committer config already anchors *admission*
+// to the committer (a forged invite names a non-committer inviter and is un-redeemable), so
+// invite gating is owner-anchored regardless; admin-can-invite only matters under future
+// multi-committer (then a committer-side role re-check is needed). (b) revocation is by
+// deletion — a malicious member could re-add a *previously valid* owner-signed grant (no
+// nonce/expiry), so revocation isn't replay-proof; a grant epoch/nonce is a follow-up.
+// (c) role keys are 4-byte fingerprints + `admin_set` filters to current members.
 
 /// The reserved document id for the per-server member-roles document.
 const ROLES_DOC: u128 = 0;
-const ROLE_ADMIN: &str = "admin";
+/// Domain separator for an owner's admin-grant signature.
+const ROLE_GRANT_DOMAIN: &[u8] = b"catcoms/role-grant/v1";
 
 /// A member's effective role in a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,21 +361,54 @@ impl Role {
     }
 }
 
-/// Grant or revoke an admin role for a member fingerprint in the roles document.
-fn write_role(doc: &mut AutoCommit, fp: &str, admin: bool) -> Result<(), AutomergeError> {
-    if admin {
-        doc.put(ROOT, fp, ROLE_ADMIN)?;
-    } else {
-        doc.delete(ROOT, fp)?;
+/// The bytes the owner signs to grant `target_fp` admin in this group (domain-separated +
+/// group- and target-bound, so a grant can't be replayed to another group or member). The
+/// `group_id` is **length-prefixed** so `… ‖ group_id ‖ target_fp` can never reparse as a
+/// different `(group_id', target_fp')` pair (no concatenation ambiguity), regardless of id
+/// length.
+fn grant_payload(group_id: &[u8], target_fp: &str) -> Vec<u8> {
+    let mut p = Vec::with_capacity(ROLE_GRANT_DOMAIN.len() + 2 + group_id.len() + target_fp.len());
+    p.extend_from_slice(ROLE_GRANT_DOMAIN);
+    p.extend_from_slice(&(group_id.len() as u16).to_be_bytes());
+    p.extend_from_slice(group_id);
+    p.extend_from_slice(target_fp.as_bytes());
+    p
+}
+
+/// Write (`Some(grant)` = `owner_pubkey ‖ sig`) or revoke (`None`) a fingerprint's admin grant.
+fn write_role(doc: &mut AutoCommit, fp: &str, grant: Option<&[u8]>) -> Result<(), AutomergeError> {
+    match grant {
+        Some(g) => doc.put(ROOT, fp, ScalarValue::Bytes(g.to_vec()))?,
+        None => doc.delete(ROOT, fp)?,
     }
     Ok(())
 }
 
-/// Materialize the set of fingerprints granted admin.
-fn read_admins(doc: &AutoCommit) -> std::collections::HashSet<String> {
+/// Materialize the set of fingerprints with a **valid owner-signed** admin grant: the stored
+/// `owner_pubkey ‖ sig` must verify over `grant_payload(group_id, fp)` AND the signing key's
+/// **full device id** must equal the current owner's. Comparing the full 32-byte device id
+/// (not the 4-byte display fingerprint) keeps a forged-grant attack at a full preimage (2^256)
+/// rather than a feasible 2^32 fingerprint grind. Forged/foreign grants are ignored.
+fn read_admins(
+    doc: &AutoCommit,
+    group_id: &[u8],
+    owner_id: &DeviceId,
+) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for key in doc.keys(ROOT) {
-        if str_field(doc, &ROOT, &key) == ROLE_ADMIN {
+        let grant = bytes_field(doc, &ROOT, &key);
+        if grant.len() != 96 {
+            continue; // 32-byte pubkey + 64-byte signature
+        }
+        let (pubkey, sig_bytes) = grant.split_at(32);
+        let Ok(sig) = <[u8; 64]>::try_from(sig_bytes) else {
+            continue;
+        };
+        // The grant must be signed by the *current* owner's device key (full id, not the fp).
+        if DeviceId::from_public_key_bytes(pubkey) != *owner_id {
+            continue;
+        }
+        if verify_with_public_bytes(pubkey, &grant_payload(group_id, &key), &sig) {
             out.insert(key);
         }
     }
@@ -923,18 +959,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(fingerprint)
     }
 
-    /// The set of fingerprints currently granted admin (from the roles doc), **filtered to
+    /// The set of fingerprints with a valid **owner-signed** admin grant, **filtered to
     /// current members** so a departed member's stale grant (the doc is never GC'd) does not
-    /// resolve to a live admin.
+    /// resolve to a live admin. A grant not signed by the current owner is ignored.
     fn admin_set(&self) -> std::collections::HashSet<String> {
+        let Some(owner_id) = self.sync.designated_committer_id() else {
+            return std::collections::HashSet::new();
+        };
         let members: std::collections::HashSet<String> = self
             .members_view()
             .into_iter()
             .map(|m| m.fingerprint)
             .collect();
+        let group_id = self.sync.group_id();
         self.sync
             .doc(DocType::MemberRoles, ROLES_DOC)
-            .map(|d| read_admins(d.doc()))
+            .map(|d| read_admins(d.doc(), &group_id, &owner_id))
             .unwrap_or_default()
             .into_iter()
             .filter(|fp| members.contains(fp))
@@ -976,15 +1016,27 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .collect()
     }
 
-    /// Grant or revoke admin for a member fingerprint. **Owner only** — errors otherwise.
+    /// Grant or revoke admin for a member fingerprint. **Owner only** — errors otherwise. A
+    /// grant is an owner-signed capability (`owner_pubkey ‖ sig` over `group ‖ target`), so
+    /// any member can verify it and a non-owner cannot forge one.
     pub async fn set_admin(&mut self, fp: &str, admin: bool) -> Result<(), AppError> {
         if !self.is_owner() {
             return Err(AppError::Invalid("only the owner can change roles".into()));
         }
         let fp = fp.to_string();
+        let grant = if admin {
+            let mut g = self.sync.my_public_key();
+            let sig = self
+                .sync
+                .sign_blob(&grant_payload(&self.sync.group_id(), &fp))?;
+            g.extend_from_slice(&sig);
+            Some(g)
+        } else {
+            None
+        };
         self.sync
             .post(DocType::MemberRoles, ROLES_DOC, |d| {
-                write_role(d, &fp, admin)
+                write_role(d, &fp, grant.as_deref())
             })
             .await?;
         Ok(())
@@ -1365,6 +1417,55 @@ mod tests {
         // admin_set is filtered to current members, so a stale/bogus fp can't become admin.
         alice.set_admin("deadbeef", true).await.unwrap();
         assert_eq!(alice.role_of("deadbeef"), Role::Member);
+    }
+
+    #[test]
+    fn read_admins_only_counts_valid_owner_signed_grants() {
+        use automerge::transaction::Transactable;
+        let owner = MlsDevice::generate().unwrap();
+        let other = MlsDevice::generate().unwrap();
+        let gid = b"group-xyz".to_vec();
+        let owner_id = owner.device_id();
+
+        let mk_grant = |dev: &MlsDevice, target: &str| {
+            let mut g = dev.public_key_bytes();
+            g.extend_from_slice(&dev.sign(&grant_payload(&gid, target)).unwrap());
+            g
+        };
+
+        let mut doc = AutoCommit::new();
+        // A valid owner-signed grant.
+        doc.put(
+            ROOT,
+            "aaaa1111",
+            ScalarValue::Bytes(mk_grant(&owner, "aaaa1111")),
+        )
+        .unwrap();
+        // Forged: signed by a non-owner device.
+        doc.put(
+            ROOT,
+            "bbbb2222",
+            ScalarValue::Bytes(mk_grant(&other, "bbbb2222")),
+        )
+        .unwrap();
+        // Owner-signed but bound to a DIFFERENT target (a replay onto the wrong key).
+        doc.put(
+            ROOT,
+            "cccc3333",
+            ScalarValue::Bytes(mk_grant(&owner, "wrongkey")),
+        )
+        .unwrap();
+
+        let admins = read_admins(&doc, &gid, &owner_id);
+        assert!(admins.contains("aaaa1111"), "owner-signed grant counts");
+        assert!(
+            !admins.contains("bbbb2222"),
+            "a non-owner grant is rejected (cannot forge admin)"
+        );
+        assert!(
+            !admins.contains("cccc3333"),
+            "a grant bound to a different target is rejected"
+        );
     }
 
     #[test]
