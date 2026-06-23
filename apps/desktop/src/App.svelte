@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import { renderMessage } from "./render";
+  import { renderMessage, renderWiki } from "./render";
 
   type Msg = { author: string; text: string; ts: number };
   type Channel = { id: string; name: string };
@@ -91,10 +91,24 @@
   type Tab = "chat" | "files" | "status" | "wiki" | "profile";
   let view = $state<Tab>("chat");
   let wikiPages = $state<string[]>([]);
+  let wikiMap = $state<Record<string, string>>({}); // name -> body (backlinks + link existence)
   let activeWikiPage = $state("");
   let wikiBody = $state("");
   let newWikiPage = $state("");
   let wikiDirty = $state(false); // unsaved edits in the open page (avoid clobbering on live updates)
+  let wikiEdit = $state(false); // edit (textarea) vs read (rendered) mode
+  let wikiEl = $state<HTMLDivElement | undefined>(undefined); // rendered-page container (media resolve)
+  let showWikiHelp = $state(false);
+
+  // Pages whose body links to the open page ([[Open Page]]).
+  let backlinks = $derived.by(() => {
+    if (!activeWikiPage) return [] as string[];
+    const needle = `[[${activeWikiPage}]]`.toLowerCase();
+    return Object.entries(wikiMap)
+      .filter(([name, body]) => name !== activeWikiPage && (body ?? "").toLowerCase().includes(needle))
+      .map(([name]) => name)
+      .sort();
+  });
 
   // Profile editor.
   let pName = $state("");
@@ -145,6 +159,25 @@
     resolveMedia(messagesEl);
     resolveMedia(statusEl);
   });
+
+  // Resolve embeds + mark missing [[links]] in the rendered wiki page (read mode only).
+  $effect(() => {
+    void wikiBody;
+    void wikiPages;
+    void wikiEdit;
+    void files;
+    if (!wikiEdit) {
+      resolveMedia(wikiEl);
+      resolveWikiLinks(wikiEl);
+    }
+  });
+
+  function resolveWikiLinks(container: HTMLElement | undefined) {
+    if (!container) return;
+    for (const a of Array.from(container.querySelectorAll<HTMLElement>("[data-wikilink]"))) {
+      a.classList.toggle("missing", !wikiPages.includes(a.getAttribute("data-wikilink") ?? ""));
+    }
+  }
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
@@ -215,6 +248,7 @@
     activeWikiPage = "";
     wikiBody = "";
     wikiDirty = false;
+    wikiEdit = false;
     folder = "";
     newFolder = "";
     await Promise.all([
@@ -358,6 +392,7 @@
     if (activeServerId === null) return;
     try {
       wikiPages = await invoke<string[]>("get_wiki_pages", { server: activeServerId });
+      wikiMap = await invoke<Record<string, string>>("get_wiki_map", { server: activeServerId });
       // Reload the open page only if it still exists and the user isn't mid-edit.
       if (activeWikiPage && !wikiDirty && wikiPages.includes(activeWikiPage)) {
         wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name: activeWikiPage });
@@ -372,6 +407,9 @@
       wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name });
       activeWikiPage = name;
       wikiDirty = false;
+      view = "wiki";
+      // Existing pages open in read mode; a not-yet-created page (e.g. a [[link]] target) in edit.
+      wikiEdit = !wikiPages.includes(name);
     } catch (e) {
       error = String(e);
     }
@@ -386,9 +424,40 @@
         await refreshWiki();
       }
       await openWikiPage(name);
+      wikiEdit = true;
     } catch (e) {
       error = String(e);
     }
+  }
+
+  // Embed media into the open wiki page: upload under wiki/<page>/, append a marker.
+  async function wikiEmbed(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
+    uploading = true;
+    try {
+      for (const file of Array.from(fileList)) {
+        const cid = await invoke<string>("add_file", {
+          server: activeServerId,
+          name: file.name,
+          mime: file.type || "application/octet-stream",
+          path: `wiki/${activeWikiPage}`,
+          data: await readBase64(file),
+        });
+        const alt = file.name.replace(/[[\]]/g, " ");
+        wikiBody = wikiBody ? `${wikiBody}\n\n![${alt}](cid:${cid})` : `![${alt}](cid:${cid})`;
+        wikiDirty = true;
+      }
+      await refreshFiles();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      uploading = false;
+    }
+  }
+  function onWikiDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    wikiEmbed(e.dataTransfer?.files ?? null);
   }
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
@@ -944,6 +1013,10 @@
         {:else if view === "wiki"}
           <div class="wiki">
             <div class="wiki-pages">
+              <div class="wiki-pages-head">
+                <span class="muted">Pages</span>
+                <button class="wiki-help-btn" title="Formatting help" onclick={() => (showWikiHelp = true)}>?</button>
+              </div>
               {#each wikiPages as p}
                 <button class:active={p === activeWikiPage} onclick={() => openWikiPage(p)}>{p}</button>
               {:else}
@@ -955,13 +1028,49 @@
             </div>
             {#if activeWikiPage}
               <div class="wiki-editor">
-                <h2>{activeWikiPage} {#if wikiDirty}<span class="muted">· unsaved</span>{/if}</h2>
-                <textarea bind:value={wikiBody} oninput={() => (wikiDirty = true)} rows="16"
-                  placeholder="Write this page…"></textarea>
-                <button onclick={saveWikiPage} disabled={!wikiDirty}>Save page</button>
+                <div class="wiki-editor-head">
+                  <h2>{activeWikiPage} {#if wikiDirty}<span class="muted">· unsaved</span>{/if}</h2>
+                  <div class="wiki-mode">
+                    <button class:active={!wikiEdit} onclick={() => (wikiEdit = false)}>Read</button>
+                    <button class:active={wikiEdit} onclick={() => (wikiEdit = true)}>Edit</button>
+                  </div>
+                </div>
+                {#if wikiEdit}
+                  <!-- svelte-ignore a11y_no_static_element_interactions -->
+                  <div
+                    class="wiki-edit"
+                    class:drag-over={dragOver}
+                    ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+                    ondragleave={() => (dragOver = false)}
+                    ondrop={onWikiDrop}
+                  >
+                    <textarea bind:value={wikiBody} oninput={() => (wikiDirty = true)} rows="18"
+                      placeholder="Markdown. [[Page]] links to another page; drop or attach a file to embed it."></textarea>
+                    <div class="wiki-edit-actions">
+                      <label class="attach" title="Attach image / video / audio">
+                        📎
+                        <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
+                          onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                      </label>
+                      <button onclick={saveWikiPage} disabled={!wikiDirty}>Save page</button>
+                    </div>
+                  </div>
+                {:else}
+                  <div class="wiki-render" bind:this={wikiEl} use:richClicks>{@html renderWiki(wikiBody)}</div>
+                  {#if backlinks.length}
+                    <div class="wiki-backlinks">
+                      <h4>Linked from</h4>
+                      <ul>
+                        {#each backlinks as b}
+                          <li><button class="wikilink" onclick={() => openWikiPage(b)}>{b}</button></li>
+                        {/each}
+                      </ul>
+                    </div>
+                  {/if}
+                {/if}
               </div>
             {:else}
-              <p class="muted wiki-empty">Select a page on the left, or create one.</p>
+              <p class="muted wiki-empty">Select a page on the left, or create one. Use <code>[[Page Name]]</code> to link pages.</p>
             {/if}
           </div>
         {:else if view === "profile"}
@@ -1062,6 +1171,34 @@
                 </button>
               </section>
             {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showWikiHelp}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showWikiHelp = false; }}>
+        <div class="overlay-card">
+          <header class="overlay-head">
+            <h2>Wiki formatting</h2>
+            <button class="ghost" onclick={() => (showWikiHelp = false)}>✕</button>
+          </header>
+          <div class="overlay-body wiki-help">
+            <p>Wiki pages are written in <strong>Markdown</strong> and rendered in Read mode.</p>
+            <h3>Link to another page</h3>
+            <p>Wrap a page name in double brackets: <code>[[Getting Started]]</code>. Click a link to open it; a
+              <span class="wikilink missing">red link</span> means the page doesn't exist yet — click it to create it.</p>
+            <h3>Embed an image / video / audio</h3>
+            <p>In Edit mode, <strong>drag a file onto the editor</strong> or use the 📎 button. It's stored in the
+              fileshare under <code>wiki/&lt;page&gt;/</code> and shown inline.</p>
+            <h3>Common Markdown</h3>
+            <ul>
+              <li><code>**bold**</code>, <code>*italic*</code>, <code>`code`</code></li>
+              <li><code># Heading</code>, <code>## Subheading</code></li>
+              <li><code>- bullet</code> lists, <code>1. numbered</code> lists</li>
+              <li><code>&gt; quote</code>, <code>---</code> divider, <code>[text](https://link)</code></li>
+            </ul>
           </div>
         </div>
       </div>

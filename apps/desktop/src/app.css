@@ -937,3 +937,168 @@ img.emoji {
 .embed-chip:hover {
   background: #2a2d33;
 }
+
+/* --- Phase 10d: wiki overhaul --- */
+
+.wiki-pages-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.wiki-help-btn {
+  background: transparent;
+  border: 1px solid #3a3d44;
+  color: #9aa0aa;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.wiki-editor {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 0;
+}
+
+.wiki-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.wiki-mode {
+  display: flex;
+  gap: 0.2rem;
+  flex-shrink: 0;
+}
+
+.wiki-mode button {
+  background: transparent;
+  border: 1px solid #3a3d44;
+  color: #cdd2da;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.82rem;
+}
+
+.wiki-mode button.active {
+  background: #34527e;
+  color: white;
+  border-color: #34527e;
+}
+
+.wiki-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+  min-height: 0;
+}
+
+.wiki-edit.drag-over {
+  outline: 2px dashed #4f8cff;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.wiki-edit textarea {
+  flex: 1;
+  min-height: 0;
+}
+
+.wiki-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.wiki-render {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid #3a3d44;
+  border-radius: 8px;
+  background: #1f2126;
+  padding: 0.75rem 1rem;
+  line-height: 1.5;
+}
+
+.wiki-render h1,
+.wiki-render h2,
+.wiki-render h3 {
+  margin: 0.6rem 0 0.3rem;
+}
+
+.wiki-render img,
+.wiki-render video {
+  max-width: 100%;
+}
+
+.wiki-render blockquote {
+  border-left: 3px solid #3a3d44;
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  color: #b5bcc7;
+}
+
+.wiki-render table {
+  border-collapse: collapse;
+}
+
+.wiki-render th,
+.wiki-render td {
+  border: 1px solid #3a3d44;
+  padding: 0.2rem 0.5rem;
+}
+
+.wikilink.missing {
+  color: #ff7b7b;
+  border-bottom-color: #ff7b7b;
+}
+
+.wiki-backlinks {
+  border-top: 1px solid #2a2d33;
+  padding-top: 0.5rem;
+}
+
+.wiki-backlinks h4 {
+  margin: 0 0 0.3rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9aa0aa;
+}
+
+.wiki-backlinks ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.wiki-backlinks .wikilink {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.wiki-help h3 {
+  margin: 0.8rem 0 0.3rem;
+  font-size: 0.9rem;
+}
+
+.wiki-help code {
+  background: #15171a;
+  border: 1px solid #2a2d33;
+  border-radius: 4px;
+  padding: 0 0.3em;
+}

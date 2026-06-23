@@ -85,6 +85,10 @@ pub enum AppCommand {
     CatchUpStatus { peer: PeerId },
     /// Query the wiki page names (sorted).
     WikiPages { reply: oneshot::Sender<Vec<String>> },
+    /// Query the whole wiki as a name -> body map (for backlinks / link existence).
+    WikiMap {
+        reply: oneshot::Sender<HashMap<String, String>>,
+    },
     /// Read a wiki page's body.
     ReadWikiPage {
         name: String,
@@ -344,6 +348,20 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Fetch the whole wiki as a name -> body map.
+    pub async fn wiki_map(&self) -> HashMap<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiMap { reply })
+            .await
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Read a wiki page's body.
     pub async fn read_wiki_page(&self, name: impl Into<String>) -> String {
         let (reply, rx) = oneshot::channel();
@@ -542,6 +560,9 @@ where
                     }
                     Some(AppCommand::WikiPages { reply }) => {
                         let _ = reply.send(server.wiki_pages());
+                    }
+                    Some(AppCommand::WikiMap { reply }) => {
+                        let _ = reply.send(server.wiki_map());
                     }
                     Some(AppCommand::ReadWikiPage { name, reply }) => {
                         let _ = reply.send(server.read_wiki_page(&name));

@@ -660,6 +660,16 @@ async fn get_wiki_pages(state: State<'_, AppState>, server: u64) -> Result<Vec<S
     Ok(actor.wiki_pages().await)
 }
 
+/// The whole wiki as a name -> body map (for backlinks + link existence).
+#[tauri::command]
+async fn get_wiki_map(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.wiki_map().await)
+}
+
 /// Read a wiki page's body.
 #[tauri::command]
 async fn get_wiki_page(
@@ -854,6 +864,7 @@ pub fn run() {
             post_status,
             get_statuses,
             get_wiki_pages,
+            get_wiki_map,
             get_wiki_page,
             save_wiki_page,
             send_message,
