@@ -21,7 +21,7 @@ use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
-use catcoms_storage::{BlobStore, Cid, FileRef};
+use catcoms_storage::{BlobStore, Cid, FileManifest};
 pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{
     fingerprint, read_published_roster, request_join, ChannelSync, SyncError, ROLES_DOC,
@@ -374,14 +374,19 @@ const F_PATH: &str = "path";
 // members with the group file-wrap key can open it. Size/mime/cid are read back from here.
 const F_REF: &str = "ref";
 
-/// Maximum file size accepted by [`Server::add_file`]. Bounded by what the blob-fetch
-/// response cap supports in one shot; larger files need chunked transfer (a fileshare
-/// follow-up).
-pub const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum file size accepted by [`Server::add_file`]. Chunked transfer splits a file into
+/// [`CHUNK_BYTES`] pieces, so this is a whole-**file** cap (256 MiB), no longer the per-blob
+/// transport limit. (GB-scale + background/streaming download is a follow-up.)
+pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 
-/// One shared file as the UI sees it. `cid` is the **ciphertext** content address (raw bytes)
-/// used to download the blob; `author` is the uploader's device fingerprint. The file's bytes
-/// are end-to-end encrypted under the group file-wrap key (Phase 9h).
+/// Plaintext chunk size for large-file transfer. Chosen well under the blob-fetch response cap
+/// (`MAX_BLOB_RESPONSE` = 16 MiB) so each *sealed* chunk (≈ chunk + ~40 B) fits one response.
+const CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+/// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
+/// bytes) — the file's stable identity / download+embed handle (a chunked file has no single
+/// ciphertext blob); `author` is the uploader's device fingerprint. The file's bytes are
+/// end-to-end encrypted under the group file-wrap key (Phase 9h), chunk by chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
     /// The file's display name.
@@ -441,13 +446,15 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
         for i in 0..doc.length(&list) {
             if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&list, i) {
                 let ref_bytes = bytes_field(doc, &entry, F_REF);
-                if let Ok(fref) = FileRef::decode(&ref_bytes) {
+                if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
                     out.push(FileEntry {
                         name: str_field(doc, &entry, F_NAME),
                         author: str_field(doc, &entry, F_AUTHOR),
-                        size: fref.size,
-                        mime: fref.mime.clone(),
-                        cid: fref.ciphertext_cid.as_bytes().to_vec(),
+                        size: manifest.total_size,
+                        mime: manifest.mime.clone(),
+                        // The file's identity is the whole-file PLAINTEXT cid (a chunked file has
+                        // no single ciphertext blob); this is the download/embed handle.
+                        cid: manifest.plaintext_cid.as_bytes().to_vec(),
                         path: str_field(doc, &entry, F_PATH),
                         file_ref: ref_bytes,
                     });
@@ -471,8 +478,8 @@ fn delete_file_entry(doc: &mut AutoCommit, cid: &[u8]) -> Result<(), AutomergeEr
     for i in (0..doc.length(&list)).rev() {
         if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
             let ref_bytes = bytes_field(doc, &entry, F_REF);
-            if let Ok(fref) = FileRef::decode(&ref_bytes) {
-                if fref.ciphertext_cid.as_bytes() == cid {
+            if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
+                if manifest.plaintext_cid.as_bytes() == cid {
                     doc.delete(&list, i)?;
                 }
             }
@@ -752,19 +759,39 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "no group file key yet (still joining?)".into(),
             ));
         }
-        // 9h: seal the file under the group file-wrap key; store + share the ciphertext, keyed
-        // by its ciphertext CID. The (encrypted) index carries the FileRef needed to decrypt.
+        // Chunked transfer: split into CHUNK_BYTES pieces, seal each under the group file-wrap key
+        // (9h — a fresh per-chunk content key) and store the ciphertext blob, then describe the
+        // file by a manifest (the whole-file plaintext cid + the ordered chunk FileRefs). The
+        // (encrypted) index carries the manifest; the blob fetch caps only per-chunk size. The
+        // file's identity is its whole-file plaintext cid.
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
-        let (file_ref, ciphertext) = self.sync.seal_file(bytes, mime)?;
-        let cid = self.sync.put_blob(&ciphertext)?;
-        let ref_bytes = file_ref.encode();
+        let plaintext_cid = Cid::of(bytes);
+        let mut chunks = Vec::new();
+        for chunk in bytes.chunks(CHUNK_BYTES) {
+            let (file_ref, ciphertext) = self.sync.seal_file(chunk, mime)?;
+            self.sync.put_blob(&ciphertext)?;
+            chunks.push(file_ref);
+        }
+        if chunks.is_empty() {
+            // An empty file is still one (empty) chunk, so the manifest always has >= 1.
+            let (file_ref, ciphertext) = self.sync.seal_file(&[], mime)?;
+            self.sync.put_blob(&ciphertext)?;
+            chunks.push(file_ref);
+        }
+        let manifest = FileManifest {
+            plaintext_cid,
+            total_size: bytes.len() as u64,
+            mime: mime.to_string(),
+            chunks,
+        };
+        let ref_bytes = manifest.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
                 write_file_entry(d, name, &author, &folder, &ref_bytes)
             })
             .await?;
-        Ok(cid)
+        Ok(plaintext_cid)
     }
 
     /// The shared files listed in the index (metadata only; bytes are fetched on download).
@@ -775,14 +802,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .unwrap_or_default()
     }
 
-    /// Download + decrypt a shared file by its ciphertext content address — fetching the
-    /// ciphertext blob from the best known peer if not already held, then opening it under the
-    /// group file-wrap key (Phase 9h). `None` if the blob could not be obtained or no index
-    /// entry matches the CID.
-    /// Download + decrypt a shared file by its ciphertext content address. Returns a *precise*
-    /// error so the four distinct failures are no longer conflated into "no peer has it":
-    /// the file isn't listed · the ref is corrupt · we hold the sealed blob but can't read it ·
-    /// no peer has it yet · it couldn't be decrypted.
+    /// Download + decrypt a shared file by its whole-file plaintext content address. Fetches each
+    /// chunk's ciphertext blob from the best known peer if not already held, opens it under the
+    /// group file-wrap key (9h), reassembles in order, and verifies the whole-file plaintext cid.
+    /// Returns a *precise* error (naming the failing chunk) so the distinct failures aren't
+    /// conflated: the file isn't listed · the ref is corrupt · a chunk is held but unreadable ·
+    /// no peer has a chunk yet · a chunk couldn't be decrypted · the reassembly failed its check.
     pub async fn download_file(&mut self, cid: &Cid) -> Result<Vec<u8>, AppError> {
         let Some(entry) = self
             .files()
@@ -793,34 +818,66 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "no such file in this server's index".into(),
             ));
         };
-        let file_ref = FileRef::decode(&entry.file_ref)
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
             .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
-        // Only reach out to a peer if we don't already hold the blob ourselves.
-        if !self.sync.has_blob(cid) {
-            self.sync.request_blob_best(cid).await?;
+        // `total_size` is attacker-controlled (a member authors the manifest); reject an absurd
+        // value BEFORE pre-allocating, so a hostile listing can't OOM the downloader's actor.
+        if manifest.total_size > MAX_FILE_BYTES as u64 {
+            return Err(AppError::Invalid(
+                "file reference declares an implausible size".into(),
+            ));
         }
-        let Some(ciphertext) = self.sync.get_blob(cid) else {
-            // get_blob is None either because we genuinely don't hold it, or because we hold the
-            // sealed file but couldn't unseal it — distinguish them so the error is truthful.
-            return Err(if self.sync.has_blob(cid) {
-                AppError::Invalid(
-                    "the file is stored on this device but could not be read (it may be corrupted)"
-                        .into(),
-                )
-            } else {
-                AppError::Invalid("file not available yet — no connected peer has it".into())
-            });
-        };
-        self.sync
-            .open_file(&ciphertext, &file_ref)
-            .map_err(|e| AppError::Invalid(format!("the file could not be decrypted: {e}")))
+        let mut out = Vec::with_capacity(manifest.total_size as usize);
+        for (i, chunk_ref) in manifest.chunks.iter().enumerate() {
+            let ccid = chunk_ref.ciphertext_cid;
+            // Only reach out to a peer if we don't already hold this chunk ourselves.
+            if !self.sync.has_blob(&ccid) {
+                self.sync.request_blob_best(&ccid).await?;
+            }
+            let Some(ciphertext) = self.sync.get_blob(&ccid) else {
+                return Err(if self.sync.has_blob(&ccid) {
+                    AppError::Invalid(format!(
+                        "chunk {i} is stored on this device but could not be read (it may be corrupted)"
+                    ))
+                } else {
+                    AppError::Invalid(format!(
+                        "file not available yet — no connected peer has chunk {i}"
+                    ))
+                });
+            };
+            let chunk = self
+                .sync
+                .open_file(&ciphertext, chunk_ref)
+                .map_err(|e| AppError::Invalid(format!("chunk {i} could not be decrypted: {e}")))?;
+            out.extend_from_slice(&chunk);
+        }
+        // End-to-end integrity: the reassembled plaintext must hash to the manifest's identity.
+        if Cid::of(&out) != manifest.plaintext_cid {
+            return Err(AppError::Invalid(
+                "the reassembled file failed its integrity check".into(),
+            ));
+        }
+        Ok(out)
     }
 
-    /// Whether this device already holds the file's ciphertext blob locally — i.e. the file can
-    /// be opened/previewed without a network fetch. (A listed file whose blob isn't held yet is
-    /// still downloadable from a peer that has it.)
+    /// Whether this device already holds **all** of the file's chunk blobs locally — i.e. it can
+    /// be opened/previewed without a network fetch. (A listed file whose chunks aren't all held
+    /// yet is still downloadable from peers that have them.)
     pub fn file_available(&self, cid: &Cid) -> bool {
-        self.sync.has_blob(cid)
+        let Some(entry) = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
+        else {
+            return false;
+        };
+        match FileManifest::decode_or_legacy(&entry.file_ref) {
+            Ok(manifest) => manifest
+                .chunks
+                .iter()
+                .all(|c| self.sync.has_blob(&c.ciphertext_cid)),
+            Err(_) => false,
+        }
     }
 
     /// Remove a file from the shared index. **Owner or admin only** at this product layer —
@@ -1785,5 +1842,57 @@ mod tests {
                 .await,
             Err(AppError::Invalid(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_large_file_is_chunked_and_reassembles() {
+        // A file larger than one chunk is split into multiple sealed chunks + a manifest, and
+        // download reassembles it byte-for-byte. Use a position-dependent pattern so a mis-ordered
+        // or dropped chunk would change the result.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let n = CHUNK_BYTES + 1234;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        let cid = alice
+            .add_file("big.bin", "application/octet-stream", "", &data)
+            .await
+            .unwrap();
+
+        // The manifest split it into more than one chunk, each under the per-blob cap.
+        let entry = alice
+            .files()
+            .into_iter()
+            .find(|e| e.cid == cid.as_bytes().to_vec())
+            .expect("the file is listed");
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        assert!(
+            manifest.chunks.len() >= 2,
+            "a larger-than-chunk file is split into multiple chunks"
+        );
+        assert_eq!(manifest.total_size, n as u64);
+        assert_eq!(
+            cid,
+            Cid::of(&data),
+            "the identity is the whole-file plaintext cid"
+        );
+
+        // It reassembles to the exact original (the uploader holds every chunk locally).
+        assert!(alice.file_available(&cid), "all chunks are held locally");
+        let got = alice.download_file(&cid).await.unwrap();
+        assert_eq!(got, data, "the chunked file reassembles byte-for-byte");
+    }
+
+    #[tokio::test]
+    async fn an_empty_file_round_trips() {
+        // An empty file is one empty chunk; it still uploads, lists, and downloads back to empty.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let cid = alice
+            .add_file("empty.bin", "application/octet-stream", "", b"")
+            .await
+            .unwrap();
+        assert_eq!(cid, Cid::of(b""));
+        let got = alice.download_file(&cid).await.unwrap();
+        assert!(got.is_empty(), "an empty file downloads back to empty");
     }
 }

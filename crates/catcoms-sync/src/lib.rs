@@ -82,13 +82,18 @@ const KIND_ADMIT_RESULT: u8 = 6;
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
 const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
-/// Minimum interval (ms, injected clock) between blob responses *served* to the same
-/// requesting **member** — a rate limit, since a 32-byte CID request can elicit a
-/// response up to `MAX_BLOB_RESPONSE` (the strongest amplifier in the system) plus a
-/// per-request signature. Mirrors `MIN_PEX_INTERVAL_MS`. (A bytes-budget / chunked
-/// anti-entropy for large blobs is deferred to the fileshare slice — see
-/// `MAX_CATCHUP_RESPONSE`.)
-const MIN_BLOB_INTERVAL_MS: u64 = 200;
+/// Per-requesting-**member** blob-serve budget over a fixed window — the anti-amplification rate
+/// limit (a 32-byte CID can elicit up to `MAX_BLOB_RESPONSE` + a signature). A **bytes** budget
+/// (not a per-blob interval) so a single legitimate download can pull many chunks back-to-back
+/// from one holder — required for chunked large-file transfer, where a throttled-to-empty serve
+/// would be misread as "not held" and break the fetch. Bounds a flooder to `BLOB_BUDGET_BYTES`
+/// per window per requester per holder (≈96 MiB/s — comparable to the old worst case of one
+/// 16 MiB blob / 200 ms ≈ 80 MiB/s). Only a HIT (a served blob) is charged; misses are free.
+/// This is a FIXED window (not sliding / token-bucket), so a requester can draw a full budget at
+/// the tail of one window and another at the head of the next — a transient ≤2× burst across a
+/// boundary. That doesn't change the asymptotic bound and the absolute burst is modest.
+const BLOB_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
+const BLOB_BUDGET_WINDOW_MS: u64 = 1_000;
 /// Cap on peer records returned in one PEX response / retained locally.
 const MAX_PEX_ENTRIES: usize = 64;
 /// Cap on dialable addresses carried per peer record.
@@ -1598,9 +1603,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// transport connection, so multiple connections cannot multiply the rate).
     /// Bounded by `max_known_peers`.
     pex_served_at: HashMap<DeviceId, u64>,
-    /// Per-requesting-**device** timestamp of the last blob response served, for the blob
-    /// rate limit (same keying + bounding as `pex_served_at`).
-    blob_served_at: HashMap<DeviceId, u64>,
+    /// Per-requesting-**device** blob-serve budget accounting `(window_start_ms, bytes_in_window)`
+    /// for the bytes-budget rate limit (same keying + bounding as `pex_served_at`).
+    blob_budget: HashMap<DeviceId, (u64, u64)>,
     /// Content-addressed blob store for binaries fetched/served over the mesh (8l) —
     /// avatars and, later, fileshare. An in-memory store by default; a persistent store
     /// can be injected later. Boxed (not a generic param) so it does not ripple through
@@ -1660,7 +1665,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             roster_gen: 0,
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
-            blob_served_at: HashMap::new(),
+            blob_budget: HashMap::new(),
             blobs: Box::new(MemoryBlobStore::new()),
             stats: SyncStats::default(),
         };
@@ -3924,23 +3929,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Record that we served a blob to requester `device` at `now`, for the rate limit;
-    /// bound the map by evicting the stalest entry (mirrors `note_pex_served`).
-    fn note_blob_served(&mut self, device: DeviceId, now: u64) {
-        self.blob_served_at.insert(device, now);
-        while self.blob_served_at.len() > self.config.max_known_peers {
+    /// Charge `bytes` to `device`'s blob-serve budget window (resetting the window if it elapsed),
+    /// returning whether the charge fit (the serve is allowed). A serve that would exceed
+    /// `BLOB_BUDGET_BYTES` in the current window is refused (served empty, rate-limited). Bounds the
+    /// map by evicting the stalest-window entry (mirrors `note_pex_served`).
+    fn charge_blob_budget(&mut self, device: DeviceId, now: u64, bytes: u64) -> bool {
+        let entry = self.blob_budget.entry(device).or_insert((now, 0));
+        if now.saturating_sub(entry.0) >= BLOB_BUDGET_WINDOW_MS {
+            *entry = (now, 0); // the window elapsed — start a fresh one
+        }
+        if entry.1.saturating_add(bytes) > BLOB_BUDGET_BYTES {
+            return false; // would exceed the window budget
+        }
+        entry.1 = entry.1.saturating_add(bytes);
+        while self.blob_budget.len() > self.config.max_known_peers {
             let victim = self
-                .blob_served_at
+                .blob_budget
                 .iter()
-                .min_by_key(|(_, &t)| t)
+                .filter(|(p, _)| **p != device)
+                .min_by_key(|(_, (start, _))| *start)
                 .map(|(p, _)| *p);
             match victim {
                 Some(v) => {
-                    self.blob_served_at.remove(&v);
+                    self.blob_budget.remove(&v);
                 }
                 None => break,
             }
         }
+        true
     }
 
     /// Serve a content-addressed blob — only to a proven current member, rate-limited per
@@ -3950,12 +3966,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_BLOB_FETCH, data)?;
         let requester = DeviceId::from_public_key_bytes(&req_pubkey);
         let now = self.clock.now_ms();
-        if let Some(&last) = self.blob_served_at.get(&requester) {
-            if now.saturating_sub(last) < MIN_BLOB_INTERVAL_MS {
-                tracing::trace!("blob fetch rate-limited; serving empty");
-                return Some(Vec::new());
-            }
-        }
         let cid = decode_blob_fetch_req(&inner).ok()?;
         let blob = self.blobs.get(&cid).ok()??;
         if blob.len() > MAX_BLOB_RESPONSE {
@@ -3964,6 +3974,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 "held blob exceeds response budget; not served"
             );
             return None;
+        }
+        // Bytes-budget rate limit, charged only on a HIT (a miss is cheap + free). A serve that
+        // would exceed the window budget is refused with an empty reply.
+        if !self.charge_blob_budget(requester, now, blob.len() as u64) {
+            tracing::trace!("blob fetch over byte budget; serving empty");
+            return Some(Vec::new());
         }
         let transcript = blob_fetch_resp_transcript(
             &self.group.group_id(),
@@ -3974,9 +3990,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &blob,
         );
         let signature = self.device.sign(&transcript).ok()?;
-        // Only the expensive serve path (a held blob, read + signed) counts toward the
-        // rate limit; a miss is cheap and not throttled.
-        self.note_blob_served(requester, now);
         tracing::debug!(bytes = blob.len(), "serving blob");
         Some(encode_signed_commit_resp(
             &self.device.public_key_bytes(),
@@ -5807,27 +5820,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_serving_is_rate_limited_per_requester() {
-        // The injected clock is fixed in the test harness, so two serves land within
-        // MIN_BLOB_INTERVAL_MS — the second is throttled to an empty reply.
+    async fn rapid_blob_fetches_serve_under_the_byte_budget() {
+        // The bytes-budget (not a per-blob interval) lets a requester pull many small blobs
+        // back-to-back within the same window — the enabler for chunked multi-blob fetch. (The old
+        // per-blob 200ms throttle would have empty-replied the second, breaking chunked transfer.)
         let (_hub, members, _ids) = build_members(2).await;
         let mut it = members.into_iter();
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         let alice_peer = alice.local_peer();
 
-        let cid1 = alice.put_blob(b"blob one").unwrap();
-        let cid2 = alice.put_blob(b"blob two").unwrap();
+        let cid1 = alice.put_blob(b"chunk one").unwrap();
+        let cid2 = alice.put_blob(b"chunk two").unwrap();
 
         let (f1, _) = tokio::join!(bob.request_blob(alice_peer, &cid1), alice.run_once());
-        assert!(f1.unwrap(), "first blob served");
-
+        assert!(f1.unwrap(), "first chunk served");
         let (f2, _) = tokio::join!(bob.request_blob(alice_peer, &cid2), alice.run_once());
         assert!(
-            !f2.unwrap(),
-            "a second blob within the interval is rate-limited"
+            f2.unwrap(),
+            "a second chunk in the same window still serves"
         );
-        assert!(!bob.has_blob(&cid2));
+        assert!(bob.has_blob(&cid1) && bob.has_blob(&cid2));
+    }
+
+    #[tokio::test]
+    async fn blob_byte_budget_refuses_over_budget_serves() {
+        // Direct test of the per-requester bytes budget: up to BLOB_BUDGET_BYTES per window is
+        // allowed; one more byte in the same window is refused; a new window resets it.
+        let (_hub, members, ids) = build_members(2).await;
+        let mut alice = members.into_iter().next().unwrap();
+        let requester = ids[1];
+        let now = 1_000;
+        assert!(
+            alice.charge_blob_budget(requester, now, BLOB_BUDGET_BYTES),
+            "serving up to the full budget is allowed"
+        );
+        assert!(
+            !alice.charge_blob_budget(requester, now, 1),
+            "a serve that would exceed the window budget is refused"
+        );
+        assert!(
+            alice.charge_blob_budget(requester, now + BLOB_BUDGET_WINDOW_MS, 1),
+            "a new window resets the budget"
+        );
     }
 
     #[tokio::test]

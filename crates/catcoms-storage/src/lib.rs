@@ -28,7 +28,7 @@ use thiserror::Error;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
 pub use cid::Cid;
-pub use filecrypto::{open_file, seal_file, FileRef};
+pub use filecrypto::{open_file, seal_file, FileManifest, FileRef};
 pub use retention::{
     BlobEntry, BlobKind, BlobState, Expiry, ExpiryPolicy, GcReport, HolderOracle, RetentionIndex,
     ServerId, ONE_MONTH_MS,
