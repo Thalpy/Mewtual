@@ -1597,6 +1597,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.device.device_id()
     }
 
+    /// The designated committer's device id (the server owner — the MLS-anchored ownership
+    /// the product layer uses, Phase 10h), if the group has one.
+    pub fn designated_committer_id(&self) -> Option<DeviceId> {
+        self.group.designated_committer()
+    }
+
     /// This server's MLS group id (stable across restarts) — used to key the on-disk blob
     /// store directory, so a reloaded server finds its sealed blobs.
     pub fn group_id(&self) -> Vec<u8> {
@@ -2245,8 +2251,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Whether this node is the group's single designated committer (lowest leaf
-    /// index) — the serializer that produces every commit and so never lags.
-    fn is_designated_committer(&self) -> bool {
+    /// index) — the serializer that produces every commit and so never lags. Also the
+    /// product layer's server "owner" anchor (Phase 10h).
+    pub fn is_designated_committer(&self) -> bool {
         matches!(
             (
                 self.group.member_leaf_index(&self.device.device_id()),

@@ -98,6 +98,18 @@ pub enum AppCommand {
     WriteWikiPage { name: String, body: String },
     /// Pull the wiki from `peer` (e.g. right after joining).
     CatchUpWiki { peer: PeerId },
+    /// Query every member's role, keyed by fingerprint (owner/admin/member).
+    Roles {
+        reply: oneshot::Sender<HashMap<String, String>>,
+    },
+    /// Grant or revoke admin for a member fingerprint (owner only).
+    SetAdmin {
+        fp: String,
+        admin: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Pull the roles document from `peer` (e.g. right after joining).
+    CatchUpRoles { peer: PeerId },
     /// Serialize the server's durable state for sealing to disk (Phase 9f).
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
@@ -123,6 +135,8 @@ pub enum AppEvent {
     StatusUpdated,
     /// The wiki changed — the UI should re-fetch pages / the open page.
     WikiUpdated,
+    /// Member roles changed — the UI should re-fetch roles.
+    RolesUpdated,
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -362,6 +376,34 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Fetch every member's role (fingerprint -> owner/admin/member).
+    pub async fn roles(&self) -> HashMap<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self.cmd_tx.send(AppCommand::Roles { reply }).await.is_err() {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Grant or revoke admin for a member fingerprint (owner only).
+    pub async fn set_admin(&self, fp: String, admin: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetAdmin { fp, admin, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Pull the roles document from `peer`.
+    pub async fn catch_up_roles(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpRoles { peer }).await;
+    }
+
     /// Read a wiki page's body.
     pub async fn read_wiki_page(&self, name: impl Into<String>) -> String {
         let (reply, rx) = oneshot::channel();
@@ -444,6 +486,13 @@ where
             tracing::warn!(error = %e, "open_wiki failed");
         }
         let mut last_wiki = server.wiki_map();
+        // …and subscribe the member-roles doc so admin grants propagate. The *owner* role is
+        // not stored here — it is derived from the MLS designated committer (lowest leaf
+        // index), so every member computes the owner identically with no roles op present.
+        if let Err(e) = server.open_roles().await {
+            tracing::warn!(error = %e, "open_roles failed");
+        }
+        let mut last_roles = server.roles();
         loop {
             tokio::select! {
                 biased;
@@ -564,6 +613,24 @@ where
                     Some(AppCommand::WikiMap { reply }) => {
                         let _ = reply.send(server.wiki_map());
                     }
+                    Some(AppCommand::Roles { reply }) => {
+                        let _ = reply.send(server.roles());
+                    }
+                    Some(AppCommand::SetAdmin { fp, admin, reply }) => {
+                        let res = server.set_admin(&fp, admin).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if roles_changed(&server, &mut last_roles) {
+                            let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CatchUpRoles { peer }) => {
+                        if let Err(e) = server.request_roles_catchup(peer).await {
+                            tracing::warn!(error = %e, "roles catch-up failed");
+                        }
+                        if roles_changed(&server, &mut last_roles) {
+                            let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
                     Some(AppCommand::ReadWikiPage { name, reply }) => {
                         let _ = reply.send(server.read_wiki_page(&name));
                     }
@@ -612,6 +679,9 @@ where
                         }
                         if wiki_changed(&server, &mut last_wiki) {
                             let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                        if roles_changed(&server, &mut last_roles) {
+                            let _ = event_tx.send(AppEvent::RolesUpdated).await;
                         }
                     }
                     _ => {
@@ -685,6 +755,21 @@ where
     R: CryptoRngCore,
 {
     let now = server.wiki_map();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether member roles changed since last seen (updating the record).
+fn roles_changed<T, R>(server: &Server<T, R>, last: &mut HashMap<String, String>) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.roles();
     if now != *last {
         *last = now;
         true

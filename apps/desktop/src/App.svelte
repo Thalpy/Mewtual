@@ -138,6 +138,9 @@
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
   // Reserved fileshare folder for chat/status media embeds uploaded by this member.
   let myEmbedFolder = $derived(myFp ? `embed/${myFp}` : "embed");
+  // Member roles (10h): fingerprint -> "owner"|"admin"|"member".
+  let roles = $state<Record<string, string>>({});
+  let myRole = $derived(roles[myFp] ?? "member");
 
   function activeName(): string {
     return cur?.channels.find((c) => c.id === cur?.active)?.name ?? "";
@@ -347,6 +350,7 @@
       refreshFiles(),
       refreshStatuses(),
       refreshInvite(),
+      refreshRoles(),
     ]);
     syncProfileEditor();
   }
@@ -437,6 +441,23 @@
     if (activeServerId === null) return;
     try {
       statuses = await invoke<Msg[]>("get_statuses", { server: activeServerId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function refreshRoles() {
+    if (activeServerId === null) return;
+    try {
+      roles = await invoke<Record<string, string>>("get_roles", { server: activeServerId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function setAdmin(fp: string, admin: boolean) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_admin", { server: activeServerId, fp, admin });
+      await refreshRoles();
     } catch (e) {
       error = String(e);
     }
@@ -857,6 +878,9 @@
       listen<{ server: number }>("wiki-updated", (e) => {
         if (e.payload.server === activeServerId && view === "wiki") refreshWiki();
       }),
+      listen<{ server: number }>("roles-updated", (e) => {
+        if (e.payload.server === activeServerId) refreshRoles();
+      }),
       listen<{ server: number }>("server-closed", (e) => {
         servers = servers.filter((s) => s.id !== e.payload.server);
         if (activeServerId === e.payload.server) {
@@ -994,6 +1018,9 @@
               <li title={m.fingerprint}>
                 {@render avatarTag(m.fingerprint)}
                 {@render nameTag(m.fingerprint)}
+                {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
+                  <span class="role-badge {roles[m.fingerprint]}">{roles[m.fingerprint]}</span>
+                {/if}
                 {#if m.you}<span class="you-badge">you</span>{/if}
               </li>
             {/each}
@@ -1276,8 +1303,32 @@
           <div class="overlay-body">
             <section class="set-section">
               <h3>Server</h3>
-              <p>{cur?.name ?? "—"}</p>
-              <p class="muted small">Owner controls (rename, members, admins) arrive in a later update.</p>
+              <p>{cur?.name ?? "—"} <span class="role-badge {myRole}">{myRole}</span></p>
+              <h4 class="members-h4">Members &amp; roles</h4>
+              <ul class="role-list">
+                {#each roster as m}
+                  {@const r = roles[m.fingerprint] ?? "member"}
+                  <li>
+                    {@render avatarTag(m.fingerprint)}
+                    {@render nameTag(m.fingerprint)}
+                    <span class="role-badge {r}">{r}</span>
+                    {#if myRole === "owner" && !m.you && r !== "owner"}
+                      {#if r === "admin"}
+                        <button class="ghost small" onclick={() => setAdmin(m.fingerprint, false)}>Remove admin</button>
+                      {:else}
+                        <button class="ghost small" onclick={() => setAdmin(m.fingerprint, true)}>Make admin</button>
+                      {/if}
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              <p class="muted small">
+                Roles are a display + policy aid, not a hard security control yet — a modified
+                client can still set its own role. The owner is the founder (the MLS committer).
+              </p>
+              {#if myRole !== "owner"}
+                <p class="muted small">Only the owner can change roles.</p>
+              {/if}
             </section>
 
             {#if cur?.invite}

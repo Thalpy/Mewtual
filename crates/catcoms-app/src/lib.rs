@@ -298,6 +298,87 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
     }
     out
 }
+// --- member roles (Phase 10h) ----------------------------------------------
+//
+// One shared CRDT doc per server (`DocType::MemberRoles`, id `ROLES_DOC`): a map keyed by
+// member **device fingerprint** → role string. Today only **admin** grants are stored here;
+// the **owner** is the MLS designated committer (the founder — cryptographically anchored,
+// not stored), and everyone else is a plain member.
+//
+// ENFORCEMENT BOUNDARY — read this before treating roles as a security control:
+//
+// * **Owner** is sound: it is the MLS designated committer (lowest leaf index), which only
+//   that device can act as. It is NOT sticky, however — it follows the lowest *live* leaf, so
+//   if the founder ever leaves/is removed, ownership (and `set_admin` power) silently passes to
+//   the next-lowest member. (Founder removal is not wired into the desktop app today, so this
+//   is latent.) Anchoring the owner to a recorded founder identity is a follow-up.
+//
+// * **Admin** is *advisory*, NOT enforced. The roles doc is a plain CRDT map and inbound ops
+//   are accepted on a valid inner signature from *any* current member (no author-is-owner
+//   check). So a **modified client run by any member can write `<any-fp> → admin`** for itself
+//   or others, and every honest client will materialize + DISPLAY those grants as authoritative
+//   (role badges, the owner's settings panel). The `is_owner()` gate on `set_admin` and the
+//   role gate on `mint_invite` therefore only bind *honest* clients + the UI. **Do not treat
+//   the admin badge / settings panel as a trust boundary.** The real fix — owner-signed admin
+//   grants verified against the owner's device key at read time, plus a committer-side
+//   role re-check at join (rank-0 single-committer admission already blunts a forged invite,
+//   since only the committer admits) — is the documented hardening follow-up.
+//
+// Role keys are 4-byte device fingerprints (display-grade); `admin_set` filters to current
+// members so a departed grant doesn't resolve, but keying roles by the full device id (to
+// remove the residual collision surface) is part of the same follow-up.
+
+/// The reserved document id for the per-server member-roles document.
+const ROLES_DOC: u128 = 0;
+const ROLE_ADMIN: &str = "admin";
+
+/// A member's effective role in a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The server owner (the MLS designated committer / founder).
+    Owner,
+    /// An admin (granted by the owner) — may mint invites.
+    Admin,
+    /// A regular member.
+    Member,
+}
+
+impl Role {
+    /// The lowercase wire/UI string for this role.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Owner => "owner",
+            Role::Admin => "admin",
+            Role::Member => "member",
+        }
+    }
+    /// Whether this role may mint invites + manage admins.
+    pub fn can_invite(self) -> bool {
+        matches!(self, Role::Owner | Role::Admin)
+    }
+}
+
+/// Grant or revoke an admin role for a member fingerprint in the roles document.
+fn write_role(doc: &mut AutoCommit, fp: &str, admin: bool) -> Result<(), AutomergeError> {
+    if admin {
+        doc.put(ROOT, fp, ROLE_ADMIN)?;
+    } else {
+        doc.delete(ROOT, fp)?;
+    }
+    Ok(())
+}
+
+/// Materialize the set of fingerprints granted admin.
+fn read_admins(doc: &AutoCommit) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for key in doc.keys(ROOT) {
+        if str_field(doc, &ROOT, &key) == ROLE_ADMIN {
+            out.insert(key);
+        }
+    }
+    out
+}
+
 const FILES: &str = "files";
 const F_NAME: &str = "name";
 const F_AUTHOR: &str = "author";
@@ -810,6 +891,105 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
+    // --- member roles / permissions (Phase 10h) ----------------------------
+
+    /// Open (create/subscribe) the per-server member-roles document. Call once after
+    /// founding/joining.
+    pub async fn open_roles(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::MemberRoles, ROLES_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// Catch up the roles document from `peer` (e.g. right after joining).
+    pub async fn request_roles_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::MemberRoles, ROLES_DOC)
+            .await?)
+    }
+
+    /// Whether **this** member is the server owner (the MLS designated committer / founder).
+    pub fn is_owner(&self) -> bool {
+        self.sync.is_designated_committer()
+    }
+
+    /// The owner's device fingerprint (the designated committer), if any.
+    pub fn owner_fingerprint(&self) -> Option<String> {
+        self.sync
+            .designated_committer_id()
+            .as_ref()
+            .map(fingerprint)
+    }
+
+    /// The set of fingerprints currently granted admin (from the roles doc), **filtered to
+    /// current members** so a departed member's stale grant (the doc is never GC'd) does not
+    /// resolve to a live admin.
+    fn admin_set(&self) -> std::collections::HashSet<String> {
+        let members: std::collections::HashSet<String> = self
+            .members_view()
+            .into_iter()
+            .map(|m| m.fingerprint)
+            .collect();
+        self.sync
+            .doc(DocType::MemberRoles, ROLES_DOC)
+            .map(|d| read_admins(d.doc()))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|fp| members.contains(fp))
+            .collect()
+    }
+
+    /// This member's effective [`Role`].
+    pub fn my_role(&self) -> Role {
+        self.role_of(&self.my_fingerprint())
+    }
+
+    /// The effective [`Role`] of a member by fingerprint.
+    pub fn role_of(&self, fp: &str) -> Role {
+        if self.owner_fingerprint().as_deref() == Some(fp) {
+            Role::Owner
+        } else if self.admin_set().contains(fp) {
+            Role::Admin
+        } else {
+            Role::Member
+        }
+    }
+
+    /// Every known member's role, keyed by fingerprint (for the UI roster/settings).
+    pub fn roles(&self) -> HashMap<String, String> {
+        let owner = self.owner_fingerprint();
+        let admins = self.admin_set();
+        self.members_view()
+            .into_iter()
+            .map(|m| {
+                let role = if owner.as_deref() == Some(m.fingerprint.as_str()) {
+                    Role::Owner
+                } else if admins.contains(&m.fingerprint) {
+                    Role::Admin
+                } else {
+                    Role::Member
+                };
+                (m.fingerprint, role.as_str().to_string())
+            })
+            .collect()
+    }
+
+    /// Grant or revoke admin for a member fingerprint. **Owner only** — errors otherwise.
+    pub async fn set_admin(&mut self, fp: &str, admin: bool) -> Result<(), AppError> {
+        if !self.is_owner() {
+            return Err(AppError::Invalid("only the owner can change roles".into()));
+        }
+        let fp = fp.to_string();
+        self.sync
+            .post(DocType::MemberRoles, ROLES_DOC, |d| {
+                write_role(d, &fp, admin)
+            })
+            .await?;
+        Ok(())
+    }
+
     /// The current materialized messages in a channel (empty if it is not open).
     pub fn messages(&self, channel: u128) -> Vec<ChatMessage> {
         self.sync
@@ -825,7 +1005,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, AppError> {
+        self.require_invite_permission()?;
         Ok(self.sync.mint_invite(nonce, expires_at_ms, bootstrap)?)
+    }
+
+    /// Gate on the caller being owner/admin (Phase 10h). Policy-layer: enforced for honest
+    /// clients + the UI; the committer-side join-time re-check is the hardening follow-up.
+    fn require_invite_permission(&self) -> Result<(), AppError> {
+        if self.my_role().can_invite() {
+            Ok(())
+        } else {
+            Err(AppError::Invalid(
+                "only the owner or an admin can invite to this server".into(),
+            ))
+        }
     }
 
     /// Mint an invite that also carries rendezvous infra addresses (discovery-enabled).
@@ -836,6 +1029,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
     ) -> Result<InviteToken, AppError> {
+        self.require_invite_permission()?;
         Ok(self
             .sync
             .mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous)?)
@@ -1146,6 +1340,31 @@ mod tests {
 
         // The uploader already holds the bytes.
         assert_eq!(alice.download_file(&cid).await.unwrap(), Some(data));
+    }
+
+    #[tokio::test]
+    async fn the_founder_is_owner_and_gates_invites_and_admin_grants() {
+        let mut alice = founder();
+        alice.open_roles().await.unwrap();
+
+        // The founder is the owner (the MLS designated committer) and may invite.
+        assert!(alice.is_owner());
+        assert_eq!(alice.my_role(), Role::Owner);
+        assert!(alice.my_role().can_invite());
+        assert!(alice.mint_invite([1u8; 16], u64::MAX, vec![]).is_ok());
+
+        // The owner is reported as owner in the roster roles.
+        assert!(
+            alice
+                .roles()
+                .get(&alice.my_fingerprint())
+                .map(String::as_str)
+                == Some("owner")
+        );
+        // The owner may write a grant, but a grant for a non-member never resolves to admin —
+        // admin_set is filtered to current members, so a stale/bogus fp can't become admin.
+        alice.set_admin("deadbeef", true).await.unwrap();
+        assert_eq!(alice.role_of("deadbeef"), Role::Member);
     }
 
     #[test]

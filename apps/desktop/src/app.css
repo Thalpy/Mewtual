@@ -1180,3 +1180,51 @@ button.emoji-pick:hover {
 .upload-btn input[type="file"] {
   display: none;
 }
+
+/* --- Phase 10h: roles / permissions --- */
+
+.role-badge {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0 0.35rem;
+  border-radius: 4px;
+  font-weight: 700;
+  background: #3a3d44;
+  color: #cdd2da;
+}
+
+.role-badge.owner {
+  background: #7a5b1e;
+  color: #ffd98a;
+}
+
+.role-badge.admin {
+  background: #2f5b8a;
+  color: #cfe3ff;
+}
+
+.members-h4 {
+  margin: 0.6rem 0 0.3rem;
+  font-size: 0.78rem;
+  color: #9aa0aa;
+}
+
+.role-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.role-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.role-list li .ghost.small {
+  margin-left: auto;
+}

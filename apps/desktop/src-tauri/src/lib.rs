@@ -147,6 +147,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::WikiUpdated => {
                     let _ = app.emit("wiki-updated", ServerEvt { server });
                 }
+                AppEvent::RolesUpdated => {
+                    let _ = app.emit("roles-updated", ServerEvt { server });
+                }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
                     break;
@@ -442,6 +445,7 @@ async fn join_server(
     actor.catch_up_files(inviter).await;
     actor.catch_up_status(inviter).await;
     actor.catch_up_wiki(inviter).await;
+    actor.catch_up_roles(inviter).await;
     let server_id = register_server(&app, &state, actor, events, None, name).await;
     // Seal the joined server + the registry to disk (if the store is unlocked).
     persist_server(&state, server_id).await;
@@ -670,6 +674,30 @@ async fn get_wiki_map(
     Ok(actor.wiki_map().await)
 }
 
+/// Every member's role (fingerprint -> owner/admin/member).
+#[tauri::command]
+async fn get_roles(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.roles().await)
+}
+
+/// Grant or revoke admin for a member (owner only); re-seals the server.
+#[tauri::command]
+async fn set_admin(
+    state: State<'_, AppState>,
+    server: u64,
+    fp: String,
+    admin: bool,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.set_admin(fp, admin).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Read a wiki page's body.
 #[tauri::command]
 async fn get_wiki_page(
@@ -867,6 +895,8 @@ pub fn run() {
             get_wiki_map,
             get_wiki_page,
             save_wiki_page,
+            get_roles,
+            set_admin,
             send_message,
             get_messages
         ])
