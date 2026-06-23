@@ -68,6 +68,11 @@
   // Cache of resolved embed media: ciphertext-CID hex -> data: URL (avoids re-fetching).
   const embedCache = new Map<string, string>();
 
+  // Custom emoji (10f): files under the "emoji" folder. code -> cid, and resolved code -> URL.
+  let emojiUrls = $state<Record<string, string>>({});
+  let newEmojiCode = $state("");
+  let showEmoji = $state(false);
+
   // Group the file list into the current folder's subfolders + files-here (folder browser).
   let folderView = $derived.by(() => {
     const base = folder === "" ? "" : folder + "/";
@@ -86,6 +91,18 @@
     return { subs: [...subs].sort(), here };
   });
   let breadcrumbs = $derived(folder === "" ? [] : folder.split("/"));
+
+  // Custom emoji map: files in the "emoji" folder, keyed by name (sans extension), lowercased.
+  let emojiMap = $derived.by(() => {
+    const m: Record<string, string> = {};
+    for (const f of files) {
+      if (f.path === "emoji") {
+        const code = f.name.replace(/\.[^.]+$/, "").toLowerCase();
+        if (code) m[code] = f.cid;
+      }
+    }
+    return m;
+  });
 
   // The main pane shows one tab at a time.
   type Tab = "chat" | "files" | "status" | "wiki" | "profile";
@@ -151,32 +168,104 @@
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   });
 
-  // Resolve inline media embeds whenever messages, statuses, or the file index change.
+  // Resolve inline media embeds + custom emoji whenever content or the file index changes.
   $effect(() => {
     void messages;
     void statuses;
     void files;
+    void emojiUrls;
     resolveMedia(messagesEl);
+    resolveEmoji(messagesEl);
     resolveMedia(statusEl);
+    resolveEmoji(statusEl);
   });
 
-  // Resolve embeds + mark missing [[links]] in the rendered wiki page (read mode only).
+  // Resolve embeds + emoji + mark missing [[links]] in the rendered wiki page (read mode).
   $effect(() => {
     void wikiBody;
     void wikiPages;
     void wikiEdit;
     void files;
+    void emojiUrls;
     if (!wikiEdit) {
       resolveMedia(wikiEl);
+      resolveEmoji(wikiEl);
       resolveWikiLinks(wikiEl);
     }
   });
+
+  // Pre-resolve every custom-emoji image (small) when the file index changes, into emojiUrls.
+  $effect(() => {
+    void files;
+    if (activeServerId === null) return;
+    for (const [code, cid] of Object.entries(emojiMap)) {
+      if (!emojiUrls[code]) void loadEmoji(code, cid);
+    }
+  });
+  async function loadEmoji(code: string, cid: string) {
+    if (activeServerId === null) return;
+    try {
+      let url = embedCache.get(cid);
+      if (!url) {
+        const base64 = await invoke<string>("download_file", { server: activeServerId, cid });
+        const file = files.find((f) => f.cid === cid);
+        url = `data:${safeMime(file?.mime ?? "") || "image/png"};base64,${base64}`;
+        embedCache.set(cid, url);
+      }
+      emojiUrls = { ...emojiUrls, [code]: url };
+    } catch {
+      /* leave unresolved; retry on next files change */
+    }
+  }
+
+  function resolveEmoji(container: HTMLElement | undefined) {
+    if (!container) return;
+    for (const span of Array.from(container.querySelectorAll<HTMLElement>("[data-emoji]:not([data-resolved])"))) {
+      const code = (span.getAttribute("data-emoji") ?? "").toLowerCase();
+      const url = emojiUrls[code];
+      if (!url) continue; // unknown / not loaded yet — leave :code: text, retry on update
+      span.setAttribute("data-resolved", "1");
+      const img = document.createElement("img");
+      img.src = url;
+      img.className = "emoji";
+      img.alt = `:${code}:`;
+      img.title = `:${code}:`;
+      span.replaceWith(img);
+    }
+  }
 
   function resolveWikiLinks(container: HTMLElement | undefined) {
     if (!container) return;
     for (const a of Array.from(container.querySelectorAll<HTMLElement>("[data-wikilink]"))) {
       a.classList.toggle("missing", !wikiPages.includes(a.getAttribute("data-wikilink") ?? ""));
     }
+  }
+
+  // Upload an image as a custom emoji `:code:` (stored under the "emoji" folder).
+  async function addEmoji(fileList: FileList | null) {
+    const code = newEmojiCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
+    const file = fileList?.[0];
+    if (!code || !file || activeServerId === null) return;
+    uploading = true;
+    try {
+      await invoke("add_file", {
+        server: activeServerId,
+        name: code,
+        mime: file.type || "image/png",
+        path: "emoji",
+        data: await readBase64(file),
+      });
+      newEmojiCode = "";
+      await refreshFiles();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      uploading = false;
+    }
+  }
+  function insertEmoji(code: string) {
+    draft = draft ? `${draft} :${code}:` : `:${code}:`;
+    showEmoji = false;
   }
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
@@ -912,28 +1001,46 @@
               <li class="muted">No messages yet — say hello.</li>
             {/each}
           </ul>
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <form
-            class="composer"
-            class:drag-over={dragOver}
-            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
-            ondragleave={() => (dragOver = false)}
-            ondrop={(e) => onComposerDrop("chat", e)}
-            onsubmit={(e) => { e.preventDefault(); send(); }}
-          >
-            <label class="attach" title="Attach image / video / audio">
-              📎
-              <input
-                type="file"
-                accept="image/*,video/*,audio/*"
-                multiple
-                disabled={uploading}
-                onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
-              />
-            </label>
-            <input bind:value={draft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()} />
-            <button type="submit" disabled={uploading}>Send</button>
-          </form>
+          <div class="composer-wrap">
+            {#if showEmoji}
+              <div class="emoji-picker">
+                {#if Object.keys(emojiMap).length}
+                  <div class="emoji-grid">
+                    {#each Object.keys(emojiMap) as code}
+                      <button class="emoji-pick" type="button" title={":" + code + ":"} onclick={() => insertEmoji(code)}>
+                        {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted">:{code}:</span>{/if}
+                      </button>
+                    {/each}
+                  </div>
+                {:else}
+                  <p class="muted small">No custom emoji yet — add some in ⚙ Settings → Emoji.</p>
+                {/if}
+              </div>
+            {/if}
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <form
+              class="composer"
+              class:drag-over={dragOver}
+              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragleave={() => (dragOver = false)}
+              ondrop={(e) => onComposerDrop("chat", e)}
+              onsubmit={(e) => { e.preventDefault(); send(); }}
+            >
+              <label class="attach" title="Attach image / video / audio">
+                📎
+                <input
+                  type="file"
+                  accept="image/*,video/*,audio/*"
+                  multiple
+                  disabled={uploading}
+                  onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
+                />
+              </label>
+              <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
+              <input bind:value={draft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()} />
+              <button type="submit" disabled={uploading}>Send</button>
+            </form>
+          </div>
         {:else if view === "files"}
           <div class="files-head">
             <h2>Files <span class="muted">· {files.length}</span></h2>
@@ -1157,6 +1264,28 @@
                 <input type="checkbox" checked={soundOn} onchange={toggleSound} />
                 <span>Play a sound for new messages</span>
               </label>
+            </section>
+
+            <section class="set-section">
+              <h3>Custom emoji</h3>
+              <p class="muted small">Type <code>:code:</code> in chat to use one. Shared with the whole server.</p>
+              {#if Object.keys(emojiMap).length}
+                <div class="emoji-grid manage">
+                  {#each Object.keys(emojiMap) as code}
+                    <span class="emoji-pick" title={":" + code + ":"}>
+                      {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted">:{code}:</span>{/if}
+                    </span>
+                  {/each}
+                </div>
+              {/if}
+              <form class="emoji-add" onsubmit={(e) => e.preventDefault()}>
+                <input bind:value={newEmojiCode} placeholder="code (e.g. catjam)" />
+                <label class="upload-btn">
+                  {uploading ? "…" : "Upload image"}
+                  <input type="file" accept="image/*" disabled={uploading || !newEmojiCode.trim()}
+                    onchange={(e) => { addEmoji(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                </label>
+              </form>
             </section>
 
             <section class="set-section">

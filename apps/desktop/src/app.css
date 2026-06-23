@@ -1102,3 +1102,81 @@ img.emoji {
   border-radius: 4px;
   padding: 0 0.3em;
 }
+
+/* --- Phase 10f: custom emoji --- */
+
+.composer-wrap {
+  position: relative;
+}
+
+.emoji-picker {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: #1f2227;
+  border: 1px solid #3a3d44;
+  border-radius: 8px;
+  padding: 0.5rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  z-index: 20;
+}
+
+.emoji-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.emoji-grid.manage {
+  margin: 0.4rem 0;
+}
+
+.emoji-pick {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.2rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+}
+
+button.emoji-pick:hover {
+  background: #2a2d33;
+  border-color: #3a3d44;
+}
+
+.emoji-pick img {
+  height: 24px;
+  width: 24px;
+  object-fit: contain;
+}
+
+.emoji-add {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  background: #4f8cff;
+  color: white;
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.upload-btn input[type="file"] {
+  display: none;
+}
