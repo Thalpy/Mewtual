@@ -60,6 +60,14 @@
   let draft = $state("");
   let members = $state(1);
   let roster = $state<Member[]>([]);
+  let rosterFilter = $state("");
+  let filteredRoster = $derived.by(() => {
+    const q = rosterFilter.trim().toLowerCase();
+    if (!q) return roster;
+    return roster.filter(
+      (m) => m.fingerprint.toLowerCase().includes(q) || nameOf(m.fingerprint).toLowerCase().includes(q),
+    );
+  });
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   let uploading = $state(false);
@@ -84,7 +92,7 @@
     | { label: string; icon?: string; danger?: boolean; disabled?: boolean; onSelect: () => unknown };
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   let menuEl = $state<HTMLElement | undefined>();
-  let composerEl = $state<HTMLInputElement | undefined>();
+  let composerEl = $state<HTMLTextAreaElement | undefined>();
 
   // Group the file list into the current folder's subfolders + files-here (folder browser).
   let folderView = $derived.by(() => {
@@ -121,6 +129,11 @@
   type Tab = "chat" | "files" | "status" | "wiki" | "profile";
   let view = $state<Tab>("chat");
   let wikiPages = $state<string[]>([]);
+  let wikiFilter = $state("");
+  let filteredWikiPages = $derived.by(() => {
+    const q = wikiFilter.trim().toLowerCase();
+    return q ? wikiPages.filter((p) => p.toLowerCase().includes(q)) : wikiPages;
+  });
   let wikiMap = $state<Record<string, string>>({}); // name -> body (backlinks + link existence)
   let activeWikiPage = $state("");
   let wikiBody = $state("");
@@ -627,6 +640,16 @@
     view = "chat";
     composerEl?.focus();
   }
+
+  // Auto-grow the composer textarea to fit its content (bounded), so multi-line messages
+  // (Shift+Enter) expand the box instead of scrolling inside one row.
+  $effect(() => {
+    void draft;
+    if (composerEl) {
+      composerEl.style.height = "auto";
+      composerEl.style.height = `${Math.min(composerEl.scrollHeight, 140)}px`;
+    }
+  });
 
   function messageMenu(m: Msg): MenuItem[] {
     return [
@@ -1333,7 +1356,11 @@
             use:contextMenu={() => serverMenu(s)}
           >
             {s.name.slice(0, 1).toUpperCase()}
-            {#if s.dot}<span class="rail-dot">●</span>{/if}
+            {#if s.unread.length}
+              <span class="rail-badge">{s.unread.length}</span>
+            {:else if s.dot}
+              <span class="rail-dot">●</span>
+            {/if}
           </button>
         {/each}
         <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
@@ -1362,8 +1389,11 @@
 
         <div class="roster">
           <h3>Members <span class="muted">({members})</span></h3>
+          {#if roster.length > 6}
+            <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
+          {/if}
           <ul>
-            {#each roster as m}
+            {#each filteredRoster as m}
               <li title={m.fingerprint} class:is-you={m.you} use:contextMenu={() => memberMenu(m)}>
                 {@render avatarTag(m.fingerprint)}
                 {@render nameTag(m.fingerprint)}
@@ -1444,7 +1474,14 @@
                 />
               </label>
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
-              <input bind:this={composerEl} bind:value={draft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()} />
+              <textarea
+                bind:this={composerEl}
+                bind:value={draft}
+                rows="1"
+                class="composer-input"
+                placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+              ></textarea>
               <button type="submit" disabled={uploading}>Send</button>
             </form>
           </div>
@@ -1531,10 +1568,13 @@
                 <span class="muted">Pages</span>
                 <button class="wiki-help-btn" title="Formatting help" onclick={() => (showWikiHelp = true)}>?</button>
               </div>
-              {#each wikiPages as p}
+              {#if wikiPages.length > 6}
+                <input class="list-search" bind:value={wikiFilter} placeholder="Search pages…" />
+              {/if}
+              {#each filteredWikiPages as p}
                 <button class:active={p === activeWikiPage} onclick={() => openWikiPage(p)} use:contextMenu={() => wikiPageMenu(p)}>{p}</button>
               {:else}
-                <span class="muted">No pages yet.</span>
+                <span class="muted">{wikiFilter ? "No matching pages." : "No pages yet."}</span>
               {/each}
               <form onsubmit={(e) => { e.preventDefault(); createWikiPage(); }}>
                 <input bind:value={newWikiPage} placeholder="+ new page" />

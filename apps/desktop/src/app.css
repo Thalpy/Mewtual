@@ -618,10 +618,20 @@ button.ghost:hover {
 .composer {
   display: flex;
   gap: 0.5rem;
+  align-items: flex-end;
 }
 
 .composer input {
   flex: 1;
+}
+
+.composer .composer-input {
+  flex: 1;
+  resize: none;
+  overflow-y: auto;
+  font: inherit;
+  line-height: 1.35;
+  max-height: 140px;
 }
 
 .muted {
@@ -1392,4 +1402,33 @@ button.emoji-pick:hover {
 .roster li.is-you {
   background: rgba(255, 255, 255, 0.04);
   border-radius: 5px;
+}
+
+/* QoL: list search inputs + unread count badge */
+.list-search {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  font-size: 0.85em;
+  border: 1px solid var(--border, #2a2a33);
+  border-radius: 5px;
+  background: var(--bg-elev, #1a1a1f);
+  color: inherit;
+}
+.rail-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: #e0574b;
+  color: #fff;
+  font-size: 0.7em;
+  line-height: 16px;
+  text-align: center;
+  font-weight: 600;
 }
