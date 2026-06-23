@@ -78,7 +78,27 @@ roadmap:
    or accept the residual (lowest stakes).
 3. **Replay-proof grant revocation** — a grant epoch/nonce so a deleted admin grant cannot be
    re-added by replaying an old op.
-4. **Make admin invites functional** — the roles-based multi-committer admission decision above.
+4. **Make admin invites functional (R3)** — **design chosen: Option C, "owner-serialized admin
+   invites."** An admin who wants to invite broadcasts a *signed Add-request* on the control
+   topic (mirroring the R1 remove-request pattern); the **owner alone** runs the MLS Add after
+   re-checking the inviter is Owner/Admin per the roles doc. This keeps `max_committer_rank = 0`
+   (single committer → **no fork**), reuses the most-tested membership code + the existing
+   two-phase Welcome-push, and ships in slices: (0) move `read_admins`/grant logic down into
+   `catcoms-sync` so the gate reads the live roles doc with zero staleness; (1) the inviter-role
+   re-check at admission; (2) the `CTRL_ADD_REQUEST` op + `on_add_request` + the
+   **Welcome-authentication chain** (the load-bearing new crypto — must get adversarial review,
+   it re-touches the group-substitution surface); (3) actor/desktop wiring.
+   - *Rejected:* **Option A** (admins are committers / `max_committer_rank ≥ 1`) — forces
+     concurrent committers and the staged fork-resolution path's **I1 is still open**, so two
+     admins admitting at once can permanently split the group. **Option B** (owner-admits-on-
+     behalf via point-to-point forward) — routing is a blocker without a new forward protocol +
+     a rewritten Welcome trust anchor.
+   - *Product implication:* admin invites admit **only while the owner is online** (the owner is
+     the sole serializer). This is not a regression (today only the owner can admit at all) but
+     is newly visible. Owner-offline admin admission would require Option A (gated on I1).
+   - *Residual:* the re-check makes a *non-admin's* minted invite useless at the protocol layer,
+     but a **demoted** admin can still replay their old grant op until item 3 (grant epoch/nonce)
+     lands — so demotion is "current-doc, honest-client," not yet replay-proof.
 5. **Invite rate-limit as server policy (R5)** — owner-set, honest-client-enforced; ship with
    the limitation stated in the UI.
 
