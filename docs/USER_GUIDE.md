@@ -70,7 +70,9 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 
 ## 4. The layout
 
-- **Left rail** — your servers (one icon each) + **＋** to add one + **⚙** for Settings.
+- **Left rail** — your servers (one icon each) + **＋** to add one + **💬** to send feedback
+  (a bug report or feature request — CatComs has no servers, so it composes a report you copy
+  and share with the maintainer) + **⚙** for Settings.
 - **Sidebar** — the server's channels and its member list (with role badges).
 - **Main pane tabs** — **Chat · Files · Status · Wiki · Profile**. Click a tab to switch.
 
@@ -128,7 +130,10 @@ peers behind NATs. It is **zero-knowledge** — it only routes ciphertext.
 The **Files** tab is a folder browser:
 
 - **Share a file here** uploads into the current folder; **＋ new folder** organises them.
-- Click a file to **download** it (fetched from a member who has it).
+- **Click a file to open its info pane** — a preview (for images/video/audio), whether it's
+  already on your device or will be fetched from a peer, who uploaded it, its size, type and
+  folder, plus a **Download** button. Owners and admins also get a two-click **Delete** there
+  (deleting unlists the file for everyone; members who already downloaded it keep their copy).
 - Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
   rest, and only members can open them.
 
