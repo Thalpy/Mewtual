@@ -25,6 +25,8 @@ catcoms-app = { path = "../../../crates/catcoms-app" }
 catcoms-mls = { path = "../../../crates/catcoms-mls" }
 catcoms-net = { path = "../../../crates/catcoms-net" }
 catcoms-rt = { path = "../../../crates/catcoms-rt" }
+catcoms-sync = { path = "../../../crates/catcoms-sync" }
+catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]

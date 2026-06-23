@@ -17,9 +17,14 @@ use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Profile, Server, ServerActor,
     ServerRecord, ServerStore, MAX_AVATAR_BYTES,
 };
+use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
-use catcoms_net::{phase0_peer_id, target_peer_in_multiaddr, MeshService};
-use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, RngCore, SystemClock, TransportEvent};
+use catcoms_net::{
+    phase0_peer_id, target_peer_in_multiaddr, validate_rendezvous_addrs, MeshHandle, MeshService,
+    RendezvousTarget,
+};
+use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
+use catcoms_sync::join_namespace;
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
@@ -37,6 +42,14 @@ struct ServerEntry {
     /// founded/reloaded. Reused to mint a *fresh* invite on demand (so it carries the live
     /// address, not a stale one). Empty for a joiner (only the owner mints).
     bootstrap: Vec<String>,
+    /// The rendezvous infra multiaddrs this server registered at (if any), so a fresh on-demand
+    /// invite is also discovery-enabled. Empty when the server uses direct bootstrap only. Not
+    /// separately persisted — on reload it is recovered from the persisted invite's `rendezvous`.
+    rendezvous: Vec<String>,
+    /// A clonable handle to this server's live transport, kept so the bridge can register a
+    /// freshly-minted invite's namespace at the rendezvous *after* the `Server` was moved into its
+    /// actor. `None` for a joiner (never registers) or a server without rendezvous.
+    mesh: Option<MeshHandle>,
 }
 
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
@@ -200,6 +213,7 @@ fn build_advertised(input: &str, port: u16, peer_id: &str) -> Result<String, Str
 
 /// Insert a freshly-spawned server into the registry, forward its events, and return the
 /// new server id.
+#[allow(clippy::too_many_arguments)]
 async fn register_server(
     app: &AppHandle,
     state: &AppState,
@@ -208,6 +222,8 @@ async fn register_server(
     invite: Option<String>,
     name: String,
     bootstrap: Vec<String>,
+    rendezvous: Vec<String>,
+    mesh: Option<MeshHandle>,
 ) -> u64 {
     let id = {
         let mut n = state.next_id.lock().await;
@@ -222,6 +238,8 @@ async fn register_server(
             invite,
             name,
             bootstrap,
+            rendezvous,
+            mesh,
         },
     );
     id
@@ -287,12 +305,161 @@ async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, Os
     }
 }
 
+/// Strip a trailing `/p2p/<id>` from a bootstrap address to get the bare transport address to
+/// advertise as an *external* address for rendezvous registration (libp2p re-appends our own id).
+/// Returns `None` for a relay-circuit address (those auto-promote to external on reservation) or
+/// an unparseable string.
+fn external_addr(s: &str) -> Option<Multiaddr> {
+    let mut addr: Multiaddr = s.parse().ok()?;
+    if addr.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        return None;
+    }
+    if matches!(addr.iter().last(), Some(Protocol::P2p(_))) {
+        addr.pop();
+    }
+    Some(addr)
+}
+
+/// Whether a multiaddr is a loopback address (`127.0.0.0/8` or `::1`).
+fn addr_is_loopback(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| match p {
+        Protocol::Ip4(ip) => ip.is_loopback(),
+        Protocol::Ip6(ip) => ip.is_loopback(),
+        _ => false,
+    })
+}
+
+/// The reachable external addresses to advertise for rendezvous registration, from the bootstrap
+/// list. Loopback is advertised **only** when nothing else is reachable (same-machine testing) —
+/// otherwise it's dropped so we don't pollute a shared rendezvous namespace with a record a remote
+/// joiner can't reach (it would instead use the invite's real bootstrap addrs as a fallback).
+fn external_addrs(bootstrap: &[String]) -> Vec<Multiaddr> {
+    let all: Vec<Multiaddr> = bootstrap.iter().filter_map(|s| external_addr(s)).collect();
+    let routable: Vec<Multiaddr> = all.iter().filter(|a| !addr_is_loopback(a)).cloned().collect();
+    if routable.is_empty() {
+        all
+    } else {
+        routable
+    }
+}
+
+/// Register a `(group_id, nonce)` invite's pre-join namespace at the rendezvous `rz` via `handle`
+/// (fire-and-forget — the grant is internally deferred + flushed once an external address exists,
+/// which the founder establishes when it first registers). So a joiner holding the invite can
+/// discover this server with no hard-coded address.
+async fn register_join_ns(
+    handle: &MeshHandle,
+    group_id: &[u8],
+    nonce: &[u8; 16],
+    rz: &RendezvousTarget,
+) -> Result<(), String> {
+    let ns = join_namespace(group_id, nonce, &rz.peer.to_bytes());
+    handle
+        .rendezvous_register(&ns, rz.peer)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// The discover-on-join path (no hard-coded inviter address): build a transport, dial the invite's
+/// rendezvous node(s), discover the inviter's records under the pre-join namespace, rank them
+/// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses — plus the
+/// invite's `bootstrap` addrs as direct fallbacks — and return the connected transport + the
+/// inviter's peer id. Mirrors `tcp_rendezvous_e2e.rs`.
+async fn discover_and_connect(invite: &InviteToken) -> Result<(MeshService, PeerId), String> {
+    let targets = validate_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
+    if targets.is_empty() {
+        return Err("invite carries no rendezvous address".into());
+    }
+    let rz_addrs: Vec<Multiaddr> = targets.iter().map(|t| t.addr.clone()).collect();
+    let (mesh, _id) = MeshService::new_tcp(None, &rz_addrs).map_err(|e| e.to_string())?;
+
+    // Wait until at least one rendezvous node is connected.
+    let rz_peers: Vec<PeerId> = targets.iter().map(|t| phase0_peer_id(&t.peer)).collect();
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                if rz_peers.contains(&p) {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out connecting to the rendezvous".to_string())?;
+
+    // Discover the inviter under each rendezvous's pre-join namespace.
+    for t in &targets {
+        let ns = join_namespace(&invite.group_id, &invite.invite_nonce, &t.peer.to_bytes());
+        mesh.rendezvous_discover(&ns, t.peer)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Collect discovered records into candidates (bounded by a deadline + a count cap).
+    let root = targets[0].peer.to_bytes();
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let _ = timeout(Duration::from_secs(20), async {
+        while let Some(d) = mesh.next_discovered().await {
+            candidates.push(Candidate {
+                peer: d.peer.to_bytes(),
+                addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
+                source: Source::Rendezvous(root.clone()),
+                // Placeholder pre-join: we can't read the registrant's own signed seq here, so the
+                // policy's anti-replay freshness is inert; the backstop is request_join's Welcome-
+                // signature + group-id check, which fails closed if we dial the wrong peer.
+                seq: 1,
+                tag_verified: false, // pre-join: no group secret to recompute the member tag
+            });
+            if candidates.len() >= 8 {
+                break;
+            }
+        }
+    })
+    .await;
+    if candidates.is_empty() {
+        return Err("could not discover the server at the rendezvous".into());
+    }
+
+    // The DiscoveryPolicy alone decides what to dial (eclipse-resistance — never auto-dial).
+    let mut policy = DiscoveryPolicy::with_config(PolicyConfig::default());
+    let mut rng = OsCryptoRng;
+    let dialed = policy
+        .plan(candidates, 2, &SystemClock, &mut rng)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "the discovery policy offered no peer to dial".to_string())?;
+    let inviter_lp = libp2p::PeerId::from_bytes(&dialed.peer)
+        .map_err(|_| "discovered peer id was malformed".to_string())?;
+    let inviter = phase0_peer_id(&inviter_lp);
+
+    // Dial the policy-chosen addresses plus the invite's bootstrap addrs (direct fallbacks).
+    for a in dialed.addresses.iter().chain(invite.bootstrap.iter()) {
+        if let Ok(m) = a.parse::<Multiaddr>() {
+            let _ = mesh.dial(m).await;
+        }
+    }
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                if p == inviter {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out connecting to the discovered server".to_string())?;
+    Ok((mesh, inviter))
+}
+
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
 /// loopback), found the group, mint a single-use invite carrying the reachable address(es),
 /// spawn the actor, and register it. `advertise` is an optional user-supplied reachable
 /// address (LAN or public IP); `relay` is an optional relay-node multiaddr — when given, we
 /// reserve a circuit there and put the **relayed** address first in the invite, so a joiner
 /// reaches us through the relay with **no port-forward** (zero-config NAT traversal).
+/// `rendezvous` is an optional zero-knowledge rendezvous multiaddr — when given, we register at it
+/// so a joiner can discover us with **no hard-coded address at all** (just the pasted invite).
 #[tauri::command]
 async fn found_server(
     app: AppHandle,
@@ -300,6 +467,7 @@ async fn found_server(
     display_name: String,
     advertise: String,
     relay: String,
+    rendezvous: String,
 ) -> Result<FoundResult, String> {
     let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
@@ -360,6 +528,45 @@ async fn found_server(
         bootstrap.insert(0, circuit_addr.to_string()); // prefer the relayed address
     }
 
+    // Optional rendezvous: connect to it + advertise our reachable address(es) on the raw mesh
+    // (so the deferred registration can flush), keeping a handle to register each invite's
+    // namespace after the server is spawned. The founder is then discoverable with no hard-coded
+    // address — a joiner needs only the pasted invite.
+    let rendezvous = rendezvous.trim().to_string();
+    let (rz_target, rz_handle): (Option<RendezvousTarget>, Option<MeshHandle>) = if rendezvous
+        .is_empty()
+    {
+        (None, None)
+    } else {
+        let rz = validate_rendezvous_addrs(std::slice::from_ref(&rendezvous))
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "no rendezvous address".to_string())?;
+        mesh.dial(rz.addr.clone()).await.map_err(|e| e.to_string())?;
+        let rz_peer = phase0_peer_id(&rz.peer);
+        timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                    if p == rz_peer {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| "could not connect to the rendezvous".to_string())?;
+        // Advertise our routable addresses so the deferred registration can flush. A relay
+        // *circuit* address is intentionally not advertised here — it auto-promotes to an external
+        // address on reservation (in the transport actor), so the rendezvous still learns it.
+        for addr in external_addrs(&bootstrap) {
+            mesh.add_external_address(addr)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        (Some(rz), Some(mesh.handle()))
+    };
+
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
     let mut server = Server::found(mesh, device, OsCryptoRng, Box::new(SystemClock), display_name)
@@ -367,21 +574,43 @@ async fn found_server(
     server.subscribe_control().await.map_err(|e| e.to_string())?;
     attach_blob_store(&state, &mut server).await;
 
-    // Mint a single-use invite (1h) carrying the bootstrap address.
+    // Mint a single-use invite (1h) carrying the bootstrap address (+ rendezvous addr if set, so
+    // the joiner can discover us), then register the invite's namespace at the rendezvous.
     let mut nonce = [0u8; 16];
     let mut rng = OsCryptoRng;
     rng.fill_bytes(&mut nonce);
     let expires = SystemClock.now_ms() + 3_600_000;
-    let invite = server
-        .mint_invite(nonce, expires, bootstrap.clone())
-        .map_err(|e| e.to_string())?;
+    let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
+    let invite = if let Some(rz) = &rz_target {
+        let token = server
+            .mint_invite_with_rendezvous(nonce, expires, bootstrap.clone(), rz_vec.clone())
+            .map_err(|e| e.to_string())?;
+        if let Some(handle) = &rz_handle {
+            register_join_ns(handle, &server.group_id(), &nonce, rz).await?;
+        }
+        token
+    } else {
+        server
+            .mint_invite(nonce, expires, bootstrap.clone())
+            .map_err(|e| e.to_string())?
+    };
     let invite_hex = hex::encode(invite.encode());
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
-    let server_id =
-        register_server(&app, &state, actor, events, Some(invite_hex), name, bootstrap).await;
+    let server_id = register_server(
+        &app,
+        &state,
+        actor,
+        events,
+        Some(invite_hex),
+        name,
+        bootstrap,
+        rz_vec,
+        rz_handle,
+    )
+    .await;
     // Seal the new server + the registry to disk (if the store is unlocked).
     persist_server(&state, server_id).await;
     persist_registry(&state).await;
@@ -402,35 +631,40 @@ async fn join_server(
 ) -> Result<FoundResult, String> {
     let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
     let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
-    // Dial every bootstrap address the invite carries — loopback (same machine), a LAN IP,
-    // or a public/relayed address; whichever reaches the inviter first wins.
-    let addrs: Vec<Multiaddr> = invite
-        .bootstrap
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    if addrs.is_empty() {
-        return Err("invite carries no usable bootstrap address".to_string());
-    }
-    let inviter_lp = addrs
-        .iter()
-        .find_map(target_peer_in_multiaddr)
-        .ok_or_else(|| "bootstrap has no peer id".to_string())?;
-    let inviter = phase0_peer_id(&inviter_lp);
 
-    let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
-    // Wait for the connection to the inviter before requesting the join.
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                if p == inviter {
-                    break;
+    // If the invite points at a rendezvous, discover the inviter there (no hard-coded address);
+    // otherwise dial the invite's bootstrap addresses directly (loopback / LAN / relayed).
+    let (mesh, inviter) = if !invite.rendezvous.is_empty() {
+        discover_and_connect(&invite).await?
+    } else {
+        let addrs: Vec<Multiaddr> = invite
+            .bootstrap
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if addrs.is_empty() {
+            return Err("invite carries no usable bootstrap address".to_string());
+        }
+        let inviter_lp = addrs
+            .iter()
+            .find_map(target_peer_in_multiaddr)
+            .ok_or_else(|| "bootstrap has no peer id".to_string())?;
+        let inviter = phase0_peer_id(&inviter_lp);
+        let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
+        // Wait for the connection to the inviter before requesting the join.
+        timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                    if p == inviter {
+                        break;
+                    }
                 }
             }
-        }
-    })
-    .await
-    .map_err(|_| "timed out connecting to the server".to_string())?;
+        })
+        .await
+        .map_err(|_| "timed out connecting to the server".to_string())?;
+        (mesh, inviter)
+    };
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
@@ -456,8 +690,19 @@ async fn join_server(
     actor.catch_up_status(inviter).await;
     actor.catch_up_wiki(inviter).await;
     actor.catch_up_roles(inviter).await;
-    // A joiner mints no invites (owner-scoped), so it carries no bootstrap of its own here.
-    let server_id = register_server(&app, &state, actor, events, None, name, Vec::new()).await;
+    // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
+    let server_id = register_server(
+        &app,
+        &state,
+        actor,
+        events,
+        None,
+        name,
+        Vec::new(),
+        Vec::new(),
+        None,
+    )
+    .await;
     // Seal the joined server + the registry to disk (if the store is unlocked).
     persist_server(&state, server_id).await;
     persist_registry(&state).await;
@@ -514,23 +759,40 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
 }
 
 /// Mint a **fresh** single-use invite on demand (owner/admin only — gated in `Server::mint_invite`),
-/// carrying the live bootstrap address captured at found/reload. Replaces the server's stored
-/// invite (so the UI shows the latest) and re-seals the registry. Returns the new invite hex.
+/// carrying the live bootstrap address captured at found/reload. If the server registered at a
+/// rendezvous, the fresh invite is also discovery-enabled and its new (nonce-keyed) namespace is
+/// registered there via the stored transport handle, so the new joiner can discover us with no
+/// hard-coded address. Replaces the server's stored invite and re-seals the registry.
 #[tauri::command]
 async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<String, String> {
-    let bootstrap = {
+    let (bootstrap, rendezvous, handle) = {
         let servers = state.servers.lock().await;
-        servers
-            .get(&server)
-            .map(|e| e.bootstrap.clone())
-            .ok_or_else(|| "unknown server".to_string())?
+        let e = servers.get(&server).ok_or_else(|| "unknown server".to_string())?;
+        (e.bootstrap.clone(), e.rendezvous.clone(), e.mesh.clone())
     };
     let actor = actor_of(&state, server).await?;
     let mut nonce = [0u8; 16];
     let mut rng = OsCryptoRng;
     rng.fill_bytes(&mut nonce);
     let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
-    let encoded = actor.mint_invite(nonce, expires, bootstrap).await?;
+    let encoded = if rendezvous.is_empty() {
+        actor.mint_invite(nonce, expires, bootstrap).await?
+    } else {
+        let encoded = actor
+            .mint_invite_with_rendezvous(nonce, expires, bootstrap, rendezvous.clone())
+            .await?;
+        // Register the fresh invite's namespace so the new joiner can discover us.
+        if let (Some(handle), Some(rz)) = (
+            &handle,
+            validate_rendezvous_addrs(&rendezvous)
+                .ok()
+                .and_then(|v| v.into_iter().next()),
+        ) {
+            let token = InviteToken::decode(&encoded).map_err(|e| e.to_string())?;
+            register_join_ns(handle, &token.group_id, &token.invite_nonce, &rz).await?;
+        }
+        encoded
+    };
     let invite_hex = hex::encode(encoded);
     if let Some(e) = state.servers.lock().await.get_mut(&server) {
         e.invite = Some(invite_hex.clone());
@@ -881,6 +1143,54 @@ async fn reload_one(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
+
+    // If the persisted invite was discovery-enabled, re-connect to its rendezvous, re-advertise
+    // our (new-port) address, and re-register the invite's namespace there — so the founder is
+    // discoverable again after restart, and fresh invites can register via the kept handle. The
+    // rz addrs ride in the persisted invite (not separately persisted). Best-effort.
+    let persisted_invite = (!record.invite.is_empty())
+        .then(|| hex::decode(&record.invite).ok().map(|b| InviteToken::decode(&b).ok()))
+        .flatten()
+        .flatten();
+    let mut rz_vec: Vec<String> = Vec::new();
+    let mut rz_handle: Option<MeshHandle> = None;
+    if let Some(invite) = &persisted_invite {
+        if let Some(rz) = validate_rendezvous_addrs(&invite.rendezvous)
+            .ok()
+            .and_then(|v| v.into_iter().next())
+        {
+            if mesh.dial(rz.addr.clone()).await.is_ok() {
+                let rz_peer = phase0_peer_id(&rz.peer);
+                let connected = timeout(Duration::from_secs(15), async {
+                    loop {
+                        if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                            if p == rz_peer {
+                                break;
+                            }
+                        }
+                    }
+                })
+                .await
+                .is_ok();
+                if connected {
+                    for addr in external_addrs(&bootstrap) {
+                        let _ = mesh.add_external_address(addr).await;
+                    }
+                    let handle = mesh.handle();
+                    let _ = register_join_ns(
+                        &handle,
+                        &invite.group_id,
+                        &invite.invite_nonce,
+                        &rz,
+                    )
+                    .await;
+                    rz_vec = invite.rendezvous.clone();
+                    rz_handle = Some(handle);
+                }
+            }
+        }
+    }
+
     let mut server = Server::restore(
         snapshot,
         mesh,
@@ -892,6 +1202,18 @@ async fn reload_one(
     server.subscribe_control().await.map_err(|e| e.to_string())?;
     attach_blob_store(state, &mut server).await;
 
+    // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
+    // (rendezvous infra was down at reload), drop it: it would not resolve — no registration, and
+    // after a reload the only bootstrap is a stale new-port loopback. The rail then prompts a fresh
+    // invite (which re-registers). A direct (non-rendezvous) invite is presented unchanged.
+    let discovery_unregistered =
+        persisted_invite.as_ref().is_some_and(|i| !i.rendezvous.is_empty()) && rz_handle.is_none();
+    let presented_invite = if record.invite.is_empty() || discovery_unregistered {
+        None
+    } else {
+        Some(record.invite.clone())
+    };
+
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
@@ -901,13 +1223,11 @@ async fn reload_one(
         record.id,
         ServerEntry {
             actor,
-            invite: if record.invite.is_empty() {
-                None
-            } else {
-                Some(record.invite.clone())
-            },
+            invite: presented_invite,
             name: record.display_name.clone(),
             bootstrap,
+            rendezvous: rz_vec,
+            mesh: rz_handle,
         },
     );
     Ok(())

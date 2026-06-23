@@ -582,9 +582,11 @@ version = "0.0.0"
 dependencies = [
  "base64 0.22.1",
  "catcoms-app",
+ "catcoms-discovery",
  "catcoms-mls",
  "catcoms-net",
  "catcoms-rt",
+ "catcoms-sync",
  "hex",
  "libp2p",
  "serde",
@@ -592,6 +594,17 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+]
+
+[[package]]
+name = "catcoms-discovery"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "catcoms-rt",
+ "catcoms-wire",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

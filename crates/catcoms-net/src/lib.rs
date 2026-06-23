@@ -1151,6 +1151,80 @@ impl MeshService {
         }
         Ok((Self::spawn(swarm), libp2p_id))
     }
+
+    /// A cheap, clonable [`MeshHandle`] to this node's command channel, for driving rendezvous
+    /// register/dial **after** the `MeshService` has been moved elsewhere (e.g. into a server
+    /// actor) — the desktop bridge keeps one to register a fresh invite's namespace post-spawn.
+    pub fn handle(&self) -> MeshHandle {
+        MeshHandle {
+            local: self.local,
+            cmd_tx: self.cmd_tx.clone(),
+        }
+    }
+}
+
+/// A cheap, clonable handle to a spawned [`MeshService`]'s command channel. Exposes the
+/// fire-and-forget control verbs (register / discover / dial / advertise) but NOT the
+/// single-consumer event receivers. Lets a caller drive rendezvous registration once the owning
+/// `MeshService` has been moved away (e.g. the bridge registering a fresh invite's namespace after
+/// the server was spawned into its actor). Confirmation ([`MeshService::next_registered`]) stays
+/// with the owner; registration is internally deferred + flushed once an external address exists,
+/// so a handle's `rendezvous_register` still lands without the handle observing the grant.
+#[derive(Clone, Debug)]
+pub struct MeshHandle {
+    local: PeerId,
+    cmd_tx: mpsc::Sender<Command>,
+}
+
+impl MeshHandle {
+    /// This node's transport peer id.
+    pub fn local_peer(&self) -> PeerId {
+        self.local
+    }
+
+    /// See [`MeshService::rendezvous_register`].
+    pub async fn rendezvous_register(
+        &self,
+        namespace: &str,
+        rz_node: libp2p::PeerId,
+    ) -> Result<(), NetError> {
+        let namespace = rendezvous::Namespace::new(namespace.to_owned())
+            .map_err(|_| NetError::Rendezvous("namespace too long".into()))?;
+        self.cmd_tx
+            .send(Command::RendezvousRegister { namespace, rz_node })
+            .await
+            .map_err(|_| NetError::Rendezvous("transport closed".into()))
+    }
+
+    /// See [`MeshService::rendezvous_discover`].
+    pub async fn rendezvous_discover(
+        &self,
+        namespace: &str,
+        rz_node: libp2p::PeerId,
+    ) -> Result<(), NetError> {
+        let namespace = rendezvous::Namespace::new(namespace.to_owned())
+            .map_err(|_| NetError::Rendezvous("namespace too long".into()))?;
+        self.cmd_tx
+            .send(Command::RendezvousDiscover { namespace, rz_node })
+            .await
+            .map_err(|_| NetError::Rendezvous("transport closed".into()))
+    }
+
+    /// See [`MeshService::dial`].
+    pub async fn dial(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Dial(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// See [`MeshService::add_external_address`].
+    pub async fn add_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::AddExternalAddress(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
 }
 
 #[async_trait]

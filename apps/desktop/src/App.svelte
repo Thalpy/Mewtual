@@ -69,6 +69,12 @@
   let displayName = $state("me");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
+  // Optional rendezvous multiaddr — when set, the founder registers there so a joiner discovers
+  // it with no hard-coded address (just the pasted invite). Persisted as a default (it's usually a
+  // stable infra node), pre-filled into the Found form and editable in Settings → Network.
+  let rendezvous = $state(
+    typeof localStorage !== "undefined" ? (localStorage.getItem("catcoms.rendezvous") ?? "") : ""
+  );
   let joinInvite = $state(""); // pasted invite (joiner)
   let copied = $state(false);
   let newChannel = $state("");
@@ -230,6 +236,15 @@
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
   });
 
+  // Persist the rendezvous address as a reusable default (it's usually a stable infra node).
+  $effect(() => {
+    try {
+      localStorage.setItem("catcoms.rendezvous", rendezvous);
+    } catch {
+      /* ignore */
+    }
+  });
+
   // Resolve inline media embeds + custom emoji whenever content or the file index changes.
   // The `tick()` is essential: it waits for Svelte to commit the `{@html renderMessage(...)}`
   // DOM so the [data-embed-cid]/[data-emoji] placeholders exist before we query for them.
@@ -366,7 +381,7 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("found_server", { displayName, advertise, relay });
+      const r = await invoke<Found>("found_server", { displayName, advertise, relay, rendezvous });
       addServer(r, displayName);
     } catch (e) {
       error = String(e);
@@ -1360,6 +1375,14 @@
           </span>
           <input bind:value={relay} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
         </label>
+        <label class="field">
+          <span class="muted">
+            Rendezvous address (optional) — paste a rendezvous node's multiaddr to register there,
+            so people can join with <em>just the invite</em> (no address needed). Saved as your
+            default.
+          </span>
+          <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
+        </label>
       </details>
       <button onclick={found} disabled={busy}>
         {busy ? "Working…" : "Found a server"}
@@ -1734,6 +1757,14 @@
             <section class="set-section">
               <h3>Network</h3>
               <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
+              <label class="field">
+                <span class="muted small">
+                  Default rendezvous address — pre-filled when you found a server, so people can
+                  join with just the invite (no address needed). Pasting a joiner invite that names
+                  a rendezvous is discovered automatically.
+                </span>
+                <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
+              </label>
             </section>
 
             {#if activeServerId !== null}

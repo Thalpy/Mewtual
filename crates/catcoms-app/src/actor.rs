@@ -133,6 +133,17 @@ pub enum AppCommand {
         bootstrap: Vec<String>,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    /// Mint a fresh single-use invite that ALSO embeds `rendezvous` infra addrs (signed-over), so a
+    /// joiner can discover the server with no hard-coded address. Owner/admin only. The caller
+    /// (bridge) is responsible for registering the new namespace at the rendezvous via a
+    /// `MeshHandle` afterwards.
+    MintInviteWithRendezvous {
+        nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+        rendezvous: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     /// Serialize the server's durable state for sealing to disk (Phase 9f).
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
@@ -253,6 +264,34 @@ impl ServerActor {
                 nonce,
                 expires_at_ms,
                 bootstrap,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server actor stopped".into());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
+    /// Mint a fresh single-use invite that ALSO embeds `rendezvous` infra addrs (owner/admin only);
+    /// returns the encoded `InviteToken` bytes. The caller registers the new namespace separately.
+    pub async fn mint_invite_with_rendezvous(
+        &self,
+        nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+        rendezvous: Vec<String>,
+    ) -> Result<Vec<u8>, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MintInviteWithRendezvous {
+                nonce,
+                expires_at_ms,
+                bootstrap,
+                rendezvous,
                 reply,
             })
             .await
@@ -780,6 +819,13 @@ where
                     Some(AppCommand::MintInvite { nonce, expires_at_ms, bootstrap, reply }) => {
                         let res = server
                             .mint_invite(nonce, expires_at_ms, bootstrap)
+                            .map(|t| t.encode())
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::MintInviteWithRendezvous { nonce, expires_at_ms, bootstrap, rendezvous, reply }) => {
+                        let res = server
+                            .mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous)
                             .map(|t| t.encode())
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
