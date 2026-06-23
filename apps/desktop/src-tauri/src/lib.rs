@@ -616,6 +616,28 @@ async fn get_files(state: State<'_, AppState>, server: u64) -> Result<Vec<UiFile
         .collect())
 }
 
+/// Whether a shared file's blob is held locally (openable without a network fetch).
+#[tauri::command]
+async fn file_available(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<bool, String> {
+    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.file_available(raw).await)
+}
+
+/// Remove a shared file from the index by content-address hex (owner/admin only).
+#[tauri::command]
+async fn delete_file(state: State<'_, AppState>, server: u64, cid: String) -> Result<(), String> {
+    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    let actor = actor_of(&state, server).await?;
+    actor.delete_file(raw).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Download a shared file by content-address hex; returns base64-encoded bytes.
 #[tauri::command]
 async fn download_file(
@@ -916,6 +938,8 @@ pub fn run() {
             add_file,
             get_files,
             download_file,
+            file_available,
+            delete_file,
             post_status,
             get_statuses,
             get_wiki_pages,

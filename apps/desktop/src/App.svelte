@@ -28,6 +28,10 @@
   let activeServerId = $state<number | null>(null);
   let showAdd = $state(false); // showing the found/join form to add a server
   let showSettings = $state(false); // the Settings overlay
+  let showFeedback = $state(false); // the Send-feedback overlay
+  let feedbackKind = $state<"bug" | "feature">("bug");
+  let feedbackText = $state("");
+  let feedbackCopied = $state(false);
   // Notification-sound preference (wired to actual playback in 10g), persisted locally.
   let soundOn = $state(typeof localStorage !== "undefined" ? localStorage.getItem("catcoms.sound") !== "off" : true);
   function toggleSound() {
@@ -816,12 +820,92 @@
     }
   }
 
+  // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
+  let fileInfo = $state<UiFile | null>(null);
+  let fileInfoAvail = $state<boolean | null>(null); // null = still checking
+  let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
+  let fileInfoBusy = $state(false);
+  let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
+
+  async function openFileInfo(f: UiFile) {
+    if (activeServerId === null) return;
+    fileInfo = f;
+    fileInfoAvail = null;
+    fileInfoPreview = "";
+    confirmDeleteCid = "";
+    const id = activeServerId;
+    // Report whether the blob is held locally *before* a preview fetch would pull it. Guard the
+    // assignment against a race where the user clicked another file while this was in flight.
+    try {
+      const ok = await invoke<boolean>("file_available", { server: id, cid: f.cid });
+      if (fileInfo?.cid === f.cid) fileInfoAvail = ok;
+    } catch {
+      if (fileInfo?.cid === f.cid) fileInfoAvail = false;
+    }
+    // Fetch an inline preview for media types (bounded by the backend's max file size).
+    if (safeMime(f.mime) && fileInfo?.cid === f.cid) {
+      try {
+        const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
+        // Guard against a race where the pane was closed/switched while fetching.
+        if (fileInfo?.cid === f.cid) fileInfoPreview = `data:${f.mime};base64,${base64}`;
+      } catch {
+        /* no preview — the availability line already explains why */
+      }
+    }
+  }
+
+  function closeFileInfo() {
+    fileInfo = null;
+    fileInfoPreview = "";
+    fileInfoAvail = null;
+    confirmDeleteCid = "";
+  }
+
+  async function removeFile(f: UiFile) {
+    if (activeServerId === null) return;
+    fileInfoBusy = true;
+    try {
+      await invoke("delete_file", { server: activeServerId, cid: f.cid });
+      closeFileInfo();
+      await refreshFiles();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      fileInfoBusy = false;
+    }
+  }
+
+  const previewKind = $derived.by(() => {
+    const m = safeMime(fileInfo?.mime ?? "");
+    if (m.startsWith("image/")) return "image";
+    if (m.startsWith("video/")) return "video";
+    if (m.startsWith("audio/")) return "audio";
+    return "";
+  });
+
   async function send() {
     const text = draft.trim();
     if (!text || !cur || !cur.active || activeServerId === null) return;
     draft = "";
     try {
       await invoke("send_message", { server: activeServerId, channel: cur.active, text });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function copyFeedback() {
+    const report = [
+      `Type: ${feedbackKind === "bug" ? "Bug report" : "Feature request"}`,
+      `App: CatComs (desktop)`,
+      `Environment: ${navigator.userAgent}`,
+      ``,
+      feedbackText.trim(),
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(report);
+      feedbackCopied = true;
+      setTimeout(() => (feedbackCopied = false), 2000);
     } catch (e) {
       error = String(e);
     }
@@ -1009,6 +1093,7 @@
           </button>
         {/each}
         <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
+        <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" onclick={() => (showFeedback = true)}>💬</button>
         <button class="server-icon gear" title="Settings" onclick={() => (showSettings = true)}>⚙</button>
       </nav>
 
@@ -1147,8 +1232,8 @@
             {/each}
             {#each folderView.here as f}
               <li>
-                <button class="file-name" title={"from " + nameOf(f.author)} onclick={() => downloadFile(f)}>
-                  ↓ {f.name}
+                <button class="file-name" title="View file details" onclick={() => openFileInfo(f)}>
+                  📄 {f.name}
                 </button>
                 <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)}</span>
               </li>
@@ -1408,6 +1493,107 @@
                 </button>
               </section>
             {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if fileInfo}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeFileInfo(); }}>
+        <div class="overlay-card">
+          <header class="overlay-head">
+            <h2 class="file-info-title">📄 {fileInfo.name}</h2>
+            <button class="ghost" onclick={closeFileInfo}>✕</button>
+          </header>
+          <div class="overlay-body file-info">
+            {#if previewKind}
+              <div class="file-preview">
+                {#if !fileInfoPreview}
+                  <p class="muted small">Loading preview…</p>
+                {:else if previewKind === "image"}
+                  <img src={fileInfoPreview} alt={fileInfo.name} />
+                {:else if previewKind === "video"}
+                  <!-- svelte-ignore a11y_media_has_caption -->
+                  <video controls src={fileInfoPreview}></video>
+                {:else if previewKind === "audio"}
+                  <audio controls src={fileInfoPreview}></audio>
+                {/if}
+              </div>
+            {/if}
+
+            <dl class="file-meta">
+              <dt>Availability</dt>
+              <dd>
+                {#if fileInfoAvail === null}
+                  <span class="muted">checking…</span>
+                {:else if fileInfoAvail}
+                  <span class="avail yes">● Available on this device</span>
+                {:else}
+                  <span class="avail no">○ Not downloaded — fetched from a peer on demand</span>
+                {/if}
+              </dd>
+              <dt>Uploaded by</dt>
+              <dd>{nameOf(fileInfo.author)}</dd>
+              <dt>Size</dt>
+              <dd>{fmtSize(fileInfo.size)}</dd>
+              <dt>Type</dt>
+              <dd>{fileInfo.mime || "unknown"}</dd>
+              <dt>Folder</dt>
+              <dd>{fileInfo.path === "" ? "(root)" : fileInfo.path}</dd>
+              <dt>Address</dt>
+              <dd class="cid" title={fileInfo.cid}>{fileInfo.cid.slice(0, 16)}…</dd>
+            </dl>
+
+            <div class="file-info-actions">
+              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              {#if myRole === "owner" || myRole === "admin"}
+                {#if confirmDeleteCid === fileInfo.cid}
+                  <button class="danger-btn" disabled={fileInfoBusy} onclick={() => fileInfo && removeFile(fileInfo)}>
+                    {fileInfoBusy ? "Deleting…" : "Confirm delete"}
+                  </button>
+                  <button class="ghost" onclick={() => (confirmDeleteCid = "")}>Cancel</button>
+                {:else}
+                  <button class="ghost danger-text" onclick={() => fileInfo && (confirmDeleteCid = fileInfo.cid)}>Delete</button>
+                {/if}
+              {/if}
+            </div>
+            {#if myRole === "owner" || myRole === "admin"}
+              <p class="muted small">Deleting unlists the file for everyone. Members who already downloaded it keep their copy.</p>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showFeedback}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showFeedback = false; }}>
+        <div class="overlay-card">
+          <header class="overlay-head">
+            <h2>💬 Send feedback</h2>
+            <button class="ghost" onclick={() => (showFeedback = false)}>✕</button>
+          </header>
+          <div class="overlay-body feedback">
+            <div class="seg fb-seg">
+              <button class:active={feedbackKind === "bug"} onclick={() => (feedbackKind = "bug")}>🐞 Bug report</button>
+              <button class:active={feedbackKind === "feature"} onclick={() => (feedbackKind = "feature")}>✨ Feature request</button>
+            </div>
+            <label class="fb-label" for="fb-text">
+              {feedbackKind === "bug"
+                ? "What went wrong? Steps to reproduce, and what you expected to happen."
+                : "What would you like CatComs to do?"}
+            </label>
+            <textarea id="fb-text" class="fb-text" bind:value={feedbackText} rows="7" placeholder="Describe it here…"></textarea>
+            <p class="muted small">
+              CatComs is peer-to-peer with no servers, so feedback can't be sent automatically. Copy the report and
+              share it with the maintainer (your issue tracker, email, or chat). Your environment is included to help debugging.
+            </p>
+            <div class="file-info-actions">
+              <button class="primary" disabled={!feedbackText.trim()} onclick={copyFeedback}>
+                {feedbackCopied ? "✓ Copied to clipboard" : "Copy report"}
+              </button>
+            </div>
           </div>
         </div>
       </div>

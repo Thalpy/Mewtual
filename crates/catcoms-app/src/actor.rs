@@ -73,6 +73,16 @@ pub enum AppCommand {
         cid: Vec<u8>,
         reply: oneshot::Sender<Option<Vec<u8>>>,
     },
+    /// Whether the file's blob is already held locally (no network fetch needed to open it).
+    FileAvailable {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Remove a file from the shared index by content address (owner/admin only).
+    DeleteFile {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Pull the file index from `peer` (e.g. right after joining).
     CatchUpFiles { peer: PeerId },
     /// Post to the server status feed.
@@ -319,6 +329,35 @@ impl ServerActor {
             return None;
         }
         rx.await.unwrap_or(None)
+    }
+
+    /// Whether the file's blob is held locally (openable without a network fetch).
+    pub async fn file_available(&self, cid: Vec<u8>) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FileAvailable { cid, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Remove a file from the shared index by content address (owner/admin only). A
+    /// `FilesUpdated` event follows on success.
+    pub async fn delete_file(&self, cid: Vec<u8>) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeleteFile { cid, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Pull the file index from `peer`.
@@ -598,6 +637,26 @@ where
                             Err(_) => None,
                         };
                         let _ = reply.send(bytes);
+                    }
+                    Some(AppCommand::FileAvailable { cid, reply }) => {
+                        let avail = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server.file_available(&Cid::from_bytes(arr)),
+                            Err(_) => false,
+                        };
+                        let _ = reply.send(avail);
+                    }
+                    Some(AppCommand::DeleteFile { cid, reply }) => {
+                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server
+                                .delete_file(&Cid::from_bytes(arr))
+                                .await
+                                .map_err(|e| e.to_string()),
+                            Err(_) => Err("bad content address".to_string()),
+                        };
+                        let _ = reply.send(res);
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
                     }
                     Some(AppCommand::CatchUpFiles { peer }) => {
                         if let Err(e) = server.request_files_catchup(peer).await {

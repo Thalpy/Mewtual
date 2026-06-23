@@ -510,6 +510,29 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
     out
 }
 
+/// Remove *every* index entry whose ciphertext CID matches `cid` (a no-op if none do). The
+/// index is an append-only list with no dedup, so a concurrent double-add can leave more than
+/// one entry for the same content; unlisting must remove them all. Iterating top-down keeps the
+/// indices we have yet to visit stable as we delete. The content-addressed blob is left in
+/// place; this only unlists the file.
+fn delete_file_entry(doc: &mut AutoCommit, cid: &[u8]) -> Result<(), AutomergeError> {
+    let list = match doc.get(ROOT, FILES)? {
+        Some((Value::Object(ObjType::List), id)) => id,
+        _ => return Ok(()),
+    };
+    for i in (0..doc.length(&list)).rev() {
+        if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
+            let ref_bytes = bytes_field(doc, &entry, F_REF);
+            if let Ok(fref) = FileRef::decode(&ref_bytes) {
+                if fref.ciphertext_cid.as_bytes() == cid {
+                    doc.delete(&list, i)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Read a `Bytes` scalar field (empty if absent or another type).
 fn bytes_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> Vec<u8> {
     match doc.get(obj, key) {
@@ -826,6 +849,36 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             return Ok(None);
         };
         Ok(Some(self.sync.open_file(&ciphertext, &file_ref)?))
+    }
+
+    /// Whether this device already holds the file's ciphertext blob locally — i.e. the file can
+    /// be opened/previewed without a network fetch. (A listed file whose blob isn't held yet is
+    /// still downloadable from a peer that has it.)
+    pub fn file_available(&self, cid: &Cid) -> bool {
+        self.sync.has_blob(cid)
+    }
+
+    /// Remove a file from the shared index. **Owner or admin only** at this product layer —
+    /// errors otherwise. The content-addressed blob may still exist on peers who already hold
+    /// it; this removes the listing (a blob garbage-collection pass is a follow-up). Like
+    /// invites and member removal, the gate is enforced for honest clients; protocol-layer
+    /// enforcement is the same documented residual.
+    pub async fn delete_file(&mut self, cid: &Cid) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can delete files".into(),
+            ));
+        }
+        let raw = cid.as_bytes().to_vec();
+        if !self.files().iter().any(|e| e.cid == raw) {
+            return Err(AppError::Invalid("no such file".into()));
+        }
+        self.sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                delete_file_entry(d, &raw)
+            })
+            .await?;
+        Ok(())
     }
 
     /// Catch up the file index document from `peer` (e.g. right after joining).
@@ -1447,6 +1500,60 @@ mod tests {
         // The owner removes Bob — the MLS commit drops him from the roster.
         alice.remove_member(&bob_fp).await.unwrap();
         assert_eq!(alice.member_count(), 1, "owner removed Bob");
+    }
+
+    #[tokio::test]
+    async fn an_owner_deletes_a_file_and_a_member_cannot() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+
+        alice.open_files().await.unwrap();
+        let cid = alice
+            .add_file("doc.txt", "text/plain", "", b"hello")
+            .await
+            .unwrap();
+        assert_eq!(alice.files().len(), 1);
+
+        // A plain member cannot delete a file — the role gate rejects before anything else.
+        assert!(matches!(
+            bob.delete_file(&cid).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(alice.files().len(), 1, "the file is still listed");
+
+        // The owner deletes it — the listing is removed.
+        alice.delete_file(&cid).await.unwrap();
+        assert!(alice.files().is_empty(), "owner deleted the file");
+
+        // Deleting a now-absent file errors rather than silently succeeding.
+        assert!(matches!(
+            alice.delete_file(&cid).await,
+            Err(AppError::Invalid(_))
+        ));
     }
 
     #[tokio::test]

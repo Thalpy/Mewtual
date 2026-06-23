@@ -1237,3 +1237,90 @@ button.emoji-pick:hover {
 .danger-btn:hover {
   background: #3a2626;
 }
+
+/* File info pane (click a file in the Files tab) */
+.file-info .file-preview {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: var(--bg-elev, #1a1a1f);
+  border: 1px solid var(--border, #2a2a33);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 14px;
+  min-height: 80px;
+}
+.file-info .file-preview img,
+.file-info .file-preview video {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: 4px;
+}
+.file-info .file-preview audio { width: 100%; }
+.file-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0 0 16px;
+}
+.file-meta dt {
+  color: var(--muted, #8a8a96);
+  font-size: 0.85em;
+}
+.file-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+.file-meta dd.cid {
+  font-family: var(--mono, monospace);
+  font-size: 0.85em;
+  color: var(--muted, #8a8a96);
+}
+.avail.yes { color: #4caf86; }
+.avail.no { color: var(--muted, #8a8a96); }
+.file-info-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.danger-text { color: #e0574b; }
+.danger-text:hover { color: #ff6b5e; }
+
+/* Send-feedback overlay */
+.feedback .fb-seg {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.feedback .fb-seg button {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2a33);
+  border-radius: 6px;
+  background: var(--bg-elev, #1a1a1f);
+  cursor: pointer;
+}
+.feedback .fb-seg button.active {
+  border-color: var(--accent, #6c8cff);
+  background: var(--accent-dim, #232a44);
+}
+.fb-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted, #8a8a96);
+  font-size: 0.9em;
+}
+.fb-text {
+  width: 100%;
+  resize: vertical;
+  font: inherit;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2a33);
+  background: var(--bg-elev, #1a1a1f);
+  color: inherit;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+}
+.server-icon.feedback-btn { font-size: 1.05em; }
