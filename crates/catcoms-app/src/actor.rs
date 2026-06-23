@@ -68,10 +68,10 @@ pub enum AppCommand {
     Files {
         reply: oneshot::Sender<Vec<FileEntry>>,
     },
-    /// Download a file's bytes by content address (raw CID bytes).
+    /// Download a file's bytes by content address (raw CID bytes); a precise error otherwise.
     DownloadFile {
         cid: Vec<u8>,
-        reply: oneshot::Sender<Option<Vec<u8>>>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
     /// Whether the file's blob is already held locally (no network fetch needed to open it).
     FileAvailable {
@@ -351,8 +351,9 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
-    /// Download a file's bytes by content address (raw CID bytes); `None` if unavailable.
-    pub async fn download_file(&self, cid: Vec<u8>) -> Option<Vec<u8>> {
+    /// Download a file's bytes by content address (raw CID bytes); a precise error string if it
+    /// can't be produced (not listed / held-but-unreadable / no peer has it / undecryptable).
+    pub async fn download_file(&self, cid: Vec<u8>) -> Result<Vec<u8>, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -360,9 +361,9 @@ impl ServerActor {
             .await
             .is_err()
         {
-            return None;
+            return Err("server stopped".into());
         }
-        rx.await.unwrap_or(None)
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Whether the file's blob is held locally (openable without a network fetch).
@@ -662,15 +663,14 @@ where
                         let _ = reply.send(server.files());
                     }
                     Some(AppCommand::DownloadFile { cid, reply }) => {
-                        let bytes = match <[u8; 32]>::try_from(cid.as_slice()) {
+                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
                             Ok(arr) => server
                                 .download_file(&Cid::from_bytes(arr))
                                 .await
-                                .ok()
-                                .flatten(),
-                            Err(_) => None,
+                                .map_err(|e| e.to_string()),
+                            Err(_) => Err("bad content address".to_string()),
                         };
-                        let _ = reply.send(bytes);
+                        let _ = reply.send(res);
                     }
                     Some(AppCommand::FileAvailable { cid, reply }) => {
                         let avail = match <[u8; 32]>::try_from(cid.as_slice()) {

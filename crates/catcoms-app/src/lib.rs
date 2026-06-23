@@ -832,23 +832,41 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// ciphertext blob from the best known peer if not already held, then opening it under the
     /// group file-wrap key (Phase 9h). `None` if the blob could not be obtained or no index
     /// entry matches the CID.
-    pub async fn download_file(&mut self, cid: &Cid) -> Result<Option<Vec<u8>>, AppError> {
+    /// Download + decrypt a shared file by its ciphertext content address. Returns a *precise*
+    /// error so the four distinct failures are no longer conflated into "no peer has it":
+    /// the file isn't listed · the ref is corrupt · we hold the sealed blob but can't read it ·
+    /// no peer has it yet · it couldn't be decrypted.
+    pub async fn download_file(&mut self, cid: &Cid) -> Result<Vec<u8>, AppError> {
         let Some(entry) = self
             .files()
             .into_iter()
             .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
         else {
-            return Ok(None);
+            return Err(AppError::Invalid(
+                "no such file in this server's index".into(),
+            ));
         };
         let file_ref = FileRef::decode(&entry.file_ref)
-            .map_err(|_| AppError::Invalid("corrupt file ref".into()))?;
+            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
+        // Only reach out to a peer if we don't already hold the blob ourselves.
         if !self.sync.has_blob(cid) {
             self.sync.request_blob_best(cid).await?;
         }
         let Some(ciphertext) = self.sync.get_blob(cid) else {
-            return Ok(None);
+            // get_blob is None either because we genuinely don't hold it, or because we hold the
+            // sealed file but couldn't unseal it — distinguish them so the error is truthful.
+            return Err(if self.sync.has_blob(cid) {
+                AppError::Invalid(
+                    "the file is stored on this device but could not be read (it may be corrupted)"
+                        .into(),
+                )
+            } else {
+                AppError::Invalid("file not available yet — no connected peer has it".into())
+            });
         };
-        Ok(Some(self.sync.open_file(&ciphertext, &file_ref)?))
+        self.sync
+            .open_file(&ciphertext, &file_ref)
+            .map_err(|e| AppError::Invalid(format!("the file could not be decrypted: {e}")))
     }
 
     /// Whether this device already holds the file's ciphertext blob locally — i.e. the file can
@@ -1449,9 +1467,55 @@ mod tests {
 
         let got = restored.download_file(&cid).await.unwrap();
         assert_eq!(
-            got.as_deref(),
-            Some(&b"PNG-BYTES-xyz"[..]),
+            got,
+            b"PNG-BYTES-xyz".to_vec(),
             "an embedded file downloads + decrypts after a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_uploaded_file_downloads_after_the_vault_is_reopened() {
+        // The real restart path: the vault is CLOSED and RE-OPENED (keys re-derived from the
+        // passphrase) between uploading a file and downloading it. Reproduces "I uploaded it but
+        // get 'file unavailable'": if blob_key isn't stable across re-open, has_blob stays true
+        // (the sealed file is on disk) but get_blob can't unseal -> None -> unavailable.
+        let dir = tempfile::tempdir().unwrap();
+        let key = "g"; // the blob-store dir label (the bridge uses the hex group id)
+
+        let cid;
+        let snap;
+        {
+            let mut rng = ChaCha20Rng::seed_from_u64(7);
+            let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+            let mut alice = founder();
+            alice.set_blob_store(store.blob_store(key).unwrap());
+            alice.open_files().await.unwrap();
+            cid = alice
+                .add_file("doc.bin", "application/octet-stream", "", b"hello-bytes")
+                .await
+                .unwrap();
+            snap = alice.snapshot().unwrap();
+        } // store + alice dropped — simulate the app closing
+
+        // Re-open the vault (re-derive keys) and restore the server, as a restart does.
+        let mut rng2 = ChaCha20Rng::seed_from_u64(8);
+        let store2 = ServerStore::open(dir.path(), b"correct horse", &mut rng2).unwrap();
+        let hub = Hub::new();
+        let mut restored = Server::restore(
+            &snap,
+            hub.join(PeerId::from_u64(9)),
+            ChaCha20Rng::seed_from_u64(0),
+            Box::new(ManualClock::new(1)),
+            "alice",
+        )
+        .unwrap();
+        restored.set_blob_store(store2.blob_store(key).unwrap());
+
+        let got = restored.download_file(&cid).await.unwrap();
+        assert_eq!(
+            got,
+            b"hello-bytes".to_vec(),
+            "an uploaded file must still download after the vault is reopened"
         );
     }
 
@@ -1613,7 +1677,7 @@ mod tests {
         assert_eq!(files[0].path, "docs/sub", "the folder path round-trips");
 
         // The uploader already holds the bytes.
-        assert_eq!(alice.download_file(&cid).await.unwrap(), Some(data));
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
     }
 
     #[tokio::test]

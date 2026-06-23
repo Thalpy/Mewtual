@@ -700,10 +700,8 @@ async fn download_file(
 ) -> Result<String, String> {
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
     let actor = actor_of(&state, server).await?;
-    match actor.download_file(raw).await {
-        Some(bytes) => Ok(B64.encode(&bytes)),
-        None => Err("file unavailable (no peer has it yet)".into()),
-    }
+    let bytes = actor.download_file(raw).await?;
+    Ok(B64.encode(&bytes))
 }
 
 /// Post to the server status feed.
