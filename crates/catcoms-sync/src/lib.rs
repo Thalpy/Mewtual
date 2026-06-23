@@ -30,12 +30,15 @@ use std::fmt;
 use automerge::{AutoCommit, AutomergeError};
 use bytes::Bytes;
 use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
+use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{
     restore_server, serialize_key_package, snapshot_server, Incoming, InviteLedger, InviteToken,
     MlsDevice, ServerGroup,
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
-use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent};
+use catcoms_rt::{
+    Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Topic, TransportEvent,
+};
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
     StorageError,
@@ -96,6 +99,9 @@ const BLOB_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
 const BLOB_BUDGET_WINDOW_MS: u64 = 1_000;
 /// Cap on peer records returned in one PEX response / retained locally.
 const MAX_PEX_ENTRIES: usize = 64;
+/// Bound on the steady-state-discovery "already dialed" dedup set; cleared on overflow (re-dials
+/// stay policy-budget-gated, so clearing only costs a bounded re-consideration, never unbounded RAM).
+const MAX_DIALED_PEERS: usize = 4096;
 /// Cap on dialable addresses carried per peer record.
 const MAX_PEX_ADDRESSES: usize = 8;
 /// Minimum interval (ms, on the injected clock) between PEX responses served to the
@@ -1594,6 +1600,16 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Generation counter for the owner's *published* roster copy (monotonic; persisted), so
     /// honest members converge deterministically. Not load-bearing for the local gate.
     roster_gen: u64,
+    /// Steady-state rendezvous discovery config (persisted): the `(dialable_addr, rz_node_id_bytes)`
+    /// of each rendezvous this member registers/discovers at to re-find the group after a restart.
+    /// Empty for a server not using rendezvous.
+    rendezvous_nodes: Vec<(String, Vec<u8>)>,
+    /// The eclipse-resistant dial policy (one long-lived per group; transient — rebuilt on restore)
+    /// that ranks discovered candidates into a bounded dial plan. The transport NEVER auto-dials.
+    discovery: DiscoveryPolicy,
+    /// Discovered peers already dialed this session (dedup, keyed on the opaque peer bytes), so
+    /// repeated discovery of the same member doesn't re-dial. Transient.
+    dialed_peers: HashSet<Vec<u8>>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
@@ -1663,6 +1679,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             outgoing_add_requests: HashMap::new(),
             admin_roster: BTreeSet::new(),
             roster_gen: 0,
+            rendezvous_nodes: Vec::new(),
+            discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
+            dialed_peers: HashSet::new(),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
             blob_budget: HashMap::new(),
@@ -1727,6 +1746,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for fp in &self.admin_roster {
             e.put_str(fp).map_err(|_| oversize())?;
         }
+        // Post-join discovery: the rendezvous config, so a reloaded member re-registers/discovers
+        // to re-find the group (also appended after the peer records).
+        e.put_u32(self.rendezvous_nodes.len() as u32);
+        for (addr, rz) in &self.rendezvous_nodes {
+            e.put_str(addr).map_err(|_| oversize())?;
+            e.put_bytes(rz).map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -1770,8 +1796,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Item 3: the owner-local authoritative admin roster + generation. Read gracefully so a
         // pre-item-3 snapshot (no trailing bytes) loads with an empty roster (the owner re-grants;
         // old per-fp grant docs are no longer honored). A new snapshot is decoded strictly.
-        let (roster_gen, admin_roster) = if d.is_empty() {
-            (0u64, BTreeSet::new())
+        let (roster_gen, admin_roster, rendezvous_nodes) = if d.is_empty() {
+            (0u64, BTreeSet::new(), Vec::new())
         } else {
             let gen = d.get_u64().map_err(|_| bad())?;
             let count = d.get_u32().map_err(|_| bad())?;
@@ -1779,7 +1805,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             for _ in 0..count {
                 set.insert(d.get_str().map_err(|_| bad())?.to_string());
             }
-            (gen, set)
+            // Post-join discovery rendezvous config — also a graceful tail (absent in a snapshot
+            // written before this feature). `get_*` is bounded by the remaining input, so push
+            // (no pre-alloc) can't over-run; the snapshot is sealed, so the count isn't adversarial.
+            let mut nodes = Vec::new();
+            if !d.is_empty() {
+                let n = d.get_u32().map_err(|_| bad())?;
+                for _ in 0..n {
+                    let addr = d.get_str().map_err(|_| bad())?.to_string();
+                    let rz = d.get_bytes().map_err(|_| bad())?.to_vec();
+                    nodes.push((addr, rz));
+                }
+            }
+            (gen, set, nodes)
         };
         d.finish().map_err(|_| bad())?;
 
@@ -1809,6 +1847,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         this.peer_records = peer_records;
         this.roster_gen = roster_gen;
         this.admin_roster = admin_roster;
+        this.rendezvous_nodes = rendezvous_nodes;
         Ok(this)
     }
 
@@ -2664,6 +2703,83 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         out
+    }
+
+    // --- steady-state rendezvous discovery (post-join member re-finding) ------------------
+
+    /// Set this member's rendezvous discovery config: the `(dialable_addr, rz_node_id_bytes)` of
+    /// each rendezvous to register/discover at, so the group re-finds itself after a restart
+    /// (founder: the rendezvous it registered at; joiner: the invite's rendezvous). Persisted.
+    pub fn set_rendezvous_nodes(&mut self, nodes: Vec<(String, Vec<u8>)>) {
+        self.rendezvous_nodes = nodes;
+    }
+
+    /// Whether any rendezvous is configured (so the actor knows whether to drive discovery).
+    pub fn has_rendezvous(&self) -> bool {
+        !self.rendezvous_nodes.is_empty()
+    }
+
+    /// Steady-state discovery tick: register our record under each member-only rendezvous namespace
+    /// and ask each rendezvous for other members' records. Discovered records surface via
+    /// [`next_discovered`](Self::next_discovered) and are dialed (policy-gated) by
+    /// [`ingest_discovered`](Self::ingest_discovered). A no-op without rendezvous configured.
+    pub async fn drive_discovery(&mut self) {
+        for (addr, rz_node) in self.rendezvous_nodes.clone() {
+            // Ensure we're connected to the rendezvous (idempotent if already connected) — so a
+            // reloaded member re-establishes the link without the bridge re-dialing it.
+            let _ = self.transport.dial_addr(&addr).await;
+            for ns in self.rendezvous_namespaces(&rz_node) {
+                let _ = self.transport.rendezvous_register(&ns, &rz_node).await;
+                let _ = self.transport.rendezvous_discover(&ns, &rz_node).await;
+            }
+        }
+    }
+
+    /// Await the next rendezvous-discovered peer (delegates to the transport; inert without
+    /// rendezvous — the default never resolves). `&mut self` (not `&self`) so the actor's task
+    /// future stays `Send` without requiring `ChannelSync: Sync`.
+    pub async fn next_discovered(&mut self) -> Option<DiscoveredPeer> {
+        self.transport.next_discovered().await
+    }
+
+    /// Rank a discovered peer through the [`DiscoveryPolicy`] (which alone decides dials — the
+    /// transport never auto-dials) and dial the chosen addresses if not already dialed. The
+    /// namespace must be one of ours (member-only); membership is re-proven post-dial by the
+    /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false` (the pre-dial membership
+    /// tag isn't surfaced by the transport yet — a documented hardening follow-up).
+    pub async fn ingest_discovered(&mut self, d: DiscoveredPeer) {
+        if self.dialed_peers.contains(&d.peer) {
+            return;
+        }
+        // Only act on a record from a namespace we actually register/discover under.
+        let Some(rz_root) = self
+            .rendezvous_nodes
+            .iter()
+            .map(|(_, rz)| rz.clone())
+            .find(|rz| self.rendezvous_namespaces(rz).contains(&d.namespace))
+        else {
+            return;
+        };
+        if self.dialed_peers.len() >= MAX_DIALED_PEERS {
+            self.dialed_peers.clear(); // bound memory; re-dials are still policy-budget-gated
+        }
+        self.dialed_peers.insert(d.peer.clone());
+        let candidate = Candidate {
+            peer: d.peer,
+            addresses: d.addresses,
+            source: Source::Rendezvous(rz_root),
+            seq: 1,
+            tag_verified: false,
+        };
+        let roster = self.member_count();
+        let plan = self
+            .discovery
+            .plan(vec![candidate], roster, &*self.clock, &mut self.rng);
+        for pd in plan {
+            for addr in &pd.addresses {
+                let _ = self.transport.dial_addr(addr).await;
+            }
+        }
     }
 
     /// Map a discovered namespace string back to its routing label, if it is one this
@@ -5475,6 +5591,8 @@ mod tests {
         let (_hub, mut members, ids) = build_members(2).await;
         let admin = ids[1];
         grant_admin(&mut members[0], &admin).await;
+        // Also set a rendezvous config so we confirm the post-join-discovery fields persist too.
+        members[0].set_rendezvous_nodes(vec![("/ip4/9.9.9.9/tcp/1/p2p/rz".into(), vec![3, 4, 5])]);
         let snap = members[0].snapshot().unwrap();
 
         let hub2 = Hub::new();
@@ -5489,6 +5607,10 @@ mod tests {
         assert!(
             restored.inviter_is_authorized(&admin),
             "the granted admin is still authorized after restore"
+        );
+        assert!(
+            restored.has_rendezvous(),
+            "the rendezvous discovery config persists across restore"
         );
         assert!(
             !restored.inviter_is_authorized(&MlsDevice::generate().unwrap().device_id()),
@@ -5862,6 +5984,44 @@ mod tests {
         assert!(
             alice.charge_blob_budget(requester, now + BLOB_BUDGET_WINDOW_MS, 1),
             "a new window resets the budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn ingest_discovered_processes_known_namespaces_and_ignores_others() {
+        // Steady-state discovery: a record discovered under one of our member-only rendezvous
+        // namespaces is processed (marked dialed, so we don't reconsider it); a record under an
+        // unrecognized namespace is ignored (not one we register/discover under).
+        let mut alice = solo_node();
+        let rz = vec![7u8; 38]; // an opaque rendezvous node id
+        alice.set_rendezvous_nodes(vec![("/ip4/1.2.3.4/tcp/9/p2p/rz".into(), rz.clone())]);
+        assert!(alice.has_rendezvous());
+        let ns = alice
+            .rendezvous_namespaces(&rz)
+            .into_iter()
+            .next()
+            .expect("a founder derives at least the current namespace");
+
+        let good = DiscoveredPeer {
+            peer: vec![1, 2, 3],
+            addresses: vec!["/ip4/5.6.7.8/tcp/1".into()],
+            namespace: ns,
+        };
+        alice.ingest_discovered(good).await;
+        assert!(
+            alice.dialed_peers.contains(&vec![1, 2, 3]),
+            "a record under our namespace is processed"
+        );
+
+        let unknown = DiscoveredPeer {
+            peer: vec![9, 9],
+            addresses: vec![],
+            namespace: "catcoms1-not-one-of-ours".into(),
+        };
+        alice.ingest_discovered(unknown).await;
+        assert!(
+            !alice.dialed_peers.contains(&vec![9, 9]),
+            "a record under an unrecognized namespace is ignored"
         );
     }
 

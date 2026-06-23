@@ -22,6 +22,11 @@ use catcoms_storage::Cid;
 
 use crate::{ChatMessage, FileEntry, MemberView, Profile, Server};
 
+/// Per drive: how long to wait for a discovered record before concluding the queue is drained.
+const DISCOVERY_DRAIN_MS: u64 = 500;
+/// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
+const MAX_DISCOVERED_PER_TICK: usize = 16;
+
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
@@ -148,6 +153,10 @@ pub enum AppCommand {
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    /// Drive one steady-state rendezvous-discovery pass (re-register + re-discover + dial newly
+    /// found members). Fire-and-forget; sent periodically by the bridge's per-server timer (the
+    /// real-time interval lives there, off the deterministic-time seam). No-op without rendezvous.
+    DriveDiscovery,
     /// Stop the actor.
     Shutdown,
 }
@@ -573,6 +582,15 @@ impl ServerActor {
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
     }
+
+    /// Drive one steady-state rendezvous-discovery pass. Fire-and-forget — the bridge calls this on
+    /// a timer. Returns `Err` once the actor has stopped (so the bridge's timer task can exit).
+    pub async fn drive_discovery(&self) -> Result<(), ()> {
+        self.cmd_tx
+            .send(AppCommand::DriveDiscovery)
+            .await
+            .map_err(|_| ())
+    }
 }
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
@@ -815,6 +833,30 @@ where
                     }
                     Some(AppCommand::Snapshot { reply }) => {
                         let _ = reply.send(server.snapshot().map(|z| z.to_vec()).map_err(|e| e.to_string()));
+                    }
+                    // Steady-state rendezvous discovery: re-register + re-discover at the rendezvous,
+                    // then drain the records that arrive in a bounded window and dial each
+                    // (policy-gated). Driven by a periodic command from the bridge (the real-time
+                    // timer lives there, off the deterministic-time seam). A no-op without rendezvous.
+                    Some(AppCommand::DriveDiscovery) => {
+                        if server.has_rendezvous() {
+                            server.drive_discovery().await;
+                            // ONE overall timeout bounds the whole drain to a single window, so an
+                            // attacker drip-feeding records can't extend the actor's block; the
+                            // count cap bounds the work.
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_millis(DISCOVERY_DRAIN_MS),
+                                async {
+                                    for _ in 0..MAX_DISCOVERED_PER_TICK {
+                                        match server.next_discovered().await {
+                                            Some(d) => server.ingest_discovered(d).await,
+                                            None => break, // transport closed
+                                        }
+                                    }
+                                },
+                            )
+                            .await;
+                        }
                     }
                     Some(AppCommand::MintInvite { nonce, expires_at_ms, bootstrap, reply }) => {
                         let res = server

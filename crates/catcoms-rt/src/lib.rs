@@ -22,6 +22,6 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
-    MeshTransport, PeerId, ProtocolId, Responder, ResponderRx, Topic, TransportError,
-    TransportEvent,
+    DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Responder, ResponderRx, Topic,
+    TransportError, TransportEvent,
 };

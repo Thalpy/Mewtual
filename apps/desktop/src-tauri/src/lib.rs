@@ -135,6 +135,26 @@ struct ServerEvt {
 }
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
+/// How often the bridge nudges a server's actor to drive steady-state rendezvous discovery. The
+/// real-time interval lives HERE (in the bridge / `apps`, off the deterministic-time seam the
+/// `crates` ambient gate enforces); the actor's pass is a no-op for a server without rendezvous.
+const DISCOVERY_INTERVAL_SECS: u64 = 60;
+
+/// Spawn a per-server timer that periodically drives steady-state rendezvous discovery, so the
+/// group re-finds itself after a restart. Exits once the actor stops (`drive_discovery` errors).
+fn spawn_discovery_timer(actor: ServerActor) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(DISCOVERY_INTERVAL_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            if actor.drive_discovery().await.is_err() {
+                break; // the actor stopped
+            }
+        }
+    });
+}
+
 fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
@@ -231,6 +251,7 @@ async fn register_server(
         *n
     };
     forward_events(app.clone(), id, events);
+    spawn_discovery_timer(actor.clone());
     state.servers.lock().await.insert(
         id,
         ServerEntry {
@@ -365,13 +386,29 @@ async fn register_join_ns(
 /// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses — plus the
 /// invite's `bootstrap` addrs as direct fallbacks — and return the connected transport + the
 /// inviter's peer id. Mirrors `tcp_rendezvous_e2e.rs`.
-async fn discover_and_connect(invite: &InviteToken) -> Result<(MeshService, PeerId), String> {
+async fn discover_and_connect(
+    invite: &InviteToken,
+) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>), String> {
     let targets = validate_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
     if targets.is_empty() {
         return Err("invite carries no rendezvous address".into());
     }
     let rz_addrs: Vec<Multiaddr> = targets.iter().map(|t| t.addr.clone()).collect();
-    let (mesh, _id) = MeshService::new_tcp(None, &rz_addrs).map_err(|e| e.to_string())?;
+    // Bind a listen port so the joiner is itself dialable — post-join steady-state discovery has
+    // members register/discover + dial each other — then dial the rendezvous nodes.
+    let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
+        .parse()
+        .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
+    let (mesh, _id) = MeshService::new_tcp(Some(listen), &rz_addrs).map_err(|e| e.to_string())?;
+    // Advertise our reachable (loopback) address so our steady-state rendezvous registration
+    // carries a dialable record (same-machine; a LAN/relay advertise for joiners is a follow-up).
+    if let Ok(Some(bound)) = timeout(Duration::from_secs(10), mesh.next_listen_addr()).await {
+        if let Some(port) = tcp_port(&bound) {
+            if let Ok(addr) = format!("/ip4/127.0.0.1/tcp/{port}").parse::<Multiaddr>() {
+                let _ = mesh.add_external_address(addr).await;
+            }
+        }
+    }
 
     // Wait until at least one rendezvous node is connected.
     let rz_peers: Vec<PeerId> = targets.iter().map(|t| phase0_peer_id(&t.peer)).collect();
@@ -449,7 +486,12 @@ async fn discover_and_connect(invite: &InviteToken) -> Result<(MeshService, Peer
     })
     .await
     .map_err(|_| "timed out connecting to the discovered server".to_string())?;
-    Ok((mesh, inviter))
+    // The rendezvous config the joiner keeps for steady-state discovery (re-finding the group).
+    let rz_config: Vec<(String, Vec<u8>)> = targets
+        .iter()
+        .map(|t| (t.addr.to_string(), t.peer.to_bytes()))
+        .collect();
+    Ok((mesh, inviter, rz_config))
 }
 
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
@@ -573,6 +615,11 @@ async fn found_server(
         .map_err(|e| e.to_string())?;
     server.subscribe_control().await.map_err(|e| e.to_string())?;
     attach_blob_store(&state, &mut server).await;
+    // Steady-state discovery: tell the server which rendezvous to re-register/discover at, so the
+    // actor re-finds the group after a restart. (The founder already advertised + connected above.)
+    if let Some(rz) = &rz_target {
+        server.set_rendezvous_nodes(vec![(rz.addr.to_string(), rz.peer.to_bytes())]);
+    }
 
     // Mint a single-use invite (1h) carrying the bootstrap address (+ rendezvous addr if set, so
     // the joiner can discover us), then register the invite's namespace at the rendezvous.
@@ -634,7 +681,7 @@ async fn join_server(
 
     // If the invite points at a rendezvous, discover the inviter there (no hard-coded address);
     // otherwise dial the invite's bootstrap addresses directly (loopback / LAN / relayed).
-    let (mesh, inviter) = if !invite.rendezvous.is_empty() {
+    let (mesh, inviter, rz_config) = if !invite.rendezvous.is_empty() {
         discover_and_connect(&invite).await?
     } else {
         let addrs: Vec<Multiaddr> = invite
@@ -663,7 +710,7 @@ async fn join_server(
         })
         .await
         .map_err(|_| "timed out connecting to the server".to_string())?;
-        (mesh, inviter)
+        (mesh, inviter, Vec::new())
     };
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
@@ -680,6 +727,11 @@ async fn join_server(
     .await
     .map_err(|e| e.to_string())?;
     attach_blob_store(&state, &mut server).await;
+    // Steady-state discovery: the joiner keeps the invite's rendezvous so the actor re-registers/
+    // re-discovers there (re-finding the group after a restart, no fresh invite).
+    if !rz_config.is_empty() {
+        server.set_rendezvous_nodes(rz_config);
+    }
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
@@ -1143,6 +1195,12 @@ async fn reload_one(
             .unwrap_or_default(),
         _ => Vec::new(),
     };
+    // Advertise our (new-port) reachable address unconditionally, so that if this server has a
+    // persisted steady-state rendezvous config (restored from the snapshot), the actor's discovery
+    // tick can re-register a dialable record. Harmless for a server without rendezvous.
+    for addr in external_addrs(&bootstrap) {
+        let _ = mesh.add_external_address(addr).await;
+    }
 
     // If the persisted invite was discovery-enabled, re-connect to its rendezvous, re-advertise
     // our (new-port) address, and re-register the invite's namespace there — so the founder is
@@ -1219,6 +1277,7 @@ async fn reload_one(
     actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
     forward_events(app.clone(), record.id, events);
+    spawn_discovery_timer(actor.clone());
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {

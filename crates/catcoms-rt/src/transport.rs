@@ -152,6 +152,21 @@ pub enum TransportEvent {
     PeerDisconnected(PeerId),
 }
 
+/// A peer surfaced by rendezvous discovery (rt-native, libp2p-free). `peer` is the discovered
+/// node's opaque transport-id bytes (the same encoding passed back to `dial`/used as a dedup key);
+/// `addresses` are its advertised dialable addresses; `namespace` is the rendezvous namespace it
+/// was found under. Surfaced only — the discovery/dial policy above the transport decides what to
+/// dial (the transport never auto-dials a discovered record).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredPeer {
+    /// The discovered node's opaque transport-id bytes.
+    pub peer: Vec<u8>,
+    /// Its advertised dialable addresses.
+    pub addresses: Vec<String>,
+    /// The rendezvous namespace it was discovered under.
+    pub namespace: String,
+}
+
 /// The messaging seam. Outbound operations take `&self` so the transport can be
 /// shared (e.g. behind an `Arc`); [`MeshTransport::next_event`] is single-consumer.
 #[async_trait]
@@ -179,4 +194,48 @@ pub trait MeshTransport: Send + Sync {
     /// Await the next inbound event. Returns `None` once the transport is closed.
     /// Intended to be driven by a single consumer task.
     async fn next_event(&self) -> Option<TransportEvent>;
+
+    // --- rendezvous discovery (optional; default no-op for transports without it) -----------
+    //
+    // These let a higher layer drive steady-state rendezvous discovery generically. `rz_node` is
+    // the rendezvous node's opaque transport-id bytes; `namespace` is a (member-only-derived)
+    // rendezvous namespace; addresses are dialable address strings. The defaults make a transport
+    // without rendezvous support inert: the control verbs succeed as no-ops and `next_discovered`
+    // never resolves (so a `select!` arm awaiting it simply never fires — returning `None` would
+    // busy-loop the caller's loop).
+
+    /// Register our advertised external addresses under `namespace` at rendezvous `rz_node`.
+    async fn rendezvous_register(
+        &self,
+        _namespace: &str,
+        _rz_node: &[u8],
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    /// Ask `rz_node` for peers registered under `namespace`; results surface via
+    /// [`MeshTransport::next_discovered`] and are NEVER auto-dialed.
+    async fn rendezvous_discover(
+        &self,
+        _namespace: &str,
+        _rz_node: &[u8],
+    ) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    /// Dial a peer address string at runtime (the higher layer's chosen dial, post-policy).
+    async fn dial_addr(&self, _addr: &str) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    /// Advertise `addr` as an externally-reachable address, so a rendezvous registration can flush.
+    async fn add_external_addr(&self, _addr: &str) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    /// Await the next rendezvous-discovered peer. The default never resolves (a transport without
+    /// rendezvous never surfaces one), so a `select!` arm awaiting it is inert.
+    async fn next_discovered(&self) -> Option<DiscoveredPeer> {
+        std::future::pending().await
+    }
 }

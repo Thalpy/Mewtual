@@ -33,7 +33,8 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_rt::{
-    MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError, TransportEvent,
+    DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError,
+    TransportEvent,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -1270,5 +1271,48 @@ impl MeshTransport for MeshService {
 
     async fn next_event(&self) -> Option<TransportEvent> {
         self.event_rx.lock().await.recv().await
+    }
+
+    // Rendezvous discovery — delegate to the inherent methods, mapping rt-native opaque bytes/
+    // strings to libp2p types. (`MeshService::method(self, ..)` is the explicit inherent call.)
+    async fn rendezvous_register(
+        &self,
+        namespace: &str,
+        rz_node: &[u8],
+    ) -> Result<(), TransportError> {
+        let rz = libp2p::PeerId::from_bytes(rz_node).map_err(|_| TransportError::Closed)?;
+        MeshService::rendezvous_register(self, namespace, rz)
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    async fn rendezvous_discover(
+        &self,
+        namespace: &str,
+        rz_node: &[u8],
+    ) -> Result<(), TransportError> {
+        let rz = libp2p::PeerId::from_bytes(rz_node).map_err(|_| TransportError::Closed)?;
+        MeshService::rendezvous_discover(self, namespace, rz)
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    async fn dial_addr(&self, addr: &str) -> Result<(), TransportError> {
+        let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
+        MeshService::dial(self, m).await
+    }
+
+    async fn add_external_addr(&self, addr: &str) -> Result<(), TransportError> {
+        let m: Multiaddr = addr.parse().map_err(|_| TransportError::Closed)?;
+        MeshService::add_external_address(self, m).await
+    }
+
+    async fn next_discovered(&self) -> Option<DiscoveredPeer> {
+        let d = MeshService::next_discovered(self).await?;
+        Some(DiscoveredPeer {
+            peer: d.peer.to_bytes(),
+            addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
+            namespace: d.namespace,
+        })
     }
 }

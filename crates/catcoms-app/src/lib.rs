@@ -20,7 +20,7 @@ use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
-use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
+use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
 use catcoms_storage::{BlobStore, Cid, FileManifest};
 pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{
@@ -1230,6 +1230,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// layer drives this in a background loop; tests drive it explicitly.
     pub async fn sync_once(&mut self) -> Result<bool, AppError> {
         Ok(self.sync.run_once().await?)
+    }
+
+    // --- steady-state rendezvous discovery (driven by the actor) -----------------------------
+
+    /// Configure the rendezvous nodes this member registers/discovers at, so the group re-finds
+    /// itself after a restart (founder: the rendezvous it registered at; joiner: the invite's).
+    pub fn set_rendezvous_nodes(&mut self, nodes: Vec<(String, Vec<u8>)>) {
+        self.sync.set_rendezvous_nodes(nodes);
+    }
+
+    /// Whether steady-state rendezvous discovery is configured (so the actor drives its tick).
+    pub fn has_rendezvous(&self) -> bool {
+        self.sync.has_rendezvous()
+    }
+
+    /// Drive one steady-state discovery tick (re-register + re-discover at the rendezvous).
+    pub async fn drive_discovery(&mut self) {
+        self.sync.drive_discovery().await;
+    }
+
+    /// Await the next rendezvous-discovered peer (inert without rendezvous configured).
+    pub async fn next_discovered(&mut self) -> Option<DiscoveredPeer> {
+        self.sync.next_discovered().await
+    }
+
+    /// Dial a discovered peer if the [`DiscoveryPolicy`](catcoms_discovery::DiscoveryPolicy)
+    /// approves it (never auto-dial; membership re-proven post-dial via PEX).
+    pub async fn ingest_discovered(&mut self, d: DiscoveredPeer) {
+        self.sync.ingest_discovered(d).await;
     }
 
     /// Fetch a channel's history from `peer` (request/response catch-up), e.g. right

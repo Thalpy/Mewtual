@@ -684,6 +684,7 @@ dependencies = [
  "blake3",
  "bytes",
  "catcoms-crypto",
+ "catcoms-discovery",
  "catcoms-mls",
  "catcoms-replication",
  "catcoms-rt",
