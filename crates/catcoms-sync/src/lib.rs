@@ -44,6 +44,11 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod roles;
+// Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
+// canonical implementation rather than keeping a second copy that could drift.
+pub use roles::{fingerprint, grant_payload, read_admins, ROLES_DOC, ROLE_GRANT_DOMAIN};
+
 /// Request/response protocol (one RR protocol; the first payload byte selects the
 /// request kind so it works over the single-protocol mesh node).
 const RR_PROTOCOL: &str = "/catcoms/rr/1";
@@ -1607,6 +1612,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// the product layer uses, Phase 10h), if the group has one.
     pub fn designated_committer_id(&self) -> Option<DeviceId> {
         self.group.designated_committer()
+    }
+
+    /// Whether `device_id` is currently authorized to invite/admit — the **owner** (designated
+    /// committer) unconditionally, or a current member holding a valid **owner-signed admin
+    /// grant** in the live `MemberRoles` doc. Reads the doc as it exists *now* (zero staleness),
+    /// which is what the membership-admission gate needs (a demoted admin's authority lapses the
+    /// instant the demotion is applied). Returns `false` if there is no owner/roles doc yet
+    /// except for the owner itself, so the founder can always invite the first members.
+    pub fn inviter_is_authorized(&self, device_id: &DeviceId) -> bool {
+        let Some(owner) = self.group.designated_committer() else {
+            return false;
+        };
+        if owner == *device_id {
+            return true;
+        }
+        match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
+            Some(doc) => roles::read_admins(doc.doc(), &self.group.group_id(), &owner)
+                .contains(&roles::fingerprint(device_id)),
+            None => false,
+        }
     }
 
     /// Sign a blob with this device's signature key (for owner-signed capability records like
@@ -4704,6 +4729,56 @@ mod tests {
             alice.stats.requests_rejected,
             rejected_before + 1,
             "the forged request was counted as rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn inviter_is_authorized_for_owner_and_owner_signed_admins_only() {
+        use automerge::{transaction::Transactable, ScalarValue, ROOT};
+        let (_hub, mut members, ids) = build_members(3).await;
+        let owner = ids[0];
+        let admin = ids[1];
+        let plain = ids[2];
+        let outsider = MlsDevice::generate().unwrap().device_id();
+
+        // The owner writes a valid owner-signed admin grant for members[1] into the roles doc.
+        members[0]
+            .open_channel(DocType::MemberRoles, ROLES_DOC)
+            .await
+            .unwrap();
+        let admin_fp = fingerprint(&admin);
+        let grant = {
+            let group_id = members[0].group_id();
+            let mut g = members[0].device.public_key_bytes(); // 32-byte owner pubkey
+            let sig = members[0]
+                .device
+                .sign(&grant_payload(&group_id, &admin_fp))
+                .unwrap();
+            g.extend_from_slice(&sig); // + 64-byte signature = 96 bytes
+            g
+        };
+        members[0]
+            .post(DocType::MemberRoles, ROLES_DOC, |d| {
+                d.put(ROOT, admin_fp.as_str(), ScalarValue::Bytes(grant.clone()))
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            members[0].inviter_is_authorized(&owner),
+            "the owner is always authorized"
+        );
+        assert!(
+            members[0].inviter_is_authorized(&admin),
+            "an owner-signed admin is authorized"
+        );
+        assert!(
+            !members[0].inviter_is_authorized(&plain),
+            "a plain member is not authorized"
+        );
+        assert!(
+            !members[0].inviter_is_authorized(&outsider),
+            "a non-member is not authorized"
         );
     }
 

@@ -18,12 +18,14 @@ use std::collections::HashMap;
 
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
-use catcoms_crypto::{verify_with_public_bytes, DeviceId};
+use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, MeshTransport, PeerId};
 use catcoms_storage::{BlobStore, Cid, FileRef};
 pub use catcoms_sync::peer_addrs_from_snapshot;
-use catcoms_sync::{request_join, ChannelSync, SyncError};
+use catcoms_sync::{
+    fingerprint, grant_payload, read_admins, request_join, ChannelSync, SyncError, ROLES_DOC,
+};
 use catcoms_wire::DocType;
 use thiserror::Error;
 
@@ -330,10 +332,8 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
 // nonce/expiry), so revocation isn't replay-proof; a grant epoch/nonce is a follow-up.
 // (c) role keys are 4-byte fingerprints + `admin_set` filters to current members.
 
-/// The reserved document id for the per-server member-roles document.
-const ROLES_DOC: u128 = 0;
-/// Domain separator for an owner's admin-grant signature.
-const ROLE_GRANT_DOMAIN: &[u8] = b"catcoms/role-grant/v1";
+// `ROLES_DOC`, `ROLE_GRANT_DOMAIN`, `grant_payload`, `read_admins`, and `fingerprint` now live
+// in `catcoms-sync` (next to the admission gate that enforces them) and are re-exported here.
 
 /// A member's effective role in a server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,20 +361,6 @@ impl Role {
     }
 }
 
-/// The bytes the owner signs to grant `target_fp` admin in this group (domain-separated +
-/// group- and target-bound, so a grant can't be replayed to another group or member). The
-/// `group_id` is **length-prefixed** so `… ‖ group_id ‖ target_fp` can never reparse as a
-/// different `(group_id', target_fp')` pair (no concatenation ambiguity), regardless of id
-/// length.
-fn grant_payload(group_id: &[u8], target_fp: &str) -> Vec<u8> {
-    let mut p = Vec::with_capacity(ROLE_GRANT_DOMAIN.len() + 2 + group_id.len() + target_fp.len());
-    p.extend_from_slice(ROLE_GRANT_DOMAIN);
-    p.extend_from_slice(&(group_id.len() as u16).to_be_bytes());
-    p.extend_from_slice(group_id);
-    p.extend_from_slice(target_fp.as_bytes());
-    p
-}
-
 /// Write (`Some(grant)` = `owner_pubkey ‖ sig`) or revoke (`None`) a fingerprint's admin grant.
 fn write_role(doc: &mut AutoCommit, fp: &str, grant: Option<&[u8]>) -> Result<(), AutomergeError> {
     match grant {
@@ -382,37 +368,6 @@ fn write_role(doc: &mut AutoCommit, fp: &str, grant: Option<&[u8]>) -> Result<()
         None => doc.delete(ROOT, fp)?,
     }
     Ok(())
-}
-
-/// Materialize the set of fingerprints with a **valid owner-signed** admin grant: the stored
-/// `owner_pubkey ‖ sig` must verify over `grant_payload(group_id, fp)` AND the signing key's
-/// **full device id** must equal the current owner's. Comparing the full 32-byte device id
-/// (not the 4-byte display fingerprint) keeps a forged-grant attack at a full preimage (2^256)
-/// rather than a feasible 2^32 fingerprint grind. Forged/foreign grants are ignored.
-fn read_admins(
-    doc: &AutoCommit,
-    group_id: &[u8],
-    owner_id: &DeviceId,
-) -> std::collections::HashSet<String> {
-    let mut out = std::collections::HashSet::new();
-    for key in doc.keys(ROOT) {
-        let grant = bytes_field(doc, &ROOT, &key);
-        if grant.len() != 96 {
-            continue; // 32-byte pubkey + 64-byte signature
-        }
-        let (pubkey, sig_bytes) = grant.split_at(32);
-        let Ok(sig) = <[u8; 64]>::try_from(sig_bytes) else {
-            continue;
-        };
-        // The grant must be signed by the *current* owner's device key (full id, not the fp).
-        if DeviceId::from_public_key_bytes(pubkey) != *owner_id {
-            continue;
-        }
-        if verify_with_public_bytes(pubkey, &grant_payload(group_id, &key), &sig) {
-            out.insert(key);
-        }
-    }
-    out
 }
 
 const FILES: &str = "files";
@@ -561,14 +516,6 @@ pub struct MemberView {
     pub fingerprint: String,
     /// Whether this is the local device.
     pub is_self: bool,
-}
-
-/// A short hex fingerprint (first 4 bytes) of a device id, for display.
-fn fingerprint(id: &DeviceId) -> String {
-    id.as_bytes()[..4]
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
