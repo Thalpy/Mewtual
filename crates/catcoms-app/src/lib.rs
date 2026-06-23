@@ -55,6 +55,10 @@ pub enum AppError {
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),
+    /// The join did not finalize before the wall-clock deadline — e.g. an Option-C admin invite
+    /// whose owner never came online to serialize the Add. The user can retry.
+    #[error("the join timed out before it finalized; try again")]
+    JoinTimeout,
 }
 
 /// One chat message as the UI sees it. The `author` is the sender's **device
@@ -85,6 +89,10 @@ pub fn channel_id(name: &str) -> u128 {
     let bytes = h.finalize();
     u128::from_be_bytes(bytes.as_bytes()[..16].try_into().expect("16 bytes"))
 }
+
+/// Wall-clock ceiling on a join handshake. Past this the joiner gives up (and the user can
+/// retry) — so an Option-C admin invite whose owner never comes online can't wedge it forever.
+const JOIN_TIMEOUT_SECS: u64 = 120;
 
 // --- the canonical channel-document schema ----------------------------------
 // A channel doc is `{ messages: [ { author: str, text: str } ] }`.
@@ -549,7 +557,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         invite: &InviteToken,
     ) -> Result<Self, AppError> {
         let device_id = device.device_id();
-        let (group, routing) = request_join(&transport, inviter, &device, invite).await?;
+        // Bound the whole join so a never-finalizing owner (an Option-C admin invite whose owner
+        // stays offline) can't wedge the joiner forever; the sync layer stays runtime-agnostic.
+        let (group, routing) = tokio::time::timeout(
+            std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
+            request_join(&transport, inviter, &device, invite),
+        )
+        .await
+        .map_err(|_| AppError::JoinTimeout)??;
         Ok(Self {
             sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
             display_name: display_name.into(),

@@ -78,16 +78,20 @@ roadmap:
    or accept the residual (lowest stakes).
 3. **Replay-proof grant revocation** — a grant epoch/nonce so a deleted admin grant cannot be
    re-added by replaying an old op.
-4. **Make admin invites functional (R3)** — **design chosen: Option C, "owner-serialized admin
-   invites."** An admin who wants to invite broadcasts a *signed Add-request* on the control
-   topic (mirroring the R1 remove-request pattern); the **owner alone** runs the MLS Add after
-   re-checking the inviter is Owner/Admin per the roles doc. This keeps `max_committer_rank = 0`
-   (single committer → **no fork**), reuses the most-tested membership code + the existing
-   two-phase Welcome-push, and ships in slices: (0) move `read_admins`/grant logic down into
-   `catcoms-sync` so the gate reads the live roles doc with zero staleness; (1) the inviter-role
-   re-check at admission; (2) the `CTRL_ADD_REQUEST` op + `on_add_request` + the
-   **Welcome-authentication chain** (the load-bearing new crypto — must get adversarial review,
-   it re-touches the group-substitution surface); (3) actor/desktop wiring.
+4. **Make admin invites functional (R3)** — **IMPLEMENTED (slices 2a–2d) + REVIEWED; UI gated on
+   item 3.** Design: Option C, "owner-serialized admin invites." An admin who wants to invite
+   broadcasts a *signed Add-request* on the control topic (mirroring the R1 remove-request
+   pattern); the **owner alone** runs the MLS Add after re-checking the inviter is Owner/Admin per
+   the live roles doc. This keeps `max_committer_rank = 0` (single committer → **no fork**),
+   reuses the most-tested membership code + the existing two-phase Welcome-push. Shipped slices:
+   (0) `read_admins`/grant logic moved into `catcoms-sync` (live-doc gate, zero staleness) ✓;
+   (1) the inviter-role re-check at admission ✓; (2) the `CTRL_ADD_REQUEST` op + `on_add_request`
+   + the **Welcome-authentication chain** ✓ — the load-bearing new crypto passed a focused
+   adversarial review with **no blocking findings** (verified: no non-owner commit path; the
+   no-substitution property holds — the admin re-signs the *identical* transcript only after
+   verifying the owner's signature over it, and the joiner's `group_id` pin + MLS KeyPackage bind
+   reject any substituted group; exactly-once admission across the hop). (3) actor/desktop wiring
+   is the only remaining step and is **gated off in the UI until item 3** (see the residual).
    - *Rejected:* **Option A** (admins are committers / `max_committer_rank ≥ 1`) — forces
      concurrent committers and the staged fork-resolution path's **I1 is still open**, so two
      admins admitting at once can permanently split the group. **Option B** (owner-admits-on-

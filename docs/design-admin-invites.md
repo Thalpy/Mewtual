@@ -1,8 +1,11 @@
 # Design — admin invites (owner-serialized, Option C + offline queuing)
 
-Status: **design approved, implementation in progress.** Reviewed (adversarial self-review
-folded). Lets an **Admin** (owner-signed role grant) hand out an invite and have the join
-actually admit the newcomer — fork-safe, with the owner as the sole MLS committer.
+Status: **implemented (slices 2a–2d landed), GA-gated on THREAT-MODEL item 3.** The protocol +
+codecs + owner/admin handlers are in `catcoms-sync` and pass an adversarial review (no blocking
+findings; S1/S3 folded, S2 documented below). The admin-invite path is **not yet exposed in the
+product UI** — that waits on replay-proof grant revocation (item 3). Lets an **Admin**
+(owner-signed role grant) hand out an invite and have the join actually admit the newcomer —
+fork-safe, with the owner as the sole MLS committer.
 
 See also: [`THREAT-MODEL.md`](THREAT-MODEL.md) R3 / hardening item 4.
 
@@ -81,11 +84,16 @@ is consumed once, on the owner's persisted ledger; a second submission gets `Alr
    reappear in `read_admins`, letting it still get someone admitted. Admin invites do not make
    the residual worse, but they make it *exploitable for admission*. **Do not enable admin
    invites in the product UI until replay-proof grant revocation (item 3) lands.**
-2. **Metadata:** `CTRL_ADD_REQUEST` rides the members-only control topic but carries the
-   joiner's KeyPackage + invite to **every** member (not just the owner). Members already see
-   every Add commit + the new member's identity, so this is bounded — but **strip
-   `bootstrap`/`rendezvous` from the invite copy in `CTRL_ADD_REQUEST`** (the owner pushes to
-   the admin, not the joiner, so it doesn't need them).
+2. **Metadata (residual, not fixed — see note):** `CTRL_ADD_REQUEST` rides the members-only
+   control topic but carries the KeyPackage + invite to **every** member (not just the owner).
+   Members already see every Add commit + the new member's identity, so this is bounded. The
+   original plan was to *strip* `bootstrap`/`rendezvous` from the invite copy, **but those
+   fields are part of the invite's signed payload** (`invite.rs` `signing_payload`), so removing
+   them would fail the owner's `verify_self` check — they cannot be stripped without an
+   invite-format change that separates the discovery addresses from the signed core. The leaked
+   fields are the **inviter's (a member's) own** bootstrap + the group's rendezvous addresses,
+   which members already possess, so the residual leak is minimal. Deferred: split the invite
+   wire format (signed core ‖ unsigned discovery hints) so the request can carry only the core.
 3. **Stranded admission** if the admin never returns after the owner consumed the invite: the
    group stays consistent; the joiner is left pending (product-layer concern).
 4. **Owner clock** is used for freshness/expiry vs the admin's `ts` (harmless; the ledger is the
@@ -93,13 +101,25 @@ is consumed once, on the owner's persisted ledger; a second submission gets `Alr
 
 ## Implementation slices
 
-- **2a (foundation):** `CTRL_ADD_REQUEST`/`KIND_ADMIT_RESULT`/`MAX_ADD_REQUESTS`,
+- **2a (foundation) — DONE:** `CTRL_ADD_REQUEST`/`KIND_ADMIT_RESULT`/`MAX_ADD_REQUESTS`,
   `add_req_transcript`, `encode/decode_add_request`, `encode/decode_admit_result` + round-trip
-  test. *(this commit)*
-- **2b:** `admit_now` refactor (factor `serve_join`'s synchronous body), `request_add`,
-  `on_add_request`, `drain_add_request_queue`, the `serve_join` non-committer arm.
-- **2c:** the relay — `KIND_ADMIT_RESULT` push, `on_admit_result`, owner re-push on reconnect,
-  the `await_welcome_push` timeout.
-- **2d:** e2e tests (admit via owner; non-admin rejected; demoted-admin rejected; substitution
-  rejected; single-use across the hop; no commit by a non-owner) + adversarial review + the
-  actor/desktop wiring (gated off in the UI until item 3).
+  test.
+- **2b — DONE:** `admit_now` refactor (factor `serve_join`'s synchronous body), `request_add`,
+  `drive_outgoing_add_requests`, `on_add_request`, `drain_add_request_queue`, the `serve_join`
+  non-committer arm.
+- **2c — DONE:** the relay — `KIND_ADMIT_RESULT` push (`drain_admit_result_outbox`),
+  `on_admit_result` (owner-sig verify → admin re-sign → `KIND_WELCOME` push), owner re-push from
+  the `admit_results` cache on reconnect, and the join timeout (at the `catcoms-app` call site —
+  `JOIN_TIMEOUT_SECS` — so the sync crate stays runtime-agnostic).
+- **2d — DONE:** verified at the method level — `the_owner_admits_a_valid_admin_add_request`,
+  `a_non_admin_add_request_is_rejected_by_the_owner`, and
+  `an_admin_relays_the_owner_admit_result_so_the_joiner_accepts` (which proves the relayed
+  Welcome verifies against the invite's inviter — the no-substitution property of Option B).
+  Adversarial review folded: **S1** joiner timeout, **S3** bound `outgoing_add_requests`
+  (`MAX_ADD_REQUEST_LIFETIME_MS` + drop-soonest-expiring cap); **S2** metadata documented as a
+  deferred residual (#2 above); NIT gossipsub-`Signed` dependency commented at `on_add_request`.
+  A full multi-party networked e2e is deferred — the `run_once` wiring is correct by inspection
+  (top-of-tick drains are cancellation-safe) and the security properties are method-tested.
+- **Remaining — actor/desktop wiring:** the sync layer admits transparently; the only product
+  change is exposing the on-demand invite affordance to admins (today owner-only). **Gated off
+  in the UI until item 3.**

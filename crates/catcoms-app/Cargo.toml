@@ -17,7 +17,7 @@ blake3 = "1"
 zeroize = "1"
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
 rand_chacha = "0.3"

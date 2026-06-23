@@ -1229,8 +1229,14 @@ const REMOVE_REQ_DOMAIN: &str = "catcoms/remove-req/v1";
 const ADD_REQ_DOMAIN: &str = "catcoms/add-req/v1";
 /// DoS bound: the owner queues at most this many pending Add-requests (drop-oldest, deduped on
 /// invite nonce) so a flood can't force unbounded MLS Adds or memory.
-#[allow(dead_code)] // used by the owner's Add-request queue in the next slice
 const MAX_ADD_REQUESTS: usize = 64;
+/// How often an admin re-broadcasts a pending Add-request until the owner delivers the result
+/// (driven off run_once events — notably the owner's reconnect — so an offline owner is caught
+/// up when it returns).
+const ADD_REQ_RETRY_MS: u64 = 2_000;
+/// Admin-side cap on how long a single Add-request is driven (re-broadcast), regardless of the
+/// invite's own (possibly far-future) expiry — bounds the `outgoing_add_requests` lifetime.
+const MAX_ADD_REQUEST_LIFETIME_MS: u64 = 3_600_000;
 
 /// A membership commit fanned out on the control topic so existing members apply
 /// it and advance to the same epoch. `commit_epoch` is the epoch the commit was
@@ -1455,6 +1461,34 @@ fn decode_join_req(bytes: &[u8]) -> Result<(InviteToken, Vec<u8>), SyncError> {
 /// Synchronizes a server's documents over a [`MeshTransport`], and admits new
 /// members via single-use invites. Generic over the injected RNG `R`
 /// (e.g. `OsCryptoRng` in production, a seeded CSPRNG in tests).
+/// Owner-side: an authorized admin's Add-request accepted and awaiting the next admit drain.
+struct PendingAdd {
+    invite: InviteToken,
+    kp_bytes: Vec<u8>,
+    admin: PeerId,
+}
+
+/// Owner-side: an admit the owner already finalized, cached by invite nonce so a *retransmitted*
+/// request re-delivers the same result instead of failing the (now-consumed) ledger check.
+struct CachedAdmit {
+    welcome: Vec<u8>,
+    sealed_routing: Vec<u8>,
+    owner_sig: [u8; 64],
+}
+
+/// Admin-side: an Add-request this node is driving to completion (re-broadcast until the owner
+/// delivers the admit result, then re-signed + pushed to the joiner).
+struct OutgoingAdd {
+    invite: InviteToken,
+    kp_bytes: Vec<u8>,
+    joiner: PeerId,
+    next_retry_ms: u64,
+    expires_at_ms: u64,
+}
+
+/// (invite_encoded, kp_bytes, invite_nonce, group_id) — one Add-request to re-broadcast.
+type Rebroadcast = (Vec<u8>, Vec<u8>, [u8; 16], Vec<u8>);
+
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
     group: ServerGroup,
@@ -1534,6 +1568,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
     /// staged admission resolves: `(joiner, payload)` drained in `run_once`.
     welcome_outbox: Vec<(PeerId, Vec<u8>)>,
+    /// Admin invites (Option C) — owner-side: accepted Add-requests awaiting admission (bounded
+    /// `MAX_ADD_REQUESTS`, deduped on invite nonce).
+    add_request_queue: VecDeque<PendingAdd>,
+    /// Owner-side: finalized admit results by invite nonce, to re-deliver on a retransmit.
+    admit_results: HashMap<[u8; 16], CachedAdmit>,
+    /// Owner-side: `KIND_ADMIT_RESULT` pushes to deliver to requesting admins (drained in `run_once`).
+    admit_result_outbox: Vec<(PeerId, Vec<u8>)>,
+    /// Admin-side: Add-requests this node is driving to completion, keyed by invite nonce.
+    outgoing_add_requests: HashMap<[u8; 16], OutgoingAdd>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
@@ -1597,6 +1640,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             failed_catchup_peers: VecDeque::new(),
             pending: None,
             welcome_outbox: Vec::new(),
+            add_request_queue: VecDeque::new(),
+            admit_results: HashMap::new(),
+            admit_result_outbox: Vec::new(),
+            outgoing_add_requests: HashMap::new(),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
             blob_served_at: HashMap::new(),
@@ -1941,8 +1988,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// catch-up / join request), after first draining queued broadcasts and any
     /// pending recovery work. Returns `false` when the transport has closed.
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
-        // Flush any queued membership-commit broadcasts (retries previous failures).
+        // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
+        // (caught up by the owner on its reconnect), then flush the Welcome a result produced —
+        // the admin relays it to the joiner here (in single-committer mode the contest path that
+        // normally drains the Welcome outbox never runs).
+        self.drive_outgoing_add_requests();
+        // Flush any queued membership-commit broadcasts + Add-request retransmits.
         self.drain_outbox().await;
+        self.drain_welcome_outbox().await;
+        // Owner: push finalized admit results to admins here too — a tick that admitted may be
+        // cancelled (in a select!-driven loop) after publishing the commit but before sending the
+        // result, so draining at the top each tick makes delivery robust.
+        self.drain_admit_result_outbox().await;
         // Apply any routing-label rotation from a previous tick: subscribe the new
         // label's topics and drop the ones that aged out of the grandfather window.
         self.resync_if_needed().await;
@@ -1966,10 +2023,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some(TransportEvent::Gossip { topic, from, data }) => {
                 self.remember_peer(from);
                 if self.control_topics.contains(&topic) {
-                    self.on_control(&data);
-                    // The designated committer may have queued a commit in response
-                    // to a remove request — fan it out now, then apply any rotation
-                    // the commit triggered before the next tick.
+                    self.on_control(from, &data);
+                    // The designated committer may have queued a commit in response to a remove
+                    // request, or an admin Add-request (Option C) — admit it + fan out the commit
+                    // here; the result push to the admin happens at the top of the next tick
+                    // (robust against this tick being cancelled mid-flight).
+                    self.drain_add_request_queue();
                     self.drain_outbox().await;
                     self.resync_if_needed().await;
                 } else {
@@ -3324,8 +3383,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// exactly the next one is applied immediately (then any buffered successors
     /// drain in order); one that is ahead of us is buffered and triggers
     /// commit-catch-up; an already-applied one is ignored.
-    fn on_control(&mut self, data: &[u8]) {
-        // The control envelope is a tagged union (commit record / remove request).
+    fn on_control(&mut self, from: PeerId, data: &[u8]) {
+        // The control envelope is a tagged union (commit record / remove request / add request).
         let record = match data.split_first() {
             Some((&CTRL_COMMIT, rest)) => match CommitRecord::decode(rest) {
                 Ok(r) => r,
@@ -3336,6 +3395,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             },
             Some((&CTRL_REMOVE_REQUEST, rest)) => {
                 self.on_remove_request(rest);
+                return;
+            }
+            Some((&CTRL_ADD_REQUEST, rest)) => {
+                // `from` is the requesting admin's peer — where the owner returns the result.
+                self.on_add_request(from, rest);
                 return;
             }
             _ => {
@@ -3758,6 +3822,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
             Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(rest).unwrap_or_default(),
+            Some((&KIND_ADMIT_RESULT, rest)) => {
+                // Admin invites (Option C): the owner delivered a finalized admission; re-sign +
+                // relay the Welcome to the joiner. Empty ack response.
+                self.on_admit_result(rest);
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -3922,19 +3992,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("join request for an invite this device did not issue");
             return None;
         }
-        // The admitting inviter must be an authorized committer (within rank). At
-        // rank 0 this is exactly the designated committer (the 6d-1 invariant).
-        let my_rank = match (
-            self.group.member_leaf_index(&self.device.device_id()),
-            self.group.designated_committer_index(),
-        ) {
-            (Some(idx), Some(base)) => idx.saturating_sub(base),
-            _ => return None,
-        };
-        if my_rank > self.config.max_committer_rank {
-            tracing::warn!("not an authorized committer; cannot admit");
-            return None;
-        }
         if !invite.verify_self() {
             tracing::warn!("join request with an inauthentic invite");
             return None;
@@ -3943,42 +4000,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.ledger.check(&invite, now).is_err() {
             return None; // expired / revoked / already used
         }
-        let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
+
+        // Where this node sits relative to the designated committer. At rank 0 this is exactly
+        // the designated committer (the 6d-1 invariant).
+        let my_rank = match (
+            self.group.member_leaf_index(&self.device.device_id()),
+            self.group.designated_committer_index(),
+        ) {
+            (Some(idx), Some(base)) => idx.saturating_sub(base),
+            _ => return None,
+        };
+
+        // A non-committer (an Admin, in the single-committer model) cannot run the Add itself —
+        // that would be a second committer (a fork). Instead it asks the owner to admit
+        // (Option C): broadcast a signed Add-request, drive it to completion, and tell the joiner
+        // to wait for the pushed Welcome. The OWNER re-checks the inviter's role authoritatively
+        // (against its own live roles doc) before committing, so we don't self-gate here — our
+        // local roles view may lag, and only the owner ever commits anyway (no fork).
+        if my_rank > self.config.max_committer_rank {
+            self.request_add(invite, kp_bytes, from, now);
+            return Some(vec![JOIN_PENDING]);
+        }
 
         if self.config.max_committer_rank == 0 {
             // --- synchronous single-committer path (6d-1 behavior) ---
-            let base_authenticator = self.group.epoch_authenticator_id();
-            self.snapshot_epoch_keys();
-            let outcome = self
-                .group
-                .add_member_via_invite(&self.device, key_package, &invite, &mut self.ledger, now)
-                .ok()?;
-            self.evict_past_keys();
-            let record =
-                self.sign_add_record(outcome.commit_epoch, &outcome.commit, base_authenticator);
-            self.record_commit(record.clone());
-            let mut framed = vec![CTRL_COMMIT];
-            framed.extend_from_slice(&record.encode());
-            self.outbox.push((self.control_topic.clone(), framed));
-            // Transfer the routing state to the joiner, sealed under the shared
-            // post-join epoch key (the Welcome lands them on this exact epoch, so the
-            // seal/open epochs match — no race). Seal first so the inviter signature
-            // can bind it.
-            let sealed_routing = self.seal_routing_state();
-            let transcript = join_transcript(
-                &invite.group_id,
-                &invite.invite_nonce,
-                &outcome.welcome,
-                &sealed_routing,
-            );
-            let signature = self.device.sign(&transcript).ok()?;
-            tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
+            let (welcome, sealed_routing, signature) = self.admit_now(&invite, &kp_bytes, now)?;
             let mut resp = vec![JOIN_READY];
-            resp.extend_from_slice(&encode_join_resp(
-                &outcome.welcome,
-                &signature,
-                &sealed_routing,
-            ));
+            resp.extend_from_slice(&encode_join_resp(&welcome, &signature, &sealed_routing));
             return Some(resp);
         }
 
@@ -3987,6 +4035,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("a commit is already staged here; rejecting concurrent join (retry)");
             return None; // joiner retries against the (now-known) committer
         }
+        let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
         self.group
             .validate_invite_binding(&key_package, &invite)
             .ok()?;
@@ -4012,6 +4061,316 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.outbox.push((self.control_topic.clone(), framed));
         tracing::info!("staged an admission; awaiting the fork-resolution window");
         Some(vec![JOIN_PENDING])
+    }
+
+    /// Run the synchronous single-committer admission: produce + locally apply the MLS Add,
+    /// broadcast the commit, seal the routing transfer, and sign the join transcript. Shared by
+    /// `serve_join` (owner admitting its own invite) and `drain_add_request_queue` (owner
+    /// admitting an admin-requested invite). Returns `(welcome, sealed_routing, owner_signature)`.
+    fn admit_now(
+        &mut self,
+        invite: &InviteToken,
+        kp_bytes: &[u8],
+        now: u64,
+    ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        let key_package = self.device.parse_key_package(kp_bytes).ok()?;
+        let base_authenticator = self.group.epoch_authenticator_id();
+        self.snapshot_epoch_keys();
+        let outcome = self
+            .group
+            .add_member_via_invite(&self.device, key_package, invite, &mut self.ledger, now)
+            .ok()?;
+        self.evict_past_keys();
+        let record =
+            self.sign_add_record(outcome.commit_epoch, &outcome.commit, base_authenticator);
+        self.record_commit(record.clone());
+        let mut framed = vec![CTRL_COMMIT];
+        framed.extend_from_slice(&record.encode());
+        self.outbox.push((self.control_topic.clone(), framed));
+        // Seal the routing transfer first so the join transcript binds it (the joiner verifies
+        // the Welcome + routing together).
+        let sealed_routing = self.seal_routing_state();
+        let transcript = join_transcript(
+            &invite.group_id,
+            &invite.invite_nonce,
+            &outcome.welcome,
+            &sealed_routing,
+        );
+        let signature = self.device.sign(&transcript).ok()?;
+        tracing::info!(epoch = self.group.epoch(), "admitted a member via invite");
+        Some((outcome.welcome, sealed_routing, signature))
+    }
+
+    /// Admin side (Option C): broadcast a signed Add-request asking the owner to admit `invite`'s
+    /// joiner, and remember it so we drive it to completion (re-broadcast until the owner returns
+    /// the result, then re-sign + push the Welcome to the joiner).
+    fn request_add(&mut self, invite: InviteToken, kp_bytes: Vec<u8>, joiner: PeerId, now: u64) {
+        let kp_hash = Cid::of(&kp_bytes);
+        let pubkey = self.device.public_key_bytes();
+        let transcript = add_req_transcript(
+            &self.group.group_id(),
+            &invite.invite_nonce,
+            kp_hash.as_bytes(),
+            &pubkey,
+            now,
+        );
+        let Ok(sig) = self.device.sign(&transcript) else {
+            return;
+        };
+        let mut framed = vec![CTRL_ADD_REQUEST];
+        framed.extend_from_slice(&encode_add_request(
+            &invite.encode(),
+            &kp_bytes,
+            &pubkey,
+            now,
+            &sig,
+        ));
+        self.outbox.push((self.control_topic.clone(), framed));
+        // Bound how long we drive this request (don't trust a far-future invite expiry), and cap
+        // the map (evict the soonest-expiring) so a busy admin can't grow it without bound.
+        let expires_at_ms = invite
+            .expires_at_ms
+            .min(now.saturating_add(MAX_ADD_REQUEST_LIFETIME_MS));
+        while self.outgoing_add_requests.len() >= MAX_ADD_REQUESTS {
+            let Some(victim) = self
+                .outgoing_add_requests
+                .iter()
+                .min_by_key(|(_, o)| o.expires_at_ms)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            self.outgoing_add_requests.remove(&victim);
+        }
+        self.outgoing_add_requests.insert(
+            invite.invite_nonce,
+            OutgoingAdd {
+                expires_at_ms,
+                invite,
+                kp_bytes,
+                joiner,
+                next_retry_ms: now + ADD_REQ_RETRY_MS,
+            },
+        );
+    }
+
+    /// Admin side: re-broadcast any pending Add-request whose retry interval elapsed (and drop
+    /// expired ones). Driven off `run_once` events — notably the owner's reconnect — so an
+    /// offline owner is caught up when it returns.
+    fn drive_outgoing_add_requests(&mut self) {
+        let now = self.clock.now_ms();
+        // (invite_encoded, kp_bytes, invite_nonce, group_id) for each request to re-broadcast.
+        let mut to_send: Vec<Rebroadcast> = Vec::new();
+        self.outgoing_add_requests.retain(|nonce, out| {
+            if now > out.expires_at_ms {
+                return false; // expired; give up driving it
+            }
+            if now >= out.next_retry_ms {
+                out.next_retry_ms = now + ADD_REQ_RETRY_MS;
+                to_send.push((
+                    out.invite.encode(),
+                    out.kp_bytes.clone(),
+                    *nonce,
+                    out.invite.group_id.clone(),
+                ));
+            }
+            true
+        });
+        let pubkey = self.device.public_key_bytes();
+        for (invite_enc, kp_bytes, nonce, group_id) in to_send {
+            let kp_hash = Cid::of(&kp_bytes);
+            let transcript =
+                add_req_transcript(&group_id, &nonce, kp_hash.as_bytes(), &pubkey, now);
+            if let Ok(sig) = self.device.sign(&transcript) {
+                let mut framed = vec![CTRL_ADD_REQUEST];
+                framed.extend_from_slice(&encode_add_request(
+                    &invite_enc,
+                    &kp_bytes,
+                    &pubkey,
+                    now,
+                    &sig,
+                ));
+                self.outbox.push((self.control_topic.clone(), framed));
+            }
+        }
+    }
+
+    /// Owner side (Option C): an authorized admin asked us to admit a joiner via an invite.
+    /// Re-check everything against the *live* group + roles doc, then queue the admission (or, if
+    /// we already admitted this nonce, re-deliver the cached result). Only the owner acts.
+    // `from_admin` is the gossip *source* (the broadcasting admin), used to route the admit
+    // result back. This is the authenticated publisher only because the gossipsub layer is
+    // configured `MessageAuthenticity::Signed` (see catcoms-net); were that ever relaxed to
+    // anonymous authorship, the result would route to a forwarding neighbour and joins would stall.
+    fn on_add_request(&mut self, from_admin: PeerId, data: &[u8]) {
+        if !self.group.is_designated_committer(&self.device) {
+            return; // some other node is the serializer
+        }
+        let (invite_bytes, kp_bytes, pubkey, ts, sig) = match decode_add_request(data) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let Ok(invite) = InviteToken::decode(&invite_bytes) else {
+            return;
+        };
+        let requester = DeviceId::from_public_key_bytes(&pubkey);
+
+        // The requester must be a current member, fresh, and have signed the request binding the
+        // exact KeyPackage (recompute its hash so a relay can't swap the KP under a valid sig).
+        if !self.group.contains_device(&requester)
+            || self.clock.now_ms().abs_diff(ts) > MAX_REQUEST_AGE_MS
+        {
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        let kp_hash = Cid::of(&kp_bytes);
+        let transcript = add_req_transcript(
+            &self.group.group_id(),
+            &invite.invite_nonce,
+            kp_hash.as_bytes(),
+            &pubkey,
+            ts,
+        );
+        if !verify_with_public_bytes(&pubkey, &transcript, &sig) {
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        // THE ROLE RE-CHECK: the requester must BE the invite's named inviter, and that inviter
+        // must be authorized (owner/admin) RIGHT NOW per the live roles doc. The invite must also
+        // self-authenticate + target this group.
+        if requester != invite.inviter_device_id
+            || !self.inviter_is_authorized(&invite.inviter_device_id)
+            || invite.group_id != self.group.group_id()
+            || !invite.verify_self()
+        {
+            self.stats.requests_rejected += 1;
+            return;
+        }
+
+        // Already admitted this nonce (the admin missed our result and retransmitted): re-deliver
+        // the cached result instead of re-admitting (the ledger has consumed the nonce).
+        if let Some(cached) = self.admit_results.get(&invite.invite_nonce) {
+            let payload = encode_admit_result(
+                &invite.invite_nonce,
+                &cached.welcome,
+                &cached.sealed_routing,
+                &cached.owner_sig,
+            );
+            self.admit_result_outbox.push((from_admin, payload));
+            return;
+        }
+
+        // Ledger fresh + bind the KeyPackage (reject junk before the heavy parse pays off).
+        let now = self.clock.now_ms();
+        if self.ledger.check(&invite, now).is_err() {
+            return;
+        }
+        let Ok(key_package) = self.device.parse_key_package(&kp_bytes) else {
+            return;
+        };
+        if self
+            .group
+            .validate_invite_binding(&key_package, &invite)
+            .is_err()
+        {
+            return;
+        }
+
+        // Dedup on nonce + bound the queue (drop-oldest).
+        if self
+            .add_request_queue
+            .iter()
+            .any(|p| p.invite.invite_nonce == invite.invite_nonce)
+        {
+            return;
+        }
+        while self.add_request_queue.len() >= MAX_ADD_REQUESTS {
+            self.add_request_queue.pop_front();
+        }
+        self.add_request_queue.push_back(PendingAdd {
+            invite,
+            kp_bytes,
+            admin: from_admin,
+        });
+    }
+
+    /// Owner side: admit each queued Add-request — run the MLS Add, cache the result, and push it
+    /// back to the requesting admin (who re-signs + relays the Welcome to the joiner).
+    fn drain_add_request_queue(&mut self) {
+        let queued = std::mem::take(&mut self.add_request_queue);
+        for p in queued {
+            let now = self.clock.now_ms();
+            let Some((welcome, sealed_routing, owner_sig)) =
+                self.admit_now(&p.invite, &p.kp_bytes, now)
+            else {
+                continue;
+            };
+            let nonce = p.invite.invite_nonce;
+            // Cache (bounded) so a later retransmit re-delivers without re-admitting.
+            while self.admit_results.len() >= MAX_ADD_REQUESTS {
+                let Some(victim) = self.admit_results.keys().next().copied() else {
+                    break;
+                };
+                self.admit_results.remove(&victim);
+            }
+            self.admit_results.insert(
+                nonce,
+                CachedAdmit {
+                    welcome: welcome.clone(),
+                    sealed_routing: sealed_routing.clone(),
+                    owner_sig,
+                },
+            );
+            let payload = encode_admit_result(&nonce, &welcome, &sealed_routing, &owner_sig);
+            self.admit_result_outbox.push((p.admin, payload));
+        }
+    }
+
+    /// Admin side: the owner delivered a finalized admission. Verify the owner's signature, then
+    /// re-sign the join transcript with our own (the inviter's) key — so the joiner's
+    /// verification against `invite.inviter_public_key` is unchanged — and push the Welcome to the
+    /// waiting joiner.
+    fn on_admit_result(&mut self, data: &[u8]) {
+        let Ok((nonce, welcome, sealed_routing, owner_sig)) = decode_admit_result(data) else {
+            return;
+        };
+        if !self.outgoing_add_requests.contains_key(&nonce) {
+            return; // not ours / already completed
+        }
+        // Verify the owner really built this Welcome before we vouch for it: the owner is the
+        // group's designated committer; its signature over the join transcript must verify.
+        let transcript = join_transcript(&self.group.group_id(), &nonce, &welcome, &sealed_routing);
+        let Some(owner_id) = self.group.designated_committer() else {
+            return;
+        };
+        let Some(owner_key) = self.group.member_signature_key(&owner_id) else {
+            return;
+        };
+        if !verify_with_public_bytes(&owner_key, &transcript, &owner_sig) {
+            tracing::warn!("admit result with an invalid owner signature; ignored");
+            return;
+        }
+        let Ok(admin_sig) = self.device.sign(&transcript) else {
+            return;
+        };
+        if let Some(out) = self.outgoing_add_requests.remove(&nonce) {
+            let payload = encode_welcome_push(&welcome, &admin_sig, &sealed_routing);
+            self.welcome_outbox.push((out.joiner, payload));
+        }
+    }
+
+    /// Owner side: push finalized admit results to the requesting admins over RR (best-effort;
+    /// the admin re-broadcasts the request if its result doesn't arrive).
+    async fn drain_admit_result_outbox(&mut self) {
+        let pending = std::mem::take(&mut self.admit_result_outbox);
+        for (admin, payload) in pending {
+            let mut req = vec![KIND_ADMIT_RESULT];
+            req.extend_from_slice(&payload);
+            let _ = self
+                .transport
+                .request(admin, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await;
+        }
     }
 
     /// Build the signed [`CommitRecord`] for an Add produced via the synchronous
@@ -4082,6 +4441,9 @@ pub async fn request_join<T: MeshTransport>(
         // signed Welcome once its staged commit wins and merges. Await it.
         Some((&JOIN_PENDING, _)) => {
             tracing::debug!("admission staged; awaiting the Welcome push");
+            // The wall-clock bound on this wait lives at the call site (catcoms-app, which owns
+            // the tokio runtime) so this crate stays runtime-agnostic — see the `request_join`
+            // timeout wrapper there, so a never-finalizing owner can't wedge the joiner.
             await_welcome_push(transport, device, invite).await
         }
         // Empty or unknown => rejected.
@@ -4342,18 +4704,18 @@ mod tests {
         // A tampered copy claiming a different committer is rejected; Bob stays put.
         let mut forged = genuine.clone();
         forged.committer_device = [0xAA; 32];
-        bsy.on_control(&framed_commit(&forged));
+        bsy.on_control(PeerId::from_u64(0), &framed_commit(&forged));
         assert_eq!(bsy.epoch(), 1, "forged-committer commit must be rejected");
         assert_eq!(bsy.stats().commits_applied, 0);
 
         // A copy with a tampered signature (real committer) is also rejected.
         let mut bad_sig = genuine.clone();
         bad_sig.committer_sig[0] ^= 0xFF;
-        bsy.on_control(&framed_commit(&bad_sig));
+        bsy.on_control(PeerId::from_u64(0), &framed_commit(&bad_sig));
         assert_eq!(bsy.epoch(), 1, "bad-signature commit must be rejected");
 
         // The genuine commit (committer = Alice, valid signature) applies.
-        bsy.on_control(&framed_commit(&genuine));
+        bsy.on_control(PeerId::from_u64(0), &framed_commit(&genuine));
         assert_eq!(bsy.epoch(), 2, "genuine commit applies");
     }
 
@@ -4938,6 +5300,181 @@ mod tests {
         assert!(
             !members[0].inviter_is_authorized(&outsider),
             "a non-member is not authorized"
+        );
+    }
+
+    /// Write an owner-signed admin grant for `target` into the owner's roles doc.
+    async fn grant_admin(owner: &mut Member, target: &DeviceId) {
+        use automerge::{transaction::Transactable, ScalarValue, ROOT};
+        owner
+            .open_channel(DocType::MemberRoles, ROLES_DOC)
+            .await
+            .unwrap();
+        let target_fp = fingerprint(target);
+        let gid = owner.group_id();
+        let mut grant = owner.device.public_key_bytes(); // 32-byte owner pubkey
+        let sig = owner.device.sign(&grant_payload(&gid, &target_fp)).unwrap();
+        grant.extend_from_slice(&sig); // + 64-byte signature
+        owner
+            .post(DocType::MemberRoles, ROLES_DOC, |d| {
+                d.put(ROOT, target_fp.as_str(), ScalarValue::Bytes(grant.clone()))
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Build the body an admin would broadcast in `CTRL_ADD_REQUEST` for `invite`/`kp_bytes`.
+    fn admin_add_request_body(admin: &Member, invite: &InviteToken, kp_bytes: &[u8]) -> Vec<u8> {
+        let pubkey = admin.device.public_key_bytes();
+        let ts = admin.clock.now_ms();
+        let kp_hash = Cid::of(kp_bytes);
+        let transcript = add_req_transcript(
+            &admin.group.group_id(),
+            &invite.invite_nonce,
+            kp_hash.as_bytes(),
+            &pubkey,
+            ts,
+        );
+        let sig = admin.device.sign(&transcript).unwrap();
+        encode_add_request(&invite.encode(), kp_bytes, &pubkey, ts, &sig)
+    }
+
+    #[tokio::test]
+    async fn the_owner_admits_a_valid_admin_add_request() {
+        // Owner side of Option C: a valid Add-request from an authorized admin is admitted (the
+        // owner commits the MLS Add and queues a result back to the admin).
+        let (_hub, mut members, ids) = build_members(2).await;
+        let admin = ids[1];
+        grant_admin(&mut members[0], &admin).await;
+        let invite = members[1].mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let dave = MlsDevice::generate().unwrap();
+        let kp = dave
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp_bytes = serialize_key_package(&kp).unwrap();
+        let body = admin_add_request_body(&members[1], &invite, &kp_bytes);
+
+        let owner = &mut members[0];
+        let epoch_before = owner.epoch();
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        owner.drain_add_request_queue();
+
+        assert_eq!(
+            owner.epoch(),
+            epoch_before + 1,
+            "the owner committed the admission"
+        );
+        assert!(
+            owner.contains_member(&dave.device_id()),
+            "Dave was admitted"
+        );
+        assert_eq!(
+            owner.admit_result_outbox.len(),
+            1,
+            "a result was queued back to the admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_admin_relays_the_owner_admit_result_so_the_joiner_accepts() {
+        // The full Option-C chain at the method level: admin requests → owner admits → admin
+        // relays the Welcome, re-signed with ITS key, so the joiner's existing finish_join
+        // verification (against the invite's inviter key) accepts it — the Welcome-auth chain
+        // (Option B), validated without the multi-party network dance.
+        let (_hub, mut members, ids) = build_members(2).await;
+        let admin_id = ids[1];
+        grant_admin(&mut members[0], &admin_id).await;
+        let invite = members[1].mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let dave = MlsDevice::generate().unwrap();
+        let kp = dave
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp_bytes = serialize_key_package(&kp).unwrap();
+        let dave_peer = PeerId::from_u64(50);
+        let now = members[1].clock.now_ms();
+
+        // Admin issues the request (stores the OutgoingAdd so it can relay the result).
+        members[1].request_add(invite.clone(), kp_bytes.clone(), dave_peer, now);
+
+        // Owner admits it and produces the admit result.
+        let body = admin_add_request_body(&members[1], &invite, &kp_bytes);
+        members[0].on_add_request(PeerId::from_u64(2), &body);
+        members[0].drain_add_request_queue();
+        let result_body = members[0].admit_result_outbox.last().unwrap().1.clone();
+
+        // Admin processes the result → re-signs + queues the Welcome to the joiner.
+        members[1].on_admit_result(&result_body);
+        assert_eq!(
+            members[1].welcome_outbox.len(),
+            1,
+            "the admin relayed a Welcome to the joiner"
+        );
+        assert_eq!(
+            members[1].welcome_outbox[0].0, dave_peer,
+            "the Welcome targets the joiner"
+        );
+
+        // The relayed Welcome carries the ADMIN's signature, so the joiner's finish_join (which
+        // verifies against invite.inviter_public_key == the admin's key) accepts it — the
+        // no-substitution property of Option B.
+        let payload = &members[1].welcome_outbox[0].1; // [JOIN_READY] ‖ encode_join_resp(...)
+        let (welcome, sig, sealed_routing) = decode_join_resp(&payload[1..]).unwrap();
+        let transcript = join_transcript(
+            &invite.group_id,
+            &invite.invite_nonce,
+            &welcome,
+            &sealed_routing,
+        );
+        assert!(
+            invite.verify_inviter_signature(&transcript, &sig),
+            "the relayed Welcome verifies against the invite's inviter (Option B)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_add_request_is_rejected_by_the_owner() {
+        // A plain member (no admin grant) requests an admission; the owner's on_add_request must
+        // reject it at the role re-check — no commit, no admission.
+        let (_hub, mut members, _ids) = build_members(3).await; // owner + two plain members
+        let plain = &members[1];
+        // Forge a well-formed, correctly-signed Add-request from the plain member.
+        let invite = plain.mint_invite([8u8; 16], u64::MAX, vec![]).unwrap();
+        let dave = MlsDevice::generate().unwrap();
+        let kp = dave
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp_bytes = serialize_key_package(&kp).unwrap();
+        let (pubkey, ts, sig) = {
+            let p = &members[1];
+            let pubkey = p.device.public_key_bytes();
+            let ts = p.clock.now_ms();
+            let kp_hash = Cid::of(&kp_bytes);
+            let transcript = add_req_transcript(
+                &p.group.group_id(),
+                &invite.invite_nonce,
+                kp_hash.as_bytes(),
+                &pubkey,
+                ts,
+            );
+            (pubkey, ts, p.device.sign(&transcript).unwrap())
+        };
+        let body = encode_add_request(&invite.encode(), &kp_bytes, &pubkey, ts, &sig);
+
+        let owner = &mut members[0];
+        let epoch_before = owner.epoch();
+        let rejected_before = owner.stats.requests_rejected;
+        owner.on_add_request(PeerId::from_u64(9), &body);
+        owner.drain_add_request_queue();
+
+        assert_eq!(owner.epoch(), epoch_before, "no admission was committed");
+        assert!(
+            !owner.contains_member(&dave.device_id()),
+            "Dave was not admitted"
+        );
+        assert_eq!(
+            owner.stats.requests_rejected,
+            rejected_before + 1,
+            "the non-admin request was rejected"
         );
     }
 
