@@ -141,6 +141,7 @@
   // Member roles (10h): fingerprint -> "owner"|"admin"|"member".
   let roles = $state<Record<string, string>>({});
   let myRole = $derived(roles[myFp] ?? "member");
+  let confirmRemoveFp = $state(""); // two-click confirm for member removal
 
   function activeName(): string {
     return cur?.channels.find((c) => c.id === cur?.active)?.name ?? "";
@@ -458,6 +459,16 @@
     try {
       await invoke("set_admin", { server: activeServerId, fp, admin });
       await refreshRoles();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function removeMember(fp: string) {
+    if (activeServerId === null) return;
+    confirmRemoveFp = "";
+    try {
+      await invoke("remove_member", { server: activeServerId, fp });
+      await Promise.all([refreshMembers(), refreshRoles()]);
     } catch (e) {
       error = String(e);
     }
@@ -1317,6 +1328,11 @@
                         <button class="ghost small" onclick={() => setAdmin(m.fingerprint, false)}>Remove admin</button>
                       {:else}
                         <button class="ghost small" onclick={() => setAdmin(m.fingerprint, true)}>Make admin</button>
+                      {/if}
+                      {#if confirmRemoveFp === m.fingerprint}
+                        <button class="ghost small danger-btn" onclick={() => removeMember(m.fingerprint)}>Confirm</button>
+                      {:else}
+                        <button class="ghost small danger-btn" onclick={() => (confirmRemoveFp = m.fingerprint)}>Remove</button>
                       {/if}
                     {/if}
                   </li>

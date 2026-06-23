@@ -1042,6 +1042,34 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
+    /// Remove a member from the server by fingerprint. **Owner only** at this product layer —
+    /// errors otherwise. The owner is the committer, so this removes directly; the MLS commit
+    /// advances the epoch, so the removed member loses access to future content (forward
+    /// secrecy) and the routing secret rotates. (The underlying single-serializer protocol
+    /// still lets any member *request* a removal of the committer; cryptographic
+    /// owner-enforcement at that layer is a follow-up, like the invite re-check.)
+    pub async fn remove_member(&mut self, fp: &str) -> Result<(), AppError> {
+        if !self.is_owner() {
+            return Err(AppError::Invalid(
+                "only the owner can remove members".into(),
+            ));
+        }
+        if fp == self.my_fingerprint() {
+            return Err(AppError::Invalid("the owner cannot remove itself".into()));
+        }
+        // Resolve the fingerprint to exactly one member; reject an ambiguous 4-byte-prefix
+        // collision so a removal can't be misdirected to an unintended same-prefix member.
+        let mut matches = self.members().into_iter().filter(|d| fingerprint(d) == fp);
+        let target = matches
+            .next()
+            .ok_or_else(|| AppError::Invalid("no such member".into()))?;
+        if matches.next().is_some() {
+            return Err(AppError::Invalid("ambiguous member fingerprint".into()));
+        }
+        self.sync.request_remove(&target).await?;
+        Ok(())
+    }
+
     /// The current materialized messages in a channel (empty if it is not open).
     pub fn messages(&self, channel: u128) -> Vec<ChatMessage> {
         self.sync
@@ -1332,6 +1360,53 @@ mod tests {
         assert_eq!(msgs[0].text, "welcome!");
         // Authored by Alice's device fingerprint (the name resolves from her profile).
         assert_eq!(msgs[0].author, alice.my_fingerprint());
+    }
+
+    #[tokio::test]
+    async fn the_owner_removes_a_member_and_a_non_owner_cannot() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let bob_device = MlsDevice::generate().unwrap();
+        let bob_fp = fingerprint(&bob_device.device_id());
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                bob_device,
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        assert_eq!(alice.member_count(), 2);
+
+        // A non-owner (Bob) cannot remove anyone; the owner cannot remove itself.
+        assert!(matches!(
+            bob.remove_member(&alice.my_fingerprint()).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.remove_member(&alice.my_fingerprint()).await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // The owner removes Bob — the MLS commit drops him from the roster.
+        alice.remove_member(&bob_fp).await.unwrap();
+        assert_eq!(alice.member_count(), 1, "owner removed Bob");
     }
 
     #[tokio::test]

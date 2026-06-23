@@ -110,6 +110,11 @@ pub enum AppCommand {
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
     CatchUpRoles { peer: PeerId },
+    /// Remove a member by fingerprint (owner only).
+    RemoveMember {
+        fp: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Serialize the server's durable state for sealing to disk (Phase 9f).
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
@@ -404,6 +409,20 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpRoles { peer }).await;
     }
 
+    /// Remove a member by fingerprint (owner only).
+    pub async fn remove_member(&self, fp: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RemoveMember { fp, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Read a wiki page's body.
     pub async fn read_wiki_page(&self, name: impl Into<String>) -> String {
         let (reply, rx) = oneshot::channel();
@@ -626,6 +645,18 @@ where
                     Some(AppCommand::CatchUpRoles { peer }) => {
                         if let Err(e) = server.request_roles_catchup(peer).await {
                             tracing::warn!(error = %e, "roles catch-up failed");
+                        }
+                        if roles_changed(&server, &mut last_roles) {
+                            let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::RemoveMember { fp, reply }) => {
+                        let res = server.remove_member(&fp).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        let mc = server.member_count();
+                        if mc != members {
+                            members = mc;
+                            let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;

@@ -3116,7 +3116,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Ok(r) => r,
             Err(_) => return,
         };
-        // The requester must be a current member with a fresh, valid signature.
+        // The requester must be a current member with a fresh, valid signature. (The product
+        // layer additionally gates *removal* to the server owner — Phase 10h — but the
+        // single-serializer protocol itself still lets any member ask the committer, which the
+        // 6d-2b convergence tests rely on; owner-enforcement at this layer is a follow-up.)
         let requester = DeviceId::from_public_key_bytes(&pubkey);
         if !self.group.contains_device(&requester) {
             tracing::warn!("remove request from a non-member; ignored");

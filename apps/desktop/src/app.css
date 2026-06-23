@@ -1228,3 +1228,12 @@ button.emoji-pick:hover {
 .role-list li .ghost.small {
   margin-left: auto;
 }
+
+/* Member-removal (danger) button in the role manager. */
+.danger-btn {
+  color: #ff8080;
+  border-color: #5a3636;
+}
+.danger-btn:hover {
+  background: #3a2626;
+}

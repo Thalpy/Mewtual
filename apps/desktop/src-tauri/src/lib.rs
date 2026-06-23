@@ -698,6 +698,15 @@ async fn set_admin(
     Ok(())
 }
 
+/// Remove a member from the server (owner only); re-seals the server.
+#[tauri::command]
+async fn remove_member(state: State<'_, AppState>, server: u64, fp: String) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.remove_member(fp).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Read a wiki page's body.
 #[tauri::command]
 async fn get_wiki_page(
@@ -897,6 +906,7 @@ pub fn run() {
             save_wiki_page,
             get_roles,
             set_admin,
+            remove_member,
             send_message,
             get_messages
         ])
