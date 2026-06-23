@@ -69,6 +69,12 @@ const KIND_PEX: u8 = 4;
 /// for a content-addressed blob (avatars, files), so large/shared binaries move off the
 /// gossiped documents onto on-demand mesh fetch. Members-only and signed, like catch-up.
 const KIND_BLOB_FETCH: u8 = 5;
+/// Request kind: the owner delivering a finalized admission back to the **admin** that
+/// requested it (admin invites, Option C): `invite_nonce ‖ welcome ‖ sealed_routing ‖
+/// owner_sig`. The admin verifies the owner's signature, re-signs the join transcript, and
+/// pushes the Welcome to the waiting joiner.
+#[allow(dead_code)] // wired into the relay flow in the next slice
+const KIND_ADMIT_RESULT: u8 = 6;
 /// Ceiling on a blob **response** accepted from a serving peer before storing. The blob's
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
@@ -756,6 +762,107 @@ fn decode_remove_request(bytes: &[u8]) -> Result<RemoveRequest, SyncError> {
     Ok((target, pubkey, timestamp_ms, signature))
 }
 
+// --- admin invites (Option C): Add-request + admit-result codecs ---------------------------
+// These define the stable wire format; the request/relay flow that uses them lands in the next
+// slice. `#[allow(dead_code)]` until then (removed when wired into serve_join/on_control).
+
+/// The transcript an authorized inviter signs for an Add-request: binds the target group, the
+/// invite nonce, the joiner KeyPackage (by hash, so a relay can't swap it under a valid sig),
+/// the requester key, and a timestamp (freshness). Domain-separated.
+#[allow(dead_code)]
+fn add_req_transcript(
+    group_id: &[u8],
+    invite_nonce: &[u8; 16],
+    kp_hash: &[u8; 32],
+    requester_pubkey: &[u8],
+    ts: u64,
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(ADD_REQ_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(invite_nonce).expect("nonce fits");
+    e.put_bytes(kp_hash).expect("hash fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(ts);
+    e.finish()
+}
+
+/// Encode a signed Add-request body: `invite ‖ key_package ‖ requester_pubkey ‖ ts ‖ sig`.
+#[allow(dead_code)]
+fn encode_add_request(
+    invite: &[u8],
+    key_package: &[u8],
+    requester_pubkey: &[u8],
+    ts: u64,
+    signature: &[u8; 64],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(invite).expect("invite fits");
+    e.put_bytes(key_package).expect("kp fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(ts);
+    e.put_bytes(signature).expect("64 fits");
+    e.finish()
+}
+
+/// (invite, key_package, requester_pubkey, ts, signature)
+type AddRequest = (Vec<u8>, Vec<u8>, Vec<u8>, u64, [u8; 64]);
+
+#[allow(dead_code)]
+fn decode_add_request(bytes: &[u8]) -> Result<AddRequest, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let invite = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let key_package = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let ts = d.get_u64().map_err(|_| SyncError::Malformed)?;
+    let signature: [u8; 64] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((invite, key_package, pubkey, ts, signature))
+}
+
+/// Encode the owner→admin admit-result push: `invite_nonce ‖ welcome ‖ sealed_routing ‖
+/// owner_sig`.
+#[allow(dead_code)]
+fn encode_admit_result(
+    invite_nonce: &[u8; 16],
+    welcome: &[u8],
+    sealed_routing: &[u8],
+    owner_sig: &[u8; 64],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(invite_nonce).expect("nonce fits");
+    e.put_bytes(welcome).expect("welcome fits");
+    e.put_bytes(sealed_routing).expect("routing fits");
+    e.put_bytes(owner_sig).expect("64 fits");
+    e.finish()
+}
+
+/// (invite_nonce, welcome, sealed_routing, owner_sig)
+type AdmitResult = ([u8; 16], Vec<u8>, Vec<u8>, [u8; 64]);
+
+#[allow(dead_code)]
+fn decode_admit_result(bytes: &[u8]) -> Result<AdmitResult, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let nonce: [u8; 16] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let welcome = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let sealed_routing = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let owner_sig: [u8; 64] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((nonce, welcome, sealed_routing, owner_sig))
+}
+
 /// Encode the committer→joiner Welcome push payload (a winning staged admission):
 /// `[JOIN_READY] ‖ welcome ‖ signature`.
 fn encode_welcome_push(welcome: &[u8], signature: &[u8; 64], sealed_routing: &[u8]) -> Vec<u8> {
@@ -1106,11 +1213,24 @@ const CTRL_COMMIT: u8 = 0;
 /// remove a target (the single-serializer proposal model, 6d-2b). Only the
 /// designated committer acts on it, so no concurrent commits arise.
 const CTRL_REMOVE_REQUEST: u8 = 1;
+/// Control-topic tag: an **authorized inviter (owner/admin)**'s signed request that the
+/// designated committer admit a joiner via an invite (admin invites, Option C). Only the
+/// committer (owner) acts on it, so admins never produce a commit → no fork. The owner returns
+/// the Welcome to the requesting admin, who re-signs the join transcript and pushes it to the
+/// joiner (so the joiner's verification is unchanged — see docs/design-admin-invites.md).
+#[allow(dead_code)] // wired into serve_join/on_control in the next slice
+const CTRL_ADD_REQUEST: u8 = 2;
 
 /// Domain separator for the committer's per-commit authorization signature.
 const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
 /// Domain separator for a member's signed remove request.
 const REMOVE_REQ_DOMAIN: &str = "catcoms/remove-req/v1";
+/// Domain separator for an authorized inviter's signed add request.
+const ADD_REQ_DOMAIN: &str = "catcoms/add-req/v1";
+/// DoS bound: the owner queues at most this many pending Add-requests (drop-oldest, deduped on
+/// invite nonce) so a flood can't force unbounded MLS Adds or memory.
+#[allow(dead_code)] // used by the owner's Add-request queue in the next slice
+const MAX_ADD_REQUESTS: usize = 64;
 
 /// A membership commit fanned out on the control topic so existing members apply
 /// it and advance to the same epoch. `commit_epoch` is the epoch the commit was
@@ -4055,6 +4175,45 @@ mod tests {
     fn catchup_request_roundtrips_through_codec() {
         let bytes = encode_catchup_req(DocType::Wiki, 99);
         assert_eq!(decode_catchup_req(&bytes).unwrap(), (DocType::Wiki, 99));
+    }
+
+    #[test]
+    fn add_request_and_admit_result_round_trip_through_codecs() {
+        // Add-request: invite ‖ key_package ‖ requester_pubkey ‖ ts ‖ sig
+        let invite = b"invite-token-bytes".to_vec();
+        let kp = b"key-package-bytes".to_vec();
+        let pubkey = vec![7u8; 32];
+        let ts = 1_234_567u64;
+        let sig = [9u8; 64];
+        let enc = encode_add_request(&invite, &kp, &pubkey, ts, &sig);
+        assert_eq!(
+            decode_add_request(&enc).unwrap(),
+            (invite, kp, pubkey, ts, sig)
+        );
+
+        // Admit-result: invite_nonce ‖ welcome ‖ sealed_routing ‖ owner_sig
+        let nonce = [3u8; 16];
+        let welcome = b"welcome-bytes".to_vec();
+        let routing = b"sealed-routing".to_vec();
+        let owner_sig = [5u8; 64];
+        let enc2 = encode_admit_result(&nonce, &welcome, &routing, &owner_sig);
+        assert_eq!(
+            decode_admit_result(&enc2).unwrap(),
+            (nonce, welcome, routing, owner_sig)
+        );
+
+        // The Add-request transcript is deterministic + domain/group-bound.
+        let kp_hash = [1u8; 32];
+        let t1 = add_req_transcript(b"gid", &nonce, &kp_hash, &[7u8; 32], ts);
+        assert_eq!(
+            t1,
+            add_req_transcript(b"gid", &nonce, &kp_hash, &[7u8; 32], ts)
+        );
+        assert_ne!(
+            t1,
+            add_req_transcript(b"gXd", &nonce, &kp_hash, &[7u8; 32], ts),
+            "the transcript binds the group id"
+        );
     }
 
     #[test]
