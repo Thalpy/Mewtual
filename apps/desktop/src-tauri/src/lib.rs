@@ -843,8 +843,26 @@ async fn unlock(
         .map_err(|e| e.to_string())?
         .join("vault");
     let mut rng = OsCryptoRng;
+    // Opening the vault verifies the passphrase (the DEK won't decrypt otherwise).
     let store =
         ServerStore::open(&dir, passphrase.as_bytes(), &mut rng).map_err(|e| e.to_string())?;
+
+    // If the vault is already unlocked (e.g. a dev HMR re-mounted the frontend while the Rust
+    // process kept running), don't reload from disk — that would spawn a duplicate actor +
+    // transport per server. Return the servers already registered so the rail repopulates.
+    if state.store.lock().await.is_some() {
+        let servers = state.servers.lock().await;
+        return Ok(servers
+            .iter()
+            .map(|(id, e)| ReloadedServer {
+                server: *id,
+                name: e.name.clone(),
+                invite: e.invite.clone().unwrap_or_default(),
+                channel: channel_id("general").to_string(),
+            })
+            .collect());
+    }
+
     let records = store.load_registry().map_err(|e| e.to_string())?;
 
     let mut reloaded = Vec::new();

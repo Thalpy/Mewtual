@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { renderMessage, renderWiki } from "./render";
 
   type Msg = { author: string; text: string; ts: number };
@@ -173,15 +173,22 @@
   });
 
   // Resolve inline media embeds + custom emoji whenever content or the file index changes.
+  // The `tick()` is essential: it waits for Svelte to commit the `{@html renderMessage(...)}`
+  // DOM so the [data-embed-cid]/[data-emoji] placeholders exist before we query for them.
+  // Without it, on a fresh mount (app restart / HMR / tab switch) this effect runs in the
+  // same flush as the {@html} block, finds zero placeholders, and never re-runs — so embeds
+  // render on first send but vanish after a restart.
   $effect(() => {
     void messages;
     void statuses;
     void files;
     void emojiUrls;
-    resolveMedia(messagesEl);
-    resolveEmoji(messagesEl);
-    resolveMedia(statusEl);
-    resolveEmoji(statusEl);
+    tick().then(() => {
+      resolveMedia(messagesEl);
+      resolveEmoji(messagesEl);
+      resolveMedia(statusEl);
+      resolveEmoji(statusEl);
+    });
   });
 
   // Resolve embeds + emoji + mark missing [[links]] in the rendered wiki page (read mode).
@@ -192,9 +199,11 @@
     void files;
     void emojiUrls;
     if (!wikiEdit) {
-      resolveMedia(wikiEl);
-      resolveEmoji(wikiEl);
-      resolveWikiLinks(wikiEl);
+      tick().then(() => {
+        resolveMedia(wikiEl);
+        resolveEmoji(wikiEl);
+        resolveWikiLinks(wikiEl);
+      });
     }
   });
 

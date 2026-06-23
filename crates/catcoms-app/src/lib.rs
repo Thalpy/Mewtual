@@ -1363,6 +1363,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_embed_file_survives_snapshot_restore_with_the_sealing_blob_store() {
+        // Reproduces the "embeds don't survive a restart" path: add a file through the on-disk
+        // sealing blob store, snapshot the server, restore it, re-attach the SAME blob store
+        // (as the desktop reload does, keyed by the group id), and download it back.
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+
+        let mut alice = founder();
+        let gid = "test-group"; // a stable key (the bridge uses the hex group id)
+        alice.set_blob_store(store.blob_store(gid).unwrap());
+        alice.open_files().await.unwrap();
+        let cid = alice
+            .add_file("pic.png", "image/png", "embed/me", b"PNG-BYTES-xyz")
+            .await
+            .unwrap();
+
+        let snap = alice.snapshot().unwrap();
+
+        // Restart: restore onto a fresh transport + re-attach the same on-disk blob store.
+        let hub = Hub::new();
+        let mut restored = Server::restore(
+            &snap,
+            hub.join(PeerId::from_u64(9)),
+            ChaCha20Rng::seed_from_u64(0),
+            Box::new(ManualClock::new(1)),
+            "alice",
+        )
+        .unwrap();
+        restored.set_blob_store(store.blob_store(gid).unwrap());
+
+        let got = restored.download_file(&cid).await.unwrap();
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"PNG-BYTES-xyz"[..]),
+            "an embedded file downloads + decrypts after a restart"
+        );
+    }
+
+    #[tokio::test]
     async fn the_owner_removes_a_member_and_a_non_owner_cannot() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
