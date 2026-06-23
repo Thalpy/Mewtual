@@ -98,6 +98,7 @@ struct UiFile {
     mime: String,
     cid: String,
     author: String,
+    path: String,
 }
 
 // Event payloads — every event is tagged with its server id.
@@ -580,13 +581,14 @@ async fn add_file(
     server: u64,
     name: String,
     mime: String,
+    path: String,
     data: String,
 ) -> Result<String, String> {
     let bytes = B64
         .decode(data.as_bytes())
         .map_err(|e| format!("bad file data: {e}"))?;
     let actor = actor_of(&state, server).await?;
-    let cid = actor.add_file(name, mime, bytes).await?;
+    let cid = actor.add_file(name, mime, path, bytes).await?;
     persist_server(&state, server).await;
     Ok(cid)
 }
@@ -605,6 +607,7 @@ async fn get_files(state: State<'_, AppState>, server: u64) -> Result<Vec<UiFile
             mime: f.mime,
             cid: hex::encode(&f.cid),
             author: f.author,
+            path: f.path,
         })
         .collect())
 }

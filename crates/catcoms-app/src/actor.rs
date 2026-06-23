@@ -56,10 +56,11 @@ pub enum AppCommand {
     Profiles {
         reply: oneshot::Sender<HashMap<String, Profile>>,
     },
-    /// Share a file; replies with its content-address hex, or an error string.
+    /// Share a file under folder `path`; replies with its content-address hex, or an error.
     AddFile {
         name: String,
         mime: String,
+        path: String,
         bytes: Vec<u8>,
         reply: oneshot::Sender<Result<String, String>>,
     },
@@ -248,11 +249,12 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
-    /// Share a file (bytes); returns its content-address hex, or an error string.
+    /// Share a file (bytes) under folder `path`; returns its content-address hex, or an error.
     pub async fn add_file(
         &self,
         name: String,
         mime: String,
+        path: String,
         bytes: Vec<u8>,
     ) -> Result<String, String> {
         let (reply, rx) = oneshot::channel();
@@ -261,6 +263,7 @@ impl ServerActor {
             .send(AppCommand::AddFile {
                 name,
                 mime,
+                path,
                 bytes,
                 reply,
             })
@@ -485,9 +488,9 @@ where
                     Some(AppCommand::Profiles { reply }) => {
                         let _ = reply.send(server.profiles());
                     }
-                    Some(AppCommand::AddFile { name, mime, bytes, reply }) => {
+                    Some(AppCommand::AddFile { name, mime, path, bytes, reply }) => {
                         let res = server
-                            .add_file(&name, &mime, &bytes)
+                            .add_file(&name, &mime, &path, &bytes)
                             .await
                             .map(|cid| cid.to_hex())
                             .map_err(|e| e.to_string());
@@ -1067,7 +1070,12 @@ mod tests {
         // Alice shares a file: bytes to the blob store, only the metadata into the index.
         let data = b"shared document contents".to_vec();
         alice
-            .add_file("doc.txt".into(), "text/plain".into(), data.clone())
+            .add_file(
+                "doc.txt".into(),
+                "text/plain".into(),
+                "".into(),
+                data.clone(),
+            )
             .await
             .unwrap();
 

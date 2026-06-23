@@ -301,6 +301,9 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
 const FILES: &str = "files";
 const F_NAME: &str = "name";
 const F_AUTHOR: &str = "author";
+// 10c: a virtual folder path for organisation (e.g. "", "docs", "embed/<fp>", "wiki/<page>",
+// "emoji"). The blob itself is still content-addressed; the path is mutable index metadata.
+const F_PATH: &str = "path";
 // 9h: the encoded FileRef (ciphertext CID + wrapped per-file key + plaintext CID + size +
 // mime). The file's bytes are stored/shared as ciphertext keyed by the ciphertext CID; only
 // members with the group file-wrap key can open it. Size/mime/cid are read back from here.
@@ -326,16 +329,30 @@ pub struct FileEntry {
     pub cid: Vec<u8>,
     /// The uploader's device fingerprint.
     pub author: String,
+    /// A virtual folder path for organisation (`""` = root). Embeds live under
+    /// `embed/<fp>`, wiki media under `wiki/<page>`, custom emoji under `emoji` (10c–10f).
+    pub path: String,
     /// The encoded [`FileRef`] (wrapped per-file key + addresses) needed to decrypt. Carried
     /// in the encrypted index; not forwarded to the UI.
     pub file_ref: Vec<u8>,
 }
 
-/// Append a file entry (name + author + encoded `FileRef`) to the index document.
+/// Normalize a virtual folder path: trim whitespace + surrounding slashes and drop empty,
+/// `.` and `..` segments, so `""` is the root and a path can never escape it.
+fn normalize_path(path: &str) -> String {
+    path.split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Append a file entry (name + author + folder path + encoded `FileRef`) to the index doc.
 fn write_file_entry(
     doc: &mut AutoCommit,
     name: &str,
     author: &str,
+    path: &str,
     file_ref: &[u8],
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, FILES)? {
@@ -346,6 +363,7 @@ fn write_file_entry(
     let entry = doc.insert_object(&list, index, ObjType::Map)?;
     doc.put(&entry, F_NAME, name)?;
     doc.put(&entry, F_AUTHOR, author)?;
+    doc.put(&entry, F_PATH, path)?;
     doc.put(&entry, F_REF, ScalarValue::Bytes(file_ref.to_vec()))?;
     Ok(())
 }
@@ -365,6 +383,7 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
                         size: fref.size,
                         mime: fref.mime.clone(),
                         cid: fref.ciphertext_cid.as_bytes().to_vec(),
+                        path: str_field(doc, &entry, F_PATH),
                         file_ref: ref_bytes,
                     });
                 }
@@ -625,12 +644,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Share a file: store its bytes in the blob store and add an index entry (gossiped to
-    /// the group). Returns the file's content address. Rejects files over [`MAX_FILE_BYTES`].
+    /// Share a file under folder `path` (`""` = root): store its bytes in the blob store and
+    /// add an index entry (gossiped to the group). Returns the file's content address. Rejects
+    /// files over [`MAX_FILE_BYTES`].
     pub async fn add_file(
         &mut self,
         name: &str,
         mime: &str,
+        path: &str,
         bytes: &[u8],
     ) -> Result<Cid, AppError> {
         if bytes.len() > MAX_FILE_BYTES {
@@ -647,12 +668,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // 9h: seal the file under the group file-wrap key; store + share the ciphertext, keyed
         // by its ciphertext CID. The (encrypted) index carries the FileRef needed to decrypt.
         let author = self.my_fingerprint();
+        let folder = normalize_path(path);
         let (file_ref, ciphertext) = self.sync.seal_file(bytes, mime)?;
         let cid = self.sync.put_blob(&ciphertext)?;
         let ref_bytes = file_ref.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(d, name, &author, &ref_bytes)
+                write_file_entry(d, name, &author, &folder, &ref_bytes)
             })
             .await?;
         Ok(cid)
@@ -1109,7 +1131,7 @@ mod tests {
 
         let data = b"the quick brown fox".to_vec();
         let cid = alice
-            .add_file("notes.txt", "text/plain", &data)
+            .add_file("notes.txt", "text/plain", "docs/sub", &data)
             .await
             .unwrap();
 
@@ -1120,9 +1142,19 @@ mod tests {
         assert_eq!(files[0].mime, "text/plain");
         assert_eq!(files[0].cid, cid.as_bytes().to_vec());
         assert_eq!(files[0].author, alice.my_fingerprint());
+        assert_eq!(files[0].path, "docs/sub", "the folder path round-trips");
 
         // The uploader already holds the bytes.
         assert_eq!(alice.download_file(&cid).await.unwrap(), Some(data));
+    }
+
+    #[test]
+    fn folder_paths_are_normalized_and_cannot_escape() {
+        assert_eq!(normalize_path(""), "");
+        assert_eq!(normalize_path("/docs/"), "docs");
+        assert_eq!(normalize_path("a//b/./c"), "a/b/c");
+        assert_eq!(normalize_path("../../etc/passwd"), "etc/passwd");
+        assert_eq!(normalize_path("embed/ fp /x"), "embed/fp/x");
     }
 
     #[tokio::test]
@@ -1191,7 +1223,7 @@ mod tests {
         let big = vec![0u8; MAX_FILE_BYTES + 1];
         assert!(matches!(
             alice
-                .add_file("big.bin", "application/octet-stream", &big)
+                .add_file("big.bin", "application/octet-stream", "", &big)
                 .await,
             Err(AppError::Invalid(_))
         ));
