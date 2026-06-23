@@ -628,3 +628,206 @@ button.ghost:hover {
   color: #9aa0aa;
   font-size: 0.85rem;
 }
+
+/* --- Phase 10a: tabbed nav + Settings overlay --- */
+
+.tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.tab-bar button {
+  background: transparent;
+  color: #cdd2da;
+  font-weight: 500;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid #3a3d44;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tab-bar button:hover {
+  background: #2a2d33;
+}
+
+.tab-bar button.active {
+  background: #34527e;
+  color: white;
+  border-color: #34527e;
+}
+
+.tab-count {
+  font-size: 0.68rem;
+  background: #3a3d44;
+  color: #cdd2da;
+  border-radius: 9px;
+  padding: 0 0.4rem;
+  line-height: 1.4;
+}
+
+.tab-bar button.active .tab-count {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+/* The Settings gear sits at the bottom of the rail. */
+.server-icon.gear {
+  margin-top: auto;
+  background: #15171a;
+  font-size: 1.1rem;
+}
+
+.invite-quick {
+  margin-top: 0.75rem;
+  width: 100
+/* --- Phase 10a: tabbed nav + Settings overlay --- */
+
+.tab-bar {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.tab-bar button {
+  background: transparent;
+  color: #cdd2da;
+  font-weight: 500;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid #3a3d44;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.tab-bar button:hover {
+  background: #2a2d33;
+}
+
+.tab-bar button.active {
+  background: #34527e;
+  color: white;
+  border-color: #34527e;
+}
+
+.tab-count {
+  font-size: 0.68rem;
+  background: #3a3d44;
+  color: #cdd2da;
+  border-radius: 9px;
+  padding: 0 0.4rem;
+  line-height: 1.4;
+}
+
+.tab-bar button.active .tab-count {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+.server-icon.gear {
+  margin-top: auto;
+  background: #15171a;
+  font-size: 1.1rem;
+}
+
+.invite-quick {
+  margin-top: 0.75rem;
+  width: 100%;
+  font-size: 0.82rem;
+}
+
+.tab-pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.profile-tab {
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.profile-tab input[type="color"] {
+  width: 48px;
+  height: 28px;
+  padding: 0;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.overlay-card {
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: #1f2227;
+  border: 1px solid #3a3d44;
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.overlay-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #2a2d33;
+}
+
+.overlay-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.overlay-body {
+  padding: 0.5rem 1rem 1rem;
+  overflow-y: auto;
+}
+
+.set-section {
+  padding: 0.75rem 0;
+  border-bottom: 1px solid #2a2d33;
+}
+
+.set-section:last-child {
+  border-bottom: none;
+}
+
+.set-section h3 {
+  margin: 0 0 0.4rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9aa0aa;
+}
+
+.set-section.danger .leave {
+  color: #ff8080;
+  border-color: #5a3636;
+}
+
+.small {
+  font-size: 0.78rem;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.toggle input {
+  width: auto;
+}

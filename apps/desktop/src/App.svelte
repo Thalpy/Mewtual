@@ -26,6 +26,13 @@
   let servers = $state<ServerState[]>([]);
   let activeServerId = $state<number | null>(null);
   let showAdd = $state(false); // showing the found/join form to add a server
+  let showSettings = $state(false); // the Settings overlay
+  // Notification-sound preference (wired to actual playback in 10g), persisted locally.
+  let soundOn = $state(typeof localStorage !== "undefined" ? localStorage.getItem("catcoms.sound") !== "off" : true);
+  function toggleSound() {
+    soundOn = !soundOn;
+    try { localStorage.setItem("catcoms.sound", soundOn ? "on" : "off"); } catch { /* ignore */ }
+  }
 
   // Persistence (9f): a passphrase gate. On launch the app is locked until the user enters
   // their passphrase, which unlocks the on-disk vault and reloads their servers (or, on
@@ -54,8 +61,9 @@
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
 
-  // Wiki (main-pane view toggles between chat and wiki).
-  let view = $state<"chat" | "wiki">("chat");
+  // The main pane shows one tab at a time.
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile";
+  let view = $state<Tab>("chat");
   let wikiPages = $state<string[]>([]);
   let activeWikiPage = $state("");
   let wikiBody = $state("");
@@ -178,6 +186,20 @@
       refreshStatuses(),
       refreshInvite(),
     ]);
+    syncProfileEditor();
+  }
+
+  // Populate the Profile tab's editor from this member's own saved profile (so the tab shows
+  // current values for the server you just switched to).
+  function syncProfileEditor() {
+    const me = profiles[myFp];
+    if (me) {
+      pName = me.name || pName;
+      pColor = me.color || pColor;
+      pFont = me.font || pFont;
+      pEffect = me.effect || pEffect;
+      pAvatar = me.avatar || "";
+    }
   }
 
   async function leaveServer(id: number) {
@@ -268,7 +290,7 @@
     }
   }
 
-  function switchView(v: "chat" | "wiki") {
+  function switchView(v: Tab) {
     view = v;
     if (v === "wiki") refreshWiki();
   }
@@ -574,6 +596,7 @@
           </button>
         {/each}
         <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
+        <button class="server-icon gear" title="Settings" onclick={() => (showSettings = true)}>⚙</button>
       </nav>
 
       <aside class="sidebar">
@@ -581,7 +604,10 @@
         <ul class="channel-list">
           {#each cur?.channels ?? [] as c}
             <li>
-              <button class:active={c.id === cur?.active} onclick={() => switchTo(c.id)}>
+              <button
+                class:active={c.id === cur?.active && view === "chat"}
+                onclick={() => { switchTo(c.id); view = "chat"; }}
+              >
                 #{c.name}
                 {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
               </button>
@@ -605,115 +631,20 @@
           </ul>
         </div>
 
-        <details class="profile-editor">
-          <summary>Your profile</summary>
-          <label class="field">
-            <span class="muted">Name</span>
-            <input bind:value={pName} placeholder="display name" />
-          </label>
-          <label class="field row">
-            <span class="muted">Color</span>
-            <input type="color" bind:value={pColor} />
-          </label>
-          <label class="field">
-            <span class="muted">Font</span>
-            <select bind:value={pFont}>
-              <option value="system">System</option>
-              <option value="serif">Serif</option>
-              <option value="mono">Mono</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="muted">Effect</span>
-            <select bind:value={pEffect}>
-              <option value="none">None</option>
-              <option value="rainbow">Rainbow wave</option>
-              <option value="wave">Wave</option>
-              <option value="pulse">Pulse</option>
-            </select>
-          </label>
-          <div class="field">
-            <span class="muted">Avatar</span>
-            <div class="avatar-row">
-              {#if pAvatar}
-                <img class="avatar lg" src={"data:image/jpeg;base64," + pAvatar} alt="" />
-              {:else}
-                <span class="avatar lg fallback" style={`background:${pColor}`}>
-                  {(pName || displayName).slice(0, 1).toUpperCase()}
-                </span>
-              {/if}
-              <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
-              {#if pAvatar}
-                <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
-              {/if}
-            </div>
-          </div>
-          <p class="preview">
-            Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
-          </p>
-          <button onclick={saveProfile}>Save profile</button>
-        </details>
-
-        <details class="files-panel">
-          <summary>Files <span class="muted">({files.length})</span></summary>
-          <label class="upload">
-            <span class="muted">{uploading ? "Uploading…" : "Share a file"}</span>
-            <input type="file" disabled={uploading} onchange={(e) => uploadFile(e.currentTarget.files)} />
-          </label>
-          <ul class="file-list">
-            {#each files as f}
-              <li>
-                <button class="file-name" title={"from " + nameOf(f.author)} onclick={() => downloadFile(f)}>
-                  ↓ {f.name}
-                </button>
-                <span class="muted file-size">{fmtSize(f.size)}</span>
-              </li>
-            {:else}
-              <li class="muted">No files shared yet.</li>
-            {/each}
-          </ul>
-        </details>
-
-        <details class="status-panel">
-          <summary>Status <span class="muted">({statuses.length})</span></summary>
-          <form onsubmit={(e) => { e.preventDefault(); postStatus(); }}>
-            <input bind:value={statusDraft} placeholder="Post a status…" />
-          </form>
-          <ul class="status-list">
-            {#each statuses as s}
-              <li>
-                <span class="status-head">
-                  {@render nameTag(s.author)}
-                  <span class="time">{fmtTime(s.ts)}</span>
-                </span>
-                <span class="status-text">{s.text}</span>
-              </li>
-            {:else}
-              <li class="muted">No status posts yet.</li>
-            {/each}
-          </ul>
-        </details>
-
         {#if cur?.invite}
-          <details>
-            <summary>Invite someone</summary>
-            <p class="muted">Single-use — open a second window and paste it:</p>
-            <textarea readonly rows="3" value={cur.invite}></textarea>
-            <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
-          </details>
-        {/if}
-
-        {#if activeServerId !== null}
-          <button class="ghost leave" onclick={() => activeServerId !== null && leaveServer(activeServerId)}>
-            Leave server
-          </button>
+          <button class="ghost invite-quick" onclick={() => (showSettings = true)}>＋ Invite someone</button>
         {/if}
       </aside>
 
       <section class="channel">
-        <div class="view-tabs">
+        <div class="tab-bar">
           <button class:active={view === "chat"} onclick={() => switchView("chat")}>Chat</button>
+          <button class:active={view === "files"} onclick={() => switchView("files")}>
+            Files {#if files.length}<span class="tab-count">{files.length}</span>{/if}
+          </button>
+          <button class:active={view === "status"} onclick={() => switchView("status")}>Status</button>
           <button class:active={view === "wiki"} onclick={() => switchView("wiki")}>Wiki</button>
+          <button class:active={view === "profile"} onclick={() => switchView("profile")}>Profile</button>
         </div>
 
         {#if view === "chat"}
@@ -736,7 +667,45 @@
             <input bind:value={draft} placeholder={"Message #" + activeName()} />
             <button type="submit">Send</button>
           </form>
-        {:else}
+        {:else if view === "files"}
+          <h2>Files <span class="muted">· {files.length}</span></h2>
+          <label class="upload">
+            <span class="muted">{uploading ? "Uploading…" : "＋ Share a file"}</span>
+            <input type="file" disabled={uploading} onchange={(e) => uploadFile(e.currentTarget.files)} />
+          </label>
+          <ul class="file-list tab-pane">
+            {#each files as f}
+              <li>
+                <button class="file-name" title={"from " + nameOf(f.author)} onclick={() => downloadFile(f)}>
+                  ↓ {f.name}
+                </button>
+                <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)}</span>
+              </li>
+            {:else}
+              <li class="muted">No files shared yet.</li>
+            {/each}
+          </ul>
+        {:else if view === "status"}
+          <h2>Status</h2>
+          <form class="composer" onsubmit={(e) => { e.preventDefault(); postStatus(); }}>
+            <input bind:value={statusDraft} placeholder="Post a status…" />
+            <button type="submit">Post</button>
+          </form>
+          <ul class="status-list tab-pane">
+            {#each statuses as s}
+              <li>
+                <span class="status-head">
+                  {@render avatarTag(s.author)}
+                  {@render nameTag(s.author)}
+                  <span class="time">{fmtTime(s.ts)}</span>
+                </span>
+                <span class="status-text">{s.text}</span>
+              </li>
+            {:else}
+              <li class="muted">No status posts yet.</li>
+            {/each}
+          </ul>
+        {:else if view === "wiki"}
           <div class="wiki">
             <div class="wiki-pages">
               {#each wikiPages as p}
@@ -759,9 +728,107 @@
               <p class="muted wiki-empty">Select a page on the left, or create one.</p>
             {/if}
           </div>
+        {:else if view === "profile"}
+          <h2>Your profile</h2>
+          <div class="profile-tab tab-pane">
+            <label class="field">
+              <span class="muted">Name</span>
+              <input bind:value={pName} placeholder="display name" />
+            </label>
+            <label class="field row">
+              <span class="muted">Color</span>
+              <input type="color" bind:value={pColor} />
+            </label>
+            <label class="field">
+              <span class="muted">Font</span>
+              <select bind:value={pFont}>
+                <option value="system">System</option>
+                <option value="serif">Serif</option>
+                <option value="mono">Mono</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="muted">Effect</span>
+              <select bind:value={pEffect}>
+                <option value="none">None</option>
+                <option value="rainbow">Rainbow wave</option>
+                <option value="wave">Wave</option>
+                <option value="pulse">Pulse</option>
+              </select>
+            </label>
+            <div class="field">
+              <span class="muted">Avatar</span>
+              <div class="avatar-row">
+                {#if pAvatar}
+                  <img class="avatar lg" src={"data:image/jpeg;base64," + pAvatar} alt="" />
+                {:else}
+                  <span class="avatar lg fallback" style={`background:${pColor}`}>
+                    {(pName || displayName).slice(0, 1).toUpperCase()}
+                  </span>
+                {/if}
+                <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
+                {#if pAvatar}
+                  <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
+                {/if}
+              </div>
+            </div>
+            <p class="preview">
+              Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
+            </p>
+            <button onclick={saveProfile}>Save profile</button>
+          </div>
         {/if}
         {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
       </section>
     </div>
+
+    {#if showSettings}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showSettings = false; }}>
+        <div class="overlay-card">
+          <header class="overlay-head">
+            <h2>⚙ Settings</h2>
+            <button class="ghost" onclick={() => (showSettings = false)}>✕</button>
+          </header>
+          <div class="overlay-body">
+            <section class="set-section">
+              <h3>Server</h3>
+              <p>{cur?.name ?? "—"}</p>
+              <p class="muted small">Owner controls (rename, members, admins) arrive in a later update.</p>
+            </section>
+
+            {#if cur?.invite}
+              <section class="set-section">
+                <h3>Invite someone</h3>
+                <p class="muted small">Single-use — share it with one person to join this server.</p>
+                <textarea readonly rows="3" value={cur.invite}></textarea>
+                <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
+              </section>
+            {/if}
+
+            <section class="set-section">
+              <h3>Notifications</h3>
+              <label class="toggle">
+                <input type="checkbox" checked={soundOn} onchange={toggleSound} />
+                <span>Play a sound for new messages</span>
+              </label>
+            </section>
+
+            <section class="set-section">
+              <h3>Network</h3>
+              <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
+            </section>
+
+            {#if activeServerId !== null}
+              <section class="set-section danger">
+                <button class="ghost leave" onclick={() => { const id = activeServerId; showSettings = false; if (id !== null) leaveServer(id); }}>
+                  Leave this server
+                </button>
+              </section>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
   {/if}
 </main>
