@@ -125,6 +125,14 @@ pub enum AppCommand {
         fp: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Mint a fresh single-use invite (owner/admin only) carrying `bootstrap`; replies with the
+    /// encoded `InviteToken` bytes, or an error.
+    MintInvite {
+        nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     /// Serialize the server's durable state for sealing to disk (Phase 9f).
     Snapshot {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
@@ -221,6 +229,32 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::Snapshot { reply })
+            .await
+            .is_err()
+        {
+            return Err("server actor stopped".into());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
+    /// Mint a fresh single-use invite (owner/admin only) carrying `bootstrap`; returns the
+    /// encoded `InviteToken` bytes, or an error string.
+    pub async fn mint_invite(
+        &self,
+        nonce: [u8; 16],
+        expires_at_ms: u64,
+        bootstrap: Vec<String>,
+    ) -> Result<Vec<u8>, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MintInvite {
+                nonce,
+                expires_at_ms,
+                bootstrap,
+                reply,
+            })
             .await
             .is_err()
         {
@@ -742,6 +776,13 @@ where
                     }
                     Some(AppCommand::Snapshot { reply }) => {
                         let _ = reply.send(server.snapshot().map(|z| z.to_vec()).map_err(|e| e.to_string()));
+                    }
+                    Some(AppCommand::MintInvite { nonce, expires_at_ms, bootstrap, reply }) => {
+                        let res = server
+                            .mint_invite(nonce, expires_at_ms, bootstrap)
+                            .map(|t| t.encode())
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
                     }
                     Some(AppCommand::Shutdown) | None => {
                         let _ = event_tx.send(AppEvent::Closed).await;

@@ -1324,3 +1324,5 @@ button.emoji-pick:hover {
   margin-bottom: 10px;
 }
 .server-icon.feedback-btn { font-size: 1.05em; }
+
+.invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }

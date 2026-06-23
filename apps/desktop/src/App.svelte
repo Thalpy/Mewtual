@@ -922,6 +922,22 @@
     }
   }
 
+  let mintingInvite = $state(false);
+  // Mint a fresh single-use invite on demand (owner only). The new invite carries the live
+  // bootstrap address, so it works even after a restart changed the listen port.
+  async function generateInvite() {
+    if (activeServerId === null || !cur) return;
+    mintingInvite = true;
+    try {
+      cur.invite = await invoke<string>("mint_invite_fresh", { server: activeServerId });
+      copied = false;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      mintingInvite = false;
+    }
+  }
+
   // A short two-note chime via the Web Audio API (no asset to bundle), gated by the
   // notification-sound preference. Played for messages you aren't actively looking at.
   let audioCtx: AudioContext | null = null;
@@ -1441,12 +1457,26 @@
               {/if}
             </section>
 
-            {#if cur?.invite}
+            {#if cur?.invite || myRole === "owner"}
               <section class="set-section">
                 <h3>Invite someone</h3>
-                <p class="muted small">Single-use — share it with one person to join this server.</p>
-                <textarea readonly rows="3" value={cur.invite}></textarea>
-                <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
+                <p class="muted small">Single-use — share it with one person to join this server. Generate a fresh
+                  one anytime (after a restart, or once the last one was used).</p>
+                {#if cur?.invite}
+                  <textarea readonly rows="3" value={cur.invite}></textarea>
+                  <div class="invite-actions">
+                    <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
+                    {#if myRole === "owner"}
+                      <button class="ghost" disabled={mintingInvite} onclick={generateInvite}>
+                        {mintingInvite ? "Generating…" : "Generate new invite"}
+                      </button>
+                    {/if}
+                  </div>
+                {:else if myRole === "owner"}
+                  <button disabled={mintingInvite} onclick={generateInvite}>
+                    {mintingInvite ? "Generating…" : "Generate an invite"}
+                  </button>
+                {/if}
               </section>
             {/if}
 

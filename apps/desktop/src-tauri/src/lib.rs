@@ -33,6 +33,10 @@ struct ServerEntry {
     actor: ServerActor,
     invite: Option<String>,
     name: String,
+    /// The current reachable bootstrap addresses for this device, captured when the server was
+    /// founded/reloaded. Reused to mint a *fresh* invite on demand (so it carries the live
+    /// address, not a stale one). Empty for a joiner (only the owner mints).
+    bootstrap: Vec<String>,
 }
 
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
@@ -203,6 +207,7 @@ async fn register_server(
     events: mpsc::Receiver<AppEvent>,
     invite: Option<String>,
     name: String,
+    bootstrap: Vec<String>,
 ) -> u64 {
     let id = {
         let mut n = state.next_id.lock().await;
@@ -210,11 +215,15 @@ async fn register_server(
         *n
     };
     forward_events(app.clone(), id, events);
-    state
-        .servers
-        .lock()
-        .await
-        .insert(id, ServerEntry { actor, invite, name });
+    state.servers.lock().await.insert(
+        id,
+        ServerEntry {
+            actor,
+            invite,
+            name,
+            bootstrap,
+        },
+    );
     id
 }
 
@@ -364,14 +373,15 @@ async fn found_server(
     rng.fill_bytes(&mut nonce);
     let expires = SystemClock.now_ms() + 3_600_000;
     let invite = server
-        .mint_invite(nonce, expires, bootstrap)
+        .mint_invite(nonce, expires, bootstrap.clone())
         .map_err(|e| e.to_string())?;
     let invite_hex = hex::encode(invite.encode());
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
-    let server_id = register_server(&app, &state, actor, events, Some(invite_hex), name).await;
+    let server_id =
+        register_server(&app, &state, actor, events, Some(invite_hex), name, bootstrap).await;
     // Seal the new server + the registry to disk (if the store is unlocked).
     persist_server(&state, server_id).await;
     persist_registry(&state).await;
@@ -446,7 +456,8 @@ async fn join_server(
     actor.catch_up_status(inviter).await;
     actor.catch_up_wiki(inviter).await;
     actor.catch_up_roles(inviter).await;
-    let server_id = register_server(&app, &state, actor, events, None, name).await;
+    // A joiner mints no invites (owner-scoped), so it carries no bootstrap of its own here.
+    let server_id = register_server(&app, &state, actor, events, None, name, Vec::new()).await;
     // Seal the joined server + the registry to disk (if the store is unlocked).
     persist_server(&state, server_id).await;
     persist_registry(&state).await;
@@ -500,6 +511,32 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
         .await
         .get(&server)
         .and_then(|e| e.invite.clone()))
+}
+
+/// Mint a **fresh** single-use invite on demand (owner/admin only — gated in `Server::mint_invite`),
+/// carrying the live bootstrap address captured at found/reload. Replaces the server's stored
+/// invite (so the UI shows the latest) and re-seals the registry. Returns the new invite hex.
+#[tauri::command]
+async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<String, String> {
+    let bootstrap = {
+        let servers = state.servers.lock().await;
+        servers
+            .get(&server)
+            .map(|e| e.bootstrap.clone())
+            .ok_or_else(|| "unknown server".to_string())?
+    };
+    let actor = actor_of(&state, server).await?;
+    let mut nonce = [0u8; 16];
+    let mut rng = OsCryptoRng;
+    rng.fill_bytes(&mut nonce);
+    let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
+    let encoded = actor.mint_invite(nonce, expires, bootstrap).await?;
+    let invite_hex = hex::encode(encoded);
+    if let Some(e) = state.servers.lock().await.get_mut(&server) {
+        e.invite = Some(invite_hex.clone());
+    }
+    persist_registry(&state).await;
+    Ok(invite_hex)
 }
 
 /// The current roster (member fingerprints; `you` marks the local device).
@@ -818,7 +855,18 @@ async fn reload_one(
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
-    let (mesh, _id) = MeshService::new_tcp(Some(listen), &redial).map_err(|e| e.to_string())?;
+    let (mesh, libp2p_id) =
+        MeshService::new_tcp(Some(listen), &redial).map_err(|e| e.to_string())?;
+    // Capture the current loopback bootstrap. The OS-assigned port changes across reloads (the
+    // 9f caveat), so a freshly-minted invite must carry the *new* address — capture it here
+    // rather than reuse the persisted (stale) one. Best-effort same-machine reach; re-advertising
+    // a LAN/relay address on reload is a networking follow-up (tied to rendezvous).
+    let bootstrap = match timeout(Duration::from_secs(10), mesh.next_listen_addr()).await {
+        Ok(Some(addr)) => tcp_port(&addr)
+            .map(|p| vec![format!("/ip4/127.0.0.1/tcp/{p}/p2p/{libp2p_id}")])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
     let mut server = Server::restore(
         snapshot,
         mesh,
@@ -845,6 +893,7 @@ async fn reload_one(
                 Some(record.invite.clone())
             },
             name: record.display_name.clone(),
+            bootstrap,
         },
     );
     Ok(())
@@ -932,6 +981,7 @@ pub fn run() {
             leave_server,
             open_channel,
             get_invite,
+            mint_invite_fresh,
             get_members,
             set_profile,
             get_profiles,
