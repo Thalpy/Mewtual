@@ -672,59 +672,6 @@ button.ghost:hover {
   color: #fff;
 }
 
-/* The Settings gear sits at the bottom of the rail. */
-.server-icon.gear {
-  margin-top: auto;
-  background: #15171a;
-  font-size: 1.1rem;
-}
-
-.invite-quick {
-  margin-top: 0.75rem;
-  width: 100
-/* --- Phase 10a: tabbed nav + Settings overlay --- */
-
-.tab-bar {
-  display: flex;
-  gap: 0.25rem;
-  margin-bottom: 0.25rem;
-}
-
-.tab-bar button {
-  background: transparent;
-  color: #cdd2da;
-  font-weight: 500;
-  padding: 0.35rem 0.85rem;
-  border: 1px solid #3a3d44;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-
-.tab-bar button:hover {
-  background: #2a2d33;
-}
-
-.tab-bar button.active {
-  background: #34527e;
-  color: white;
-  border-color: #34527e;
-}
-
-.tab-count {
-  font-size: 0.68rem;
-  background: #3a3d44;
-  color: #cdd2da;
-  border-radius: 9px;
-  padding: 0 0.4rem;
-  line-height: 1.4;
-}
-
-.tab-bar button.active .tab-count {
-  background: rgba(255, 255, 255, 0.25);
-  color: #fff;
-}
-
 .server-icon.gear {
   margin-top: auto;
   background: #15171a;
@@ -830,4 +777,73 @@ button.ghost:hover {
 
 .toggle input {
   width: auto;
+}
+
+/* --- Phase 10b: rich-text rendering --- */
+
+.wikilink {
+  color: #7fa8ff;
+  cursor: pointer;
+  text-decoration: none;
+  border-bottom: 1px dotted #7fa8ff;
+}
+
+.wikilink:hover {
+  color: #a9c4ff;
+}
+
+.emoji {
+  font-style: normal;
+}
+
+img.emoji {
+  height: 1.25em;
+  width: 1.25em;
+  vertical-align: -0.2em;
+  object-fit: contain;
+}
+
+.text code,
+.status-text code,
+.wiki-render code {
+  background: #15171a;
+  border: 1px solid #2a2d33;
+  border-radius: 4px;
+  padding: 0 0.3em;
+  font-size: 0.9em;
+}
+
+.text pre,
+.wiki-render pre {
+  background: #15171a;
+  border: 1px solid #2a2d33;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  overflow-x: auto;
+}
+
+.text pre code,
+.wiki-render pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.text a,
+.status-text a,
+.wiki-render a {
+  color: #7fa8ff;
+}
+
+.embed-media {
+  display: block;
+  max-width: 320px;
+  max-height: 240px;
+  border-radius: 6px;
+  margin: 0.25rem 0;
+}
+
+.embed-audio {
+  width: 260px;
+  margin: 0.25rem 0;
 }

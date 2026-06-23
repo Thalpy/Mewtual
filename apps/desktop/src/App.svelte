@@ -2,6 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import { renderMessage } from "./render";
 
   type Msg = { author: string; text: string; ts: number };
   type Channel = { id: string; name: string };
@@ -293,6 +294,27 @@
   function switchView(v: Tab) {
     view = v;
     if (v === "wiki") refreshWiki();
+  }
+
+  // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
+  async function handleRichClick(e: MouseEvent) {
+    const el = (e.target as HTMLElement | null)?.closest("[data-wikilink]") as HTMLElement | null;
+    if (el) {
+      e.preventDefault();
+      const page = el.getAttribute("data-wikilink") ?? "";
+      if (page) {
+        view = "wiki";
+        await openWikiPage(page);
+      }
+    }
+  }
+
+  // Svelte action: delegate clicks inside a rendered-rich-text container (attaches the
+  // listener imperatively, so no a11y warning for a click on a non-interactive container).
+  function richClicks(node: HTMLElement) {
+    const h = (e: Event) => handleRichClick(e as MouseEvent);
+    node.addEventListener("click", h);
+    return { destroy: () => node.removeEventListener("click", h) };
   }
   async function refreshWiki() {
     if (activeServerId === null) return;
@@ -649,7 +671,7 @@
 
         {#if view === "chat"}
           <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
-          <ul class="messages" bind:this={messagesEl}>
+          <ul class="messages" bind:this={messagesEl} use:richClicks>
             {#each messages as m}
               <li class:own={m.author === myFp}>
                 <span class="author">
@@ -657,7 +679,7 @@
                   {@render nameTag(m.author)}
                   <span class="time">{fmtTime(m.ts)}</span>
                 </span>
-                <span class="text">{m.text}</span>
+                <span class="text">{@html renderMessage(m.text)}</span>
               </li>
             {:else}
               <li class="muted">No messages yet — say hello.</li>
@@ -691,7 +713,7 @@
             <input bind:value={statusDraft} placeholder="Post a status…" />
             <button type="submit">Post</button>
           </form>
-          <ul class="status-list tab-pane">
+          <ul class="status-list tab-pane" use:richClicks>
             {#each statuses as s}
               <li>
                 <span class="status-head">
@@ -699,7 +721,7 @@
                   {@render nameTag(s.author)}
                   <span class="time">{fmtTime(s.ts)}</span>
                 </span>
-                <span class="status-text">{s.text}</span>
+                <span class="status-text">{@html renderMessage(s.text)}</span>
               </li>
             {:else}
               <li class="muted">No status posts yet.</li>
