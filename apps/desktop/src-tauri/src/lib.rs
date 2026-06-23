@@ -950,36 +950,44 @@ async fn unlock(
 
     let records = store.load_registry().map_err(|e| e.to_string())?;
 
-    let mut reloaded = Vec::new();
-    let mut max_id = 0u64;
-    for record in &records {
-        let bytes = match store.load_server(record.id) {
-            Ok(b) => b,
+    // Load every server's sealed snapshot up front, while we still own `store` locally.
+    let snapshots: Vec<_> = records
+        .iter()
+        .map(|r| match store.load_server(r.id) {
+            Ok(b) => Some(b),
             Err(e) => {
-                eprintln!("unlock: loading server {} failed: {e}", record.id);
-                continue;
+                eprintln!("unlock: loading server {} failed: {e}", r.id);
+                None
             }
-        };
-        if let Err(e) = reload_one(&app, &state, &bytes, record).await {
-            eprintln!("unlock: restoring server {} failed: {e}", record.id);
-            continue;
-        }
-        max_id = max_id.max(record.id);
-        reloaded.push(ReloadedServer {
-            server: record.id,
-            name: record.display_name.clone(),
-            invite: record.invite.clone(),
-            channel: channel_id("general").to_string(),
-        });
-    }
+        })
+        .collect();
+    let max_id = records.iter().map(|r| r.id).max().unwrap_or(0);
 
-    // Keep the unlocked store, and ensure new servers get ids past the reloaded ones.
+    // Install the unlocked store BEFORE reloading. `reload_one` -> `attach_blob_store` reads
+    // `state.store` to attach the on-disk sealing blob store; if it were still `None` here,
+    // every reloaded server would silently keep an empty in-memory blob store and be unable to
+    // read its own persisted blobs ("no peer has it" for files you uploaded before the restart).
     *state.store.lock().await = Some(store);
     {
         let mut n = state.next_id.lock().await;
         if *n < max_id {
             *n = max_id;
         }
+    }
+
+    let mut reloaded = Vec::new();
+    for (record, snap) in records.iter().zip(snapshots.iter()) {
+        let Some(bytes) = snap else { continue };
+        if let Err(e) = reload_one(&app, &state, bytes, record).await {
+            eprintln!("unlock: restoring server {} failed: {e}", record.id);
+            continue;
+        }
+        reloaded.push(ReloadedServer {
+            server: record.id,
+            name: record.display_name.clone(),
+            invite: record.invite.clone(),
+            channel: channel_id("general").to_string(),
+        });
     }
     Ok(reloaded)
 }
