@@ -93,9 +93,18 @@ roadmap:
      admins admitting at once can permanently split the group. **Option B** (owner-admits-on-
      behalf via point-to-point forward) — routing is a blocker without a new forward protocol +
      a rewritten Welcome trust anchor.
-   - *Product implication:* admin invites admit **only while the owner is online** (the owner is
-     the sole serializer). This is not a regression (today only the owner can admit at all) but
-     is newly visible. Owner-offline admin admission would require Option A (gated on I1).
+   - *Chosen variant: Option C + **offline Add-request queuing**.* The admin's signed
+     Add-request sits on the control topic until the owner is next online; the joiner waits and
+     is admitted when the owner finalizes. So an admin can create + hand out invites **with the
+     owner offline** (admin-independent), and admission completes whenever the owner next syncs.
+   - *Product implication:* admission finalizes **when the owner is next online** — admins are
+     independent for minting/handing out invites, but the final MLS Add is owner-serialized so
+     the group can't fork. Not a regression (today only the owner can admit at all). Owner-
+     **never**-online concurrent admission is explicitly **out of scope**: it needs safe
+     concurrent committers, i.e. closing **I1**, which is fundamental consensus (FLP/CAP) — a
+     multi-week-to-month redesign whose failure mode is a *permanent group split* (forward-
+     secrecy/PCS defeated on the losing branch). Recommended against; do **not** enable
+     `max_committer_rank ≥ 1`.
    - *Residual:* the re-check makes a *non-admin's* minted invite useless at the protocol layer,
      but a **demoted** admin can still replay their old grant op until item 3 (grant epoch/nonce)
      lands — so demotion is "current-doc, honest-client," not yet replay-proof.
