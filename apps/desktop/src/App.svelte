@@ -797,18 +797,49 @@
     }
   }
 
+  // A short two-note chime via the Web Audio API (no asset to bundle), gated by the
+  // notification-sound preference. Played for messages you aren't actively looking at.
+  let audioCtx: AudioContext | null = null;
+  function playNotify() {
+    if (!soundOn) return;
+    try {
+      audioCtx = audioCtx ?? new AudioContext();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") void ctx.resume();
+      const now = ctx.currentTime;
+      [880, 1318.5].forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        const t = now + i * 0.09;
+        gain.gain.setValueAtTime(0.0001, t);
+        gain.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(t);
+        osc.stop(t + 0.2);
+      });
+    } catch {
+      /* audio unavailable */
+    }
+  }
+
   onMount(() => {
     const subs: Promise<UnlistenFn>[] = [
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
         if (server === activeServerId && channel === cur?.active) {
           refresh();
+          // You're looking at this channel — only chime if the window isn't focused.
+          if (!document.hasFocus()) playNotify();
           return;
         }
         const s = servers.find((x) => x.id === server);
         if (s && s.channels.some((c) => c.id === channel)) {
           if (!s.unread.includes(channel)) s.unread.push(channel);
           if (server !== activeServerId) s.dot = true;
+          playNotify();
         }
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
@@ -1264,6 +1295,7 @@
                 <input type="checkbox" checked={soundOn} onchange={toggleSound} />
                 <span>Play a sound for new messages</span>
               </label>
+              <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
             </section>
 
             <section class="set-section">
