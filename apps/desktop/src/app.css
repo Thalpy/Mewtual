@@ -1434,3 +1434,31 @@ button.emoji-pick:hover {
   text-align: center;
   font-weight: 600;
 }
+
+/* Server settings: rename row + sidebar server header */
+.rename-row {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0;
+}
+.rename-row input {
+  flex: 1;
+}
+.server-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.server-title {
+  flex: 1;
+  font-size: 1rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.icon-btn {
+  padding: 2px 8px;
+  font-size: 1rem;
+  flex: none;
+}

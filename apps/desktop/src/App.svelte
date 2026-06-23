@@ -27,7 +27,25 @@
   let servers = $state<ServerState[]>([]);
   let activeServerId = $state<number | null>(null);
   let showAdd = $state(false); // showing the found/join form to add a server
-  let showSettings = $state(false); // the Settings overlay
+  let showSettings = $state(false); // the personal/app Settings overlay
+  let showServerSettings = $state(false); // the per-server (admin) Settings overlay
+  let serverNameDraft = $state("");
+
+  function openServerSettings(id: number | null = null) {
+    if (id !== null && id !== activeServerId) switchServer(id);
+    serverNameDraft = cur?.name ?? "";
+    showServerSettings = true;
+  }
+  async function renameServer() {
+    const name = serverNameDraft.trim();
+    if (activeServerId === null || !cur || !name || name === cur.name) return;
+    try {
+      await invoke("rename_server", { server: activeServerId, name });
+      cur.name = name;
+    } catch (e) {
+      error = String(e);
+    }
+  }
   let showFeedback = $state(false); // the Send-feedback overlay
   let feedbackKind = $state<"bug" | "feature">("bug");
   let feedbackText = $state("");
@@ -714,7 +732,7 @@
   function serverMenu(s: ServerState): MenuItem[] {
     const items: MenuItem[] = [];
     if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => copyText(s.invite) });
-    items.push({ label: "Server settings", icon: "⚙", onSelect: () => { if (s.id !== activeServerId) switchServer(s.id); showSettings = true; } });
+    items.push({ label: "Server settings", icon: "⚙", onSelect: () => openServerSettings(s.id) });
     items.push({ divider: true });
     items.push({
       label: "Leave server",
@@ -1242,6 +1260,7 @@
         else if (fileInfo) closeFileInfo();
         else if (showWikiHelp) showWikiHelp = false;
         else if (showFeedback) showFeedback = false;
+        else if (showServerSettings) showServerSettings = false;
         else if (showSettings) showSettings = false;
         return;
       }
@@ -1371,6 +1390,10 @@
       </nav>
 
       <aside class="sidebar">
+        <div class="server-head">
+          <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
+          <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>🛠</button>
+        </div>
         <h3>Channels</h3>
         <ul class="channel-list">
           {#each cur?.channels ?? [] as c}
@@ -1411,7 +1434,7 @@
         </div>
 
         {#if cur?.invite}
-          <button class="ghost invite-quick" onclick={() => (showSettings = true)}>＋ Invite someone</button>
+          <button class="ghost invite-quick" onclick={() => openServerSettings()}>＋ Invite someone</button>
         {/if}
       </aside>
 
@@ -1695,8 +1718,50 @@
           </header>
           <div class="overlay-body">
             <section class="set-section">
+              <h3>Notifications</h3>
+              <label class="toggle">
+                <input type="checkbox" checked={soundOn} onchange={toggleSound} />
+                <span>Play a sound for new messages</span>
+              </label>
+              <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
+            </section>
+
+            <section class="set-section">
+              <h3>Network</h3>
+              <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
+            </section>
+
+            {#if activeServerId !== null}
+              <section class="set-section">
+                <h3>This server</h3>
+                <button class="ghost" onclick={() => { showSettings = false; openServerSettings(); }}>Open server settings →</button>
+              </section>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showServerSettings}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showServerSettings = false; }}>
+        <div class="overlay-card">
+          <header class="overlay-head">
+            <h2>🛠 Server settings</h2>
+            <button class="ghost" onclick={() => (showServerSettings = false)}>✕</button>
+          </header>
+          <div class="overlay-body">
+            <section class="set-section">
               <h3>Server</h3>
               <p>{cur?.name ?? "—"} <span class="role-badge {myRole}">{myRole}</span></p>
+              <form class="rename-row" onsubmit={(e) => { e.preventDefault(); renameServer(); }}>
+                <input bind:value={serverNameDraft} placeholder="Server name" />
+                <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
+              </form>
+              <p class="muted small">The name is your own label for this server (not shared with other members).</p>
+            </section>
+
+            <section class="set-section">
               <h4 class="members-h4">Members &amp; roles</h4>
               <ul class="role-list">
                 {#each roster as m}
@@ -1721,8 +1786,8 @@
                 {/each}
               </ul>
               <p class="muted small">
-                Roles are a display + policy aid, not a hard security control yet — a modified
-                client can still set its own role. The owner is the founder (the MLS committer).
+                The owner is the founder (the MLS committer). Member removal is owner-only and
+                protocol-enforced; admin grants are a policy aid (see the guide).
               </p>
               {#if myRole !== "owner"}
                 <p class="muted small">Only the owner can change roles.</p>
@@ -1753,15 +1818,6 @@
             {/if}
 
             <section class="set-section">
-              <h3>Notifications</h3>
-              <label class="toggle">
-                <input type="checkbox" checked={soundOn} onchange={toggleSound} />
-                <span>Play a sound for new messages</span>
-              </label>
-              <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
-            </section>
-
-            <section class="set-section">
               <h3>Custom emoji</h3>
               <p class="muted small">Type <code>:code:</code> in chat to use one. Shared with the whole server.</p>
               {#if Object.keys(emojiMap).length}
@@ -1783,14 +1839,9 @@
               </form>
             </section>
 
-            <section class="set-section">
-              <h3>Network</h3>
-              <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
-            </section>
-
             {#if activeServerId !== null}
               <section class="set-section danger">
-                <button class="ghost leave" onclick={() => { const id = activeServerId; showSettings = false; if (id !== null) leaveServer(id); }}>
+                <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
                   Leave this server
                 </button>
               </section>

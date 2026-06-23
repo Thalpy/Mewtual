@@ -539,6 +539,22 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
     Ok(invite_hex)
 }
 
+/// Rename a server — a **local** display label in this client's rail (server names are not
+/// shared between members), persisted to the registry.
+#[tauri::command]
+async fn rename_server(state: State<'_, AppState>, server: u64, name: String) -> Result<(), String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("name cannot be empty".into());
+    }
+    match state.servers.lock().await.get_mut(&server) {
+        Some(e) => e.name = name,
+        None => return Err("unknown server".into()),
+    }
+    persist_registry(&state).await;
+    Ok(())
+}
+
 /// The current roster (member fingerprints; `you` marks the local device).
 #[tauri::command]
 async fn get_members(state: State<'_, AppState>, server: u64) -> Result<Vec<UiMember>, String> {
@@ -982,6 +998,7 @@ pub fn run() {
             open_channel,
             get_invite,
             mint_invite_fresh,
+            rename_server,
             get_members,
             set_profile,
             get_profiles,
