@@ -24,7 +24,7 @@
 //! (here a single designated committer serializes membership changes).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
 use automerge::{AutoCommit, AutomergeError};
@@ -47,7 +47,10 @@ use zeroize::Zeroizing;
 mod roles;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
-pub use roles::{fingerprint, grant_payload, read_admins, ROLES_DOC, ROLE_GRANT_DOMAIN};
+pub use roles::{
+    encode_roster, fingerprint, read_published_roster, roster_payload, ROLES_DOC,
+    ROLE_ROSTER_DOMAIN, ROSTER_KEY,
+};
 
 /// Request/response protocol (one RR protocol; the first payload byte selects the
 /// request kind so it works over the single-protocol mesh node).
@@ -1577,6 +1580,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     admit_result_outbox: Vec<(PeerId, Vec<u8>)>,
     /// Admin-side: Add-requests this node is driving to completion, keyed by invite nonce.
     outgoing_add_requests: HashMap<[u8; 16], OutgoingAdd>,
+    /// **Owner-local authoritative** admin set (fingerprints), persisted in the snapshot. This is
+    /// the security source of truth for the admission gate (`inviter_is_authorized`): a malicious
+    /// member cannot write it, so the demoted-admin grant-replay residual is closed (THREAT-MODEL
+    /// item 3). The owner publishes a signed *copy* into the `MemberRoles` doc for display only.
+    /// Empty on non-owner nodes (they don't admit; they read the published copy for display).
+    admin_roster: BTreeSet<String>,
+    /// Generation counter for the owner's *published* roster copy (monotonic; persisted), so
+    /// honest members converge deterministically. Not load-bearing for the local gate.
+    roster_gen: u64,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
@@ -1644,6 +1656,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             admit_results: HashMap::new(),
             admit_result_outbox: Vec::new(),
             outgoing_add_requests: HashMap::new(),
+            admin_roster: BTreeSet::new(),
+            roster_gen: 0,
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
             blob_served_at: HashMap::new(),
@@ -1697,9 +1711,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for desc in self.peer_records.values() {
             e.put_bytes(&desc.encode()).map_err(|_| oversize())?;
         }
-        // 9h: the stable file-wrap key, appended LAST so `peer_addrs_from_snapshot` (which
-        // stops after the peer records) is unaffected.
+        // 9h: the stable file-wrap key, appended after the peer records so
+        // `peer_addrs_from_snapshot` (which stops after them) is unaffected.
         e.put_bytes(&*self.file_wrap_key).map_err(|_| oversize())?;
+        // Item 3: the owner-local authoritative admin roster + its generation, appended last
+        // (also after the peer records, so `peer_addrs_from_snapshot` is still unaffected). This
+        // is the security source of truth for the admission gate, so it MUST persist.
+        e.put_u64(self.roster_gen);
+        e.put_u32(self.admin_roster.len() as u32);
+        for fp in &self.admin_roster {
+            e.put_str(fp).map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -1740,6 +1762,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .map_err(|_| bad())?
             .try_into()
             .map_err(|_| bad())?;
+        // Item 3: the owner-local authoritative admin roster + generation. Read gracefully so a
+        // pre-item-3 snapshot (no trailing bytes) loads with an empty roster (the owner re-grants;
+        // old per-fp grant docs are no longer honored). A new snapshot is decoded strictly.
+        let (roster_gen, admin_roster) = if d.is_empty() {
+            (0u64, BTreeSet::new())
+        } else {
+            let gen = d.get_u64().map_err(|_| bad())?;
+            let count = d.get_u32().map_err(|_| bad())?;
+            let mut set = BTreeSet::new();
+            for _ in 0..count {
+                set.insert(d.get_str().map_err(|_| bad())?.to_string());
+            }
+            (gen, set)
+        };
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -1766,6 +1802,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         this.commit_log = commit_log;
         this.peer_records = peer_records;
+        this.roster_gen = roster_gen;
+        this.admin_roster = admin_roster;
         Ok(this)
     }
 
@@ -1782,11 +1820,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Whether `device_id` is currently authorized to invite/admit — the **owner** (designated
-    /// committer) unconditionally, or a current member holding a valid **owner-signed admin
-    /// grant** in the live `MemberRoles` doc. Reads the doc as it exists *now* (zero staleness),
-    /// which is what the membership-admission gate needs (a demoted admin's authority lapses the
-    /// instant the demotion is applied). Returns `false` if there is no owner/roles doc yet
-    /// except for the owner itself, so the founder can always invite the first members.
+    /// committer) unconditionally, or a current admin. On the **owner** (the only node that runs
+    /// admission in Option C) this reads the owner's **local authoritative roster**, which a
+    /// malicious member cannot write — so a demoted admin replaying/deleting its grant in the
+    /// shared CRDT cannot re-authorize itself (THREAT-MODEL item 3). On a non-owner node it is a
+    /// display fallback only (never the admission path), reading the owner-signed published roster.
+    /// Returns `false` for a non-admin / non-member.
     pub fn inviter_is_authorized(&self, device_id: &DeviceId) -> bool {
         let Some(owner) = self.group.designated_committer() else {
             return false;
@@ -1794,11 +1833,64 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if owner == *device_id {
             return true;
         }
+        let fp = roles::fingerprint(device_id);
+        if self.is_designated_committer() {
+            // We are the owner — the only node that runs admission (Option C). Consult our LOCAL
+            // authoritative roster: replay/deletion/forgery against the shared CRDT cannot touch
+            // it, so a demoted admin cannot re-authorize itself (THREAT-MODEL item 3).
+            return self.admin_roster.contains(&fp);
+        }
+        // Non-owner: this is display/fallback only and does not gate admission. Trust the
+        // owner-signed published roster (a stale replay here is cosmetic, never an admission).
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
-            Some(doc) => roles::read_admins(doc.doc(), &self.group.group_id(), &owner)
-                .contains(&roles::fingerprint(device_id)),
+            Some(doc) => roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner)
+                .is_some_and(|s| s.contains(&fp)),
             None => false,
         }
+    }
+
+    /// The owner's local authoritative admin set (fingerprints). Owner-only meaningful — empty on
+    /// non-owner nodes. The product layer uses this for the owner's own role display so it always
+    /// matches the admission gate (other members read the published copy).
+    pub fn admin_roster(&self) -> HashSet<String> {
+        self.admin_roster.iter().cloned().collect()
+    }
+
+    /// Owner-only: grant/revoke admin for `fp`, updating the **local authoritative** roster (the
+    /// admission source of truth) and publishing a fresh owner-signed copy into the `MemberRoles`
+    /// doc for display. The local set is updated first, so a later delete/replay of the published
+    /// copy by a malicious member cannot affect the gate. Errors `Unauthorized` if not the owner;
+    /// `NoSuchDoc` if the roles doc isn't open.
+    pub async fn set_admin(&mut self, fp: &str, admin: bool) -> Result<(), SyncError> {
+        if !self.is_designated_committer() {
+            return Err(SyncError::Unauthorized);
+        }
+        if admin {
+            self.admin_roster.insert(fp.to_string());
+        } else {
+            self.admin_roster.remove(fp);
+        }
+        self.publish_roster().await
+    }
+
+    /// Sign + publish the current `admin_roster` as the owner-signed `roster` value (display copy).
+    /// Bumps `roster_gen`. Owner-only (callers are owner-gated); fails `NoSuchDoc` if the roles
+    /// doc isn't open.
+    async fn publish_roster(&mut self) -> Result<(), SyncError> {
+        use automerge::{transaction::Transactable, ScalarValue, ROOT};
+        self.roster_gen = self.roster_gen.saturating_add(1);
+        let gen = self.roster_gen;
+        let group_id = self.group.group_id();
+        let fps: Vec<String> = self.admin_roster.iter().cloned().collect(); // BTreeSet ⇒ sorted
+        let payload = roles::roster_payload(&group_id, gen, &fps);
+        let sig = self.device.sign(&payload)?;
+        let owner_pk = self.device.public_key_bytes();
+        let value = roles::encode_roster(gen, &owner_pk, &fps, &sig);
+        self.post(DocType::MemberRoles, roles::ROLES_DOC, move |d| {
+            d.put(ROOT, roles::ROSTER_KEY, ScalarValue::Bytes(value))?;
+            Ok(())
+        })
+        .await
     }
 
     /// Sign a blob with this device's signature key (for owner-signed capability records like
@@ -5254,36 +5346,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inviter_is_authorized_for_owner_and_owner_signed_admins_only() {
-        use automerge::{transaction::Transactable, ScalarValue, ROOT};
+    async fn inviter_is_authorized_tracks_the_owners_local_roster() {
         let (_hub, mut members, ids) = build_members(3).await;
         let owner = ids[0];
         let admin = ids[1];
         let plain = ids[2];
         let outsider = MlsDevice::generate().unwrap().device_id();
 
-        // The owner writes a valid owner-signed admin grant for members[1] into the roles doc.
-        members[0]
-            .open_channel(DocType::MemberRoles, ROLES_DOC)
-            .await
-            .unwrap();
-        let admin_fp = fingerprint(&admin);
-        let grant = {
-            let group_id = members[0].group_id();
-            let mut g = members[0].device.public_key_bytes(); // 32-byte owner pubkey
-            let sig = members[0]
-                .device
-                .sign(&grant_payload(&group_id, &admin_fp))
-                .unwrap();
-            g.extend_from_slice(&sig); // + 64-byte signature = 96 bytes
-            g
-        };
-        members[0]
-            .post(DocType::MemberRoles, ROLES_DOC, |d| {
-                d.put(ROOT, admin_fp.as_str(), ScalarValue::Bytes(grant.clone()))
-            })
-            .await
-            .unwrap();
+        // The owner grants members[1] admin via its authoritative roster.
+        grant_admin(&mut members[0], &admin).await;
 
         assert!(
             members[0].inviter_is_authorized(&owner),
@@ -5291,7 +5362,7 @@ mod tests {
         );
         assert!(
             members[0].inviter_is_authorized(&admin),
-            "an owner-signed admin is authorized"
+            "a granted admin is authorized"
         );
         assert!(
             !members[0].inviter_is_authorized(&plain),
@@ -5301,26 +5372,137 @@ mod tests {
             !members[0].inviter_is_authorized(&outsider),
             "a non-member is not authorized"
         );
+
+        // Revoking the admin removes it from the owner's gate.
+        members[0]
+            .set_admin(&fingerprint(&admin), false)
+            .await
+            .unwrap();
+        assert!(
+            !members[0].inviter_is_authorized(&admin),
+            "a revoked admin is no longer authorized"
+        );
     }
 
-    /// Write an owner-signed admin grant for `target` into the owner's roles doc.
+    #[tokio::test]
+    async fn a_replayed_old_roster_does_not_re_authorize_a_demoted_admin() {
+        // THREAT-MODEL item 3 — the core property. A demoted admin is still a member and can
+        // re-publish its (still validly owner-signed) OLD roster into the shared CRDT. The
+        // owner's admission gate reads its LOCAL authoritative roster, so the replay cannot
+        // re-authorize the demoted admin, and a CTRL_ADD_REQUEST from it is rejected.
+        let (_hub, mut members, ids) = build_members(2).await;
+        let mallory = ids[1];
+        let mallory_fp = fingerprint(&mallory);
+
+        // Owner grants Mallory (gen 1); capture the gen-1 published roster value.
+        grant_admin(&mut members[0], &mallory).await;
+        assert!(members[0].inviter_is_authorized(&mallory), "granted");
+        let stale_roster = published_roster_value(&members[0]);
+        assert!(!stale_roster.is_empty(), "a roster was published");
+
+        // Owner demotes Mallory (gen 2).
+        members[0].set_admin(&mallory_fp, false).await.unwrap();
+        assert!(!members[0].inviter_is_authorized(&mallory), "revoked");
+
+        // Mallory replays the gen-1 roster value back into the CRDT (the owner's doc here, to
+        // simulate it having propagated). It still verifies (owner-signed), so read_published
+        // would show her — but the gate ignores the CRDT.
+        {
+            use automerge::{transaction::Transactable, ScalarValue, ROOT};
+            let value = stale_roster.clone();
+            members[0]
+                .post(DocType::MemberRoles, ROLES_DOC, move |d| {
+                    d.put(ROOT, ROSTER_KEY, ScalarValue::Bytes(value))
+                })
+                .await
+                .unwrap();
+        }
+        // The published copy now (wrongly) names Mallory — proving the replay "succeeds" at the
+        // CRDT layer — yet the owner's gate still rejects her.
+        let published = members[0]
+            .doc(DocType::MemberRoles, ROLES_DOC)
+            .and_then(|d| read_published_roster(d.doc(), &members[0].group_id(), &ids[0]))
+            .unwrap_or_default();
+        assert!(
+            published.contains(&mallory_fp),
+            "the replayed CRDT copy does name Mallory (so the replay is real)"
+        );
+        assert!(
+            !members[0].inviter_is_authorized(&mallory),
+            "but the owner's local-roster gate is unaffected by the replay (item 3 closed)"
+        );
+
+        // And the full admission gate rejects a CTRL_ADD_REQUEST from the demoted admin.
+        let invite = members[1].mint_invite([3u8; 16], u64::MAX, vec![]).unwrap();
+        let dave = MlsDevice::generate().unwrap();
+        let kp = dave
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp_bytes = serialize_key_package(&kp).unwrap();
+        let body = admin_add_request_body(&members[1], &invite, &kp_bytes);
+        let owner = &mut members[0];
+        let epoch_before = owner.epoch();
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        owner.drain_add_request_queue();
+        assert_eq!(
+            owner.epoch(),
+            epoch_before,
+            "the demoted admin's Add-request causes no admission"
+        );
+        assert!(
+            !owner.contains_member(&dave.device_id()),
+            "Dave was not admitted via a demoted admin"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_admin_roster_survives_a_snapshot_restore() {
+        // The owner-local authoritative roster is the security source of truth, so it must
+        // persist. Grant an admin, snapshot+restore, and confirm the gate still authorizes it.
+        let (_hub, mut members, ids) = build_members(2).await;
+        let admin = ids[1];
+        grant_admin(&mut members[0], &admin).await;
+        let snap = members[0].snapshot().unwrap();
+
+        let hub2 = Hub::new();
+        let net = hub2.join(PeerId::from_u64(99));
+        let restored = Member::restore(
+            &snap,
+            net,
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        assert!(
+            restored.inviter_is_authorized(&admin),
+            "the granted admin is still authorized after restore"
+        );
+        assert!(
+            !restored.inviter_is_authorized(&MlsDevice::generate().unwrap().device_id()),
+            "a non-admin is still rejected after restore"
+        );
+    }
+
+    /// Grant `target` admin via the owner's authoritative roster (item 3) + publish the copy.
     async fn grant_admin(owner: &mut Member, target: &DeviceId) {
-        use automerge::{transaction::Transactable, ScalarValue, ROOT};
         owner
             .open_channel(DocType::MemberRoles, ROLES_DOC)
             .await
             .unwrap();
-        let target_fp = fingerprint(target);
-        let gid = owner.group_id();
-        let mut grant = owner.device.public_key_bytes(); // 32-byte owner pubkey
-        let sig = owner.device.sign(&grant_payload(&gid, &target_fp)).unwrap();
-        grant.extend_from_slice(&sig); // + 64-byte signature
-        owner
-            .post(DocType::MemberRoles, ROLES_DOC, |d| {
-                d.put(ROOT, target_fp.as_str(), ScalarValue::Bytes(grant.clone()))
-            })
-            .await
-            .unwrap();
+        owner.set_admin(&fingerprint(target), true).await.unwrap();
+    }
+
+    /// Read the raw `roster` value bytes from a member's roles doc (for replay tests).
+    fn published_roster_value(m: &Member) -> Vec<u8> {
+        use automerge::{ReadDoc, ScalarValue, Value, ROOT};
+        let doc = m.doc(DocType::MemberRoles, ROLES_DOC).unwrap();
+        match doc.doc().get(ROOT, ROSTER_KEY) {
+            Ok(Some((Value::Scalar(s), _))) => match s.as_ref() {
+                ScalarValue::Bytes(b) => b.clone(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
     }
 
     /// Build the body an admin would broadcast in `CTRL_ADD_REQUEST` for `invite`/`kp_bytes`.

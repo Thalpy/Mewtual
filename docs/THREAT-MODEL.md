@@ -76,8 +76,17 @@ roadmap:
    the invite format. This is the same mechanism that would make admin invites functional.
 2. **File-delete protocol gate (R2)** — optional; same re-check applied to `FileIndex` deletes,
    or accept the residual (lowest stakes).
-3. **Replay-proof grant revocation** — a grant epoch/nonce so a deleted admin grant cannot be
-   re-added by replaying an old op.
+3. **Replay-proof grant revocation** — ✅ **DONE + REVIEWED** (`design-grant-revocation.md`).
+   Rather than a CRDT epoch/nonce, the authoritative admin set is kept **owner-local** (a
+   persisted `admin_roster`); since only the owner admits (Option C), the admission gate
+   (`inviter_is_authorized`) reads that local set, which a malicious member cannot write — so a
+   demoted admin replaying or deleting its grant in the shared CRDT can no longer re-authorize
+   itself. The CRDT now carries a single **owner-signed** `roster` value for display only
+   (readers verify the owner's signature; a tampered copy is at worst cosmetic). Adversarial
+   review: no blocking/should-fix findings. **Residual:** the guarantee rests on single-committer
+   admission — under `max_committer_rank ≥ 1` a second committer would re-introduce the replay
+   surface (it would need a per-reader high-water on the signed published roster). Do not enable
+   concurrent committers. This **closes the GA gate** for admin invites (item 4).
 4. **Make admin invites functional (R3)** — **IMPLEMENTED (slices 2a–2d) + REVIEWED; UI gated on
    item 3.** Design: Option C, "owner-serialized admin invites." An admin who wants to invite
    broadcasts a *signed Add-request* on the control topic (mirroring the R1 remove-request
