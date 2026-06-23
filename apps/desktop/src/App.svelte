@@ -185,6 +185,10 @@
   // Member roles (10h): fingerprint -> "owner"|"admin"|"member".
   let roles = $state<Record<string, string>>({});
   let myRole = $derived(roles[myFp] ?? "member");
+  // Owners + admins may invite. Admin invites are owner-serialized end-to-end (the joiner is
+  // admitted when the owner is next online), and revocation is replay-proof (THREAT-MODEL item 3),
+  // so this is safe to surface to admins.
+  let canInvite = $derived(myRole === "owner" || myRole === "admin");
   let confirmRemoveFp = $state(""); // two-click confirm for member removal
 
   function activeName(): string {
@@ -1165,8 +1169,9 @@
   }
 
   let mintingInvite = $state(false);
-  // Mint a fresh single-use invite on demand (owner only). The new invite carries the live
-  // bootstrap address, so it works even after a restart changed the listen port.
+  // Mint a fresh single-use invite on demand (owner or admin — the backend gates on can_invite).
+  // The new invite carries the live bootstrap address, so it works even after a restart changed
+  // the listen port. An admin's invitee is owner-serialized (admitted when the owner is online).
   async function generateInvite() {
     if (activeServerId === null || !cur) return;
     mintingInvite = true;
@@ -1433,7 +1438,7 @@
           </ul>
         </div>
 
-        {#if cur?.invite}
+        {#if canInvite || cur?.invite}
           <button class="ghost invite-quick" onclick={() => openServerSettings()}>＋ Invite someone</button>
         {/if}
       </aside>
@@ -1787,29 +1792,34 @@
               </ul>
               <p class="muted small">
                 The owner is the founder (the MLS committer). Member removal is owner-only and
-                protocol-enforced; admin grants are a policy aid (see the guide).
+                protocol-enforced. Admins can invite newcomers — the owner serializes each
+                admission, so it completes when the owner is next online — and a demotion is
+                replay-proof (a removed admin can't re-grant itself).
               </p>
               {#if myRole !== "owner"}
                 <p class="muted small">Only the owner can change roles.</p>
               {/if}
             </section>
 
-            {#if cur?.invite || myRole === "owner"}
+            {#if cur?.invite || canInvite}
               <section class="set-section">
                 <h3>Invite someone</h3>
                 <p class="muted small">Single-use — share it with one person to join this server. Generate a fresh
                   one anytime (after a restart, or once the last one was used).</p>
+                {#if myRole === "admin"}
+                  <p class="muted small">As an admin, the newcomer is admitted once the owner is next online.</p>
+                {/if}
                 {#if cur?.invite}
                   <textarea readonly rows="3" value={cur.invite}></textarea>
                   <div class="invite-actions">
                     <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
-                    {#if myRole === "owner"}
+                    {#if canInvite}
                       <button class="ghost" disabled={mintingInvite} onclick={generateInvite}>
                         {mintingInvite ? "Generating…" : "Generate new invite"}
                       </button>
                     {/if}
                   </div>
-                {:else if myRole === "owner"}
+                {:else if canInvite}
                   <button disabled={mintingInvite} onclick={generateInvite}>
                     {mintingInvite ? "Generating…" : "Generate an invite"}
                   </button>
