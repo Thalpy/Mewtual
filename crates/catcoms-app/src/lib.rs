@@ -1095,12 +1095,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Remove a member from the server by fingerprint. **Owner only** at this product layer —
-    /// errors otherwise. The owner is the committer, so this removes directly; the MLS commit
-    /// advances the epoch, so the removed member loses access to future content (forward
-    /// secrecy) and the routing secret rotates. (The underlying single-serializer protocol
-    /// still lets any member *request* a removal of the committer; cryptographic
-    /// owner-enforcement at that layer is a follow-up, like the invite re-check.)
+    /// Remove a member from the server by fingerprint. **Owner only**, enforced at *both* this
+    /// product layer and the protocol layer: `request_remove` rejects a non-owner outright and
+    /// the committer ignores any inbound remove request that isn't from the owner (THREAT-MODEL
+    /// R1). The owner is the committer, so this removes directly; the MLS commit advances the
+    /// epoch, so the removed member loses access to future content (forward secrecy) and the
+    /// routing secret rotates.
     pub async fn remove_member(&mut self, fp: &str) -> Result<(), AppError> {
         if !self.is_owner() {
             return Err(AppError::Invalid(

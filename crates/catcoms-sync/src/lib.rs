@@ -712,7 +712,10 @@ fn remove_req_transcript(
     e.finish()
 }
 
-/// Encode a signed remove request body: `target ‖ requester_pubkey ‖ ts ‖ sig`.
+/// Encode a signed remove request body: `target ‖ requester_pubkey ‖ ts ‖ sig`. Only the
+/// committer ever *receives* a remove request now (removal is owner-only), so nothing in the
+/// library encodes one — this is retained for the forged-request rejection test.
+#[cfg(test)]
 fn encode_remove_request(
     target: &[u8; 32],
     requester_pubkey: &[u8],
@@ -793,6 +796,9 @@ pub enum SyncError {
     /// A sync message was malformed.
     #[error("malformed sync message")]
     Malformed,
+    /// The caller is not authorized for this action (e.g. a non-owner attempting a removal).
+    #[error("not authorized")]
+    Unauthorized,
 }
 
 /// A member's **self-signed, dialable peer record**, exchanged via PEX (6e-3d-7). The
@@ -3082,24 +3088,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// window needed). If *this* node is already the designated committer, the
     /// removal is performed directly.
     pub async fn request_remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
-        if self.group.is_designated_committer(&self.device) {
-            self.commit_remove_now(target);
-            self.drain_outbox().await;
-            return Ok(());
+        // Removal is owner-only (THREAT-MODEL R1): only the designated committer (the server
+        // owner) may remove, and it does so directly. A non-owner caller is unauthorized — we
+        // return an error rather than broadcasting a request the committer would only reject.
+        if !self.group.is_designated_committer(&self.device) {
+            return Err(SyncError::Unauthorized);
         }
-        let target_bytes = *target.as_bytes();
-        let pubkey = self.device.public_key_bytes();
-        let ts = self.clock.now_ms();
-        let transcript = remove_req_transcript(&self.group.group_id(), &target_bytes, &pubkey, ts);
-        let signature = self.device.sign(&transcript)?;
-        let mut framed = vec![CTRL_REMOVE_REQUEST];
-        framed.extend_from_slice(&encode_remove_request(
-            &target_bytes,
-            &pubkey,
-            ts,
-            &signature,
-        ));
-        self.outbox.push((self.control_topic.clone(), framed));
+        self.commit_remove_now(target);
         self.drain_outbox().await;
         Ok(())
     }
@@ -3116,13 +3111,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Ok(r) => r,
             Err(_) => return,
         };
-        // The requester must be a current member with a fresh, valid signature. (The product
-        // layer additionally gates *removal* to the server owner — Phase 10h — but the
-        // single-serializer protocol itself still lets any member ask the committer, which the
-        // 6d-2b convergence tests rely on; owner-enforcement at this layer is a follow-up.)
+        // Removal is **owner-only**, enforced here at the protocol layer (THREAT-MODEL R1).
+        // The owner is the designated committer and removes *directly* (see `request_remove`),
+        // so it never sends a remove request to itself — any inbound request is therefore from
+        // a non-owner and is rejected. The signature check below still matters: it prevents a
+        // modified client from forging a request that merely *claims* the owner's key, since
+        // only the owner's private key can produce a valid signature over the transcript.
         let requester = DeviceId::from_public_key_bytes(&pubkey);
-        if !self.group.contains_device(&requester) {
-            tracing::warn!("remove request from a non-member; ignored");
+        if self.group.designated_committer() != Some(requester) {
+            tracing::warn!("remove request from a non-owner; ignored");
             self.stats.requests_rejected += 1;
             return;
         }
@@ -4667,6 +4664,47 @@ mod tests {
         }
         members.insert(0, founder_sync);
         (hub, members, ids)
+    }
+
+    #[tokio::test]
+    async fn the_committer_rejects_a_remove_request_forged_by_a_non_owner() {
+        // Removal is owner-only (THREAT-MODEL R1). A modified non-owner client could craft a
+        // well-formed, correctly-self-signed remove request and broadcast it; the committer
+        // (owner) must still reject it, because the requester is not the designated committer.
+        let (_hub, mut members, ids) = build_members(3).await;
+        let target = ids[2];
+
+        // Forge a valid request *from the non-owner* (members[1]) — correct signature, fresh ts.
+        let (pubkey, ts, signature) = {
+            let bob = &members[1];
+            let pubkey = bob.device.public_key_bytes();
+            let ts = bob.clock.now_ms();
+            let transcript =
+                remove_req_transcript(&bob.group.group_id(), target.as_bytes(), &pubkey, ts);
+            let signature = bob.device.sign(&transcript).unwrap();
+            (pubkey, ts, signature)
+        };
+        let body = encode_remove_request(target.as_bytes(), &pubkey, ts, &signature);
+
+        let alice = &mut members[0]; // the owner / designated committer
+        let epoch_before = alice.epoch();
+        let rejected_before = alice.stats.requests_rejected;
+        alice.on_remove_request(&body);
+
+        assert_eq!(
+            alice.epoch(),
+            epoch_before,
+            "a non-owner request causes no commit"
+        );
+        assert!(
+            alice.contains_member(&target),
+            "the target is still a member"
+        );
+        assert_eq!(
+            alice.stats.requests_rejected,
+            rejected_before + 1,
+            "the forged request was counted as rejected"
+        );
     }
 
     #[test]

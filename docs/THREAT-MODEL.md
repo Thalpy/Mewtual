@@ -31,6 +31,7 @@ table with the commit that closed it.
 | **Invite admission** | The admitter must be the **named inviter** *and* an **authorized committer** (leaf rank ≤ `max_committer_rank`; at rank 0 that is exactly the owner). A non-committer member **cannot get anyone admitted**, even with a self-minted invite. | `catcoms-sync/src/lib.rs:3779-3795` |
 | Owner identity | Owner = MLS **designated committer** = lowest leaf index; cryptographic, not stored | `catcoms-mls::designated_committer` |
 | Admin-grant authenticity | Admin = an **owner-signed** capability (`owner_pubkey ‖ sig` over `domain ‖ len(group_id) ‖ group_id ‖ target_fp`), verified at read against the *current* owner's full device id. A modified client **cannot forge** an admin grant. | `catcoms-app::read_admins` |
+| Member-removal authorization | Removal is **owner-only**: `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (signature-verified, so a forged owner-claim fails). A modified member cannot get anyone removed. | `catcoms-sync` (on_remove_request gate + `request_remove` Unauthorized) |
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
@@ -40,7 +41,7 @@ table with the commit that closed it.
 
 | # | Action | Honest-client gate | What a modified member could do | Severity | Status |
 |---|---|---|---|---|---|
-| R1 | **Member-removal requests** | UI shows "remove" to the owner only; the owner removes directly | The single-serializer model (6d-2b) lets **any** member *ask* the committer to remove a target, and the committer honors the request **without checking the requester's role**. A modified member could get any member removed. | **Medium** | **Open** — the prime target for the join-time/requester role re-check (option "b") |
+| ~~R1~~ | **Member-removal requests** | — | ~~The committer honored a removal request from any member without a role check.~~ **CLOSED:** removal is now owner-only at the protocol layer — `request_remove` rejects a non-owner, and the committer ignores any inbound remove request whose requester isn't the owner (verified by signature, so a forged owner-claim fails too). | — | **Closed** — `crates/catcoms-sync` (on_remove_request owner gate + request_remove Unauthorized) |
 | R2 | **File deletion** | `Server::delete_file` gates on owner/admin role | A modified member could post a raw `FileIndex` delete op directly, unlisting any file. Low stakes — the content-addressed blob survives on every peer that holds it; nothing is destroyed. | **Low** | **Open** — close with the same committer-side role re-check, or accept (lowest stakes) |
 | R3 | **Invite-minting permission** | `require_invite_permission` → `can_invite()` (Owner/Admin) gates `mint_invite` | A modified member can *mint* an invite token, **but it is useless**: admission is rank-gated (see the protocol table), so a non-committer can't admit the joiner. Not exploitable in the default single-committer config; the rank check backstops it. | **None today** (single-committer) / **Medium** if multi-committer is enabled | Backstopped by R-protocol; the role re-check makes it explicit for multi-committer |
 | R4 | **Local role display** | `my_role()` drives which controls the UI shows | A modified client can paint itself as "admin/owner" **in its own UI**, but this grants **no real capability** — grants are owner-signed (unforgeable) and admission is rank-gated. Cosmetic only. | **Cosmetic** | Accepted; documented in-app |
@@ -66,14 +67,13 @@ roadmap:
 
 ## Hardening backlog (the fixes)
 
-1. **Committer-side requester-role re-check (option "b")** — before the committer honors a
-   member-removal request (R1), and before it admits via an invite in any multi-committer
-   config (R3), verify the *requester/inviter* is Owner or Admin per the owner-signed roles
-   doc, and reject otherwise. The inviter's identity is already cryptographically recoverable
-   from the invite (`inviter_device_id` + signature), and the roles doc is reachable at the
-   admission layer — so this is feasible without changing the invite format. *Decision pending:
-   whether removal requests become Owner/Admin-only (changes the 6d-2b "any member may ask"
-   semantics) — see HANDOVER.*
+1. **Committer-side requester/inviter role re-check (option "b")** — ✅ **done for removal**
+   (owner-only, see R1). Still **open for multi-committer invite admission (R3)**: before the
+   committer admits via an invite in any `max_committer_rank ≥ 1` config, verify the *inviter*
+   is Owner or Admin per the owner-signed roles doc and reject otherwise. The inviter's identity
+   is already cryptographically recoverable from the invite (`inviter_device_id` + signature),
+   and the roles doc is reachable at the admission layer — so it is feasible without changing
+   the invite format. This is the same mechanism that would make admin invites functional.
 2. **File-delete protocol gate (R2)** — optional; same re-check applied to `FileIndex` deletes,
    or accept the residual (lowest stakes).
 3. **Replay-proof grant revocation** — a grant epoch/nonce so a deleted admin grant cannot be

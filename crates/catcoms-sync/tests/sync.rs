@@ -7,7 +7,7 @@ use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ReadDoc, ROOT};
 use catcoms_mls::{InviteLedger, MlsDevice, ServerGroup};
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
-use catcoms_sync::ChannelSync;
+use catcoms_sync::{ChannelSync, SyncError};
 use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -1053,30 +1053,32 @@ async fn staged_join_admits_via_the_welcome_push() {
     assert!(s[0].contains_member(&bob.device_id()));
 }
 
-/// 6d-2b: a non-committer member can have a target removed by *requesting* it — the
-/// designated committer alone executes the removal (the single-serializer model).
-/// Works under the DEFAULT config (no concurrent committers, so no fork, no I1).
+/// Removal is **owner-only**, enforced at the protocol layer (THREAT-MODEL R1): the designated
+/// committer (the owner) removes directly, and a non-owner's `request_remove` is rejected
+/// outright — a modified member cannot get anyone removed.
 #[tokio::test]
-async fn a_member_can_request_the_committer_to_remove_a_target() {
+async fn removal_is_owner_only_and_a_non_owner_request_is_rejected() {
     catcoms_log::init_test();
     let hub = Hub::new();
     let clock = ManualClock::new(1_000);
-    // Alice(0)=designated committer, Bob(1)=requester, Carol(2)=target; default config.
+    // Alice(0)=owner/committer, Bob(1)=non-owner, Carol(2)=target; default config.
     let (mut s, ids) = build_members(&hub, &clock, 3).await;
     let carol = ids[2];
     assert_eq!(s[0].epoch(), 2);
 
-    // Bob (a non-committer) requests Carol's removal; the request is broadcast.
-    s[1].request_remove(&carol).await.unwrap();
-    assert_eq!(s[1].epoch(), 2, "the requester does not commit");
+    // A non-owner cannot remove — the request is rejected and nothing is broadcast.
+    assert!(matches!(
+        s[1].request_remove(&carol).await,
+        Err(SyncError::Unauthorized)
+    ));
+    assert_eq!(s[1].epoch(), 2, "a rejected request changes nothing");
+    assert!(s[0].contains_member(&carol), "Carol is still a member");
+    assert_eq!(s[0].epoch(), 2, "the committer did not act on a non-owner");
 
-    // Alice (the committer) processes the request, removes Carol, and fans out the
-    // commit — all within one tick.
-    assert!(s[0].run_once().await.unwrap());
-    assert_eq!(s[0].epoch(), 3, "the committer executed the removal");
+    // The owner removes Carol directly; the others converge on the broadcast commit.
+    s[0].request_remove(&carol).await.unwrap();
+    assert_eq!(s[0].epoch(), 3, "the owner executed the removal");
     assert!(!s[0].contains_member(&carol));
-
-    // Bob applies the broadcast commit and converges.
     assert!(s[1].run_once().await.unwrap());
     assert_eq!(s[1].epoch(), 3);
     assert!(!s[1].contains_member(&carol));
@@ -1124,7 +1126,7 @@ async fn routing_namespace_rotates_only_on_member_removal() {
     catcoms_log::init_test();
     let hub = Hub::new();
     let clock = ManualClock::new(1_000);
-    // Alice(0)=committer, Bob(1)=requester+applier, Carol(2)=removal target.
+    // Alice(0)=owner/committer, Bob(1)=applier, Carol(2)=removal target.
     let (mut s, ids) = build_members(&hub, &clock, 3).await;
 
     // Two Adds built the group; neither rotated the routing label.
@@ -1144,11 +1146,10 @@ async fn routing_namespace_rotates_only_on_member_removal() {
         "the namespace must differ per rendezvous node"
     );
 
-    // Remove Carol: Bob requests, Alice (committer) commits, Bob applies. This
-    // exercises both rotation paths — the local committer (commit_remove_now) and
-    // the inbound apply (note_commit_applied via process_incoming).
-    s[1].request_remove(&ids[2]).await.unwrap();
-    assert!(s[0].run_once().await.unwrap()); // Alice commits the removal
+    // Remove Carol: Alice (owner) removes directly + fans out the commit; Bob applies. This
+    // exercises both rotation paths — the local committer (commit_remove_now) and the inbound
+    // apply (note_commit_applied via process_incoming).
+    s[0].request_remove(&ids[2]).await.unwrap();
     assert!(s[1].run_once().await.unwrap()); // Bob applies the broadcast commit
 
     // The removal rotated L to 1 on both remaining members, identically.
@@ -1177,17 +1178,15 @@ async fn grandfathered_namespaces_are_bounded_to_two_windows() {
     catcoms_log::init_test();
     let hub = Hub::new();
     let clock = ManualClock::new(1_000);
-    // Alice(0)=committer, Bob(1)=requester+applier, members 2/3/4 are removal
-    // targets. Driving only Alice and Bob avoids the multi-applier gossip-ordering
-    // dance (a non-requester also receives the broadcast request, needing an extra
-    // tick); Bob, the requester, receives only the commit, so one tick each.
+    // Alice(0)=owner/committer, Bob(1)=applier; members 2/3/4 are removal targets.
+    // Driving only Alice and Bob avoids the multi-applier gossip-ordering dance; Alice
+    // removes directly and Bob receives only the resulting commit, so one tick each.
     let (mut s, ids) = build_members(&hub, &clock, 5).await;
     let ns_l0 = s[0].rendezvous_namespaces(RZ)[0].clone();
 
-    // Three successive removals; Bob requests, Alice commits, Bob applies each.
+    // Three successive removals; Alice (owner) removes directly, Bob applies each.
     for target in [4usize, 3, 2] {
-        s[1].request_remove(&ids[target]).await.unwrap();
-        assert!(s[0].run_once().await.unwrap()); // Alice commits
+        s[0].request_remove(&ids[target]).await.unwrap();
         assert!(s[1].run_once().await.unwrap()); // Bob applies
     }
 
@@ -1253,13 +1252,12 @@ async fn a_member_joining_after_a_removal_converges_via_the_transfer() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_000);
     let alice_peer = PeerId::from_u64(1);
-    // Alice(0)=committer, Bob(1)=requester, Carol(2)=target.
+    // Alice(0)=owner/committer, Bob(1)=applier, Carol(2)=target.
     let (mut s, ids) = build_members(&hub, &clock, 3).await;
 
     // Remove Carol: the group advances to L=1 with a post-removal ns_secret that a
     // *future* joiner cannot derive on its own (it was never at that epoch).
-    s[1].request_remove(&ids[2]).await.unwrap();
-    assert!(s[0].run_once().await.unwrap());
+    s[0].request_remove(&ids[2]).await.unwrap();
     assert!(s[1].run_once().await.unwrap());
     assert_eq!(s[0].routing_label(), 1);
 
@@ -1304,8 +1302,7 @@ async fn channel_delivery_survives_a_topic_rotation_on_removal() {
     assert_eq!(get_str(&s[1], "before").as_deref(), Some("1"));
 
     // Remove Carol: the routing label rotates, so the channel + control topics change.
-    s[1].request_remove(&ids[2]).await.unwrap();
-    assert!(s[0].run_once().await.unwrap()); // Alice commits + rotates + resubscribes
+    s[0].request_remove(&ids[2]).await.unwrap(); // Alice (owner) commits + rotates + resubscribes
     assert!(s[1].run_once().await.unwrap()); // Bob applies + rotates + resubscribes
     assert_eq!(s[0].routing_label(), 1);
     assert_eq!(s[1].routing_label(), 1);
