@@ -8,7 +8,7 @@
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
-  type UiFile = { name: string; size: number; mime: string; cid: string; author: string };
+  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string };
   type Found = { server: number; channel: string };
   type Reloaded = { server: number; name: string; invite: string; channel: string };
 
@@ -59,8 +59,33 @@
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   let uploading = $state(false);
+  let folder = $state(""); // current folder in the Files tab
+  let newFolder = $state(""); // new-folder name input
+  let dragOver = $state(false); // composer drag-over highlight
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
+  let statusEl = $state<HTMLUListElement | undefined>(undefined);
+  // Cache of resolved embed media: ciphertext-CID hex -> data: URL (avoids re-fetching).
+  const embedCache = new Map<string, string>();
+
+  // Group the file list into the current folder's subfolders + files-here (folder browser).
+  let folderView = $derived.by(() => {
+    const base = folder === "" ? "" : folder + "/";
+    const subs = new Set<string>();
+    const here: UiFile[] = [];
+    for (const f of files) {
+      const p = f.path ?? "";
+      if (p === folder) {
+        here.push(f);
+      } else if (folder === "" || p.startsWith(base)) {
+        const rest = folder === "" ? p : p.slice(base.length);
+        const seg = rest.split("/")[0];
+        if (seg) subs.add(seg);
+      }
+    }
+    return { subs: [...subs].sort(), here };
+  });
+  let breadcrumbs = $derived(folder === "" ? [] : folder.split("/"));
 
   // The main pane shows one tab at a time.
   type Tab = "chat" | "files" | "status" | "wiki" | "profile";
@@ -80,6 +105,8 @@
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
+  // Reserved fileshare folder for chat/status media embeds uploaded by this member.
+  let myEmbedFolder = $derived(myFp ? `embed/${myFp}` : "embed");
 
   function activeName(): string {
     return cur?.channels.find((c) => c.id === cur?.active)?.name ?? "";
@@ -108,6 +135,15 @@
   $effect(() => {
     void messages;
     if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+
+  // Resolve inline media embeds whenever messages, statuses, or the file index change.
+  $effect(() => {
+    void messages;
+    void statuses;
+    void files;
+    resolveMedia(messagesEl);
+    resolveMedia(statusEl);
   });
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
@@ -174,11 +210,13 @@
     activeServerId = id;
     const s = servers.find((x) => x.id === id);
     if (s) s.dot = false;
-    // Each server has its own wiki; reset the wiki view to the new server's.
+    // Each server has its own wiki + fileshare; reset per-server view state.
     view = "chat";
     activeWikiPage = "";
     wikiBody = "";
     wikiDirty = false;
+    folder = "";
+    newFolder = "";
     await Promise.all([
       refresh(),
       refreshMembers(),
@@ -416,25 +454,31 @@
     }
   }
 
+  // Read a File as raw base64 (strips the data: prefix), for the add_file command.
+  function readBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("could not read file"));
+      reader.onload = () => {
+        const r = reader.result;
+        resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Share a file into the Files-tab's current folder.
   async function uploadFile(fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file || activeServerId === null) return;
     uploading = true;
     try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onerror = () => reject(new Error("could not read file"));
-        reader.onload = () => {
-          const r = reader.result;
-          resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
-        };
-        reader.readAsDataURL(file);
-      });
       await invoke("add_file", {
         server: activeServerId,
         name: file.name,
         mime: file.type || "application/octet-stream",
-        data: base64,
+        path: folder,
+        data: await readBase64(file),
       });
       await refreshFiles();
     } catch (e) {
@@ -442,6 +486,120 @@
     } finally {
       uploading = false;
     }
+  }
+
+  // Embed media (image/video/audio) into the chat/status composer: upload under this
+  // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
+  // shared renderer to resolve inline. Non-media files are shared as plain attachments.
+  async function embedFiles(target: "chat" | "status", fileList: FileList | null) {
+    if (!fileList || fileList.length === 0 || activeServerId === null) return;
+    uploading = true;
+    try {
+      for (const file of Array.from(fileList)) {
+        const cid = await invoke<string>("add_file", {
+          server: activeServerId,
+          name: file.name,
+          mime: file.type || "application/octet-stream",
+          path: myEmbedFolder,
+          data: await readBase64(file),
+        });
+        // Brackets in the alt would break the `![alt](cid:…)` marker parse — strip them.
+        const alt = file.name.replace(/[[\]]/g, " ");
+        const marker = `![${alt}](cid:${cid})`;
+        if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
+        else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
+      }
+      await refreshFiles();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      uploading = false;
+    }
+  }
+
+  function onComposerDrop(target: "chat" | "status", e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    embedFiles(target, e.dataTransfer?.files ?? null);
+  }
+
+  // Only embeddable media types render inline; anything else is shown as a download chip.
+  function safeMime(mime: string): string {
+    return /^(image|video|audio)\/[a-z0-9.+-]+$/i.test(mime || "") ? mime.toLowerCase() : "";
+  }
+
+  function buildMediaEl(mime: string, url: string, alt: string): HTMLElement {
+    let el: HTMLImageElement | HTMLVideoElement | HTMLAudioElement;
+    if (mime.startsWith("video/")) {
+      el = document.createElement("video");
+      el.controls = true;
+      el.className = "embed-media";
+    } else if (mime.startsWith("audio/")) {
+      el = document.createElement("audio");
+      el.controls = true;
+      el.className = "embed-audio";
+    } else {
+      el = document.createElement("img");
+      (el as HTMLImageElement).alt = alt;
+      el.className = "embed-media";
+    }
+    el.src = url;
+    return el;
+  }
+
+  function downloadChip(file: UiFile): HTMLElement {
+    const b = document.createElement("button");
+    b.className = "embed-chip";
+    b.textContent = `📎 ${file.name}`;
+    b.onclick = () => downloadFile(file);
+    return b;
+  }
+
+  // Replace `[data-embed-cid]` placeholders (from the renderer) with media built in code from
+  // the group's own content-addressed blobs — never via untrusted innerHTML, so a peer's text
+  // can't inject a live tag or remote URL. Only media MIME types embed; others get a chip.
+  async function resolveMedia(container: HTMLElement | undefined) {
+    if (!container || activeServerId === null) return;
+    const spans = container.querySelectorAll<HTMLElement>("[data-embed-cid]:not([data-resolved])");
+    for (const span of Array.from(spans)) {
+      const cid = span.getAttribute("data-embed-cid") ?? "";
+      if (!cid) {
+        span.setAttribute("data-resolved", "1");
+        continue;
+      }
+      const file = files.find((f) => f.cid === cid);
+      if (!file) continue; // not in the index yet — retry when `files` updates
+      span.setAttribute("data-resolved", "1");
+      const mime = safeMime(file.mime);
+      const alt = span.getAttribute("data-alt") || file.name || "";
+      if (!mime) {
+        span.replaceWith(downloadChip(file));
+        continue;
+      }
+      try {
+        let url = embedCache.get(cid);
+        if (!url) {
+          const base64 = await invoke<string>("download_file", { server: activeServerId, cid });
+          url = `data:${mime};base64,${base64}`;
+          embedCache.set(cid, url);
+          // Bound the cache (each entry is a full decrypted blob) — FIFO-evict the oldest.
+          if (embedCache.size > 48) {
+            const oldest = embedCache.keys().next().value;
+            if (oldest !== undefined) embedCache.delete(oldest);
+          }
+        }
+        span.replaceWith(buildMediaEl(mime, url, alt));
+      } catch {
+        span.replaceWith(downloadChip(file));
+      }
+    }
+  }
+
+  function enterFolder(seg: string) {
+    folder = folder === "" ? seg : `${folder}/${seg}`;
+  }
+  function gotoCrumb(i: number) {
+    folder = breadcrumbs.slice(0, i + 1).join("/");
   }
 
   async function downloadFile(f: UiFile) {
@@ -685,35 +843,91 @@
               <li class="muted">No messages yet — say hello.</li>
             {/each}
           </ul>
-          <form class="composer" onsubmit={(e) => { e.preventDefault(); send(); }}>
-            <input bind:value={draft} placeholder={"Message #" + activeName()} />
-            <button type="submit">Send</button>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <form
+            class="composer"
+            class:drag-over={dragOver}
+            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={(e) => onComposerDrop("chat", e)}
+            onsubmit={(e) => { e.preventDefault(); send(); }}
+          >
+            <label class="attach" title="Attach image / video / audio">
+              📎
+              <input
+                type="file"
+                accept="image/*,video/*,audio/*"
+                multiple
+                disabled={uploading}
+                onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
+              />
+            </label>
+            <input bind:value={draft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()} />
+            <button type="submit" disabled={uploading}>Send</button>
           </form>
         {:else if view === "files"}
-          <h2>Files <span class="muted">· {files.length}</span></h2>
-          <label class="upload">
-            <span class="muted">{uploading ? "Uploading…" : "＋ Share a file"}</span>
-            <input type="file" disabled={uploading} onchange={(e) => uploadFile(e.currentTarget.files)} />
-          </label>
+          <div class="files-head">
+            <h2>Files <span class="muted">· {files.length}</span></h2>
+            <nav class="breadcrumb">
+              <button class="crumb" onclick={() => (folder = "")}>🏠</button>
+              {#each breadcrumbs as seg, i}
+                <span class="crumb-sep">/</span>
+                <button class="crumb" onclick={() => gotoCrumb(i)}>{seg}</button>
+              {/each}
+            </nav>
+          </div>
+          <div class="files-actions">
+            <label class="upload">
+              <span class="muted">{uploading ? "Uploading…" : "＋ Share a file here"}</span>
+              <input type="file" disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+            </label>
+            <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
+              <input bind:value={newFolder} placeholder="＋ new folder…" />
+            </form>
+          </div>
           <ul class="file-list tab-pane">
-            {#each files as f}
+            {#each folderView.subs as sub}
+              <li>
+                <button class="folder-name" onclick={() => enterFolder(sub)}>📁 {sub}</button>
+              </li>
+            {/each}
+            {#each folderView.here as f}
               <li>
                 <button class="file-name" title={"from " + nameOf(f.author)} onclick={() => downloadFile(f)}>
                   ↓ {f.name}
                 </button>
                 <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)}</span>
               </li>
-            {:else}
-              <li class="muted">No files shared yet.</li>
             {/each}
+            {#if folderView.subs.length === 0 && folderView.here.length === 0}
+              <li class="muted">This folder is empty.</li>
+            {/if}
           </ul>
         {:else if view === "status"}
           <h2>Status</h2>
-          <form class="composer" onsubmit={(e) => { e.preventDefault(); postStatus(); }}>
-            <input bind:value={statusDraft} placeholder="Post a status…" />
-            <button type="submit">Post</button>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <form
+            class="composer"
+            class:drag-over={dragOver}
+            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={(e) => onComposerDrop("status", e)}
+            onsubmit={(e) => { e.preventDefault(); postStatus(); }}
+          >
+            <label class="attach" title="Attach image / video / audio">
+              📎
+              <input
+                type="file"
+                accept="image/*,video/*,audio/*"
+                multiple
+                disabled={uploading}
+                onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
+              />
+            </label>
+            <input bind:value={statusDraft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Post a status…"} />
+            <button type="submit" disabled={uploading}>Post</button>
           </form>
-          <ul class="status-list tab-pane" use:richClicks>
+          <ul class="status-list tab-pane" bind:this={statusEl} use:richClicks>
             {#each statuses as s}
               <li>
                 <span class="status-head">

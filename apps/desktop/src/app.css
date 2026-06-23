@@ -847,3 +847,93 @@ img.emoji {
   width: 260px;
   margin: 0.25rem 0;
 }
+
+/* --- Phase 10c: folder browser + drag-drop embeds --- */
+
+.composer.drag-over {
+  outline: 2px dashed #4f8cff;
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.attach {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  font-size: 1.1rem;
+  padding: 0 0.35rem;
+  user-select: none;
+}
+
+.attach input[type="file"] {
+  display: none;
+}
+
+.files-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex-wrap: wrap;
+}
+
+.crumb {
+  background: transparent;
+  border: none;
+  color: #7fa8ff;
+  padding: 0.1rem 0.25rem;
+  font-size: 0.85rem;
+}
+
+.crumb:hover {
+  text-decoration: underline;
+}
+
+.crumb-sep {
+  color: #777e8a;
+}
+
+.files-actions {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 0.5rem 0;
+  flex-wrap: wrap;
+}
+
+.new-folder input {
+  width: 140px;
+}
+
+.folder-name {
+  background: transparent;
+  border: none;
+  color: #e6e6e6;
+  font-weight: 500;
+  padding: 0.15rem 0;
+  text-align: left;
+}
+
+.folder-name:hover {
+  color: #7fa8ff;
+}
+
+.embed-chip {
+  background: #15171a;
+  border: 1px solid #2a2d33;
+  border-radius: 6px;
+  color: #cdd2da;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.embed-chip:hover {
+  background: #2a2d33;
+}
