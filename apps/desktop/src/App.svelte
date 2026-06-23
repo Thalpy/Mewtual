@@ -77,6 +77,15 @@
   let newEmojiCode = $state("");
   let showEmoji = $state(false);
 
+  // Right-click context menu (one shared instance). `onSelect` returning true keeps the menu
+  // open (used to swap in a confirm prompt for destructive actions).
+  type MenuItem =
+    | { divider: true }
+    | { label: string; icon?: string; danger?: boolean; disabled?: boolean; onSelect: () => unknown };
+  let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  let menuEl = $state<HTMLElement | undefined>();
+  let composerEl = $state<HTMLInputElement | undefined>();
+
   // Group the file list into the current folder's subfolders + files-here (folder browser).
   let folderView = $derived.by(() => {
     const base = folder === "" ? "" : folder + "/";
@@ -155,6 +164,16 @@
   }
   function fontClass(font: string): string {
     return font === "serif" ? "font-serif" : font === "mono" ? "font-mono" : "";
+  }
+  // A file-type glyph from the MIME prefix (a small QoL cue in the file browser).
+  function fileIcon(mime: string): string {
+    if (mime.startsWith("image/")) return "🖼";
+    if (mime.startsWith("video/")) return "🎬";
+    if (mime.startsWith("audio/")) return "🎵";
+    if (mime.startsWith("text/")) return "📝";
+    if (mime.includes("pdf")) return "📕";
+    if (mime.includes("zip") || mime.includes("compressed")) return "🗜";
+    return "📄";
   }
   function fxClass(effect: string): string {
     return effect && effect !== "none" ? `fx-${effect}` : "";
@@ -498,6 +517,7 @@
   }
 
   function switchView(v: Tab) {
+    menu = null;
     view = v;
     if (v === "wiki") refreshWiki();
   }
@@ -519,8 +539,187 @@
   // listener imperatively, so no a11y warning for a click on a non-interactive container).
   function richClicks(node: HTMLElement) {
     const h = (e: Event) => handleRichClick(e as MouseEvent);
+    const c = (e: Event) => handleRichContext(e as MouseEvent);
     node.addEventListener("click", h);
-    return { destroy: () => node.removeEventListener("click", h) };
+    node.addEventListener("contextmenu", c);
+    return {
+      destroy: () => {
+        node.removeEventListener("click", h);
+        node.removeEventListener("contextmenu", c);
+      },
+    };
+  }
+
+  // --- right-click context menu --------------------------------------------------------------
+  function openMenu(e: MouseEvent, items: MenuItem[]) {
+    if (items.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    menu = { x: e.clientX, y: e.clientY, items };
+  }
+
+  // Svelte action: open a context menu on right-click, with items built fresh at click time
+  // (so they capture current roles/draft/etc.).
+  function contextMenu(node: HTMLElement, factory: () => MenuItem[]) {
+    let make = factory;
+    const h = (e: MouseEvent) => openMenu(e, make());
+    node.addEventListener("contextmenu", h);
+    return {
+      update(f: () => MenuItem[]) {
+        make = f;
+      },
+      destroy() {
+        node.removeEventListener("contextmenu", h);
+      },
+    };
+  }
+
+  // Keep the menu on-screen + focus it once rendered (clamp against the viewport).
+  $effect(() => {
+    if (!menu || !menuEl) return;
+    const w = menuEl.offsetWidth;
+    const h = menuEl.offsetHeight;
+    const x = Math.max(4, Math.min(menu.x, window.innerWidth - w - 8));
+    const y = Math.max(4, Math.min(menu.y, window.innerHeight - h - 8));
+    menuEl.style.left = `${x}px`;
+    menuEl.style.top = `${y}px`;
+    menuEl.focus();
+  });
+
+  function onMenuKey(e: KeyboardEvent) {
+    if (!menuEl) return;
+    const items = Array.from(menuEl.querySelectorAll<HTMLButtonElement>(".ctx-item:not([disabled])"));
+    if (items.length === 0) return;
+    const idx = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      items[(idx + 1) % items.length]?.focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(idx - 1 + items.length) % items.length]?.focus();
+    }
+  }
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard may be unavailable in the webview */
+    }
+  }
+
+  // Re-arm the open menu as a confirm/cancel prompt for a destructive action.
+  function confirmInMenu(label: string, action: () => void) {
+    if (!menu) return true;
+    menu = {
+      ...menu,
+      items: [
+        { label, icon: "⚠", danger: true, onSelect: action },
+        { label: "Cancel", onSelect: () => {} },
+      ],
+    };
+    return true; // keep the menu open to show the confirm
+  }
+
+  // Append text to the chat composer draft (used by "post to chat" actions).
+  function appendToDraft(text: string) {
+    draft = draft ? `${draft} ${text}` : text;
+    view = "chat";
+    composerEl?.focus();
+  }
+
+  function messageMenu(m: Msg): MenuItem[] {
+    return [
+      { label: "Copy text", icon: "⧉", onSelect: () => copyText(m.text) },
+      { label: "Quote in reply", icon: "❝", onSelect: () => appendToDraft(`> ${nameOf(m.author)}: ${m.text}`) },
+      { divider: true },
+      { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
+    ];
+  }
+
+  function memberMenu(m: Member): MenuItem[] {
+    const items: MenuItem[] = [
+      { label: "Copy fingerprint", icon: "#", onSelect: () => copyText(m.fingerprint) },
+    ];
+    const r = roles[m.fingerprint] ?? "member";
+    if (myRole === "owner" && !m.you && r !== "owner") {
+      items.push({ divider: true });
+      items.push(
+        r === "admin"
+          ? { label: "Demote from admin", icon: "▾", onSelect: () => setAdmin(m.fingerprint, false) }
+          : { label: "Make admin", icon: "▴", onSelect: () => setAdmin(m.fingerprint, true) },
+      );
+      items.push({
+        label: "Remove from server",
+        icon: "⨯",
+        danger: true,
+        onSelect: () => confirmInMenu(`Remove ${nameOf(m.fingerprint)}`, () => removeMember(m.fingerprint)),
+      });
+    }
+    return items;
+  }
+
+  function fileMenu(f: UiFile): MenuItem[] {
+    const items: MenuItem[] = [
+      { label: "Open details", icon: "ⓘ", onSelect: () => openFileInfo(f) },
+      { label: "Download", icon: "↓", onSelect: () => downloadFile(f) },
+      { label: "Post to chat", icon: "➦", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
+      { divider: true },
+      { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(f.cid) },
+    ];
+    if (myRole === "owner" || myRole === "admin") {
+      items.push({
+        label: "Delete file",
+        icon: "🗑",
+        danger: true,
+        onSelect: () => confirmInMenu(`Delete ${f.name}`, () => removeFile(f)),
+      });
+    }
+    return items;
+  }
+
+  function wikiPageMenu(p: string): MenuItem[] {
+    return [
+      { label: "Open page", icon: "⊞", onSelect: () => openWikiPage(p) },
+      { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${p}]]`) },
+      { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${p}]]`) },
+    ];
+  }
+
+  function serverMenu(s: ServerState): MenuItem[] {
+    const items: MenuItem[] = [];
+    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => copyText(s.invite) });
+    items.push({ label: "Server settings", icon: "⚙", onSelect: () => { if (s.id !== activeServerId) switchServer(s.id); showSettings = true; } });
+    items.push({ divider: true });
+    items.push({
+      label: "Leave server",
+      icon: "⤴",
+      danger: true,
+      onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
+    });
+    return items;
+  }
+
+  // Context menu on rendered rich text: copy/post a [[wikilink]], copy a :emoji:, copy an embed.
+  function handleRichContext(e: MouseEvent) {
+    const el = (e.target as HTMLElement | null)?.closest(
+      "[data-wikilink],[data-emoji],[data-embed-cid]",
+    ) as HTMLElement | null;
+    if (!el) return;
+    if (el.hasAttribute("data-wikilink")) {
+      const page = el.getAttribute("data-wikilink") ?? "";
+      openMenu(e, [
+        { label: "Open page", icon: "⊞", onSelect: () => { view = "wiki"; openWikiPage(page); } },
+        { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${page}]]`) },
+        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${page}]]`) },
+      ]);
+    } else if (el.hasAttribute("data-emoji")) {
+      const code = (el.getAttribute("data-emoji") ?? "").replace(/:/g, "");
+      openMenu(e, [{ label: `Copy :${code}:`, icon: "⧉", onSelect: () => copyText(`:${code}:`) }]);
+    } else {
+      const cid = el.getAttribute("data-embed-cid") ?? "";
+      openMenu(e, [{ label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) }]);
+    }
   }
   async function refreshWiki() {
     if (activeServerId === null) return;
@@ -1009,7 +1208,35 @@
         }
       }),
     ];
-    return () => subs.forEach((p) => p.then((un) => un()));
+    // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
+    // tabs; Ctrl/Cmd+K jumps to the chat composer.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (menu) menu = null;
+        else if (showEmoji) showEmoji = false;
+        else if (fileInfo) closeFileInfo();
+        else if (showWikiHelp) showWikiHelp = false;
+        else if (showFeedback) showFeedback = false;
+        else if (showSettings) showSettings = false;
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile"];
+        if (e.key >= "1" && e.key <= "5") {
+          e.preventDefault();
+          if (activeServerId !== null) switchView(tabs[Number(e.key) - 1]);
+        } else if (e.key.toLowerCase() === "k") {
+          e.preventDefault();
+          view = "chat";
+          composerEl?.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      subs.forEach((p) => p.then((un) => un()));
+    };
   });
 </script>
 
@@ -1103,6 +1330,7 @@
             class:active={s.id === activeServerId}
             title={s.name}
             onclick={() => switchServer(s.id)}
+            use:contextMenu={() => serverMenu(s)}
           >
             {s.name.slice(0, 1).toUpperCase()}
             {#if s.dot}<span class="rail-dot">●</span>{/if}
@@ -1136,7 +1364,7 @@
           <h3>Members <span class="muted">({members})</span></h3>
           <ul>
             {#each roster as m}
-              <li title={m.fingerprint}>
+              <li title={m.fingerprint} class:is-you={m.you} use:contextMenu={() => memberMenu(m)}>
                 {@render avatarTag(m.fingerprint)}
                 {@render nameTag(m.fingerprint)}
                 {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
@@ -1168,11 +1396,11 @@
           <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
           <ul class="messages" bind:this={messagesEl} use:richClicks>
             {#each messages as m}
-              <li class:own={m.author === myFp}>
+              <li class:own={m.author === myFp} use:contextMenu={() => messageMenu(m)}>
                 <span class="author">
                   {@render avatarTag(m.author)}
                   {@render nameTag(m.author)}
-                  <span class="time">{fmtTime(m.ts)}</span>
+                  <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                 </span>
                 <span class="text">{@html renderMessage(m.text)}</span>
               </li>
@@ -1216,7 +1444,7 @@
                 />
               </label>
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
-              <input bind:value={draft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()} />
+              <input bind:this={composerEl} bind:value={draft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()} />
               <button type="submit" disabled={uploading}>Send</button>
             </form>
           </div>
@@ -1247,9 +1475,9 @@
               </li>
             {/each}
             {#each folderView.here as f}
-              <li>
+              <li use:contextMenu={() => fileMenu(f)}>
                 <button class="file-name" title="View file details" onclick={() => openFileInfo(f)}>
-                  📄 {f.name}
+                  {fileIcon(f.mime)} {f.name}
                 </button>
                 <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)}</span>
               </li>
@@ -1304,7 +1532,7 @@
                 <button class="wiki-help-btn" title="Formatting help" onclick={() => (showWikiHelp = true)}>?</button>
               </div>
               {#each wikiPages as p}
-                <button class:active={p === activeWikiPage} onclick={() => openWikiPage(p)}>{p}</button>
+                <button class:active={p === activeWikiPage} onclick={() => openWikiPage(p)} use:contextMenu={() => wikiPageMenu(p)}>{p}</button>
               {:else}
                 <span class="muted">No pages yet.</span>
               {/each}
@@ -1654,6 +1882,42 @@
             </ul>
           </div>
         </div>
+      </div>
+    {/if}
+
+    {#if menu}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="ctx-backdrop"
+        role="presentation"
+        onclick={() => (menu = null)}
+        oncontextmenu={(e) => { e.preventDefault(); menu = null; }}
+      ></div>
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div
+        class="ctx-menu"
+        bind:this={menuEl}
+        role="menu"
+        tabindex="-1"
+        style="left:{menu.x}px; top:{menu.y}px"
+        onkeydown={onMenuKey}
+      >
+        {#each menu.items as item}
+          {#if "divider" in item}
+            <div class="ctx-divider"></div>
+          {:else}
+            <button
+              class="ctx-item"
+              class:danger={item.danger}
+              role="menuitem"
+              tabindex="-1"
+              disabled={item.disabled}
+              onclick={() => { const keep = item.onSelect(); if (keep !== true) menu = null; }}
+            >
+              {#if item.icon}<span class="ctx-icon">{item.icon}</span>{/if}<span class="ctx-label">{item.label}</span>
+            </button>
+          {/if}
+        {/each}
       </div>
     {/if}
   {/if}

@@ -1326,3 +1326,70 @@ button.emoji-pick:hover {
 .server-icon.feedback-btn { font-size: 1.05em; }
 
 .invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Right-click context menu */
+.ctx-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+}
+.ctx-menu {
+  position: fixed;
+  z-index: 901;
+  min-width: 180px;
+  max-width: 280px;
+  padding: 4px;
+  background: var(--bg-elev, #1d1d24);
+  border: 1px solid var(--border, #33333d);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  outline: none;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-item:hover:not(:disabled),
+.ctx-item:focus-visible {
+  background: var(--accent-dim, #2a3150);
+  outline: none;
+}
+.ctx-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.ctx-item.danger {
+  color: #e0574b;
+}
+.ctx-item.danger:hover:not(:disabled),
+.ctx-item.danger:focus-visible {
+  background: rgba(224, 87, 75, 0.16);
+}
+.ctx-icon {
+  width: 1.1em;
+  text-align: center;
+  opacity: 0.85;
+  flex: none;
+}
+.ctx-label {
+  flex: 1;
+}
+.ctx-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border, #33333d);
+}
+.roster li.is-you {
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 5px;
+}
