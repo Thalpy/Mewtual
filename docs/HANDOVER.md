@@ -3,6 +3,8 @@
 Authoritative current-state document. Read this first, then
 [`INTERFACES.md`](INTERFACES.md) (the API/seam schema) and
 [`ARCHITECTURE.md`](ARCHITECTURE.md) (decisions + the adversarial-review fixes).
+[`THREAT-MODEL.md`](THREAT-MODEL.md) tracks what a modified ("hacked") client can/can't do —
+the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
 ## Status (as of 2026-06-22)
 
