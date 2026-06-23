@@ -634,10 +634,12 @@
     return true; // keep the menu open to show the confirm
   }
 
-  // Append text to the chat composer draft (used by "post to chat" actions).
-  function appendToDraft(text: string) {
+  // Append text to the chat composer draft (used by "post to chat" actions). Awaits a tick so
+  // the composer is mounted before focusing (these can fire from the wiki/files tab).
+  async function appendToDraft(text: string) {
     draft = draft ? `${draft} ${text}` : text;
     view = "chat";
+    await tick();
     composerEl?.focus();
   }
 
@@ -1402,6 +1404,8 @@
                 {/if}
                 {#if m.you}<span class="you-badge">you</span>{/if}
               </li>
+            {:else}
+              <li class="muted">No matching members.</li>
             {/each}
           </ul>
         </div>
@@ -1480,7 +1484,7 @@
                 rows="1"
                 class="composer-input"
                 placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
-                onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
+                onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } }}
               ></textarea>
               <button type="submit" disabled={uploading}>Send</button>
             </form>

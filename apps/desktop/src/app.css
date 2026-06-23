@@ -632,6 +632,8 @@ button.ghost:hover {
   font: inherit;
   line-height: 1.35;
   max-height: 140px;
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 .muted {
