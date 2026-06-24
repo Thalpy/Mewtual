@@ -2179,3 +2179,46 @@ button.emoji-pick:hover {
 .msg-action:hover {
   background: var(--accent-dim, #232a44);
 }
+
+/* Spoiler tags: a blacked-out block until clicked to reveal. */
+.spoiler {
+  background: #45454f;
+  color: transparent;
+  border-radius: 4px;
+  padding: 0 3px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+.spoiler:hover {
+  background: #54545f;
+}
+.spoiler.revealed {
+  background: rgba(255, 255, 255, 0.07);
+  color: inherit;
+  cursor: text;
+  user-select: text;
+}
+
+/* Composer formatting toolbar (bold / italic / strike / code / spoiler). */
+.format-tools {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.format-tools button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--muted, #9aa0b5);
+  font-size: 0.85rem;
+  min-width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  padding: 0 4px;
+  line-height: 1;
+}
+.format-tools button:hover {
+  background: var(--accent-dim, #232a44);
+  color: var(--text, #e4e4ef);
+}

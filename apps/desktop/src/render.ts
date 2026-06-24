@@ -81,6 +81,25 @@ const mention: TokenizerAndRendererExtension = {
   },
 };
 
+// `||text||` → a spoiler: rendered blurred/blacked-out until clicked (the app toggles a `revealed`
+// class via the data-spoiler hook). The content is escaped plain text (no nested formatting).
+const spoiler: TokenizerAndRendererExtension = {
+  name: "spoiler",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("||");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const m = /^\|\|([^\n]+?)\|\|/.exec(src);
+    if (m) return { type: "spoiler", raw: m[0], text: m[1] };
+    return undefined;
+  },
+  renderer(token) {
+    return `<span class="spoiler" data-spoiler tabindex="0" role="button">${escText(token.text)}</span>`;
+  },
+};
+
 // `![alt](cid:HEX)` → a fileshare embed placeholder (resolved to media in 10c). Matched ahead
 // of marked's own image syntax; plain `![](http…)` falls through and is stripped by sanitize.
 const embed: TokenizerAndRendererExtension = {
@@ -103,7 +122,7 @@ const embed: TokenizerAndRendererExtension = {
 let configured = false;
 function configure() {
   if (configured) return;
-  marked.use({ extensions: [wikiLink, emoji, mention, embed], breaks: true, gfm: true });
+  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed], breaks: true, gfm: true });
   configured = true;
 }
 
@@ -115,7 +134,8 @@ const SANITIZE = {
     "table", "thead", "tbody", "tr", "th", "td",
   ],
   ALLOWED_ATTR: [
-    "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt", "data-mention",
+    "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
+    "data-mention", "data-spoiler", "tabindex", "role",
   ],
 };
 

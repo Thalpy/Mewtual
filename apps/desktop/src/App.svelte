@@ -750,6 +750,7 @@
   }
 
   async function switchServer(id: number) {
+    saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     activeServerId = id;
     inboxView = false;
     const s = servers.find((x) => x.id === id);
@@ -773,6 +774,7 @@
     mentionQuery = null;
     showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
+    loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
       refresh(),
@@ -827,7 +829,9 @@
 
   function switchTo(id: string) {
     if (!cur) return;
+    saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     cur.active = id;
+    loadDraftFor(chanKey()); // restore the target channel's draft
     cur.unread = cur.unread.filter((c) => c !== id);
     if (showSearch) closeSearch();
     reactionPickerFor = "";
@@ -962,7 +966,15 @@
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
   async function handleRichClick(e: MouseEvent) {
-    const el = (e.target as HTMLElement | null)?.closest("[data-wikilink]") as HTMLElement | null;
+    const target = e.target as HTMLElement | null;
+    // A spoiler: first click reveals it (don't also follow any link inside).
+    const sp = target?.closest("[data-spoiler]") as HTMLElement | null;
+    if (sp && !sp.classList.contains("revealed")) {
+      e.preventDefault();
+      sp.classList.add("revealed");
+      return;
+    }
+    const el = target?.closest("[data-wikilink]") as HTMLElement | null;
     if (el) {
       e.preventDefault();
       const page = el.getAttribute("data-wikilink") ?? "";
@@ -1724,6 +1736,10 @@
       if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionCandidates[mentionIdx]); return; }
       if (e.key === "Escape") { e.preventDefault(); mentionQuery = null; return; }
     }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+      if (e.key === "b") { e.preventDefault(); e.stopPropagation(); wrapSelection("**"); return; }
+      if (e.key === "i") { e.preventDefault(); e.stopPropagation(); wrapSelection("*"); return; }
+    }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
   }
 
@@ -1796,13 +1812,44 @@
     jumpToMessageId(it.message_id);
   }
 
+  // Per-channel composer drafts (in-memory): switching channels/servers preserves what you'd typed.
+  let drafts = $state<Record<string, string>>({});
+  function saveDraftFor(key: string | null) {
+    if (!key) return;
+    if (draft.trim()) drafts[key] = draft;
+    else delete drafts[key];
+  }
+  function loadDraftFor(key: string | null) {
+    draft = (key && drafts[key]) || "";
+  }
+
+  // Wrap the composer's selection (or insert at the caret) with markdown markers — the formatting
+  // toolbar's bold/italic/etc. After it, the wrapped text stays selected so toggling reads naturally.
+  function wrapSelection(before: string, after = before) {
+    const ta = composerEl;
+    const start = ta?.selectionStart ?? draft.length;
+    const end = ta?.selectionEnd ?? start;
+    const sel = draft.slice(start, end);
+    draft = draft.slice(0, start) + before + sel + after + draft.slice(end);
+    const a = start + before.length;
+    queueMicrotask(() => {
+      if (composerEl) {
+        composerEl.focus();
+        composerEl.selectionStart = a;
+        composerEl.selectionEnd = a + sel.length;
+      }
+    });
+  }
+
   async function send() {
     const text = draft.trim();
     if (!text || !cur || !cur.active || activeServerId === null) return;
     const reply_to = replyingTo;
+    const key = chanKey();
     draft = "";
     replyingTo = "";
     mentionQuery = null;
+    if (key) delete drafts[key];
     try {
       await invoke("send_message", { server: activeServerId, channel: cur.active, text, replyTo: reply_to });
     } catch (e) {
@@ -2674,6 +2721,13 @@
                 />
               </label>
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
+              <div class="format-tools">
+                <button type="button" title="Bold (Ctrl+B)" onclick={() => wrapSelection("**")}><b>B</b></button>
+                <button type="button" title="Italic (Ctrl+I)" onclick={() => wrapSelection("*")}><i>I</i></button>
+                <button type="button" title="Strikethrough" onclick={() => wrapSelection("~~")}><s>S</s></button>
+                <button type="button" title="Inline code" onclick={() => wrapSelection("`")} aria-label="Inline code">{"</>"}</button>
+                <button type="button" title="Spoiler" onclick={() => wrapSelection("||")} aria-label="Spoiler">▦</button>
+              </div>
               <textarea
                 bind:this={composerEl}
                 bind:value={draft}
