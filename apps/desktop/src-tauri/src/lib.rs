@@ -1062,6 +1062,44 @@ async fn get_online_members(state: State<'_, AppState>, server: u64) -> Result<V
     Ok(actor.online_members().await)
 }
 
+/// Per-DM activity stats (no message text) for the friends-list sortings, one entry per DM group.
+#[derive(Serialize, Clone)]
+struct DmStat {
+    server: u64,
+    count: u64,
+    first_ts: u64,
+    last_ts: u64,
+    active_days: u64,
+}
+
+/// Activity stats for every DM (count + timestamps over its #general conversation), so the UI can
+/// sort friends by activity / reconnect / recency. Clones the DM actors first (no lock held across
+/// the awaits), then queries each — bounded by the (small) number of DMs.
+#[tauri::command]
+async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
+    let dms: Vec<(u64, ServerActor)> = {
+        let servers = state.servers.lock().await;
+        servers
+            .iter()
+            .filter(|(_, e)| e.is_dm)
+            .map(|(id, e)| (*id, e.actor.clone()))
+            .collect()
+    };
+    let general = channel_id("general");
+    let mut out = Vec::with_capacity(dms.len());
+    for (id, actor) in dms {
+        let s = actor.message_stats(general).await;
+        out.push(DmStat {
+            server: id,
+            count: s.count,
+            first_ts: s.first_ts,
+            last_ts: s.last_ts,
+            active_days: s.active_days,
+        });
+    }
+    Ok(out)
+}
+
 /// Whether a shared file's blob is held locally (openable without a network fetch).
 #[tauri::command]
 async fn file_available(
@@ -1473,6 +1511,7 @@ pub fn run() {
             add_file,
             get_files,
             get_online_members,
+            dm_stats,
             download_file,
             file_available,
             delete_file,

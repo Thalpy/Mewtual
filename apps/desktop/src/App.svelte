@@ -33,6 +33,27 @@
   // Servers shown on the rail vs DMs shown behind the DMs circle.
   let railServers = $derived(servers.filter((s) => !s.isDm));
   let dmList = $derived(servers.filter((s) => s.isDm));
+  // Per-DM activity stats (no message text), keyed by server id — for the friends-list sortings.
+  type DmStat = { server: number; count: number; first_ts: number; last_ts: number; active_days: number };
+  let dmStats = $state<Record<number, DmStat>>({});
+  type DmSort = "recent" | "activity" | "reconnect" | "alpha";
+  let dmSort = $state<DmSort>("recent");
+  // The DM list sorted by the chosen mode: recent (last message), activity (avg msgs per active
+  // day), reconnect (high past volume × a long silence), or alphabetical.
+  let sortedDmList = $derived.by(() => {
+    const arr = [...dmList];
+    if (dmSort === "alpha") return arr.sort((a, b) => a.name.localeCompare(b.name));
+    const now = Date.now();
+    const key = (id: number): number => {
+      const s = dmStats[id];
+      if (!s || !s.count) return 0;
+      if (dmSort === "recent") return s.last_ts;
+      if (dmSort === "activity") return s.active_days ? s.count / s.active_days : 0; // no dated activity ⇒ bottom
+      const gapDays = s.last_ts ? (now - s.last_ts) / 86_400_000 : 0; // reconnect
+      return s.count * gapDays;
+    };
+    return arr.sort((a, b) => key(b.id) - key(a.id));
+  });
   let showAdd = $state(false); // showing the found/join form to add a server
   let showNewDm = $state(false); // the "New DM" composer (friend name → friend code to share)
   let showAddFriend = $state(false); // the "Add friend" composer (paste a friend code)
@@ -512,6 +533,18 @@
     switchServer(r.server);
   }
 
+  // Pull per-DM activity stats for the friends-list sortings (one round-trip for all DMs).
+  async function refreshDmStats() {
+    try {
+      const list = await invoke<DmStat[]>("dm_stats", {});
+      const map: Record<number, DmStat> = {};
+      for (const s of list) map[s.server] = s;
+      dmStats = map;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   // Open the DMs area (the friends/DM list); land on the first DM if there is one, else an empty
   // DM-home (no active group) ready for a New DM / Add friend.
   function enterDmHome() {
@@ -519,6 +552,7 @@
     menu = null;
     showNewDm = false;
     showAddFriend = false;
+    refreshDmStats();
     if (dmList.length) switchServer(dmList[0].id);
     else {
       activeServerId = null;
@@ -1454,6 +1488,8 @@
     const subs: Promise<UnlistenFn>[] = [
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // A DM got a message → its activity stats changed; keep the friends sorting fresh.
+        if (dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
         if (server === activeServerId && channel === cur?.active) {
           refresh();
           // You're looking at this channel — only chime if the window isn't focused.
@@ -1720,13 +1756,29 @@
               <button disabled={busy || !dmName.trim() || !dmInvite.trim()}>Connect</button>
             </form>
           {/if}
+          {#if dmList.length > 1}
+            <label class="dm-sort">
+              <span class="muted small">Sort</span>
+              <select bind:value={dmSort}>
+                <option value="recent">Recent</option>
+                <option value="activity">Most active</option>
+                <option value="reconnect">Reconnect</option>
+                <option value="alpha">A–Z</option>
+              </select>
+            </label>
+          {/if}
           <ul class="dm-list">
-            {#each dmList as d}
+            {#each sortedDmList as d (d.id)}
+              {@const st = dmStats[d.id]}
               <li>
                 <button class:active={d.id === activeServerId} onclick={() => switchServer(d.id)}>
                   <span class="dm-ava">{d.name.slice(0, 1).toUpperCase()}</span>
                   <span class="dm-label">{d.name}</span>
-                  {#if d.unread.length}<span class="dot">●</span>{/if}
+                  {#if d.unread.length}
+                    <span class="dot">●</span>
+                  {:else if st?.last_ts}
+                    <span class="dm-hint muted" title="Last message">{relTime(nowTick - st.last_ts)}</span>
+                  {/if}
                 </button>
               </li>
             {:else}

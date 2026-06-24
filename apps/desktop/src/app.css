@@ -1679,3 +1679,19 @@ button.emoji-pick:hover {
   max-width: 32rem;
   margin: 0 auto;
 }
+
+/* Friends-list sort selector + the per-DM last-message hint. */
+.dm-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+}
+.dm-sort select {
+  flex: 1;
+  font-size: 0.8rem;
+}
+.dm-hint {
+  flex: none;
+  font-size: 0.7rem;
+}

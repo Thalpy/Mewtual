@@ -75,6 +75,20 @@ pub struct ChatMessage {
     pub ts: u64,
 }
 
+/// Lightweight activity stats over a conversation (no message text), for the friends-list
+/// sortings. See [`Server::message_stats`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MessageStats {
+    /// Total messages in the channel.
+    pub count: u64,
+    /// Earliest message timestamp (epoch-millis), or `0` if none.
+    pub first_ts: u64,
+    /// Latest message timestamp (epoch-millis), or `0` if none.
+    pub last_ts: u64,
+    /// Distinct UTC days on which a message was sent.
+    pub active_days: u64,
+}
+
 /// Deterministically derive a channel's document id from its **name**, so any two
 /// members who open the same channel name converge on the same channel — IRC-style name
 /// addressing, with no shared channel registry. Names are normalized (trimmed +
@@ -1262,6 +1276,30 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .unwrap_or_default()
     }
 
+    /// Lightweight activity stats over a channel's messages — total count, first/last wall-clock
+    /// timestamp, and the number of distinct days a message was sent — for the friends-list
+    /// sortings (activity / reconnect / recency) WITHOUT shipping message text to the UI.
+    pub fn message_stats(&self, channel: u128) -> MessageStats {
+        let msgs = self.messages(channel);
+        let mut days = std::collections::HashSet::new();
+        let mut first = u64::MAX;
+        let mut last = 0u64;
+        for m in &msgs {
+            if m.ts == 0 {
+                continue; // a legacy message with no timestamp doesn't anchor a day
+            }
+            first = first.min(m.ts);
+            last = last.max(m.ts);
+            days.insert(m.ts / 86_400_000); // bucket by UTC day
+        }
+        MessageStats {
+            count: msgs.len() as u64,
+            first_ts: if first == u64::MAX { 0 } else { first },
+            last_ts: last,
+            active_days: days.len() as u64,
+        }
+    }
+
     /// Mint a single-use invite to this server.
     pub fn mint_invite(
         &self,
@@ -1473,6 +1511,41 @@ mod tests {
         assert_eq!(roster.len(), 1);
         assert!(roster[0].is_self, "the founder sees itself in the roster");
         assert_eq!(roster[0].fingerprint.len(), 8, "4-byte hex fingerprint");
+    }
+
+    #[tokio::test]
+    async fn message_stats_aggregates_count_timestamps_and_distinct_days() {
+        // The friends-list sortings ride on these stats: total volume, last activity, and the
+        // number of distinct days a conversation was active.
+        let hub = Hub::new();
+        let clock = ManualClock::new(86_400_000); // day 1 (a whole day in ms, so the bucket is 1)
+        let mut alice = Server::found(
+            hub.join(PeerId::from_u64(1)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+
+        // An empty conversation → all-zero stats (sorts to the bottom).
+        let empty = alice.message_stats(GENERAL);
+        assert_eq!(empty.count, 0);
+        assert_eq!(empty.active_days, 0);
+        assert_eq!(empty.last_ts, 0);
+
+        // Two messages on day 1, one more on day 3 (advance two days).
+        alice.send_message(GENERAL, "one").await.unwrap();
+        alice.send_message(GENERAL, "two").await.unwrap();
+        clock.advance_ms(2 * 86_400_000);
+        alice.send_message(GENERAL, "three").await.unwrap();
+
+        let s = alice.message_stats(GENERAL);
+        assert_eq!(s.count, 3, "all three messages counted");
+        assert_eq!(s.first_ts, 86_400_000);
+        assert_eq!(s.last_ts, 3 * 86_400_000);
+        assert_eq!(s.active_days, 2, "messages span two distinct UTC days");
     }
 
     #[tokio::test]
