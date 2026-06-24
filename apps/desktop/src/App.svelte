@@ -150,7 +150,7 @@
   });
 
   // The main pane shows one tab at a time.
-  type Tab = "chat" | "files" | "status" | "wiki" | "profile";
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads";
   let view = $state<Tab>("chat");
   let wikiPages = $state<string[]>([]);
   let wikiFilter = $state("");
@@ -1075,7 +1075,16 @@
 
   async function downloadFile(f: UiFile) {
     if (activeServerId === null) return;
-    downloadProgress[f.cid] = 0;
+    const key = dlKey(activeServerId, f.cid);
+    downloads[key] = {
+      server: activeServerId,
+      cid: f.cid,
+      name: f.name,
+      author: f.author,
+      status: "queued",
+      progress: 0,
+      ts: Date.now(),
+    };
     try {
       const base64 = await invoke<string>("download_file", { server: activeServerId, cid: f.cid });
       const a = document.createElement("a");
@@ -1084,10 +1093,10 @@
       document.body.appendChild(a);
       a.click();
       a.remove();
+      if (downloads[key]) downloads[key].status = "done";
     } catch (e) {
       error = String(e);
-    } finally {
-      delete downloadProgress[f.cid];
+      if (downloads[key]) downloads[key].status = "failed";
     }
   }
 
@@ -1097,9 +1106,37 @@
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
   let fileInfoBusy = $state(false);
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
-  // In-flight download progress per file cid (a 0..1 fraction); absent = not downloading. Driven
-  // by 'download-progress' events from the actor's per-chunk reporting (large multi-chunk files).
-  let downloadProgress = $state<Record<string, number>>({});
+  // Tracked downloads keyed by file cid, for the Downloads tab + the file-info progress bar. Driven
+  // by 'download-progress' events (per-chunk) from the actor. Only EXPLICIT downloads (the Download
+  // button) are tracked here — background embed/preview fetches emit progress but create no entry.
+  type DownloadInfo = {
+    server: number;
+    cid: string;
+    name: string;
+    author: string; // the uploader (the file's source / initial provider)
+    status: "queued" | "downloading" | "done" | "failed";
+    progress: number; // 0..1
+    ts: number;
+  };
+  // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
+  // exist on two servers, and switching servers must not show the other's transfers).
+  let downloads = $state<Record<string, DownloadInfo>>({});
+  const dlKey = (server: number, cid: string) => `${server}:${cid}`;
+  // The active server's downloads, newest first.
+  let downloadList = $derived(
+    Object.values(downloads)
+      .filter((d) => d.server === activeServerId)
+      .sort((a, b) => b.ts - a.ts)
+  );
+  let activeDownloads = $derived(
+    downloadList.filter((d) => d.status === "queued" || d.status === "downloading").length
+  );
+  function clearFinishedDownloads() {
+    for (const [k, d] of Object.entries(downloads)) {
+      if (d.server === activeServerId && (d.status === "done" || d.status === "failed"))
+        delete downloads[k];
+    }
+  }
   // Advisory eclipse hint for the active server (the node may be isolated — verify a member out of
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
   let eclipseCaution = $state(false);
@@ -1273,13 +1310,11 @@
       listen<{ server: number; cid: string; done: number; total: number }>(
         "download-progress",
         (e) => {
-          if (e.payload.server !== activeServerId) return;
-          if (e.payload.done >= e.payload.total) {
-            delete downloadProgress[e.payload.cid];
-          } else {
-            downloadProgress[e.payload.cid] =
-              e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
-          }
+          const d = downloads[dlKey(e.payload.server, e.payload.cid)];
+          if (!d) return; // only track explicitly-initiated downloads
+          d.progress = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+          if (e.payload.done >= e.payload.total) d.status = "done";
+          else if (d.status === "queued") d.status = "downloading";
         }
       ),
       listen<{ server: number }>("status-updated", (e) => {
@@ -1316,8 +1351,8 @@
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
-        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile"];
-        if (e.key >= "1" && e.key <= "5") {
+        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads"];
+        if (e.key >= "1" && e.key <= "6") {
           e.preventDefault();
           if (activeServerId !== null) switchView(tabs[Number(e.key) - 1]);
         } else if (e.key.toLowerCase() === "k") {
@@ -1511,6 +1546,9 @@
           <button class:active={view === "status"} onclick={() => switchView("status")}>Status</button>
           <button class:active={view === "wiki"} onclick={() => switchView("wiki")}>Wiki</button>
           <button class:active={view === "profile"} onclick={() => switchView("profile")}>Profile</button>
+          <button class:active={view === "downloads"} onclick={() => switchView("downloads")}>
+            Downloads {#if activeDownloads}<span class="tab-count">{activeDownloads}</span>{/if}
+          </button>
         </div>
 
         {#if view === "chat"}
@@ -1767,6 +1805,37 @@
             </p>
             <button onclick={saveProfile}>Save profile</button>
           </div>
+        {:else if view === "downloads"}
+          <h2>Downloads</h2>
+          <div class="downloads-tab tab-pane">
+            {#if downloadList.length === 0}
+              <p class="muted">No downloads yet. Open a file and click <strong>↓ Download</strong> to start one.</p>
+            {:else}
+              <div class="dl-toolbar">
+                <span class="muted small">{activeDownloads} active · {downloadList.length} total</span>
+                <button class="ghost small" onclick={clearFinishedDownloads}>Clear finished</button>
+              </div>
+              <ul class="dl-list">
+                {#each downloadList as d (d.cid)}
+                  <li class="dl-item">
+                    <div class="dl-item-main">
+                      <span class="dl-item-name">{d.name}</span>
+                      <span class="muted small">shared by {nameOf(d.author)}</span>
+                    </div>
+                    <div class="dl-item-status {d.status}">
+                      {#if d.status === "downloading"}{Math.round(d.progress * 100)}%
+                      {:else if d.status === "queued"}Queued
+                      {:else if d.status === "done"}✓ Done
+                      {:else}✗ Failed{/if}
+                    </div>
+                    {#if d.status === "downloading" || d.status === "queued"}
+                      <progress class="dl-item-bar" value={d.progress} max="1"></progress>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </div>
         {/if}
         {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
       </section>
@@ -1975,10 +2044,13 @@
               <dd class="cid" title={fileInfo.cid}>{fileInfo.cid.slice(0, 16)}…</dd>
             </dl>
 
-            {#if downloadProgress[fileInfo.cid] !== undefined}
+            {#if activeServerId !== null && downloads[dlKey(activeServerId, fileInfo.cid)] && (downloads[dlKey(activeServerId, fileInfo.cid)].status === "downloading" || downloads[dlKey(activeServerId, fileInfo.cid)].status === "queued")}
+              {@const di = downloads[dlKey(activeServerId, fileInfo.cid)]}
               <label class="dl-progress">
-                <span class="muted small">Downloading… {Math.round(downloadProgress[fileInfo.cid] * 100)}%</span>
-                <progress value={downloadProgress[fileInfo.cid]} max="1"></progress>
+                <span class="muted small">
+                  {di.status === "queued" ? "Queued…" : `Downloading… ${Math.round(di.progress * 100)}%`}
+                </span>
+                <progress value={di.progress} max="1"></progress>
               </label>
             {/if}
             <div class="file-info-actions">
