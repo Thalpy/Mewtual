@@ -27,6 +27,10 @@ const DISCOVERY_DRAIN_MS: u64 = 500;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
 const MAX_DISCOVERED_PER_TICK: usize = 16;
 
+/// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
+/// error string). One chunk per command keeps the actor responsive during a large download.
+type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
+
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
@@ -94,10 +98,17 @@ pub enum AppCommand {
         invite: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
-    /// Download a file's bytes by content address (raw CID bytes); a precise error otherwise.
-    DownloadFile {
+    /// The download plan for a file by content address: `(total chunks, total size)`, or `None`.
+    /// The bridge fetches the chunks one per command so the actor stays responsive between them.
+    FileDownloadPlan {
         cid: Vec<u8>,
-        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+        reply: oneshot::Sender<Option<(usize, u64)>>,
+    },
+    /// Fetch + decrypt a single chunk (`idx`) of a file: `(plaintext bytes, provider)`, or an error.
+    FetchFileChunk {
+        cid: Vec<u8>,
+        idx: usize,
+        reply: oneshot::Sender<ChunkResult>,
     },
     /// Whether the file's blob is already held locally (no network fetch needed to open it).
     FileAvailable {
@@ -195,16 +206,6 @@ pub enum AppEvent {
     ProfilesUpdated,
     /// The shared file list changed — the UI should re-fetch it (`files`).
     FilesUpdated,
-    /// Progress of an in-flight file download, as `(done, total)` chunks, so the UI can show a
-    /// progress bar. Emitted by the `DownloadFile` handler from `download_file_with_progress`.
-    /// `provider` is the signed responder's fingerprint that served the most recent chunk over the
-    /// network (`None` when that chunk was already held locally), for the "downloading from …" hint.
-    DownloadProgress {
-        cid: Vec<u8>,
-        done: usize,
-        total: usize,
-        provider: Option<String>,
-    },
     /// The status feed changed — the UI should re-fetch it (`statuses`).
     StatusUpdated,
     /// The wiki changed — the UI should re-fetch pages / the open page.
@@ -524,13 +525,28 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Download a file's bytes by content address (raw CID bytes); a precise error string if it
-    /// can't be produced (not listed / held-but-unreadable / no peer has it / undecryptable).
-    pub async fn download_file(&self, cid: Vec<u8>) -> Result<Vec<u8>, String> {
+    /// The download plan for a file by content address: `(total chunks, total size)`, or `None` if
+    /// not listed / corrupt / implausibly large.
+    pub async fn file_download_plan(&self, cid: Vec<u8>) -> Option<(usize, u64)> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(AppCommand::DownloadFile { cid, reply })
+            .send(AppCommand::FileDownloadPlan { cid, reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    /// Fetch + decrypt a single chunk (`idx`) of a file: `(plaintext bytes, provider)`. One chunk
+    /// per call so the actor interleaves other work between chunks (the orchestrator reassembles).
+    pub async fn fetch_file_chunk(&self, cid: Vec<u8>, idx: usize) -> ChunkResult {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FetchFileChunk { cid, idx, reply })
             .await
             .is_err()
         {
@@ -876,35 +892,21 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
-                    Some(AppCommand::DownloadFile { cid, reply }) => {
+                    Some(AppCommand::FileDownloadPlan { cid, reply }) => {
+                        let plan = <[u8; 32]>::try_from(cid.as_slice())
+                            .ok()
+                            .and_then(|arr| server.file_download_plan(&Cid::from_bytes(arr)));
+                        let _ = reply.send(plan);
+                    }
+                    // Fetch ONE chunk, then return to the select! loop — so a large download no
+                    // longer pins the actor: other commands + sync_once interleave between chunks
+                    // (the bridge orchestrates the per-chunk loop + reassembly + progress).
+                    Some(AppCommand::FetchFileChunk { cid, idx, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => {
-                                // Forward per-chunk progress to the event stream via a short-lived
-                                // drain task, so a large download shows a live progress bar even
-                                // though this handler blocks the actor until it finishes (it pauses
-                                // this server's sync_once + other commands meanwhile — a documented
-                                // MVP trade-off; true non-blocking download is a follow-up).
-                                let (ptx, mut prx) =
-                                    mpsc::channel::<(usize, usize, Option<String>)>(64);
-                                let evt = event_tx.clone();
-                                let cid_evt = cid.clone();
-                                tokio::spawn(async move {
-                                    while let Some((done, total, provider)) = prx.recv().await {
-                                        let _ = evt
-                                            .send(AppEvent::DownloadProgress {
-                                                cid: cid_evt.clone(),
-                                                done,
-                                                total,
-                                                provider,
-                                            })
-                                            .await;
-                                    }
-                                });
-                                server
-                                    .download_file_with_progress(&Cid::from_bytes(arr), Some(&ptx))
-                                    .await
-                                    .map_err(|e| e.to_string())
-                            }
+                            Ok(arr) => server
+                                .fetch_file_chunk(&Cid::from_bytes(arr), idx)
+                                .await
+                                .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);

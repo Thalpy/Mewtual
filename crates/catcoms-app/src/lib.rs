@@ -21,7 +21,10 @@ use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
-use catcoms_storage::{BlobStore, Cid, FileManifest};
+use catcoms_storage::{BlobStore, FileManifest, FileRef};
+// Re-export the content-address type: it's part of the app's public file surface, and the bridge
+// verifies a reassembled download against it.
+pub use catcoms_storage::Cid;
 pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{
     fingerprint, read_published_roster, request_join, ChannelSync, SyncError, ROLES_DOC,
@@ -884,29 +887,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let mut out = Vec::with_capacity(manifest.total_size as usize);
         for (i, chunk_ref) in manifest.chunks.iter().enumerate() {
-            let ccid = chunk_ref.ciphertext_cid;
-            // Only reach out to a peer if we don't already hold this chunk ourselves; capture the
-            // signed responder that served it so the UI can show who the bytes came from.
-            let provider = if !self.sync.has_blob(&ccid) {
-                self.sync.request_blob_best_provider(&ccid).await?
-            } else {
-                None
-            };
-            let Some(ciphertext) = self.sync.get_blob(&ccid) else {
-                return Err(if self.sync.has_blob(&ccid) {
-                    AppError::Invalid(format!(
-                        "chunk {i} is stored on this device but could not be read (it may be corrupted)"
-                    ))
-                } else {
-                    AppError::Invalid(format!(
-                        "file not available yet — no connected peer has chunk {i}"
-                    ))
-                });
-            };
-            let chunk = self
-                .sync
-                .open_file(&ciphertext, chunk_ref)
-                .map_err(|e| AppError::Invalid(format!("chunk {i} could not be decrypted: {e}")))?;
+            let (chunk, provider) = self.fetch_and_open_chunk(chunk_ref, i).await?;
             out.extend_from_slice(&chunk);
             if let Some(p) = progress {
                 let _ = p.send((i + 1, total, provider)).await;
@@ -919,6 +900,84 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         Ok(out)
+    }
+
+    /// Fetch (if not held) + decrypt one chunk, returning its plaintext bytes and the signed
+    /// provider that served it. The single exclusive-state need on the fetch path is `blobs.put`;
+    /// everything else is read-only. Shared by the all-in-one download and the per-chunk path.
+    async fn fetch_and_open_chunk(
+        &mut self,
+        chunk_ref: &FileRef,
+        idx: usize,
+    ) -> Result<(Vec<u8>, Option<String>), AppError> {
+        let ccid = chunk_ref.ciphertext_cid;
+        // Only reach out to a peer if we don't already hold this chunk; capture the signed responder
+        // that served it so the UI can show who the bytes came from.
+        let provider = if !self.sync.has_blob(&ccid) {
+            self.sync.request_blob_best_provider(&ccid).await?
+        } else {
+            None
+        };
+        let Some(ciphertext) = self.sync.get_blob(&ccid) else {
+            return Err(if self.sync.has_blob(&ccid) {
+                AppError::Invalid(format!(
+                    "chunk {idx} is stored on this device but could not be read (it may be corrupted)"
+                ))
+            } else {
+                AppError::Invalid(format!(
+                    "file not available yet — no connected peer has chunk {idx}"
+                ))
+            });
+        };
+        let chunk = self
+            .sync
+            .open_file(&ciphertext, chunk_ref)
+            .map_err(|e| AppError::Invalid(format!("chunk {idx} could not be decrypted: {e}")))?;
+        Ok((chunk, provider))
+    }
+
+    /// The download plan for a listed file: `(total chunks, total plaintext size)`. `None` if the
+    /// file isn't listed, its reference is corrupt, or it declares an implausible size. The
+    /// orchestrator fetches the chunks one per command (see [`Server::fetch_file_chunk`]) so the
+    /// actor stays responsive between chunks instead of blocking for the whole download.
+    pub fn file_download_plan(&self, cid: &Cid) -> Option<(usize, u64)> {
+        let entry = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
+        if manifest.total_size > MAX_FILE_BYTES as u64 {
+            return None;
+        }
+        Some((manifest.chunks.len(), manifest.total_size))
+    }
+
+    /// Fetch + decrypt a single chunk (`idx`) of a listed file, returning its plaintext bytes + the
+    /// provider that served it. One chunk per call so the actor can interleave other work between
+    /// chunks; the orchestrator reassembles and verifies the whole-file content address.
+    pub async fn fetch_file_chunk(
+        &mut self,
+        cid: &Cid,
+        idx: usize,
+    ) -> Result<(Vec<u8>, Option<String>), AppError> {
+        // Re-resolve the manifest each call (cheap vs. a chunk fetch). Deliberate: it keeps the
+        // per-chunk path current with the index, so a file unlisted mid-download fails cleanly here
+        // rather than serving from a stale manifest.
+        let Some(entry) = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
+        else {
+            return Err(AppError::Invalid(
+                "no such file in this server's index".into(),
+            ));
+        };
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
+            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
+        let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
+            return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
+        };
+        self.fetch_and_open_chunk(&chunk_ref, idx).await
     }
 
     /// Whether this device already holds **all** of the file's chunk blobs locally — i.e. it can
@@ -2140,6 +2199,42 @@ mod tests {
         assert!(alice.file_available(&cid), "all chunks are held locally");
         let got = alice.download_file(&cid).await.unwrap();
         assert_eq!(got, data, "the chunked file reassembles byte-for-byte");
+    }
+
+    #[tokio::test]
+    async fn the_per_chunk_download_path_reassembles_byte_for_byte() {
+        // The non-blocking download fetches ONE chunk per command (file_download_plan +
+        // fetch_file_chunk) so the actor stays responsive; the per-chunk path must reassemble
+        // identically to the all-in-one download.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let n = CHUNK_BYTES * 2 + 77;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        let cid = alice
+            .add_file("big.bin", "application/octet-stream", "", &data)
+            .await
+            .unwrap();
+
+        let (total, size) = alice
+            .file_download_plan(&cid)
+            .expect("a plan for a listed file");
+        assert!(total >= 3, "split into multiple chunks");
+        assert_eq!(size, n as u64);
+
+        let mut out = Vec::with_capacity(size as usize);
+        for i in 0..total {
+            let (chunk, _provider) = alice.fetch_file_chunk(&cid, i).await.unwrap();
+            out.extend_from_slice(&chunk);
+        }
+        assert_eq!(out, data, "the per-chunk fetch reassembles byte-for-byte");
+        assert_eq!(Cid::of(&out), cid, "and verifies to the whole-file cid");
+
+        // No plan for an unknown file; an out-of-range chunk errors.
+        assert!(alice.file_download_plan(&Cid::of(b"nope")).is_none());
+        assert!(
+            alice.fetch_file_chunk(&cid, total).await.is_err(),
+            "an out-of-range chunk index errors",
+        );
     }
 
     #[tokio::test]

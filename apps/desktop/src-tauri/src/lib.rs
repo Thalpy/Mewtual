@@ -14,7 +14,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
-    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Profile, Server, ServerActor,
+    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, Profile, Server, ServerActor,
     ServerRecord, ServerStore, MAX_AVATAR_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
@@ -210,23 +210,6 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
-                }
-                AppEvent::DownloadProgress {
-                    cid,
-                    done,
-                    total,
-                    provider,
-                } => {
-                    let _ = app.emit(
-                        "download-progress",
-                        DownloadProgressEvt {
-                            server,
-                            cid: hex::encode(cid),
-                            done,
-                            total,
-                            provider,
-                        },
-                    );
                 }
                 AppEvent::StatusUpdated => {
                     let _ = app.emit("status-updated", ServerEvt { server });
@@ -1178,17 +1161,59 @@ async fn delete_file(state: State<'_, AppState>, server: u64, cid: String) -> Re
     Ok(())
 }
 
-/// Download a shared file by content-address hex; returns base64-encoded bytes.
+/// Download a shared file by content-address hex; returns base64-encoded bytes. Fetches the file
+/// ONE chunk per actor command (emitting `download-progress` after each), so a large download no
+/// longer freezes the server actor — the actor returns to its loop between chunks and interleaves
+/// other commands + network sync. The whole reassembled file is verified against the requested
+/// content address (defends against a malicious manifest whose chunks individually verify).
 #[tauri::command]
 async fn download_file(
+    app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
     cid: String,
 ) -> Result<String, String> {
     let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    let target: [u8; 32] = raw
+        .clone()
+        .try_into()
+        .map_err(|_| "bad cid length".to_string())?;
     let actor = actor_of(&state, server).await?;
-    let bytes = actor.download_file(raw).await?;
-    Ok(B64.encode(&bytes))
+    let (total, size) = actor
+        .file_download_plan(raw.clone())
+        .await
+        .ok_or_else(|| {
+            "this file can't be downloaded — it isn't listed, or its reference is invalid".to_string()
+        })?;
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgressEvt {
+            server,
+            cid: cid.clone(),
+            done: 0,
+            total,
+            provider: None,
+        },
+    );
+    let mut out = Vec::with_capacity(size as usize);
+    for i in 0..total {
+        let (chunk, provider) = actor.fetch_file_chunk(raw.clone(), i).await?;
+        out.extend_from_slice(&chunk);
+        let _ = app.emit(
+            "download-progress",
+            DownloadProgressEvt {
+                server,
+                cid: cid.clone(),
+                done: i + 1,
+                total,
+                provider,
+            },
+        );
+    }
+    if Cid::of(&out).as_bytes() != &target {
+        return Err("the reassembled file failed its integrity check".into());
+    }
+    Ok(B64.encode(&out))
 }
 
 /// Post to the server status feed.
