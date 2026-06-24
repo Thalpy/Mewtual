@@ -75,6 +75,8 @@ pub enum AppCommand {
     },
     /// Query the shared file list with per-file local-availability counts + a reachable-peer flag.
     FilesView { reply: oneshot::Sender<FilesView> },
+    /// Query the fingerprints of members reachable right now (presence).
+    OnlineMembers { reply: oneshot::Sender<Vec<String>> },
     /// Download a file's bytes by content address (raw CID bytes); a precise error otherwise.
     DownloadFile {
         cid: Vec<u8>,
@@ -195,6 +197,9 @@ pub enum AppEvent {
     /// The advisory eclipse verdict changed: `true` = the node may be isolated (verify a member
     /// out of band). Surfaced as a UI hint; never gates anything.
     EclipseChanged { caution: bool },
+    /// The set of members reachable right now (a live connection) changed — `online` is their
+    /// fingerprints, for the roster's presence indicators + the file-availability hint.
+    ConnectivityChanged { online: Vec<String> },
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -430,6 +435,20 @@ impl ServerActor {
             return empty();
         }
         rx.await.unwrap_or_else(|_| empty())
+    }
+
+    /// Fetch the fingerprints of members reachable right now (presence).
+    pub async fn online_members(&self) -> Vec<String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::OnlineMembers { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
     }
 
     /// Download a file's bytes by content address (raw CID bytes); a precise error string if it
@@ -677,6 +696,7 @@ where
         }
         let mut last_roles = server.roles();
         let mut last_eclipse = false;
+        let mut last_online = server.online_members();
         loop {
             tokio::select! {
                 biased;
@@ -755,6 +775,9 @@ where
                     }
                     Some(AppCommand::FilesView { reply }) => {
                         let _ = reply.send(server.files_view());
+                    }
+                    Some(AppCommand::OnlineMembers { reply }) => {
+                        let _ = reply.send(server.online_members());
                     }
                     Some(AppCommand::DownloadFile { cid, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -967,6 +990,16 @@ where
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                        // Presence: emit when the set of currently-reachable members changes
+                        // (a peer connected or dropped). `online_members` is sorted, so the Vec
+                        // compare is order-stable.
+                        let online = server.online_members();
+                        if online != last_online {
+                            last_online = online.clone();
+                            let _ = event_tx
+                                .send(AppEvent::ConnectivityChanged { online })
+                                .await;
                         }
                     }
                     _ => {

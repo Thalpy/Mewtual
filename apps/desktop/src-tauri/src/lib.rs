@@ -158,6 +158,11 @@ struct EclipseEvt {
     server: u64,
     caution: bool,
 }
+#[derive(Serialize, Clone)]
+struct OnlineEvt {
+    server: u64,
+    online: Vec<String>,
+}
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
 /// How often the bridge nudges a server's actor to drive steady-state rendezvous discovery. The
@@ -231,6 +236,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::EclipseChanged { caution } => {
                     let _ = app.emit("eclipse-changed", EclipseEvt { server, caution });
+                }
+                AppEvent::ConnectivityChanged { online } => {
+                    let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
                 }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
@@ -1035,6 +1043,13 @@ async fn get_files(state: State<'_, AppState>, server: u64) -> Result<FilesPaylo
     })
 }
 
+/// The fingerprints of members reachable right now (presence indicators in the roster).
+#[tauri::command]
+async fn get_online_members(state: State<'_, AppState>, server: u64) -> Result<Vec<String>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.online_members().await)
+}
+
 /// Whether a shared file's blob is held locally (openable without a network fetch).
 #[tauri::command]
 async fn file_available(
@@ -1441,6 +1456,7 @@ pub fn run() {
             get_profiles,
             add_file,
             get_files,
+            get_online_members,
             download_file,
             file_available,
             delete_file,

@@ -84,6 +84,9 @@
   let draft = $state("");
   let members = $state(1);
   let roster = $state<Member[]>([]);
+  // Fingerprints of members reachable right now (a live connection) — drives the roster's online
+  // dots + the online count. Refreshed with the roster and updated live by 'connectivity-changed'.
+  let onlineMembers = $state<Set<string>>(new Set());
   let rosterFilter = $state("");
   let filteredRoster = $derived.by(() => {
     const q = rosterFilter.trim().toLowerCase();
@@ -92,6 +95,8 @@
       (m) => m.fingerprint.toLowerCase().includes(q) || nameOf(m.fingerprint).toLowerCase().includes(q),
     );
   });
+  // Members reachable right now (self always counts) — the roster header's "N online".
+  let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   // Whether ≥1 peer is currently reachable to fetch missing chunks from (a soft availability hint;
@@ -248,11 +253,12 @@
     }
   });
 
-  // The eclipse hint is per-server; clear it when switching (the new server re-asserts via its
-  // next 'eclipse-changed' event).
+  // The eclipse hint + presence are per-server; clear them when switching (the new server re-loads
+  // presence via refreshMembers and re-asserts the eclipse hint via its next event).
   $effect(() => {
     void activeServerId;
     eclipseCaution = false;
+    onlineMembers = new Set();
   });
 
   // Resolve inline media embeds + custom emoji whenever content or the file index changes.
@@ -503,10 +509,15 @@
     }
   }
   async function refreshMembers() {
-    if (activeServerId === null) return;
+    const id = activeServerId;
+    if (id === null) return;
     try {
-      roster = await invoke<Member[]>("get_members", { server: activeServerId });
-      members = roster.length;
+      const r = await invoke<Member[]>("get_members", { server: id });
+      const online = await invoke<string[]>("get_online_members", { server: id });
+      if (activeServerId !== id) return; // server switched mid-fetch — drop stale results
+      roster = r;
+      members = r.length;
+      onlineMembers = new Set(online);
     } catch (e) {
       error = String(e);
     }
@@ -1363,6 +1374,12 @@
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
       }),
+      listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
+        if (e.payload.server === activeServerId) {
+          onlineMembers = new Set(e.payload.online);
+          refreshFiles(); // a peer came/went — re-evaluate the availability hint (has_peers)
+        }
+      }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
@@ -1551,13 +1568,15 @@
         {/if}
 
         <div class="roster">
-          <h3>Members <span class="muted">({members})</span></h3>
+          <h3>Members <span class="muted">({members}{#if members > 1} · {onlineCount} online{/if})</span></h3>
           {#if roster.length > 6}
             <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
           {/if}
           <ul>
             {#each filteredRoster as m}
+              {@const online = m.you || onlineMembers.has(m.fingerprint)}
               <li title={m.fingerprint} class:is-you={m.you} use:contextMenu={() => memberMenu(m)}>
+                <span class="presence" class:online title={online ? "online" : "offline"}>●</span>
                 {@render avatarTag(m.fingerprint)}
                 {@render nameTag(m.fingerprint)}
                 {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}

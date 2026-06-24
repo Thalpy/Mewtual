@@ -1574,6 +1574,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// un-handshaked candidates cannot crowd out a known-good source (the Sybil-C1
     /// fix). Bounded by `max_known_peers`.
     member_peers: VecDeque<PeerId>,
+    /// The set of transport peers with a **live connection right now** — maintained on both
+    /// `PeerConnected` (insert) and `PeerDisconnected` (remove), unlike `known_peers`/`member_peers`
+    /// which only grow. The accurate liveness signal for presence + the file-availability hint.
+    /// Transient (connections re-establish on reload).
+    connected_peers: HashSet<PeerId>,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
     /// Peers that recently answered a commit catch-up without filling the gap;
@@ -1676,6 +1681,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             routing_secrets: BTreeMap::new(),
             known_peers: VecDeque::new(),
             member_peers: VecDeque::new(),
+            connected_peers: HashSet::new(),
             catchup_queue: Vec::new(),
             failed_catchup_peers: VecDeque::new(),
             pending: None,
@@ -2196,6 +2202,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Ok(true)
             }
             Some(TransportEvent::PeerConnected(peer)) => {
+                self.connected_peers.insert(peer);
                 self.remember_peer(peer);
                 // A freshly-connected peer is a catch-up source; proactively probe in
                 // case we fell behind while the live topic was outside our window
@@ -2204,7 +2211,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.maybe_probe_for_missed_commits();
                 Ok(true)
             }
-            Some(_) => Ok(true),
+            Some(TransportEvent::PeerDisconnected(peer)) => {
+                // Drop it from the live-connection set so presence + the availability hint reflect
+                // the loss. (Catch-up source lists are left as-is — they age out / re-prove; only
+                // liveness needs the precise removal.)
+                self.connected_peers.remove(&peer);
+                Ok(true)
+            }
         }
     }
 
@@ -2912,6 +2925,44 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// PEX-sourced dial candidates).
     pub fn known_peer_records(&self) -> Vec<PeerDescriptor> {
         self.peer_records.values().cloned().collect()
+    }
+
+    /// Whether ≥1 transport peer is connected right now — the accurate liveness signal (maintained
+    /// on both connect and disconnect, unlike the catch-up source lists). Backs the file-browser
+    /// "can a fetch be tried" availability hint.
+    pub fn has_connected_peer(&self) -> bool {
+        !self.connected_peers.is_empty()
+    }
+
+    /// The fingerprints of current members reachable **right now** (a live connection), sorted +
+    /// deduped — for the roster's online indicators. Each member is matched by **its own** signed
+    /// record: iterate `peer_records` by device and surface a member iff the `peer_id` it signed
+    /// into its own `PeerDescriptor` is in the live set AND it is still a roster member. Driving the
+    /// match by the keyed device (rather than searching records by `peer_id`) means a member's
+    /// record can only ever vouch for *that* member — a malicious record claiming another member's
+    /// `peer_id` can mislabel only its own dot, never another's. A member we hold no record for yet
+    /// (no PEX) just won't show until we learn it — a safe under-count, never a false positive.
+    pub fn connected_member_fingerprints(&self) -> Vec<String> {
+        let mut fps = BTreeSet::new();
+        for (device, desc) in &self.peer_records {
+            if self.connected_peers.contains(&PeerId::new(desc.peer_id))
+                && self.group.contains_device(device)
+            {
+                fps.insert(roles::fingerprint(device));
+            }
+        }
+        fps.into_iter().collect()
+    }
+
+    /// Test-only: drive the live-connection set without a real transport (the in-memory transport
+    /// does not model connect/disconnect). Mirrors the `PeerConnected`/`PeerDisconnected` handlers.
+    #[cfg(test)]
+    pub(crate) fn test_set_connected(&mut self, peer: PeerId, connected: bool) {
+        if connected {
+            self.connected_peers.insert(peer);
+        } else {
+            self.connected_peers.remove(&peer);
+        }
     }
 
     /// Verify and store a peer record: its **self-signature** must be valid **and**
@@ -5949,6 +6000,74 @@ mod tests {
 
         // PEX ingestion never promotes anyone to the trusted catch-up pool.
         assert_eq!(alice.stats().member_peers, 0);
+    }
+
+    #[tokio::test]
+    async fn presence_reflects_live_connections_authenticated_per_member() {
+        let (_hub, mut members, ids) = build_members(3).await;
+        let mut it = members.drain(..);
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        drop(it);
+        let bob_peer = bob.local_peer();
+        let carol_peer = carol.local_peer();
+        let bob_fp = roles::fingerprint(&ids[1]);
+        let carol_fp = roles::fingerprint(&ids[2]);
+
+        // Baseline: the in-memory transport reports no live connections.
+        assert!(!alice.has_connected_peer());
+        assert!(alice.connected_member_fingerprints().is_empty());
+
+        // Alice learns Bob's + Carol's signed records (PEX).
+        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+            .unwrap();
+        carol
+            .publish_self_record(vec!["/ip4/10.0.0.3/tcp/1".into()], 1)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        assert!(alice.ingest_peer_record(carol.self_record().unwrap().clone()));
+
+        // Bob connects → only Bob is online; a connection we hold no record for is ignored (a safe
+        // under-count, never a false positive).
+        alice.test_set_connected(bob_peer, true);
+        alice.test_set_connected(PeerId::from_u64(987), true);
+        assert!(alice.has_connected_peer());
+        assert_eq!(alice.connected_member_fingerprints(), vec![bob_fp.clone()]);
+
+        // A malicious member (Bob) re-publishes a fresher record forging Carol's transport id.
+        // Because presence is matched per-device (each record vouches only for its own device key),
+        // this can at most mislabel Bob's OWN dot — it must never hide or steal Carol's presence.
+        let forged_payload = peer_record_signing_payload(
+            &bob.device.public_key_bytes(),
+            carol_peer.as_bytes(),
+            &[],
+            9,
+        );
+        let forged = PeerDescriptor {
+            device_pubkey: bob.device.public_key_bytes(),
+            peer_id: *carol_peer.as_bytes(),
+            addresses: vec![],
+            seq: 9,
+            signature: bob.device.sign(&forged_payload).unwrap(),
+        };
+        let _ = alice.ingest_peer_record(forged);
+        assert_eq!(
+            alice.peer_record(&ids[1]).unwrap().peer_id,
+            *carol_peer.as_bytes(),
+            "the fresher forged record is stored",
+        );
+
+        // Carol connects. Carol shows online from HER OWN record regardless of Bob's forgery.
+        alice.test_set_connected(carol_peer, true);
+        assert!(
+            alice.connected_member_fingerprints().contains(&carol_fp),
+            "Carol's genuine presence is shown despite Bob forging her peer_id",
+        );
+
+        // Disconnect clears liveness for everyone keyed off carol_peer.
+        alice.test_set_connected(carol_peer, false);
+        assert!(!alice.connected_member_fingerprints().contains(&carol_fp));
     }
 
     #[tokio::test]

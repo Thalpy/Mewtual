@@ -1576,3 +1576,14 @@ button.emoji-pick:hover {
 .avail-text.downloading {
   color: #6ab0ff;
 }
+
+/* Roster presence dot — green when the member is reachable right now, dim when not. */
+.presence {
+  flex-shrink: 0;
+  font-size: 0.55rem;
+  line-height: 1;
+  color: #555b66;
+}
+.presence.online {
+  color: #57c759;
+}

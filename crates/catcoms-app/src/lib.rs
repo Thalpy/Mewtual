@@ -961,12 +961,19 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
     }
 
-    /// Whether ≥1 catch-up peer (a proven member, else a handshaked candidate) is currently known
-    /// — a cheap proxy for "a missing chunk could be fetched right now". Does NOT prove any peer
-    /// holds a particular file. Zero network cost (an in-memory peer-set check).
+    /// Whether ≥1 transport peer is connected **right now** — a cheap, accurate proxy for "a
+    /// missing chunk could be fetched". Maintained on connect/disconnect (does NOT go stale like the
+    /// catch-up source lists), though it does not prove any peer holds a particular file. Zero
+    /// network cost (an in-memory peer-set check).
     pub fn has_fetch_peers(&self) -> bool {
-        let s = self.sync.stats();
-        s.member_peers > 0 || s.known_peers > 0
+        self.sync.has_connected_peer()
+    }
+
+    /// The fingerprints of current members reachable right now (a live connection), for the
+    /// roster's presence indicators. Best-effort + authenticated — see
+    /// [`ChannelSync::connected_member_fingerprints`].
+    pub fn online_members(&self) -> Vec<String> {
+        self.sync.connected_member_fingerprints()
     }
 
     /// Remove a file from the shared index, and **garbage-collect its now-orphaned chunk blobs**
