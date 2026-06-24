@@ -432,6 +432,7 @@
     void statuses;
     void files;
     void emojiUrls;
+    void view; // switching tabs destroys + recreates this DOM (fresh, unresolved placeholders)
     tick().then(() => {
       resolveMedia(messagesEl);
       resolveEmoji(messagesEl);
@@ -447,6 +448,7 @@
     void wikiEdit;
     void files;
     void emojiUrls;
+    void view; // re-resolve after a tab switch recreates the wiki DOM
     if (!wikiEdit) {
       tick().then(() => {
         resolveMedia(wikiEl);
@@ -1349,15 +1351,24 @@
 
   async function saveProfile() {
     if (activeServerId === null) return;
+    const prevName = myName; // my name before this edit, to detect a rail that was tracking it
+    const newName = pName.trim() || displayName;
     try {
       await invoke("set_profile", {
         server: activeServerId,
-        name: pName.trim() || displayName,
+        name: newName,
         color: pColor,
         font: pFont,
         effect: pEffect,
         avatar: pAvatar,
       });
+      // Keep the server's rail label in sync ONLY when it was still tracking my name (i.e. never
+      // deliberately renamed in Server settings), so the name I set shows everywhere without
+      // clobbering a chosen server name like "Team Chat".
+      if (cur && !cur.isDm && cur.name === prevName && newName) {
+        await invoke("rename_server", { server: activeServerId, name: newName });
+        cur.name = newName;
+      }
       await refreshProfiles();
     } catch (e) {
       error = String(e);
@@ -1544,6 +1555,7 @@
   let fileInfo = $state<UiFile | null>(null);
   let fileInfoAvail = $state<boolean | null>(null); // null = still checking
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
+  let fileInfoPreviewError = $state(false); // the preview fetch failed (so "Loading…" doesn't hang)
   let fileInfoBusy = $state(false);
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
   // Tracked downloads keyed by file cid, for the Downloads tab + the file-info progress bar. Driven
@@ -1587,6 +1599,7 @@
     fileInfo = f;
     fileInfoAvail = null;
     fileInfoPreview = "";
+    fileInfoPreviewError = false;
     confirmDeleteCid = "";
     const id = activeServerId;
     // Report whether the blob is held locally *before* a preview fetch would pull it. Guard the
@@ -1604,7 +1617,9 @@
         // Guard against a race where the pane was closed/switched while fetching.
         if (fileInfo?.cid === f.cid) fileInfoPreview = `data:${f.mime};base64,${base64}`;
       } catch {
-        /* no preview — the availability line already explains why */
+        // The fetch failed (not held locally + no peer sharing it) — surface that instead of
+        // leaving "Loading preview…" up forever.
+        if (fileInfo?.cid === f.cid) fileInfoPreviewError = true;
       }
     }
   }
@@ -1612,6 +1627,7 @@
   function closeFileInfo() {
     fileInfo = null;
     fileInfoPreview = "";
+    fileInfoPreviewError = false;
     fileInfoAvail = null;
     confirmDeleteCid = "";
   }
@@ -3151,7 +3167,9 @@
           <div class="overlay-body file-info">
             {#if previewKind}
               <div class="file-preview">
-                {#if !fileInfoPreview}
+                {#if fileInfoPreviewError}
+                  <p class="muted small">Preview unavailable — the file isn't downloaded yet and no peer is sharing it right now.</p>
+                {:else if !fileInfoPreview}
                   <p class="muted small">Loading preview…</p>
                 {:else if previewKind === "image"}
                   <img src={fileInfoPreview} alt={fileInfo.name} />

@@ -2338,6 +2338,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_customized_profile_survives_a_snapshot_restore() {
+        // Regression: a reload must keep the user's customized name/styling. The snapshot preserves
+        // the Profile doc; the actor's `spawn` seed is "only if absent", so it leaves a restored
+        // profile alone (the bug was an unconditional re-seed reverting the name to the founding one).
+        let mut alice = founder();
+        alice.open_profiles().await.unwrap();
+        alice
+            .set_profile(Profile {
+                name: "Renamed Alice".into(),
+                color: "#ff0000".into(),
+                ..Profile::default()
+            })
+            .await
+            .unwrap();
+        let me = alice.my_fingerprint();
+        let snap = alice.snapshot().unwrap();
+
+        // Restore onto a fresh transport — note the founding display name "alice" is NOT the saved
+        // profile name, so a naive re-seed would clobber "Renamed Alice".
+        let hub = Hub::new();
+        let restored = Server::restore(
+            &snap,
+            hub.join(PeerId::from_u64(9)),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(2_000)),
+            "alice",
+        )
+        .unwrap();
+
+        let p = restored.profiles();
+        assert!(
+            p.contains_key(&me),
+            "the profile exists post-restore → spawn's guard skips the seed"
+        );
+        assert_eq!(p[&me].name, "Renamed Alice", "custom name survived reload");
+        assert_eq!(p[&me].color, "#ff0000", "custom styling survived reload");
+    }
+
+    #[tokio::test]
     async fn a_joiner_converges_on_the_channel_through_the_facade() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);

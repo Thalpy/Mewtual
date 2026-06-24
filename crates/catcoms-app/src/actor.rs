@@ -903,16 +903,20 @@ where
         let mut members = server.member_count();
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
-        // customize color/font/effect later via SetProfile).
+        // customize color/font/effect later via SetProfile). Seed ONLY when this device has no
+        // profile entry yet (first founding/join) — otherwise a reload would overwrite the
+        // customized name/color/font the user saved with the founding display name + defaults.
         if let Err(e) = server.open_profiles().await {
             tracing::warn!(error = %e, "open_profiles failed");
         }
-        let seed = Profile {
-            name: server.display_name().to_string(),
-            ..Profile::default()
-        };
-        if let Err(e) = server.set_profile(seed).await {
-            tracing::warn!(error = %e, "seed profile failed");
+        if !server.profiles().contains_key(&server.my_fingerprint()) {
+            let seed = Profile {
+                name: server.display_name().to_string(),
+                ..Profile::default()
+            };
+            if let Err(e) = server.set_profile(seed).await {
+                tracing::warn!(error = %e, "seed profile failed");
+            }
         }
         let mut last_profiles = server.profiles();
         // Open the per-server file index too.
