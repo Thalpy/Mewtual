@@ -50,6 +50,8 @@ struct ServerEntry {
     /// freshly-minted invite's namespace at the rendezvous *after* the `Server` was moved into its
     /// actor. `None` for a joiner (never registers) or a server without rendezvous.
     mesh: Option<MeshHandle>,
+    /// Whether this group is a 1:1 DM (shown behind the DMs circle) rather than a server.
+    is_dm: bool,
 }
 
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
@@ -77,6 +79,7 @@ async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> 
 struct FoundResult {
     server: u64,
     channel: String,
+    is_dm: bool,
 }
 
 /// A chat message as serialized to the frontend.
@@ -297,6 +300,7 @@ async fn register_server(
     bootstrap: Vec<String>,
     rendezvous: Vec<String>,
     mesh: Option<MeshHandle>,
+    is_dm: bool,
 ) -> u64 {
     let id = {
         let mut n = state.next_id.lock().await;
@@ -314,6 +318,7 @@ async fn register_server(
             bootstrap,
             rendezvous,
             mesh,
+            is_dm,
         },
     );
     id
@@ -352,6 +357,7 @@ async fn persist_registry(state: &AppState) {
                 id: *id,
                 display_name: e.name.clone(),
                 invite: e.invite.clone().unwrap_or_default(),
+                is_dm: e.is_dm,
             })
             .collect()
     };
@@ -564,6 +570,7 @@ async fn found_server(
     advertise: String,
     relay: String,
     rendezvous: String,
+    is_dm: bool,
 ) -> Result<FoundResult, String> {
     let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
@@ -710,6 +717,7 @@ async fn found_server(
         bootstrap,
         rz_vec,
         rz_handle,
+        is_dm,
     )
     .await;
     // Seal the new server + the registry to disk (if the store is unlocked).
@@ -718,6 +726,7 @@ async fn found_server(
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
+        is_dm,
     })
 }
 
@@ -729,6 +738,7 @@ async fn join_server(
     state: State<'_, AppState>,
     invite_hex: String,
     display_name: String,
+    is_dm: bool,
 ) -> Result<FoundResult, String> {
     let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
     let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
@@ -807,6 +817,7 @@ async fn join_server(
         Vec::new(),
         Vec::new(),
         None,
+        is_dm,
     )
     .await;
     // Seal the joined server + the registry to disk (if the store is unlocked).
@@ -815,6 +826,7 @@ async fn join_server(
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
+        is_dm,
     })
 }
 
@@ -1229,6 +1241,7 @@ struct ReloadedServer {
     name: String,
     invite: String,
     channel: String,
+    is_dm: bool,
 }
 
 /// Reload one sealed server from disk onto a fresh transport and register it under its
@@ -1354,6 +1367,7 @@ async fn reload_one(
             bootstrap,
             rendezvous: rz_vec,
             mesh: rz_handle,
+            is_dm: record.is_dm,
         },
     );
     Ok(())
@@ -1390,6 +1404,7 @@ async fn unlock(
                 name: e.name.clone(),
                 invite: e.invite.clone().unwrap_or_default(),
                 channel: channel_id("general").to_string(),
+                is_dm: e.is_dm,
             })
             .collect());
     }
@@ -1433,6 +1448,7 @@ async fn unlock(
             name: record.display_name.clone(),
             invite: record.invite.clone(),
             channel: channel_id("general").to_string(),
+            is_dm: record.is_dm,
         });
     }
     Ok(reloaded)

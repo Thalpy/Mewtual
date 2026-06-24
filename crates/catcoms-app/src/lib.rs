@@ -1496,6 +1496,7 @@ mod tests {
                         id: 42,
                         display_name: "alice".into(),
                         invite: String::new(),
+                        is_dm: false,
                     }],
                     &mut rng,
                 )

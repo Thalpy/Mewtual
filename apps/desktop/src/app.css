@@ -1595,3 +1595,87 @@ button.emoji-pick:hover {
   font-size: 0.7rem;
   color: #6b7280;
 }
+
+/* Rail separator between the DMs circle and the servers. */
+.rail-sep {
+  width: 24px;
+  height: 1px;
+  background: #3a3d44;
+  flex: none;
+}
+
+/* DM-home sidebar: friends/DM list + the New DM / Add friend composers. */
+.dm-actions {
+  display: flex;
+  gap: 6px;
+}
+.dm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+.dm-form input,
+.dm-form textarea {
+  width: 100%;
+}
+.dm-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dm-list button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  text-align: left;
+  background: transparent;
+  color: #cdd2da;
+  font-weight: 500;
+  padding: 0.3rem 0.4rem;
+}
+.dm-list button:hover {
+  background: #2a2d33;
+}
+.dm-list button.active {
+  background: #34527e;
+  color: #fff;
+}
+.dm-ava {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 50%;
+  background: #34527e;
+  color: #fff;
+  font-size: 0.7rem;
+  flex: none;
+}
+.dm-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dm-code {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.dm-code textarea {
+  width: 100%;
+  font-size: 0.7rem;
+}
+.dm-placeholder {
+  padding: 2rem;
+  text-align: center;
+  max-width: 32rem;
+  margin: 0 auto;
+}

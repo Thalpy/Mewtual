@@ -9,8 +9,8 @@
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
   type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number };
-  type Found = { server: number; channel: string };
-  type Reloaded = { server: number; name: string; invite: string; channel: string };
+  type Found = { server: number; channel: string; is_dm: boolean };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; is_dm: boolean };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
@@ -22,11 +22,22 @@
     unread: string[]; // channel ids with unread
     invite: string; // founder's invite ("" for a joiner)
     dot: boolean; // activity while not the active server
+    isDm: boolean; // a 1:1 DM (shown behind the DMs circle) rather than a server
   };
 
   let servers = $state<ServerState[]>([]);
   let activeServerId = $state<number | null>(null);
+  // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
+  // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
+  let dmHome = $state(false);
+  // Servers shown on the rail vs DMs shown behind the DMs circle.
+  let railServers = $derived(servers.filter((s) => !s.isDm));
+  let dmList = $derived(servers.filter((s) => s.isDm));
   let showAdd = $state(false); // showing the found/join form to add a server
+  let showNewDm = $state(false); // the "New DM" composer (friend name → friend code to share)
+  let showAddFriend = $state(false); // the "Add friend" composer (paste a friend code)
+  let dmName = $state(""); // the friend's name for a new/accepted DM
+  let dmInvite = $state(""); // a pasted friend code (Add friend)
   let showSettings = $state(false); // the personal/app Settings overlay
   let showServerSettings = $state(false); // the per-server (admin) Settings overlay
   let serverNameDraft = $state("");
@@ -410,12 +421,13 @@
       for (const r of reloaded) {
         servers = [
           ...servers,
-          { id: r.server, name: r.name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: r.invite, dot: false },
+          { id: r.server, name: r.name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: r.invite, dot: false, isDm: r.is_dm },
         ];
       }
       locked = false;
       passphrase = "";
-      if (servers.length) switchServer(servers[0].id);
+      const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
+      if (firstServer) switchServer(firstServer.id);
     } catch (e) {
       error = String(e);
     } finally {
@@ -427,7 +439,7 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("found_server", { displayName, advertise, relay, rendezvous });
+      const r = await invoke<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
       addServer(r, displayName);
     } catch (e) {
       error = String(e);
@@ -440,9 +452,47 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: joinInvite.trim(), displayName });
+      const r = await invoke<Found>("join_server", { inviteHex: joinInvite.trim(), displayName, isDm: false });
       addServer(r, displayName);
       joinInvite = "";
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Start a new DM: found a 1:1 group named after the friend; the invite that comes back is the
+  // "friend code" to share. Your own profile name is unchanged (a DM's label is the friend's name).
+  async function newDm() {
+    const name = dmName.trim();
+    if (!name) return;
+    busy = true;
+    error = "";
+    try {
+      const r = await invoke<Found>("found_server", { displayName: name, advertise, relay, rendezvous, isDm: true });
+      addServer(r, name);
+      dmName = "";
+      showNewDm = false;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Accept a friend code: join the friend's 1:1 group, flagged as a DM.
+  async function addFriend() {
+    const name = dmName.trim();
+    if (!name) return;
+    busy = true;
+    error = "";
+    try {
+      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: name, isDm: true });
+      addServer(r, name);
+      dmName = "";
+      dmInvite = "";
+      showAddFriend = false;
     } catch (e) {
       error = String(e);
     } finally {
@@ -453,17 +503,58 @@
   function addServer(r: Found, name: string) {
     servers = [
       ...servers,
-      { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false },
+      { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
     ];
     showAdd = false;
-    pName = name;
+    // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
+    // name, so leave your profile alone.
+    if (!r.is_dm) pName = name;
     switchServer(r.server);
+  }
+
+  // Open the DMs area (the friends/DM list); land on the first DM if there is one, else an empty
+  // DM-home (no active group) ready for a New DM / Add friend.
+  function enterDmHome() {
+    dmHome = true;
+    menu = null;
+    showNewDm = false;
+    showAddFriend = false;
+    if (dmList.length) switchServer(dmList[0].id);
+    else {
+      activeServerId = null;
+      clearServerView(); // no active group — drop the previous server's stale messages/roster/etc.
+    }
+  }
+  // Reset the per-server display collections (used when there is no active group, so nothing from a
+  // previously-active server lingers behind the empty DM-home placeholder).
+  function clearServerView() {
+    view = "chat";
+    messages = [];
+    roster = [];
+    members = 0;
+    files = [];
+    statuses = [];
+    onlineMembers = new Set();
+  }
+  function openNewDm() {
+    showNewDm = true;
+    showAddFriend = false;
+    dmName = "";
+  }
+  function openAddFriend() {
+    showAddFriend = true;
+    showNewDm = false;
+    dmName = "";
+    dmInvite = "";
   }
 
   async function switchServer(id: number) {
     activeServerId = id;
     const s = servers.find((x) => x.id === id);
     if (s) s.dot = false;
+    dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
+    showNewDm = false;
+    showAddFriend = false;
     // Each server has its own wiki + fileshare; reset per-server view state.
     view = "chat";
     activeWikiPage = "";
@@ -1575,10 +1666,20 @@
   {:else}
     <div class="app">
       <nav class="rail">
-        {#each servers as s}
+        <button
+          class="server-icon dm-circle"
+          class:active={dmHome}
+          title="Direct messages & friends"
+          onclick={enterDmHome}
+        >
+          👥
+          {#if dmList.some((d) => d.unread.length || d.dot)}<span class="rail-dot">●</span>{/if}
+        </button>
+        <div class="rail-sep"></div>
+        {#each railServers as s}
           <button
             class="server-icon"
-            class:active={s.id === activeServerId}
+            class:active={s.id === activeServerId && !dmHome}
             title={s.name}
             onclick={() => switchServer(s.id)}
             use:contextMenu={() => serverMenu(s)}
@@ -1597,6 +1698,49 @@
       </nav>
 
       <aside class="sidebar">
+        {#if dmHome}
+          <div class="server-head">
+            <strong class="server-title">Direct messages</strong>
+          </div>
+          <div class="dm-actions">
+            <button class="ghost small" onclick={openNewDm}>＋ New DM</button>
+            <button class="ghost small" onclick={openAddFriend}>Add friend</button>
+          </div>
+          {#if showNewDm}
+            <form class="dm-form" onsubmit={(e) => { e.preventDefault(); newDm(); }}>
+              <input bind:value={dmName} placeholder="Friend's name…" />
+              <button disabled={busy || !dmName.trim()}>Create &amp; get code</button>
+              <span class="muted small">Creates a private 1:1 and gives you a friend code to share.</span>
+            </form>
+          {/if}
+          {#if showAddFriend}
+            <form class="dm-form" onsubmit={(e) => { e.preventDefault(); addFriend(); }}>
+              <input bind:value={dmName} placeholder="Friend's name…" />
+              <textarea bind:value={dmInvite} rows="2" placeholder="Paste their friend code…"></textarea>
+              <button disabled={busy || !dmName.trim() || !dmInvite.trim()}>Connect</button>
+            </form>
+          {/if}
+          <ul class="dm-list">
+            {#each dmList as d}
+              <li>
+                <button class:active={d.id === activeServerId} onclick={() => switchServer(d.id)}>
+                  <span class="dm-ava">{d.name.slice(0, 1).toUpperCase()}</span>
+                  <span class="dm-label">{d.name}</span>
+                  {#if d.unread.length}<span class="dot">●</span>{/if}
+                </button>
+              </li>
+            {:else}
+              <li class="muted">No DMs yet — start one or accept a friend code.</li>
+            {/each}
+          </ul>
+          {#if cur?.isDm && cur.invite}
+            <div class="dm-code">
+              <span class="muted small">Friend code for {cur.name} — share it to connect:</span>
+              <textarea readonly rows="2" value={cur.invite}></textarea>
+              <button class="ghost small" onclick={copyInvite}>Copy code</button>
+            </div>
+          {/if}
+        {:else}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
           <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>🛠</button>
@@ -1650,9 +1794,16 @@
         {#if canInvite || cur?.invite}
           <button class="ghost invite-quick" onclick={() => openServerSettings()}>＋ Invite someone</button>
         {/if}
+        {/if}
       </aside>
 
       <section class="channel">
+        {#if dmHome && !cur}
+          <div class="dm-placeholder">
+            <h2>Direct messages</h2>
+            <p class="muted">Pick a conversation on the left, or start a <strong>New DM</strong> / <strong>Add a friend</strong> with their code. A DM is a private, end-to-end-encrypted 1:1 — your identity here stays unlinkable to your servers.</p>
+          </div>
+        {:else}
         <div class="tab-bar">
           <button class:active={view === "chat"} onclick={() => switchView("chat")}>Chat</button>
           <button class:active={view === "files"} onclick={() => switchView("files")}>
@@ -1955,6 +2106,7 @@
               </ul>
             {/if}
           </div>
+        {/if}
         {/if}
         {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
       </section>

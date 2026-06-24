@@ -31,6 +31,9 @@ pub struct ServerRecord {
     pub display_name: String,
     /// The founder's invite text, so the UI can re-show it (empty for a joiner).
     pub invite: String,
+    /// Whether this group is a 1:1 direct message (a "friend") rather than a server. Shown behind
+    /// the DMs circle, not on the server rail. Encoded as a backward-compatible trailing flag.
+    pub is_dm: bool,
 }
 
 /// A passphrase-gated, on-disk store for a member's servers.
@@ -159,6 +162,13 @@ fn encode_registry(records: &[ServerRecord]) -> Vec<u8> {
         e.put_str(&r.display_name).expect("name fits");
         e.put_str(&r.invite).expect("invite fits");
     }
+    // v2 trailing block: one `is_dm` flag per record, appended after the v1 records. A v1 registry
+    // has no trailing bytes, so a reader defaults every flag to false — existing servers survive.
+    // NOTE: this "is anything left?" trick is single-shot. A future v3 field must introduce an
+    // explicit version byte (a v2 reader can't distinguish v2-only from v2+v3 by length alone).
+    for r in records {
+        e.put_u8(u8::from(r.is_dm));
+    }
     e.finish()
 }
 
@@ -175,7 +185,14 @@ fn decode_registry(bytes: &[u8]) -> Result<Vec<ServerRecord>, AppError> {
             id,
             display_name,
             invite,
+            is_dm: false,
         });
+    }
+    // Read the v2 `is_dm` trailing block if present (a v1 registry ends right after the records).
+    if !d.is_empty() {
+        for r in out.iter_mut() {
+            r.is_dm = d.get_u8().map_err(|_| bad())? != 0;
+        }
     }
     d.finish().map_err(|_| bad())?;
     Ok(out)
@@ -205,11 +222,19 @@ mod tests {
                 id: 1,
                 display_name: "Alice's place".into(),
                 invite: "invite-text".into(),
+                is_dm: false,
             },
             ServerRecord {
                 id: 2,
                 display_name: "Joined server".into(),
                 invite: String::new(),
+                is_dm: false,
+            },
+            ServerRecord {
+                id: 3,
+                display_name: "Bob".into(),
+                invite: "dm-invite".into(),
+                is_dm: true,
             },
         ];
 
@@ -240,6 +265,32 @@ mod tests {
 
         // A WRONG passphrase cannot open the existing vault (and never re-inits it).
         assert!(ServerStore::open(dir.path(), b"wrong passphrase", &mut rng).is_err());
+    }
+
+    #[test]
+    fn a_v1_registry_without_is_dm_flags_decodes_with_dm_false() {
+        // A registry sealed before the is_dm trailing block: count + (id, name, invite)* and
+        // nothing more. The decoder must accept it and default every flag to false.
+        let mut e = Encoder::new();
+        e.put_u32(1);
+        e.put_u64(7);
+        e.put_str("Legacy server").expect("fits");
+        e.put_str("inv").expect("fits");
+        let v1 = e.finish();
+        let out = decode_registry(&v1).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, 7);
+        assert!(!out[0].is_dm, "a v1 record defaults to not-a-DM");
+
+        // And a v2 round-trip preserves the flag.
+        let v2 = encode_registry(&[ServerRecord {
+            id: 9,
+            display_name: "Carol".into(),
+            invite: String::new(),
+            is_dm: true,
+        }]);
+        let back = decode_registry(&v2).unwrap();
+        assert!(back[0].is_dm);
     }
 
     #[test]
