@@ -153,6 +153,46 @@
     showSearch = false;
     searchQuery = "";
   }
+
+  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen, persisted
+  // to localStorage. Entering a channel snapshots the PRIOR mark as `dividerTs` (so a "New" divider
+  // renders before the first message past it), then the mark advances to the latest once loaded.
+  let readMarks = $state<Record<string, number>>(loadReadMarks());
+  let dividerTs = $state(Number.POSITIVE_INFINITY);
+  function loadReadMarks(): Record<string, number> {
+    try {
+      return JSON.parse(localStorage.getItem("catcoms.readmarks") ?? "{}") as Record<string, number>;
+    } catch {
+      return {};
+    }
+  }
+  function persistReadMarks() {
+    try {
+      localStorage.setItem("catcoms.readmarks", JSON.stringify(readMarks));
+    } catch {
+      /* storage unavailable — read marks are best-effort */
+    }
+  }
+  function chanKey(): string | null {
+    if (activeServerId === null || !cur?.active) return null;
+    return `${activeServerId}:${cur.active}`;
+  }
+  function captureDivider() {
+    const k = chanKey();
+    dividerTs = k ? (readMarks[k] ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
+  }
+  function advanceReadMark() {
+    const k = chanKey();
+    if (!k || !messages.length) return;
+    const latest = messages.reduce((a, m) => Math.max(a, m.ts), 0);
+    if ((readMarks[k] ?? 0) < latest) {
+      readMarks[k] = latest;
+      persistReadMarks();
+    }
+  }
+  // Index of the first message newer than the read boundary (-1 if all read).
+  let firstUnreadIdx = $derived(messages.findIndex((m) => m.ts > dividerTs));
+
   let draft = $state("");
   let members = $state(1);
   let roster = $state<Member[]>([]);
@@ -282,6 +322,7 @@
   // admitted when the owner is next online), and revocation is replay-proof (THREAT-MODEL item 3),
   // so this is safe to surface to admins.
   let canInvite = $derived(myRole === "owner" || myRole === "admin");
+  let canModerate = $derived(myRole === "owner" || myRole === "admin");
   let confirmRemoveFp = $state(""); // two-click confirm for member removal
 
   function activeName(): string {
@@ -707,6 +748,7 @@
     wikiEdit = false;
     folder = "";
     newFolder = "";
+    captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
       refresh(),
       refreshMembers(),
@@ -763,6 +805,7 @@
     cur.active = id;
     cur.unread = cur.unread.filter((c) => c !== id);
     if (showSearch) closeSearch();
+    captureDivider(); // snapshot the read boundary before refresh advances the mark
     refresh();
   }
 
@@ -770,6 +813,7 @@
     if (!cur || !cur.active || activeServerId === null) return;
     try {
       messages = await invoke<Msg[]>("get_messages", { server: activeServerId, channel: cur.active });
+      advanceReadMark();
     } catch (e) {
       error = String(e);
     }
@@ -1017,6 +1061,15 @@
         icon: "🗑",
         danger: true,
         onSelect: () => confirmInMenu("Delete this message?", () => deleteMessage(m)),
+      });
+    } else if (m.id && canModerate && !cur?.isDm) {
+      // Owner/admin moderation: remove another member's message (not in DMs).
+      items.push({ divider: true });
+      items.push({
+        label: "Delete (moderator)",
+        icon: "🗑",
+        danger: true,
+        onSelect: () => confirmInMenu(`Delete ${nameOf(m.author)}'s message?`, () => deleteMessage(m)),
       });
     }
     return items;
@@ -2068,6 +2121,9 @@
           <h2>
             #{activeName()} <span class="muted">· {members} member(s)</span>
             <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
+            {#if firstUnreadIdx >= 0}
+              <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => scrollToMatch(firstUnreadIdx)}>↑ New</button>
+            {/if}
           </h2>
           {#if showSearch}
             <div class="msg-search">
@@ -2088,6 +2144,9 @@
           {/if}
           <ul class="messages" bind:this={messagesEl} use:richClicks>
             {#each messages as m, mi}
+              {#if mi === firstUnreadIdx}
+                <li class="unread-divider" aria-hidden="true"><span>New messages</span></li>
+              {/if}
               <li
                 data-mi={mi}
                 class:own={m.author === myFp}

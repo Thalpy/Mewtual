@@ -1767,3 +1767,27 @@ button.emoji-pick:hover {
 .edited-tag {
   font-size: 0.75em;
 }
+
+/* Jump-to-unread: the "New messages" divider + the header jump button. */
+.unread-divider {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 2px;
+  color: var(--accent, #6c8cff);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.unread-divider::before,
+.unread-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--accent, #6c8cff);
+  opacity: 0.45;
+}
+.jump-unread {
+  color: var(--accent, #6c8cff);
+}

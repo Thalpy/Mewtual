@@ -756,10 +756,17 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Delete one of **your own** messages (by id) from a channel. Honest-client gating as above.
+    /// Delete a message (by id) from a channel: **your own**, or — if you are the owner/admin —
+    /// anyone's (moderation). Honest-client gating (a modified client could post a raw delete op
+    /// for any message regardless — the documented R6 residual). Errors if the message is gone or
+    /// you may not delete it.
     pub async fn delete_message(&mut self, channel: u128, id: &str) -> Result<(), AppError> {
         let me = self.my_fingerprint();
-        if !self.owns_message(channel, id, &me) {
+        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+            return Err(AppError::Invalid("no such message".into()));
+        };
+        let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
+        if msg.author != me && !moderator {
             return Err(AppError::Invalid(
                 "you can only delete your own messages".into(),
             ));
@@ -771,13 +778,6 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })
             .await?;
         Ok(())
-    }
-
-    /// Whether message `id` exists in `channel` and is authored by `me` (the soft own-message gate).
-    fn owns_message(&self, channel: u128, id: &str, me: &str) -> bool {
-        self.messages(channel)
-            .iter()
-            .any(|m| m.id == id && m.author == me)
     }
 
     /// This device's short fingerprint (the key its messages + profile are stored under).
@@ -1750,6 +1750,32 @@ mod tests {
         // Editing/deleting an unknown (or not-your-own) message is refused.
         assert!(alice.edit_message(GENERAL, "deadbeef", "x").await.is_err());
         assert!(alice.delete_message(GENERAL, "deadbeef").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_owner_can_moderation_delete_another_members_message() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        assert_eq!(alice.my_role(), Role::Owner);
+
+        // Inject a message authored by someone else (as if it had arrived over gossip).
+        alice
+            .sync
+            .post(DocType::Channel, GENERAL, move |d| {
+                append_message(d, "mid-01", "beefbeef", "spam", 5).map(|_| ())
+            })
+            .await
+            .unwrap();
+        assert!(alice
+            .messages(GENERAL)
+            .iter()
+            .any(|m| m.author == "beefbeef"));
+
+        // An owner may delete it even though it isn't theirs (moderation); editing it is still
+        // refused (moderation is delete-only — no impersonation).
+        assert!(alice.edit_message(GENERAL, "mid-01", "x").await.is_err());
+        alice.delete_message(GENERAL, "mid-01").await.unwrap();
+        assert!(!alice.messages(GENERAL).iter().any(|m| m.id == "mid-01"));
     }
 
     #[tokio::test]
