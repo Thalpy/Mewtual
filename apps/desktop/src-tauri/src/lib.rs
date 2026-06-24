@@ -91,6 +91,7 @@ struct UiMessage {
     ts: u64,
     edited: u64,
     reactions: Vec<UiReaction>,
+    reply_to: String,
 }
 
 /// One emoji reaction on a message (the emoji + the fingerprints of those who reacted).
@@ -116,6 +117,7 @@ fn ui_message(m: catcoms_app::ChatMessage) -> UiMessage {
                 by: r.by,
             })
             .collect(),
+        reply_to: m.reply_to,
     }
 }
 
@@ -1349,10 +1351,11 @@ async fn send_message(
     server: u64,
     channel: String,
     text: String,
+    reply_to: Option<String>,
 ) -> Result<(), String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
-    actor.send_message(id, text).await;
+    actor.send_reply(id, text, reply_to.unwrap_or_default()).await;
     persist_server(&state, server).await;
     Ok(())
 }

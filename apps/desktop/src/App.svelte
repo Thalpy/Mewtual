@@ -5,7 +5,7 @@
   import { renderMessage, renderWiki } from "./render";
 
   type Reaction = { emoji: string; by: string[] };
-  type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[] };
+  type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string };
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
@@ -751,6 +751,7 @@
     folder = "";
     newFolder = "";
     reactionPickerFor = "";
+    replyingTo = "";
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
       refresh(),
@@ -809,6 +810,7 @@
     cur.unread = cur.unread.filter((c) => c !== id);
     if (showSearch) closeSearch();
     reactionPickerFor = "";
+    replyingTo = "";
     captureDivider(); // snapshot the read boundary before refresh advances the mark
     refresh();
   }
@@ -1057,7 +1059,13 @@
       { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
     ];
     if (m.id) {
-      items.splice(0, 0, { label: "React…", icon: "☺", onSelect: () => (reactionPickerFor = m.id) }, { divider: true });
+      items.splice(
+        0,
+        0,
+        { label: "Reply", icon: "↰", onSelect: () => startReply(m) },
+        { label: "React…", icon: "☺", onSelect: () => (reactionPickerFor = m.id) },
+        { divider: true },
+      );
     }
     // Edit / delete your own messages (legacy ones without an id can't be targeted).
     if (m.author === myFp && m.id) {
@@ -1588,12 +1596,44 @@
     return "";
   });
 
+  // Index the loaded messages by id once per change, so reply-parent lookups (the quote on every
+  // reply + the composer banner) are O(1) instead of a linear scan per render.
+  let msgById = $derived(new Map(messages.map((m) => [m.id, m] as const)));
+  // Reply target: the id of the message the composer is replying to ("" = a plain message).
+  let replyingTo = $state("");
+  let replyTarget = $derived(replyingTo ? msgById.get(replyingTo) : undefined);
+  // Briefly flash a message you jumped to (e.g. from a reply quote), keyed by id so it survives
+  // index shifts; cleared after the pulse.
+  let flashId = $state("");
+  function jumpToMessageId(id: string) {
+    const idx = messages.findIndex((m) => m.id === id);
+    if (idx < 0) return; // parent not in the loaded list (deleted / scrolled out of history)
+    scrollToMatch(idx);
+    flashId = id;
+    setTimeout(() => {
+      if (flashId === id) flashId = "";
+    }, 1300);
+  }
+  function startReply(m: Msg) {
+    replyingTo = m.id;
+    composerEl?.focus();
+  }
+  function cancelReply() {
+    replyingTo = "";
+  }
+  function msgSnippet(text: string, n = 70): string {
+    const t = text.replace(/\s+/g, " ").trim();
+    return t.length > n ? t.slice(0, n) + "…" : t;
+  }
+
   async function send() {
     const text = draft.trim();
     if (!text || !cur || !cur.active || activeServerId === null) return;
+    const reply_to = replyingTo;
     draft = "";
+    replyingTo = "";
     try {
-      await invoke("send_message", { server: activeServerId, channel: cur.active, text });
+      await invoke("send_message", { server: activeServerId, channel: cur.active, text, replyTo: reply_to });
     } catch (e) {
       error = String(e);
     }
@@ -1819,6 +1859,7 @@
       if (e.key === "Escape") {
         if (menu) menu = null;
         else if (reactionPickerFor) reactionPickerFor = "";
+        else if (replyingTo) replyingTo = "";
         else if (showEmoji) showEmoji = false;
         else if (fileInfo) closeFileInfo();
         else if (showWikiHelp) showWikiHelp = false;
@@ -2176,8 +2217,25 @@
                 class:own={m.author === myFp}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchMatches[searchPos] === mi}
+                class:flash={!!m.id && m.id === flashId}
                 use:contextMenu={() => messageMenu(m)}
               >
+                {#if m.reply_to}
+                  {@const parent = msgById.get(m.reply_to)}
+                  <button
+                    class="reply-quote"
+                    type="button"
+                    title="Jump to the replied message"
+                    onclick={() => jumpToMessageId(m.reply_to)}
+                  >
+                    <span class="reply-arrow">↰</span>
+                    {#if parent}
+                      {@render nameTag(parent.author)}<span class="muted"> {msgSnippet(parent.text, 60)}</span>
+                    {:else}
+                      <span class="muted">original message</span>
+                    {/if}
+                  </button>
+                {/if}
                 <span class="author">
                   {@render avatarTag(m.author)}
                   {@render nameTag(m.author)}
@@ -2231,6 +2289,17 @@
             {/each}
           </ul>
           <div class="composer-wrap">
+            {#if replyingTo}
+              <div class="reply-banner">
+                <span class="reply-arrow">↰</span>
+                {#if replyTarget}
+                  <span>Replying to {@render nameTag(replyTarget.author)}<span class="muted"> {msgSnippet(replyTarget.text, 60)}</span></span>
+                {:else}
+                  <span class="muted">Replying to a message</span>
+                {/if}
+                <button class="ghost small reply-cancel" type="button" title="Cancel reply (Esc)" onclick={cancelReply}>✕</button>
+              </div>
+            {/if}
             {#if showEmoji}
               <div class="emoji-picker">
                 {#if Object.keys(emojiMap).length}

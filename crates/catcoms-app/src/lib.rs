@@ -83,6 +83,8 @@ pub struct ChatMessage {
     pub edited: u64,
     /// Emoji reactions on this message (empty if none).
     pub reactions: Vec<Reaction>,
+    /// The id of the message this one replies to, or empty if it isn't a reply.
+    pub reply_to: String,
 }
 
 /// One emoji reaction on a message: the emoji plus the fingerprints of the members who reacted.
@@ -136,6 +138,7 @@ const TEXT: &str = "text";
 const TS: &str = "ts";
 const MSG_ID: &str = "id";
 const EDITED: &str = "edited";
+const REPLY_TO: &str = "reply_to";
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -144,6 +147,7 @@ pub fn append_message(
     author: &str,
     text: &str,
     ts: u64,
+    reply_to: &str,
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, MESSAGES)? {
         Some((Value::Object(ObjType::List), id)) => id,
@@ -155,6 +159,10 @@ pub fn append_message(
     doc.put(&msg, AUTHOR, author)?;
     doc.put(&msg, TEXT, text)?;
     doc.put(&msg, TS, ts as i64)?;
+    // Only carry a reply pointer when it's actually a reply (keeps plain messages key-clean).
+    if !reply_to.is_empty() {
+        doc.put(&msg, REPLY_TO, reply_to)?;
+    }
     Ok(())
 }
 
@@ -171,6 +179,7 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
                     ts: int_field(doc, &msg, TS),
                     edited: int_field(doc, &msg, EDITED),
                     reactions: read_reactions(doc, &msg),
+                    reply_to: str_field(doc, &msg, REPLY_TO),
                 });
             }
         }
@@ -782,12 +791,24 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// fingerprint**; the display name + styling are resolved from the author's profile
     /// at render time (so a profile change updates all of that member's messages).
     pub async fn send_message(&mut self, channel: u128, text: &str) -> Result<(), AppError> {
+        self.send_reply(channel, text, "").await
+    }
+
+    /// Send a chat message that replies to `reply_to` (the parent message's id; empty for a plain
+    /// message). The pointer is advisory display metadata — it doesn't affect ordering or delivery.
+    pub async fn send_reply(
+        &mut self,
+        channel: u128,
+        text: &str,
+        reply_to: &str,
+    ) -> Result<(), AppError> {
         let author = self.my_fingerprint();
         let ts = self.sync.now_ms();
         let id = self.sync.random_id();
+        let reply_to = reply_to.to_string();
         self.sync
             .post(DocType::Channel, channel, |d| {
-                append_message(d, &id, &author, text, ts)
+                append_message(d, &id, &author, text, ts, &reply_to)
             })
             .await?;
         Ok(())
@@ -1358,7 +1379,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let id = self.sync.random_id();
         self.sync
             .post(DocType::Status, STATUS_DOC, |d| {
-                append_message(d, &id, &author, text, ts)
+                append_message(d, &id, &author, text, ts, "")
             })
             .await?;
         Ok(())
@@ -1860,7 +1881,7 @@ mod tests {
         alice
             .sync
             .post(DocType::Channel, GENERAL, move |d| {
-                append_message(d, "mid-01", "beefbeef", "spam", 5).map(|_| ())
+                append_message(d, "mid-01", "beefbeef", "spam", 5, "").map(|_| ())
             })
             .await
             .unwrap();
@@ -1922,7 +1943,7 @@ mod tests {
         // SAME message while partitioned must BOTH survive the merge (no dropped reaction), and both
         // replicas must converge to identical state. Exercised at the CRDT layer via fork/merge.
         let mut base = AutoCommit::new();
-        append_message(&mut base, "m1", "alice", "hi", 1).unwrap();
+        append_message(&mut base, "m1", "alice", "hi", 1, "").unwrap();
         let mut a = base.fork();
         let mut b = base.fork();
 
@@ -1972,6 +1993,28 @@ mod tests {
             .reactions
             .iter()
             .any(|r| r.emoji == "🔥" && r.by == vec!["bob".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn a_reply_carries_its_parent_id() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.send_message(GENERAL, "parent").await.unwrap();
+        let parent_id = alice.messages(GENERAL)[0].id.clone();
+        assert!(!parent_id.is_empty());
+
+        alice
+            .send_reply(GENERAL, "child", &parent_id)
+            .await
+            .unwrap();
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].reply_to, "", "a plain message carries no parent");
+        assert_eq!(
+            msgs[1].reply_to, parent_id,
+            "the reply points at its parent"
+        );
+        assert_eq!(msgs[1].text, "child");
     }
 
     #[tokio::test]

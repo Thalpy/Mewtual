@@ -40,8 +40,12 @@ pub enum AppCommand {
         channel: u128,
         ack: oneshot::Sender<()>,
     },
-    /// Send a chat message to a channel.
-    SendMessage { channel: u128, text: String },
+    /// Send a chat message to a channel (`reply_to` = the parent message id, or empty).
+    SendMessage {
+        channel: u128,
+        text: String,
+        reply_to: String,
+    },
     /// Edit the text of one of your own messages (by id) in a channel.
     EditMessage {
         channel: u128,
@@ -271,6 +275,24 @@ impl ServerActor {
             .send(AppCommand::SendMessage {
                 channel,
                 text: text.into(),
+                reply_to: String::new(),
+            })
+            .await;
+    }
+
+    /// Send a chat message replying to `reply_to` (the parent message's id).
+    pub async fn send_reply(
+        &self,
+        channel: u128,
+        text: impl Into<String>,
+        reply_to: impl Into<String>,
+    ) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::SendMessage {
+                channel,
+                text: text.into(),
+                reply_to: reply_to.into(),
             })
             .await;
     }
@@ -887,8 +909,12 @@ where
                         channel_changed(&server, channel, &mut counts);
                         let _ = ack.send(());
                     }
-                    Some(AppCommand::SendMessage { channel, text }) => {
-                        if let Err(e) = server.send_message(channel, &text).await {
+                    Some(AppCommand::SendMessage {
+                        channel,
+                        text,
+                        reply_to,
+                    }) => {
+                        if let Err(e) = server.send_reply(channel, &text, &reply_to).await {
                             tracing::warn!(error = %e, channel, "send_message failed");
                         }
                         if channel_changed(&server, channel, &mut counts) {

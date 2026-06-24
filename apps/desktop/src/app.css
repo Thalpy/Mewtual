@@ -1845,3 +1845,58 @@ button.emoji-pick:hover {
 .reaction-picker .qe:hover {
   background: var(--accent-dim, #232a44);
 }
+
+/* Reply / threading: the parent quote on a message + the composer reply banner. */
+.reply-quote {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 0 2px 0;
+  padding: 1px 6px 1px 2px;
+  border: none;
+  background: none;
+  border-left: 2px solid var(--border, #2a2a36);
+  color: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  opacity: 0.8;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.reply-quote:hover {
+  opacity: 1;
+  border-left-color: var(--accent, #6c8cff);
+}
+.reply-arrow {
+  opacity: 0.7;
+}
+.reply-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  border-radius: 8px;
+  background: var(--accent-dim, #232a44);
+  border: 1px solid var(--border, #2a2a36);
+  font-size: 0.82rem;
+}
+.reply-banner .reply-cancel {
+  margin-left: auto;
+}
+
+/* Flash a message you jumped to from a reply quote. */
+@keyframes flashPulse {
+  0% {
+    background: var(--accent-dim, #232a44);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.messages li.flash {
+  animation: flashPulse 1.3s ease-out;
+  border-radius: 6px;
+}
