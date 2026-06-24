@@ -87,6 +87,13 @@
   // Fingerprints of members reachable right now (a live connection) — drives the roster's online
   // dots + the online count. Refreshed with the roster and updated live by 'connectivity-changed'.
   let onlineMembers = $state<Set<string>>(new Set());
+  // Per-member presence timing OBSERVED this session for the active server (wall-clock ms): when we
+  // saw a member come online / go offline. Only set on a transition we witnessed, so durations are
+  // honest (a member already online at load shows "Online" with no fabricated duration). Per-server.
+  let onlineSince = $state<Record<string, number>>({});
+  let lastSeen = $state<Record<string, number>>({});
+  // Ticks every 60s so relative presence times ("Last seen 5m ago") stay current without a reload.
+  let nowTick = $state(Date.now());
   let rosterFilter = $state("");
   let filteredRoster = $derived.by(() => {
     const q = rosterFilter.trim().toLowerCase();
@@ -233,6 +240,27 @@
   function fmtTime(ts: number): string {
     return ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   }
+  // Coarse relative duration for presence ("45s", "5m", "3h", "2d").
+  function relTime(ms: number): string {
+    const s = Math.max(0, Math.round(ms / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.round(m / 60);
+    if (h < 24) return `${h}h`;
+    return `${Math.round(h / 24)}d`;
+  }
+  // The presence detail line for a member: "You" / "Online" / "Online · 5m" / "Last seen 5m ago" /
+  // "Offline". Durations only appear for transitions we actually observed this session.
+  function presenceText(fp: string, you: boolean): string {
+    if (you) return "You";
+    if (onlineMembers.has(fp)) {
+      const since = onlineSince[fp];
+      return since ? `Online · ${relTime(nowTick - since)}` : "Online";
+    }
+    const ls = lastSeen[fp];
+    return ls ? `Last seen ${relTime(nowTick - ls)} ago` : "Offline";
+  }
   function fmtSize(n: number): string {
     if (n < 1024) return `${n} B`;
     if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -259,6 +287,8 @@
     void activeServerId;
     eclipseCaution = false;
     onlineMembers = new Set();
+    onlineSince = {};
+    lastSeen = {};
   });
 
   // Resolve inline media embeds + custom emoji whenever content or the file index changes.
@@ -745,7 +775,15 @@
   }
 
   function memberMenu(m: Member): MenuItem[] {
+    const isOnline = m.you || onlineMembers.has(m.fingerprint);
     const items: MenuItem[] = [
+      {
+        label: presenceText(m.fingerprint, m.you),
+        icon: isOnline ? "●" : "○",
+        disabled: true,
+        onSelect: () => {},
+      },
+      { divider: true },
       { label: "Copy fingerprint", icon: "#", onSelect: () => copyText(m.fingerprint) },
     ];
     const r = roles[m.fingerprint] ?? "member";
@@ -1376,7 +1414,20 @@
       }),
       listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
         if (e.payload.server === activeServerId) {
-          onlineMembers = new Set(e.payload.online);
+          const next = new Set(e.payload.online);
+          const t = Date.now();
+          // Record the transitions we witness, so presence detail can show real durations.
+          for (const fp of next)
+            if (!onlineMembers.has(fp)) {
+              onlineSince[fp] = t;
+              delete lastSeen[fp];
+            }
+          for (const fp of onlineMembers)
+            if (!next.has(fp)) {
+              lastSeen[fp] = t;
+              delete onlineSince[fp];
+            }
+          onlineMembers = next;
           refreshFiles(); // a peer came/went — re-evaluate the availability hint (has_peers)
         }
       }),
@@ -1417,8 +1468,11 @@
       }
     };
     window.addEventListener("keydown", onKey);
+    // Keep relative presence times current.
+    const tick = setInterval(() => (nowTick = Date.now()), 60_000);
     return () => {
       window.removeEventListener("keydown", onKey);
+      clearInterval(tick);
       subs.forEach((p) => p.then((un) => un()));
     };
   });
@@ -1576,13 +1630,16 @@
             {#each filteredRoster as m}
               {@const online = m.you || onlineMembers.has(m.fingerprint)}
               <li title={m.fingerprint} class:is-you={m.you} use:contextMenu={() => memberMenu(m)}>
-                <span class="presence" class:online title={online ? "online" : "offline"}>●</span>
+                <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
                 {@render avatarTag(m.fingerprint)}
                 {@render nameTag(m.fingerprint)}
                 {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
                   <span class="role-badge {roles[m.fingerprint]}">{roles[m.fingerprint]}</span>
                 {/if}
                 {#if m.you}<span class="you-badge">you</span>{/if}
+                {#if !m.you && !online && lastSeen[m.fingerprint]}
+                  <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
+                {/if}
               </li>
             {:else}
               <li class="muted">No matching members.</li>

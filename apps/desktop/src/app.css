@@ -1587,3 +1587,11 @@ button.emoji-pick:hover {
 .presence.online {
   color: #57c759;
 }
+
+/* Roster: how long ago an offline member was last seen (only when observed this session). */
+.last-seen {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: #6b7280;
+}
