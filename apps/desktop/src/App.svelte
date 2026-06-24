@@ -2542,7 +2542,14 @@
                   <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                   {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
                 </span>
-                {#if editingId === m.id}
+                {#if m.id && editingId !== m.id}
+                  <div class="msg-actions">
+                    <button class="msg-action" type="button" title="Add reaction" aria-label="Add reaction" onclick={() => toggleReactionPicker(m)}>😊</button>
+                    <button class="msg-action" type="button" title="Reply" aria-label="Reply" onclick={() => startReply(m)}>↰</button>
+                    <button class="msg-action" type="button" title="More actions" aria-label="More actions" onclick={(e) => openMenu(e, messageMenu(m))}>⋯</button>
+                  </div>
+                {/if}
+                {#if m.id && editingId === m.id}
                   <div class="msg-edit">
                     <textarea
                       bind:value={editDraft}
@@ -2564,7 +2571,7 @@
                     💬 {n} {n === 1 ? "reply" : "replies"}
                   </button>
                 {/if}
-                {#if m.reactions.length || reactionPickerFor === m.id}
+                {#if m.reactions.length || (m.id && reactionPickerFor === m.id)}
                   <div class="reactions">
                     {#each m.reactions as r (r.emoji)}
                       {@const rcode = customEmojiCode(r.emoji)}
@@ -2587,7 +2594,7 @@
                     {#if m.id}
                       <button class="reaction add-reaction" title="Add reaction" aria-label="Add reaction" onclick={() => toggleReactionPicker(m)}>＋</button>
                     {/if}
-                    {#if reactionPickerFor === m.id}
+                    {#if m.id && reactionPickerFor === m.id}
                       <div class="reaction-picker" role="menu">
                         {#each QUICK_EMOJI as e}
                           <button class="qe" type="button" aria-label={`React with ${e}`} onclick={() => toggleReaction(m, e)}>{e}</button>
