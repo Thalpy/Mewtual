@@ -4,7 +4,7 @@
   import { onMount, tick } from "svelte";
   import { renderMessage, renderWiki } from "./render";
 
-  type Msg = { author: string; text: string; ts: number };
+  type Msg = { id: string; author: string; text: string; ts: number; edited: number };
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
@@ -1002,12 +1002,24 @@
   });
 
   function messageMenu(m: Msg): MenuItem[] {
-    return [
+    const items: MenuItem[] = [
       { label: "Copy text", icon: "⧉", onSelect: () => copyText(m.text) },
       { label: "Quote in reply", icon: "❝", onSelect: () => appendToDraft(`> ${nameOf(m.author)}: ${m.text}`) },
       { divider: true },
       { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
     ];
+    // Edit / delete your own messages (legacy ones without an id can't be targeted).
+    if (m.author === myFp && m.id) {
+      items.push({ divider: true });
+      items.push({ label: "Edit", icon: "✎", onSelect: () => startEdit(m) });
+      items.push({
+        label: "Delete",
+        icon: "🗑",
+        danger: true,
+        onSelect: () => confirmInMenu("Delete this message?", () => deleteMessage(m)),
+      });
+    }
+    return items;
   }
 
   function memberMenu(m: Member): MenuItem[] {
@@ -1522,6 +1534,42 @@
     draft = "";
     try {
       await invoke("send_message", { server: activeServerId, channel: cur.active, text });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Inline edit of one of your own messages.
+  let editingId = $state("");
+  let editDraft = $state("");
+  function startEdit(m: Msg) {
+    editingId = m.id;
+    editDraft = m.text;
+  }
+  function cancelEdit() {
+    editingId = "";
+    editDraft = "";
+  }
+  async function saveEdit(m: Msg) {
+    const text = editDraft.trim();
+    const ch = cur?.active;
+    if (!text || activeServerId === null || !ch) {
+      cancelEdit();
+      return;
+    }
+    cancelEdit();
+    if (text === m.text) return; // no change
+    try {
+      await invoke("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function deleteMessage(m: Msg) {
+    const ch = cur?.active;
+    if (activeServerId === null || !ch) return;
+    try {
+      await invoke("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
     } catch (e) {
       error = String(e);
     }
@@ -2052,7 +2100,22 @@
                   {@render nameTag(m.author)}
                   <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                 </span>
-                <span class="text">{@html renderMessage(m.text)}</span>
+                {#if editingId === m.id}
+                  <div class="msg-edit">
+                    <textarea
+                      bind:value={editDraft}
+                      rows="2"
+                      onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveEdit(m); } else if (e.key === "Escape") { e.preventDefault(); cancelEdit(); } }}
+                    ></textarea>
+                    <div class="msg-edit-actions">
+                      <button class="ghost small" onclick={() => saveEdit(m)}>Save</button>
+                      <button class="ghost small" onclick={cancelEdit}>Cancel</button>
+                      <span class="muted small">Enter to save · Esc to cancel</span>
+                    </div>
+                  </div>
+                {:else}
+                  <span class="text">{@html renderMessage(m.text)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
+                {/if}
               </li>
             {:else}
               <li class="muted">No messages yet — say hello.</li>

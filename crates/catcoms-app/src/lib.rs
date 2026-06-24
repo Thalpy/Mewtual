@@ -70,12 +70,17 @@ pub enum AppError {
 /// member's messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatMessage {
+    /// A stable per-message id (random hex), for addressing edits/deletes under concurrent merges.
+    /// Empty for legacy messages sent before ids existed (those can't be edited/deleted).
+    pub id: String,
     /// The author's device fingerprint (resolve to a name/style via [`Server::profiles`]).
     pub author: String,
     /// The message text.
     pub text: String,
     /// Send time in epoch-millis (the sender's injected clock; `0` if absent).
     pub ts: u64,
+    /// Wall-clock of the last edit (epoch-millis), or `0` if never edited.
+    pub edited: u64,
 }
 
 /// Lightweight activity stats over a conversation (no message text), for the friends-list
@@ -118,10 +123,13 @@ const MESSAGES: &str = "messages";
 const AUTHOR: &str = "author";
 const TEXT: &str = "text";
 const TS: &str = "ts";
+const MSG_ID: &str = "id";
+const EDITED: &str = "edited";
 
-/// Append a `{author, text, ts}` message to a channel document (the canonical edit).
+/// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
     doc: &mut AutoCommit,
+    id: &str,
     author: &str,
     text: &str,
     ts: u64,
@@ -132,6 +140,7 @@ pub fn append_message(
     };
     let index = doc.length(&list);
     let msg = doc.insert_object(&list, index, ObjType::Map)?;
+    doc.put(&msg, MSG_ID, id)?;
     doc.put(&msg, AUTHOR, author)?;
     doc.put(&msg, TEXT, text)?;
     doc.put(&msg, TS, ts as i64)?;
@@ -145,14 +154,56 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
         for i in 0..doc.length(&list) {
             if let Ok(Some((Value::Object(ObjType::Map), msg))) = doc.get(&list, i) {
                 out.push(ChatMessage {
+                    id: str_field(doc, &msg, MSG_ID),
                     author: str_field(doc, &msg, AUTHOR),
                     text: str_field(doc, &msg, TEXT),
                     ts: int_field(doc, &msg, TS),
+                    edited: int_field(doc, &msg, EDITED),
                 });
             }
         }
     }
     out
+}
+
+/// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
+/// whether a message was found + changed. (Honest-client own-message gating is the caller's job.)
+fn edit_message_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    new_text: &str,
+    edited_ts: u64,
+) -> Result<bool, AutomergeError> {
+    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+        return Ok(false);
+    };
+    for i in 0..doc.length(&list) {
+        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
+            if str_field(doc, &msg, MSG_ID) == id {
+                doc.put(&msg, TEXT, new_text)?;
+                doc.put(&msg, EDITED, edited_ts as i64)?;
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Delete the message with `id` from a channel document. Returns whether one was removed. Ids are
+/// unique, so it removes (at most) the single matching element and returns.
+fn delete_message_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
+    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+        return Ok(false);
+    };
+    for i in 0..doc.length(&list) {
+        if let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? {
+            if str_field(doc, &msg, MSG_ID) == id {
+                doc.delete(&list, i)?;
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn str_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
@@ -662,12 +713,71 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub async fn send_message(&mut self, channel: u128, text: &str) -> Result<(), AppError> {
         let author = self.my_fingerprint();
         let ts = self.sync.now_ms();
+        let id = self.sync.random_id();
         self.sync
             .post(DocType::Channel, channel, |d| {
-                append_message(d, &author, text, ts)
+                append_message(d, &id, &author, text, ts)
             })
             .await?;
         Ok(())
+    }
+
+    /// Edit the text of one of **your own** messages (by id) in a channel. Honest-client gating:
+    /// refused if the message isn't authored by this device (a modified client could bypass it, as
+    /// with all CRDT content — see THREAT-MODEL.md). A no-op edit (same text) is dropped, so the
+    /// `post` always carries a real change (automerge suppresses a same-value `put`).
+    pub async fn edit_message(
+        &mut self,
+        channel: u128,
+        id: &str,
+        new_text: &str,
+    ) -> Result<(), AppError> {
+        let me = self.my_fingerprint();
+        let Some(current) = self
+            .messages(channel)
+            .into_iter()
+            .find(|m| m.id == id && m.author == me)
+        else {
+            return Err(AppError::Invalid(
+                "you can only edit your own messages".into(),
+            ));
+        };
+        if current.text == new_text {
+            return Ok(()); // unchanged — don't post a redundant op
+        }
+        let edited = self.sync.now_ms();
+        let id = id.to_string();
+        let new_text = new_text.to_string();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                edit_message_in_doc(d, &id, &new_text, edited).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Delete one of **your own** messages (by id) from a channel. Honest-client gating as above.
+    pub async fn delete_message(&mut self, channel: u128, id: &str) -> Result<(), AppError> {
+        let me = self.my_fingerprint();
+        if !self.owns_message(channel, id, &me) {
+            return Err(AppError::Invalid(
+                "you can only delete your own messages".into(),
+            ));
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                delete_message_in_doc(d, &id).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Whether message `id` exists in `channel` and is authored by `me` (the soft own-message gate).
+    fn owns_message(&self, channel: u128, id: &str, me: &str) -> bool {
+        self.messages(channel)
+            .iter()
+            .any(|m| m.id == id && m.author == me)
     }
 
     /// This device's short fingerprint (the key its messages + profile are stored under).
@@ -1147,9 +1257,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub async fn post_status(&mut self, text: &str) -> Result<(), AppError> {
         let author = self.my_fingerprint();
         let ts = self.sync.now_ms();
+        let id = self.sync.random_id();
         self.sync
             .post(DocType::Status, STATUS_DOC, |d| {
-                append_message(d, &author, text, ts)
+                append_message(d, &id, &author, text, ts)
             })
             .await?;
         Ok(())
@@ -1604,6 +1715,41 @@ mod tests {
         assert_eq!(roster.len(), 1);
         assert!(roster[0].is_self, "the founder sees itself in the roster");
         assert_eq!(roster[0].fingerprint.len(), 8, "4-byte hex fingerprint");
+    }
+
+    #[tokio::test]
+    async fn a_member_edits_and_deletes_its_own_messages_by_stable_id() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.send_message(GENERAL, "first").await.unwrap();
+        alice.send_message(GENERAL, "secnod").await.unwrap();
+
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(msgs.len(), 2);
+        let id0 = msgs[0].id.clone();
+        let id1 = msgs[1].id.clone();
+        assert!(!id1.is_empty(), "new messages get a stable id");
+        assert_ne!(id0, id1, "ids are unique");
+        assert_eq!(msgs[1].edited, 0, "an unedited message has no edit stamp");
+
+        // Fix the typo in the second message.
+        alice.edit_message(GENERAL, &id1, "second").await.unwrap();
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(msgs.len(), 2, "editing doesn't change the count");
+        assert_eq!(msgs[1].text, "second");
+        assert!(msgs[1].edited > 0, "edited is stamped");
+        assert_eq!(msgs[1].id, id1, "the id is stable across an edit");
+
+        // Delete the first message.
+        alice.delete_message(GENERAL, &id0).await.unwrap();
+        let msgs = alice.messages(GENERAL);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].text, "second", "the right message remains");
+        assert_eq!(msgs[0].id, id1);
+
+        // Editing/deleting an unknown (or not-your-own) message is refused.
+        assert!(alice.edit_message(GENERAL, "deadbeef", "x").await.is_err());
+        assert!(alice.delete_message(GENERAL, "deadbeef").await.is_err());
     }
 
     #[tokio::test]

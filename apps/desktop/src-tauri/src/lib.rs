@@ -85,9 +85,11 @@ struct FoundResult {
 /// A chat message as serialized to the frontend.
 #[derive(Serialize, Clone)]
 struct UiMessage {
+    id: String,
     author: String,
     text: String,
     ts: u64,
+    edited: u64,
 }
 
 /// A roster member as serialized to the frontend.
@@ -1235,9 +1237,11 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .into_iter()
         .rev()
         .map(|m| UiMessage {
+            id: m.id,
             author: m.author,
             text: m.text,
             ts: m.ts,
+            edited: m.edited,
         })
         .collect())
 }
@@ -1332,6 +1336,37 @@ async fn send_message(
     Ok(())
 }
 
+/// Edit one of your own messages (by message id) in a channel.
+#[tauri::command]
+async fn edit_message(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    msg_id: String,
+    text: String,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    actor.edit_message(id, msg_id, text).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Delete one of your own messages (by message id) from a channel.
+#[tauri::command]
+async fn delete_message(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    msg_id: String,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    actor.delete_message(id, msg_id).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Read a channel's current messages (by id).
 #[tauri::command]
 async fn get_messages(
@@ -1346,9 +1381,11 @@ async fn get_messages(
         .await
         .into_iter()
         .map(|m| UiMessage {
+            id: m.id,
             author: m.author,
             text: m.text,
             ts: m.ts,
+            edited: m.edited,
         })
         .collect())
 }
@@ -1609,6 +1646,8 @@ pub fn run() {
             set_admin,
             remove_member,
             send_message,
+            edit_message,
+            delete_message,
             get_messages
         ])
         .run(tauri::generate_context!())

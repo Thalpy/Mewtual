@@ -42,6 +42,19 @@ pub enum AppCommand {
     },
     /// Send a chat message to a channel.
     SendMessage { channel: u128, text: String },
+    /// Edit the text of one of your own messages (by id) in a channel.
+    EditMessage {
+        channel: u128,
+        id: String,
+        text: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete one of your own messages (by id) from a channel.
+    DeleteMessage {
+        channel: u128,
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Pull a channel's history from `peer` (e.g. right after joining).
     CatchUp { peer: PeerId, channel: u128 },
     /// Pull a channel's history from the best known peer (no peer named).
@@ -253,6 +266,44 @@ impl ServerActor {
                 text: text.into(),
             })
             .await;
+    }
+
+    /// Edit the text of one of your own messages (by id) in a channel.
+    pub async fn edit_message(
+        &self,
+        channel: u128,
+        id: String,
+        text: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::EditMessage {
+                channel,
+                id,
+                text,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Delete one of your own messages (by id) from a channel.
+    pub async fn delete_message(&self, channel: u128, id: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeleteMessage { channel, id, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Pull a channel's history from `peer`.
@@ -746,7 +797,9 @@ where
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<AppCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>(256);
     let handle = tokio::spawn(async move {
-        let mut counts: HashMap<u128, usize> = HashMap::new();
+        // Per open channel: a content signature of its messages (see `channel_changed`), so an
+        // edit/delete/add all surface a `ChannelUpdated`.
+        let mut counts: HashMap<u128, u64> = HashMap::new();
         let mut members = server.member_count();
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
@@ -795,16 +848,43 @@ where
                         if let Err(e) = server.open_channel(channel).await {
                             tracing::warn!(error = %e, channel, "open_channel failed");
                         }
-                        counts.entry(channel).or_insert(0);
+                        // Seed (and start tracking) the channel's current content signature WITHOUT
+                        // emitting — the UI fetches messages on open (switchTo → refresh); only a
+                        // later add/edit/delete should fire ChannelUpdated. (A non-empty channel's
+                        // signature is non-zero, so the old `or_insert(0)` would have spuriously
+                        // signalled "changed" on open under the content-hash detector.)
+                        channel_changed(&server, channel, &mut counts);
                         let _ = ack.send(());
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
-                        }
                     }
                     Some(AppCommand::SendMessage { channel, text }) => {
                         if let Err(e) = server.send_message(channel, &text).await {
                             tracing::warn!(error = %e, channel, "send_message failed");
                         }
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
+                    Some(AppCommand::EditMessage {
+                        channel,
+                        id,
+                        text,
+                        reply,
+                    }) => {
+                        let res = server
+                            .edit_message(channel, &id, &text)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
+                    Some(AppCommand::DeleteMessage { channel, id, reply }) => {
+                        let res = server
+                            .delete_message(channel, &id)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
                         if channel_changed(&server, channel, &mut counts) {
                             let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
                         }
@@ -1123,15 +1203,25 @@ where
 fn channel_changed<T, R>(
     server: &Server<T, R>,
     channel: u128,
-    counts: &mut HashMap<u128, usize>,
+    sigs: &mut HashMap<u128, u64>,
 ) -> bool
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    let n = server.messages(channel).len();
-    if counts.get(&channel).copied() != Some(n) {
-        counts.insert(channel, n);
+    use std::hash::{Hash, Hasher};
+    // A content signature (not just the count) so an EDIT — which doesn't change the count — is
+    // detected too, both locally and when a peer's edit arrives. `DefaultHasher::new()` has a fixed
+    // seed, so the same content hashes the same across ticks. Cheap over a channel's message list.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in &server.messages(channel) {
+        m.id.hash(&mut h);
+        m.text.hash(&mut h);
+        m.edited.hash(&mut h);
+    }
+    let sig = h.finish();
+    if sigs.get(&channel).copied() != Some(sig) {
+        sigs.insert(channel, sig);
         true
     } else {
         false

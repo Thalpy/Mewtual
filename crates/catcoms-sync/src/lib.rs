@@ -4110,6 +4110,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.clock.now_ms()
     }
 
+    /// A fresh random 128-bit id, hex-encoded — for stable per-message identity (addressing
+    /// edits/deletes under concurrent CRDT merges). Uses the injected RNG (no ambient randomness).
+    pub fn random_id(&mut self) -> String {
+        let mut b = [0u8; 16];
+        self.rng.fill_bytes(&mut b);
+        b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
     /// Borrow the underlying transport, so the **discovery/dial layer** — which lives
     /// *above* `ChannelSync` (the net Actor never auto-dials; the dial decision and
     /// eclipse-resistance are a layer up) — can drive rendezvous register/discover and

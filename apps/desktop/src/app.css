@@ -1748,3 +1748,22 @@ button.emoji-pick:hover {
   background: rgba(255, 213, 79, 0.24);
   border-radius: 5px;
 }
+
+/* Inline message edit + the "(edited)" tag. */
+.msg-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.msg-edit textarea {
+  width: 100%;
+  resize: vertical;
+}
+.msg-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.edited-tag {
+  font-size: 0.75em;
+}
