@@ -2081,3 +2081,66 @@ button.emoji-pick:hover {
 .reply-count:hover {
   background: var(--accent-dim, #232a44);
 }
+
+/* Pinned messages: the inline mark, the header toggle, and the dropdown panel. */
+.pin-mark {
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+.pinned-toggle.active {
+  background: var(--accent-dim, #232a44);
+  color: var(--accent, #6c8cff);
+}
+.pinned-panel {
+  margin: 4px 0 8px;
+  border: 1px solid var(--border, #2a2a36);
+  border-radius: 10px;
+  background: var(--panel, #1c1c24);
+  overflow: hidden;
+}
+.pinned-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border, #2a2a36);
+}
+.pinned-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.pinned-list li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pinned-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+}
+.pinned-item:hover {
+  background: var(--accent-dim, #232a44);
+}
+.pinned-text {
+  color: var(--muted, #c9cede);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.pinned-unpin {
+  flex: 0 0 auto;
+}

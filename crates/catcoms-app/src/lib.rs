@@ -85,6 +85,8 @@ pub struct ChatMessage {
     pub reactions: Vec<Reaction>,
     /// The id of the message this one replies to, or empty if it isn't a reply.
     pub reply_to: String,
+    /// Whether this message is pinned in its channel.
+    pub pinned: bool,
 }
 
 /// One emoji reaction on a message: the emoji plus the fingerprints of the members who reacted.
@@ -185,6 +187,7 @@ const TS: &str = "ts";
 const MSG_ID: &str = "id";
 const EDITED: &str = "edited";
 const REPLY_TO: &str = "reply_to";
+const PINNED: &str = "pinned";
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -226,6 +229,7 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
                     edited: int_field(doc, &msg, EDITED),
                     reactions: read_reactions(doc, &msg),
                     reply_to: str_field(doc, &msg, REPLY_TO),
+                    pinned: doc.get(&msg, PINNED).ok().flatten().is_some(),
                 });
             }
         }
@@ -286,6 +290,30 @@ fn toggle_reaction_in_doc(
             doc.delete(&msg, &key)?;
         } else {
             doc.put(&msg, &key, true)?;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Pin or unpin the message with `id` by setting/removing a `pinned` flag **directly on its message
+/// map** (which always exists) — so concurrent pins of different messages never conflict and a
+/// pin/unpin race on one message is a clean last-writer-wins. Returns whether the message was found.
+fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, AutomergeError> {
+    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+        return Ok(false);
+    };
+    for i in 0..doc.length(&list) {
+        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
+            continue;
+        };
+        if str_field(doc, &msg, MSG_ID) != id {
+            continue;
+        }
+        if pinned {
+            doc.put(&msg, PINNED, true)?;
+        } else {
+            doc.delete(&msg, PINNED)?;
         }
         return Ok(true);
     }
@@ -940,6 +968,30 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync
             .post(DocType::Channel, channel, move |d| {
                 toggle_reaction_in_doc(d, &id, &emoji, &me).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Pin or unpin a message (by id) in a channel. **Owner/admin only** (honest-client gating, like
+    /// message deletion — the documented R6 residual). Errors if the message is gone, you may not
+    /// pin, or the pin state is already as requested (no redundant op).
+    pub async fn set_pin(&mut self, channel: u128, id: &str, pinned: bool) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner/admin can pin messages".into(),
+            ));
+        }
+        let Some(msg) = self.messages(channel).into_iter().find(|m| m.id == id) else {
+            return Err(AppError::Invalid("no such message".into()));
+        };
+        if msg.pinned == pinned {
+            return Ok(()); // already in the requested state — don't post a redundant op
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                set_pin_in_doc(d, &id, pinned).map(|_| ())
             })
             .await?;
         Ok(())
@@ -1992,6 +2044,29 @@ mod tests {
         assert!(alice.edit_message(GENERAL, "mid-01", "x").await.is_err());
         alice.delete_message(GENERAL, "mid-01").await.unwrap();
         assert!(!alice.messages(GENERAL).iter().any(|m| m.id == "mid-01"));
+    }
+
+    #[tokio::test]
+    async fn an_owner_pins_and_unpins_a_message() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        assert_eq!(alice.my_role(), Role::Owner);
+        alice.send_message(GENERAL, "important").await.unwrap();
+        let id = alice.messages(GENERAL)[0].id.clone();
+        assert!(!alice.messages(GENERAL)[0].pinned);
+
+        alice.set_pin(GENERAL, &id, true).await.unwrap();
+        assert!(alice.messages(GENERAL)[0].pinned, "now pinned");
+
+        // Pinning an already-pinned message is an idempotent no-op (Ok, no redundant op).
+        alice.set_pin(GENERAL, &id, true).await.unwrap();
+        assert!(alice.messages(GENERAL)[0].pinned);
+
+        alice.set_pin(GENERAL, &id, false).await.unwrap();
+        assert!(!alice.messages(GENERAL)[0].pinned, "unpinned");
+
+        // Unknown message errors.
+        assert!(alice.set_pin(GENERAL, "deadbeef", true).await.is_err());
     }
 
     #[tokio::test]

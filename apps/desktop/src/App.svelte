@@ -5,7 +5,7 @@
   import { renderMessage, renderWiki } from "./render";
 
   type Reaction = { emoji: string; by: string[] };
-  type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string };
+  type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
   type InboxEntry = {
     server: number; server_name: string; is_dm: boolean;
     channel: string; message_id: string; author: string; author_name: string;
@@ -771,6 +771,7 @@
     reactionPickerFor = "";
     replyingTo = "";
     mentionQuery = null;
+    showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
@@ -832,6 +833,7 @@
     reactionPickerFor = "";
     replyingTo = "";
     mentionQuery = null;
+    showPinned = false;
     if (mentionChannels.has(id)) {
       mentionChannels = new Set(mentionChannels);
       mentionChannels.delete(id); // reading the channel clears its mention badge
@@ -1084,13 +1086,16 @@
       { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
     ];
     if (m.id) {
-      items.splice(
-        0,
-        0,
+      const top: MenuItem[] = [
         { label: "Reply", icon: "↰", onSelect: () => startReply(m) },
         { label: "React…", icon: "☺", onSelect: () => (reactionPickerFor = m.id) },
-        { divider: true },
-      );
+      ];
+      // Owner/admin can pin/unpin any message (not in DMs).
+      if (canModerate && !cur?.isDm) {
+        top.push({ label: m.pinned ? "Unpin" : "Pin message", icon: "📌", onSelect: () => togglePin(m) });
+      }
+      top.push({ divider: true });
+      items.splice(0, 0, ...top);
     }
     // Edit / delete your own messages (legacy ones without an id can't be targeted).
     if (m.author === myFp && m.id) {
@@ -1863,6 +1868,19 @@
     return m ? m[1].toLowerCase() : null;
   }
 
+  // Pinned messages (owner/admin pin/unpin; a panel surfaces them).
+  let showPinned = $state(false);
+  let pinnedMsgs = $derived(messages.filter((m) => m.pinned));
+  async function togglePin(m: Msg) {
+    const ch = cur?.active;
+    if (activeServerId === null || !ch || !m.id) return;
+    try {
+      await invoke("set_pin", { server: activeServerId, channel: ch, msgId: m.id, pinned: !m.pinned });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function copyFeedback() {
     const report = [
       `Type: ${feedbackKind === "bug" ? "Bug report" : "Feature request"}`,
@@ -2447,10 +2465,31 @@
           <h2>
             #{activeName()} <span class="muted">· {members} member(s)</span>
             <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
+            {#if pinnedMsgs.length}
+              <button class="ghost small pinned-toggle" class:active={showPinned} title="Pinned messages" onclick={() => (showPinned = !showPinned)}>📌 {pinnedMsgs.length}</button>
+            {/if}
             {#if firstUnreadIdx >= 0}
               <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => scrollToMatch(firstUnreadIdx)}>↑ New</button>
             {/if}
           </h2>
+          {#if showPinned && pinnedMsgs.length}
+            <div class="pinned-panel">
+              <div class="pinned-head"><strong>📌 Pinned</strong><button class="ghost small" onclick={() => (showPinned = false)}>✕</button></div>
+              <ul class="pinned-list">
+                {#each pinnedMsgs as p (p.id)}
+                  <li>
+                    <button class="pinned-item" onclick={() => { showPinned = false; jumpToMessageId(p.id); }}>
+                      <strong>{nameOf(p.author)}</strong>
+                      <span class="pinned-text">{msgSnippet(p.text, 80)}</span>
+                    </button>
+                    {#if canModerate && !cur?.isDm}
+                      <button class="ghost small pinned-unpin" title="Unpin" onclick={() => togglePin(p)}>✕</button>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            </div>
+          {/if}
           {#if showSearch}
             <div class="msg-search">
               <input
@@ -2501,6 +2540,7 @@
                   {@render avatarTag(m.author)}
                   {@render nameTag(m.author)}
                   <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
+                  {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
                 </span>
                 {#if editingId === m.id}
                   <div class="msg-edit">

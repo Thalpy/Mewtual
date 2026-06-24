@@ -92,6 +92,7 @@ struct UiMessage {
     edited: u64,
     reactions: Vec<UiReaction>,
     reply_to: String,
+    pinned: bool,
 }
 
 /// One emoji reaction on a message (the emoji + the fingerprints of those who reacted).
@@ -134,6 +135,7 @@ fn ui_message(m: catcoms_app::ChatMessage) -> UiMessage {
             })
             .collect(),
         reply_to: m.reply_to,
+        pinned: m.pinned,
     }
 }
 
@@ -1423,6 +1425,22 @@ async fn toggle_reaction(
     Ok(())
 }
 
+/// Pin or unpin a message (by message id) in a channel (owner/admin).
+#[tauri::command]
+async fn set_pin(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    msg_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    actor.set_pin(id, msg_id, pinned).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Read a channel's current messages (by id).
 #[tauri::command]
 async fn get_messages(
@@ -1737,6 +1755,7 @@ pub fn run() {
             edit_message,
             delete_message,
             toggle_reaction,
+            set_pin,
             get_inbox,
             get_messages
         ])
