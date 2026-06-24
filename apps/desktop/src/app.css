@@ -2063,3 +2063,21 @@ button.emoji-pick:hover {
   white-space: nowrap;
   min-width: 0;
 }
+
+/* Reply-count thread affordance under a message that has replies. */
+.reply-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  padding: 1px 8px;
+  border: 1px solid var(--border, #2a2a36);
+  border-radius: 10px;
+  background: none;
+  color: var(--accent, #6c8cff);
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.reply-count:hover {
+  background: var(--accent-dim, #232a44);
+}

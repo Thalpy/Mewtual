@@ -1639,6 +1639,18 @@
       if (flashId === id) flashId = "";
     }, 1300);
   }
+  // Reply counts per parent message id (for the "N replies" thread affordance).
+  let replyCounts = $derived.by(() => {
+    const m = new Map<string, number>();
+    for (const msg of messages) {
+      if (msg.reply_to) m.set(msg.reply_to, (m.get(msg.reply_to) ?? 0) + 1);
+    }
+    return m;
+  });
+  function jumpToFirstReply(parentId: string) {
+    const first = messages.find((m) => m.reply_to === parentId);
+    if (first) jumpToMessageId(first.id);
+  }
   function startReply(m: Msg) {
     replyingTo = m.id;
     composerEl?.focus();
@@ -1899,14 +1911,14 @@
   // A short two-note chime via the Web Audio API (no asset to bundle), gated by the
   // notification-sound preference. Played for messages you aren't actively looking at.
   let audioCtx: AudioContext | null = null;
-  function playNotify() {
+  function playChime(freqs: number[]) {
     if (!soundOn) return;
     try {
       audioCtx = audioCtx ?? new AudioContext();
       const ctx = audioCtx;
       if (ctx.state === "suspended") void ctx.resume();
       const now = ctx.currentTime;
-      [880, 1318.5].forEach((freq, i) => {
+      freqs.forEach((freq, i) => {
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = "sine";
@@ -1923,6 +1935,14 @@
       /* audio unavailable */
     }
   }
+  // A regular new-message chime (two notes) vs a distinct, brighter rising triad for a message that
+  // mentions you or replies to you.
+  function playNotify() {
+    playChime([880, 1318.5]);
+  }
+  function playMention() {
+    playChime([987.8, 1318.5, 1760]);
+  }
 
   onMount(() => {
     const subs: Promise<UnlistenFn>[] = [
@@ -1933,28 +1953,43 @@
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
         if (dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
         if (server === activeServerId && channel === cur?.active) {
-          refresh();
-          // You're looking at this channel — only chime if the window isn't focused.
-          if (!document.hasFocus()) playNotify();
+          refresh().then(() => {
+            // You're looking at this channel — only chime if the window isn't focused; use the
+            // mention chime if the just-arrived (newest) message is aimed at you.
+            if (document.hasFocus()) return;
+            const last = messages[messages.length - 1];
+            const forMe =
+              last &&
+              last.author !== myFp &&
+              (mentionsMe(last.text) || (!!last.reply_to && msgById.get(last.reply_to)?.author === myFp));
+            if (forMe) playMention();
+            else playNotify();
+          });
           return;
         }
         const s = servers.find((x) => x.id === server);
         if (s && s.channels.some((c) => c.id === channel)) {
           if (!s.unread.includes(channel)) s.unread.push(channel);
           if (server !== activeServerId) s.dot = true;
-          playNotify();
-          // A non-active channel of the server I'm in: scan it for a message that @-mentions me or
-          // replies to one of mine, and badge it if so (I have my per-server identity only here).
-          // Already-badged channels need no re-scan, so skip the fetch entirely.
-          if (server === activeServerId && !mentionChannels.has(channel)) {
+          if (server !== activeServerId) {
+            playNotify(); // another server — no per-server identity here to detect a mention
+          } else if (mentionChannels.has(channel)) {
+            playMention(); // already a known mention channel — new activity is still aimed at me
+          } else {
+            // A non-active channel of the server I'm in: scan it for a message that @-mentions me or
+            // replies to one of mine. A hit gets the distinct mention chime + a badge; else the
+            // generic chime. (Already-badged channels are handled above without a re-scan.)
             invoke<Msg[]>("get_messages", { server, channel })
               .then((msgs) => {
                 if (server !== activeServerId) return; // switched servers mid-fetch — drop it
-                if (targetsMe(channel, msgs) && !mentionChannels.has(channel)) {
-                  mentionChannels = new Set(mentionChannels).add(channel);
+                if (targetsMe(channel, msgs)) {
+                  if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
+                  playMention();
+                } else {
+                  playNotify();
                 }
               })
-              .catch(() => {});
+              .catch(() => playNotify());
           }
         }
       }),
@@ -2482,6 +2517,12 @@
                   </div>
                 {:else}
                   <span class="text">{@html renderMessage(m.text, myMentionName)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
+                {/if}
+                {#if m.id && replyCounts.get(m.id)}
+                  {@const n = replyCounts.get(m.id)}
+                  <button class="reply-count" type="button" title="Jump to the first reply" onclick={() => jumpToFirstReply(m.id)}>
+                    💬 {n} {n === 1 ? "reply" : "replies"}
+                  </button>
                 {/if}
                 {#if m.reactions.length || reactionPickerFor === m.id}
                   <div class="reactions">
