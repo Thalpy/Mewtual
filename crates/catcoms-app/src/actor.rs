@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 
 use catcoms_storage::Cid;
 
-use crate::{ChatMessage, FileEntry, MemberView, Profile, Server};
+use crate::{ChatMessage, FileEntry, FilesView, MemberView, Profile, Server};
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
@@ -73,6 +73,8 @@ pub enum AppCommand {
     Files {
         reply: oneshot::Sender<Vec<FileEntry>>,
     },
+    /// Query the shared file list with per-file local-availability counts + a reachable-peer flag.
+    FilesView { reply: oneshot::Sender<FilesView> },
     /// Download a file's bytes by content address (raw CID bytes); a precise error otherwise.
     DownloadFile {
         cid: Vec<u8>,
@@ -412,6 +414,24 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Fetch the shared file list with per-file local-availability counts + the reachable-peer flag.
+    pub async fn files_view(&self) -> FilesView {
+        let (reply, rx) = oneshot::channel();
+        let empty = || FilesView {
+            files: Vec::new(),
+            has_peers: false,
+        };
+        if self
+            .cmd_tx
+            .send(AppCommand::FilesView { reply })
+            .await
+            .is_err()
+        {
+            return empty();
+        }
+        rx.await.unwrap_or_else(|_| empty())
+    }
+
     /// Download a file's bytes by content address (raw CID bytes); a precise error string if it
     /// can't be produced (not listed / held-but-unreadable / no peer has it / undecryptable).
     pub async fn download_file(&self, cid: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -732,6 +752,9 @@ where
                     }
                     Some(AppCommand::Files { reply }) => {
                         let _ = reply.send(server.files());
+                    }
+                    Some(AppCommand::FilesView { reply }) => {
+                        let _ = reply.send(server.files_view());
                     }
                     Some(AppCommand::DownloadFile { cid, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {

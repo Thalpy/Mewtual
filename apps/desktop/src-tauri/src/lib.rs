@@ -116,6 +116,18 @@ struct UiFile {
     cid: String,
     author: String,
     path: String,
+    /// Chunks of this file already held locally (availability indicator).
+    held: u32,
+    /// Total chunks the file is split into.
+    total: u32,
+}
+
+/// The shared file list plus whether any peer is currently reachable to fetch from — the payload
+/// of `get_files`, so the UI can color each file by availability in one round-trip.
+#[derive(Serialize, Clone)]
+struct FilesPayload {
+    files: Vec<UiFile>,
+    has_peers: bool,
 }
 
 // Event payloads — every event is tagged with its server id.
@@ -1000,21 +1012,27 @@ async fn add_file(
 
 /// The shared file list (metadata; bytes are fetched on download).
 #[tauri::command]
-async fn get_files(state: State<'_, AppState>, server: u64) -> Result<Vec<UiFile>, String> {
+async fn get_files(state: State<'_, AppState>, server: u64) -> Result<FilesPayload, String> {
     let actor = actor_of(&state, server).await?;
-    Ok(actor
-        .files()
-        .await
+    let view = actor.files_view().await;
+    let files = view
+        .files
         .into_iter()
-        .map(|f| UiFile {
-            name: f.name,
-            size: f.size,
-            mime: f.mime,
-            cid: hex::encode(&f.cid),
-            author: f.author,
-            path: f.path,
+        .map(|l| UiFile {
+            name: l.entry.name,
+            size: l.entry.size,
+            mime: l.entry.mime,
+            cid: hex::encode(&l.entry.cid),
+            author: l.entry.author,
+            path: l.entry.path,
+            held: l.held_chunks,
+            total: l.total_chunks,
         })
-        .collect())
+        .collect();
+    Ok(FilesPayload {
+        files,
+        has_peers: view.has_peers,
+    })
 }
 
 /// Whether a shared file's blob is held locally (openable without a network fetch).

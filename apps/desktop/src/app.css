@@ -1546,3 +1546,33 @@ button.emoji-pick:hover {
   width: 100%;
   height: 6px;
 }
+
+/* File availability indicator — the colour signals whether a file is held locally, partial,
+   fetchable from peers, or unreachable. A leading dot + matching status text in the meta line. */
+.file-avail {
+  flex-shrink: 0;
+  width: 1em;
+  text-align: center;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+.file-avail.local,
+.avail-text.local {
+  color: #4caf86;
+}
+.file-avail.partial,
+.avail-text.partial {
+  color: #d8a657;
+}
+.file-avail.remote,
+.avail-text.remote {
+  color: #6ab0ff;
+}
+.file-avail.offline,
+.avail-text.offline {
+  color: #8a8a96;
+}
+.file-avail.downloading,
+.avail-text.downloading {
+  color: #6ab0ff;
+}

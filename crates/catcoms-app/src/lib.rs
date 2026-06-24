@@ -407,6 +407,31 @@ pub struct FileEntry {
     pub file_ref: Vec<u8>,
 }
 
+/// A listed file plus how many of its chunks this device already holds locally, for the file
+/// browser's availability indicator. `held_chunks == total_chunks` ⇒ openable with no network
+/// fetch; `0 < held < total` ⇒ partially downloaded; `held == 0` ⇒ not yet downloaded. The counts
+/// are a pure local blob-store check (zero network cost).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileListing {
+    /// The file index entry (metadata).
+    pub entry: FileEntry,
+    /// Chunks of this file already held in the local blob store.
+    pub held_chunks: u32,
+    /// Total chunks the file is split into.
+    pub total_chunks: u32,
+}
+
+/// The shared file list with per-file local-availability counts, plus whether **any** catch-up
+/// peer is currently reachable to fetch missing chunks from. `has_peers` is a cheap in-memory
+/// signal — it does NOT prove a given file is held by any peer, only that a fetch could be tried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesView {
+    /// The listed files with availability counts.
+    pub files: Vec<FileListing>,
+    /// Whether ≥1 peer (proven member or candidate) is currently known to fetch from.
+    pub has_peers: bool,
+}
+
 /// Normalize a virtual folder path: trim whitespace + surrounding slashes and drop empty,
 /// `.` and `..` segments, so `""` is the root and a path can never escape it.
 fn normalize_path(path: &str) -> String {
@@ -893,13 +918,55 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         else {
             return false;
         };
+        let (held, total) = self.chunk_holding(&entry);
+        held == total // vacuously true for a (degenerate) zero-chunk file, matching `all()`
+    }
+
+    /// How many of a listed file's chunks this device holds locally, as `(held, total)`. A pure
+    /// local blob-store check (zero network cost). A corrupt/undecodable `file_ref` yields `(0, 0)`.
+    fn chunk_holding(&self, entry: &FileEntry) -> (u32, u32) {
         match FileManifest::decode_or_legacy(&entry.file_ref) {
-            Ok(manifest) => manifest
-                .chunks
-                .iter()
-                .all(|c| self.sync.has_blob(&c.ciphertext_cid)),
-            Err(_) => false,
+            Ok(manifest) => {
+                let total = manifest.chunks.len() as u32;
+                let held = manifest
+                    .chunks
+                    .iter()
+                    .filter(|c| self.sync.has_blob(&c.ciphertext_cid))
+                    .count() as u32;
+                (held, total)
+            }
+            Err(_) => (0, 0),
         }
+    }
+
+    /// The shared file list with per-file local-availability counts and a cheap "any peer
+    /// reachable" flag, for the file browser's availability indicator. Zero network cost — purely
+    /// local blob-store + in-memory peer-set checks. See [`FilesView`].
+    pub fn files_view(&self) -> FilesView {
+        let files = self
+            .files()
+            .into_iter()
+            .map(|entry| {
+                let (held_chunks, total_chunks) = self.chunk_holding(&entry);
+                FileListing {
+                    entry,
+                    held_chunks,
+                    total_chunks,
+                }
+            })
+            .collect();
+        FilesView {
+            files,
+            has_peers: self.has_fetch_peers(),
+        }
+    }
+
+    /// Whether ≥1 catch-up peer (a proven member, else a handshaked candidate) is currently known
+    /// — a cheap proxy for "a missing chunk could be fetched right now". Does NOT prove any peer
+    /// holds a particular file. Zero network cost (an in-memory peer-set check).
+    pub fn has_fetch_peers(&self) -> bool {
+        let s = self.sync.stats();
+        s.member_peers > 0 || s.known_peers > 0
     }
 
     /// Remove a file from the shared index, and **garbage-collect its now-orphaned chunk blobs**

@@ -8,7 +8,7 @@
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
-  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string };
+  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number };
   type Found = { server: number; channel: string };
   type Reloaded = { server: number; name: string; invite: string; channel: string };
 
@@ -94,6 +94,9 @@
   });
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
+  // Whether ≥1 peer is currently reachable to fetch missing chunks from (a soft availability hint;
+  // refreshed alongside the file list). Distinguishes "downloadable" from "no peers online".
+  let hasPeers = $state(false);
   let uploading = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
@@ -522,10 +525,33 @@
   async function refreshFiles() {
     if (activeServerId === null) return;
     try {
-      files = await invoke<UiFile[]>("get_files", { server: activeServerId });
+      const v = await invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", {
+        server: activeServerId,
+      });
+      files = v.files;
+      hasPeers = v.has_peers;
     } catch (e) {
       error = String(e);
     }
+  }
+
+  // The availability of a file for the browser indicator: held locally / partially downloaded /
+  // fetchable from peers / no peers online — or actively downloading. Reactive (reads files,
+  // downloads, hasPeers). The colour conveys it; `label` is the status text.
+  type Avail = { cls: string; icon: string; label: string };
+  function availOf(f: UiFile): Avail {
+    const dl =
+      activeServerId !== null ? downloads[dlKey(activeServerId, f.cid)] : undefined;
+    if (dl && dl.status === "downloading")
+      return { cls: "downloading", icon: "↓", label: `Downloading ${Math.round(dl.progress * 100)}%` };
+    if (dl && dl.status === "queued")
+      return { cls: "downloading", icon: "↓", label: "Queued" };
+    if (f.total > 0 && f.held >= f.total)
+      return { cls: "local", icon: "●", label: "On this device" };
+    if (f.held > 0)
+      return { cls: "partial", icon: "◐", label: `Partial ${f.held}/${f.total}` };
+    if (hasPeers) return { cls: "remote", icon: "○", label: "Downloadable" };
+    return { cls: "offline", icon: "○", label: "No peers online" };
   }
   async function refreshStatuses() {
     if (activeServerId === null) return;
@@ -577,6 +603,7 @@
     menu = null;
     view = v;
     if (v === "wiki") refreshWiki();
+    if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
   }
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
@@ -1094,6 +1121,7 @@
       a.click();
       a.remove();
       if (downloads[key]) downloads[key].status = "done";
+      refreshFiles(); // the file's chunks are now held locally — update its availability
     } catch (e) {
       error = String(e);
       if (downloads[key]) downloads[key].status = "failed";
@@ -1300,7 +1328,10 @@
         }
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
-        if (e.payload.server === activeServerId) refreshMembers();
+        if (e.payload.server === activeServerId) {
+          refreshMembers();
+          if (view === "files") refreshFiles(); // membership change ⇒ re-check fetch availability
+        }
       }),
       listen<{ server: number }>("profiles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshProfiles();
@@ -1499,23 +1530,25 @@
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
           <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>🛠</button>
         </div>
-        <h3>Channels</h3>
-        <ul class="channel-list">
-          {#each cur?.channels ?? [] as c}
-            <li>
-              <button
-                class:active={c.id === cur?.active && view === "chat"}
-                onclick={() => { switchTo(c.id); view = "chat"; }}
-              >
-                #{c.name}
-                {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
-              </button>
-            </li>
-          {/each}
-        </ul>
-        <form onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
-          <input bind:value={newChannel} placeholder="join #channel…" />
-        </form>
+        {#if view === "chat"}
+          <h3>Channels</h3>
+          <ul class="channel-list">
+            {#each cur?.channels ?? [] as c}
+              <li>
+                <button
+                  class:active={c.id === cur?.active && view === "chat"}
+                  onclick={() => { switchTo(c.id); view = "chat"; }}
+                >
+                  #{c.name}
+                  {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
+                </button>
+              </li>
+            {/each}
+          </ul>
+          <form onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
+            <input bind:value={newChannel} placeholder="join #channel…" />
+          </form>
+        {/if}
 
         <div class="roster">
           <h3>Members <span class="muted">({members})</span></h3>
@@ -1647,11 +1680,13 @@
               </li>
             {/each}
             {#each folderView.here as f}
+              {@const av = availOf(f)}
               <li use:contextMenu={() => fileMenu(f)}>
+                <span class="file-avail {av.cls}" title={av.label}>{av.icon}</span>
                 <button class="file-name" title="View file details" onclick={() => openFileInfo(f)}>
                   {fileIcon(f.mime)} {f.name}
                 </button>
-                <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)}</span>
+                <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)} · <span class="avail-text {av.cls}">{av.label}</span></span>
               </li>
             {/each}
             {#if folderView.subs.length === 0 && folderView.here.length === 0}
