@@ -2827,7 +2827,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn observe_eclipse(&mut self) -> bool {
         let obs = EclipseObservation {
             roster_size: self.member_count(),
-            reachable_devices: self.member_peers.len() + 1,
+            // Reachable devices = currently-connected members (+ self), from the LIVE connection set
+            // (`connected_member_fingerprints`) rather than the monotonic `member_peers` catch-up
+            // list, which never shrank on disconnect and so over-counted reachability — making the
+            // detector under-warn after a node actually lost its peers.
+            reachable_devices: self.connected_member_fingerprints().len() + 1,
             trust_roots: self.rendezvous_nodes.len(),
         };
         matches!(
