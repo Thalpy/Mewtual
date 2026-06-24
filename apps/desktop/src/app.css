@@ -1695,3 +1695,32 @@ button.emoji-pick:hover {
   flex: none;
   font-size: 0.7rem;
 }
+
+/* In-band friend requests (DM-home). */
+.dm-notice {
+  margin: 4px 0;
+}
+.dm-requests {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.dm-requests h3 {
+  margin: 0;
+}
+.dm-req {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  background: #1f2126;
+  border-radius: 6px;
+}
+.dm-req-name {
+  font-size: 0.85rem;
+}
+.dm-req-actions {
+  display: flex;
+  gap: 6px;
+}

@@ -82,6 +82,18 @@ pub enum AppCommand {
     FilesView { reply: oneshot::Sender<FilesView> },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    /// Query pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
+    DmRequests {
+        reply: oneshot::Sender<Vec<(String, String, Vec<u8>)>>,
+    },
+    /// Dismiss a pending DM request by the sender's fingerprint (accepted or declined).
+    DismissDmRequest { from_fp: String },
+    /// Deliver a DM (friend) invite to a member over this group ("Add friend"); `true` if reached.
+    SendDmInvite {
+        target_fp: String,
+        invite: Vec<u8>,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     /// Download a file's bytes by content address (raw CID bytes); a precise error otherwise.
     DownloadFile {
         cid: Vec<u8>,
@@ -205,6 +217,8 @@ pub enum AppEvent {
     /// The set of members reachable right now (a live connection) changed — `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
+    /// The set of pending incoming DM (friend) requests changed — the UI should re-fetch them.
+    DmRequestsChanged,
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -470,6 +484,46 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Fetch pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
+    pub async fn dm_requests(&self) -> Vec<(String, String, Vec<u8>)> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DmRequests { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Dismiss a pending DM request by the sender's fingerprint.
+    pub async fn dismiss_dm_request(&self, from_fp: String) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::DismissDmRequest { from_fp })
+            .await;
+    }
+
+    /// Deliver a DM (friend) invite to a member over this group; `Ok(true)` if reached.
+    pub async fn send_dm_invite(&self, target_fp: String, invite: Vec<u8>) -> Result<bool, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SendDmInvite {
+                target_fp,
+                invite,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Download a file's bytes by content address (raw CID bytes); a precise error string if it
     /// can't be produced (not listed / held-but-unreadable / no peer has it / undecryptable).
     pub async fn download_file(&self, cid: Vec<u8>) -> Result<Vec<u8>, String> {
@@ -716,6 +770,7 @@ where
         let mut last_roles = server.roles();
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
+        let mut last_dm_requests = server.dm_requests();
         loop {
             tokio::select! {
                 biased;
@@ -800,6 +855,26 @@ where
                     }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
+                    }
+                    Some(AppCommand::DmRequests { reply }) => {
+                        let _ = reply.send(server.dm_requests());
+                    }
+                    Some(AppCommand::DismissDmRequest { from_fp }) => {
+                        server.dismiss_dm_request(&from_fp);
+                        if dm_requests_changed(&server, &mut last_dm_requests) {
+                            let _ = event_tx.send(AppEvent::DmRequestsChanged).await;
+                        }
+                    }
+                    Some(AppCommand::SendDmInvite {
+                        target_fp,
+                        invite,
+                        reply,
+                    }) => {
+                        let res = server
+                            .send_dm_invite(&target_fp, &invite)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
                     }
                     Some(AppCommand::DownloadFile { cid, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -1023,6 +1098,10 @@ where
                                 .send(AppEvent::ConnectivityChanged { online })
                                 .await;
                         }
+                        // A DM (friend) request may have arrived over this group — surface a change.
+                        if dm_requests_changed(&server, &mut last_dm_requests) {
+                            let _ = event_tx.send(AppEvent::DmRequestsChanged).await;
+                        }
                     }
                     _ => {
                         let _ = event_tx.send(AppEvent::Closed).await;
@@ -1110,6 +1189,26 @@ where
     R: CryptoRngCore,
 {
     let now = server.roles();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the pending incoming DM (friend) requests changed since last seen. The list is small
+/// (bounded), so comparing it per tick is cheap.
+#[allow(clippy::type_complexity)]
+fn dm_requests_changed<T, R>(
+    server: &Server<T, R>,
+    last: &mut Vec<(String, String, Vec<u8>)>,
+) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.dm_requests();
     if now != *last {
         *last = now;
         true

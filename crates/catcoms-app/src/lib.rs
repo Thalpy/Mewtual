@@ -990,6 +990,40 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.connected_member_fingerprints()
     }
 
+    /// Pending incoming DM (friend) requests, each as `(sender fingerprint, sender display name,
+    /// opaque DM-group invite bytes)` — the name resolved against this group's profiles so the
+    /// recipient sees who it's from regardless of which server is active.
+    pub fn dm_requests(&self) -> Vec<(String, String, Vec<u8>)> {
+        let profiles = self.profiles();
+        self.sync
+            .pending_dm_invites()
+            .into_iter()
+            .map(|(fp, invite)| {
+                let name = profiles
+                    .get(&fp)
+                    .map(|p| p.name.clone())
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| fp.clone());
+                (fp, name, invite)
+            })
+            .collect()
+    }
+
+    /// Drop a pending DM request by the sender's fingerprint (once accepted or dismissed).
+    pub fn dismiss_dm_request(&mut self, from_fp: &str) {
+        self.sync.dismiss_dm_invite(from_fp);
+    }
+
+    /// Deliver a DM (friend) invite to current member `target_fp` over this group ("Add friend").
+    /// `Ok(true)` if delivered, `Ok(false)` if the target isn't reachable (no peer record).
+    pub async fn send_dm_invite(
+        &mut self,
+        target_fp: &str,
+        invite: &[u8],
+    ) -> Result<bool, AppError> {
+        Ok(self.sync.send_dm_invite(target_fp, invite).await?)
+    }
+
     /// Remove a file from the shared index, and **garbage-collect its now-orphaned chunk blobs**
     /// from local storage. **Owner or admin only** — errors otherwise. The GC is **dedup-safe**:
     /// a chunk still referenced by another listed file (chunks are content-addressed, so two files

@@ -48,8 +48,13 @@ frontend math over the existing message history.
 1. **DM foundation + friend-code establishment** — the `is_dm` plumbing, the DMs circle + DM-home,
    New DM / Add friend (friend code), conversations. _(first; usable end-to-end)_
 2. **Friends-list sortings** — the four sorts above.
-3. **In-server one-click add** — "Add friend" on a shared-server member, delivering the DM request
-   in-band over that server.
+3. **In-server one-click add** _(done)_ — "Add friend" on an **online** shared-server member founds a
+   DM and delivers its invite **in-band** over that server via a new authenticated `KIND_DM_INVITE`
+   request (same membership+signature+freshness auth as PEX/blob-fetch; `from` is the verified
+   signer, unforgeable). The recipient gets a bounded, deduped, transient pending "friend request"
+   (surfaced via the cached-compare-emit detector → `DmRequestsChanged`) and accepts with one click
+   (the normal join). Offline targets fall back to the friend code. Reviewed — auth/no-spoof,
+   inert-payload, and DoS-bound all hold.
 
 ## Security / privacy notes
 - Unlinkability preserved: a DM is its own group with its own fresh identities; nothing correlates a

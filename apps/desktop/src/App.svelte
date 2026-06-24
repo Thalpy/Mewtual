@@ -59,6 +59,10 @@
   let showAddFriend = $state(false); // the "Add friend" composer (paste a friend code)
   let dmName = $state(""); // the friend's name for a new/accepted DM
   let dmInvite = $state(""); // a pasted friend code (Add friend)
+  // Incoming DM (friend) requests delivered in-band over a shared server, aggregated across servers.
+  type DmRequest = { server: number; from_fp: string; from_name: string; invite: string };
+  let dmRequests = $state<DmRequest[]>([]);
+  let notice = $state(""); // a transient confirmation (e.g. "Friend request sent")
   let showSettings = $state(false); // the personal/app Settings overlay
   let showServerSettings = $state(false); // the per-server (admin) Settings overlay
   let serverNameDraft = $state("");
@@ -533,6 +537,73 @@
     switchServer(r.server);
   }
 
+  // Add a member you share a server with as a friend: found a 1:1 DM and deliver its invite to them
+  // IN-BAND over the shared server (they get a pending friend request). Stays on the current server.
+  async function startDmWithMember(fp: string) {
+    const sourceServer = activeServerId;
+    if (sourceServer === null) return;
+    const name = nameOf(fp);
+    busy = true;
+    error = "";
+    notice = "";
+    menu = null;
+    try {
+      const r = await invoke<Found>("found_server", { displayName: name, advertise, relay, rendezvous, isDm: true });
+      // Add the DM to the list without switching away from the current server.
+      servers = [
+        ...servers,
+        { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
+      ];
+      const invite = (await invoke<string | null>("get_invite", { server: r.server })) ?? "";
+      const sent = invite
+        ? await invoke<boolean>("send_dm_invite", { server: sourceServer, targetFp: fp, inviteHex: invite })
+        : false;
+      notice = sent
+        ? `Friend request sent to ${name} — they'll see it in their DMs.`
+        : `Couldn't reach ${name} right now. Open DMs to share a friend code instead.`;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Pull pending friend requests for one server, merging them into the aggregated list.
+  async function refreshDmRequests(server: number) {
+    try {
+      const reqs = await invoke<{ from_fp: string; from_name: string; invite: string }[]>("get_dm_requests", { server });
+      const others = dmRequests.filter((r) => r.server !== server);
+      dmRequests = [...others, ...reqs.map((r) => ({ server, ...r }))];
+    } catch {
+      /* a server that's gone / mid-shutdown — ignore */
+    }
+  }
+
+  // Accept a friend request: join the DM group, then clear the request on the carrying server.
+  async function acceptDmRequest(req: DmRequest) {
+    busy = true;
+    error = "";
+    try {
+      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: req.from_name, isDm: true });
+      addServer(r, req.from_name);
+      await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
+      dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function declineDmRequest(req: DmRequest) {
+    try {
+      await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
+    } catch {
+      /* ignore */
+    }
+    dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
+  }
+
   // Pull per-DM activity stats for the friends-list sortings (one round-trip for all DMs).
   async function refreshDmStats() {
     try {
@@ -589,6 +660,8 @@
     dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
     showNewDm = false;
     showAddFriend = false;
+    notice = "";
+    refreshDmRequests(id); // pick up any friend request that arrived over this server
     // Each server has its own wiki + fileshare; reset per-server view state.
     view = "chat";
     activeWikiPage = "";
@@ -911,6 +984,11 @@
       { divider: true },
       { label: "Copy fingerprint", icon: "#", onSelect: () => copyText(m.fingerprint) },
     ];
+    // Add a friend in-band (only for an online member of a server — not in a DM, not yourself).
+    if (!m.you && !cur?.isDm && isOnline) {
+      items.push({ divider: true });
+      items.push({ label: "Add friend (DM)", icon: "👋", onSelect: () => startDmWithMember(m.fingerprint) });
+    }
     const r = roles[m.fingerprint] ?? "member";
     if (myRole === "owner" && !m.you && r !== "owner") {
       items.push({ divider: true });
@@ -1539,6 +1617,10 @@
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
       }),
+      listen<{ server: number }>("dm-requests-changed", (e) => {
+        // A friend request may have arrived over ANY server (active or not) — refresh that server's.
+        refreshDmRequests(e.payload.server);
+      }),
       listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
         if (e.payload.server === activeServerId) {
           const next = new Set(e.payload.online);
@@ -1709,7 +1791,11 @@
           onclick={enterDmHome}
         >
           👥
-          {#if dmList.some((d) => d.unread.length || d.dot)}<span class="rail-dot">●</span>{/if}
+          {#if dmRequests.length}
+            <span class="rail-badge">{dmRequests.length}</span>
+          {:else if dmList.some((d) => d.unread.length || d.dot)}
+            <span class="rail-dot">●</span>
+          {/if}
         </button>
         <div class="rail-sep"></div>
         {#each railServers as s}
@@ -1742,6 +1828,21 @@
             <button class="ghost small" onclick={openNewDm}>＋ New DM</button>
             <button class="ghost small" onclick={openAddFriend}>Add friend</button>
           </div>
+          {#if notice}<p class="dm-notice muted small">{notice}</p>{/if}
+          {#if dmRequests.length}
+            <div class="dm-requests">
+              <h3>Friend requests</h3>
+              {#each dmRequests as req (req.server + ":" + req.from_fp)}
+                <div class="dm-req">
+                  <span class="dm-req-name">{req.from_name} wants to DM you</span>
+                  <div class="dm-req-actions">
+                    <button class="ghost small" disabled={busy} onclick={() => acceptDmRequest(req)}>Accept</button>
+                    <button class="ghost small" onclick={() => declineDmRequest(req)}>Decline</button>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {/if}
           {#if showNewDm}
             <form class="dm-form" onsubmit={(e) => { e.preventDefault(); newDm(); }}>
               <input bind:value={dmName} placeholder="Friend's name…" />

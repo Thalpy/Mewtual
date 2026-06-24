@@ -243,6 +243,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::ConnectivityChanged { online } => {
                     let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
                 }
+                AppEvent::DmRequestsChanged => {
+                    let _ = app.emit("dm-requests-changed", ServerEvt { server });
+                }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
                     break;
@@ -1100,6 +1103,59 @@ async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
     Ok(out)
 }
 
+/// One pending incoming DM (friend) request surfaced to the recipient.
+#[derive(Serialize, Clone)]
+struct DmRequestView {
+    from_fp: String,
+    from_name: String,
+    invite: String,
+}
+
+/// Deliver a DM (friend) invite to member `target_fp` over `server` ("Add friend" from the roster).
+/// Returns `true` if the member was reachable and the request was sent.
+#[tauri::command]
+async fn send_dm_invite(
+    state: State<'_, AppState>,
+    server: u64,
+    target_fp: String,
+    invite_hex: String,
+) -> Result<bool, String> {
+    let invite = hex::decode(invite_hex.trim()).map_err(|e| format!("bad invite: {e}"))?;
+    let actor = actor_of(&state, server).await?;
+    actor.send_dm_invite(target_fp, invite).await
+}
+
+/// The pending incoming DM (friend) requests received over `server`.
+#[tauri::command]
+async fn get_dm_requests(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<DmRequestView>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .dm_requests()
+        .await
+        .into_iter()
+        .map(|(from_fp, from_name, invite)| DmRequestView {
+            from_fp,
+            from_name,
+            invite: hex::encode(invite),
+        })
+        .collect())
+}
+
+/// Dismiss a pending DM request by the sender's fingerprint (after accepting or declining it).
+#[tauri::command]
+async fn dismiss_dm_request(
+    state: State<'_, AppState>,
+    server: u64,
+    from_fp: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.dismiss_dm_request(from_fp).await;
+    Ok(())
+}
+
 /// Whether a shared file's blob is held locally (openable without a network fetch).
 #[tauri::command]
 async fn file_available(
@@ -1512,6 +1568,9 @@ pub fn run() {
             get_files,
             get_online_members,
             dm_stats,
+            send_dm_invite,
+            get_dm_requests,
+            dismiss_dm_request,
             download_file,
             file_available,
             delete_file,

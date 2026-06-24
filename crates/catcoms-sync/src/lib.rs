@@ -84,6 +84,15 @@ const KIND_BLOB_FETCH: u8 = 5;
 /// pushes the Welcome to the waiting joiner.
 #[allow(dead_code)] // wired into the relay flow in the next slice
 const KIND_ADMIT_RESULT: u8 = 6;
+/// Request kind: a member delivers a **DM invite** to another member of the same group, so a 1:1
+/// DM can be set up in-band ("Add friend" from the roster) instead of copy-pasting a friend code.
+/// The payload is the opaque DM-group invite bytes; authenticated as a current member (same as PEX),
+/// then surfaced to the recipient as a pending friend request. The DM-group invite itself is
+/// validated on accept (the normal join), so the carrier only proves "a member sent you this".
+const KIND_DM_INVITE: u8 = 7;
+/// Bound on pending incoming DM (friend) requests held at once (deduped on the sender's fingerprint),
+/// so a member can't flood the queue.
+const MAX_PENDING_DM_INVITES: usize = 64;
 /// Ceiling on a blob **response** accepted from a serving peer before storing. The blob's
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
@@ -1622,6 +1631,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
     /// "verify out-of-band" hint. Transient — rebuilt on restore.
     eclipse: EclipseDetector,
+    /// Incoming DM (friend) requests received over this group via `KIND_DM_INVITE`: `(sender
+    /// fingerprint, opaque DM-group invite bytes)`, deduped on the sender. Surfaced to the recipient
+    /// as pending friend requests; transient + bounded (`MAX_PENDING_DM_INVITES`).
+    pending_dm_invites: Vec<(String, Vec<u8>)>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
@@ -1696,6 +1709,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
             dialed_peers: HashSet::new(),
             eclipse: EclipseDetector::new(EclipseConfig::default()),
+            pending_dm_invites: Vec::new(),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
             blob_budget: HashMap::new(),
@@ -2965,6 +2979,65 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Pending incoming DM (friend) requests received over this group: `(sender fingerprint, opaque
+    /// DM-group invite bytes)`. The recipient surfaces these and accepts one by joining the invite.
+    pub fn pending_dm_invites(&self) -> Vec<(String, Vec<u8>)> {
+        self.pending_dm_invites.clone()
+    }
+
+    /// Drop a pending DM request by the sender's fingerprint (once accepted or dismissed).
+    pub fn dismiss_dm_invite(&mut self, from_fp: &str) {
+        self.pending_dm_invites.retain(|(fp, _)| fp != from_fp);
+    }
+
+    /// The transport peer id for a current member by fingerprint, taken from its signed peer record
+    /// (the dial target). `None` if we hold no record for that member yet (no PEX).
+    fn peer_for_fingerprint(&self, fp: &str) -> Option<PeerId> {
+        self.peer_records.iter().find_map(|(device, desc)| {
+            (self.group.contains_device(device) && roles::fingerprint(device) == fp)
+                .then(|| PeerId::new(desc.peer_id))
+        })
+    }
+
+    /// Deliver a DM (friend) invite to current member `target_fp` over this group, so they receive
+    /// a pending friend request in-band ("Add friend" from the roster). `Ok(true)` if delivered,
+    /// `Ok(false)` if we hold no peer record for the target (the UI gates this on the member being
+    /// online). The invite is authenticated as coming from a current member; its DM-group validity
+    /// is checked by the recipient on accept (the normal join).
+    pub async fn send_dm_invite(
+        &mut self,
+        target_fp: &str,
+        invite: &[u8],
+    ) -> Result<bool, SyncError> {
+        let Some(peer) = self.peer_for_fingerprint(target_fp) else {
+            return Ok(false);
+        };
+        let (req, _auth) = self.build_authed_request(KIND_DM_INVITE, invite)?;
+        self.transport
+            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+            .await?;
+        Ok(true)
+    }
+
+    /// Serve an inbound `KIND_DM_INVITE`: authenticate the sender as a current member, then queue
+    /// the invite as a pending friend request (deduped on the sender, bounded). Never replies data.
+    fn serve_dm_invite(&mut self, data: &[u8]) {
+        let Some((invite, req_pubkey, _auth)) = self.authenticate_request(KIND_DM_INVITE, data)
+        else {
+            return;
+        };
+        if invite.is_empty() {
+            return;
+        }
+        let from = roles::fingerprint(&DeviceId::from_public_key_bytes(&req_pubkey));
+        // Dedup on the sender (a re-send replaces the prior pending request), then bound the queue.
+        self.pending_dm_invites.retain(|(fp, _)| fp != &from);
+        self.pending_dm_invites.push((from, invite));
+        while self.pending_dm_invites.len() > MAX_PENDING_DM_INVITES {
+            self.pending_dm_invites.remove(0);
+        }
+    }
+
     /// Verify and store a peer record: its **self-signature** must be valid **and**
     /// its signer must be a current group member. Returns `true` only when it adds a
     /// *newly-known* member (a refresh of an existing device, a stale-`seq` record, an
@@ -4158,6 +4231,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // Admin invites (Option C): the owner delivered a finalized admission; re-sign +
                 // relay the Welcome to the joiner. Empty ack response.
                 self.on_admit_result(rest);
+                Vec::new()
+            }
+            Some((&KIND_DM_INVITE, rest)) => {
+                // A member delivered a DM (friend) invite; queue it as a pending request. Empty ack.
+                self.serve_dm_invite(rest);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -6068,6 +6146,52 @@ mod tests {
         // Disconnect clears liveness for everyone keyed off carol_peer.
         alice.test_set_connected(carol_peer, false);
         assert!(!alice.connected_member_fingerprints().contains(&carol_fp));
+    }
+
+    #[tokio::test]
+    async fn a_dm_invite_is_delivered_in_band_and_queued_as_a_friend_request() {
+        // "Add friend" from the roster: Alice delivers a DM-group invite to fellow member Bob over
+        // their shared group; Bob receives it as a pending friend request attributed to Alice.
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_fp = roles::fingerprint(&ids[0]);
+        let bob_fp = roles::fingerprint(&ids[1]);
+
+        // Alice must hold Bob's signed peer record to address him (the UI gates this on Bob online).
+        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        assert!(bob.pending_dm_invites().is_empty());
+
+        // Deliver the (opaque) DM invite; Bob's run_once serves the request.
+        let invite = b"opaque-dm-group-invite".to_vec();
+        let (sent, _) = tokio::join!(alice.send_dm_invite(&bob_fp, &invite), bob.run_once());
+        assert!(
+            sent.unwrap(),
+            "Bob was reachable, so the invite was delivered"
+        );
+
+        let pending = bob.pending_dm_invites();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, alice_fp, "attributed to the sending member");
+        assert_eq!(pending[0].1, invite, "carrying the DM-group invite bytes");
+
+        // A re-send dedups on the sender (no duplicate request).
+        let invite2 = b"a-fresher-dm-invite".to_vec();
+        let (_, _) = tokio::join!(alice.send_dm_invite(&bob_fp, &invite2), bob.run_once());
+        let pending = bob.pending_dm_invites();
+        assert_eq!(pending.len(), 1, "a re-send replaces, not duplicates");
+        assert_eq!(pending[0].1, invite2);
+
+        // Accepting / declining dismisses it.
+        bob.dismiss_dm_invite(&alice_fp);
+        assert!(bob.pending_dm_invites().is_empty());
+
+        // Addressing a member we hold no record for is a no-op (not delivered).
+        let stranger = roles::fingerprint(&DeviceId::from_public_key_bytes(&[9u8; 32]));
+        assert!(!alice.send_dm_invite(&stranger, &invite).await.unwrap());
     }
 
     #[tokio::test]
