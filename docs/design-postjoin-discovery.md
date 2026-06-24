@@ -78,10 +78,18 @@ namespaces. The bridge's existing one-shot found/join `join_ns` registration is 
 the invite); steady-state adds the rotation-aware namespaces on top.
 
 ## Scope / deferred
-- **Pre-dial membership-tag verification** (surfacing the PeerRecord seq + the synthetic-address tag
-  through `DiscoveredPeer`, then `verify_membership_tag` → `tag_verified=true`): the eclipse-resistance
-  hardening, deferred (never built). `AddressCache` cross-session persistence + `EclipseDetector`
-  surfacing: deferred.
+- **Record seq — DONE (follow-up):** the discovered record's signed `seq` is now surfaced
+  (`Discovered`/`DiscoveredPeer`/`Candidate`), so the `DiscoveryPolicy`'s anti-replay freshness is
+  live (was inert under the placeholder `seq=1`).
+- **`EclipseDetector` surfacing — DONE (follow-up):** `ChannelSync::observe_eclipse` feeds the
+  hysteretic detector (R = roster, D = reachable member peers + self, S = distinct rendezvous roots);
+  the actor emits `EclipseChanged{caution}` on a change and the UI shows an advisory banner. Strictly
+  advisory — never gates dialing/messaging/membership.
+- **Pre-dial membership-tag verification — still deferred:** carrying the per-namespace
+  `routing_membership_tag` as a synthetic address in the libp2p PeerRecord (the only libp2p-level
+  path) is invasive across 5 layers for marginal value — `tag_verified=false` is safe (the
+  `DiscoveryPolicy` never *drops* an unverified candidate, only ranks it; the member-only namespace +
+  MLS + PEX are the gates). `AddressCache` cross-session persistence: deferred.
 - **Re-registration cadence:** a fixed interval (re-register every tick) rather than TTL-driven; a
   TTL-aware schedule is a refinement.
 

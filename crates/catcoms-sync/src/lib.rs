@@ -30,7 +30,10 @@ use std::fmt;
 use automerge::{AutoCommit, AutomergeError};
 use bytes::Bytes;
 use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
-use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
+use catcoms_discovery::{
+    Candidate, DiscoveryPolicy, EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservation,
+    PolicyConfig, Source,
+};
 use catcoms_mls::{
     restore_server, serialize_key_package, snapshot_server, Incoming, InviteLedger, InviteToken,
     MlsDevice, ServerGroup,
@@ -1610,6 +1613,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Discovered peers already dialed this session (dedup, keyed on the opaque peer bytes), so
     /// repeated discovery of the same member doesn't re-dial. Transient.
     dialed_peers: HashSet<Vec<u8>>,
+    /// Advisory-only isolation detector (never gates anything): hysteretic over R (roster) / D
+    /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
+    /// "verify out-of-band" hint. Transient — rebuilt on restore.
+    eclipse: EclipseDetector,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
@@ -1682,6 +1689,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             rendezvous_nodes: Vec::new(),
             discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
             dialed_peers: HashSet::new(),
+            eclipse: EclipseDetector::new(EclipseConfig::default()),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
             blob_budget: HashMap::new(),
@@ -2768,7 +2776,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer: d.peer,
             addresses: d.addresses,
             source: Source::Rendezvous(rz_root),
-            seq: 1,
+            // The record's own signed seq gives the policy real anti-replay freshness; tag_verified
+            // stays false (the pre-dial membership tag isn't carried by the transport yet — a
+            // documented follow-up; the member-only namespace + MLS/PEX are the gates meanwhile).
+            seq: d.seq,
             tag_verified: false,
         };
         let roster = self.member_count();
@@ -2780,6 +2791,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let _ = self.transport.dial_addr(addr).await;
             }
         }
+    }
+
+    /// Advisory eclipse check (NEVER gates anything): feed the hysteretic detector the roster size
+    /// (R), the reachable member peers + self (D), and the distinct rendezvous trust roots (S), and
+    /// return whether it currently counsels CAUTION — "you may be isolated; verify a member out of
+    /// band". Small groups (≤ the roster floor) never trip it.
+    pub fn observe_eclipse(&mut self) -> bool {
+        let obs = EclipseObservation {
+            roster_size: self.member_count(),
+            reachable_devices: self.member_peers.len() + 1,
+            trust_roots: self.rendezvous_nodes.len(),
+        };
+        matches!(
+            self.eclipse.observe(obs, &*self.clock),
+            EclipseLevel::Caution
+        )
     }
 
     /// Map a discovered namespace string back to its routing label, if it is one this
@@ -3718,6 +3745,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Whether a blob is held locally.
     pub fn has_blob(&self, cid: &Cid) -> bool {
         self.blobs.has(cid)
+    }
+
+    /// Delete a locally-held blob by content address (`Ok(true)` if it was held). Used by the
+    /// product layer's dedup-safe delete-time garbage collection; deletion is harmless if a peer
+    /// still holds it (the content-addressed blob can be re-fetched).
+    pub fn delete_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
+        Ok(self.blobs.delete(cid)?)
     }
 
     /// Fetch a blob by content address from `peer`, verify it, and store it. Returns
@@ -6006,6 +6040,7 @@ mod tests {
             peer: vec![1, 2, 3],
             addresses: vec!["/ip4/5.6.7.8/tcp/1".into()],
             namespace: ns,
+            seq: 7,
         };
         alice.ingest_discovered(good).await;
         assert!(
@@ -6017,6 +6052,7 @@ mod tests {
             peer: vec![9, 9],
             addresses: vec![],
             namespace: "catcoms1-not-one-of-ours".into(),
+            seq: 1,
         };
         alice.ingest_discovered(unknown).await;
         assert!(

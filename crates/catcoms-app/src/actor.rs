@@ -174,12 +174,22 @@ pub enum AppEvent {
     ProfilesUpdated,
     /// The shared file list changed — the UI should re-fetch it (`files`).
     FilesUpdated,
+    /// Progress of an in-flight file download, as `(done, total)` chunks, so the UI can show a
+    /// progress bar. Emitted by the `DownloadFile` handler from `download_file_with_progress`.
+    DownloadProgress {
+        cid: Vec<u8>,
+        done: usize,
+        total: usize,
+    },
     /// The status feed changed — the UI should re-fetch it (`statuses`).
     StatusUpdated,
     /// The wiki changed — the UI should re-fetch pages / the open page.
     WikiUpdated,
     /// Member roles changed — the UI should re-fetch roles.
     RolesUpdated,
+    /// The advisory eclipse verdict changed: `true` = the node may be isolated (verify a member
+    /// out of band). Surfaced as a UI hint; never gates anything.
+    EclipseChanged { caution: bool },
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -643,6 +653,7 @@ where
             tracing::warn!(error = %e, "open_roles failed");
         }
         let mut last_roles = server.roles();
+        let mut last_eclipse = false;
         loop {
             tokio::select! {
                 biased;
@@ -721,10 +732,31 @@ where
                     }
                     Some(AppCommand::DownloadFile { cid, reply }) => {
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
-                            Ok(arr) => server
-                                .download_file(&Cid::from_bytes(arr))
-                                .await
-                                .map_err(|e| e.to_string()),
+                            Ok(arr) => {
+                                // Forward per-chunk progress to the event stream via a short-lived
+                                // drain task, so a large download shows a live progress bar even
+                                // though this handler blocks the actor until it finishes (it pauses
+                                // this server's sync_once + other commands meanwhile — a documented
+                                // MVP trade-off; true non-blocking download is a follow-up).
+                                let (ptx, mut prx) = mpsc::channel::<(usize, usize)>(64);
+                                let evt = event_tx.clone();
+                                let cid_evt = cid.clone();
+                                tokio::spawn(async move {
+                                    while let Some((done, total)) = prx.recv().await {
+                                        let _ = evt
+                                            .send(AppEvent::DownloadProgress {
+                                                cid: cid_evt.clone(),
+                                                done,
+                                                total,
+                                            })
+                                            .await;
+                                    }
+                                });
+                                server
+                                    .download_file_with_progress(&Cid::from_bytes(arr), Some(&ptx))
+                                    .await
+                                    .map_err(|e| e.to_string())
+                            }
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);
@@ -839,6 +871,12 @@ where
                     // (policy-gated). Driven by a periodic command from the bridge (the real-time
                     // timer lives there, off the deterministic-time seam). A no-op without rendezvous.
                     Some(AppCommand::DriveDiscovery) => {
+                        // Re-evaluate the advisory eclipse verdict each pass; surface a change.
+                        let caution = server.observe_eclipse();
+                        if caution != last_eclipse {
+                            last_eclipse = caution;
+                            let _ = event_tx.send(AppEvent::EclipseChanged { caution }).await;
+                        }
                         if server.has_rendezvous() {
                             server.drive_discovery().await;
                             // ONE overall timeout bounds the whole drain to a single window, so an

@@ -165,6 +165,8 @@ pub struct DiscoveredPeer {
     pub addresses: Vec<String>,
     /// The rendezvous namespace it was discovered under.
     pub namespace: String,
+    /// The record's own signed sequence number, for the discovery policy's anti-replay freshness.
+    pub seq: u64,
 }
 
 /// The messaging seam. Outbound operations take `&self` so the transport can be

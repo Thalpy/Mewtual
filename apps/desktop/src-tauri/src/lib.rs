@@ -133,6 +133,18 @@ struct CountEvt {
 struct ServerEvt {
     server: u64,
 }
+#[derive(Serialize, Clone)]
+struct DownloadProgressEvt {
+    server: u64,
+    cid: String,
+    done: usize,
+    total: usize,
+}
+#[derive(Serialize, Clone)]
+struct EclipseEvt {
+    server: u64,
+    caution: bool,
+}
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
 /// How often the bridge nudges a server's actor to drive steady-state rendezvous discovery. The
@@ -178,6 +190,17 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
                 }
+                AppEvent::DownloadProgress { cid, done, total } => {
+                    let _ = app.emit(
+                        "download-progress",
+                        DownloadProgressEvt {
+                            server,
+                            cid: hex::encode(cid),
+                            done,
+                            total,
+                        },
+                    );
+                }
                 AppEvent::StatusUpdated => {
                     let _ = app.emit("status-updated", ServerEvt { server });
                 }
@@ -186,6 +209,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::RolesUpdated => {
                     let _ = app.emit("roles-updated", ServerEvt { server });
+                }
+                AppEvent::EclipseChanged { caution } => {
+                    let _ = app.emit("eclipse-changed", EclipseEvt { server, caution });
                 }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
@@ -441,11 +467,12 @@ async fn discover_and_connect(
                 peer: d.peer.to_bytes(),
                 addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
                 source: Source::Rendezvous(root.clone()),
-                // Placeholder pre-join: we can't read the registrant's own signed seq here, so the
-                // policy's anti-replay freshness is inert; the backstop is request_join's Welcome-
-                // signature + group-id check, which fails closed if we dial the wrong peer.
-                seq: 1,
-                tag_verified: false, // pre-join: no group secret to recompute the member tag
+                // The record's own signed seq gives the policy real anti-replay freshness; the
+                // backstop remains request_join's Welcome-signature + group-id check, which fails
+                // closed if we dial the wrong peer. tag_verified stays false pre-join (no group
+                // secret to recompute the member tag).
+                seq: d.seq,
+                tag_verified: false,
             });
             if candidates.len() >= 8 {
                 break;

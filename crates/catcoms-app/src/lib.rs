@@ -809,6 +809,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// conflated: the file isn't listed · the ref is corrupt · a chunk is held but unreadable ·
     /// no peer has a chunk yet · a chunk couldn't be decrypted · the reassembly failed its check.
     pub async fn download_file(&mut self, cid: &Cid) -> Result<Vec<u8>, AppError> {
+        self.download_file_with_progress(cid, None).await
+    }
+
+    /// As [`download_file`](Self::download_file), but reports per-chunk progress over `progress` as
+    /// `(chunks_done, chunks_total)` — `(0, total)` first so the UI shows 0% immediately, then
+    /// `(i+1, total)` after each chunk. The actor wires this to a `DownloadProgress` event so a
+    /// large multi-chunk download shows a progress bar.
+    pub async fn download_file_with_progress(
+        &mut self,
+        cid: &Cid,
+        progress: Option<&tokio::sync::mpsc::Sender<(usize, usize)>>,
+    ) -> Result<Vec<u8>, AppError> {
         let Some(entry) = self
             .files()
             .into_iter()
@@ -826,6 +838,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             return Err(AppError::Invalid(
                 "file reference declares an implausible size".into(),
             ));
+        }
+        let total = manifest.chunks.len();
+        if let Some(p) = progress {
+            let _ = p.send((0, total)).await;
         }
         let mut out = Vec::with_capacity(manifest.total_size as usize);
         for (i, chunk_ref) in manifest.chunks.iter().enumerate() {
@@ -850,6 +866,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 .open_file(&ciphertext, chunk_ref)
                 .map_err(|e| AppError::Invalid(format!("chunk {i} could not be decrypted: {e}")))?;
             out.extend_from_slice(&chunk);
+            if let Some(p) = progress {
+                let _ = p.send((i + 1, total)).await;
+            }
         }
         // End-to-end integrity: the reassembled plaintext must hash to the manifest's identity.
         if Cid::of(&out) != manifest.plaintext_cid {
@@ -880,11 +899,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
     }
 
-    /// Remove a file from the shared index. **Owner or admin only** at this product layer —
-    /// errors otherwise. The content-addressed blob may still exist on peers who already hold
-    /// it; this removes the listing (a blob garbage-collection pass is a follow-up). Like
-    /// invites and member removal, the gate is enforced for honest clients; protocol-layer
-    /// enforcement is the same documented residual.
+    /// Remove a file from the shared index, and **garbage-collect its now-orphaned chunk blobs**
+    /// from local storage. **Owner or admin only** — errors otherwise. The GC is **dedup-safe**:
+    /// a chunk still referenced by another listed file (chunks are content-addressed, so two files
+    /// can share one) is kept; only chunks no remaining manifest references are deleted (they're
+    /// re-fetchable from any peer that still holds them). Like invites and member removal, the role
+    /// gate is honest-client-enforced (the protocol residual is the same as those).
     pub async fn delete_file(&mut self, cid: &Cid) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
@@ -895,11 +915,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if !self.files().iter().any(|e| e.cid == raw) {
             return Err(AppError::Invalid("no such file".into()));
         }
+        // Capture the chunk blobs of the file(s) being removed, BEFORE unlisting them.
+        let removed_chunks: Vec<Cid> = self
+            .files()
+            .iter()
+            .filter(|e| e.cid == raw)
+            .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
+            .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
+            .collect();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
                 delete_file_entry(d, &raw)
             })
             .await?;
+        // Dedup-safe GC: delete each removed chunk that NO still-listed file references.
+        let live: std::collections::HashSet<Cid> = self
+            .files()
+            .iter()
+            .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
+            .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
+            .collect();
+        for chunk in removed_chunks {
+            if !live.contains(&chunk) {
+                let _ = self.sync.delete_blob(&chunk);
+            }
+        }
         Ok(())
     }
 
@@ -1259,6 +1299,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// approves it (never auto-dial; membership re-proven post-dial via PEX).
     pub async fn ingest_discovered(&mut self, d: DiscoveredPeer) {
         self.sync.ingest_discovered(d).await;
+    }
+
+    /// Advisory eclipse check — `true` if the node may be isolated (verify a member out of band).
+    /// Never gates anything; the actor surfaces a changed verdict to the UI.
+    pub fn observe_eclipse(&mut self) -> bool {
+        self.sync.observe_eclipse()
     }
 
     /// Fetch a channel's history from `peer` (request/response catch-up), e.g. right
@@ -1923,5 +1969,60 @@ mod tests {
         assert_eq!(cid, Cid::of(b""));
         let got = alice.download_file(&cid).await.unwrap();
         assert!(got.is_empty(), "an empty file downloads back to empty");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_file_garbage_collects_its_orphaned_chunk_blobs() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let cid_a = alice
+            .add_file(
+                "a.bin",
+                "application/octet-stream",
+                "",
+                b"the bytes of file A",
+            )
+            .await
+            .unwrap();
+        let cid_b = alice
+            .add_file(
+                "b.bin",
+                "application/octet-stream",
+                "",
+                b"the bytes of file B",
+            )
+            .await
+            .unwrap();
+        // Capture A's chunk ciphertext cids before deleting.
+        let a_chunks: Vec<Cid> = alice
+            .files()
+            .iter()
+            .filter(|e| e.cid == cid_a.as_bytes().to_vec())
+            .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
+            .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
+            .collect();
+        assert!(!a_chunks.is_empty());
+        assert!(
+            a_chunks.iter().all(|c| alice.sync().has_blob(c)),
+            "A's chunks are held"
+        );
+
+        alice.delete_file(&cid_a).await.unwrap();
+
+        // A's chunk blobs are GC'd (no longer held); B is untouched + still downloadable.
+        for c in &a_chunks {
+            assert!(
+                !alice.sync().has_blob(c),
+                "A's orphaned chunk blob was deleted"
+            );
+        }
+        assert!(
+            alice.file_available(&cid_b),
+            "the other file's chunks survive"
+        );
+        assert_eq!(
+            alice.download_file(&cid_b).await.unwrap(),
+            b"the bytes of file B".to_vec()
+        );
     }
 }

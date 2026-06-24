@@ -1462,3 +1462,25 @@ button.emoji-pick:hover {
   font-size: 1rem;
   flex: none;
 }
+
+/* Advisory eclipse-isolation banner (never gates; verify a member out of band). */
+.eclipse-banner {
+  background: #8a6d1a;
+  color: #fff;
+  padding: 8px 14px;
+  text-align: center;
+  font-size: 0.85rem;
+  flex: none;
+}
+
+/* Per-file download progress (large multi-chunk files). */
+.dl-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+}
+.dl-progress progress {
+  width: 100%;
+  height: 8px;
+}

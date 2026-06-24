@@ -245,6 +245,13 @@
     }
   });
 
+  // The eclipse hint is per-server; clear it when switching (the new server re-asserts via its
+  // next 'eclipse-changed' event).
+  $effect(() => {
+    void activeServerId;
+    eclipseCaution = false;
+  });
+
   // Resolve inline media embeds + custom emoji whenever content or the file index changes.
   // The `tick()` is essential: it waits for Svelte to commit the `{@html renderMessage(...)}`
   // DOM so the [data-embed-cid]/[data-emoji] placeholders exist before we query for them.
@@ -1068,6 +1075,7 @@
 
   async function downloadFile(f: UiFile) {
     if (activeServerId === null) return;
+    downloadProgress[f.cid] = 0;
     try {
       const base64 = await invoke<string>("download_file", { server: activeServerId, cid: f.cid });
       const a = document.createElement("a");
@@ -1078,6 +1086,8 @@
       a.remove();
     } catch (e) {
       error = String(e);
+    } finally {
+      delete downloadProgress[f.cid];
     }
   }
 
@@ -1087,6 +1097,12 @@
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
   let fileInfoBusy = $state(false);
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
+  // In-flight download progress per file cid (a 0..1 fraction); absent = not downloading. Driven
+  // by 'download-progress' events from the actor's per-chunk reporting (large multi-chunk files).
+  let downloadProgress = $state<Record<string, number>>({});
+  // Advisory eclipse hint for the active server (the node may be isolated — verify a member out of
+  // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
+  let eclipseCaution = $state(false);
 
   async function openFileInfo(f: UiFile) {
     if (activeServerId === null) return;
@@ -1254,6 +1270,18 @@
       listen<{ server: number }>("files-updated", (e) => {
         if (e.payload.server === activeServerId) refreshFiles();
       }),
+      listen<{ server: number; cid: string; done: number; total: number }>(
+        "download-progress",
+        (e) => {
+          if (e.payload.server !== activeServerId) return;
+          if (e.payload.done >= e.payload.total) {
+            delete downloadProgress[e.payload.cid];
+          } else {
+            downloadProgress[e.payload.cid] =
+              e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+          }
+        }
+      ),
       listen<{ server: number }>("status-updated", (e) => {
         if (e.payload.server === activeServerId) refreshStatuses();
       }),
@@ -1262,6 +1290,9 @@
       }),
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
+      }),
+      listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
+        if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
       listen<{ server: number }>("server-closed", (e) => {
         servers = servers.filter((s) => s.id !== e.payload.server);
@@ -1325,6 +1356,11 @@
 {/snippet}
 
 <main>
+  {#if eclipseCaution && activeServerId !== null && !locked}
+    <div class="eclipse-banner" role="status">
+      ⚠ You may be isolated from this server — few members are reachable. Verify a member out of band.
+    </div>
+  {/if}
   {#if locked}
     <div class="start">
       <h1>CatComs</h1>
@@ -1939,6 +1975,12 @@
               <dd class="cid" title={fileInfo.cid}>{fileInfo.cid.slice(0, 16)}…</dd>
             </dl>
 
+            {#if downloadProgress[fileInfo.cid] !== undefined}
+              <label class="dl-progress">
+                <span class="muted small">Downloading… {Math.round(downloadProgress[fileInfo.cid] * 100)}%</span>
+                <progress value={downloadProgress[fileInfo.cid]} max="1"></progress>
+              </label>
+            {/if}
             <div class="file-info-actions">
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
               {#if myRole === "owner" || myRole === "admin"}

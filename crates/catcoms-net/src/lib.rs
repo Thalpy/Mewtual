@@ -91,6 +91,10 @@ pub struct Discovered {
     pub addresses: Vec<Multiaddr>,
     /// The namespace it was discovered under.
     pub namespace: String,
+    /// The record's own signed sequence number (a monotonic counter the registrant signs into its
+    /// libp2p PeerRecord). Carried up so the discovery policy can use real signed-freshness for its
+    /// anti-replay high-water (rather than a placeholder).
+    pub seq: u64,
 }
 
 /// Confirmation that our own peer record was **registered** at a rendezvous node,
@@ -922,6 +926,7 @@ impl Actor {
                             peer: reg.record.peer_id(),
                             addresses: reg.record.addresses().to_vec(),
                             namespace: reg.namespace.to_string(),
+                            seq: reg.record.seq(),
                         });
                     }
                     if total > MAX_DISCOVERED_PER_RESPONSE {
@@ -1313,6 +1318,7 @@ impl MeshTransport for MeshService {
             peer: d.peer.to_bytes(),
             addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
             namespace: d.namespace,
+            seq: d.seq,
         })
     }
 }
