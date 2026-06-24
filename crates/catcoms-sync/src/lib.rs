@@ -4099,6 +4099,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.docs.get(&(doc_type, doc_id))
     }
 
+    /// The ids of every open chat-channel document (excludes profile/roles/status/etc.) — lets the
+    /// product layer scan across channels (e.g. to build the mention/reply inbox).
+    pub fn channel_ids(&self) -> Vec<u128> {
+        self.docs
+            .keys()
+            .filter(|(t, _)| *t == DocType::Channel)
+            .map(|(_, id)| *id)
+            .collect()
+    }
+
     /// This member's transport peer id.
     pub fn local_peer(&self) -> catcoms_rt::PeerId {
         self.transport.local_peer()

@@ -6,6 +6,11 @@
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string };
+  type InboxEntry = {
+    server: number; server_name: string; is_dm: boolean;
+    channel: string; message_id: string; author: string; author_name: string;
+    text: string; ts: number; mention: boolean; reply: boolean;
+  };
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
@@ -32,6 +37,11 @@
   // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
   // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
   let dmHome = $state(false);
+  // Inbox mode: the rail's inbox icon is active and the content area shows the cross-server
+  // mention/reply inbox instead of a server/DM.
+  let inboxView = $state(false);
+  let inboxItems = $state<InboxEntry[]>([]);
+  let inboxLoading = $state(false);
   // Servers shown on the rail vs DMs shown behind the DMs circle.
   let railServers = $derived(servers.filter((s) => !s.isDm));
   let dmList = $derived(servers.filter((s) => s.isDm));
@@ -537,6 +547,7 @@
       passphrase = "";
       const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
       if (firstServer) switchServer(firstServer.id);
+      loadInbox(); // populate the inbox badge once the reloaded servers are live
     } catch (e) {
       error = String(e);
     } finally {
@@ -704,6 +715,7 @@
   // DM-home (no active group) ready for a New DM / Add friend.
   function enterDmHome() {
     dmHome = true;
+    inboxView = false;
     menu = null;
     showNewDm = false;
     showAddFriend = false;
@@ -739,6 +751,7 @@
 
   async function switchServer(id: number) {
     activeServerId = id;
+    inboxView = false;
     const s = servers.find((x) => x.id === id);
     if (s) s.dot = false;
     dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
@@ -1720,6 +1733,52 @@
     );
   }
 
+  // Cross-server inbox: the backend scans every server's channels for messages addressed to me.
+  async function loadInbox() {
+    inboxLoading = true;
+    try {
+      inboxItems = await invoke<InboxEntry[]>("get_inbox");
+    } catch (e) {
+      error = String(e);
+    } finally {
+      inboxLoading = false;
+    }
+  }
+  let inboxTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleInboxReload() {
+    clearTimeout(inboxTimer);
+    inboxTimer = setTimeout(loadInbox, 1500); // debounce the cross-server scan
+  }
+  // An inbox entry is "unseen" until you've read past it in that channel (the same read marks that
+  // drive jump-to-unread); resolved against the entry's own server, not the active one.
+  function inboxUnseen(it: InboxEntry): boolean {
+    return it.ts > (readMarks[`${it.server}:${it.channel}`] ?? 0);
+  }
+  let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
+  // The entry's channel name, resolved from the server's known channel list (names are a UI concern).
+  function inboxChannelName(it: InboxEntry): string {
+    return servers.find((s) => s.id === it.server)?.channels.find((c) => c.id === it.channel)?.name ?? "channel";
+  }
+  function openInbox() {
+    inboxView = true;
+    dmHome = false;
+    loadInbox();
+  }
+  // Open the server + channel an inbox entry points at and scroll to the message.
+  async function jumpToInbox(it: InboxEntry) {
+    inboxView = false;
+    if (it.server !== activeServerId) await switchServer(it.server);
+    view = "chat";
+    // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
+    // sidebar list — register it so it renders + selects, then switch to it.
+    if (cur && !cur.channels.some((c) => c.id === it.channel)) {
+      cur.channels = [...cur.channels, { id: it.channel, name: inboxChannelName(it) }];
+    }
+    if (cur && cur.active !== it.channel) switchTo(it.channel);
+    await refresh();
+    jumpToMessageId(it.message_id);
+  }
+
   async function send() {
     const text = draft.trim();
     if (!text || !cur || !cur.active || activeServerId === null) return;
@@ -1869,6 +1928,8 @@
     const subs: Promise<UnlistenFn>[] = [
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
+        scheduleInboxReload();
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
         if (dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
         if (server === activeServerId && channel === cur?.active) {
@@ -2008,6 +2069,7 @@
     return () => {
       window.removeEventListener("keydown", onKey);
       clearInterval(tick);
+      clearTimeout(inboxTimer);
       subs.forEach((p) => p.then((un) => un()));
     };
   });
@@ -2123,11 +2185,22 @@
             <span class="rail-dot">●</span>
           {/if}
         </button>
+        <button
+          class="server-icon inbox-circle"
+          class:active={inboxView}
+          title="Inbox — mentions & replies"
+          onclick={openInbox}
+        >
+          📥
+          {#if inboxUnseenCount}
+            <span class="rail-badge">{inboxUnseenCount}</span>
+          {/if}
+        </button>
         <div class="rail-sep"></div>
         {#each railServers as s}
           <button
             class="server-icon"
-            class:active={s.id === activeServerId && !dmHome}
+            class:active={s.id === activeServerId && !dmHome && !inboxView}
             title={s.name}
             onclick={() => switchServer(s.id)}
             use:contextMenu={() => serverMenu(s)}
@@ -2145,6 +2218,44 @@
         <button class="server-icon gear" title="Settings" onclick={() => (showSettings = true)}>⚙</button>
       </nav>
 
+      {#if inboxView}
+        <section class="inbox-screen">
+          <div class="inbox-head">
+            <h2>📥 Inbox</h2>
+            <span class="muted small">Mentions &amp; replies, across every server &amp; DM</span>
+            <button class="ghost small inbox-refresh" onclick={loadInbox} disabled={inboxLoading}>↻ Refresh</button>
+          </div>
+          {#if inboxLoading && !inboxItems.length}
+            <p class="muted inbox-empty">Loading…</p>
+          {:else if !inboxItems.length}
+            <p class="muted inbox-empty">
+              Nothing yet. When someone <strong>@-mentions</strong> you or <strong>replies</strong> to one of your
+              messages, it shows up here — with who said it, where, and a jump straight to it.
+            </p>
+          {:else}
+            <ul class="inbox-list">
+              {#each inboxItems as it (it.server + ":" + it.channel + ":" + it.message_id)}
+                <li class="inbox-item" class:unseen={inboxUnseen(it)}>
+                  <button class="inbox-jump" onclick={() => jumpToInbox(it)}>
+                    <div class="inbox-meta">
+                      <span class="inbox-kind">
+                        {#if it.mention}<span class="inbox-tag mention-tag">@ mention</span>{/if}
+                        {#if it.reply}<span class="inbox-tag reply-tag">↰ reply</span>{/if}
+                      </span>
+                      <span class="inbox-where">{it.is_dm ? "Direct message" : it.server_name} · #{inboxChannelName(it)}</span>
+                      <span class="inbox-time" title={new Date(it.ts).toLocaleString()}>{fmtTime(it.ts)}</span>
+                    </div>
+                    <div class="inbox-body">
+                      <strong class="inbox-author">{it.author_name || it.author.slice(0, 8)}</strong>
+                      <span class="inbox-text">{@html renderMessage(it.text, "")}</span>
+                    </div>
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {:else}
       <aside class="sidebar">
         {#if dmHome}
           <div class="server-head">
@@ -2718,6 +2829,7 @@
         {/if}
         {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
       </section>
+      {/if}
     </div>
 
     {#if showSettings}

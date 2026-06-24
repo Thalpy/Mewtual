@@ -110,6 +110,52 @@ pub struct MessageStats {
     pub active_days: u64,
 }
 
+/// Normalize a display name into the form the desktop UI carries inside an `@[Name]` mention marker
+/// (mirrors `mentionName` there): swap the bracket/newline chars that would break the marker for a
+/// space, collapse runs of whitespace, and bound the length to the marker's 40-char cap. Inbox
+/// mention-detection and the composer's insertion must agree, or mentions are silently missed.
+pub(crate) fn normalize_mention_name(name: &str) -> String {
+    let swapped: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '[' | ']' | '\n') {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    swapped
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(40)
+        .collect()
+}
+
+/// One mention/reply addressed to the local member, materialized for the cross-server inbox. A
+/// single message can be both a mention and a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxItem {
+    /// The channel the message is in.
+    pub channel: u128,
+    /// The message's stable id (for jump-to).
+    pub message_id: String,
+    /// The author's fingerprint.
+    pub author: String,
+    /// The author's display name in this server (resolved here since names are per-server).
+    pub author_name: String,
+    /// The message text.
+    pub text: String,
+    /// Send time (epoch-millis).
+    pub ts: u64,
+    /// The message `@[my name]`-mentions me.
+    pub mention: bool,
+    /// The message replies to one of my messages.
+    pub reply: bool,
+}
+
 /// Deterministically derive a channel's document id from its **name**, so any two
 /// members who open the same channel name converge on the same channel — IRC-style name
 /// addressing, with no shared channel registry. Names are normalized (trimmed +
@@ -1623,6 +1669,57 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
     }
 
+    /// Scan every open channel for messages addressed to me — either an `@[my name]` mention (the
+    /// UI's mention marker) or a reply to one of my own messages — newest first, capped at `limit`.
+    /// Author names are resolved here because they are per-server. Excludes my own messages.
+    pub fn inbox(&self, limit: usize) -> Vec<InboxItem> {
+        let me = self.my_fingerprint();
+        let names: std::collections::HashMap<String, String> = self
+            .profiles()
+            .into_iter()
+            .map(|(fp, p)| (fp, p.name))
+            .collect();
+        // Build the mention marker from the SAME normalization the composer applies when it inserts
+        // `@[Name]` (desktop `mentionName`), so a name with brackets/newlines/extra spaces or over
+        // the length cap is detected here exactly as it was written — not silently missed.
+        let my_name = normalize_mention_name(&names.get(&me).cloned().unwrap_or_default());
+        let marker = (!my_name.is_empty()).then(|| format!("@[{my_name}]"));
+
+        let mut out = Vec::new();
+        for channel in self.sync.channel_ids() {
+            let msgs = self.messages(channel);
+            // message id -> author, to resolve a reply's parent within this channel.
+            let author_of: std::collections::HashMap<&str, &str> = msgs
+                .iter()
+                .filter(|m| !m.id.is_empty())
+                .map(|m| (m.id.as_str(), m.author.as_str()))
+                .collect();
+            for m in &msgs {
+                if m.author == me {
+                    continue; // never inbox my own messages
+                }
+                let mention = marker.as_deref().is_some_and(|mk| m.text.contains(mk));
+                let reply = !m.reply_to.is_empty()
+                    && author_of.get(m.reply_to.as_str()) == Some(&me.as_str());
+                if mention || reply {
+                    out.push(InboxItem {
+                        channel,
+                        message_id: m.id.clone(),
+                        author: m.author.clone(),
+                        author_name: names.get(&m.author).cloned().unwrap_or_default(),
+                        text: m.text.clone(),
+                        ts: m.ts,
+                        mention,
+                        reply,
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| b.ts.cmp(&a.ts));
+        out.truncate(limit);
+        out
+    }
+
     /// Mint a single-use invite to this server.
     pub fn mint_invite(
         &self,
@@ -2015,6 +2112,68 @@ mod tests {
             "the reply points at its parent"
         );
         assert_eq!(msgs[1].text, "child");
+    }
+
+    #[tokio::test]
+    async fn inbox_collects_mentions_and_replies_to_me() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.open_profiles().await.unwrap();
+        alice
+            .set_profile(Profile {
+                name: "Alice".into(),
+                color: String::new(),
+                font: String::new(),
+                effect: String::new(),
+                avatar: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        // alice posts a message a reply can target.
+        alice.send_message(GENERAL, "hi all").await.unwrap();
+        let alice_id = alice.messages(GENERAL)[0].id.clone();
+
+        // Inject a foreign message mentioning @[Alice] and a foreign reply to alice's message.
+        let parent = alice_id.clone();
+        alice
+            .sync
+            .post(DocType::Channel, GENERAL, move |d| {
+                append_message(d, "m-mention", "beefbeef", "look here @[Alice] !", 10, "")?;
+                append_message(d, "m-reply", "feedface", "agreed", 11, &parent)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let inbox = alice.inbox(50);
+        assert_eq!(
+            inbox.len(),
+            2,
+            "the mention + the reply, not alice's own message"
+        );
+        assert_eq!(inbox[0].message_id, "m-reply", "newest first");
+
+        let mention = inbox.iter().find(|i| i.message_id == "m-mention").unwrap();
+        assert!(mention.mention && !mention.reply);
+        assert_eq!(mention.author, "beefbeef");
+
+        let reply = inbox.iter().find(|i| i.message_id == "m-reply").unwrap();
+        assert!(reply.reply && !reply.mention);
+
+        // My own messages are never in my inbox.
+        let me = alice.my_fingerprint();
+        assert!(!inbox.iter().any(|i| i.author == me));
+    }
+
+    #[test]
+    fn mention_name_normalization_matches_the_marker_form() {
+        // Must mirror the desktop `mentionName`, or inbox detection misses real mentions.
+        assert_eq!(normalize_mention_name("Alice"), "Alice");
+        assert_eq!(normalize_mention_name("Bob] Smith"), "Bob Smith"); // bracket -> space, collapsed
+        assert_eq!(normalize_mention_name("a\nb"), "a b");
+        assert_eq!(normalize_mention_name("  x   y  "), "x y");
+        assert_eq!(normalize_mention_name(&"z".repeat(50)).chars().count(), 40);
     }
 
     #[tokio::test]

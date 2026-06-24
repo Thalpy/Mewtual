@@ -20,7 +20,9 @@ use tokio::task::JoinHandle;
 
 use catcoms_storage::Cid;
 
-use crate::{ChatMessage, FileEntry, FilesView, MemberView, MessageStats, Profile, Server};
+use crate::{
+    ChatMessage, FileEntry, FilesView, InboxItem, MemberView, MessageStats, Profile, Server,
+};
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
@@ -79,6 +81,11 @@ pub enum AppCommand {
     MessageStats {
         channel: u128,
         reply: oneshot::Sender<MessageStats>,
+    },
+    /// Query this server's mention/reply inbox (newest first, capped at `limit`).
+    Inbox {
+        limit: usize,
+        reply: oneshot::Sender<Vec<InboxItem>>,
     },
     /// Query the current member count.
     MemberCount { reply: oneshot::Sender<usize> },
@@ -396,6 +403,20 @@ impl ServerActor {
             .is_err()
         {
             return MessageStats::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch this server's mention/reply inbox (newest first, capped at `limit`).
+    pub async fn inbox(&self, limit: usize) -> Vec<InboxItem> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Inbox { limit, reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
         }
         rx.await.unwrap_or_default()
     }
@@ -982,6 +1003,9 @@ where
                     }
                     Some(AppCommand::MessageStats { channel, reply }) => {
                         let _ = reply.send(server.message_stats(channel));
+                    }
+                    Some(AppCommand::Inbox { limit, reply }) => {
+                        let _ = reply.send(server.inbox(limit));
                     }
                     Some(AppCommand::MemberCount { reply }) => {
                         let _ = reply.send(server.member_count());

@@ -1965,3 +1965,101 @@ button.emoji-pick:hover {
   object-fit: contain;
   display: block;
 }
+
+/* Inbox screen: the cross-server mention/reply list. */
+.inbox-circle {
+  font-size: 1.05rem;
+}
+.inbox-screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+.inbox-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.inbox-head h2 {
+  margin: 0;
+}
+.inbox-refresh {
+  margin-left: auto;
+}
+.inbox-empty {
+  max-width: 540px;
+  line-height: 1.55;
+}
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.inbox-jump {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #2a2a36);
+  border-radius: 10px;
+  background: var(--panel, #1c1c24);
+  color: inherit;
+  cursor: pointer;
+}
+.inbox-jump:hover {
+  border-color: var(--accent, #6c8cff);
+}
+.inbox-item.unseen .inbox-jump {
+  border-left: 3px solid var(--accent, #6c8cff);
+  background: var(--accent-dim, #232a44);
+}
+.inbox-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.73rem;
+  margin-bottom: 4px;
+}
+.inbox-where {
+  color: var(--muted, #9aa0b5);
+}
+.inbox-time {
+  margin-left: auto;
+  color: var(--muted, #9aa0b5);
+}
+.inbox-tag {
+  padding: 0 6px;
+  border-radius: 8px;
+  font-weight: 600;
+}
+.mention-tag {
+  background: rgba(255, 196, 0, 0.18);
+  color: #ffd479;
+}
+.reply-tag {
+  background: var(--accent-dim, #232a44);
+  color: var(--accent, #6c8cff);
+}
+.inbox-body {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  min-width: 0;
+}
+.inbox-author {
+  flex: 0 0 auto;
+}
+.inbox-text {
+  color: var(--muted, #c9cede);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

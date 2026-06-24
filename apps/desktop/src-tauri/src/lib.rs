@@ -101,6 +101,22 @@ struct UiReaction {
     by: Vec<String>,
 }
 
+/// One cross-server inbox entry (a mention or reply aimed at me) with its server/channel context.
+#[derive(Serialize, Clone)]
+struct UiInboxItem {
+    server: u64,
+    server_name: String,
+    is_dm: bool,
+    channel: String,
+    message_id: String,
+    author: String,
+    author_name: String,
+    text: String,
+    ts: u64,
+    mention: bool,
+    reply: bool,
+}
+
 /// Map a backend chat message to its UI shape (shared by `get_messages` + `get_statuses`).
 fn ui_message(m: catcoms_app::ChatMessage) -> UiMessage {
     UiMessage {
@@ -1424,6 +1440,44 @@ async fn get_messages(
         .collect())
 }
 
+/// The cross-server mention/reply inbox: every message addressed to me, across all servers/DMs,
+/// newest first. Each server's actor scans its own channels (and resolves author names, since they
+/// are per-server); the bridge tags each item with its server context.
+#[tauri::command]
+async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, String> {
+    // Snapshot (id, name, is_dm, actor) under the lock, then query each actor without holding it.
+    let servers: Vec<(u64, String, bool, ServerActor)> = {
+        let guard = state.servers.lock().await;
+        guard
+            .iter()
+            .map(|(id, e)| (*id, e.name.clone(), e.is_dm, e.actor.clone()))
+            .collect()
+    };
+    let mut out = Vec::new();
+    for (id, name, is_dm, actor) in servers {
+        for item in actor.inbox(50).await {
+            out.push(UiInboxItem {
+                server: id,
+                server_name: name.clone(),
+                is_dm,
+                channel: item.channel.to_string(),
+                message_id: item.message_id,
+                author: item.author,
+                author_name: item.author_name,
+                text: item.text,
+                ts: item.ts,
+                mention: item.mention,
+                reply: item.reply,
+            });
+        }
+    }
+    out.sort_by(|a, b| b.ts.cmp(&a.ts));
+    // Per-server cap (50) then a global cap (100), newest first. A single hyper-active server can
+    // thus have its older mentions truncated before the global merge — fine for an inbox view.
+    out.truncate(100);
+    Ok(out)
+}
+
 /// One server reloaded from disk, returned to the UI to repopulate the rail.
 #[derive(Serialize, Clone)]
 struct ReloadedServer {
@@ -1683,6 +1737,7 @@ pub fn run() {
             edit_message,
             delete_message,
             toggle_reaction,
+            get_inbox,
             get_messages
         ])
         .run(tauri::generate_context!())
