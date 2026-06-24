@@ -446,6 +446,14 @@
     lastSeen = {};
   });
 
+  // Auto-dismiss a transient error after a few seconds (it's also manually dismissable via the ✕),
+  // so a one-off "file not available" doesn't linger forever.
+  $effect(() => {
+    if (!error) return;
+    const t = setTimeout(() => (error = ""), 8000);
+    return () => clearTimeout(t);
+  });
+
   // Resolve inline media embeds + custom emoji whenever content or the file index changes.
   // The `tick()` is essential: it waits for Svelte to commit the `{@html renderMessage(...)}`
   // DOM so the [data-embed-cid]/[data-emoji] placeholders exist before we query for them.
@@ -457,7 +465,9 @@
     void statuses;
     void files;
     void emojiUrls;
+    void emojiSize;
     void view; // switching tabs destroys + recreates this DOM (fresh, unresolved placeholders)
+    void inboxView; // returning from the inbox recreates the chat DOM too
     tick().then(() => {
       resolveMedia(messagesEl);
       resolveEmoji(messagesEl);
@@ -519,12 +529,23 @@
       img.className = "emoji";
       img.alt = `:${code}:`;
       img.title = `:${code}:`;
+      img.dataset.emojiCode = code; // so we can re-apply the size if it loads later
       const sz = emojiSize[code];
       if (sz) {
         img.style.width = `${sz}px`;
         img.style.height = `${sz}px`;
       }
       span.replaceWith(img);
+    }
+    // Re-apply sizes to already-resolved emoji — the size (from `files`) may have loaded after the
+    // image was first resolved (e.g. after returning from the inbox), which would otherwise leave a
+    // sticker stuck at the default small size.
+    for (const img of Array.from(container.querySelectorAll<HTMLImageElement>("img.emoji[data-emoji-code]"))) {
+      const sz = emojiSize[img.dataset.emojiCode ?? ""];
+      if (sz) {
+        img.style.width = `${sz}px`;
+        img.style.height = `${sz}px`;
+      }
     }
   }
 
@@ -2504,6 +2525,7 @@
           </form>
         {/if}
 
+        {#if view === "chat"}
         <div class="roster">
           <h3>Members <span class="muted">({members}{#if members > 1} · {onlineCount} online{/if})</span></h3>
           {#if roster.length > 6}
@@ -2529,6 +2551,7 @@
             {/each}
           </ul>
         </div>
+        {/if}
 
         {#if canInvite || cur?.invite}
           <button class="ghost invite-quick" onclick={() => openServerSettings()}>＋ Invite someone</button>
@@ -2607,9 +2630,16 @@
               {#if mi === firstUnreadIdx}
                 <li class="unread-divider" aria-hidden="true"><span>New messages</span></li>
               {/if}
+              {@const grouped =
+                mi > 0 &&
+                mi !== firstUnreadIdx &&
+                !m.reply_to &&
+                messages[mi - 1].author === m.author &&
+                m.ts - messages[mi - 1].ts < 300000}
               <li
                 data-mi={mi}
                 class:own={m.author === myFp}
+                class:grouped
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchMatches[searchPos] === mi}
                 class:flash={!!m.id && m.id === flashId}
@@ -2631,16 +2661,23 @@
                     {/if}
                   </button>
                 {/if}
-                <span class="author">
-                  {@render avatarTag(m.author)}
-                  {@render nameTag(m.author)}
-                  <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
-                  {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
-                </span>
+                {#if !grouped}
+                  <span class="author">
+                    {@render avatarTag(m.author)}
+                    {@render nameTag(m.author)}
+                    <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
+                    {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
+                  </span>
+                {:else if m.pinned}
+                  <span class="author"><span class="pin-mark" title="Pinned message">📌</span></span>
+                {/if}
                 {#if m.id && editingId !== m.id}
                   <div class="msg-actions">
                     <button class="msg-action" type="button" title="Add reaction" aria-label="Add reaction" onclick={() => toggleReactionPicker(m)}>😊</button>
                     <button class="msg-action" type="button" title="Reply" aria-label="Reply" onclick={() => startReply(m)}>↰</button>
+                    {#if m.author === myFp}
+                      <button class="msg-action" type="button" title="Edit" aria-label="Edit" onclick={() => startEdit(m)}>✎</button>
+                    {/if}
                     <button class="msg-action" type="button" title="More actions" aria-label="More actions" onclick={(e) => openMenu(e, messageMenu(m))}>⋯</button>
                   </div>
                 {/if}
@@ -3010,7 +3047,12 @@
           </div>
         {/if}
         {/if}
-        {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
+        {#if error}
+          <div class="error-toast" role="alert">
+            <span>{error}</span>
+            <button class="error-x" aria-label="Dismiss" title="Dismiss" onclick={() => (error = "")}>✕</button>
+          </div>
+        {/if}
       </section>
       {/if}
     </div>
