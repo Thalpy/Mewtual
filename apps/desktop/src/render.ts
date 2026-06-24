@@ -59,6 +59,28 @@ const emoji: TokenizerAndRendererExtension = {
   },
 };
 
+// `@[Name]` → a member mention. The bracket form is self-contained (handles names with spaces and
+// needs no member list in the renderer); the composer's @-autocomplete inserts it. Renders as a
+// highlighted `@Name` chip, with an extra `mention-me` class when it names the local member.
+let selfMentionName = "";
+const mention: TokenizerAndRendererExtension = {
+  name: "mention",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("@[");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const m = /^@\[([^\]\n]{1,40})\]/.exec(src);
+    if (m) return { type: "mention", raw: m[0], text: m[1].trim() };
+    return undefined;
+  },
+  renderer(token) {
+    const me = selfMentionName && token.text === selfMentionName ? " mention-me" : "";
+    return `<span class="mention${me}" data-mention="${escAttr(token.text)}">@${escText(token.text)}</span>`;
+  },
+};
+
 // `![alt](cid:HEX)` → a fileshare embed placeholder (resolved to media in 10c). Matched ahead
 // of marked's own image syntax; plain `![](http…)` falls through and is stripped by sanitize.
 const embed: TokenizerAndRendererExtension = {
@@ -81,7 +103,7 @@ const embed: TokenizerAndRendererExtension = {
 let configured = false;
 function configure() {
   if (configured) return;
-  marked.use({ extensions: [wikiLink, emoji, embed], breaks: true, gfm: true });
+  marked.use({ extensions: [wikiLink, emoji, mention, embed], breaks: true, gfm: true });
   configured = true;
 }
 
@@ -92,17 +114,24 @@ const SANITIZE = {
     "ul", "ol", "li", "blockquote", "hr", "h1", "h2", "h3", "h4",
     "table", "thead", "tbody", "tr", "th", "td",
   ],
-  ALLOWED_ATTR: ["class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt"],
+  ALLOWED_ATTR: [
+    "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt", "data-mention",
+  ],
 };
 
-/** Render a chat/status message: inline markdown + the three custom tokens, sanitized. */
-export function renderMessage(text: string): string {
+/**
+ * Render a chat/status message: inline markdown + the custom tokens, sanitized. Pass `me` (the
+ * local member's display name) so a mention of yourself gets the extra `mention-me` highlight.
+ */
+export function renderMessage(text: string, me = ""): string {
   configure();
+  selfMentionName = me;
   return DOMPurify.sanitize(marked.parseInline(text ?? "") as string, SANITIZE) as string;
 }
 
 /** Render a full wiki page: block markdown + the custom tokens, sanitized. */
 export function renderWiki(text: string): string {
   configure();
+  selfMentionName = ""; // no "mention-me" self-highlight outside chat/status
   return DOMPurify.sanitize(marked.parse(text ?? "") as string, SANITIZE) as string;
 }

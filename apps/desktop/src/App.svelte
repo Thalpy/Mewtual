@@ -315,6 +315,11 @@
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
+  // My display name in the active server (per-server identity) — drives @mention self-highlight
+  // and detection of mentions aimed at me. `myMentionName` is the form that round-trips through the
+  // `@[Name]` marker (see `mentionName`), so insertion + detection + self-highlight all agree.
+  let myName = $derived(myFp ? nameOf(myFp) : "");
+  let myMentionName = $derived(mentionName(myName));
   // Reserved fileshare folder for chat/status media embeds uploaded by this member.
   let myEmbedFolder = $derived(myFp ? `embed/${myFp}` : "embed");
   // Member roles (10h): fingerprint -> "owner"|"admin"|"member".
@@ -752,6 +757,8 @@
     newFolder = "";
     reactionPickerFor = "";
     replyingTo = "";
+    mentionQuery = null;
+    mentionChannels = new Set(); // mention badges are scoped to the active server
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
       refresh(),
@@ -811,6 +818,11 @@
     if (showSearch) closeSearch();
     reactionPickerFor = "";
     replyingTo = "";
+    mentionQuery = null;
+    if (mentionChannels.has(id)) {
+      mentionChannels = new Set(mentionChannels);
+      mentionChannels.delete(id); // reading the channel clears its mention badge
+    }
     captureDivider(); // snapshot the read boundary before refresh advances the mark
     refresh();
   }
@@ -1626,12 +1638,95 @@
     return t.length > n ? t.slice(0, n) + "…" : t;
   }
 
+  // @-mention autocomplete: when the caret sits right after an "@partial", offer matching members;
+  // selecting one inserts the `@[Name]` marker the renderer highlights.
+  let mentionQuery = $state<string | null>(null);
+  let mentionStart = $state(0); // index of the '@' in the draft
+  let mentionIdx = $state(0); // highlighted candidate
+  let mentionCandidates = $derived.by(() => {
+    if (mentionQuery === null) return [] as { fp: string; name: string }[];
+    const q = mentionQuery.toLowerCase();
+    return roster
+      .map((r) => ({ fp: r.fingerprint, name: nameOf(r.fingerprint) }))
+      .filter((c) => c.name.toLowerCase().includes(q))
+      .slice(0, 6);
+  });
+  function onComposerInput(e: Event & { currentTarget: HTMLTextAreaElement }) {
+    const caret = e.currentTarget.selectionStart ?? draft.length;
+    const m = /@([^\s@[\]]{0,30})$/.exec(draft.slice(0, caret));
+    if (m) {
+      mentionStart = caret - m[0].length;
+      mentionQuery = m[1];
+      mentionIdx = 0;
+    } else {
+      mentionQuery = null;
+    }
+  }
+  // Normalize a display name into the form carried by an `@[Name]` marker: no `[`/`]`/newline (which
+  // would break the bracketed marker / the tokenizer regex) and bounded to the tokenizer's 40 chars.
+  // Insertion and detection both go through this, so a mention round-trips even for odd names.
+  function mentionName(name: string): string {
+    return name
+      .replace(/[[\]\n]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 40);
+  }
+  function pickMention(c: { fp: string; name: string }) {
+    const caret = composerEl?.selectionStart ?? draft.length;
+    const before = draft.slice(0, mentionStart);
+    const insert = `@[${mentionName(c.name)}] `;
+    draft = before + insert + draft.slice(caret);
+    mentionQuery = null;
+    const pos = before.length + insert.length;
+    queueMicrotask(() => {
+      if (composerEl) {
+        composerEl.focus();
+        composerEl.selectionStart = composerEl.selectionEnd = pos;
+      }
+    });
+  }
+  function onComposerKeydown(e: KeyboardEvent) {
+    if (mentionQuery !== null && mentionCandidates.length) {
+      const n = mentionCandidates.length;
+      if (e.key === "ArrowDown") { e.preventDefault(); mentionIdx = (mentionIdx + 1) % n; return; }
+      if (e.key === "ArrowUp") { e.preventDefault(); mentionIdx = (mentionIdx - 1 + n) % n; return; }
+      if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); pickMention(mentionCandidates[mentionIdx]); return; }
+      if (e.key === "Escape") { e.preventDefault(); mentionQuery = null; return; }
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  }
+
+  // Mentions/replies aimed at me. `mentionChannels` holds the active server's channels with an
+  // unseen message that @-mentions me or replies to one of my messages (drives the sidebar badge).
+  let mentionChannels = $state<Set<string>>(new Set());
+  // Best-effort, name-based: collisions (two members with the same display name both match) and
+  // renames (old markers orphan) are accepted for advisory metadata — the `@[Name]` wire form keeps
+  // the renderer member-list-free. `myMentionName` matches what `pickMention` would have inserted.
+  function mentionsMe(text: string): boolean {
+    return !!myMentionName && text.includes(`@[${myMentionName}]`);
+  }
+  // Does `msgs` contain a message newer than the channel's read mark that targets me (and isn't
+  // mine)? Used to flag a channel and to decide whether an arrival deserves a mention chime.
+  function targetsMe(channel: string, msgs: Msg[]): boolean {
+    if (!myFp) return false;
+    const seen = readMarks[`${activeServerId}:${channel}`] ?? 0;
+    const byId = new Map(msgs.map((m) => [m.id, m] as const));
+    return msgs.some(
+      (m) =>
+        m.ts > seen &&
+        m.author !== myFp &&
+        (mentionsMe(m.text) || (!!m.reply_to && byId.get(m.reply_to)?.author === myFp)),
+    );
+  }
+
   async function send() {
     const text = draft.trim();
     if (!text || !cur || !cur.active || activeServerId === null) return;
     const reply_to = replyingTo;
     draft = "";
     replyingTo = "";
+    mentionQuery = null;
     try {
       await invoke("send_message", { server: activeServerId, channel: cur.active, text, replyTo: reply_to });
     } catch (e) {
@@ -1781,6 +1876,19 @@
           if (!s.unread.includes(channel)) s.unread.push(channel);
           if (server !== activeServerId) s.dot = true;
           playNotify();
+          // A non-active channel of the server I'm in: scan it for a message that @-mentions me or
+          // replies to one of mine, and badge it if so (I have my per-server identity only here).
+          // Already-badged channels need no re-scan, so skip the fetch entirely.
+          if (server === activeServerId && !mentionChannels.has(channel)) {
+            invoke<Msg[]>("get_messages", { server, channel })
+              .then((msgs) => {
+                if (server !== activeServerId) return; // switched servers mid-fetch — drop it
+                if (targetsMe(channel, msgs) && !mentionChannels.has(channel)) {
+                  mentionChannels = new Set(mentionChannels).add(channel);
+                }
+              })
+              .catch(() => {});
+          }
         }
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
@@ -2120,6 +2228,7 @@
                   onclick={() => { switchTo(c.id); view = "chat"; }}
                 >
                   #{c.name}
+                  {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
                   {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
                 </button>
               </li>
@@ -2255,7 +2364,7 @@
                     </div>
                   </div>
                 {:else}
-                  <span class="text">{@html renderMessage(m.text)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
+                  <span class="text">{@html renderMessage(m.text, myMentionName)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
                 {/if}
                 {#if m.reactions.length || reactionPickerFor === m.id}
                   <div class="reactions">
@@ -2289,6 +2398,20 @@
             {/each}
           </ul>
           <div class="composer-wrap">
+            {#if mentionQuery !== null && mentionCandidates.length}
+              <div class="mention-popup">
+                {#each mentionCandidates as c, i}
+                  <button
+                    type="button"
+                    class="mention-option"
+                    class:active={i === mentionIdx}
+                    onmousedown={(e) => { e.preventDefault(); pickMention(c); }}
+                  >
+                    {@render avatarTag(c.fp)}{@render nameTag(c.fp)}
+                  </button>
+                {/each}
+              </div>
+            {/if}
             {#if replyingTo}
               <div class="reply-banner">
                 <span class="reply-arrow">↰</span>
@@ -2341,7 +2464,9 @@
                 rows="1"
                 class="composer-input"
                 placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
-                onkeydown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } }}
+                oninput={onComposerInput}
+                onkeydown={onComposerKeydown}
+                onblur={() => queueMicrotask(() => (mentionQuery = null))}
               ></textarea>
               <button type="submit" disabled={uploading}>Send</button>
             </form>
@@ -2418,7 +2543,7 @@
                   {@render nameTag(s.author)}
                   <span class="time">{fmtTime(s.ts)}</span>
                 </span>
-                <span class="status-text">{@html renderMessage(s.text)}</span>
+                <span class="status-text">{@html renderMessage(s.text, myMentionName)}</span>
               </li>
             {:else}
               <li class="muted">No status posts yet.</li>

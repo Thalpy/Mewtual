@@ -1900,3 +1900,54 @@ button.emoji-pick:hover {
   animation: flashPulse 1.3s ease-out;
   border-radius: 6px;
 }
+
+/* @-mentions: the rendered chip, the self-highlight, the composer autocomplete, the channel badge. */
+.mention {
+  color: var(--accent, #6c8cff);
+  background: var(--accent-dim, #232a44);
+  border-radius: 4px;
+  padding: 0 3px;
+  font-weight: 600;
+}
+.mention.mention-me {
+  color: #ffd479;
+  background: rgba(255, 196, 0, 0.16);
+}
+.mention-popup {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-bottom: 4px;
+  padding: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2a2a36);
+  background: var(--panel, #1c1c24);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.mention-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+.mention-option:hover,
+.mention-option.active {
+  background: var(--accent-dim, #232a44);
+}
+.mention-badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(255, 196, 0, 0.2);
+  color: #ffd479;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
