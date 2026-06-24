@@ -1951,3 +1951,17 @@ button.emoji-pick:hover {
   font-size: 0.72rem;
   font-weight: 700;
 }
+
+/* Custom (:name:) emoji images in reaction chips + the reaction picker. */
+.r-emoji-img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  vertical-align: -3px;
+}
+.reaction-picker .qe img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  display: block;
+}

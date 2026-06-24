@@ -1785,6 +1785,12 @@
       error = String(e);
     }
   }
+  // A reaction emoji can be a unicode glyph or a custom `:name:` (a server emoji file). Returns the
+  // custom code if it's the latter, so the chip + picker can render the emoji image.
+  function customEmojiCode(emoji: string): string | null {
+    const m = /^:([a-z0-9_+\-]{1,40}):$/i.exec(emoji);
+    return m ? m[1].toLowerCase() : null;
+  }
 
   async function copyFeedback() {
     const report = [
@@ -2369,6 +2375,7 @@
                 {#if m.reactions.length || reactionPickerFor === m.id}
                   <div class="reactions">
                     {#each m.reactions as r (r.emoji)}
+                      {@const rcode = customEmojiCode(r.emoji)}
                       <button
                         class="reaction"
                         class:mine={r.by.includes(myFp)}
@@ -2377,7 +2384,12 @@
                         aria-label={`${r.emoji}, ${r.by.length}, ${r.by.includes(myFp) ? "remove your reaction" : "react"}`}
                         onclick={() => toggleReaction(m, r.emoji)}
                       >
-                        <span class="r-emoji">{r.emoji}</span> {r.by.length}
+                        {#if rcode && emojiUrls[rcode]}
+                          <img class="r-emoji-img" src={emojiUrls[rcode]} alt={r.emoji} />
+                        {:else}
+                          <span class="r-emoji">{r.emoji}</span>
+                        {/if}
+                        {r.by.length}
                       </button>
                     {/each}
                     {#if m.id}
@@ -2387,6 +2399,11 @@
                       <div class="reaction-picker" role="menu">
                         {#each QUICK_EMOJI as e}
                           <button class="qe" type="button" aria-label={`React with ${e}`} onclick={() => toggleReaction(m, e)}>{e}</button>
+                        {/each}
+                        {#each Object.keys(emojiMap) as code}
+                          <button class="qe" type="button" aria-label={`React with :${code}:`} onclick={() => toggleReaction(m, `:${code}:`)}>
+                            {#if emojiUrls[code]}<img src={emojiUrls[code]} alt={code} />{:else}<span class="muted small">:{code}:</span>{/if}
+                          </button>
                         {/each}
                       </div>
                     {/if}
