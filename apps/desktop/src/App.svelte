@@ -117,6 +117,42 @@
 
   let messages = $state<Msg[]>([]);
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
+  // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
+  let showSearch = $state(false);
+  let searchQuery = $state("");
+  let searchPos = $state(0);
+  let searchInput = $state<HTMLInputElement | undefined>(undefined);
+  let searchMatches = $derived.by(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [] as number[];
+    const out: number[] = [];
+    messages.forEach((m, i) => {
+      if (m.text.toLowerCase().includes(q)) out.push(i);
+    });
+    return out;
+  });
+  let searchMatchSet = $derived(new Set(searchMatches));
+  function scrollToMatch(msgIdx: number) {
+    messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  function stepMatch(dir: number) {
+    if (!searchMatches.length) return;
+    searchPos = (searchPos + dir + searchMatches.length) % searchMatches.length;
+    scrollToMatch(searchMatches[searchPos]);
+  }
+  function onSearchInput(v: string) {
+    searchQuery = v;
+    searchPos = 0;
+    if (searchMatches.length) scrollToMatch(searchMatches[0]);
+  }
+  function openSearch() {
+    showSearch = true;
+    queueMicrotask(() => searchInput?.focus());
+  }
+  function closeSearch() {
+    showSearch = false;
+    searchQuery = "";
+  }
   let draft = $state("");
   let members = $state(1);
   let roster = $state<Member[]>([]);
@@ -660,6 +696,7 @@
     dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
     showNewDm = false;
     showAddFriend = false;
+    if (showSearch) closeSearch();
     notice = "";
     refreshDmRequests(id); // pick up any friend request that arrived over this server
     // Each server has its own wiki + fileshare; reset per-server view state.
@@ -725,6 +762,7 @@
     if (!cur) return;
     cur.active = id;
     cur.unread = cur.unread.filter((c) => c !== id);
+    if (showSearch) closeSearch();
     refresh();
   }
 
@@ -1662,6 +1700,7 @@
         else if (showFeedback) showFeedback = false;
         else if (showServerSettings) showServerSettings = false;
         else if (showSettings) showSettings = false;
+        else if (showSearch) closeSearch();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
@@ -1673,6 +1712,13 @@
           e.preventDefault();
           view = "chat";
           composerEl?.focus();
+        } else if (e.key.toLowerCase() === "f") {
+          // Search messages in the active conversation (no browser find in the webview).
+          if (activeServerId !== null) {
+            e.preventDefault();
+            view = "chat";
+            openSearch();
+          }
         }
       }
     };
@@ -1971,10 +2017,36 @@
         </div>
 
         {#if view === "chat"}
-          <h2>#{activeName()} <span class="muted">· {members} member(s)</span></h2>
+          <h2>
+            #{activeName()} <span class="muted">· {members} member(s)</span>
+            <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
+          </h2>
+          {#if showSearch}
+            <div class="msg-search">
+              <input
+                bind:this={searchInput}
+                value={searchQuery}
+                placeholder="Search this channel…"
+                oninput={(e) => onSearchInput(e.currentTarget.value)}
+                onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); stepMatch(e.shiftKey ? -1 : 1); } else if (e.key === "Escape") { e.preventDefault(); closeSearch(); } }}
+              />
+              <span class="muted small">
+                {searchQuery.trim() ? (searchMatches.length ? `${searchPos + 1} / ${searchMatches.length}` : "no matches") : ""}
+              </span>
+              <button class="ghost small" title="Previous (Shift+Enter)" disabled={!searchMatches.length} onclick={() => stepMatch(-1)}>↑</button>
+              <button class="ghost small" title="Next (Enter)" disabled={!searchMatches.length} onclick={() => stepMatch(1)}>↓</button>
+              <button class="ghost small" title="Close (Esc)" onclick={closeSearch}>✕</button>
+            </div>
+          {/if}
           <ul class="messages" bind:this={messagesEl} use:richClicks>
-            {#each messages as m}
-              <li class:own={m.author === myFp} use:contextMenu={() => messageMenu(m)}>
+            {#each messages as m, mi}
+              <li
+                data-mi={mi}
+                class:own={m.author === myFp}
+                class:search-match={showSearch && searchMatchSet.has(mi)}
+                class:search-current={showSearch && searchMatches[searchPos] === mi}
+                use:contextMenu={() => messageMenu(m)}
+              >
                 <span class="author">
                   {@render avatarTag(m.author)}
                   {@render nameTag(m.author)}

@@ -1724,3 +1724,27 @@ button.emoji-pick:hover {
   display: flex;
   gap: 6px;
 }
+
+/* In-channel message search. */
+.search-toggle {
+  font-size: 0.8rem;
+  vertical-align: middle;
+  padding: 0 0.3rem;
+}
+.msg-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0 6px;
+}
+.msg-search input {
+  flex: 1;
+}
+.messages li.search-match {
+  background: rgba(255, 213, 79, 0.08);
+  border-radius: 5px;
+}
+.messages li.search-current {
+  background: rgba(255, 213, 79, 0.24);
+  border-radius: 5px;
+}
