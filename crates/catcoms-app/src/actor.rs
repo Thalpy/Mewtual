@@ -176,10 +176,13 @@ pub enum AppEvent {
     FilesUpdated,
     /// Progress of an in-flight file download, as `(done, total)` chunks, so the UI can show a
     /// progress bar. Emitted by the `DownloadFile` handler from `download_file_with_progress`.
+    /// `provider` is the signed responder's fingerprint that served the most recent chunk over the
+    /// network (`None` when that chunk was already held locally), for the "downloading from …" hint.
     DownloadProgress {
         cid: Vec<u8>,
         done: usize,
         total: usize,
+        provider: Option<String>,
     },
     /// The status feed changed — the UI should re-fetch it (`statuses`).
     StatusUpdated,
@@ -738,16 +741,18 @@ where
                                 // though this handler blocks the actor until it finishes (it pauses
                                 // this server's sync_once + other commands meanwhile — a documented
                                 // MVP trade-off; true non-blocking download is a follow-up).
-                                let (ptx, mut prx) = mpsc::channel::<(usize, usize)>(64);
+                                let (ptx, mut prx) =
+                                    mpsc::channel::<(usize, usize, Option<String>)>(64);
                                 let evt = event_tx.clone();
                                 let cid_evt = cid.clone();
                                 tokio::spawn(async move {
-                                    while let Some((done, total)) = prx.recv().await {
+                                    while let Some((done, total, provider)) = prx.recv().await {
                                         let _ = evt
                                             .send(AppEvent::DownloadProgress {
                                                 cid: cid_evt.clone(),
                                                 done,
                                                 total,
+                                                provider,
                                             })
                                             .await;
                                     }

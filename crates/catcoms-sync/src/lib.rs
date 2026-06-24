@@ -3755,17 +3755,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Fetch a blob by content address from `peer`, verify it, and store it. Returns
-    /// `Ok(true)` if fetched (or already held), `Ok(false)` if the peer did not have it.
-    /// The response is members-only and signed (bound to this request); the served bytes
-    /// are re-hashed against the requested address before storing, so a member cannot
-    /// substitute different bytes under it.
-    pub async fn request_blob(
+    /// `(available, provider)`: `available` is whether the blob is now held (already-held or
+    /// freshly fetched); `provider` is the **signed responder's device id** when the bytes were
+    /// fetched fresh from the network (authenticated — it signed the request-bound response),
+    /// else `None`. The response is members-only and signed; the served bytes are re-hashed
+    /// against the requested address before storing, so a member cannot substitute different
+    /// bytes under it.
+    async fn request_blob_tracked(
         &mut self,
         peer: catcoms_rt::PeerId,
         cid: &Cid,
-    ) -> Result<bool, SyncError> {
+    ) -> Result<(bool, Option<DeviceId>), SyncError> {
         if self.blobs.has(cid) {
-            return Ok(true);
+            return Ok((true, None));
         }
         let (req, auth) =
             self.build_authed_request(KIND_BLOB_FETCH, &encode_blob_fetch_req(cid))?;
@@ -3774,7 +3776,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
             .await?;
         if resp.is_empty() {
-            return Ok(false); // the peer did not have this blob
+            return Ok((false, None)); // the peer did not have this blob
         }
         if resp.len() > MAX_BLOB_RESPONSE {
             tracing::warn!(bytes = resp.len(), "oversized blob response dropped");
@@ -3805,7 +3807,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(SyncError::Malformed);
         }
         self.blobs.put(&blob)?;
-        Ok(true)
+        Ok((true, Some(responder)))
+    }
+
+    /// Fetch a blob by content address from `peer`; `Ok(true)` if now held (already-held or
+    /// freshly fetched), `Ok(false)` if the peer did not have it. See [`Self::request_blob_tracked`]
+    /// for the variant that also surfaces the provider.
+    pub async fn request_blob(
+        &mut self,
+        peer: catcoms_rt::PeerId,
+        cid: &Cid,
+    ) -> Result<bool, SyncError> {
+        Ok(self.request_blob_tracked(peer, cid).await?.0)
     }
 
     /// Fetch a blob from the **best known peer** (a proven member, else any known peer).
@@ -3817,6 +3830,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         match self.pick_catchup_peer() {
             Some(peer) => self.request_blob(peer, cid).await,
             None => Ok(false),
+        }
+    }
+
+    /// Like [`Self::request_blob_best`], but returns the **provider's fingerprint** — the signed
+    /// responder that served the bytes — when the blob was fetched fresh from a member, for the
+    /// UI's per-transfer "downloading from …" display. `None` if the blob was already held
+    /// locally or no peer had it. Authenticated: the responder signed the request-bound response.
+    pub async fn request_blob_best_provider(
+        &mut self,
+        cid: &Cid,
+    ) -> Result<Option<String>, SyncError> {
+        if self.blobs.has(cid) {
+            return Ok(None);
+        }
+        match self.pick_catchup_peer() {
+            Some(peer) => Ok(self
+                .request_blob_tracked(peer, cid)
+                .await?
+                .1
+                .map(|d| roles::fingerprint(&d))),
+            None => Ok(None),
         }
     }
 
@@ -5973,6 +6007,26 @@ mod tests {
         assert!(fetched.unwrap(), "Bob fetched the blob from a member");
         assert_eq!(bob.get_blob(&cid), Some(data));
         assert!(bob.has_blob(&cid), "and it is now held locally");
+    }
+
+    #[tokio::test]
+    async fn request_blob_best_provider_surfaces_no_provider_without_a_remote_fetch() {
+        // A locally-held blob or a not-found address yields NO provider, so the Downloads tab shows
+        // the uploader rather than a bogus "downloading from …". The authenticated remote-provider
+        // path (the signed responder's fingerprint) is exercised by the app-layer chunked-download
+        // tests; here we lock the served-locally / no-peer invariant.
+        let (_hub, members, _ids) = build_members(1).await;
+        let mut alice = members.into_iter().next().unwrap();
+        // Held locally → None (no network provider, even though the blob is available).
+        let cid = alice.put_blob(b"held locally").unwrap();
+        assert!(alice.has_blob(&cid));
+        assert_eq!(alice.request_blob_best_provider(&cid).await.unwrap(), None);
+        // An address nobody holds, with no catch-up peer → None (not an error).
+        let missing = Cid::of(b"nobody holds this");
+        assert_eq!(
+            alice.request_blob_best_provider(&missing).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]

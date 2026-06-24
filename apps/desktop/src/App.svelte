@@ -1113,7 +1113,8 @@
     server: number;
     cid: string;
     name: string;
-    author: string; // the uploader (the file's source / initial provider)
+    author: string; // the uploader (the file's source)
+    provider?: string; // the live serving peer's fingerprint, when bytes came over the network
     status: "queued" | "downloading" | "done" | "failed";
     progress: number; // 0..1
     ts: number;
@@ -1307,16 +1308,21 @@
       listen<{ server: number }>("files-updated", (e) => {
         if (e.payload.server === activeServerId) refreshFiles();
       }),
-      listen<{ server: number; cid: string; done: number; total: number }>(
-        "download-progress",
-        (e) => {
-          const d = downloads[dlKey(e.payload.server, e.payload.cid)];
-          if (!d) return; // only track explicitly-initiated downloads
-          d.progress = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
-          if (e.payload.done >= e.payload.total) d.status = "done";
-          else if (d.status === "queued") d.status = "downloading";
-        }
-      ),
+      listen<{
+        server: number;
+        cid: string;
+        done: number;
+        total: number;
+        provider: string | null;
+      }>("download-progress", (e) => {
+        const d = downloads[dlKey(e.payload.server, e.payload.cid)];
+        if (!d) return; // only track explicitly-initiated downloads
+        d.progress = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+        if (e.payload.done === 0) d.provider = undefined; // fresh transfer: drop any prior provider
+        if (e.payload.provider) d.provider = e.payload.provider; // keep the latest live provider
+        if (e.payload.done >= e.payload.total) d.status = "done";
+        else if (d.status === "queued") d.status = "downloading";
+      }),
       listen<{ server: number }>("status-updated", (e) => {
         if (e.payload.server === activeServerId) refreshStatuses();
       }),
@@ -1820,7 +1826,9 @@
                   <li class="dl-item">
                     <div class="dl-item-main">
                       <span class="dl-item-name">{d.name}</span>
-                      <span class="muted small">shared by {nameOf(d.author)}</span>
+                      <span class="muted small">
+                        {#if d.provider}from {nameOf(d.provider)}{:else}shared by {nameOf(d.author)}{/if}
+                      </span>
                     </div>
                     <div class="dl-item-status {d.status}">
                       {#if d.status === "downloading"}{Math.round(d.progress * 100)}%

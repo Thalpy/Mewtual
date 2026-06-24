@@ -139,6 +139,7 @@ struct DownloadProgressEvt {
     cid: String,
     done: usize,
     total: usize,
+    provider: Option<String>,
 }
 #[derive(Serialize, Clone)]
 struct EclipseEvt {
@@ -190,7 +191,12 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
                 }
-                AppEvent::DownloadProgress { cid, done, total } => {
+                AppEvent::DownloadProgress {
+                    cid,
+                    done,
+                    total,
+                    provider,
+                } => {
                     let _ = app.emit(
                         "download-progress",
                         DownloadProgressEvt {
@@ -198,6 +204,7 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                             cid: hex::encode(cid),
                             done,
                             total,
+                            provider,
                         },
                     );
                 }

@@ -819,7 +819,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub async fn download_file_with_progress(
         &mut self,
         cid: &Cid,
-        progress: Option<&tokio::sync::mpsc::Sender<(usize, usize)>>,
+        progress: Option<&tokio::sync::mpsc::Sender<(usize, usize, Option<String>)>>,
     ) -> Result<Vec<u8>, AppError> {
         let Some(entry) = self
             .files()
@@ -841,15 +841,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let total = manifest.chunks.len();
         if let Some(p) = progress {
-            let _ = p.send((0, total)).await;
+            let _ = p.send((0, total, None)).await;
         }
         let mut out = Vec::with_capacity(manifest.total_size as usize);
         for (i, chunk_ref) in manifest.chunks.iter().enumerate() {
             let ccid = chunk_ref.ciphertext_cid;
-            // Only reach out to a peer if we don't already hold this chunk ourselves.
-            if !self.sync.has_blob(&ccid) {
-                self.sync.request_blob_best(&ccid).await?;
-            }
+            // Only reach out to a peer if we don't already hold this chunk ourselves; capture the
+            // signed responder that served it so the UI can show who the bytes came from.
+            let provider = if !self.sync.has_blob(&ccid) {
+                self.sync.request_blob_best_provider(&ccid).await?
+            } else {
+                None
+            };
             let Some(ciphertext) = self.sync.get_blob(&ccid) else {
                 return Err(if self.sync.has_blob(&ccid) {
                     AppError::Invalid(format!(
@@ -867,7 +870,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 .map_err(|e| AppError::Invalid(format!("chunk {i} could not be decrypted: {e}")))?;
             out.extend_from_slice(&chunk);
             if let Some(p) = progress {
-                let _ = p.send((i + 1, total)).await;
+                let _ = p.send((i + 1, total, provider)).await;
             }
         }
         // End-to-end integrity: the reassembled plaintext must hash to the manifest's identity.
