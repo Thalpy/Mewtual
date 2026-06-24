@@ -246,6 +246,7 @@
   // Custom emoji (10f): files under the "emoji" folder. code -> cid, and resolved code -> URL.
   let emojiUrls = $state<Record<string, string>>({});
   let newEmojiCode = $state("");
+  let newEmojiSize = $state(0); // 0 = default inline size; else a pixel size up to the sticker max
   let showEmoji = $state(false);
 
   // Right-click context menu (one shared instance). `onSelect` returning true keeps the menu
@@ -277,12 +278,36 @@
   let breadcrumbs = $derived(folder === "" ? [] : folder.split("/"));
 
   // Custom emoji map: files in the "emoji" folder, keyed by name (sans extension), lowercased.
+  // Custom emoji live under the "emoji" fileshare folder, named `<code>` or `<code>~<px>` (the
+  // optional size suffix lets an emoji render as a larger "sticker"). `emojiMap` maps code→cid;
+  // `emojiSize` maps code→pixel size (capped at the sticker max) for the inline render.
+  const EMOJI_MAX_SIZE = 160;
+  function parseEmojiName(name: string): { code: string; size: number } {
+    const raw = name.replace(/\.[^.]+$/, "").toLowerCase();
+    const tilde = raw.indexOf("~");
+    if (tilde < 0) return { code: raw, size: 0 };
+    const size = parseInt(raw.slice(tilde + 1), 10);
+    return {
+      code: raw.slice(0, tilde),
+      size: Number.isFinite(size) ? Math.min(Math.max(size, 0), EMOJI_MAX_SIZE) : 0,
+    };
+  }
   let emojiMap = $derived.by(() => {
     const m: Record<string, string> = {};
     for (const f of files) {
       if (f.path === "emoji") {
-        const code = f.name.replace(/\.[^.]+$/, "").toLowerCase();
+        const { code } = parseEmojiName(f.name);
         if (code) m[code] = f.cid;
+      }
+    }
+    return m;
+  });
+  let emojiSize = $derived.by(() => {
+    const m: Record<string, number> = {};
+    for (const f of files) {
+      if (f.path === "emoji") {
+        const { code, size } = parseEmojiName(f.name);
+        if (code && size) m[code] = size;
       }
     }
     return m;
@@ -494,6 +519,11 @@
       img.className = "emoji";
       img.alt = `:${code}:`;
       img.title = `:${code}:`;
+      const sz = emojiSize[code];
+      if (sz) {
+        img.style.width = `${sz}px`;
+        img.style.height = `${sz}px`;
+      }
       span.replaceWith(img);
     }
   }
@@ -512,9 +542,11 @@
     if (!code || !file || activeServerId === null) return;
     uploading = true;
     try {
+      // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
+      const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
       await invoke("add_file", {
         server: activeServerId,
-        name: code,
+        name: sz ? `${code}~${sz}` : code,
         mime: file.type || "image/png",
         path: "emoji",
         data: await readBase64(file),
@@ -3136,12 +3168,19 @@
               {/if}
               <form class="emoji-add" onsubmit={(e) => e.preventDefault()}>
                 <input bind:value={newEmojiCode} placeholder="code (e.g. catjam)" />
+                <select bind:value={newEmojiSize} title="Display size">
+                  <option value={0}>Emoji</option>
+                  <option value={48}>Medium</option>
+                  <option value={96}>Large</option>
+                  <option value={160}>Sticker</option>
+                </select>
                 <label class="upload-btn">
                   {uploading ? "…" : "Upload image"}
                   <input type="file" accept="image/*" disabled={uploading || !newEmojiCode.trim()}
                     onchange={(e) => { addEmoji(e.currentTarget.files); e.currentTarget.value = ''; }} />
                 </label>
               </form>
+              <p class="muted small">Size sets how big <code>:code:</code> renders in messages (reactions stay small).</p>
             </section>
 
             {#if activeServerId !== null}
