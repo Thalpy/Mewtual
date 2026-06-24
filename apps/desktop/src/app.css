@@ -2200,25 +2200,25 @@ button.emoji-pick:hover {
   user-select: text;
 }
 
-/* Composer formatting toolbar (bold / italic / strike / code / spoiler). */
-.format-tools {
+/* Message-formatting help list in Settings. */
+.format-help {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
   display: flex;
-  align-items: center;
-  gap: 1px;
-}
-.format-tools button {
-  border: none;
-  background: none;
-  cursor: pointer;
-  color: var(--muted, #9aa0b5);
+  flex-direction: column;
+  gap: 5px;
   font-size: 0.85rem;
-  min-width: 24px;
-  height: 24px;
-  border-radius: 5px;
-  padding: 0 4px;
-  line-height: 1;
 }
-.format-tools button:hover {
+.format-help li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.format-help code {
   background: var(--accent-dim, #232a44);
-  color: var(--text, #e4e4ef);
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 0.82rem;
 }

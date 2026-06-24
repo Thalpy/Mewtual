@@ -2720,14 +2720,6 @@
                   onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
                 />
               </label>
-              <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
-              <div class="format-tools">
-                <button type="button" title="Bold (Ctrl+B)" onclick={() => wrapSelection("**")}><b>B</b></button>
-                <button type="button" title="Italic (Ctrl+I)" onclick={() => wrapSelection("*")}><i>I</i></button>
-                <button type="button" title="Strikethrough" onclick={() => wrapSelection("~~")}><s>S</s></button>
-                <button type="button" title="Inline code" onclick={() => wrapSelection("`")} aria-label="Inline code">{"</>"}</button>
-                <button type="button" title="Spoiler" onclick={() => wrapSelection("||")} aria-label="Spoiler">▦</button>
-              </div>
               <textarea
                 bind:this={composerEl}
                 bind:value={draft}
@@ -2738,6 +2730,7 @@
                 onkeydown={onComposerKeydown}
                 onblur={() => queueMicrotask(() => (mentionQuery = null))}
               ></textarea>
+              <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
               <button type="submit" disabled={uploading}>Send</button>
             </form>
           </div>
@@ -2990,6 +2983,23 @@
                 <span>Play a sound for new messages</span>
               </label>
               <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
+            </section>
+
+            <section class="set-section">
+              <h3>Message formatting</h3>
+              <p class="muted small">Type these in any message. Bold/italic also have Ctrl+B / Ctrl+I.</p>
+              <ul class="format-help">
+                <li><code>**bold**</code> → <strong>bold</strong></li>
+                <li><code>*italic*</code> → <em>italic</em></li>
+                <li><code>~~strike~~</code> → <s>strike</s></li>
+                <li><code>`code`</code> → <code>code</code> (inline) · <code>```</code> for a block</li>
+                <li><code>||spoiler||</code> → a blacked-out spoiler you click to reveal</li>
+                <li><code>&gt; quote</code> → a block quote</li>
+                <li><code>@</code> then a name → mention a member (notifies them)</li>
+                <li><code>:name:</code> → a custom emoji (add them under Emoji below), or use the 😀 picker</li>
+                <li><code>[[Page]]</code> → link to a wiki page</li>
+                <li><code>- item</code> / <code>1. item</code> → bullet / numbered lists</li>
+              </ul>
             </section>
 
             <section class="set-section">
