@@ -81,6 +81,17 @@ pub struct ChatMessage {
     pub ts: u64,
     /// Wall-clock of the last edit (epoch-millis), or `0` if never edited.
     pub edited: u64,
+    /// Emoji reactions on this message (empty if none).
+    pub reactions: Vec<Reaction>,
+}
+
+/// One emoji reaction on a message: the emoji plus the fingerprints of the members who reacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reaction {
+    /// The emoji (a short string — a unicode emoji, or `:name:` for a custom one).
+    pub emoji: String,
+    /// Fingerprints of the members who added this reaction (deduped; order not significant).
+    pub by: Vec<String>,
 }
 
 /// Lightweight activity stats over a conversation (no message text), for the friends-list
@@ -159,11 +170,71 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
                     text: str_field(doc, &msg, TEXT),
                     ts: int_field(doc, &msg, TS),
                     edited: int_field(doc, &msg, EDITED),
+                    reactions: read_reactions(doc, &msg),
                 });
             }
         }
     }
     out
+}
+
+/// The separator between the emoji and the reactor fingerprint in a flat reaction key. ASCII Unit
+/// Separator (0x1F) — a control char that appears in neither emoji nor hex fingerprints.
+const REACTION_SEP: char = '\u{1f}';
+
+/// Read a message map's reactions and group them by emoji. Reactions are stored as flat scalar keys
+/// *directly on the message map* — `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
+/// — alongside the regular field keys (`id`/`author`/…, none of which contain the separator, so they
+/// are skipped here). A `BTreeMap` gives a stable emoji order (so the UI and the change-detector
+/// signature are deterministic). No reaction keys → no reactions.
+fn read_reactions(doc: &AutoCommit, msg: &ObjId) -> Vec<Reaction> {
+    let mut grouped: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for key in doc.keys(msg) {
+        if let Some((emoji, fp)) = key.split_once(REACTION_SEP) {
+            grouped
+                .entry(emoji.to_string())
+                .or_default()
+                .push(fp.to_string());
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(emoji, by)| Reaction { emoji, by })
+        .collect()
+}
+
+/// Toggle `fp`'s reaction `emoji` on the message with `id`: adds it if absent, removes it if
+/// present. Each (emoji, reactor) pair is one flat scalar key `"<emoji>\x1f<fp>"` written *directly
+/// on the message map* — which always exists. So concurrent reactors write **distinct** keys that all
+/// survive a merge, and there is no sub-object that two reactors could create twice and lose one of —
+/// the convergence holds for every message, including ones authored by clients predating reactions.
+/// Returns whether the message was found. (`emoji` is validated by the caller; see `toggle_reaction`.)
+fn toggle_reaction_in_doc(
+    doc: &mut AutoCommit,
+    id: &str,
+    emoji: &str,
+    fp: &str,
+) -> Result<bool, AutomergeError> {
+    let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
+        return Ok(false);
+    };
+    for i in 0..doc.length(&list) {
+        let Some((Value::Object(ObjType::Map), msg)) = doc.get(&list, i)? else {
+            continue;
+        };
+        if str_field(doc, &msg, MSG_ID) != id {
+            continue;
+        }
+        let key = format!("{emoji}{REACTION_SEP}{fp}");
+        if doc.get(&msg, &key)?.is_some() {
+            doc.delete(&msg, &key)?;
+        } else {
+            doc.put(&msg, &key, true)?;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
@@ -775,6 +846,33 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync
             .post(DocType::Channel, channel, move |d| {
                 delete_message_in_doc(d, &id).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Toggle this member's `emoji` reaction on the message `id` in a channel (add if absent,
+    /// remove if present). Anyone may react to any message. Errors if the message doesn't exist.
+    pub async fn toggle_reaction(
+        &mut self,
+        channel: u128,
+        id: &str,
+        emoji: &str,
+    ) -> Result<(), AppError> {
+        // Enforce the flat-key invariant at the trust boundary: a non-empty emoji that can't contain
+        // the key separator, with a sane length bound (honest clients send a small fixed set).
+        if emoji.is_empty() || emoji.contains(REACTION_SEP) || emoji.len() > 64 {
+            return Err(AppError::Invalid("bad emoji".into()));
+        }
+        let me = self.my_fingerprint();
+        if !self.messages(channel).iter().any(|m| m.id == id) {
+            return Err(AppError::Invalid("no such message".into()));
+        }
+        let id = id.to_string();
+        let emoji = emoji.to_string();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                toggle_reaction_in_doc(d, &id, &emoji, &me).map(|_| ())
             })
             .await?;
         Ok(())
@@ -1776,6 +1874,104 @@ mod tests {
         assert!(alice.edit_message(GENERAL, "mid-01", "x").await.is_err());
         alice.delete_message(GENERAL, "mid-01").await.unwrap();
         assert!(!alice.messages(GENERAL).iter().any(|m| m.id == "mid-01"));
+    }
+
+    #[tokio::test]
+    async fn members_toggle_emoji_reactions_on_a_message() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.send_message(GENERAL, "ship it").await.unwrap();
+        let id = alice.messages(GENERAL)[0].id.clone();
+        let me = alice.my_fingerprint();
+        assert!(alice.messages(GENERAL)[0].reactions.is_empty());
+
+        // Add 👍 — one reaction, by me.
+        alice.toggle_reaction(GENERAL, &id, "👍").await.unwrap();
+        let r = alice.messages(GENERAL)[0].reactions.clone();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].emoji, "👍");
+        assert_eq!(r[0].by, vec![me.clone()]);
+
+        // A second, distinct emoji.
+        alice.toggle_reaction(GENERAL, &id, "❤").await.unwrap();
+        assert_eq!(alice.messages(GENERAL)[0].reactions.len(), 2);
+
+        // Toggling 👍 off drops it entirely (empty reactor set removed); ❤ remains.
+        alice.toggle_reaction(GENERAL, &id, "👍").await.unwrap();
+        let r = alice.messages(GENERAL)[0].reactions.clone();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].emoji, "❤");
+
+        // Reacting to an unknown message errors.
+        assert!(alice
+            .toggle_reaction(GENERAL, "deadbeef", "👍")
+            .await
+            .is_err());
+        // The flat-key invariant is enforced: a bad emoji (empty / contains the separator) is refused.
+        let id = alice.messages(GENERAL)[0].id.clone();
+        assert!(alice.toggle_reaction(GENERAL, &id, "").await.is_err());
+        assert!(alice
+            .toggle_reaction(GENERAL, &id, "a\u{1f}b")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn reactions_converge_under_concurrent_same_emoji() {
+        // The core invariant of the flat-key design: two members reacting with the SAME emoji to the
+        // SAME message while partitioned must BOTH survive the merge (no dropped reaction), and both
+        // replicas must converge to identical state. Exercised at the CRDT layer via fork/merge.
+        let mut base = AutoCommit::new();
+        append_message(&mut base, "m1", "alice", "hi", 1).unwrap();
+        let mut a = base.fork();
+        let mut b = base.fork();
+
+        // Concurrently: a reacts 👍 + 🎉; b reacts 👍 (same emoji as a, different reactor).
+        toggle_reaction_in_doc(&mut a, "m1", "👍", "alice").unwrap();
+        toggle_reaction_in_doc(&mut a, "m1", "🎉", "alice").unwrap();
+        toggle_reaction_in_doc(&mut b, "m1", "👍", "bob").unwrap();
+
+        a.merge(&mut b).unwrap();
+        b.merge(&mut a).unwrap();
+
+        let ra = read_messages(&a)[0].reactions.clone();
+        let rb = read_messages(&b)[0].reactions.clone();
+        assert_eq!(ra, rb, "the two replicas converge to identical reactions");
+
+        // 👍 kept BOTH reactors — the concurrent same-emoji adds did not clobber each other.
+        let thumbs = ra.iter().find(|r| r.emoji == "👍").expect("👍 present");
+        let mut by = thumbs.by.clone();
+        by.sort();
+        assert_eq!(by, vec!["alice".to_string(), "bob".to_string()]);
+        // 🎉 (alice only) survived the merge too.
+        let party = ra.iter().find(|r| r.emoji == "🎉").expect("🎉 present");
+        assert_eq!(party.by, vec!["alice".to_string()]);
+
+        // Concurrent remove (alice un-👍s) vs add (bob 🔥s) from the merged state stays convergent.
+        let mut c = a.fork();
+        let mut d = a.fork();
+        toggle_reaction_in_doc(&mut c, "m1", "👍", "alice").unwrap();
+        toggle_reaction_in_doc(&mut d, "m1", "🔥", "bob").unwrap();
+        c.merge(&mut d).unwrap();
+        d.merge(&mut c).unwrap();
+        assert_eq!(
+            read_messages(&c)[0].reactions,
+            read_messages(&d)[0].reactions,
+            "remove/add across replicas still converges"
+        );
+        // alice's 👍 is gone (bob's 👍 remains), bob's 🔥 landed.
+        let thumbs = read_messages(&c)[0]
+            .reactions
+            .iter()
+            .find(|r| r.emoji == "👍")
+            .expect("👍 still present (bob)")
+            .by
+            .clone();
+        assert_eq!(thumbs, vec!["bob".to_string()]);
+        assert!(read_messages(&c)[0]
+            .reactions
+            .iter()
+            .any(|r| r.emoji == "🔥" && r.by == vec!["bob".to_string()]));
     }
 
     #[tokio::test]

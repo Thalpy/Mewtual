@@ -90,6 +90,33 @@ struct UiMessage {
     text: String,
     ts: u64,
     edited: u64,
+    reactions: Vec<UiReaction>,
+}
+
+/// One emoji reaction on a message (the emoji + the fingerprints of those who reacted).
+#[derive(Serialize, Clone)]
+struct UiReaction {
+    emoji: String,
+    by: Vec<String>,
+}
+
+/// Map a backend chat message to its UI shape (shared by `get_messages` + `get_statuses`).
+fn ui_message(m: catcoms_app::ChatMessage) -> UiMessage {
+    UiMessage {
+        id: m.id,
+        author: m.author,
+        text: m.text,
+        ts: m.ts,
+        edited: m.edited,
+        reactions: m
+            .reactions
+            .into_iter()
+            .map(|r| UiReaction {
+                emoji: r.emoji,
+                by: r.by,
+            })
+            .collect(),
+    }
 }
 
 /// A roster member as serialized to the frontend.
@@ -1236,13 +1263,7 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .await
         .into_iter()
         .rev()
-        .map(|m| UiMessage {
-            id: m.id,
-            author: m.author,
-            text: m.text,
-            ts: m.ts,
-            edited: m.edited,
-        })
+        .map(ui_message)
         .collect())
 }
 
@@ -1367,6 +1388,22 @@ async fn delete_message(
     Ok(())
 }
 
+/// Toggle this member's emoji reaction on a message (by message id) in a channel.
+#[tauri::command]
+async fn toggle_reaction(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    msg_id: String,
+    emoji: String,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    actor.toggle_reaction(id, msg_id, emoji).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Read a channel's current messages (by id).
 #[tauri::command]
 async fn get_messages(
@@ -1380,13 +1417,7 @@ async fn get_messages(
         .messages(id)
         .await
         .into_iter()
-        .map(|m| UiMessage {
-            id: m.id,
-            author: m.author,
-            text: m.text,
-            ts: m.ts,
-            edited: m.edited,
-        })
+        .map(ui_message)
         .collect())
 }
 
@@ -1648,6 +1679,7 @@ pub fn run() {
             send_message,
             edit_message,
             delete_message,
+            toggle_reaction,
             get_messages
         ])
         .run(tauri::generate_context!())

@@ -55,6 +55,13 @@ pub enum AppCommand {
         id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Toggle this member's emoji reaction on a message (by id) in a channel.
+    ToggleReaction {
+        channel: u128,
+        id: String,
+        emoji: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Pull a channel's history from `peer` (e.g. right after joining).
     CatchUp { peer: PeerId, channel: u128 },
     /// Pull a channel's history from the best known peer (no peer named).
@@ -298,6 +305,30 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::DeleteMessage { channel, id, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Toggle this member's emoji reaction on a message (by id) in a channel.
+    pub async fn toggle_reaction(
+        &self,
+        channel: u128,
+        id: String,
+        emoji: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ToggleReaction {
+                channel,
+                id,
+                emoji,
+                reply,
+            })
             .await
             .is_err()
         {
@@ -889,6 +920,21 @@ where
                             let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
                         }
                     }
+                    Some(AppCommand::ToggleReaction {
+                        channel,
+                        id,
+                        emoji,
+                        reply,
+                    }) => {
+                        let res = server
+                            .toggle_reaction(channel, &id, &emoji)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
                     Some(AppCommand::CatchUp { peer, channel }) => {
                         if let Err(e) = server.request_channel_catchup(peer, channel).await {
                             tracing::warn!(error = %e, channel, "catch-up failed");
@@ -1218,6 +1264,11 @@ where
         m.id.hash(&mut h);
         m.text.hash(&mut h);
         m.edited.hash(&mut h);
+        // Reactions change the rendered message too (count unchanged), so fold them in.
+        for r in &m.reactions {
+            r.emoji.hash(&mut h);
+            r.by.hash(&mut h);
+        }
     }
     let sig = h.finish();
     if sigs.get(&channel).copied() != Some(sig) {

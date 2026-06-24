@@ -1791,3 +1791,57 @@ button.emoji-pick:hover {
 .jump-unread {
   color: var(--accent, #6c8cff);
 }
+
+/* Emoji reactions: the per-message reaction chips + the quick-picker. */
+.reactions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+.reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  border-radius: 11px;
+  border: 1px solid var(--border, #2a2a36);
+  background: var(--panel, #1c1c24);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.reaction:hover {
+  filter: brightness(1.25);
+}
+.reaction.mine {
+  border-color: var(--accent, #6c8cff);
+  background: var(--accent-dim, #232a44);
+}
+.add-reaction {
+  opacity: 0.5;
+}
+.add-reaction:hover {
+  opacity: 1;
+}
+.reaction-picker {
+  display: inline-flex;
+  gap: 1px;
+  padding: 2px 4px;
+  border-radius: 11px;
+  border: 1px solid var(--border, #2a2a36);
+  background: var(--panel, #1c1c24);
+}
+.reaction-picker .qe {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 1.05rem;
+  padding: 1px 3px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.reaction-picker .qe:hover {
+  background: var(--accent-dim, #232a44);
+}

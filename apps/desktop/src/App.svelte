@@ -4,7 +4,9 @@
   import { onMount, tick } from "svelte";
   import { renderMessage, renderWiki } from "./render";
 
-  type Msg = { id: string; author: string; text: string; ts: number; edited: number };
+  type Reaction = { emoji: string; by: string[] };
+  type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[] };
+  const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
@@ -748,6 +750,7 @@
     wikiEdit = false;
     folder = "";
     newFolder = "";
+    reactionPickerFor = "";
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
       refresh(),
@@ -805,6 +808,7 @@
     cur.active = id;
     cur.unread = cur.unread.filter((c) => c !== id);
     if (showSearch) closeSearch();
+    reactionPickerFor = "";
     captureDivider(); // snapshot the read boundary before refresh advances the mark
     refresh();
   }
@@ -1052,6 +1056,9 @@
       { divider: true },
       { label: "Copy sender fingerprint", icon: "#", onSelect: () => copyText(m.author) },
     ];
+    if (m.id) {
+      items.splice(0, 0, { label: "React…", icon: "☺", onSelect: () => (reactionPickerFor = m.id) }, { divider: true });
+    }
     // Edit / delete your own messages (legacy ones without an id can't be targeted).
     if (m.author === myFp && m.id) {
       items.push({ divider: true });
@@ -1628,6 +1635,22 @@
     }
   }
 
+  // Emoji reactions: a tiny quick-picker per message; toggling adds/removes your reaction.
+  let reactionPickerFor = $state("");
+  function toggleReactionPicker(m: Msg) {
+    reactionPickerFor = reactionPickerFor === m.id ? "" : m.id;
+  }
+  async function toggleReaction(m: Msg, emoji: string) {
+    const ch = cur?.active;
+    reactionPickerFor = "";
+    if (activeServerId === null || !ch || !m.id) return;
+    try {
+      await invoke("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function copyFeedback() {
     const report = [
       `Type: ${feedbackKind === "bug" ? "Bug report" : "Feature request"}`,
@@ -1795,6 +1818,7 @@
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (menu) menu = null;
+        else if (reactionPickerFor) reactionPickerFor = "";
         else if (showEmoji) showEmoji = false;
         else if (fileInfo) closeFileInfo();
         else if (showWikiHelp) showWikiHelp = false;
@@ -2174,6 +2198,32 @@
                   </div>
                 {:else}
                   <span class="text">{@html renderMessage(m.text)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
+                {/if}
+                {#if m.reactions.length || reactionPickerFor === m.id}
+                  <div class="reactions">
+                    {#each m.reactions as r (r.emoji)}
+                      <button
+                        class="reaction"
+                        class:mine={r.by.includes(myFp)}
+                        title={r.by.map(nameOf).join(", ")}
+                        aria-pressed={r.by.includes(myFp)}
+                        aria-label={`${r.emoji}, ${r.by.length}, ${r.by.includes(myFp) ? "remove your reaction" : "react"}`}
+                        onclick={() => toggleReaction(m, r.emoji)}
+                      >
+                        <span class="r-emoji">{r.emoji}</span> {r.by.length}
+                      </button>
+                    {/each}
+                    {#if m.id}
+                      <button class="reaction add-reaction" title="Add reaction" aria-label="Add reaction" onclick={() => toggleReactionPicker(m)}>＋</button>
+                    {/if}
+                    {#if reactionPickerFor === m.id}
+                      <div class="reaction-picker" role="menu">
+                        {#each QUICK_EMOJI as e}
+                          <button class="qe" type="button" aria-label={`React with ${e}`} onclick={() => toggleReaction(m, e)}>{e}</button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
                 {/if}
               </li>
             {:else}
