@@ -1921,14 +1921,43 @@
   let inCall = $state(false);
   let callMuted = $state(false);
   let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
+  let callPeerStates = $state<Record<string, string>>({}); // fp -> RTCPeerConnectionState
   let incomingCall = $state<{ from: string; callId: string; server: number } | null>(null);
   let callId = ""; // the active call's id (decimal u128)
   let callServer: number | null = null; // the server the call runs on
   let localStream: MediaStream | null = null;
   const callPeers: Record<string, CallPeer> = {};
-  // LAN/local works with no ICE servers (host candidates); STUN/TURN for cross-NAT is a later,
-  // ethos-consistent phase (media over the libp2p relay, or an opt-in self-hosted TURN).
-  const ICE_CONFIG: RTCConfiguration = { iceServers: [] };
+
+  // ICE configuration (NAT traversal), user-editable in Settings → Calls and persisted locally.
+  // STUN lets peers discover their public address + hole-punch (works for most home NATs); TURN
+  // relays the (still SRTP-encrypted) media when hole-punching fails (symmetric NAT / strict
+  // firewalls). Default to a public STUN so calls work cross-network out of the box; blank it for
+  // LAN-only (no third party learns you used STUN).
+  function loadCallSetting(k: string, def: string): string {
+    try { return localStorage.getItem("catcoms.call." + k) ?? def; } catch { return def; }
+  }
+  let callStun = $state(loadCallSetting("stun", "stun:stun.l.google.com:19302"));
+  let callTurn = $state(loadCallSetting("turn", ""));
+  let callTurnUser = $state(loadCallSetting("turnUser", ""));
+  let callTurnCred = $state(loadCallSetting("turnCred", ""));
+  function saveCallSettings() {
+    try {
+      localStorage.setItem("catcoms.call.stun", callStun);
+      localStorage.setItem("catcoms.call.turn", callTurn);
+      localStorage.setItem("catcoms.call.turnUser", callTurnUser);
+      localStorage.setItem("catcoms.call.turnCred", callTurnCred);
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  function iceServers(): RTCIceServer[] {
+    const out: RTCIceServer[] = [];
+    for (const u of callStun.split(/[\s,]+/).filter(Boolean)) out.push({ urls: u });
+    if (callTurn.trim()) {
+      out.push({ urls: callTurn.trim(), username: callTurnUser, credential: callTurnCred });
+    }
+    return out;
+  }
 
   function randomCallId(): string {
     const a = new Uint32Array(4);
@@ -1972,13 +2001,14 @@
     el.srcObject = stream;
   }
   function createPeer(fp: string): RTCPeerConnection {
-    const pc = new RTCPeerConnection(ICE_CONFIG);
+    const pc = new RTCPeerConnection({ iceServers: iceServers() });
     if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
     pc.onicecandidate = (e) => {
       if (e.candidate) void sendSignal(fp, { callId, type: "ice", candidate: e.candidate.toJSON() });
     };
     pc.ontrack = (e) => attachRemote(fp, e.streams[0]);
     pc.onconnectionstatechange = () => {
+      callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       if (pc.connectionState === "failed" || pc.connectionState === "closed") removePeer(fp);
     };
     callPeers[fp] = { fp, pc };
@@ -1993,7 +2023,20 @@
     }
     document.getElementById(`call-audio-${fp}`)?.remove();
     callParticipants = Object.keys(callPeers);
+    const { [fp]: _drop, ...rest } = callPeerStates;
+    callPeerStates = rest;
   }
+  // A short status for the call bar: how many peers are connected, or "connecting" while ICE works.
+  let callStatusText = $derived.by(() => {
+    const n = callParticipants.length;
+    if (n === 0) return "waiting for others…";
+    const connected = callParticipants.filter((fp) => callPeerStates[fp] === "connected").length;
+    if (connected === n) return `${n} connected`;
+    const failed = callParticipants.some(
+      (fp) => callPeerStates[fp] === "failed" || callPeerStates[fp] === "disconnected",
+    );
+    return failed ? `${connected}/${n} connected · check NAT/TURN` : `${connected}/${n} · connecting…`;
+  });
   function ringOnline(type: "ring" | "hello") {
     for (const m of roster) {
       if (m.fingerprint !== myFp && onlineMembers.has(m.fingerprint)) {
@@ -3295,7 +3338,8 @@
     {#if inCall}
       <div class="call-bar">
         <span class="call-dot">🔊</span>
-        <span class="call-title">In call · {callParticipants.length + 1}</span>
+        <span class="call-title">In call</span>
+        <span class="call-status muted">{callStatusText}</span>
         <div class="call-avatars">
           {@render avatarTag(myFp)}
           {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
@@ -3375,6 +3419,34 @@
                 <span>Play a sound for new messages</span>
               </label>
               <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
+            </section>
+
+            <section class="set-section">
+              <h3>Calls (voice)</h3>
+              <p class="muted small">
+                Voice is peer-to-peer + end-to-end encrypted. To connect across networks, peers use a
+                <strong>STUN</strong> server to find their public address; <strong>TURN</strong> relays the
+                (still encrypted) audio when a direct path can't be made. Blank STUN for LAN-only.
+              </p>
+              <label class="field">
+                <span class="muted small">STUN server(s) — space/comma separated</span>
+                <input bind:value={callStun} placeholder="stun:stun.l.google.com:19302" />
+              </label>
+              <label class="field">
+                <span class="muted small">TURN server (optional, for strict NATs)</span>
+                <input bind:value={callTurn} placeholder="turn:your-host:3478" />
+              </label>
+              <div class="field row">
+                <label class="field" style="flex:1">
+                  <span class="muted small">TURN user</span>
+                  <input bind:value={callTurnUser} />
+                </label>
+                <label class="field" style="flex:1">
+                  <span class="muted small">TURN credential</span>
+                  <input type="password" bind:value={callTurnCred} />
+                </label>
+              </div>
+              <button class="ghost small" onclick={saveCallSettings}>Save call settings</button>
             </section>
 
             <section class="set-section">
