@@ -857,6 +857,7 @@
     mentionQuery = null;
     showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
+    acceptCallsHere = loadAccept(id); // this server's call-notification preference
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
@@ -1922,11 +1923,41 @@
   let callMuted = $state(false);
   let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
   let callPeerStates = $state<Record<string, string>>({}); // fp -> RTCPeerConnectionState
-  let incomingCall = $state<{ from: string; callId: string; server: number } | null>(null);
-  let callId = ""; // the active call's id (decimal u128)
-  let callServer: number | null = null; // the server the call runs on
+  // A voice room is per-CHANNEL: the channel id doubles as the call id (for signalling + the media
+  // key). You join a channel's room; others see it via presence (below) and join the same room.
+  let callChannel = $state(""); // the channel id of my active voice room ("" = not in a call)
+  let callChannelName = $state(""); // for the call bar
+  let callServer: number | null = null; // the server the room is on
   let localStream: MediaStream | null = null;
   const callPeers: Record<string, CallPeer> = {};
+
+  // Voice-room presence: `${server}:${channel}` -> { fp: lastSeenMs }, from periodic pings members in
+  // a room broadcast. Drives the per-channel "in voice" indicators + the room-active notification.
+  let voiceRooms = $state<Record<string, Record<string, number>>>({});
+  let voiceAlert = $state<{ server: number; channel: string; name: string } | null>(null);
+  let pingTimer: ReturnType<typeof setInterval> | undefined;
+  const alertedRooms = new Set<string>(); // rooms already notified, so a call doesn't re-ring
+  const VOICE_STALE_MS = 14000; // a presence entry older than this is dropped
+  function roomKey(server: number, channel: string) {
+    return `${server}:${channel}`;
+  }
+  // Fingerprints currently in a room (presence fresher than VOICE_STALE_MS).
+  function roomMembers(server: number, channel: string): string[] {
+    const r = voiceRooms[roomKey(server, channel)];
+    if (!r) return [];
+    const cut = Date.now() - VOICE_STALE_MS;
+    return Object.entries(r).filter(([, t]) => t > cut).map(([fp]) => fp);
+  }
+  // Per-server "notify me of calls on this server" preference (default on).
+  function loadAccept(server: number): boolean {
+    try { return localStorage.getItem(`catcoms.call.accept.${server}`) !== "off"; } catch { return true; }
+  }
+  let acceptCallsHere = $state(true); // the active server's setting (for the Server-settings toggle)
+  function toggleAcceptCalls() {
+    if (activeServerId === null) return;
+    acceptCallsHere = !acceptCallsHere;
+    try { localStorage.setItem(`catcoms.call.accept.${activeServerId}`, acceptCallsHere ? "on" : "off"); } catch { /* ignore */ }
+  }
 
   // ICE configuration (NAT traversal), user-editable in Settings → Calls and persisted locally.
   // STUN lets peers discover their public address + hole-punch (works for most home NATs); TURN
@@ -1959,13 +1990,6 @@
     return out;
   }
 
-  function randomCallId(): string {
-    const a = new Uint32Array(4);
-    crypto.getRandomValues(a);
-    let v = 0n;
-    for (const x of a) v = (v << 32n) | BigInt(x);
-    return v.toString();
-  }
   function b64enc(s: string): string {
     return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
   }
@@ -1978,6 +2002,12 @@
       await invoke("send_call_signal", { server: callServer, targetFp, payload: b64enc(JSON.stringify(msg)) });
     } catch {
       /* peer unreachable — ignore (mesh tolerates a missing edge) */
+    }
+  }
+  // Send a signal to every online member of the call's server.
+  function broadcast(msg: Record<string, unknown>) {
+    for (const m of roster) {
+      if (m.fingerprint !== myFp && onlineMembers.has(m.fingerprint)) void sendSignal(m.fingerprint, msg);
     }
   }
   async function ensureMic(): Promise<boolean> {
@@ -2004,7 +2034,7 @@
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
     pc.onicecandidate = (e) => {
-      if (e.candidate) void sendSignal(fp, { callId, type: "ice", candidate: e.candidate.toJSON() });
+      if (e.candidate) void sendSignal(fp, { callId: callChannel, type: "ice", candidate: e.candidate.toJSON() });
     };
     pc.ontrack = (e) => attachRemote(fp, e.streams[0]);
     pc.onconnectionstatechange = () => {
@@ -2037,50 +2067,76 @@
     );
     return failed ? `${connected}/${n} connected · check NAT/TURN` : `${connected}/${n} · connecting…`;
   });
-  function ringOnline(type: "ring" | "hello") {
-    for (const m of roster) {
-      if (m.fingerprint !== myFp && onlineMembers.has(m.fingerprint)) {
-        void sendSignal(m.fingerprint, { callId, type });
+
+  function recordPresence(server: number, channel: string, fp: string) {
+    const key = roomKey(server, channel);
+    voiceRooms = { ...voiceRooms, [key]: { ...(voiceRooms[key] ?? {}), [fp]: Date.now() } };
+  }
+  function dropPresence(server: number, channel: string, fp: string) {
+    const key = roomKey(server, channel);
+    if (!voiceRooms[key]) return;
+    const r = { ...voiceRooms[key] };
+    delete r[fp];
+    voiceRooms = { ...voiceRooms, [key]: r };
+  }
+  function channelNameFor(server: number, channel: string): string {
+    return servers.find((s) => s.id === server)?.channels.find((c) => c.id === channel)?.name ?? "voice";
+  }
+  // Notify (chime + banner) when a room I'm NOT in just became active — gated by the server setting.
+  function maybeNotifyRoom(server: number, channel: string, wasActive: boolean) {
+    if (wasActive) return;
+    const key = roomKey(server, channel);
+    if (alertedRooms.has(key)) return;
+    if (inCall && callChannel === channel && callServer === server) return;
+    if (!loadAccept(server)) return;
+    alertedRooms.add(key);
+    voiceAlert = { server, channel, name: channelNameFor(server, channel) };
+    playMention();
+  }
+  // Join (or switch to) a channel's voice room. The channel id IS the call id.
+  async function joinVoice(channel: string, server: number, name: string) {
+    if (inCall && callChannel === channel && callServer === server) return;
+    if (inCall) leaveVoice();
+    callServer = server;
+    if (!(await ensureMic())) { callServer = null; return; }
+    callChannel = channel;
+    callChannelName = name;
+    inCall = true;
+    callMuted = false;
+    voiceAlert = null;
+    alertedRooms.delete(roomKey(server, channel));
+    recordPresence(server, channel, myFp);
+    broadcast({ callId: channel, type: "hello" }); // announce + trigger existing members to offer
+    clearInterval(pingTimer);
+    pingTimer = setInterval(() => {
+      if (callChannel && callServer !== null) {
+        broadcast({ callId: callChannel, type: "voice-ping" });
+        recordPresence(callServer, callChannel, myFp); // keep my own presence fresh
       }
-    }
+    }, 5000);
   }
-  async function startCall() {
-    if (inCall || activeServerId === null) return;
-    callServer = activeServerId;
-    if (!(await ensureMic())) { callServer = null; return; }
-    callId = randomCallId();
-    inCall = true;
-    callMuted = false;
-    ringOnline("ring"); // invite all online members
-  }
-  async function acceptCall() {
-    const inc = incomingCall;
-    if (!inc || inCall) { incomingCall = null; return; }
-    callServer = inc.server;
-    if (!(await ensureMic())) { callServer = null; return; }
-    callId = inc.callId;
-    inCall = true;
-    callMuted = false;
-    incomingCall = null;
-    ringOnline("hello"); // announce I joined → existing participants will offer to me
-  }
-  function hangUp() {
-    for (const fp of Object.keys(callPeers)) {
-      void sendSignal(fp, { callId, type: "bye" });
-      removePeer(fp);
-    }
+  function leaveVoice() {
+    if (callChannel) broadcast({ callId: callChannel, type: "bye" });
+    for (const fp of Object.keys(callPeers)) removePeer(fp);
     if (localStream) {
       for (const t of localStream.getTracks()) t.stop();
       localStream = null;
     }
+    clearInterval(pingTimer);
+    pingTimer = undefined;
+    if (callServer !== null && callChannel) dropPresence(callServer, callChannel, myFp);
     inCall = false;
     callMuted = false;
-    callId = "";
+    callChannel = "";
+    callChannelName = "";
     callServer = null;
   }
   function toggleMute() {
     callMuted = !callMuted;
     if (localStream) for (const t of localStream.getAudioTracks()) t.enabled = !callMuted;
+  }
+  function joinActiveVoice() {
+    if (activeServerId !== null && cur?.active) joinVoice(cur.active, activeServerId, activeName());
   }
   async function handleCallSignal(fromFp: string, payloadB64: string, server: number) {
     let msg: Record<string, unknown>;
@@ -2092,22 +2148,25 @@
     const cid = msg.callId as string | undefined;
     const type = msg.type as string | undefined;
     if (!cid || !type) return;
-    if (type === "ring") {
-      if (!inCall && !incomingCall) incomingCall = { from: fromFp, callId: cid, server };
-      return;
+    // Presence: both "hello" (a newcomer) and "voice-ping" (heartbeat) mean someone's in a room.
+    if (type === "hello" || type === "voice-ping") {
+      const wasActive = roomMembers(server, cid).length > 0;
+      recordPresence(server, cid, fromFp);
+      maybeNotifyRoom(server, cid, wasActive);
+      if (type === "voice-ping") return; // presence only
     }
-    // All other messages require I'm in this exact call.
-    if (!inCall || cid !== callId) return;
+    // WebRTC negotiation — only for MY current room.
+    if (!inCall || cid !== callChannel) return;
     if (type === "hello") {
       if (callPeers[fromFp]) return;
       const pc = createPeer(fromFp);
       await pc.setLocalDescription(await pc.createOffer());
-      void sendSignal(fromFp, { callId, type: "offer", sdp: pc.localDescription });
+      void sendSignal(fromFp, { callId: callChannel, type: "offer", sdp: pc.localDescription });
     } else if (type === "offer") {
       const pc = callPeers[fromFp]?.pc ?? createPeer(fromFp);
       await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
       await pc.setLocalDescription(await pc.createAnswer());
-      void sendSignal(fromFp, { callId, type: "answer", sdp: pc.localDescription });
+      void sendSignal(fromFp, { callId: callChannel, type: "answer", sdp: pc.localDescription });
     } else if (type === "answer") {
       const pc = callPeers[fromFp]?.pc;
       if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
@@ -2118,6 +2177,7 @@
       }
     } else if (type === "bye") {
       removePeer(fromFp);
+      dropPresence(server, cid, fromFp);
     }
   }
 
@@ -2478,10 +2538,27 @@
     window.addEventListener("keydown", onKey);
     // Keep relative presence times current.
     const tick = setInterval(() => (nowTick = Date.now()), 60_000);
+    // Prune stale voice-room presence so indicators clear when people leave/crash without a "bye",
+    // and re-arm the room-active alert for a room that empties out.
+    const callCleanup = setInterval(() => {
+      const cut = Date.now() - VOICE_STALE_MS;
+      let changed = false;
+      const next: Record<string, Record<string, number>> = {};
+      for (const [key, room] of Object.entries(voiceRooms)) {
+        const fresh: Record<string, number> = {};
+        for (const [fp, t] of Object.entries(room)) if (t > cut) fresh[fp] = t;
+        if (Object.keys(fresh).length) next[key] = fresh;
+        else alertedRooms.delete(key);
+        if (Object.keys(fresh).length !== Object.keys(room).length) changed = true;
+      }
+      if (changed) voiceRooms = next;
+    }, 4000);
     return () => {
       window.removeEventListener("keydown", onKey);
       clearInterval(tick);
+      clearInterval(callCleanup);
       clearTimeout(inboxTimer);
+      clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
     };
   });
@@ -2751,8 +2828,9 @@
           <h3>Channels</h3>
           <ul class="channel-list">
             {#each cur?.channels ?? [] as c}
-              <li>
+              <li class="channel-row">
                 <button
+                  class="channel-name"
                   class:active={c.id === cur?.active && view === "chat"}
                   onclick={() => { switchTo(c.id); view = "chat"; }}
                 >
@@ -2760,6 +2838,18 @@
                   {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
                   {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
                 </button>
+                {#if activeServerId !== null}
+                  {@const sv = activeServerId}
+                  {@const vn = roomMembers(sv, c.id).length}
+                  {#if vn}
+                    <button
+                      class="voice-pill"
+                      class:in={inCall && callChannel === c.id}
+                      title={inCall && callChannel === c.id ? "You're in this voice room" : `Join voice (${vn} in)`}
+                      onclick={() => joinVoice(c.id, sv, c.name)}
+                    >🔊 {vn}</button>
+                  {/if}
+                {/if}
               </li>
             {/each}
           </ul>
@@ -2833,8 +2923,9 @@
           <h2>
             #{activeName()} <span class="muted">· {members} member(s)</span>
             <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
-            {#if !inCall}
-              <button class="ghost small call-start" title="Start a voice call (E2E)" onclick={startCall}>📞 Call</button>
+            {#if !(inCall && callChannel === cur?.active)}
+              {@const n = roomMembers(activeServerId ?? -1, cur?.active ?? "").length}
+              <button class="ghost small call-start" title="Join this channel's voice room (E2E)" onclick={joinActiveVoice}>📞 {n ? `Join voice (${n})` : "Voice"}</button>
             {/if}
             {#if pinnedMsgs.length}
               <button class="ghost small pinned-toggle" class:active={showPinned} title="Pinned messages" onclick={() => (showPinned = !showPinned)}>📌 {pinnedMsgs.length}</button>
@@ -3338,22 +3429,22 @@
     {#if inCall}
       <div class="call-bar">
         <span class="call-dot">🔊</span>
-        <span class="call-title">In call</span>
+        <span class="call-title">Voice · #{callChannelName}</span>
         <span class="call-status muted">{callStatusText}</span>
         <div class="call-avatars">
           {@render avatarTag(myFp)}
           {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
         </div>
         <button class="ghost small" class:active={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{callMuted ? "🔇 Muted" : "🎙 Mute"}</button>
-        <button class="call-hangup" title="Leave call" onclick={hangUp}>📴 Leave</button>
+        <button class="call-hangup" title="Leave voice" onclick={leaveVoice}>📴 Leave</button>
       </div>
     {/if}
 
-    {#if incomingCall}
+    {#if voiceAlert}
       <div class="call-incoming">
-        <span>📞 <strong>{nameOf(incomingCall.from)}</strong> is calling…</span>
-        <button onclick={acceptCall}>Join</button>
-        <button class="ghost" onclick={() => (incomingCall = null)}>Dismiss</button>
+        <span>📞 Voice call in <strong>#{voiceAlert.name}</strong></span>
+        <button onclick={() => voiceAlert && joinVoice(voiceAlert.channel, voiceAlert.server, voiceAlert.name)}>Join</button>
+        <button class="ghost" onclick={() => (voiceAlert = null)}>Dismiss</button>
       </div>
     {/if}
 
@@ -3507,6 +3598,10 @@
                 <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
               </form>
               <p class="muted small">The name is your own label for this server (not shared with other members).</p>
+              <label class="toggle">
+                <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
+                <span>Notify me of voice calls on this server</span>
+              </label>
             </section>
 
             <section class="set-section">

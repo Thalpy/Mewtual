@@ -2396,3 +2396,33 @@ button.emoji-pick:hover {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
   z-index: 60;
 }
+
+/* Per-channel voice room: the channel row layout + the "in voice" pill. */
+.channel-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.channel-name {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+.voice-pill {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: #1d3a2e;
+  border: 1px solid #2e6b4f;
+  color: #7fe0a8;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.voice-pill.in {
+  background: #2e6b4f;
+  color: #fff;
+}
+.voice-pill:hover {
+  filter: brightness(1.25);
+}
