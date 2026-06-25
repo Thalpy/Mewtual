@@ -136,6 +136,17 @@ pub enum AppCommand {
         invite: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    /// Push a call-signalling message (opaque payload) to a member; `true` if reached.
+    SendCallSignal {
+        target_fp: String,
+        payload: Vec<u8>,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    /// This call's E2E media base key + epoch (derived from MLS; never sent on the wire).
+    MediaKey {
+        call_id: u128,
+        reply: oneshot::Sender<Result<(Vec<u8>, u64), String>>,
+    },
     /// The download plan for a file by content address: `(total chunks, total size)`, or `None`.
     /// The bridge fetches the chunks one per command so the actor stays responsive between them.
     FileDownloadPlan {
@@ -258,6 +269,9 @@ pub enum AppEvent {
     ConnectivityChanged { online: Vec<String> },
     /// The set of pending incoming DM (friend) requests changed — the UI should re-fetch them.
     DmRequestsChanged,
+    /// An inbound call-signalling message arrived: `(sender fingerprint, opaque payload)`. One event
+    /// per signal; the UI decodes the payload (`{callId, type, data}`) and drives WebRTC.
+    CallSignal { from_fp: String, payload: Vec<u8> },
     /// The actor has stopped (transport closed or shutdown requested).
     Closed,
 }
@@ -668,6 +682,42 @@ impl ServerActor {
                 invite,
                 reply,
             })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Push a call-signalling message (opaque payload) to a member; `Ok(true)` if reached.
+    pub async fn send_call_signal(
+        &self,
+        target_fp: String,
+        payload: Vec<u8>,
+    ) -> Result<bool, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SendCallSignal {
+                target_fp,
+                payload,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// This call's E2E media base key (raw bytes) + the epoch it's keyed to.
+    pub async fn media_key(&self, call_id: u128) -> Result<(Vec<u8>, u64), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MediaKey { call_id, reply })
             .await
             .is_err()
         {
@@ -1113,6 +1163,24 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
+                    Some(AppCommand::SendCallSignal {
+                        target_fp,
+                        payload,
+                        reply,
+                    }) => {
+                        let res = server
+                            .send_call_signal(&target_fp, &payload)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::MediaKey { call_id, reply }) => {
+                        let res = server
+                            .media_key(call_id)
+                            .map(|(k, epoch)| (k.to_vec(), epoch))
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
                     Some(AppCommand::FileDownloadPlan { cid, reply }) => {
                         let plan = <[u8; 32]>::try_from(cid.as_slice())
                             .ok()
@@ -1324,6 +1392,13 @@ where
                         // A DM (friend) request may have arrived over this group — surface a change.
                         if dm_requests_changed(&server, &mut last_dm_requests) {
                             let _ = event_tx.send(AppEvent::DmRequestsChanged).await;
+                        }
+                        // Drain any inbound call-signalling messages, one event each, so the UI's
+                        // WebRTC layer can process offers/answers/ICE promptly.
+                        for (from_fp, payload) in server.take_call_signals() {
+                            let _ = event_tx
+                                .send(AppEvent::CallSignal { from_fp, payload })
+                                .await;
                         }
                     }
                     _ => {

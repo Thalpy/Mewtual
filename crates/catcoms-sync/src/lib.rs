@@ -93,6 +93,14 @@ const KIND_DM_INVITE: u8 = 7;
 /// Bound on pending incoming DM (friend) requests held at once (deduped on the sender's fingerprint),
 /// so a member can't flood the queue.
 const MAX_PENDING_DM_INVITES: usize = 64;
+/// A real-time call signalling message (WebRTC SDP offer/answer + ICE candidates), pushed
+/// member-to-member like a DM invite. The payload is **opaque** to the core (the UI JSON-encodes
+/// `{callId, type, data}`); the core only proves "a current member sent you this" + relays it. Unlike
+/// DM invites these are NOT deduped — every ICE candidate must arrive — so the queue is plain FIFO.
+const KIND_CALL_SIGNAL: u8 = 8;
+/// Bound on buffered inbound call signals before the actor drains them (FIFO-evicted if exceeded), so
+/// a member can't flood the queue.
+const MAX_PENDING_CALL_SIGNALS: usize = 256;
 /// Ceiling on a blob **response** accepted from a serving peer before storing. The blob's
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
@@ -1635,6 +1643,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// fingerprint, opaque DM-group invite bytes)`, deduped on the sender. Surfaced to the recipient
     /// as pending friend requests; transient + bounded (`MAX_PENDING_DM_INVITES`).
     pending_dm_invites: Vec<(String, Vec<u8>)>,
+    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(sender fingerprint,
+    /// opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item); FIFO,
+    /// bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
+    pending_call_signals: Vec<(String, Vec<u8>)>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEX_ENTRIES`.
@@ -1710,6 +1722,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             dialed_peers: HashSet::new(),
             eclipse: EclipseDetector::new(EclipseConfig::default()),
             pending_dm_invites: Vec::new(),
+            pending_call_signals: Vec::new(),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
             blob_budget: HashMap::new(),
@@ -3042,6 +3055,56 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Push a call-signalling message (opaque payload) to current member `target_fp` over this group.
+    /// `Ok(true)` if delivered, `Ok(false)` if we hold no peer record for the target. Authenticated as
+    /// coming from a current member (the recipient learns the verified sender fingerprint).
+    pub async fn send_call_signal(
+        &mut self,
+        target_fp: &str,
+        payload: &[u8],
+    ) -> Result<bool, SyncError> {
+        let Some(peer) = self.peer_for_fingerprint(target_fp) else {
+            return Ok(false);
+        };
+        let (req, _auth) = self.build_authed_request(KIND_CALL_SIGNAL, payload)?;
+        self.transport
+            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+            .await?;
+        Ok(true)
+    }
+
+    /// Serve an inbound `KIND_CALL_SIGNAL`: authenticate the sender as a current member, then queue
+    /// the (opaque) payload for the actor to drain + surface. NOT deduped (every ICE candidate must
+    /// arrive); FIFO-bounded. Never replies data.
+    fn serve_call_signal(&mut self, data: &[u8]) {
+        let Some((payload, req_pubkey, _auth)) = self.authenticate_request(KIND_CALL_SIGNAL, data)
+        else {
+            return;
+        };
+        if payload.is_empty() {
+            return;
+        }
+        let from = roles::fingerprint(&DeviceId::from_public_key_bytes(&req_pubkey));
+        self.pending_call_signals.push((from, payload));
+        while self.pending_call_signals.len() > MAX_PENDING_CALL_SIGNALS {
+            self.pending_call_signals.remove(0);
+        }
+    }
+
+    /// Drain (return + clear) the buffered inbound call signals — the actor calls this each loop and
+    /// emits a `CallSignal` event per item.
+    pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
+        std::mem::take(&mut self.pending_call_signals)
+    }
+
+    /// Derive this call's 32-byte E2E media base key from the group's current-epoch MLS exporter, plus
+    /// the epoch (so all members on the same epoch agree). The key is never sent on the wire — each
+    /// member derives it locally.
+    pub fn media_key(&self, call_id: u128) -> Result<([u8; 32], u64), SyncError> {
+        let key = self.group.media_secret(&self.device, call_id)?;
+        Ok((key, self.group.epoch()))
+    }
+
     /// Verify and store a peer record: its **self-signature** must be valid **and**
     /// its signer must be a current group member. Returns `true` only when it adds a
     /// *newly-known* member (a refresh of an existing device, a stale-`seq` record, an
@@ -4258,6 +4321,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&KIND_DM_INVITE, rest)) => {
                 // A member delivered a DM (friend) invite; queue it as a pending request. Empty ack.
                 self.serve_dm_invite(rest);
+                Vec::new()
+            }
+            Some((&KIND_CALL_SIGNAL, rest)) => {
+                // A member sent a call-signalling message; queue it for the actor to drain. Empty ack.
+                self.serve_call_signal(rest);
                 Vec::new()
             }
             _ => Vec::new(),

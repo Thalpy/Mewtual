@@ -15,6 +15,10 @@ pub const CHANNEL_EXPORTER_LABEL: &str = "catcoms channel v1";
 /// rendezvous namespaces). Deliberately distinct from [`CHANNEL_EXPORTER_LABEL`].
 pub const METADATA_EXPORTER_LABEL: &str = "catcoms metadata v1";
 
+/// MLS exporter label for **real-time media** keys (E2E voice/video frame encryption).
+/// Domain-separated from content + metadata keys, so a media key reveals neither.
+pub const MEDIA_EXPORTER_LABEL: &str = "catcoms media v1";
+
 /// Logical document types within a server. Encoded as a fixed-width `u16` tag so
 /// the derivation context is injective. Values are stable across versions — only
 /// ever append new ones.

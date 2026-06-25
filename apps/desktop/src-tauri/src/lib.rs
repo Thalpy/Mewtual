@@ -199,6 +199,13 @@ struct CountEvt {
 struct ServerEvt {
     server: u64,
 }
+/// An inbound call-signalling message forwarded to the UI (payload is base64 of the opaque bytes).
+#[derive(Serialize, Clone)]
+struct CallSignalEvt {
+    server: u64,
+    from_fp: String,
+    payload: String,
+}
 #[derive(Serialize, Clone)]
 struct DownloadProgressEvt {
     server: u64,
@@ -279,6 +286,16 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::DmRequestsChanged => {
                     let _ = app.emit("dm-requests-changed", ServerEvt { server });
+                }
+                AppEvent::CallSignal { from_fp, payload } => {
+                    let _ = app.emit(
+                        "call-signal",
+                        CallSignalEvt {
+                            server,
+                            from_fp,
+                            payload: B64.encode(payload),
+                        },
+                    );
                 }
                 AppEvent::Closed => {
                     let _ = app.emit("server-closed", ServerEvt { server });
@@ -1165,6 +1182,35 @@ async fn send_dm_invite(
     actor.send_dm_invite(target_fp, invite).await
 }
 
+/// Push a call-signalling message (base64 payload) to member `target_fp`. `true` if reached.
+#[tauri::command]
+async fn send_call_signal(
+    state: State<'_, AppState>,
+    server: u64,
+    target_fp: String,
+    payload: String,
+) -> Result<bool, String> {
+    let bytes = B64
+        .decode(payload.as_bytes())
+        .map_err(|e| format!("bad payload: {e}"))?;
+    let actor = actor_of(&state, server).await?;
+    actor.send_call_signal(target_fp, bytes).await
+}
+
+/// This call's E2E media base key (base64) + the MLS epoch it's keyed to. Derived locally from the
+/// group key; never sent on the wire.
+#[tauri::command]
+async fn call_media_key(
+    state: State<'_, AppState>,
+    server: u64,
+    call_id: String,
+) -> Result<(String, u64), String> {
+    let id: u128 = call_id.parse().map_err(|_| "bad call id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    let (key, epoch) = actor.media_key(id).await?;
+    Ok((B64.encode(key), epoch))
+}
+
 /// The pending incoming DM (friend) requests received over `server`.
 #[tauri::command]
 async fn get_dm_requests(
@@ -1746,6 +1792,8 @@ pub fn run() {
             dm_stats,
             send_dm_invite,
             get_dm_requests,
+            send_call_signal,
+            call_media_key,
             dismiss_dm_request,
             download_file,
             file_available,

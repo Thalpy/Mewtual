@@ -1424,6 +1424,27 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.send_dm_invite(target_fp, invite).await?)
     }
 
+    /// Push a call-signalling message (opaque payload) to a current member. `Ok(true)` if delivered,
+    /// `Ok(false)` if the target isn't reachable.
+    pub async fn send_call_signal(
+        &mut self,
+        target_fp: &str,
+        payload: &[u8],
+    ) -> Result<bool, AppError> {
+        Ok(self.sync.send_call_signal(target_fp, payload).await?)
+    }
+
+    /// Drain inbound call-signalling messages: `(sender fingerprint, opaque payload)`.
+    pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
+        self.sync.take_call_signals()
+    }
+
+    /// This call's E2E media base key (derived from the group MLS exporter) + the epoch it's keyed to.
+    /// Every member derives the same key locally; it is never sent on the wire.
+    pub fn media_key(&self, call_id: u128) -> Result<([u8; 32], u64), AppError> {
+        Ok(self.sync.media_key(call_id)?)
+    }
+
     /// Remove a file from the shared index, and **garbage-collect its now-orphaned chunk blobs**
     /// from local storage. **Owner or admin only** — errors otherwise. The GC is **dedup-safe**:
     /// a chunk still referenced by another listed file (chunks are content-addressed, so two files
@@ -2446,6 +2467,53 @@ mod tests {
         assert_eq!(msgs[0].text, "welcome!");
         // Authored by Alice's device fingerprint (the name resolves from her profile).
         assert_eq!(msgs[0].author, alice.my_fingerprint());
+    }
+
+    #[tokio::test]
+    async fn members_derive_the_same_e2e_media_key() {
+        // The crux of E2E voice: every member derives the SAME call media key locally from the MLS
+        // group secret — it never travels on the wire — and distinct calls get distinct keys.
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let bob = bob.unwrap();
+        assert_eq!(bob.member_count(), 2);
+
+        let call: u128 = 0x00C0_FFEE;
+        let (ka, ea) = alice.media_key(call).unwrap();
+        let (kb, eb) = bob.media_key(call).unwrap();
+        assert_eq!(ea, eb, "both members are on the same epoch");
+        assert_eq!(
+            ka, kb,
+            "identical 32-byte media key, derived independently on each side"
+        );
+        assert_ne!(ka, [0u8; 32]);
+
+        // A different call id yields an independent key (domain separation by the call id).
+        let (other, _) = alice.media_key(0xBEEF).unwrap();
+        assert_ne!(ka, other, "distinct calls get distinct keys");
     }
 
     #[tokio::test]

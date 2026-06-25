@@ -17,5 +17,6 @@ pub mod context;
 
 pub use codec::{Decoder, Encoder, WireError};
 pub use context::{
-    context_bytes, exporter_context, DocType, CHANNEL_EXPORTER_LABEL, METADATA_EXPORTER_LABEL,
+    context_bytes, exporter_context, DocType, CHANNEL_EXPORTER_LABEL, MEDIA_EXPORTER_LABEL,
+    METADATA_EXPORTER_LABEL,
 };

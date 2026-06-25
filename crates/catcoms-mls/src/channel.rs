@@ -11,7 +11,10 @@
 //! distinct [`METADATA_EXPORTER_LABEL`], so learning a content key never reveals
 //! metadata keys and vice versa.
 
-use catcoms_wire::{exporter_context, DocType, CHANNEL_EXPORTER_LABEL, METADATA_EXPORTER_LABEL};
+use catcoms_wire::{
+    exporter_context, DocType, CHANNEL_EXPORTER_LABEL, MEDIA_EXPORTER_LABEL,
+    METADATA_EXPORTER_LABEL,
+};
 
 use crate::device::MlsDevice;
 use crate::group::ServerGroup;
@@ -31,6 +34,22 @@ impl ServerGroup {
     ) -> Result<[u8; KEY_LEN], MlsError> {
         let context = exporter_context(doc_type, doc_id);
         let secret = self.export_secret(device, CHANNEL_EXPORTER_LABEL, &context, KEY_LEN)?;
+        secret
+            .try_into()
+            .map_err(|_| MlsError::Internal("unexpected exported secret length"))
+    }
+
+    /// Derive the 32-byte **media** secret for a call at the current epoch — the base key for E2E
+    /// real-time media (voice/video frames). All members derive it identically from the group
+    /// exporter; distinct `call_id`s yield independent keys. Domain-separated from content + metadata
+    /// keys by [`MEDIA_EXPORTER_LABEL`]. The key is never sent on the wire.
+    pub fn media_secret(
+        &self,
+        device: &MlsDevice,
+        call_id: u128,
+    ) -> Result<[u8; KEY_LEN], MlsError> {
+        let context = call_id.to_be_bytes();
+        let secret = self.export_secret(device, MEDIA_EXPORTER_LABEL, &context, KEY_LEN)?;
         secret
             .try_into()
             .map_err(|_| MlsError::Internal("unexpected exported secret length"))
