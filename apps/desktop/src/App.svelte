@@ -349,15 +349,17 @@
   let pDescription = $state("");
   let pBubble = $state("");
   let pAvatar = $state("");
-  // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default.
+  // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default. All chosen
+  // dark enough for the white message text (and a text-shadow on custom bubbles backs it up).
   const BUBBLE_PRESETS: { label: string; value: string }[] = [
     { label: "Default", value: "" },
-    { label: "Ocean", value: "linear-gradient(135deg,#1a2980,#26d0ce)" },
-    { label: "Sunset", value: "linear-gradient(135deg,#ff512f,#dd2476)" },
-    { label: "Forest", value: "linear-gradient(135deg,#11998e,#38ef7d)" },
-    { label: "Grape", value: "linear-gradient(135deg,#654ea3,#eaafc8)" },
+    { label: "Ocean", value: "linear-gradient(135deg,#1a2980,#26415e)" },
+    { label: "Sunset", value: "linear-gradient(135deg,#c31432,#5c1020)" },
+    { label: "Forest", value: "linear-gradient(135deg,#134e5e,#1c7a4d)" },
+    { label: "Grape", value: "linear-gradient(135deg,#41295a,#5d2a6e)" },
+    { label: "Ember", value: "linear-gradient(135deg,#8a3a12,#b34700)" },
+    { label: "Rose", value: "linear-gradient(135deg,#7a1f3d,#3d1020)" },
     { label: "Slate", value: "#3a3f4b" },
-    { label: "Ember", value: "linear-gradient(135deg,#f7971e,#ffd200)" },
   ];
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
@@ -2673,14 +2675,16 @@
                 !m.reply_to &&
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
+              {@const bubble = bubbleStyle(m.author)}
               <li
                 data-mi={mi}
                 class:own={m.author === myFp}
                 class:grouped
+                class:has-bubble={!!bubble}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchMatches[searchPos] === mi}
                 class:flash={!!m.id && m.id === flashId}
-                style={bubbleStyle(m.author)}
+                style={bubble}
                 use:contextMenu={() => messageMenu(m)}
               >
                 {#if m.reply_to}
