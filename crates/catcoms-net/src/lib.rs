@@ -208,6 +208,10 @@ pub struct MeshBehaviour {
     /// Rendezvous client: register our (signed) peer record under a blinded namespace
     /// and discover other members, without hard-coded bootstrap addresses.
     pub rendezvous_client: rendezvous::client::Behaviour,
+    /// UPnP/NAT-PMP: best-effort ask the home router to open a port, so this node becomes directly
+    /// reachable (the discovered public address is advertised + folded into a fresh invite) — no
+    /// relay needed when the router cooperates.
+    pub upnp: libp2p::upnp::tokio::Behaviour,
     /// Connection caps so a discovery/registration flood cannot exhaust us.
     pub connection_limits: connection_limits::Behaviour,
 }
@@ -235,6 +239,7 @@ impl MeshBehaviour {
             key.public(),
         ));
         let rendezvous_client = rendezvous::client::Behaviour::new(key.clone());
+        let upnp = libp2p::upnp::tokio::Behaviour::default();
         let connection_limits = connection_limits::Behaviour::new(
             connection_limits::ConnectionLimits::default()
                 .with_max_pending_incoming(Some(64))
@@ -247,6 +252,7 @@ impl MeshBehaviour {
             dcutr,
             identify,
             rendezvous_client,
+            upnp,
             connection_limits,
         })
     }
@@ -608,6 +614,10 @@ struct Actor {
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     listen_tx: mpsc::Sender<Multiaddr>,
+    /// UPnP outcome: `Some(addr)` = the router opened a port and reported this public address
+    /// (surfaced so a fresh invite can carry a directly-dialable bootstrap, no relay);
+    /// `None` = no usable gateway (so a waiter stops promptly instead of timing out).
+    upnp_tx: mpsc::Sender<Option<Multiaddr>>,
     /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
     upgrade_tx: mpsc::Sender<PeerId>,
     /// Rendezvous-discovered peer records, surfaced but never auto-dialed. Unbounded
@@ -912,6 +922,29 @@ impl Actor {
             SwarmEvent::Behaviour(MeshBehaviourEvent::RelayClient(e)) => {
                 tracing::debug!(?e, "relay-client event");
             }
+            // UPnP/NAT-PMP: the router mapped our port and told us our public address. Promote it
+            // to an external address (so identify/rendezvous advertise it) and surface it so a
+            // fresh invite can carry a directly-dialable bootstrap — direct connect, no relay.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
+                libp2p::upnp::Event::NewExternalAddr(addr) => {
+                    tracing::info!(%addr, "UPnP mapped a public address — node is directly reachable");
+                    self.swarm.add_external_address(addr.clone());
+                    self.flush_pending_registers();
+                    let _ = self.upnp_tx.try_send(Some(addr));
+                }
+                libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
+                    tracing::info!(%addr, "UPnP port mapping expired");
+                    self.swarm.remove_external_address(&addr);
+                }
+                libp2p::upnp::Event::GatewayNotFound => {
+                    tracing::info!("no UPnP gateway found — direct reachability needs a port-forward or a relay");
+                    let _ = self.upnp_tx.try_send(None);
+                }
+                libp2p::upnp::Event::NonRoutableGateway => {
+                    tracing::info!("UPnP gateway is not internet-routable (likely CGNAT/double-NAT) — a relay is required");
+                    let _ = self.upnp_tx.try_send(None);
+                }
+            },
             // Rendezvous client: surface discovered records (NEVER auto-dial them) and
             // our own registrations; log failures/expiry for the caller to react to.
             SwarmEvent::Behaviour(MeshBehaviourEvent::RendezvousClient(e)) => match e {
@@ -981,6 +1014,7 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
+    upnp_rx: Mutex<mpsc::Receiver<Option<Multiaddr>>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
@@ -1000,6 +1034,7 @@ impl MeshService {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
+        let (upnp_tx, upnp_rx) = mpsc::channel(16);
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
         let (registered_tx, registered_rx) = mpsc::unbounded_channel();
@@ -1008,6 +1043,7 @@ impl MeshService {
             cmd_rx,
             event_tx,
             listen_tx,
+            upnp_tx,
             upgrade_tx,
             discovered_tx,
             registered_tx,
@@ -1022,6 +1058,7 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
+            upnp_rx: Mutex::new(upnp_rx),
             upgrade_rx: Mutex::new(upgrade_rx),
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
@@ -1033,6 +1070,16 @@ impl MeshService {
     /// reservation is granted). Returns `None` once the actor stops.
     pub async fn next_listen_addr(&self) -> Option<Multiaddr> {
         self.listen_rx.lock().await.recv().await
+    }
+
+    /// Await the next public address discovered via **UPnP** (the home router opened a port and
+    /// reported our internet-facing address). It is already added as an external address; callers
+    /// (e.g. invite minting) can fold it into a directly-dialable bootstrap so a peer can connect
+    /// with no relay. UPnP is best-effort: this resolves to `None` both when there is no usable
+    /// gateway (signalled promptly, so the caller doesn't wait out a full timeout) and once the
+    /// actor stops — either way the caller simply proceeds without a UPnP bootstrap.
+    pub async fn next_external_addr(&self) -> Option<Multiaddr> {
+        self.upnp_rx.lock().await.recv().await.flatten()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct

@@ -653,6 +653,15 @@ async fn found_server(
         bootstrap.push(build_advertised(&advertise, port, &id)?);
     }
 
+    // No manual address and no relay? Best-effort UPnP: give the router a few seconds to open a
+    // port and report our public address, then fold it into the invite as a directly-dialable
+    // bootstrap — a peer can connect with no relay, no port-forward (when the router cooperates).
+    if advertise.trim().is_empty() && relay.is_empty() {
+        if let Ok(Some(ext)) = timeout(Duration::from_secs(4), mesh.next_external_addr()).await {
+            bootstrap.push(format!("{ext}/p2p/{id}"));
+        }
+    }
+
     // Reserve a relay circuit and prefer the relayed address (NAT traversal, no port-forward).
     if !relay.is_empty() {
         // Wait for the relay connection before reserving (the relay-client transport needs
