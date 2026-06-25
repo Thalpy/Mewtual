@@ -2257,3 +2257,87 @@ button.emoji-pick:hover {
 .error-x:hover {
   opacity: 1;
 }
+
+/* Clickable member rows / message authors (open the profile card). */
+.member-row {
+  cursor: pointer;
+}
+.author-link {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.author-link:hover {
+  text-decoration: underline;
+}
+
+/* Profile card popover. */
+.profile-card .pc-top {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.pc-name {
+  font-size: 1.1rem;
+}
+.pc-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+.pc-desc {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--panel, #1c1c24);
+  border: 1px solid var(--border, #2a2a36);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 0 0 12px;
+}
+.pc-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Message-bubble preset swatches in the profile editor. */
+.bubble-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.bubble-swatch {
+  width: 46px;
+  height: 30px;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background: #3a3f4b;
+  cursor: pointer;
+  color: #e4e4ef;
+  font-size: 0.78rem;
+}
+.bubble-swatch.active {
+  border-color: #fff;
+}
+
+/* The clickable avatar+name inside a roster row (unstyled button → opens the profile card). */
+.member-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+.member-link:hover {
+  text-decoration: underline;
+}

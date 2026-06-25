@@ -155,6 +155,8 @@ struct UiProfile {
     color: String,
     font: String,
     effect: String,
+    description: String,
+    bubble: String,
     avatar: String,
 }
 
@@ -995,6 +997,8 @@ async fn set_profile(
     color: String,
     font: String,
     effect: String,
+    description: String,
+    bubble: String,
     avatar: String,
 ) -> Result<(), String> {
     let avatar = if avatar.is_empty() {
@@ -1016,6 +1020,8 @@ async fn set_profile(
             color,
             font,
             effect,
+            description,
+            bubble,
             avatar,
         })
         .await;
@@ -1037,6 +1043,8 @@ async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiP
             color: p.color,
             font: p.font,
             effect: p.effect,
+            description: p.description,
+            bubble: p.bubble,
             avatar: if p.avatar.is_empty() {
                 String::new()
             } else {

@@ -14,7 +14,7 @@
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
-  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; avatar: string };
+  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string };
   type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number };
   type Found = { server: number; channel: string; is_dm: boolean };
   type Reloaded = { server: number; name: string; invite: string; channel: string; is_dm: boolean };
@@ -346,7 +346,19 @@
   let pColor = $state("#4f8cff");
   let pFont = $state("system");
   let pEffect = $state("none");
+  let pDescription = $state("");
+  let pBubble = $state("");
   let pAvatar = $state("");
+  // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default.
+  const BUBBLE_PRESETS: { label: string; value: string }[] = [
+    { label: "Default", value: "" },
+    { label: "Ocean", value: "linear-gradient(135deg,#1a2980,#26d0ce)" },
+    { label: "Sunset", value: "linear-gradient(135deg,#ff512f,#dd2476)" },
+    { label: "Forest", value: "linear-gradient(135deg,#11998e,#38ef7d)" },
+    { label: "Grape", value: "linear-gradient(135deg,#654ea3,#eaafc8)" },
+    { label: "Slate", value: "#3a3f4b" },
+    { label: "Ember", value: "linear-gradient(135deg,#f7971e,#ffd200)" },
+  ];
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
@@ -372,6 +384,20 @@
   }
   function nameOf(fp: string): string {
     return profiles[fp]?.name?.trim() || fp;
+  }
+  // A member's custom message-bubble background (CSS), or "" for the default. The value comes from an
+  // untrusted profile, so allow only simple colors/gradients — no `url(...)`, `;`, `@`, `{` etc. that
+  // could inject CSS.
+  function bubbleStyle(fp: string): string {
+    const b = (profiles[fp]?.bubble ?? "").trim();
+    if (!b) return "";
+    if (!/^[#a-z0-9 ,.%()-]+$/i.test(b) || /url|expression|image|var\(/i.test(b)) return "";
+    return `background:${b}`;
+  }
+  // The profile card popover (opened by clicking a member's avatar/name).
+  let profileCard = $state<string | null>(null);
+  function showProfile(fp: string) {
+    if (fp) profileCard = fp;
   }
   function fontClass(font: string): string {
     return font === "serif" ? "font-serif" : font === "mono" ? "font-mono" : "";
@@ -852,6 +878,8 @@
       pColor = me.color || pColor;
       pFont = me.font || pFont;
       pEffect = me.effect || pEffect;
+      pDescription = me.description ?? "";
+      pBubble = me.bubble ?? "";
       pAvatar = me.avatar || "";
     }
   }
@@ -1413,6 +1441,8 @@
         color: pColor,
         font: pFont,
         effect: pEffect,
+        description: pDescription.trim(),
+        bubble: pBubble,
         avatar: pAvatar,
       });
       // Keep the server's rail label in sync ONLY when it was still tracking my name (i.e. never
@@ -2534,10 +2564,17 @@
           <ul>
             {#each filteredRoster as m}
               {@const online = m.you || onlineMembers.has(m.fingerprint)}
-              <li title={m.fingerprint} class:is-you={m.you} use:contextMenu={() => memberMenu(m)}>
+              <li
+                title={m.fingerprint}
+                class:is-you={m.you}
+                class="member-row"
+                use:contextMenu={() => memberMenu(m)}
+              >
                 <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
-                {@render avatarTag(m.fingerprint)}
-                {@render nameTag(m.fingerprint)}
+                <button type="button" class="member-link" onclick={() => showProfile(m.fingerprint)}>
+                  {@render avatarTag(m.fingerprint)}
+                  {@render nameTag(m.fingerprint)}
+                </button>
                 {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
                   <span class="role-badge {roles[m.fingerprint]}">{roles[m.fingerprint]}</span>
                 {/if}
@@ -2643,6 +2680,7 @@
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchMatches[searchPos] === mi}
                 class:flash={!!m.id && m.id === flashId}
+                style={bubbleStyle(m.author)}
                 use:contextMenu={() => messageMenu(m)}
               >
                 {#if m.reply_to}
@@ -2663,8 +2701,11 @@
                 {/if}
                 {#if !grouped}
                   <span class="author">
-                    {@render avatarTag(m.author)}
-                    {@render nameTag(m.author)}
+                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                    <span class="author-link" role="button" tabindex="0" onclick={() => showProfile(m.author)}>
+                      {@render avatarTag(m.author)}
+                      {@render nameTag(m.author)}
+                    </span>
                     <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                     {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
                   </span>
@@ -2991,6 +3032,25 @@
                 <option value="pulse">Pulse</option>
               </select>
             </label>
+            <label class="field">
+              <span class="muted">About you</span>
+              <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
+            </label>
+            <div class="field">
+              <span class="muted">Message bubble</span>
+              <div class="bubble-presets">
+                {#each BUBBLE_PRESETS as b}
+                  <button
+                    type="button"
+                    class="bubble-swatch"
+                    class:active={pBubble === b.value}
+                    title={b.label}
+                    style={b.value ? `background:${b.value}` : ""}
+                    onclick={() => (pBubble = b.value)}
+                  >{#if !b.value}Aa{/if}</button>
+                {/each}
+              </div>
+            </div>
             <div class="field">
               <span class="muted">Avatar</span>
               <div class="avatar-row">
@@ -3056,6 +3116,52 @@
       </section>
       {/if}
     </div>
+
+    {#if profileCard}
+      {@const fp = profileCard}
+      {@const p = profiles[fp]}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) profileCard = null; }}>
+        <div class="overlay-card profile-card">
+          <header class="overlay-head">
+            <h2>Profile</h2>
+            <button class="ghost" onclick={() => (profileCard = null)}>✕</button>
+          </header>
+          <div class="overlay-body">
+            <div class="pc-top">
+              {#if p?.avatar}
+                <img class="avatar lg" src={"data:image/jpeg;base64," + p.avatar} alt="" />
+              {:else}
+                <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
+              {/if}
+              <div class="pc-id">
+                <div class="pc-name">{@render nameTag(fp)}</div>
+                <div class="pc-meta">
+                  {#if roles[fp] && roles[fp] !== "member"}<span class="role-badge {roles[fp]}">{roles[fp]}</span>{/if}
+                  {#if fp === myFp}<span class="you-badge">you</span>{/if}
+                  <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "online" : "offline"}</span>
+                </div>
+              </div>
+            </div>
+            {#if p?.description}
+              <p class="pc-desc">{p.description}</p>
+            {:else}
+              <p class="muted small">No description yet.</p>
+            {/if}
+            <div class="pc-actions">
+              {#if fp === myFp}
+                <button onclick={() => { profileCard = null; switchView("profile"); }}>Edit your profile</button>
+              {:else}
+                {#if !cur?.isDm && onlineMembers.has(fp)}
+                  <button onclick={() => { const t = fp; profileCard = null; startDmWithMember(t); }}>👋 Add friend</button>
+                {/if}
+                <button class="ghost" onclick={() => copyText(fp)}>Copy fingerprint</button>
+              {/if}
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
 
     {#if showSettings}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->

@@ -396,6 +396,8 @@ const P_COLOR: &str = "color";
 const P_FONT: &str = "font";
 const P_EFFECT: &str = "effect";
 const P_AVATAR_CID: &str = "avatar_cid";
+const P_DESCRIPTION: &str = "description";
+const P_BUBBLE: &str = "bubble";
 
 /// Maximum avatar image size accepted by [`Server::set_profile`]. Avatars are stored by
 /// **content address** in the blob store (not inline in the gossiped profile document)
@@ -421,6 +423,10 @@ pub struct Profile {
     pub font: String,
     /// A text-effect key (e.g. `none` | `rainbow` | `wave` | `pulse`).
     pub effect: String,
+    /// A short self-description / bio (shown on the profile card).
+    pub description: String,
+    /// A CSS background for this member's message bubble (a color or gradient); empty = default.
+    pub bubble: String,
     /// The avatar image bytes, resolved from its content address against the local blob
     /// store (empty if unset or not yet fetched). The UI produces a downscaled JPEG.
     pub avatar: Vec<u8>,
@@ -433,6 +439,8 @@ struct ProfileRecord {
     color: String,
     font: String,
     effect: String,
+    description: String,
+    bubble: String,
     avatar_cid: Vec<u8>,
 }
 
@@ -453,6 +461,8 @@ fn write_profile(
     doc.put(&entry, P_COLOR, p.color.as_str())?;
     doc.put(&entry, P_FONT, p.font.as_str())?;
     doc.put(&entry, P_EFFECT, p.effect.as_str())?;
+    doc.put(&entry, P_DESCRIPTION, p.description.as_str())?;
+    doc.put(&entry, P_BUBBLE, p.bubble.as_str())?;
     doc.put(
         &entry,
         P_AVATAR_CID,
@@ -474,6 +484,8 @@ fn read_profile_records(doc: &AutoCommit) -> HashMap<String, ProfileRecord> {
                     color: str_field(doc, &entry, P_COLOR),
                     font: str_field(doc, &entry, P_FONT),
                     effect: str_field(doc, &entry, P_EFFECT),
+                    description: str_field(doc, &entry, P_DESCRIPTION),
+                    bubble: str_field(doc, &entry, P_BUBBLE),
                     avatar_cid: bytes_field(doc, &entry, P_AVATAR_CID),
                 },
             );
@@ -1058,6 +1070,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         color: r.color,
                         font: r.font,
                         effect: r.effect,
+                        description: r.description,
+                        bubble: r.bubble,
                         avatar,
                     },
                 )
@@ -2200,6 +2214,8 @@ mod tests {
                 color: String::new(),
                 font: String::new(),
                 effect: String::new(),
+                description: String::new(),
+                bubble: String::new(),
                 avatar: Vec::new(),
             })
             .await
@@ -2630,6 +2646,8 @@ mod tests {
             color: "#ff5577".into(),
             font: "serif".into(),
             effect: "rainbow".into(),
+            description: "the founder".into(),
+            bubble: "linear-gradient(90deg,#f06,#09f)".into(),
             avatar: vec![0xff, 0xd8, 0xff, 0x00, 1, 2, 3], // stand-in JPEG bytes
         };
         alice.set_profile(p.clone()).await.unwrap();
