@@ -1913,6 +1913,171 @@
     jumpToMessageId(it.message_id);
   }
 
+  // --- Voice calls (full-mesh WebRTC; E2E via authenticated signalling + DTLS-SRTP) -------------
+  // Each pair of participants connects directly (no server in the media path), so SRTP is end-to-end;
+  // the SDP/ICE is exchanged over the members-only, signed KIND_CALL_SIGNAL push, so the DTLS
+  // fingerprints can't be MITM'd. A future MLS-keyed frame layer (SFrame) is only needed for an SFU.
+  type CallPeer = { fp: string; pc: RTCPeerConnection };
+  let inCall = $state(false);
+  let callMuted = $state(false);
+  let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
+  let incomingCall = $state<{ from: string; callId: string; server: number } | null>(null);
+  let callId = ""; // the active call's id (decimal u128)
+  let callServer: number | null = null; // the server the call runs on
+  let localStream: MediaStream | null = null;
+  const callPeers: Record<string, CallPeer> = {};
+  // LAN/local works with no ICE servers (host candidates); STUN/TURN for cross-NAT is a later,
+  // ethos-consistent phase (media over the libp2p relay, or an opt-in self-hosted TURN).
+  const ICE_CONFIG: RTCConfiguration = { iceServers: [] };
+
+  function randomCallId(): string {
+    const a = new Uint32Array(4);
+    crypto.getRandomValues(a);
+    let v = 0n;
+    for (const x of a) v = (v << 32n) | BigInt(x);
+    return v.toString();
+  }
+  function b64enc(s: string): string {
+    return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+  }
+  function b64dec(b: string): string {
+    return new TextDecoder().decode(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
+  }
+  async function sendSignal(targetFp: string, msg: Record<string, unknown>) {
+    if (callServer === null) return;
+    try {
+      await invoke("send_call_signal", { server: callServer, targetFp, payload: b64enc(JSON.stringify(msg)) });
+    } catch {
+      /* peer unreachable — ignore (mesh tolerates a missing edge) */
+    }
+  }
+  async function ensureMic(): Promise<boolean> {
+    if (localStream) return true;
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      return true;
+    } catch {
+      error = "Couldn't access the microphone (permission denied or no device).";
+      return false;
+    }
+  }
+  function attachRemote(fp: string, stream: MediaStream) {
+    let el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
+    if (!el) {
+      el = document.createElement("audio");
+      el.id = `call-audio-${fp}`;
+      el.autoplay = true;
+      document.body.appendChild(el);
+    }
+    el.srcObject = stream;
+  }
+  function createPeer(fp: string): RTCPeerConnection {
+    const pc = new RTCPeerConnection(ICE_CONFIG);
+    if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) void sendSignal(fp, { callId, type: "ice", candidate: e.candidate.toJSON() });
+    };
+    pc.ontrack = (e) => attachRemote(fp, e.streams[0]);
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") removePeer(fp);
+    };
+    callPeers[fp] = { fp, pc };
+    callParticipants = Object.keys(callPeers);
+    return pc;
+  }
+  function removePeer(fp: string) {
+    const p = callPeers[fp];
+    if (p) {
+      try { p.pc.close(); } catch { /* already closed */ }
+      delete callPeers[fp];
+    }
+    document.getElementById(`call-audio-${fp}`)?.remove();
+    callParticipants = Object.keys(callPeers);
+  }
+  function ringOnline(type: "ring" | "hello") {
+    for (const m of roster) {
+      if (m.fingerprint !== myFp && onlineMembers.has(m.fingerprint)) {
+        void sendSignal(m.fingerprint, { callId, type });
+      }
+    }
+  }
+  async function startCall() {
+    if (inCall || activeServerId === null) return;
+    callServer = activeServerId;
+    if (!(await ensureMic())) { callServer = null; return; }
+    callId = randomCallId();
+    inCall = true;
+    callMuted = false;
+    ringOnline("ring"); // invite all online members
+  }
+  async function acceptCall() {
+    const inc = incomingCall;
+    if (!inc || inCall) { incomingCall = null; return; }
+    callServer = inc.server;
+    if (!(await ensureMic())) { callServer = null; return; }
+    callId = inc.callId;
+    inCall = true;
+    callMuted = false;
+    incomingCall = null;
+    ringOnline("hello"); // announce I joined → existing participants will offer to me
+  }
+  function hangUp() {
+    for (const fp of Object.keys(callPeers)) {
+      void sendSignal(fp, { callId, type: "bye" });
+      removePeer(fp);
+    }
+    if (localStream) {
+      for (const t of localStream.getTracks()) t.stop();
+      localStream = null;
+    }
+    inCall = false;
+    callMuted = false;
+    callId = "";
+    callServer = null;
+  }
+  function toggleMute() {
+    callMuted = !callMuted;
+    if (localStream) for (const t of localStream.getAudioTracks()) t.enabled = !callMuted;
+  }
+  async function handleCallSignal(fromFp: string, payloadB64: string, server: number) {
+    let msg: Record<string, unknown>;
+    try {
+      msg = JSON.parse(b64dec(payloadB64));
+    } catch {
+      return;
+    }
+    const cid = msg.callId as string | undefined;
+    const type = msg.type as string | undefined;
+    if (!cid || !type) return;
+    if (type === "ring") {
+      if (!inCall && !incomingCall) incomingCall = { from: fromFp, callId: cid, server };
+      return;
+    }
+    // All other messages require I'm in this exact call.
+    if (!inCall || cid !== callId) return;
+    if (type === "hello") {
+      if (callPeers[fromFp]) return;
+      const pc = createPeer(fromFp);
+      await pc.setLocalDescription(await pc.createOffer());
+      void sendSignal(fromFp, { callId, type: "offer", sdp: pc.localDescription });
+    } else if (type === "offer") {
+      const pc = callPeers[fromFp]?.pc ?? createPeer(fromFp);
+      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+      await pc.setLocalDescription(await pc.createAnswer());
+      void sendSignal(fromFp, { callId, type: "answer", sdp: pc.localDescription });
+    } else if (type === "answer") {
+      const pc = callPeers[fromFp]?.pc;
+      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+    } else if (type === "ice") {
+      const pc = callPeers[fromFp]?.pc;
+      if (pc && msg.candidate) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit)); } catch { /* stale */ }
+      }
+    } else if (type === "bye") {
+      removePeer(fromFp);
+    }
+  }
+
   // Per-channel composer drafts (in-memory): switching channels/servers preserves what you'd typed.
   let drafts = $state<Record<string, string>>({});
   function saveDraftFor(key: string | null) {
@@ -2198,6 +2363,9 @@
       listen<{ server: number }>("dm-requests-changed", (e) => {
         // A friend request may have arrived over ANY server (active or not) — refresh that server's.
         refreshDmRequests(e.payload.server);
+      }),
+      listen<{ server: number; from_fp: string; payload: string }>("call-signal", (e) => {
+        void handleCallSignal(e.payload.from_fp, e.payload.payload, e.payload.server);
       }),
       listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
         if (e.payload.server === activeServerId) {
@@ -2622,6 +2790,9 @@
           <h2>
             #{activeName()} <span class="muted">· {members} member(s)</span>
             <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
+            {#if !inCall}
+              <button class="ghost small call-start" title="Start a voice call (E2E)" onclick={startCall}>📞 Call</button>
+            {/if}
             {#if pinnedMsgs.length}
               <button class="ghost small pinned-toggle" class:active={showPinned} title="Pinned messages" onclick={() => (showPinned = !showPinned)}>📌 {pinnedMsgs.length}</button>
             {/if}
@@ -3120,6 +3291,27 @@
       </section>
       {/if}
     </div>
+
+    {#if inCall}
+      <div class="call-bar">
+        <span class="call-dot">🔊</span>
+        <span class="call-title">In call · {callParticipants.length + 1}</span>
+        <div class="call-avatars">
+          {@render avatarTag(myFp)}
+          {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
+        </div>
+        <button class="ghost small" class:active={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{callMuted ? "🔇 Muted" : "🎙 Mute"}</button>
+        <button class="call-hangup" title="Leave call" onclick={hangUp}>📴 Leave</button>
+      </div>
+    {/if}
+
+    {#if incomingCall}
+      <div class="call-incoming">
+        <span>📞 <strong>{nameOf(incomingCall.from)}</strong> is calling…</span>
+        <button onclick={acceptCall}>Join</button>
+        <button class="ghost" onclick={() => (incomingCall = null)}>Dismiss</button>
+      </div>
+    {/if}
 
     {#if profileCard}
       {@const fp = profileCard}
