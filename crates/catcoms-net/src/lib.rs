@@ -325,6 +325,26 @@ pub fn build_relay_swarm() -> Result<Swarm<RelayBehaviour>, NetError> {
     Ok(swarm)
 }
 
+/// Like [`build_relay_swarm`] but with a **caller-supplied identity**, so an operator can persist
+/// the relay's keypair and keep a **stable peer id across restarts**. Otherwise every restart
+/// generates a fresh id and silently invalidates every invite that embedded the relay's multiaddr.
+pub fn build_relay_swarm_with_key(
+    key: libp2p::identity::Keypair,
+) -> Result<Swarm<RelayBehaviour>, NetError> {
+    let swarm = SwarmBuilder::with_existing_identity(key)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .with_behaviour(relay_behaviour)
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .build();
+    Ok(swarm)
+}
+
 /// Build a relay-server swarm over the in-memory transport (deterministic tests).
 pub fn build_memory_relay_swarm() -> Swarm<RelayBehaviour> {
     SwarmBuilder::with_new_identity()
@@ -430,6 +450,25 @@ fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour 
 /// Build a TCP rendezvous-server swarm. Run it with [`run_rendezvous`].
 pub fn build_rendezvous_swarm() -> Result<Swarm<RendezvousBehaviour>, NetError> {
     let swarm = SwarmBuilder::with_new_identity()
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .with_behaviour(rendezvous_behaviour)
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .build();
+    Ok(swarm)
+}
+
+/// Like [`build_rendezvous_swarm`] but with a **caller-supplied identity**, for a **stable peer id
+/// across restarts** (a restart otherwise invalidates every invite carrying the rendezvous addr).
+pub fn build_rendezvous_swarm_with_key(
+    key: libp2p::identity::Keypair,
+) -> Result<Swarm<RendezvousBehaviour>, NetError> {
+    let swarm = SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),

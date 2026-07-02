@@ -17,7 +17,8 @@ use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
 use catcoms_net::{
-    build_relay_swarm, build_rendezvous_swarm, phase0_peer_id, run_relay, run_rendezvous,
+    build_relay_swarm, build_relay_swarm_with_key, build_rendezvous_swarm,
+    build_rendezvous_swarm_with_key, phase0_peer_id, run_relay, run_rendezvous,
     validate_rendezvous_addrs, MeshService,
 };
 use catcoms_rt::{
@@ -88,6 +89,10 @@ enum Command {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 4000)]
         port: u16,
+        /// Persist the relay identity to this file (created if absent), so the peer id — and
+        /// therefore every invite that embeds the relay's multiaddr — survives restarts.
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
     /// Run a zero-knowledge rendezvous server: members register their signed peer
     /// records under blinded namespaces and discover each other. Print its address.
@@ -95,6 +100,10 @@ enum Command {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 5000)]
         port: u16,
+        /// Persist the rendezvous identity to this file (created if absent), for a stable peer id
+        /// across restarts (so invites carrying the rendezvous address keep working).
+        #[arg(long)]
+        identity: Option<PathBuf>,
     },
     /// Join a server using an invite file written by `serve`, over real libp2p, then
     /// catch up the channel and print it.
@@ -124,16 +133,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
             rendezvous,
         } => run_serve(port, invite_file, host, relay, rendezvous).await?,
         Command::Join { invite_file } => run_join(invite_file).await?,
-        Command::Relay { port } => run_relay_node(port).await?,
-        Command::Rendezvous { port } => run_rendezvous_node(port).await?,
+        Command::Relay { port, identity } => run_relay_node(port, identity).await?,
+        Command::Rendezvous { port, identity } => run_rendezvous_node(port, identity).await?,
     }
     Ok(())
 }
 
+/// Load a persisted libp2p identity from `path`, or generate one and write it there (protobuf
+/// encoding). Gives an infra node a **stable peer id** across restarts; without it libp2p mints a
+/// fresh identity each run, changing the printed `/p2p/<id>` and breaking already-shared invites.
+fn load_or_create_identity(
+    path: &std::path::Path,
+) -> Result<libp2p::identity::Keypair, Box<dyn Error>> {
+    if path.exists() {
+        let bytes = std::fs::read(path)?;
+        Ok(libp2p::identity::Keypair::from_protobuf_encoding(&bytes)?)
+    } else {
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        std::fs::write(path, key.to_protobuf_encoding()?)?;
+        println!("[identity] created new keypair at {}", path.display());
+        Ok(key)
+    }
+}
+
 /// Run a circuit-relay-v2 server node.
-async fn run_relay_node(port: u16) -> Result<(), Box<dyn Error>> {
+async fn run_relay_node(port: u16, identity: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
     let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    let mut swarm = build_relay_swarm()?;
+    let mut swarm = match identity {
+        Some(path) => build_relay_swarm_with_key(load_or_create_identity(&path)?)?,
+        None => build_relay_swarm()?,
+    };
     let relay_id = *swarm.local_peer_id();
     swarm
         .listen_on(listen)
@@ -147,9 +176,12 @@ async fn run_relay_node(port: u16) -> Result<(), Box<dyn Error>> {
 }
 
 /// Run a rendezvous server node.
-async fn run_rendezvous_node(port: u16) -> Result<(), Box<dyn Error>> {
+async fn run_rendezvous_node(port: u16, identity: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
     let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    let mut swarm = build_rendezvous_swarm()?;
+    let mut swarm = match identity {
+        Some(path) => build_rendezvous_swarm_with_key(load_or_create_identity(&path)?)?,
+        None => build_rendezvous_swarm()?,
+    };
     let rz_id = *swarm.local_peer_id();
     swarm
         .listen_on(listen)
