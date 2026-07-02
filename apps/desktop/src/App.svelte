@@ -655,7 +655,9 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: joinInvite.trim(), displayName, isDm: false });
+      const { hex, turn } = unwrapInvite(joinInvite);
+      const r = await invoke<Found>("join_server", { inviteHex: hex, displayName, isDm: false });
+      if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
       addServer(r, displayName);
       joinInvite = "";
     } catch (e) {
@@ -858,6 +860,7 @@
     showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
     acceptCallsHere = loadAccept(id); // this server's call-notification preference
+    loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
@@ -1959,6 +1962,22 @@
     try { localStorage.setItem(`catcoms.call.accept.${activeServerId}`, acceptCallsHere ? "on" : "off"); } catch { /* ignore */ }
   }
 
+  // The active server's operator-set TURN (Server settings). Editable here; saved locally and folded
+  // into invites so members inherit it. Loaded on server switch.
+  let srvTurn = $state("");
+  let srvTurnUser = $state("");
+  let srvTurnCred = $state("");
+  function loadSrvTurn(id: number | null) {
+    const t = loadServerTurn(id);
+    srvTurn = t?.urls ?? "";
+    srvTurnUser = t?.username ?? "";
+    srvTurnCred = t?.credential ?? "";
+  }
+  function saveSrvTurn() {
+    if (activeServerId === null) return;
+    storeServerTurn(activeServerId, srvTurn.trim() ? { urls: srvTurn.trim(), username: srvTurnUser, credential: srvTurnCred } : null);
+  }
+
   // ICE configuration (NAT traversal), user-editable in Settings → Calls and persisted locally.
   // STUN lets peers discover their public address + hole-punch (works for most home NATs); TURN
   // relays the (still SRTP-encrypted) media when hole-punching fails (symmetric NAT / strict
@@ -1981,12 +2000,55 @@
       /* storage unavailable */
     }
   }
+  // Server-provided TURN: the operator sets one TURN endpoint (Server settings) that rides along
+  // the invite string, so members don't each have to configure a relay. It's only a hint — media is
+  // E2E (DTLS-SRTP), so a hostile/foreign TURN relays ciphertext at worst — hence no signing needed.
+  type TurnCfg = { urls: string; username: string; credential: string };
+  function serverTurnKey(id: number): string {
+    return `catcoms.server.turn.${id}`;
+  }
+  function loadServerTurn(id: number | null): TurnCfg | null {
+    if (id === null || typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(serverTurnKey(id));
+    if (!raw) return null;
+    try {
+      const t = JSON.parse(raw) as TurnCfg;
+      return t.urls?.trim() ? t : null;
+    } catch {
+      return null;
+    }
+  }
+  function storeServerTurn(id: number, t: TurnCfg | null) {
+    if (typeof localStorage === "undefined") return;
+    if (t && t.urls.trim()) localStorage.setItem(serverTurnKey(id), JSON.stringify(t));
+    else localStorage.removeItem(serverTurnKey(id));
+  }
+  // Append the server TURN (if any) to an invite so a joiner inherits it; joiners strip it back off.
+  function wrapInvite(hex: string, id: number | null): string {
+    const t = loadServerTurn(id);
+    return t ? `${hex}.turn.${b64enc(JSON.stringify(t))}` : hex;
+  }
+  function unwrapInvite(s: string): { hex: string; turn: TurnCfg | null } {
+    const i = s.indexOf(".turn.");
+    if (i < 0) return { hex: s.trim(), turn: null };
+    let turn: TurnCfg | null = null;
+    try {
+      turn = JSON.parse(b64dec(s.slice(i + 6))) as TurnCfg;
+    } catch {
+      turn = null;
+    }
+    return { hex: s.slice(0, i).trim(), turn };
+  }
+
   function iceServers(): RTCIceServer[] {
     const out: RTCIceServer[] = [];
     for (const u of callStun.split(/[\s,]+/).filter(Boolean)) out.push({ urls: u });
     if (callTurn.trim()) {
       out.push({ urls: callTurn.trim(), username: callTurnUser, credential: callTurnCred });
     }
+    // The active call's server-provided TURN (fallback for symmetric NAT), if the operator set one.
+    const st = loadServerTurn(callServer ?? activeServerId);
+    if (st) out.push({ urls: st.urls.trim(), username: st.username, credential: st.credential });
     return out;
   }
 
@@ -2317,7 +2379,7 @@
   async function copyInvite() {
     if (!cur) return;
     try {
-      await navigator.clipboard.writeText(cur.invite);
+      await navigator.clipboard.writeText(wrapInvite(cur.invite, cur.id));
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {
@@ -3602,6 +3664,17 @@
                 <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
                 <span>Notify me of voice calls on this server</span>
               </label>
+              <div class="field">
+                <span class="muted">Shared voice relay (TURN)</span>
+                <p class="muted small">Optional. A TURN server for voice calls that can't hole-punch (symmetric NAT).
+                  It's folded into invites, so people you invite inherit it — set it once for everyone.
+                  Media stays end-to-end encrypted; the relay only forwards ciphertext.</p>
+                <input bind:value={srvTurn} onchange={saveSrvTurn} placeholder="turn:your-host:3478" />
+                <div class="turn-creds">
+                  <label><span class="muted small">Username</span><input bind:value={srvTurnUser} onchange={saveSrvTurn} /></label>
+                  <label><span class="muted small">Credential</span><input type="password" bind:value={srvTurnCred} onchange={saveSrvTurn} /></label>
+                </div>
+              </div>
             </section>
 
             <section class="set-section">
@@ -3648,7 +3721,7 @@
                   <p class="muted small">As an admin, the newcomer is admitted once the owner is next online.</p>
                 {/if}
                 {#if cur?.invite}
-                  <textarea readonly rows="3" value={cur.invite}></textarea>
+                  <textarea readonly rows="3" value={wrapInvite(cur.invite, cur.id)}></textarea>
                   <div class="invite-actions">
                     <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
                     {#if canInvite}

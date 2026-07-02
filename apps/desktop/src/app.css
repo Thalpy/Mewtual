@@ -2426,3 +2426,16 @@ button.emoji-pick:hover {
 .voice-pill:hover {
   filter: brightness(1.25);
 }
+
+/* Server-settings shared-TURN credential row. */
+.turn-creds {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.turn-creds label {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
