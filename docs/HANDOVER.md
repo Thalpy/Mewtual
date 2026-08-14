@@ -6,25 +6,27 @@ Authoritative current-state document. Read this first, then
 [`THREAT-MODEL.md`](THREAT-MODEL.md) tracks what a modified ("hacked") client can/can't do —
 the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
-## Status (as of 2026-06-22)
+## Status (as of 2026-07-02)
 
-- **Phases 0 → 7 COMPLETE; Phase 8 (product model + Tauri desktop UI) in progress.**
-  6e-3d and Phase 7 (every networking + NAT-traversal path proven end-to-end over real
-  TCP — direct/discovered/relayed/DCUtR — plus the consolidated security suite) are
-  done. Phase 8 so far: the UI-facing **`catcoms-app`** product model + an async
-  **event-stream actor** (8a/8b-1, fully test-gated), and a first **Tauri 2 + Svelte
-  desktop app** (`apps/desktop`, 8b-2 … 8q) wired to the stack — found a server, mint a
-  single-use invite, a second instance joins via paste, **multiple name-addressed
-  channels** (with symmetric history catch-up + timestamps + auto-scroll), a live roster,
-  **customizable member profiles** (name/color/font/animated effect/**avatar**, shared +
-  converging), and a **fileshare browser**. Underneath, **8l** adds **content-addressed
-  blob fetch over the mesh**, and **8m/8n** build avatars + fileshare on it (binaries
-  travel by content address, fetched on demand — not inline in gossip). **8o–8q** make it a
-  real client: **cross-network** founding/joining (LAN/advertised + **relay-circuit** NAT
-  traversal, no port-forward) and **multi-server** (a Discord-style rail; several servers
-  at once). **204 tests passing** (the GUI WebView is the one manually-verified surface;
-  both halves compile). Rendezvous auto-discovery in the UI is the next
-  network slice. See Known limitations.
+- **Phases 0 → 10 COMPLETE. The live work is the desktop client's real-time layer —
+  group voice (phases 1–3 shipped; see [§ Voice](#voice-group-calls)).**
+  The protocol stack (0–7) is done, and every networking + NAT-traversal path is proven
+  end-to-end over **real TCP sockets** — direct / rendezvous-discovered / relayed /
+  DCUtR-upgraded — plus the consolidated security suite. **Phase 8** built the UI-facing
+  **`catcoms-app`** product model + async **event-stream actor** and the **Tauri 2 +
+  Svelte desktop app** (`apps/desktop`): a multi-server rail, name-addressed channels
+  with symmetric catch-up, a live roster with presence, profiles/avatars, a **fileshare
+  browser** over **content-addressed blob fetch** (chunked, resumable-by-chunk), a status
+  feed, a wiki, DMs + friends, and the whole chat product layer (search, edit/delete,
+  reactions, replies, @mentions, pins, cross-server inbox). **Phase 9** added **disk
+  persistence + encryption-at-rest** (passphrase vault → sealed per-server snapshots:
+  close the app, reopen, enter the passphrase, everything is back). **Phase 10** was the
+  UI/product overhaul + roles & permissions. Since then: **group voice**, and two
+  networking QoL slices — best-effort **UPnP** (an auto-reachable founder: no relay, no
+  port-forward, `bf28db9`) and **persistable relay/rendezvous identities** (a stable peer
+  id, so invites embedding an infra multiaddr survive a restart, `f317c5c`).
+  **221 tests passing** (the GUI WebView is the one manually-verified surface; both
+  halves compile). See Known limitations.
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
@@ -37,7 +39,8 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   discovers the inviter at a zero-knowledge rendezvous and joins with **no hard-coded
   server address**.
 - Toolchain pinned **Rust 1.89.0** (`rust-toolchain.toml`; automerge 0.10 needs it).
-- 9 library crates + 1 binary. The protocol layers are tested deterministically with
+- 11 library crates + 1 binary (+ `apps/desktop`, its own workspace). The protocol
+  layers are tested deterministically with
   N in-process nodes over an in-memory transport; the mesh is *additionally* tested
   over **real libp2p** — the memory transport (real swarms/Noise/req-resp), TCP
   loopback (real sockets, multi-process `serve`/`join`), a circuit relay, a DCUtR
@@ -63,15 +66,15 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2 — **read them; they constrai
 | `catcoms-wire` | Canonical, injective, length-prefixed codec; domain-separated key-derivation contexts (`DocType`, `exporter_context`). |
 | `catcoms-rt` | The **seams**: `Clock`, RNG (`OsCryptoRng`/`CryptoRngCore`), and `MeshTransport` (pub/sub + request/response) with an in-memory `MemNetwork`/`Hub` for tests. |
 | `catcoms-crypto` | Content-addressed `DeviceId`/`UserId`; Ed25519 device/account keys; device-cert chains + `Roster`; the unified key hierarchy (`Dek`→HKDF subkeys), XChaCha20 `seal`/`unseal`, tiered `SecureKeyStore`. |
-| `catcoms-mls` | MLS group core (openmls 0.8): `MlsDevice`, `ServerGroup` (create/add/remove/process/epoch/`channel_secret`), single-use device-bound `InviteToken` (now `INVITE_DOMAIN` **v2**, carrying a signature-bound `rendezvous: Vec<String>`; `mint_invite_with_rendezvous`) + `InviteLedger`, `AddOutcome`, `designated_committer`. |
+| `catcoms-mls` | MLS group core (openmls 0.8): `MlsDevice`, `ServerGroup` (create/add/remove/process/epoch/`channel_secret`), single-use device-bound `InviteToken` (now `INVITE_DOMAIN` **v2**, carrying a signature-bound `rendezvous: Vec<String>`; `mint_invite_with_rendezvous`) + `InviteLedger`, `AddOutcome`, `designated_committer`; **`media_secret(call_id)`** (MLS exporter under `MEDIA_EXPORTER_LABEL` → the per-call voice key). |
 | `catcoms-replication` | Encrypted CRDT docs (automerge 0.10): inner-signed `SignedOp`, `SealedOp` (per-epoch channel-key sealing), `EncryptedDoc` (edit/ingest/catch-up). |
 | `catcoms-storage` | Content-addressed `Cid` blob stores (mem + fs); per-file encryption (`FileRef`, per-file wrap nonce); `RetentionIndex` (3-scope expiry, GC with decorrelated eviction + `HolderOracle` probe). |
 | `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`), plus best-effort **UPnP/NAT-PMP** (`upnp` behaviour) that auto-opens a router port and surfaces the public address via `next_external_addr()` — folded into the invite so a peer can connect directly with no relay when the router cooperates (`None` promptly on no/CGNAT gateway). Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` (per-response capped) and are **never auto-dialed**. `add_external_address()` (register without a relay), `validate_rendezvous_addrs()` (reject circuit / require one `/p2p/` / distinct PeerIds). `connection_limits` on every swarm. Tracing-instrumented. |
 | `catcoms-discovery` | **Pure** eclipse-resistance layer (no I/O, no ambient time/RNG). `DiscoveryPolicy` ranks discovered candidates into a bounded, Clock-paced/RNG-jittered **dial plan** (the only thing that decides what to dial): member-tag-verified → multi-rendezvous-corroborated → cache → junk-last, ≤1 root/rendezvous, roster-clamped, seq-freshness. Advisory `EclipseDetector` (D/R/S + hysteresis; never gates). Cross-session `AddressCache` (proven members, RNG-jittered eviction, BLAKE3 keyed integrity tag → tamper-detected on load; SQLCipher backing deferred). |
-| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: `rendezvous_namespaces()`, the pre-dial **member tag** (`membership_tag`/`verify_membership_tag`), **member PEX** (`PeerDescriptor`, `request_pex`/`publish_self_record`/`ingest_peer_record`/`known_peer_records`), the pre-join **`join_namespace()`**, and `transport()` (so the discovery/dial layer above can drive register/discover/dial). `SyncStats`. |
-| `catcoms-app` | **Product model** — the UI-facing facade over the stack (so a GUI never touches MLS/automerge). `Server<T,R>` (found/join/open_channel/send_message/messages/members/invite), the canonical chat-message schema (`append_message`/`read_messages`), and the async **event-stream actor** (`spawn` → `ServerActor` commands + `AppEvent` stream: `ChannelUpdated`/`MembersChanged`/`Closed`). |
+| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: `rendezvous_namespaces()`, the pre-dial **member tag** (`membership_tag`/`verify_membership_tag`), **member PEX** (`PeerDescriptor`, `request_pex`/`publish_self_record`/`ingest_peer_record`/`known_peer_records`), the pre-join **`join_namespace()`**, and `transport()` (so the discovery/dial layer above can drive register/discover/dial). Voice: **`KIND_CALL_SIGNAL`** (authenticated members-only push of an *opaque* SDP/ICE payload — signed, freshness-bound, `from` = the verified signer; **not** deduped, FIFO-bounded) + `media_key`. `SyncStats`. |
+| `catcoms-app` | **Product model** — the UI-facing facade over the stack (so a GUI never touches MLS/automerge). `Server<T,R>` (found/join/open_channel/send_message/messages/members/invite), the canonical chat-message schema (`append_message`/`read_messages`), and the async **event-stream actor** (`spawn` → `ServerActor` commands + `AppEvent` stream: `ChannelUpdated`/`MembersChanged`/`Closed`; voice adds `MediaKey`/`SendCallSignal` commands + a `CallSignal` event). |
 | `catcoms-log` | `tracing` subscriber init; `init_debug(debug, dir)` writes `debug_log_<ts>.txt`. |
-| `apps/desktop` | **Tauri 2 + Svelte 5 desktop app** (its own cargo workspace, excluded from the root). A thin `#[tauri::command]` bridge (`src-tauri`) over the `catcoms-app` actor + a Svelte frontend. Found a server, #general, send/read. The WebView is the one manually-verified surface; `npm install && npm run tauri dev`. |
+| `apps/desktop` | **Tauri 2 + Svelte 5 desktop app** (its own cargo workspace, excluded from the root). A thin `#[tauri::command]` bridge (`src-tauri`) over the `catcoms-app` actor + a Svelte frontend — the whole product surface (rail/channels/files/status/wiki/DMs/profiles) plus the **WebRTC voice mesh** (all media-plane code is frontend). The WebView is the one manually-verified surface; `npm install && npm run tauri dev`. |
 | `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes (`--identity <file>` persists the keypair for a **stable peer id across restarts**, so invites embedding the address keep working); `recover` drives the 6d-1b miss-and-heal path; `--debug`/`--stats`. |
 
 ## Build / verify ritual (run before every commit)
@@ -82,6 +85,15 @@ cargo clippy --all-targets --all-features -- -D warnings   # must be clean
 cargo fmt --all -- --check                                  # must be clean
 cargo test --all                                            # all green
 bash scripts/check-no-ambient.sh                            # ambient-dependency gate
+```
+
+For a change that touches the desktop app (its own cargo workspace — the root
+`--all` does **not** cover it), also run, in `apps/desktop`:
+
+```sh
+npm run check          # svelte-check: must be 0 errors / 0 warnings
+npm run build          # vite build
+cargo check --manifest-path src-tauri/Cargo.toml   # the bridge half
 ```
 
 PowerShell helper to sum test results (Windows dev box):
@@ -104,6 +116,9 @@ cargo run -p catcomsctl -- join  --invite-file invite.txt
 # NAT traversal + discovery infra (each runs until Ctrl-C):
 cargo run -p catcomsctl -- relay --port 4000        # zero-knowledge circuit relay
 cargo run -p catcomsctl -- rendezvous --port 5000   # zero-knowledge rendezvous
+# ...for a DEPLOYED node, persist the identity so its peer id (and every invite that
+# embeds its multiaddr) survives a restart:
+cargo run -p catcomsctl -- relay --port 4000 --identity relay.key
 # Discovery: the server registers at a rendezvous under the invite's join_ns; the
 # joiner discovers it there and joins with NO hard-coded server address:
 cargo run -p catcomsctl -- serve --port 9000 --rendezvous /ip4/<rz-ip>/tcp/5000/p2p/<rz-id>
@@ -127,9 +142,10 @@ TCP** (verified, incl. through a relay).
   then run a `Workflow` of hostile reviewers (crypto / DoS / guarantee-preservation /
   distributed-systems), fold findings in, then commit. Don't skip it for membership /
   admission / key-handling changes.
-- **Commit messages** end with the `Co-Authored-By: Claude Opus 4.8 (1M context)`
-  line. Use `git commit -F <file>` for messages containing `==`/quotes (PowerShell
-  here-strings mangle them).
+- **Commit messages** end with a `Co-Authored-By: Claude <model> (1M context)` line
+  (history is `Opus 4.8`; use whichever model actually did the work). Use
+  `git commit -F <file>` for messages containing `==`/quotes (PowerShell here-strings
+  mangle them).
 - **Memory**: `~/.claude/projects/.../memory/` holds durable facts; this repo's
   `docs/` holds the detailed handover. Keep both current.
 
@@ -204,8 +220,16 @@ TCP** (verified, incl. through a relay).
 | 8… | **✅ rendezvous auto-discovery in the UI** — found registers at a zero-knowledge rendezvous; a joiner pasting that invite is discovered there and joins with **no hard-coded address** ([`design-rendezvous-ui.md`](design-rendezvous-ui.md), reviewed). **✅ chunked large-file transfer** — a file splits into chunks (each its own content-addressed blob) described by a `FileManifest`; the per-blob 16 MiB cap now bounds only a chunk (whole-file cap 256 MiB), the blob rate limit became a per-requester **bytes-budget**, and download reassembles + verifies the whole-file plaintext cid ([`design-chunked-transfer.md`](design-chunked-transfer.md), reviewed). **✅ post-join steady-state discovery** — after joining, a member periodically re-registers/discovers at the rendezvous under its rotation-aware namespaces and dials other members (re-finds the group after a restart, no fresh invite); `MeshTransport` extended (libp2p-free, default-inert verbs), a per-server bridge timer drives `AppCommand::DriveDiscovery` (real-time off the deterministic-time seam), persisted rz config ([`design-postjoin-discovery.md`](design-postjoin-discovery.md), reviewed). **✅ dedup-safe blob GC** (delete now reclaims a deleted file's orphaned chunk blobs, keeping any chunk another file references), **✅ download progress** (per-chunk `DownloadProgress` events → a UI progress bar; the whole-buffer-IPC/non-blocking-actor refactor stays deferred) **+ a Downloads tab** (per-server, newest-first list of queued/downloading/done/failed transfers + a "clear finished" action; shows the **live provider** — the signed responder that actually served each chunk, surfaced authenticated via `request_blob_best_provider` (the responder signs the request-bound, content-verified blob response, so the fingerprint is unspoofable), falling back to the uploader as the source), **+ file-browser availability** (each file is colour-coded by local availability — `●` on this device / `◐` partial _h/t_ / `○` downloadable / `○` no peers online — via a new `files_view` that counts held chunks per file + a cheap reachable-peer flag, zero network cost; refreshed on tab-open / files-updated / post-download), **+ channel viewer is now chat-only** (the channel list hides outside Chat; the roster stays), **+ live member presence** (`ChannelSync` now keeps an accurate `connected_peers` set — `PeerDisconnected` was previously dropped — surfaced as roster online dots + an "N online" count via `connected_member_fingerprints`, which matches each member by **its own** signed `peer_id` so a forged record can't steal another's presence; the availability hint's `has_peers` now uses this live set, fixing the staleness), **+ per-member presence detail** (the frontend tracks observed connect/disconnect transitions to show "Online · 5m" / "Last seen 5m ago" in the roster tooltip, member menu, and an inline last-seen — durations only for transitions actually witnessed this session, refreshed by a 60s tick), **+ DMs + friends (phase 1)** — a DM is a 2-person server flagged `is_dm` (a backward-compatible registry trailing block; the signed invite + network path are unchanged, so per-server unlinkability is preserved); a DMs circle on the rail opens a DM-home (friends/DM list + the conversation reusing the chat view), **New DM** founds a DM + surfaces its invite as a friend code, **Add friend** redeems a pasted code ([`design-dms-friends.md`](design-dms-friends.md), reviewed — no protocol/security change). **✅ phase 2: friends-list sortings** — a DMs-only `message_stats`/`dm_stats` (count + timestamps + distinct active days, no message text) drives sorting the friends list by **recent** / **most active** (msgs ÷ active days) / **reconnect** (volume × silence) / **A–Z**, with a per-DM last-message hint (reviewed). **✅ phase 3: in-band "Add friend"** — a roster action on an *online* member founds a DM and delivers its invite over the shared server via a new authenticated `KIND_DM_INVITE` request (membership+signature+freshness, like PEX; `from` = the verified signer, unforgeable; payload opaque/inert, validated only on accept; queue bounded+deduped+transient). The recipient sees a pending friend request (DMs-circle badge + a list) and accepts with one click; offline targets fall back to the friend code (reviewed: auth/no-spoof + inert-payload + DoS-bound all hold). **DMs + friends complete.** **✅ non-blocking download** — a large download no longer freezes the server actor: the bridge fetches the file **one chunk per actor command** (`file_download_plan` + `fetch_file_chunk`), so the actor returns to its loop between chunks and interleaves messages/sync; it reassembles, emits per-chunk progress, and verifies the whole-file content address bridge-side (reviewed — equivalent + integrity undiminished). **✅ eclipse `D` accuracy** — `observe_eclipse`'s reachable-devices now uses the live `connected_member_fingerprints` instead of the monotonic `member_peers`, so it stops under-warning after a node loses its peers. **✅ in-channel message search** — Ctrl+F (or the 🔍 header button) opens a search bar over the active conversation's messages; matches are highlighted, Enter/Shift+Enter (or ↑/↓) step through them scrolling each into view, with an _n / m_ counter; closes on Esc or a channel/server switch (frontend-only). **✅ edit + delete your own messages** — messages now carry a stable random `id` (list indices are unstable under CRDT merges); a member can edit (inline, with an "(edited)" tag) or delete its own messages via `Server::edit_message`/`delete_message` (a soft own-author gate — honest-client-only, the documented R6 residual since message content isn't authenticated). The change-detector switched from message-count to a content signature so an edit (count unchanged) refreshes everyone (reviewed: CRDT ops merge-safe, no empty/stale op). **✅ message moderation** — owner/admin can delete *any* member's message (not just their own; edit stays own-only), honest-client gated like file deletion (R6); offered in servers, not DMs. **✅ jump-to-unread** — a per-`server:channel` read mark (localStorage) renders a "New messages" divider + an "↑ New" jump button; the mark advances to the latest once seen. **✅ emoji reactions** — toggle a reaction on any message (quick-picker + right-click "React…"); chips show counts and highlight your own. Stored as flat scalar keys `"<emoji>\x1f<fp>"=true` written **directly on the message map** (no sub-object), so concurrent reactors write distinct keys that all survive a merge — no concurrent-create loss for *any* message, legacy included (5-lens adversarial review → this superseded an earlier pre-created-container design that still lost reactions on old-client-authored messages; a two-replica fork/merge convergence test pins the invariant; emoji validated at the trust boundary). The content signature folds reactions so a peer's reaction refreshes everyone. **✅ reply / threading** — reply to any message (right-click → "Reply" or the composer banner); messages carry an immutable `reply_to` parent-id (written only when it's a reply, so plain messages stay key-clean — no concurrency hazard, it's set once at creation), rendered as a clickable parent-quote that jumps to + flashes the original (degrades to "original message" if the parent isn't loaded). `Server::send_reply` threads it; `send_message` stays a 2-arg delegate (no test churn). Reviewed: sound, backward-compatible, all dangling/lifecycle paths degrade gracefully. **✅ @mentions + reply notifications** — type `@` for a member autocomplete that inserts an `@[Name]` marker (frontend-only — mentions ride in message text, no CRDT change), rendered as a highlighted chip via a new `marked` tokenizer (DOMPurify-sanitized) with a stronger self-highlight; a sidebar `@` badge marks any active-server channel with an unseen message that mentions you or replies to one of yours (scoped to the active server, where your per-server identity is known; cleared on read). Insertion + detection share a `mentionName` normalizer so odd names round-trip. Reviewed: no XSS, the mid-fetch server-switch race guarded, name-based matching is best-effort by design. **✅ custom-emoji reactions** — the reaction picker also offers the server's custom `:name:` emoji (the `emoji/` fileshare folder), and reaction chips render a custom emoji as its image (graceful `:name:` text fallback where the emoji file isn't held); backend unchanged (it already accepts any emoji string). **✅ cross-server inbox** — a dedicated rail icon (📥) opens its own screen listing every message that @-mentions you or replies to one of yours, across **all** servers/DMs, newest first, each showing who/where/when + a one-click jump (with unseen highlighting + a rail badge). Backend-driven: `Server::inbox` scans each server's channels in-process and resolves author names (per-server identity); the bridge `get_inbox` aggregates under a lock-free actor snapshot; a 1.5s-debounced reload keeps it live. The backend reuses the UI's exact `@[Name]` normalization (`normalize_mention_name`) so detection matches insertion. Reviewed: no blocking, the marker-normalization divergence + jump-to-unlisted-channel + timer-leak all fixed. **✅ reply-count thread affordance** (a "💬 N replies" chip under any message that has replies, jumping to the first) **+ distinct mention chime** (a brighter rising triad when a message mentions/replies to you, vs the two-note chime for ordinary messages — wired into both the open channel and the per-channel scan). **✅ message pinning** — owner/admin can pin/unpin any message (honest-client gated, R6); a 📌 marks pinned messages inline and a header "📌 N" opens a panel listing them with jump-to/unpin. Stored as a `pinned` flag **directly on the message map** (merge-safe like the reactions design — concurrent pins of different messages can't conflict, a pin/unpin race is clean LWW); the change-detector folds it so a peer's pin refreshes everyone; an idempotent guard avoids a redundant op. Reviewed: ship, no blocking. **✅ rich composer** — `||spoiler||` tags (a new `marked` tokenizer rendering a blacked-out span revealed on click, DOMPurify-allowlisted), a composer **formatting toolbar** (bold/italic/strike/code/spoiler that wrap the selection, + Ctrl+B/Ctrl+I), and **per-channel drafts** (in-memory: switching channels/servers preserves what you'd typed, cleared on send). **✅ message-action UX fix** — edit/picker were rendering on every legacy (empty-id) message because `editingId/reactionPickerFor === ""` matched `m.id === ""`; now gated on a truthy id, plus a Discord-style hover toolbar (react/reply/⋯-more) on each message. **✅ bug fixes (user-reported):** profile name/styling reverted on reload because `spawn` *unconditionally* re-seeded the profile from the founding display name — now seeds only when absent, so a restored profile survives (regression-tested); `saveProfile` also keeps the rail label in sync when it was still tracking your name. Inline media (status/chat embeds + custom emoji) vanished after a tab switch because the resolution `$effect` didn't track `view` (tab switch destroys+recreates the DOM with fresh, unresolved placeholders) — now re-resolves on `view` change (cheap; the embed cache holds the decrypted bytes). The file-info preview no longer hangs on "Loading preview…" forever — a failed fetch now surfaces "preview unavailable". Composer: emoji button moved right, the inline formatting toolbar replaced by a Settings → Message-formatting help section (Ctrl+B/I kept). **✅ emoji/sticker size** — custom emoji can be created at a chosen size (Emoji/Medium/Large/Sticker, capped 160px), encoded as a `~<px>` suffix in the emoji's filename so it's shared with everyone (no backend change); inline `:code:` renders at that size, reactions/pickers stay small. **✅ profile cards + customisation** — clicking a member's avatar/name opens a profile card (avatar, styled name, role, a self-set **description/bio**, an Add-friend button for online members); the Profile gained `description` + `bubble` fields (CRDT, additive/backward-compatible). The **message bubble** is now customisable per member (color/gradient presets), applied to that author's messages — the value is sanitized (colors/gradients only, no CSS injection) and the description renders as escaped text. **✅ discovery record-seq surfacing** (real anti-replay freshness) **+ advisory `EclipseDetector` surfacing** (isolation banner; never gates). Remaining: pre-dial membership-tag verification (deferred — invasive synthetic-address carry, marginal value) · AddressCache persistence · true streaming download · TTL-aware re-registration | rendezvous + chunking + post-join discovery + final polish **done**; rest planned |
 | 10+ | roles hardening: **owner-only member removal PROTOCOL-enforced** (`request_remove` rejects a non-owner; the committer ignores any inbound remove request not from the owner; THREAT-MODEL R1 closed) + **owner/admin file deletion** (`delete_file` role-gated; reviewed) — DONE. **✅ Functional admin invites (Option C, owner-serialized)** — an admin broadcasts a signed `CTRL_ADD_REQUEST`; the **owner alone** runs the MLS Add (single committer → no fork) + relays a re-signed Welcome (joiner verification unchanged); offline-queued until the owner is online ([`design-admin-invites.md`](design-admin-invites.md), reviewed, no blocking findings). **✅ Replay-proof grant revocation (THREAT-MODEL item 3)** — authoritative admin set is **owner-local** (`ChannelSync::admin_roster`, persisted); the admission gate reads it (a malicious member can't write it), the CRDT `roster` is owner-signed display-only ([`design-grant-revocation.md`](design-grant-revocation.md), reviewed). UI now lets **admins mint invites**. Remaining: file-delete protocol gate (low stakes) · sticky/transferable ownership · blob GC after delete. Do **not** enable `max_committer_rank ≥ 1`. See [`THREAT-MODEL.md`](THREAT-MODEL.md). | **✅ done** |
 | 10++ | **embed-persistence fix** + **file info pane** + **feedback button**: inline image/emoji embeds vanished after a restart/HMR — the resolve `$effect` ran before `{@html}` committed its placeholders and never re-ran; fixed with `tick()` (+ a dev-HMR `unlock` guard against duplicate actors). Clicking a file opens an **info pane** (preview · local-availability via `file_available`/`has_blob` · uploader/size/type/folder/cid · Download · owner/admin Delete). A 💬 rail button composes a bug/feature report to the clipboard (serverless, so copy-and-share). | ✅ `dd44446`, `8d9e371` |
-| 9 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
-| 10 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
+| 10+++ | **chat layout polish** — chat is edge-to-edge (no bordered box / distinct background, trimmed channel padding; bubbles float on the app background) and the bubble presets were re-picked dark enough for white text (+ a text-shadow on custom bubbles). Frontend-only | ✅ `43457ff` |
+| **11** | **GROUP VOICE** — E2E real-time audio, design in [`design-voice.md`](design-voice.md). See [§ Voice](#voice-group-calls) | ✅ 11a–11e (phases 1–3 of the design; phase 4 planned) |
+| 11a | **voice phase 1 — crypto + signalling core.** `MEDIA_EXPORTER_LABEL` + `ServerGroup::media_secret(call_id)` derive a 32-byte per-call key from the MLS exporter at the current epoch (every member derives it **locally**, never on the wire; distinct calls → distinct keys), surfaced `ChannelSync::media_key` → `Server::media_key` → actor `MediaKey` → bridge `call_media_key`. New authenticated push `KIND_CALL_SIGNAL` (= 8) mirroring `KIND_DM_INVITE` — members-only, Ed25519-signed, freshness-bound, `from` = the verified signer; payload **opaque** to the core, **not** deduped (every ICE candidate must arrive), FIFO-bounded (`MAX_PENDING_CALL_SIGNALS`). Actor drains per loop → `CallSignal` event → bridge `call-signal` (base64) | ✅ `bd483b5` |
+| 11b | **voice phase 2 — WebRTC mesh + call UI.** Full mesh (`RTCPeerConnection` per pair, no server in the media path → DTLS-SRTP is end-to-end); SDP/ICE ride the 11a authenticated push, so the DTLS fingerprints **can't be MITM'd**. Protocol: start → "ring" online members; accept → "hello" → existing participants "offer"; "answer"/"ice" per edge; "bye" tears one down (a newcomer auto-meshes with everyone). UI: header 📞 Call, a floating call bar (participant avatars, mute, leave) surviving channel/tab switches, an incoming prompt | ✅ `52a64e2` |
+| 11c | **voice NAT traversal** — configurable ICE servers: STUN on by default (hole-punch across most home NATs), optional TURN (relays still-SRTP-encrypted audio when no direct path exists — TURN can't decrypt). User-editable in Settings → Calls, persisted locally (blank STUN = LAN-only). Call bar shows live status ("connecting…" / "N connected" / "check NAT/TURN"). Note: **signalling still rides the mesh**, so the members must already be mesh-connected | ✅ `1e2a698` |
+| 11d | **channel-scoped voice rooms + presence + notifications** — a room is per **channel** (the channel id doubles as call id **and** media-key id); participants heartbeat ("voice-ping"), everyone tracks `{server:channel → {fp: lastSeen}}` with a staleness timeout + cleanup tick, so each channel shows a live "🔊 N in voice" pill and the header reads "Join voice (N)". A room you're *not* in going active raises a banner + chime, gated by a per-server "notify me of voice calls" toggle. Frontend-only | ✅ `b93164e` |
+| 11e | **server-provided TURN** — the operator sets one TURN endpoint (Server settings) that rides the invite as a `.turn.<b64json>` suffix, stripped by the joiner before the bare hex reaches `join_server` and stored per-server in localStorage; `iceServers()` merges it with the user's personal STUN/TURN. Frontend-only, **no protocol change**: TURN is a non-secret hint (media is E2E DTLS-SRTP, so a hostile TURN relays only ciphertext or the call falls back), so it needs no signing and doesn't touch invite crypto | ✅ `7492f92` |
+| 11n | **networking QoL** — best-effort **UPnP/NAT-PMP** (`upnp` feature + `MeshBehaviour.upnp`): the router auto-opens the listen port, we `add_external_address` (so identify + rendezvous advertise it) and surface it via `next_external_addr()`, signalling `None` promptly on `GatewayNotFound`/`NonRoutableGateway` so a waiter short-circuits. `found_server` waits ≤4s for it when the user left advertise **and** relay blank, folding `/ip4/<public>/tcp/<port>/p2p/<id>` into the invite — so the very first invite is directly dialable with **no relay and no port-forward**. Limits: founder-only, router-dependent, useless behind CGNAT (deploy a relay instead); untestable in CI (needs a live router). Plus `build_relay_swarm_with_key`/`build_rendezvous_swarm_with_key` + `catcomsctl relay/rendezvous --identity <file>` — a **stable peer id** across restarts (previously every launch minted a fresh identity, silently invalidating every already-shared invite) | ✅ `bf28db9`, `f317c5c` |
+| 12 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
+| 13 | hardening: calendar, cover traffic, supply-chain attestation, metadata-index aging, **security review** (deeper adversarial scenarios land here) | planned |
 
 ### Earlier blocks (history)
 6d-1b (missed-commit recovery + past-epoch key window) and 6d-2 (fork resolution +
@@ -231,8 +255,8 @@ suite) is **COMPLETE**. Every networking + NAT-traversal path is proven end-to-e
 The consolidated security suite (`security.rs`, 7b) maps the threat model to where each
 property is proven and adds the cross-layer scenarios (eclipse-never-gates-a-removal;
 removed-member-excluded-from-the-rotated-namespace). Deeper adversarial scenarios are
-deferred to **Phase 10** (the dedicated hardening + security-review phase). The next
-focus is **Phase 8** — the product model + Tauri desktop UI.
+deferred to the dedicated hardening + security-review phase (**13** in the table above —
+it was numbered "10" before the UI overhaul took that number).
 
 **Goal:** members find each other with no hard-coded bootstrap addresses, and an
 attacker cannot isolate (eclipse) a member. Everything is built on a per-removal
@@ -270,49 +294,85 @@ routing secret `ns_secret_L`:
   **discover→dial→join** (DiscoveryPolicy-mediated) — verified by a memory end-to-end
   test (no hard-coded server address).
 
+## Voice (group calls)
+
+Shipped `bd483b5` → `7492f92`; contract in [`design-voice.md`](design-voice.md)
+(design phases 1–3 are in, phase 4 is not). **All media-plane code is frontend**
+(`apps/desktop/src/App.svelte`); the Rust core only derives a key and relays opaque,
+authenticated signalling.
+
+**How it works today**
+- **Rooms are per channel.** The channel id doubles as the call id *and* the media-key
+  id, so "join #general's voice" is unambiguous. Presence heartbeats give each channel a
+  live "🔊 N in voice" pill; a room going active raises a per-server-gated banner + chime.
+- **Media plane:** a full **WebRTC mesh** in the webview — one `RTCPeerConnection` per
+  other participant, no server in the path, so DTLS-SRTP is genuinely end-to-end. Mesh
+  economics cap the useful size at **~8** (uplink = (n−1) × ~32 kbit/s Opus).
+- **Signalling:** SDP/ICE over `KIND_CALL_SIGNAL` — members-only, signed,
+  freshness-bound, `from` = the verified signer. Because signalling is authenticated,
+  the **DTLS fingerprints can't be MITM'd**. Payload is opaque to the core; not deduped
+  (every candidate must land); FIFO-bounded. **Signalling rides the existing mesh**, so
+  two members must already be mesh-connected (i.e. chat works between them) before a
+  call can be set up — STUN/TURN only fixes the *media* path.
+- **Media key:** `media_secret(call_id)` off the MLS exporter at the current epoch —
+  every member derives the identical key locally, it is **never sent on the wire**, and
+  distinct calls are domain-separated. Test-pinned (`members_derive_the_same_e2e_media_key`).
+- **NAT:** STUN by default, optional personal TURN (Settings → Calls), plus a
+  **server-provided TURN** the operator sets once and every invitee inherits.
+
+**Pending / honest gaps**
+1. **The MLS-keyed frame layer (SFrame / Encoded Transform) is NOT implemented.** The key
+   is derived and exposed to the webview (`call_media_key`), and the frontend does not yet
+   call it — today's E2E property comes from mesh DTLS-SRTP + un-MITM-able signalling.
+   That holds while media is peer-to-peer or TURN-relayed (a TURN sees only SRTP
+   ciphertext); it would **not** hold behind an SFU, which is exactly what the frame layer
+   is for. Don't describe voice as "MLS-encrypted media" until this lands.
+2. **Design phase 3 remainder:** re-derive the media key on an **MLS epoch change**
+   (using the bounded past-epoch window for in-flight frames) and VAD/DTX. A long call
+   spanning a membership change currently keeps its original epoch's key.
+3. **Design phase 4:** move media onto the libp2p relay/DCUtR fabric so calls need no
+   third-party STUN/TURN (the ethos-consistent transport).
+4. **Ring-at-start only** — a member who comes online mid-call isn't rung (the channel
+   presence pill covers most of this in practice).
+5. **No adversarial-review workflow is recorded for the voice slices.** 11a added
+   protocol surface (a new `KIND` + an MLS exporter label); the working conventions call
+   for a hostile review on that class of change. Worth running before voice is "done".
+
 ## Known limitations / deferred (the security-relevant ones)
 
-- **Desktop networking: LAN/advertised works (8o); zero-config NAT traversal + dev/release
-  build distinction.** The `apps/desktop` bridge binds all interfaces and the founder
-  advertises a reachable address (LAN/public IP, `host:port`, or a relay-circuit multiaddr);
-  joining dials every bootstrap address. So **same-machine** (blank), **LAN** (founder's
-  LAN IP), and **internet via a port-forwarded public IP** all work.
-  **Relay-circuit NAT traversal works (8q)** — paste a relay node's multiaddr when founding
-  and the invite carries the relayed address (no port-forward for either peer). Still
-  deferred: **rendezvous auto-discovery in the UI** — joining with *no* address in the
-  invite, discovering the inviter at a zero-knowledge rendezvous (the CLI's `serve
-  --rendezvous`/`join` already do this over real TCP; it is just not wired into the desktop
-  `found`/`join` yet). Also: a
-  **`cargo build` (debug) exe is a dev build** that loads the UI from the Vite dev server
-  (`localhost:1420`) and shows "can't reach the page" on any machine without it — to
-  distribute, build a release exe with the frontend embedded
+- **Desktop networking: every path is wired; what's left is router luck + the
+  dev/release build distinction.** The `apps/desktop` bridge binds all interfaces and the
+  founder advertises a reachable address (LAN/public IP, `host:port`, or a relay-circuit
+  multiaddr); joining dials every bootstrap address. So **same-machine** (blank), **LAN**
+  (founder's LAN IP), and **internet via a port-forwarded public IP** all work;
+  **relay-circuit NAT traversal** (8q) needs no port-forward on either side;
+  **rendezvous auto-discovery** works in the UI (join with *no* address in the invite) and
+  **post-join steady-state discovery** re-finds the group after a restart with no fresh
+  invite; **UPnP** (11n) can make the founder directly reachable with no relay at all.
+  Residual: UPnP is **founder-only and router-dependent** (CGNAT or a UPnP-disabled
+  gateway still needs a deployed relay), DCUtR hole-punching still needs a relay to
+  coordinate, and a **`cargo build` (debug) exe is a dev build** that loads the UI from the
+  Vite dev server (`localhost:1420`) and shows "can't reach the page" on any machine
+  without it — to distribute, build a release exe with the frontend embedded
   (`npm run build && npm run tauri build -- --no-bundle`; needs WebView2 on the target).
-- **Blob store: size-bounded interim, not yet last-copy-safe (8l/8m/8n/8s).** From the
-  8m–8q security review (no blocking findings; the slices reuse the reviewed-secure
-  blob/MLS/Noise layers — `fetch_missing_avatars` is per-pass bounded, 8r). `MemoryBlobStore`
-  is now **size-bounded** (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO** eviction, 8s) so fetched
-  avatars/files no longer grow without bound — but it is still **in-memory** (no
-  persistence) and the FIFO eviction is **not holder-probe-aware** (it can drop the last
-  copy of a blob; evicted blobs are re-fetchable only while a holder is online). Wiring the
-  `catcoms-storage` retention engine (never-evict-last-copy + on-disk store) is the follow-up.
-- **No disk persistence yet → per-file encryption-at-rest is premature (analysis, not
-  implemented).** Full design + slice plan: [`design-persistence.md`](design-persistence.md)
-  (pivotal constraint: openmls 0.8 has no group snapshot, so persistence needs a sealed
-  on-disk `StorageProvider`; the keystore already has the at-rest primitives). The desktop
-  app keeps everything **in RAM** (`MemoryBlobStore`, in-memory
-  MLS/group state) — restart loses all servers. So there is currently **no disk "at rest"**
-  to protect; the earlier "files plaintext at rest" note was about the in-memory cache, not
-  disk. Per-file encryption-at-rest was investigated and **deliberately deferred**: with
-  blobs in RAM, sealing them would put ciphertext next to the wrap-key in the same process
-  memory (zero benefit) while requiring the riskiest change in the system — transferring a
-  new stable key through the **join handshake**. The mechanics rule out shortcuts (ops are
-  sealed **per-epoch**, catch-up **re-seals under the current epoch**, and there is **no
-  stable group secret**), so the correct design is a **stable per-group file-wrap-key minted
-  at founding and transferred at join like `RoutingState`**, used with
-  `catcoms-storage::seal_file`/`open_file`. **Sequencing: disk persistence first** (blobs +
-  group state to disk, the state sealed under the device keystore `catcoms-crypto::Dek`/
-  `KeyHierarchy`), **then** per-file encryption as a paired, reviewed slice. Doing the
-  encryption before persistence is security theater.
+- **Blob store: persistent + sealed, but not yet last-copy-safe (8l–8s, 9h).** The
+  desktop attaches a per-server on-disk **`SealingBlobStore`** once the vault is unlocked
+  (9h-a), so files/avatars survive a restart and are encrypted at rest under `blob_key`;
+  deleting a file reclaims its orphaned chunk blobs while keeping any chunk another file
+  references (dedup-safe GC). `MemoryBlobStore` remains the pre-unlock/test path and is
+  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). What's still missing is the
+  `catcoms-storage` **retention engine**: eviction is not holder-probe-aware, so it can
+  drop the **last copy** of a blob (re-fetchable only while some holder is online), and
+  there is no disk quota/expiry enforcement on the sealing store.
+- **Persistence + encryption-at-rest are DONE (Phase 9) — the residuals are recovery
+  ergonomics.** [`design-persistence.md`](design-persistence.md) is the design; it shipped
+  as 9a–9h: a passphrase-sealed key vault, per-server snapshots (MLS + docs + routing +
+  ledger + commit log + peer records) written atomically under the vault, an on-disk
+  sealing blob store, and a stable per-group **file-wrap key** minted at founding +
+  transferred in the join handshake (so files are e2e ciphertext keyed by ciphertext CID).
+  Residual: **no passphrase change/recovery path** (lose it and the servers are
+  unreadable — there is no escrow by design, but there is also no re-key flow), and a
+  corrupted/partial snapshot surfaces as a load failure rather than a repair.
 - **Network admission is single-committer-only** (only the lowest-leaf-index member
   admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
 - **Commit catch-up needs a peer that still holds the commit.** A member behind by
@@ -342,17 +402,24 @@ routing secret `ns_secret_L`:
 - **A forged future `CommitRecord`** on the control topic is bounded (gap +
   buffer caps, deduped catch-up) and fails MLS verification at apply time. Per-peer
   rate limiting + exponential catch-up backoff are a hardening follow-up.
-- **Persistent sealed MLS storage** is deferred: each device uses openmls's
-  in-memory provider; tying group state to the Phase-1 `mls_seal_key` + SQLCipher
-  (and the local metadata index) is platform/storage-phase work.
+- **Persistent sealed MLS storage** landed in 9c (`snapshot_server`/`restore_server`
+  over openmls's in-memory provider, the whole sync state sealed under the vault). What
+  remains from the original note: **SQLCipher** backing (for the address cache + a local
+  metadata index) rather than sealed flat files.
 - **Metadata** is the dominant residual: who-talks-to-whom, timing, group sizes, the
   member IPs a DCUtR upgrade reveals to the peer, and — now — a **rendezvous** node
   learning `namespace ↔ IP ↔ timing` for the registration TTL (a higher-value target
   than a relay; querying ≥2 rendezvous doubles the operators who see it). Per-rendezvous
   namespace diversification removes the cross-operator join key; rotation-on-removal
-  limits long-term linkage but leaks a removal-cadence signal. Mitigated, not eliminated
-  (≥2 relays/rendezvous, cover traffic, staying relayed). Relays/rendezvous only ever
-  see Noise+MLS ciphertext / opaque namespaces. See ARCHITECTURE §3.
+  limits long-term linkage but leaks a removal-cadence signal. **Voice widens this**: ICE
+  reveals each participant's IP to every other participant (inherent to a P2P mesh), and
+  a **STUN/TURN operator** learns `IP ↔ call timing ↔ duration` (a TURN sees only SRTP
+  ciphertext, but it sees *that* you called and for how long) — the default public STUN
+  is a third party the rest of the system deliberately avoids, so privacy-sensitive
+  deployments should point Settings → Calls at their own (or blank it for LAN-only).
+  Mitigated, not eliminated (≥2 relays/rendezvous, cover traffic, staying relayed).
+  Relays/rendezvous only ever see Noise+MLS ciphertext / opaque namespaces.
+  See ARCHITECTURE §3.
 - **Per-peer rate limiting / off-actor offload** of join work: a hardening follow-up.
 - **`tracing` retrofit** for the earlier crypto/storage crates: deferred (user OK'd).
 
@@ -367,7 +434,23 @@ block you're touching**:
 - [`design-6d2.md`](design-6d2.md) — fork resolution / single-serializer membership
   (committer = lowest **leaf index**; the **I1** gate keeping concurrent committers off).
 - [`design-6e-relay.md`](design-6e-relay.md) — relay-v2 + DCUtR.
-- [`design-6e-rendezvous.md`](design-6e-rendezvous.md) — **the active block**:
-  rendezvous discovery + eclipse-resistance, the 9-slice contract, and the recorded
-  per-slice adversarial-review outcomes (A1/2b and Sybil-C1/3d-5) with their deferred
-  follow-ups.
+- [`design-6e-rendezvous.md`](design-6e-rendezvous.md) — rendezvous discovery +
+  eclipse-resistance: the 9-slice contract and the recorded per-slice adversarial-review
+  outcomes (A1/2b and Sybil-C1/3d-5) with their deferred follow-ups.
+- [`design-rendezvous-ui.md`](design-rendezvous-ui.md) ·
+  [`design-postjoin-discovery.md`](design-postjoin-discovery.md) — the same discovery
+  machinery wired into the desktop client (found/join with no address; steady-state
+  re-registration after a restart).
+- [`design-persistence.md`](design-persistence.md) — the Phase 9 vault/snapshot/at-rest
+  slice plan (9a–9h).
+- [`design-chunked-transfer.md`](design-chunked-transfer.md) — chunked large-file
+  transfer (`FileManifest`, per-requester bytes budget, whole-file CID verification).
+- [`design-dms-friends.md`](design-dms-friends.md) — DMs as 2-person servers + the
+  in-band friend-request path (`KIND_DM_INVITE`).
+- [`design-admin-invites.md`](design-admin-invites.md) ·
+  [`design-grant-revocation.md`](design-grant-revocation.md) — owner-serialized admin
+  invites and the owner-local authoritative admin set.
+- [`design-voice.md`](design-voice.md) — **the active block**: E2E group voice
+  (media key, `KIND_CALL_SIGNAL`, the WebRTC mesh, and the phase-4 transport plan).
+  Cross-check it against [§ Voice](#voice-group-calls) — the doc describes the frame
+  layer that is **not** built yet.
