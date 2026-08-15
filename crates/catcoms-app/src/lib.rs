@@ -1468,12 +1468,19 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
     out
 }
 
-/// Remove *every* index entry whose ciphertext CID matches `cid` (a no-op if none do). The
-/// index is an append-only list with no dedup, so a concurrent double-add can leave more than
-/// one entry for the same content; unlisting must remove them all. Iterating top-down keeps the
-/// indices we have yet to visit stable as we delete. The content-addressed blob is left in
-/// place; this only unlists the file.
-fn delete_file_entry(doc: &mut AutoCommit, cid: &[u8]) -> Result<(), AutomergeError> {
+/// Remove the index entries whose whole-file plaintext CID matches `cid` (a no-op if none do),
+/// restricted to folder `folder` when given. With `folder = None` *every* entry for that content
+/// goes: the index is an append-only list, so a concurrent double-add can leave more than one
+/// entry for the same content, and unlisting must remove them all. With `folder = Some(..)` only
+/// that folder's listing goes — content dedup makes several listings of one file deliberate
+/// (`add_file` re-lists shared content instead of re-storing it), so unlisting one of them must
+/// leave the others alone. Iterating top-down keeps the indices we have yet to visit stable as
+/// we delete. The content-addressed blobs are left in place; this only unlists.
+fn delete_file_entry(
+    doc: &mut AutoCommit,
+    cid: &[u8],
+    folder: Option<&str>,
+) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, FILES)? {
         Some((Value::Object(ObjType::List), id)) => id,
         _ => return Ok(()),
@@ -1482,7 +1489,9 @@ fn delete_file_entry(doc: &mut AutoCommit, cid: &[u8]) -> Result<(), AutomergeEr
         if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
             let ref_bytes = bytes_field(doc, &entry, F_REF);
             if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
-                if manifest.plaintext_cid.as_bytes() == cid {
+                let folder_matches =
+                    folder.is_none_or(|f| str_field(doc, &entry, F_PATH).as_str() == f);
+                if manifest.plaintext_cid.as_bytes() == cid && folder_matches {
                     doc.delete(&list, i)?;
                 }
             }
@@ -1998,6 +2007,23 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Share a file under folder `path` (`""` = root): store its bytes in the blob store and
     /// add an index entry (gossiped to the group). Returns the file's content address. Rejects
     /// files over [`MAX_FILE_BYTES`].
+    ///
+    /// **Content dedup**: a file's identity is its whole-file *plaintext* cid, and sealing is
+    /// randomized (a fresh content key + nonce per chunk), so re-sharing identical bytes would
+    /// otherwise store a second, byte-different set of ciphertext blobs for the same logical
+    /// file. Instead, if that content is already listed:
+    /// * same name **and** folder → nothing is added; the existing address comes back (an
+    ///   idempotent re-share, e.g. a double-submit);
+    /// * otherwise (the same image attached to a second wiki page, say) → a new index entry is
+    ///   appended that **reuses the existing entry's ref verbatim**, so it names exactly the
+    ///   already-stored chunk blobs. Nothing is sealed and no blob is written.
+    ///
+    /// The check is against this device's view of the index, so two devices adding the same
+    /// bytes concurrently can still produce two entries — the same pre-existing situation
+    /// [`delete_file`](Self::delete_file) already handles by unlisting every entry for a cid.
+    /// Reuse also means the listing inherits the *first* upload's declared mime, and that a
+    /// dedup against content this device has never downloaded adds a listing whose chunks are
+    /// held elsewhere (re-fetchable, like any other file this device does not hold locally).
     pub async fn add_file(
         &mut self,
         name: &str,
@@ -2024,6 +2050,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
         let plaintext_cid = Cid::of(bytes);
+        // Dedup on the plaintext cid against the live index (a deleted entry is removed from the
+        // list, so only still-shared files match; re-storing after a delete is harmless anyway).
+        let listed = self.files();
+        let twins: Vec<&FileEntry> = listed
+            .iter()
+            .filter(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
+            .collect();
+        if let Some(twin) = twins.first() {
+            if twins.iter().any(|e| e.name == name && e.path == folder) {
+                return Ok(plaintext_cid); // already shared under this exact name + folder
+            }
+            // Same content, new name/folder: list it again against the SAME sealed blobs.
+            let ref_bytes = twin.file_ref.clone();
+            self.sync
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                    write_file_entry(d, name, &author, &folder, &ref_bytes)
+                })
+                .await?;
+            return Ok(plaintext_cid);
+        }
         let mut chunks = Vec::new();
         for chunk in bytes.chunks(CHUNK_BYTES) {
             let (file_ref, ciphertext) = self.sync.seal_file(chunk, mime)?;
@@ -2353,33 +2399,59 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.media_key(call_id)?)
     }
 
-    /// Remove a file from the shared index, and **garbage-collect its now-orphaned chunk blobs**
-    /// from local storage. **Owner or admin only** — errors otherwise. The GC is **dedup-safe**:
-    /// a chunk still referenced by another listed file (chunks are content-addressed, so two files
-    /// can share one) is kept; only chunks no remaining manifest references are deleted (they're
-    /// re-fetchable from any peer that still holds them). Like invites and member removal, the role
-    /// gate is honest-client-enforced (the protocol residual is the same as those).
+    /// Remove a file from the shared index — **every** listing of that content — and
+    /// **garbage-collect its now-orphaned chunk blobs** from local storage. **Owner or admin
+    /// only** — errors otherwise. The GC is **dedup-safe**: a chunk still referenced by another
+    /// listed file (chunks are content-addressed, so two files can share one — and content dedup
+    /// in [`add_file`](Self::add_file) makes several listings share *all* of them) is kept; only
+    /// chunks no remaining manifest references are deleted (they're re-fetchable from any peer
+    /// that still holds them). Like invites and member removal, the role gate is
+    /// honest-client-enforced (the protocol residual is the same as those).
     pub async fn delete_file(&mut self, cid: &Cid) -> Result<(), AppError> {
+        self.delete_file_listing(cid, None).await
+    }
+
+    /// Unlist ONE folder's listing of a file, leaving any other listing of the same content
+    /// intact and downloadable. Content dedup means the same bytes can be listed under several
+    /// names/folders against one set of sealed blobs (e.g. an image attached to two wiki pages);
+    /// this removes just the listing in `path`, and the dedup-safe GC keeps the shared chunk
+    /// blobs alive for the survivors. Same owner/admin gate as [`delete_file`](Self::delete_file),
+    /// which is the "remove it everywhere" verb.
+    pub async fn delete_file_at(&mut self, cid: &Cid, path: &str) -> Result<(), AppError> {
+        let folder = normalize_path(path);
+        self.delete_file_listing(cid, Some(&folder)).await
+    }
+
+    /// Shared body of [`delete_file`] (`folder = None`, every listing) and [`delete_file_at`]
+    /// (one folder's listing): unlist, then GC the chunk blobs no *remaining* listing references.
+    async fn delete_file_listing(
+        &mut self,
+        cid: &Cid,
+        folder: Option<&str>,
+    ) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
                 "only an owner or admin can delete files".into(),
             ));
         }
         let raw = cid.as_bytes().to_vec();
-        if !self.files().iter().any(|e| e.cid == raw) {
+        let doomed = |e: &&FileEntry| {
+            e.cid == raw && folder.is_none_or(|f| e.path == f) // `None` = every listing
+        };
+        if !self.files().iter().any(|e| doomed(&e)) {
             return Err(AppError::Invalid("no such file".into()));
         }
-        // Capture the chunk blobs of the file(s) being removed, BEFORE unlisting them.
+        // Capture the chunk blobs of the listing(s) being removed, BEFORE unlisting them.
         let removed_chunks: Vec<Cid> = self
             .files()
             .iter()
-            .filter(|e| e.cid == raw)
+            .filter(doomed)
             .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
             .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
             .collect();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                delete_file_entry(d, &raw)
+                delete_file_entry(d, &raw, folder)
             })
             .await?;
         // Dedup-safe GC: delete each removed chunk that NO still-listed file references.
@@ -5885,6 +5957,214 @@ mod tests {
         assert_eq!(
             alice.download_file(&cid_b).await.unwrap(),
             b"the bytes of file B".to_vec()
+        );
+    }
+
+    // ---------- content-hash dedup on upload ----------
+
+    /// The chunk ciphertext addresses a listed file's manifest names (empty if unlisted).
+    fn chunk_cids(server: &Server<MemNetwork, ChaCha20Rng>, cid: &Cid, path: &str) -> Vec<Cid> {
+        server
+            .files()
+            .iter()
+            .filter(|e| e.cid.as_slice() == cid.as_bytes() && e.path == path)
+            .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
+            .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn re_sharing_the_same_bytes_under_the_same_name_and_folder_adds_nothing() {
+        // The idempotent re-share (a double-submit, or the same asset re-attached to the page it
+        // is already on): one entry, the same address back, and not a byte more stored.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"the bytes of a cat picture";
+        let cid = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", data)
+            .await
+            .unwrap();
+        let blobs = alice.sync().blob_cids().len();
+
+        let again = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", data)
+            .await
+            .unwrap();
+        assert_eq!(again, cid, "the second add returns the same address");
+        assert_eq!(alice.files().len(), 1, "no second index entry");
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            blobs,
+            "nothing new was stored"
+        );
+
+        // The folder is compared *normalized*, so the same folder spelled differently still dedups.
+        let third = alice
+            .add_file("cat.png", "image/png", "/wiki/Cats/", data)
+            .await
+            .unwrap();
+        assert_eq!(third, cid);
+        assert_eq!(alice.files().len(), 1, "'/wiki/Cats/' is 'wiki/Cats'");
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data.to_vec());
+    }
+
+    #[tokio::test]
+    async fn the_same_bytes_in_a_second_folder_are_relisted_not_restored() {
+        // The same image attached to a second wiki page: a new listing, but it points at the
+        // already-sealed blobs — no re-seal (which, being randomized, would store a second,
+        // byte-different copy of the same content).
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"the bytes of a cat picture";
+        let cid = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", data)
+            .await
+            .unwrap();
+        let blobs = alice.sync().blob_cids();
+
+        let same = alice
+            .add_file("kitten.png", "image/png", "emoji", data)
+            .await
+            .unwrap();
+        assert_eq!(same, cid, "same content, same address");
+
+        let mut listed: Vec<(String, String)> = alice
+            .files()
+            .into_iter()
+            .map(|e| (e.name, e.path))
+            .collect();
+        listed.sort();
+        assert_eq!(
+            listed,
+            vec![
+                ("cat.png".to_string(), "wiki/Cats".to_string()),
+                ("kitten.png".to_string(), "emoji".to_string()),
+            ],
+            "two listings of one file"
+        );
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            blobs.len(),
+            "the blob store did not grow"
+        );
+        assert_eq!(
+            chunk_cids(&alice, &cid, "emoji"),
+            chunk_cids(&alice, &cid, "wiki/Cats"),
+            "the new listing names the SAME sealed chunk blobs"
+        );
+        assert!(alice.file_available(&cid), "and is available locally");
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data.to_vec());
+    }
+
+    #[tokio::test]
+    async fn a_re_shared_chunked_file_stores_no_new_chunk_blobs() {
+        // Dedup covers the multi-chunk path too: the manifest (and so every chunk blob) is reused
+        // wholesale, which is what keeps a big re-shared file from doubling local storage.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let n = CHUNK_BYTES + 4242;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        let cid = alice
+            .add_file("big.bin", "application/octet-stream", "", &data)
+            .await
+            .unwrap();
+        let blobs = alice.sync().blob_cids().len();
+        let chunks = chunk_cids(&alice, &cid, "");
+        assert!(chunks.len() >= 2, "the file really is chunked");
+
+        let same = alice
+            .add_file("big-copy.bin", "application/octet-stream", "docs", &data)
+            .await
+            .unwrap();
+        assert_eq!(same, cid);
+        assert_eq!(alice.files().len(), 2, "listed twice");
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            blobs,
+            "no new chunk blob was stored"
+        );
+        assert_eq!(chunk_cids(&alice, &cid, "docs"), chunks);
+        assert_eq!(
+            alice.download_file(&cid).await.unwrap(),
+            data,
+            "and it still reassembles byte-for-byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn unlisting_one_dedup_listing_leaves_the_other_downloadable() {
+        // Two listings share one set of chunk blobs, so the delete-time GC must NOT reclaim them
+        // while a sibling listing still references them.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = b"the bytes shared by two listings";
+        let cid = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", data)
+            .await
+            .unwrap();
+        alice
+            .add_file("cat.png", "image/png", "emoji", data)
+            .await
+            .unwrap();
+        let chunks = chunk_cids(&alice, &cid, "emoji");
+
+        alice.delete_file_at(&cid, "emoji").await.unwrap();
+
+        let files = alice.files();
+        assert_eq!(files.len(), 1, "only the emoji listing went");
+        assert_eq!(files[0].path, "wiki/Cats");
+        assert!(
+            chunks.iter().all(|c| alice.sync().has_blob(c)),
+            "the shared chunk blobs survive the GC"
+        );
+        assert!(alice.file_available(&cid));
+        assert_eq!(
+            alice.download_file(&cid).await.unwrap(),
+            data.to_vec(),
+            "the surviving listing still downloads and verifies"
+        );
+
+        // Unlisting the last listing does reclaim them (nothing references them any more).
+        alice.delete_file(&cid).await.unwrap();
+        assert!(alice.files().is_empty());
+        for c in &chunks {
+            assert!(!alice.sync().has_blob(c), "now orphaned, so GC'd");
+        }
+        assert!(
+            alice.delete_file_at(&cid, "wiki/Cats").await.is_err(),
+            "unlisting what is not listed errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn different_bytes_under_the_same_name_are_two_distinct_files() {
+        // Dedup keys on content, never on the name: same name + folder, different bytes ⇒ two
+        // entries with two addresses, each independently downloadable.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let one = alice
+            .add_file("note.txt", "text/plain", "docs", b"version one")
+            .await
+            .unwrap();
+        let blobs = alice.sync().blob_cids().len();
+        let two = alice
+            .add_file("note.txt", "text/plain", "docs", b"version two")
+            .await
+            .unwrap();
+
+        assert_ne!(one, two, "different content, different address");
+        assert_eq!(alice.files().len(), 2, "no false dedup on the name");
+        assert!(
+            alice.sync().blob_cids().len() > blobs,
+            "the second file really was stored"
+        );
+        assert_eq!(
+            alice.download_file(&one).await.unwrap(),
+            b"version one".to_vec()
+        );
+        assert_eq!(
+            alice.download_file(&two).await.unwrap(),
+            b"version two".to_vec()
         );
     }
 }

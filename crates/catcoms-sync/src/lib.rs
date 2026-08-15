@@ -4258,6 +4258,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs.has(cid)
     }
 
+    /// Every content address held in the local blob store — the store's whole inventory, for
+    /// storage accounting (e.g. checking that a dedup'd re-share wrote nothing new).
+    pub fn blob_cids(&self) -> Vec<Cid> {
+        self.blobs.cids()
+    }
+
     /// Delete a locally-held blob by content address (`Ok(true)` if it was held). Used by the
     /// product layer's dedup-safe delete-time garbage collection; deletion is harmless if a peer
     /// still holds it (the content-addressed blob can be re-fetched).
