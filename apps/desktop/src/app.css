@@ -3866,3 +3866,49 @@ button.you-panel:hover {
   font-size: 0.8rem;
   padding: 4px 8px;
 }
+
+/* --- Widened livery: catalog tiles, background patterns, custom cursor --- */
+.cat-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.preset-btn.cat-tile {
+  flex: none;
+  text-transform: capitalize;
+  font-size: 0.75rem;
+  padding: 5px 10px;
+}
+.cursor-preview {
+  width: 32px;
+  height: 32px;
+  image-rendering: pixelated;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  padding: 2px;
+}
+
+/* Authored background patterns (livery "pattern" catalog — values are ids, never CSS). */
+:root[data-livery-pattern="grid"] .channel {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 24px),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 24px);
+}
+:root[data-livery-pattern="diag"] .channel {
+  background-image: repeating-linear-gradient(45deg, color-mix(in oklab, var(--accent) 3%, transparent) 0 1px, transparent 1px 18px);
+}
+:root[data-livery-pattern="dots"] .channel {
+  background-image: radial-gradient(color-mix(in oklab, var(--accent) 7%, transparent) 1px, transparent 1.5px);
+  background-size: 22px 22px;
+}
+/* Pattern preview on the publisher tiles. */
+.preset-btn.pat-grid { background-image: repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 10%, transparent) 0 1px, transparent 1px 8px), repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 10%, transparent) 0 1px, transparent 1px 8px); }
+.preset-btn.pat-diag { background-image: repeating-linear-gradient(45deg, color-mix(in oklab, var(--accent) 10%, transparent) 0 1px, transparent 1px 7px); }
+.preset-btn.pat-dots { background-image: radial-gradient(color-mix(in oklab, var(--accent) 18%, transparent) 1px, transparent 1.5px); background-size: 8px 8px; }
+
+/* The livery cursor applies to the general surface; interactive elements keep their own
+   cursors (pointer/text), and `, auto` inside the var is the always-on fallback. */
+:root[data-livery-cursor] main {
+  cursor: var(--livery-cursor);
+}

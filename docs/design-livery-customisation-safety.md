@@ -44,8 +44,9 @@ becomes markup or a network fetch. This is the same shape as the existing livery
    (an id → one of N faces we ship; never a family string, never a URL), a **background
    pattern** id from a fixed catalog (CSS gradients/SVG patterns we author). Each value is
    allow-listed; anything unknown is dropped. Contrast floor optional (design-livery.md).
-2. **Custom cursor (livery + profile) — the fun one, done safely.** A cursor is an *image
-   from the encrypted fileshare* (a CID), never a URL:
+2. **Custom cursor (livery + profile) — the fun one, done safely.** A cursor is *image
+   bytes carried inline in the livery doc* (like the server icon; a fileshare CID would be
+   equivalent), never a URL:
    - decoded client-side, **re-encoded** (strip metadata), dimension-capped (≤ 64×64) and
      byte-capped, applied as `cursor: url(data:image/png;base64,…) x y, auto`.
    - **always keep a real fallback** (`, auto`) and enforce a **minimum opaque area** so a

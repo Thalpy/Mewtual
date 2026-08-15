@@ -83,8 +83,9 @@
   function openServerSettings(id: number | null = null) {
     if (id !== null && id !== activeServerId) switchServer(id);
     serverNameDraft = cur?.name ?? "";
-    // The draft never carries the icon — set_livery ignores it (set_server_icon owns it).
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "" };
+    // The draft never carries the images — set_livery ignores them (set_server_icon /
+    // set_server_cursor own those fields).
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
     showServerSettings = true;
   }
   async function renameServer() {
@@ -134,8 +135,8 @@
   // UNTRUSTED (any member's client may have written the doc) — sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
-  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string };
-  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "" });
+  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "", cursor: "" });
   let livery = $state<Livery>(emptyLivery());
   // Rail icons for every (non-DM) server, fetched from each server's livery doc and kept
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
@@ -148,15 +149,60 @@
   const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
   // 64 KiB decoded ≈ 87.4k base64 chars; anything longer or non-base64 is dropped.
   const ICON_B64 = /^[A-Za-z0-9+/=]{0,90000}$/;
+  // Typed non-colour livery vocabulary (design-livery-customisation-safety.md): every value
+  // is an enum/catalog ID validated here — never a family string, never a URL, never CSS.
+  const LIVERY_RADIUS: Record<string, { r: string; rlg: string }> = {
+    sharp: { r: "0px", rlg: "2px" },
+    soft: { r: "", rlg: "" }, // the default scale — clears the override
+    round: { r: "8px", rlg: "14px" },
+  };
+  const LIVERY_FONTS: Record<string, string> = {
+    system: `"Segoe UI", system-ui, -apple-system, sans-serif`,
+    serif: `Georgia, "Times New Roman", serif`,
+    mono: `"Cascadia Code", ui-monospace, Consolas, monospace`,
+    rounded: `"Comic Sans MS", "Segoe UI", system-ui, sans-serif`,
+  };
+  const LIVERY_PATTERNS = ["none", "grid", "diag", "dots"];
   function sanitizeLivery(l: Livery): Livery {
     const out = emptyLivery();
     if (PRESETS.some((p) => p.id === l.preset)) out.preset = l.preset;
     if (HEX_COLOR.test(l.accent)) out.accent = l.accent;
     for (const [k, v] of Object.entries(l.tokens ?? {})) {
       if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) out.tokens[k] = v;
+      else if (k === "radius" && v in LIVERY_RADIUS) out.tokens[k] = v;
+      else if (k === "font" && v in LIVERY_FONTS) out.tokens[k] = v;
+      else if (k === "pattern" && LIVERY_PATTERNS.includes(v)) out.tokens[k] = v;
     }
     if (typeof l.icon === "string" && ICON_B64.test(l.icon)) out.icon = l.icon;
+    if (typeof l.cursor === "string" && ICON_B64.test(l.cursor) && l.cursor.length <= 24000) out.cursor = l.cursor;
     return out;
+  }
+
+  // Deep-validate a livery cursor before it may touch the pointer: decodes, bounds the
+  // dimensions, and requires a minimum opaque area so a hostile admin can't hide the cursor.
+  // Returns a ready `cursor:` value ("" = rejected); the `, auto` fallback always rides along.
+  let liveryCursorUrl = $state("");
+  async function validateCursor(b64: string): Promise<string> {
+    if (!b64) return "";
+    const url = "data:image/png;base64," + b64;
+    const img = new Image();
+    const ok = await new Promise<boolean>((res) => {
+      img.onload = () => res(true);
+      img.onerror = () => res(false);
+      img.src = url;
+    });
+    if (!ok || img.naturalWidth > 64 || img.naturalHeight > 64 || img.naturalWidth < 8 || img.naturalHeight < 8) return "";
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const ctx = c.getContext("2d");
+    if (!ctx) return "";
+    ctx.drawImage(img, 0, 0);
+    const px = ctx.getImageData(0, 0, c.width, c.height).data;
+    let opaque = 0;
+    for (let i = 3; i < px.length; i += 4) if (px[i] > 64) opaque++;
+    if (opaque < 24) return ""; // effectively invisible — griefing, not theming
+    return `url(${url}) 2 2, auto`;
   }
   let liveryActive = $derived(!!(livery.preset || livery.accent || Object.keys(livery.tokens).length));
   // Per-server "use my own theme" opt-out (precedence rule 1 in the design doc).
@@ -180,8 +226,10 @@
     }
     try {
       livery = sanitizeLivery(await invoke<Livery>("get_livery", { server: activeServerId }));
+      liveryCursorUrl = await validateCursor(livery.cursor);
     } catch {
       livery = emptyLivery(); // failed/malformed reads degrade to "no livery", never an error
+      liveryCursorUrl = "";
     }
   }
   async function publishLivery() {
@@ -191,7 +239,7 @@
         server: activeServerId,
         preset: liveryDraft.preset,
         accent: liveryDraft.accent,
-        tokens: {},
+        tokens: liveryDraft.tokens,
       });
       await refreshLivery();
     } catch (e) {
@@ -240,6 +288,62 @@
       error = String(err);
     }
   }
+  // Livery-draft token editing (radius/font/pattern enum ids; "" removes the override).
+  function setDraftToken(key: string, val: string) {
+    const tokens = { ...liveryDraft.tokens };
+    if (val) tokens[key] = val;
+    else delete tokens[key];
+    liveryDraft = { ...liveryDraft, tokens };
+  }
+  // Cursor upload: contain-fit into 32×32 PNG (alpha preserved), re-encoded client-side.
+  async function fileToCursorPngB64(file: File): Promise<string> {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = () => resolve(null);
+        img.onerror = () => reject(new Error("could not load image"));
+        img.src = url;
+      });
+      const size = 32;
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const scale = Math.min(size / img.width, size / img.height);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      }
+      return canvas.toDataURL("image/png").split(",")[1] ?? "";
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  async function setServerCursor(cursor: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_server_cursor", { server: activeServerId, cursor });
+      await refreshLivery();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function loadServerCursor(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      const b64 = await fileToCursorPngB64(file);
+      if (!(await validateCursor(b64))) {
+        error = "That image won't work as a cursor — it needs a visible (mostly opaque) shape.";
+        return;
+      }
+      await setServerCursor(b64);
+    } catch (err) {
+      error = String(err);
+    }
+  }
 
   // Apply the effective theme: user per-server opt-out > server livery > user appearance.
   // Density and terminal-chrome are always personal — a livery only recolors.
@@ -252,9 +356,26 @@
     set("preset", preset);
     set("density", appearance.density);
     set("chrome", appearance.chrome === "clean" ? "clean" : "terminal");
-    for (const t of LIVERY_TOKENS) el.style.removeProperty(t);
+    for (const t of [...LIVERY_TOKENS, "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
+    el.removeAttribute("data-livery-pattern");
+    el.removeAttribute("data-livery-cursor");
     if (followLivery) {
-      for (const [k, v] of Object.entries(livery.tokens)) el.style.setProperty(k, v);
+      for (const [k, v] of Object.entries(livery.tokens)) {
+        if (LIVERY_TOKENS.includes(k)) el.style.setProperty(k, v);
+      }
+      const rad = LIVERY_RADIUS[livery.tokens["radius"] ?? ""];
+      if (rad?.r) {
+        el.style.setProperty("--r", rad.r);
+        el.style.setProperty("--r-lg", rad.rlg);
+      }
+      const font = LIVERY_FONTS[livery.tokens["font"] ?? ""];
+      if (font && livery.tokens["font"] !== "system") el.style.setProperty("--ui", font);
+      const pattern = livery.tokens["pattern"];
+      if (pattern && pattern !== "none") el.setAttribute("data-livery-pattern", pattern);
+      if (liveryCursorUrl) {
+        el.style.setProperty("--livery-cursor", liveryCursorUrl);
+        el.setAttribute("data-livery-cursor", "1");
+      }
     }
     if (accent) {
       el.style.setProperty("--accent", accent);
@@ -5337,6 +5458,61 @@
                       value={liveryDraft.accent || "#977df2"}
                       oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
                     />
+                  </div>
+                </div>
+                <div class="field" style="margin-top:8px">
+                  <span class="muted small">Corners</span>
+                  <div class="cat-row">
+                    {#each Object.keys(LIVERY_RADIUS) as rid (rid)}
+                      <button
+                        type="button"
+                        class="preset-btn cat-tile"
+                        class:active={(liveryDraft.tokens["radius"] ?? "soft") === rid}
+                        onclick={() => setDraftToken("radius", rid === "soft" ? "" : rid)}
+                      >{rid}</button>
+                    {/each}
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="muted small">Interface font</span>
+                  <div class="cat-row">
+                    {#each Object.keys(LIVERY_FONTS) as fid (fid)}
+                      <button
+                        type="button"
+                        class="preset-btn cat-tile"
+                        class:active={(liveryDraft.tokens["font"] ?? "system") === fid}
+                        style={`font-family:${LIVERY_FONTS[fid]}`}
+                        onclick={() => setDraftToken("font", fid === "system" ? "" : fid)}
+                      >{fid}</button>
+                    {/each}
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="muted small">Background pattern</span>
+                  <div class="cat-row">
+                    {#each LIVERY_PATTERNS as pid (pid)}
+                      <button
+                        type="button"
+                        class="preset-btn cat-tile pat-{pid}"
+                        class:active={(liveryDraft.tokens["pattern"] ?? "none") === pid}
+                        onclick={() => setDraftToken("pattern", pid === "none" ? "" : pid)}
+                      >{pid}</button>
+                    {/each}
+                  </div>
+                </div>
+                <div class="field">
+                  <span class="muted small">Custom cursor — a small image members' pointers become here (they can opt out of the whole livery)</span>
+                  <div class="avatar-row">
+                    {#if livery.cursor}
+                      <img class="cursor-preview" src={"data:image/png;base64," + livery.cursor} alt="" />
+                    {/if}
+                    <label class="upload-btn">
+                      {livery.cursor ? "Replace cursor" : "Upload cursor"}
+                      <input type="file" accept="image/png,image/gif,image/webp" onchange={(e) => loadServerCursor(e.currentTarget.files)} />
+                    </label>
+                    {#if livery.cursor}
+                      <button class="ghost small" disabled={busy} onclick={() => setServerCursor("")}>Remove cursor</button>
+                    {/if}
                   </div>
                 </div>
                 <div class="invite-actions">
