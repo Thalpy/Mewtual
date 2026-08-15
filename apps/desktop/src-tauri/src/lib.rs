@@ -1749,6 +1749,16 @@ async fn remove_member(state: State<'_, AppState>, server: u64, fp: String) -> R
     Ok(())
 }
 
+/// Revoke one of your own linked devices (M5); re-seals the server. The owner enforces the MLS
+/// Remove when it next reconciles.
+#[tauri::command]
+async fn revoke_device(state: State<'_, AppState>, server: u64, fp: String) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.revoke_device(fp).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Read a wiki page's body.
 #[tauri::command]
 async fn get_wiki_page(
@@ -2718,6 +2728,7 @@ pub fn run() {
             get_roles,
             set_admin,
             remove_member,
+            revoke_device,
             send_message,
             edit_message,
             delete_message,

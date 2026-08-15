@@ -292,6 +292,12 @@ pub enum AppCommand {
         fp: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Revoke one of your own linked devices (M5): the origin signs a revocation; the owner
+    /// enforces the MLS Remove.
+    RevokeDevice {
+        fp: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Mint a fresh single-use invite (owner/admin only) carrying `bootstrap`; replies with the
     /// encoded `InviteToken` bytes, or an error.
     MintInvite {
@@ -1292,6 +1298,20 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// Revoke one of your own linked (companion) devices by fingerprint.
+    pub async fn revoke_device(&self, fp: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RevokeDevice { fp, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Read a wiki page's body.
     pub async fn read_wiki_page(&self, name: impl Into<String>) -> String {
         let (reply, rx) = oneshot::channel();
@@ -1814,6 +1834,10 @@ where
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
                         }
+                    }
+                    Some(AppCommand::RevokeDevice { fp, reply }) => {
+                        let res = server.revoke_device(&fp).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
                     }
                     Some(AppCommand::RemoveMember { fp, reply }) => {
                         let res = server.remove_member(&fp).await.map_err(|e| e.to_string());

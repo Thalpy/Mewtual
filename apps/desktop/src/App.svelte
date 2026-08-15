@@ -1547,6 +1547,19 @@
       deviceMap = {};
     }
   }
+  // Revoke one of YOUR OWN linked devices (M5 "lost phone"). Origin-only: the backend refuses a
+  // device you don't originate, so the UI only offers it where origin === you.
+  let confirmRevokeFp = $state("");
+  async function revokeDevice(companionFp: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("revoke_device", { server: activeServerId, fp: companionFp });
+      confirmRevokeFp = "";
+      await refreshDevices();
+    } catch (e) {
+      error = String(e);
+    }
+  }
   // Resolve a fingerprint for display: a companion renders as its origin (+ tag).
   function identityOf(fp: string): { fp: string; tag: string } {
     const d = deviceMap[fp];
@@ -6548,10 +6561,21 @@
                       <span class="dev-tag">· {d.name}</span>
                       <span class="fp small">{cfp.slice(0, 8)}</span>
                       <span class="muted small">{onlineMembers.has(cfp) ? "online" : "offline"}</span>
+                      {#if d.origin === myFp}
+                        {#if confirmRevokeFp === cfp}
+                          <button class="ghost small danger-btn" onclick={() => revokeDevice(cfp)}>Confirm revoke</button>
+                        {:else}
+                          <button class="ghost small danger-btn" onclick={() => (confirmRevokeFp = cfp)}>Revoke</button>
+                        {/if}
+                      {/if}
                     </li>
                   {/each}
                 </ul>
-                <p class="muted small">Device revocation lands with the next slice (M5).</p>
+                <p class="muted small">
+                  Revoke removes one of your own linked devices for good — its access ends and the
+                  same grant can't re-add it. Losing your original (founding) device means you can't
+                  add or revoke devices here; recover by having the server owner re-admit you.
+                </p>
               {/if}
               {#if myRole !== "owner"}
                 <p class="muted small">Only the owner can change roles.</p>

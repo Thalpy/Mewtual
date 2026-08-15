@@ -1,6 +1,16 @@
 # Multi-device identity — design (v2.2)
 
-Status: **M1 + M2 implemented (adversarially reviewed).** v1 (user-keypair + device cap)
+Status: **M1–M6 implemented (M2 & M3 adversarially reviewed, BLOCKING findings fixed).**
+M1 primitives (`f6b7386`); M2 ceremony (`fe618d3`); M3 admission + M4 UI (`ba8a8d1`); M6
+QR/audio carry channels (`bcd5e17`); M5 device revocation lands with this doc update.
+**The one deliberate deferral:** `MasterHandoff`'s primitive is committed but **inert** —
+*consuming* it (per-group master state + monotonic `master_seq` enforcement + a transfer
+command) is a scoped follow-on, since the common flows (add a device, revoke a device,
+kick a member, recover a lost origin via owner re-admission) do not need it. So "the master
+is transferable" is designed and the crypto exists, but the live transfer path is future
+work, called out here rather than implied complete.
+
+v1 (user-keypair + device cap)
 was reviewed by the project owner on 2026-08-15 and simplified: **one device per grant,
 single-use**, the **origin device is the identity root** (no separate user keypair), one
 **all-server grant bundle** per ceremony, and an explicit **grant-confirmation popup on
@@ -97,13 +107,19 @@ two devices, never on the wire as one object.
 
 ## Revocation, two verbs (unchanged from v1 in spirit)
 
-- **Member revokes own companion** (lost phone): the origin publishes a signed revocation
-  for that device id; the owner enforces an MLS Remove of that leaf. Companion devices
-  hold no grant authority, so a stolen companion can post until revoked but can never
-  mint siblings.
-- **Server kicks a member**: remove the origin's *and* all companions' leaves; ledger-ban
-  the origin id (the replay-proof machinery from
-  [`design-grant-revocation.md`](design-grant-revocation.md) applies to the origin id).
+- **Member revokes own companion** (lost phone) — **implemented (M5)**: the origin signs a
+  `DeviceRevocation` and publishes it into the `Devices` doc's revocation map; the owner, on
+  reconcile, enforces an MLS Remove of that leaf. A revocation is honoured only when its
+  origin matches the companion's **registered** origin, so a member can revoke only its own
+  devices (and holds only its own origin key regardless). Re-admission is then doubly
+  blocked — the certificate's ledger nonce is already spent, and the device is in the revoked
+  set. Companion devices hold no grant authority, so a stolen companion can post until
+  revoked but can never mint siblings.
+- **Server kicks a member** — **implemented (M5)**: `remove_member` removes the member's
+  origin leaf **and cascades to all of that member's companion leaves**, so no linked device
+  keeps speaking for a removed member. Owner-serialized like every removal. (The origin-id
+  ledger-ban from [`design-grant-revocation.md`](design-grant-revocation.md) still applies to
+  the member's re-invitation, unchanged.)
 - **Destroyed/lost master — three tiers, in order**:
   1. **The vault is the identity, not the hardware.** The master's signing key lives in
      the passphrase-sealed vault on disk; restoring a vault backup on new hardware

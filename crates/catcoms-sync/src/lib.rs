@@ -5251,6 +5251,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.revoked_devices = revoked;
     }
 
+    /// The current companion → origin edges (multi-device). Used by the product layer to cascade a
+    /// member removal to that member's linked devices (M5).
+    pub fn companion_map(&self) -> Vec<(DeviceId, DeviceId)> {
+        self.companion_devices
+            .iter()
+            .map(|(c, o)| (*c, *o))
+            .collect()
+    }
+
     /// Take the companion certificates this node admitted since the last call, so the product
     /// layer can write them into the shared `Devices` document. Only ever non-empty on the owner
     /// (admission is owner-serialized), which is exactly why that document has no write races.
