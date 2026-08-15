@@ -12,5 +12,10 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "vite.config.ts"],
+  // Unit tests run under Node (`npm test`: node --experimental-strip-types --test), not in the
+  // WebView, so they use `node:` builtins and Node's explicit `.ts` import specifiers. Type-checking
+  // them here would mean pulling @types/node into the app's surface and relaxing module resolution
+  // for shipped code; running them is the check that matters.
+  "exclude": ["src/**/*.test.ts"]
 }

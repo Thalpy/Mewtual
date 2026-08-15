@@ -1,11 +1,13 @@
 // Phase 10b — the shared rich-text renderer.
 //
 // Messages, statuses and wiki pages come from other (untrusted) group members, so rendering
-// is markdown via `marked` followed by a strict `DOMPurify` sanitize. Three custom inline
-// tokens layer on top:
+// is markdown via `marked` followed by a strict `DOMPurify` sanitize. Custom inline tokens
+// layer on top:
 //   - `[[Page]]`     → a wiki link the app navigates on click (resolved in 10d)
 //   - `:name:`       → a custom emoji (resolved to an image in 10f; shows `:name:` until then)
 //   - `![alt](cid:HEX)` → a fileshare embed (image/video/audio, resolved in 10c)
+//   - `[label](file:HEX)` / `[label](status:ID)` → an in-app reference the composer's "+" picker
+//     inserts: a fileshare file (opens its info pane) or one of this server's status posts.
 //
 // SECURITY: the sanitizer does NOT allow <img>/<video>/<audio>/<script>/raw HTML. Custom
 // emoji and embeds render as inert <span> placeholders; the resolver (resolveMedia, wired in
@@ -31,7 +33,7 @@ const wikiLink: TokenizerAndRendererExtension = {
     return i < 0 ? undefined : i;
   },
   tokenizer(src) {
-    const m = /^\[\[([^\]\n]{1,120})\]\]/.exec(src);
+    const m = WIKI_LINK_RE.exec(src);
     if (m) return { type: "wikilink", raw: m[0], text: m[1].trim() };
     return undefined;
   },
@@ -102,6 +104,9 @@ const spoiler: TokenizerAndRendererExtension = {
 
 // `![alt](cid:HEX)` → a fileshare embed placeholder (resolved to media in 10c). Matched ahead
 // of marked's own image syntax; plain `![](http…)` falls through and is stripped by sanitize.
+/** The embed grammar. Exported so `refs.ts`'s builders can be pinned against it in tests. */
+export const EMBED_RE = /^!\[([^\]]*)\]\(cid:([0-9a-fA-F]{1,64})\)/;
+
 const embed: TokenizerAndRendererExtension = {
   name: "embed",
   level: "inline",
@@ -110,7 +115,7 @@ const embed: TokenizerAndRendererExtension = {
     return i < 0 ? undefined : i;
   },
   tokenizer(src) {
-    const m = /^!\[([^\]]*)\]\(cid:([0-9a-fA-F]{1,64})\)/.exec(src);
+    const m = EMBED_RE.exec(src);
     if (m) return { type: "embed", raw: m[0], alt: m[1], cid: m[2].toLowerCase() };
     return undefined;
   },
@@ -119,10 +124,42 @@ const embed: TokenizerAndRendererExtension = {
   },
 };
 
+// `[label](file:HEX)` / `[label](status:ID)` → an in-app reference chip (inserted by the composer's
+// "+" picker). Matched ahead of marked's own link syntax so these app-only schemes never reach an
+// `<a href>` — the app resolves the target from the data- attribute instead, so a reference can
+// only ever address this group's own content. `![alt](cid:…)` is unaffected: the embed extension
+// starts at the `!` and consumes the whole thing, and `cid` isn't in this alternation anyway.
+/** The reference-chip grammar. Exported so `refs.ts`'s builders can be pinned against it in tests. */
+export const REF_LINK_RE = /^\[([^\]\n]{1,160})\]\((file|status):([0-9a-zA-Z_-]{1,64})\)/;
+
+/** The wiki-link grammar (`[[Page]]`), likewise exported for the round-trip tests. */
+export const WIKI_LINK_RE = /^\[\[([^\]\n]{1,120})\]\]/;
+
+const refLink: TokenizerAndRendererExtension = {
+  name: "reflink",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("[");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const m = REF_LINK_RE.exec(src);
+    if (m) return { type: "reflink", raw: m[0], kind: m[2], ref: m[3], text: m[1].trim() };
+    return undefined;
+  },
+  renderer(token) {
+    const file = token.kind === "file";
+    const attr = file ? "data-file-cid" : "data-status-id";
+    const ref = file ? String(token.ref).toLowerCase() : String(token.ref);
+    const icon = file ? "📄" : "◈";
+    return `<a class="reflink ${escAttr(token.kind)}-ref" ${attr}="${escAttr(ref)}"><span class="reflink-ico" aria-hidden="true">${icon}</span>${escText(token.text)}</a>`;
+  },
+};
+
 let configured = false;
 function configure() {
   if (configured) return;
-  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed], breaks: true, gfm: true });
+  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed, refLink], breaks: true, gfm: true });
   configured = true;
 }
 
@@ -135,7 +172,8 @@ const SANITIZE = {
   ],
   ALLOWED_ATTR: [
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
-    "data-mention", "data-spoiler", "tabindex", "role",
+    "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "tabindex", "role",
+    "aria-hidden",
   ],
 };
 

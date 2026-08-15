@@ -3517,3 +3517,203 @@ button.you-panel:hover {
   padding: 2px 8px;
   background: var(--bg-elev);
 }
+
+/* --- composer "+" insert picker: link/embed a file, your status post, or a wiki page --- */
+
+.ip-toggle.on {
+  color: var(--accent);
+}
+
+.insert-picker {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  z-index: 20;
+}
+
+.ip-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.ip-tabs button[role="tab"] {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.3rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ip-tabs button[role="tab"]:hover {
+  color: var(--text);
+  background: transparent;
+}
+
+.ip-tabs button[role="tab"].active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.ip-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+.ip-close {
+  padding: 0 0.35rem;
+  line-height: 1.6;
+}
+
+.ip-search {
+  margin: 6px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+}
+
+.ip-list {
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 0 4px 6px;
+}
+
+.ip-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: var(--r);
+}
+
+.ip-row:hover {
+  background: var(--accent-dim);
+}
+
+.ip-item {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 6px;
+  background: none;
+  border: none;
+  border-radius: var(--r);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ip-item:hover {
+  background: transparent;
+}
+
+.ip-ico {
+  flex: none;
+  font-size: 0.9rem;
+}
+
+.ip-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.82rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ip-meta {
+  flex: none;
+  font-size: 0.68rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.ip-mode {
+  flex: none;
+  padding-right: 6px;
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.ip-alt {
+  flex: none;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.ip-alt:hover {
+  color: var(--text);
+  border-color: var(--accent);
+  background: transparent;
+}
+
+.ip-empty {
+  margin: 0.6rem;
+}
+
+/* The rendered reference chip (file / status), inserted by the picker above. */
+.reflink {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  vertical-align: baseline;
+  overflow-wrap: anywhere;
+}
+
+.reflink:hover {
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+
+.reflink-ico {
+  font-size: 0.8em;
+  opacity: 0.8;
+}
+
+.status-list li.flash {
+  animation: flashPulse 1.3s ease-out;
+  border-radius: var(--r);
+}

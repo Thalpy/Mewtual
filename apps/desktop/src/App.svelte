@@ -3,6 +3,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   import { renderMessage, renderWiki } from "./render";
+  import { refLabel, fileMarker, statusMarker, wikiMarker, insertInto } from "./refs";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -1560,6 +1561,19 @@
         view = "wiki";
         await openWikiPage(page);
       }
+      return;
+    }
+    // Reference chips inserted by the "+" picker.
+    const fl = target?.closest("[data-file-cid]") as HTMLElement | null;
+    if (fl) {
+      e.preventDefault();
+      await openFileRef((fl.getAttribute("data-file-cid") ?? "").toLowerCase());
+      return;
+    }
+    const sl = target?.closest("[data-status-id]") as HTMLElement | null;
+    if (sl) {
+      e.preventDefault();
+      await openStatusRef(sl.getAttribute("data-status-id") ?? "");
     }
   }
 
@@ -1793,13 +1807,36 @@
     return items;
   }
 
-  // Context menu on rendered rich text: copy/post a [[wikilink]], copy a :emoji:, copy an embed.
+  // A reference chip's own label, without the leading icon glyph the renderer prepends.
+  function chipLabel(el: HTMLElement): string {
+    const c = el.cloneNode(true) as HTMLElement;
+    c.querySelector(".reflink-ico")?.remove();
+    return c.textContent?.trim() ?? "";
+  }
+
+  // Context menu on rendered rich text: copy/post a [[wikilink]], copy a :emoji:, copy an embed,
+  // open/copy a file or status reference chip.
   function handleRichContext(e: MouseEvent) {
     const el = (e.target as HTMLElement | null)?.closest(
-      "[data-wikilink],[data-emoji],[data-embed-cid]",
+      "[data-wikilink],[data-emoji],[data-embed-cid],[data-file-cid],[data-status-id]",
     ) as HTMLElement | null;
     if (!el) return;
-    if (el.hasAttribute("data-wikilink")) {
+    if (el.hasAttribute("data-file-cid")) {
+      const cid = (el.getAttribute("data-file-cid") ?? "").toLowerCase();
+      const label = chipLabel(el) || "file";
+      openMenu(e, [
+        { label: "Open file details", icon: "ⓘ", onSelect: () => openFileRef(cid) },
+        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](file:${cid})`) },
+        { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) },
+      ]);
+    } else if (el.hasAttribute("data-status-id")) {
+      const id = el.getAttribute("data-status-id") ?? "";
+      const label = chipLabel(el) || "status";
+      openMenu(e, [
+        { label: "Open status", icon: "⊞", onSelect: () => openStatusRef(id) },
+        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
+      ]);
+    } else if (el.hasAttribute("data-wikilink")) {
       const page = el.getAttribute("data-wikilink") ?? "";
       openMenu(e, [
         { label: "Open page", icon: "⊞", onSelect: () => { view = "wiki"; openWikiPage(page); } },
@@ -2287,6 +2324,127 @@
   function msgSnippet(text: string, n = 70): string {
     const t = text.replace(/\s+/g, " ").trim();
     return t.length > n ? t.slice(0, n) + "…" : t;
+  }
+
+  // --- "+" insert picker: link/embed this server's own content into the message -----------------
+  // Everything the group already holds is addressable from the composer: a fileshare file (inline
+  // embed for media, a link chip otherwise), one of YOUR status posts, or a wiki page. Each inserts
+  // a marker the shared renderer resolves — nothing here leaves the group or touches the network.
+  type InsertTab = "files" | "status" | "wiki";
+  let showInsert = $state(false);
+  let insertTab = $state<InsertTab>("files");
+  let insertQuery = $state("");
+  let insertInput = $state<HTMLInputElement | undefined>(undefined);
+  let insertLoading = $state(false); // the open-time refresh is in flight
+
+  // The custom-emoji folder has its own picker (the 🐱 button), so it's noise here.
+  let insertFiles = $derived.by(() => {
+    const q = insertQuery.trim().toLowerCase();
+    return files
+      .filter((f) => f.path !== "emoji" && !f.path.startsWith("emoji/"))
+      .filter((f) => !q || f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q))
+      .slice(0, 80);
+  });
+  // "recent statuses we posted" — your own posts, newest first. A status with no id predates the
+  // stable-id slice and can't be addressed, so it's skipped rather than offered and broken.
+  let insertStatuses = $derived.by(() => {
+    const q = insertQuery.trim().toLowerCase();
+    return statuses
+      .filter((s) => s.author === myFp && s.id && (!q || s.text.toLowerCase().includes(q)))
+      .slice()
+      .reverse()
+      .slice(0, 50);
+  });
+  let insertWikiPages = $derived(
+    wikiPages.filter((p) => !insertQuery.trim() || p.toLowerCase().includes(insertQuery.trim().toLowerCase())).slice(0, 80),
+  );
+  let insertCount = $derived(
+    insertTab === "files" ? insertFiles.length : insertTab === "status" ? insertStatuses.length : insertWikiPages.length,
+  );
+
+  async function toggleInsert() {
+    if (showInsert) {
+      closeInsert();
+      return;
+    }
+    showInsert = true;
+    showEmoji = false;
+    insertQuery = "";
+    // A DM has no Status/Wiki tab, so don't strand the picker on one you can't see.
+    const dmOnly = !!cur?.isDm;
+    if (dmOnly) insertTab = "files";
+    await tick();
+    insertInput?.focus();
+    // The picker opens from the Chat tab, where these lists may never have been loaded (each is
+    // otherwise fetched when its own tab is opened), so pull them now. These are actor round-trips
+    // that can lag behind a busy server, so say so rather than showing a bare "nothing here".
+    insertLoading = true;
+    try {
+      await Promise.all(dmOnly ? [refreshFiles()] : [refreshFiles(), refreshStatuses(), refreshWiki()]);
+    } finally {
+      insertLoading = false;
+    }
+  }
+  function closeInsert() {
+    showInsert = false;
+    insertQuery = "";
+    insertLoading = false;
+  }
+
+  // Insert at the composer caret (mirrors pickMention), leaving the caret just after it. The string
+  // maths lives in refs.ts so it can be unit-tested away from the DOM.
+  function insertAtCaret(insert: string) {
+    const start = composerEl?.selectionStart ?? draft.length;
+    const end = composerEl?.selectionEnd ?? draft.length;
+    const { text, caret } = insertInto(draft, start, end, insert);
+    draft = text;
+    queueMicrotask(() => {
+      if (composerEl) {
+        composerEl.focus();
+        composerEl.selectionStart = composerEl.selectionEnd = caret;
+      }
+    });
+  }
+  function insertFileRef(f: UiFile, asEmbed: boolean) {
+    insertAtCaret(fileMarker(f.name, f.cid, asEmbed));
+    closeInsert();
+  }
+  function insertStatusRef(s: Msg) {
+    insertAtCaret(statusMarker(s.text, s.id));
+    closeInsert();
+  }
+  function insertWikiRef(page: string) {
+    insertAtCaret(wikiMarker(page));
+    closeInsert();
+  }
+
+  // Follow a `[…](file:CID)` chip: the index may be stale (the file was added after this tab last
+  // loaded), so refresh once before giving up.
+  async function openFileRef(cid: string) {
+    let f = files.find((x) => x.cid.toLowerCase() === cid);
+    if (!f) {
+      await refreshFiles();
+      f = files.find((x) => x.cid.toLowerCase() === cid);
+    }
+    if (f) openFileInfo(f);
+    else error = "That file is no longer in this server's file index.";
+  }
+  // Follow a `[…](status:ID)` chip: switch to the Status tab and flash the post.
+  let flashStatusId = $state("");
+  async function openStatusRef(id: string) {
+    if (!id) return;
+    view = "status";
+    if (!statuses.some((s) => s.id === id)) await refreshStatuses();
+    await tick();
+    if (!statuses.some((s) => s.id === id)) {
+      error = "That status post is no longer in this server's feed.";
+      return;
+    }
+    statusEl?.querySelector(`[data-sid="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    flashStatusId = id;
+    setTimeout(() => {
+      if (flashStatusId === id) flashStatusId = "";
+    }, 1300);
   }
 
   // @-mention autocomplete: when the caret sits right after an "@partial", offer matching members;
@@ -3081,6 +3239,7 @@
         else if (reactionPickerFor) reactionPickerFor = "";
         else if (replyingTo) replyingTo = "";
         else if (showEmoji) showEmoji = false;
+        else if (showInsert) closeInsert();
         else if (fileInfo) closeFileInfo();
         else if (showWikiHelp) showWikiHelp = false;
         else if (showFeedback) showFeedback = false;
@@ -3213,6 +3372,12 @@
     <circle cx="14.8" cy="10.6" r="0.9" fill="currentColor" stroke="none" />
     <path d="M1.8 11.2l3.1.5M2 14.3l3-.6M22.2 11.2l-3.1.5M22 14.3l-3-.6" stroke-width="1.2" />
     <path d="M12 13.4l-.9 1.1h1.8z" fill="currentColor" stroke="none" />
+  </svg>
+{/snippet}
+
+{#snippet icoPlus()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 5.4v13.2M5.4 12h13.2" />
   </svg>
 {/snippet}
 
@@ -4011,6 +4176,76 @@
                 <button class="ghost small reply-cancel" type="button" title="Cancel reply (Esc)" onclick={cancelReply}>✕</button>
               </div>
             {/if}
+            {#if showInsert}
+              <div class="insert-picker">
+                <div class="ip-tabs" role="tablist">
+                  <button type="button" role="tab" aria-selected={insertTab === "files"} class:active={insertTab === "files"} onclick={() => (insertTab = "files")}>Files</button>
+                  {#if !cur?.isDm}
+                    <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Status</button>
+                    <button type="button" role="tab" aria-selected={insertTab === "wiki"} class:active={insertTab === "wiki"} onclick={() => (insertTab = "wiki")}>Wiki</button>
+                  {/if}
+                  <span class="ip-count">{insertCount}</span>
+                  <button type="button" class="ghost small ip-close" title="Close (Esc)" onclick={closeInsert}>✕</button>
+                </div>
+                <input
+                  bind:this={insertInput}
+                  class="ip-search"
+                  bind:value={insertQuery}
+                  placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : "Find a wiki page…"}
+                  onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeInsert(); composerEl?.focus(); } }}
+                />
+                <div class="ip-list">
+                  {#if insertTab === "files"}
+                    {#each insertFiles as f}
+                      {@const media = !!safeMime(f.mime)}
+                      <div class="ip-row">
+                        <button
+                          type="button"
+                          class="ip-item"
+                          title={media ? "Embed this file inline" : "Insert a link to this file"}
+                          onclick={() => insertFileRef(f, media)}
+                        >
+                          <span class="ip-ico">{fileIcon(f.mime)}</span>
+                          <span class="ip-name">{f.name}</span>
+                          <span class="ip-meta">{f.path ? f.path + " · " : ""}{fmtSize(f.size)}</span>
+                        </button>
+                        {#if media}
+                          <button type="button" class="ip-alt" title="Insert a link instead of an inline embed" onclick={() => insertFileRef(f, false)}>link</button>
+                        {/if}
+                        <span class="ip-mode">{media ? "embed" : "link"}</span>
+                      </div>
+                    {:else}
+                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No files match that." : "No files shared on this server yet."}</p>
+                    {/each}
+                  {:else if insertTab === "status"}
+                    {#each insertStatuses as s}
+                      <div class="ip-row">
+                        <button type="button" class="ip-item" title="Insert a link to this post" onclick={() => insertStatusRef(s)}>
+                          <span class="ip-ico">◈</span>
+                          <span class="ip-name">{msgSnippet(s.text, 70) || "(empty post)"}</span>
+                          <span class="ip-meta">{fmtTime(s.ts)}</span>
+                        </button>
+                        <span class="ip-mode">link</span>
+                      </div>
+                    {:else}
+                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your posts match that." : "You haven't posted a status on this server yet."}</p>
+                    {/each}
+                  {:else}
+                    {#each insertWikiPages as p}
+                      <div class="ip-row">
+                        <button type="button" class="ip-item" title="Insert a link to this page" onclick={() => insertWikiRef(p)}>
+                          <span class="ip-ico">📖</span>
+                          <span class="ip-name">{p}</span>
+                        </button>
+                        <span class="ip-mode">link</span>
+                      </div>
+                    {:else}
+                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No pages match that." : "This server's wiki is empty."}</p>
+                    {/each}
+                  {/if}
+                </div>
+              </div>
+            {/if}
             {#if showEmoji}
               <div class="emoji-picker">
                 {#if Object.keys(emojiMap).length}
@@ -4042,6 +4277,15 @@
               ondrop={(e) => onComposerDrop("chat", e)}
               onsubmit={(e) => { e.preventDefault(); send(); }}
             >
+              <button
+                type="button"
+                class="attach ip-toggle"
+                class:on={showInsert}
+                title="Link or embed a file, one of your status posts, or a wiki page"
+                aria-label="Insert a link or embed"
+                aria-expanded={showInsert}
+                onclick={toggleInsert}
+              >{@render icoPlus()}</button>
               <label class="attach" title="Attach image / video / audio">
                 📎
                 <input
@@ -4124,7 +4368,7 @@
           </form>
           <ul class="status-list tab-pane" bind:this={statusEl} use:richClicks>
             {#each statuses as s}
-              <li>
+              <li data-sid={s.id} class:flash={!!s.id && s.id === flashStatusId}>
                 <span class="status-head">
                   {@render avatarTag(s.author)}
                   {@render nameTag(s.author)}
