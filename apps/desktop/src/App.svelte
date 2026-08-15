@@ -54,7 +54,7 @@
   // Servers shown on the rail vs DMs shown behind the DMs circle.
   let railServers = $derived(servers.filter((s) => !s.isDm));
   let dmList = $derived(servers.filter((s) => s.isDm));
-  // Per-DM activity stats (no message text), keyed by server id — for the friends-list sortings.
+  // Per-DM activity stats (no message text), keyed by server id: for the friends-list sortings.
   type DmStat = { server: number; count: number; first_ts: number; last_ts: number; active_days: number };
   let dmStats = $state<Record<number, DmStat>>({});
   type DmSort = "recent" | "activity" | "reconnect" | "alpha";
@@ -91,7 +91,7 @@
   function openServerSettings(id: number | null = null) {
     if (id !== null && id !== activeServerId) switchServer(id);
     serverNameDraft = cur?.name ?? "";
-    // The draft never carries the images — set_livery ignores them (set_server_icon /
+    // The draft never carries the images: set_livery ignores them (set_server_icon /
     // set_server_cursor own those fields).
     liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
     showServerSettings = true;
@@ -140,7 +140,7 @@
   ];
   const ACCENT_CHOICES = ["#977df2", "#e2a83d", "#e0574b", "#57c77a", "#6ca0d8"];
   // Server livery (design-livery.md): the active server's published scheme. Every value is
-  // UNTRUSTED (any member's client may have written the doc) — sanitized on read, and only
+  // UNTRUSTED (any member's client may have written the doc): sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
   type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string; cursor: string };
@@ -158,10 +158,10 @@
   // 64 KiB decoded ≈ 87.4k base64 chars; anything longer or non-base64 is dropped.
   const ICON_B64 = /^[A-Za-z0-9+/=]{0,90000}$/;
   // Typed non-colour livery vocabulary (design-livery-customisation-safety.md): every value
-  // is an enum/catalog ID validated here — never a family string, never a URL, never CSS.
+  // is an enum/catalog ID validated here: never a family string, never a URL, never CSS.
   const LIVERY_RADIUS: Record<string, { r: string; rlg: string }> = {
     sharp: { r: "0px", rlg: "2px" },
-    soft: { r: "", rlg: "" }, // the default scale — clears the override
+    soft: { r: "", rlg: "" }, // the default scale: clears the override
     round: { r: "8px", rlg: "14px" },
   };
   const LIVERY_FONTS: Record<string, string> = {
@@ -209,7 +209,7 @@
     const px = ctx.getImageData(0, 0, c.width, c.height).data;
     let opaque = 0;
     for (let i = 3; i < px.length; i += 4) if (px[i] > 64) opaque++;
-    if (opaque < 24) return ""; // effectively invisible — griefing, not theming
+    if (opaque < 24) return ""; // effectively invisible: griefing, not theming
     return `url(${url}) 2 2, auto`;
   }
   let liveryActive = $derived(!!(livery.preset || livery.accent || Object.keys(livery.tokens).length));
@@ -271,7 +271,7 @@
       if (l.icon) serverIcons[id] = l.icon;
       else delete serverIcons[id];
     } catch {
-      /* unreachable server actor — keep whatever we had */
+      /* unreachable server actor: keep whatever we had */
     }
   }
   function refreshAllServerIcons() {
@@ -344,7 +344,7 @@
     try {
       const b64 = await fileToCursorPngB64(file);
       if (!(await validateCursor(b64))) {
-        error = "That image won't work as a cursor — it needs a visible (mostly opaque) shape.";
+        error = "That image won't work as a cursor: it needs a visible (mostly opaque) shape.";
         return;
       }
       await setServerCursor(b64);
@@ -354,7 +354,7 @@
   }
 
   // Apply the effective theme: user per-server opt-out > server livery > user appearance.
-  // Density and terminal-chrome are always personal — a livery only recolors.
+  // Density and terminal-chrome are always personal: a livery only recolors.
   $effect(() => {
     const el = document.documentElement;
     const set = (k: string, v: string) => (v ? el.setAttribute("data-" + k, v) : el.removeAttribute("data-" + k));
@@ -401,7 +401,7 @@
 
   // --- Unlock minigames -----------------------------------------------------------------
   // Input surfaces ONLY: every method deterministically encodes to a scheme-prefixed string
-  // that feeds the SAME vault KDF ("unlock" invoke) — the vault crypto is untouched, and a
+  // that feeds the SAME vault KDF ("unlock" invoke): the vault crypto is untouched, and a
   // passphrase remains the recommended, highest-entropy option. The scheme prefix means the
   // same finger pattern on different games can never collide into the same secret.
   type UnlockMethod = "pass" | "spell" | "melody";
@@ -412,14 +412,14 @@
   let spellSeq = $state<number[]>([]);
   let spellSecret = $derived(spellSeq.length ? `spell:v1:${spellSeq.join("-")}` : "");
   let spellBits = $derived(Math.round(spellSeq.length * Math.log2(SPELL_GLYPHS.length)));
-  // Melody lock: ABSOLUTE MIDI notes — C6 is not C4; octaves carry meaning (and entropy).
+  // Melody lock: ABSOLUTE MIDI notes: C6 is not C4; octaves carry meaning (and entropy).
   // The on-screen piano shows two octaves with a shift, so any register a MIDI controller
   // played is reachable on screen too. v3 records what a score records: notes that overlap
   // in time collapse into ONE chord event, and how long the event was held quantises to a
   // note value. Encoded "melody:v3:60+64+67.1-62.0-…" (chord tones joined by "+", ascending
   // and de-duplicated so fingering order can't change the secret; ".N" is the duration class
   // and is omitted entirely when rhythm is off). v1 (pitch-class-folded) and v2 (bare notes)
-  // are retired — a vault sealed under either must be re-entered under a scheme this build
+  // are retired: a vault sealed under either must be re-entered under a scheme this build
   // can still produce. The theory and the engraving live in `melody.ts` (pure + unit-tested);
   // only the audio and the input handling need to be here.
   let melodySeq = $state<MelodyEvent[]>([]);
@@ -436,7 +436,7 @@
   function bitsTier(b: number): "danger" | "warn" | "ok" {
     return b >= 44 ? "ok" : b >= 28 ? "warn" : "danger";
   }
-  // A small synth so the keys sing (its own context — the notification chime has one too).
+  // A small synth so the keys sing (its own context: the notification chime has one too).
   // Notes sustain while held, so what you hear is the note length you are about to record.
   let synthCtx: AudioContext | null = null;
   const noteHz = (note: number) => 440 * Math.pow(2, (note - 69) / 12); // A4 = 440
@@ -459,7 +459,7 @@
       o.stop(t + 8); // hard backstop so a lost note-off can never leave a drone
       voices.set(note, { osc: o, gain: g });
     } catch {
-      /* no audio output — the note still registers */
+      /* no audio output: the note still registers */
     }
   }
   function stopTone(note: number) {
@@ -476,7 +476,7 @@
       /* already stopped */
     }
   }
-  // A short confirmation blip — used by the register controls (z/x and 1–7), which must NEVER
+  // A short confirmation blip: used by the register controls (z/x and 1–7), which must NEVER
   // land in the sequence. It sounds the C you just moved to, so the shift is audible.
   function playBlip(note: number) {
     try {
@@ -500,7 +500,7 @@
   // --- Note on/off: overlapping notes are one chord, hold time is the note value -----------
   // A group opens on the first note-down and commits when the LAST held note lifts, so legato
   // playing groups (as it does on a real keyboard) and staccato playing does not.
-  let heldNotes = $state<number[]>([]); // sounding right now — drives key highlighting
+  let heldNotes = $state<number[]>([]); // sounding right now: drives key highlighting
   let chordBuf = $state<number[]>([]); // everything the open group has touched
   let holdMs = $state(0); // live length of the open group, for the "holding…" readout
   let groupStart = 0;
@@ -531,7 +531,7 @@
     holdMs = 0;
     if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
   }
-  // Panic release — window blur or leaving the melody tab must not strand a held note.
+  // Panic release: window blur or leaving the melody tab must not strand a held note.
   function releaseAll() {
     for (const n of heldNotes) stopTone(n);
     heldNotes = [];
@@ -553,10 +553,10 @@
   // --- Playback -----------------------------------------------------------------------------
   // Hearing the sequence back is how you learn a tune well enough to reproduce it, and with
   // rhythm on it is the only way to check that your "half" really read as a half. Plays the
-  // RECORDED durations, not the ones you happened to hold — what you hear is what is sealed.
+  // RECORDED durations, not the ones you happened to hold: what you hear is what is sealed.
   const PLAY_MS = [170, 360, 680, 1050];
   let playing = $state(false);
-  let playIdx = $state(-1); // event currently sounding — highlighted on the staff
+  let playIdx = $state(-1); // event currently sounding: highlighted on the staff
   let playToken = 0; // bumping this cancels an in-flight playback
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   function stopPlayback() {
@@ -609,7 +609,7 @@
             if (!d || d.length < 3) return;
             if (!locked || unlockMethod !== "melody") return;
             const status = d[0] & 0xf0;
-            // Note-off is either 0x80 or a 0x90 with zero velocity — controllers disagree.
+            // Note-off is either 0x80 or a 0x90 with zero velocity: controllers disagree.
             if (status === 0x90 && d[2] > 0) noteOn(d[1]);
             else if (status === 0x80 || (status === 0x90 && d[2] === 0)) noteOff(d[1]);
           };
@@ -619,7 +619,7 @@
       access.onstatechange = wire;
       wire();
     } catch {
-      midiName = ""; // permission denied or no MIDI subsystem — on-screen keys remain
+      midiName = ""; // permission denied or no MIDI subsystem: on-screen keys remain
     }
   }
   function unlockSecret(): string {
@@ -643,7 +643,7 @@
       },
     };
   }
-  // Camera QR scan: one shot — resolves with the decoded text or null (no camera / denied
+  // Camera QR scan: one shot: resolves with the decoded text or null (no camera / denied
   // / closed). The video runs in a small overlay; jsQR scans frames until a hit.
   let scanOpen = $state(false);
   let scanVideoEl = $state<HTMLVideoElement | undefined>(undefined);
@@ -673,7 +673,7 @@
       }, 180);
     } catch {
       closeScan(null);
-      error = "Camera unavailable — paste the code instead.";
+      error = "Camera unavailable: paste the code instead.";
     }
   }
   function closeScan(result: string | null) {
@@ -687,13 +687,13 @@
     cb?.(result);
   }
   // Acoustic channel. Send: render the blob as FSK and play it. Receive: record ~30s of
-  // mic audio and try to decode — stops early on success.
+  // mic audio and try to decode: stops early on success.
   let soundBusy = $state<"" | "send" | "listen">("");
   async function sendBySound(text: string) {
     if (soundBusy) return;
     const payload = new TextEncoder().encode(text);
     if (payload.length > MAX_AUDIO_PAYLOAD) {
-      error = "Too large to send as sound — use QR or paste.";
+      error = "Too large to send as sound: use QR or paste.";
       return;
     }
     soundBusy = "send";
@@ -752,9 +752,9 @@
       src.disconnect();
       await ctx.close();
       if (hit) into(new TextDecoder().decode(hit));
-      else error = "Didn't catch a transmission — try again closer to the speaker, or paste it.";
+      else error = "Didn't catch a transmission: try again closer to the speaker, or paste it.";
     } catch {
-      error = "Microphone unavailable — paste the code instead.";
+      error = "Microphone unavailable: paste the code instead.";
     } finally {
       stream?.getTracks().forEach((t) => t.stop());
       soundBusy = "";
@@ -764,7 +764,7 @@
   // --- Multi-device pairing (design-multi-device.md v2.1; ceremony is offline-first) ---
   // Origin side: paste the new device's pairing blob → confirm the SAS (the human gate;
   // nothing is minted or sent before Accept) → mint the sealed all-server grant bundle.
-  // The bundle's wrap passphrase is a TRANSPORT passphrase invented for the trip — never
+  // The bundle's wrap passphrase is a TRANSPORT passphrase invented for the trip: never
   // the vault passphrase. Admission itself lands in M3; until then the new device holds
   // its grants locally.
   let showLinkDevice = $state(false);
@@ -824,7 +824,7 @@
   // New-device side (onboarding): generate the pairing blob to carry to the master device,
   // then paste the returned bundle + transport passphrase.
   let pairBlob = $state("");
-  let pairDeviceId = $state(""); // this device's id short-code — eyeball-match on the master's popup
+  let pairDeviceId = $state(""); // this device's id short-code: eyeball-match on the master's popup
   let pairBundle = $state("");
   let pairPass = $state("");
   let pairSummary = $state("");
@@ -844,9 +844,9 @@
         { bundle: pairBundle.trim(), passphrase: pairPass },
       );
       pairSummary =
-        `Grant opened — this device is "${r.device_name}". Final check: this code must match the one the master's popup showed — ${fmtSas(r.sas)}. If it doesn't, discard this grant. ` +
+        `Grant opened: this device is "${r.device_name}". Final check: this code must match the one the master's popup showed: ${fmtSas(r.sas)}. If it doesn't, discard this grant. ` +
         `Granted for ${r.servers.length} server${r.servers.length === 1 ? "" : "s"}: ${r.servers.map((s) => s.name).join(", ")}.`;
-      // The blob and transport passphrase have done their job — don't keep them around.
+      // The blob and transport passphrase have done their job: don't keep them around.
       pairBundle = "";
       pairPass = "";
     } catch (e) {
@@ -859,7 +859,7 @@
   let displayName = $state("me");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
-  // Optional rendezvous multiaddr — when set, the founder registers there so a joiner discovers
+  // Optional rendezvous multiaddr: when set, the founder registers there so a joiner discovers
   // it with no hard-coded address (just the pasted invite). Persisted as a default (it's usually a
   // stable infra node), pre-filled into the Found form and editable in Settings → Network.
   let rendezvous = $state(
@@ -872,18 +872,18 @@
   let messages = $state<Msg[]>([]);
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
-  // Beyond the plain substring there's an advanced filter set (Ctrl+Shift+F) — author, date range,
-  // attachment kind, reactions, reply/pin/edit state — plus a sort order, so the same pass answers
+  // Beyond the plain substring there's an advanced filter set (Ctrl+Shift+F): author, date range,
+  // attachment kind, reactions, reply/pin/edit state: plus a sort order, so the same pass answers
   // "the clip Dana posted last week" as well as "where did we say quorum". Filters stand on their
   // own: with an empty query the filters alone select the matches.
   type SearchSort = "oldest" | "newest" | "author" | "reactions" | "replies";
   type SearchFilters = ReturnType<typeof noFilters>;
-  // A hit is (channel, index in that channel's list, the message) — the index drives the in-pane
+  // A hit is (channel, index in that channel's list, the message): the index drives the in-pane
   // highlight/scroll for the open channel, the id drives the jump when a hit lives elsewhere.
   type SearchHit = { ch: string; idx: number; m: Msg };
   const SEARCH_RESULT_CAP = 50; // rows rendered in the results list (stepping still covers them all)
   // Facets that select messages. `sort` and the two match modifiers are deliberately absent from
-  // the "n filters" count — they shape the query/order, they don't narrow on their own.
+  // the "n filters" count: they shape the query/order, they don't narrow on their own.
   const NON_FACETS = ["sort", "caseSensitive", "wholeWord"];
   function noFilters() {
     return {
@@ -920,8 +920,8 @@
   // cid → MIME, from the fileshare index, for classifying a message's `![alt](cid:…)` embeds.
   let fileMime = $derived.by(() => new Map(files.map((f) => [f.cid.toLowerCase(), f.mime] as const)));
   const EMBED_RE = /!\[[^\]]*\]\(cid:([0-9a-fA-F]{1,64})\)/g;
-  // What a message carries. `safeMime` accepts only image/video/audio, so anything else — and any
-  // cid not in the index yet — reads as a plain attachment, matching how the embed resolver treats it.
+  // What a message carries. `safeMime` accepts only image/video/audio, so anything else: and any
+  // cid not in the index yet: reads as a plain attachment, matching how the embed resolver treats it.
   function msgKinds(text: string) {
     const k = { image: false, video: false, audio: false, file: false, link: false };
     for (const m of text.matchAll(EMBED_RE)) {
@@ -944,7 +944,7 @@
     if (end) d.setHours(23, 59, 59, 999);
     return d.getTime();
   }
-  // How many facets are narrowing the result — drives the "Filters (n)" badge and lets an
+  // How many facets are narrowing the result: drives the "Filters (n)" badge and lets an
   // empty query still search (filters alone are a valid search).
   let filterCount = $derived(
     Object.entries(filters).filter(([k, v]) => !NON_FACETS.includes(k) && v !== "" && v !== false).length
@@ -991,7 +991,7 @@
           invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs] as const)
         )
       );
-      if (activeServerId !== id) return; // server switched mid-fetch — drop the stale snapshot
+      if (activeServerId !== id) return; // server switched mid-fetch: drop the stale snapshot
       for (const [c, msgs] of loaded) chanMsgs[c] = msgs;
     } catch (e) {
       error = String(e);
@@ -1150,7 +1150,7 @@
       chanMsgs[cur.active] = messages;
       await switchTo(h.ch, true);
       if (h.m.id) jumpToMessageId(h.m.id);
-      else scrollToMatch(h.idx); // a legacy message has no id — its index still holds
+      else scrollToMatch(h.idx); // a legacy message has no id: its index still holds
       return;
     }
     scrollToMatch(h.idx);
@@ -1165,7 +1165,7 @@
     refilter();
   }
   // Re-run from the top after any query/filter change (deriveds recompute on read, so the first
-  // match below is already the new one). Only scrolls — refining a query never yanks you into
+  // match below is already the new one). Only scrolls: refining a query never yanks you into
   // another channel; that's reserved for ↑/↓ and clicking a result.
   function refilter() {
     searchPos = 0;
@@ -1283,7 +1283,7 @@
     try {
       localStorage.setItem("catcoms.readmarks", JSON.stringify(readMarks));
     } catch {
-      /* storage unavailable — read marks are best-effort */
+      /* storage unavailable: read marks are best-effort */
     }
   }
   function chanKey(): string | null {
@@ -1304,7 +1304,7 @@
     }
   }
   // Index of the first message newer than the read boundary (-1 if all read).
-  // Own messages never count as unread — sending shouldn't raise a "New messages" divider.
+  // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
   let firstUnreadIdx = $derived(messages.findIndex((m) => m.ts > dividerTs && m.author !== myFp));
 
   // Day dividers in the log ("thu 2026-08-14" between messages from different days).
@@ -1323,7 +1323,7 @@
   let draft = $state("");
   let members = $state(1);
   let roster = $state<Member[]>([]);
-  // Fingerprints of members reachable right now (a live connection) — drives the roster's online
+  // Fingerprints of members reachable right now (a live connection): drives the roster's online
   // dots + the online count. Refreshed with the roster and updated live by 'connectivity-changed'.
   let onlineMembers = $state<Set<string>>(new Set());
   // Per-member presence timing OBSERVED this session for the active server (wall-clock ms): when we
@@ -1343,7 +1343,7 @@
   });
   // The member column is split into an "online" then an "offline" group (the offline group is
   // omitted entirely when empty). Both are filtered by the roster search first. Companion
-  // devices never appear top-level — they nest under their origin (multi-device M4), and a
+  // devices never appear top-level: they nest under their origin (multi-device M4), and a
   // member counts as online when ANY of their devices is reachable.
   let memberOnline = (m: Member) =>
     m.you ||
@@ -1351,7 +1351,7 @@
     Object.entries(deviceMap).some(([fp, d]) => d.origin === m.fingerprint && onlineMembers.has(fp));
   let onlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && memberOnline(m)));
   let offlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && !memberOnline(m)));
-  // Members reachable right now (self always counts) — the roster header's "N online".
+  // Members reachable right now (self always counts): the roster header's "N online".
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
   // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
   function roleAbbr(role: string): string {
@@ -1512,7 +1512,7 @@
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
-  // My display name in the active server (per-server identity) — drives @mention self-highlight
+  // My display name in the active server (per-server identity): drives @mention self-highlight
   // and detection of mentions aimed at me. `myMentionName` is the form that round-trips through the
   // `@[Name]` marker (see `mentionName`), so insertion + detection + self-highlight all agree.
   let myName = $derived(myFp ? nameOf(myFp) : "");
@@ -1543,7 +1543,7 @@
     return (name ?? "").trim().slice(0, 2).toUpperCase() || "?";
   }
   // A member's custom message-bubble background (CSS), or "" for the default. The value comes from an
-  // untrusted profile, so allow only simple colors/gradients — no `url(...)`, `;`, `@`, `{` etc. that
+  // untrusted profile, so allow only simple colors/gradients: no `url(...)`, `;`, `@`, `{` etc. that
   // could inject CSS.
   function bubbleStyle(fp: string): string {
     const b = (profiles[fp]?.bubble ?? "").trim();
@@ -1583,7 +1583,7 @@
     return (fp.match(/.{1,4}/g) ?? [fp]).join(" ");
   }
 
-  // Server events (the calendar doc) — any member creates; author or owner/admin deletes.
+  // Server events (the calendar doc): any member creates; author or owner/admin deletes.
   type UiEvent = { id: string; title: string; body: string; start_ts: number; end_ts: number; author: string };
   let events = $state<UiEvent[]>([]);
   let evTitle = $state("");
@@ -1640,7 +1640,7 @@
   }
 
   // News feed (inbox): recent status posts + upcoming events across every server.
-  // Client-side aggregation over existing per-server invokes — nothing new on the wire.
+  // Client-side aggregation over existing per-server invokes: nothing new on the wire.
   type NewsItem = { server: number; serverName: string; kind: "status" | "event"; ts: number; text: string; author: string };
   let inboxMode = $state<"mentions" | "news">("mentions");
   let newsItems = $state<NewsItem[]>([]);
@@ -1662,7 +1662,7 @@
             if (eventLive(ev, now))
               items.push({ server: s.id, serverName: s.name, kind: "event", ts: ev.start_ts, text: ev.title, author: ev.author });
         } catch {
-          /* unreachable server actor — skip it */
+          /* unreachable server actor: skip it */
         }
       }),
     );
@@ -1848,7 +1848,7 @@
     return "📄";
   }
   // Known: none | gradient | neon | rainbow | wave | pulse. Anything else still maps to
-  // `fx-<id>` (harmless — no rule matches), but the id is stripped to [a-z0-9-] first so an
+  // `fx-<id>` (harmless: no rule matches), but the id is stripped to [a-z0-9-] first so an
   // untrusted profile can't smuggle extra class names into the span.
   function fxClass(effect: string): string {
     const id = effect.toLowerCase().replace(/[^a-z0-9-]/g, "");
@@ -1923,7 +1923,7 @@
   // The `tick()` is essential: it waits for Svelte to commit the `{@html renderMessage(...)}`
   // DOM so the [data-embed-cid]/[data-emoji] placeholders exist before we query for them.
   // Without it, on a fresh mount (app restart / HMR / tab switch) this effect runs in the
-  // same flush as the {@html} block, finds zero placeholders, and never re-runs — so embeds
+  // same flush as the {@html} block, finds zero placeholders, and never re-runs: so embeds
   // render on first send but vanish after a restart.
   $effect(() => {
     void messages;
@@ -1987,7 +1987,7 @@
     for (const span of Array.from(container.querySelectorAll<HTMLElement>("[data-emoji]:not([data-resolved])"))) {
       const code = (span.getAttribute("data-emoji") ?? "").toLowerCase();
       const url = emojiUrls[code];
-      if (!url) continue; // unknown / not loaded yet — leave :code: text, retry on update
+      if (!url) continue; // unknown / not loaded yet: leave :code: text, retry on update
       span.setAttribute("data-resolved", "1");
       const img = document.createElement("img");
       img.src = url;
@@ -2002,7 +2002,7 @@
       }
       span.replaceWith(img);
     }
-    // Re-apply sizes to already-resolved emoji — the size (from `files`) may have loaded after the
+    // Re-apply sizes to already-resolved emoji: the size (from `files`) may have loaded after the
     // image was first resolved (e.g. after returning from the inbox), which would otherwise leave a
     // sticker stuck at the default small size.
     for (const img of Array.from(container.querySelectorAll<HTMLImageElement>("img.emoji[data-emoji-code]"))) {
@@ -2051,7 +2051,7 @@
   }
 
   // Default unicode emoji, shown under the server's custom set (Discord-style). Curated,
-  // not exhaustive — cats lead, obviously.
+  // not exhaustive: cats lead, obviously.
   const EMOJI_SETS: { label: string; list: string[] }[] = [
     { label: "cats & critters", list: ["🐱", "🐈", "🐈‍⬛", "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "🐾", "🐶", "🦊", "🐺", "🐻", "🐼", "🐸", "🦉", "🦄", "🐝", "🦋", "🐢", "🐍", "🐙", "🦀", "🐬", "🦈"] },
     { label: "smileys", list: ["😀", "😄", "😁", "😆", "😅", "😂", "🤣", "🙂", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😋", "😜", "🤪", "😎", "🥳", "😏", "😒", "😞", "😢", "😭", "😤", "😠", "🤯", "😳", "🥺", "😱", "😨", "😴", "🤤", "🫠", "🤔", "🤨", "🫡", "🤗", "🤫", "🤭", "🙄", "😬", "😶"] },
@@ -2197,7 +2197,7 @@
         ? await invoke<boolean>("send_dm_invite", { server: sourceServer, targetFp: fp, inviteHex: invite })
         : false;
       notice = sent
-        ? `Friend request sent to ${name} — they'll see it in their DMs.`
+        ? `Friend request sent to ${name}: they'll see it in their DMs.`
         : `Couldn't reach ${name} right now. Open DMs to share a friend code instead.`;
     } catch (e) {
       error = String(e);
@@ -2213,7 +2213,7 @@
       const others = dmRequests.filter((r) => r.server !== server);
       dmRequests = [...others, ...reqs.map((r) => ({ server, ...r }))];
     } catch {
-      /* a server that's gone / mid-shutdown — ignore */
+      /* a server that's gone / mid-shutdown: ignore */
     }
   }
 
@@ -2266,7 +2266,7 @@
     if (dmList.length) switchServer(dmList[0].id);
     else {
       activeServerId = null;
-      clearServerView(); // no active group — drop the previous server's stale messages/roster/etc.
+      clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
     }
   }
   // Reset the per-server display collections (used when there is no active group, so nothing from a
@@ -2383,7 +2383,7 @@
   }
 
   // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
-  // channel) — everything else closes the search bar, as before.
+  // channel): everything else closes the search bar, as before.
   async function switchTo(id: string, keepSearch = false) {
     if (!cur) return;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
@@ -2446,7 +2446,7 @@
   // Delivery states for OWN messages (docs/design-delivery-states.md). Evidence-based lower
   // bounds: a member is counted only once it has provably built on the message, so counts
   // only rise and 0 means "no proof yet", never "failed". Red is reserved for the one true
-  // negative signal we have — no peers reachable at all.
+  // negative signal we have: no peers reachable at all.
   type DeliveryState = { id: string; delivered: number; reachable: number };
   let delivery = $state<Record<string, DeliveryState>>({});
   async function refreshDelivery() {
@@ -2460,7 +2460,7 @@
       for (const s of list) map[s.id] = s;
       delivery = map;
     } catch {
-      delivery = {}; // older backend or closed actor — ticks simply don't render
+      delivery = {}; // older backend or closed actor: ticks simply don't render
     }
   }
   // The gutter tick for one of your messages: ✕ no peers · ◌ no proof yet · ~ partial ·
@@ -2468,19 +2468,19 @@
   function deliveryTick(m: Msg): { g: string; cls: string; tip: string } | null {
     if (m.author !== myFp || !m.id) return null;
     const total = Math.max(members - 1, 0);
-    if (total === 0) return null; // alone here — nothing to deliver to
+    if (total === 0) return null; // alone here: nothing to deliver to
     const d = delivery[m.id];
     const del = d?.delivered ?? 0;
     const reach = d?.reachable ?? Math.max(onlineCount - 1, 0);
     if (del >= total)
-      return { g: "✓✓", cls: "d-all", tip: `Delivered to everyone — all ${total} other member${total === 1 ? "" : "s"} proved they hold this message.` };
+      return { g: "✓✓", cls: "d-all", tip: `Delivered to everyone: all ${total} other member${total === 1 ? "" : "s"} proved they hold this message.` };
     if (reach === 0)
-      return { g: "✕", cls: "d-none", tip: "No peers reachable — queued; it gossips automatically when members reconnect. Not lost." };
+      return { g: "✕", cls: "d-none", tip: "No peers reachable: queued; it gossips automatically when members reconnect. Not lost." };
     if (del >= reach)
-      return { g: "✓", cls: "d-ok", tip: `Delivered to all ${reach} reachable member${reach === 1 ? "" : "s"} (${del}/${total} confirmed overall). Confirmation is proof-based — silent receivers may also have it.` };
+      return { g: "✓", cls: "d-ok", tip: `Delivered to all ${reach} reachable member${reach === 1 ? "" : "s"} (${del}/${total} confirmed overall). Confirmation is proof-based: silent receivers may also have it.` };
     if (del > 0)
-      return { g: "~", cls: "d-part", tip: `Delivering — ${del} of ${reach} reachable confirmed (${total} members in total). Members confirm by building on the message.` };
-    return { g: "◌", cls: "d-wait", tip: `Sent — no confirmations yet from ${reach} reachable member${reach === 1 ? "" : "s"}. Silent receipt isn't visible; the count only rises.` };
+      return { g: "~", cls: "d-part", tip: `Delivering: ${del} of ${reach} reachable confirmed (${total} members in total). Members confirm by building on the message.` };
+    return { g: "◌", cls: "d-wait", tip: `Sent: no confirmations yet from ${reach} reachable member${reach === 1 ? "" : "s"}. Silent receipt isn't visible; the count only rises.` };
   }
   async function refreshMembers() {
     const id = activeServerId;
@@ -2488,7 +2488,7 @@
     try {
       const r = await invoke<Member[]>("get_members", { server: id });
       const online = await invoke<string[]>("get_online_members", { server: id });
-      if (activeServerId !== id) return; // server switched mid-fetch — drop stale results
+      if (activeServerId !== id) return; // server switched mid-fetch: drop stale results
       roster = r;
       members = r.length;
       onlineMembers = new Set(online);
@@ -2521,7 +2521,7 @@
   }
 
   // The availability of a file for the browser indicator: held locally / partially downloaded /
-  // fetchable from peers / no peers online — or actively downloading. Reactive (reads files,
+  // fetchable from peers / no peers online: or actively downloading. Reactive (reads files,
   // downloads, hasPeers). The colour conveys it; `label` is the status text.
   type Avail = { cls: string; icon: string; label: string };
   function availOf(f: UiFile): Avail {
@@ -2792,12 +2792,12 @@
     ];
     if (!m.you) {
       items.push({
-        label: verifiedFps.has(m.fingerprint) ? "Verified — review…" : "Verify identity…",
+        label: verifiedFps.has(m.fingerprint) ? "Verified: review…" : "Verify identity…",
         icon: "✓",
         onSelect: () => (verifyFor = m.fingerprint),
       });
     }
-    // Add a friend in-band (only for an online member of a server — not in a DM, not yourself).
+    // Add a friend in-band (only for an online member of a server: not in a DM, not yourself).
     if (!m.you && !cur?.isDm && isOnline) {
       items.push({ divider: true });
       items.push({ label: "Add friend (DM)", icon: "👋", onSelect: () => startDmWithMember(m.fingerprint) });
@@ -3115,7 +3115,7 @@
           path: myEmbedFolder,
           data: await readBase64(file),
         });
-        // Brackets in the alt would break the `![alt](cid:…)` marker parse — strip them.
+        // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
         const alt = file.name.replace(/[[\]]/g, " ");
         const marker = `![${alt}](cid:${cid})`;
         if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
@@ -3168,7 +3168,7 @@
   }
 
   // Replace `[data-embed-cid]` placeholders (from the renderer) with media built in code from
-  // the group's own content-addressed blobs — never via untrusted innerHTML, so a peer's text
+  // the group's own content-addressed blobs: never via untrusted innerHTML, so a peer's text
   // can't inject a live tag or remote URL. Only media MIME types embed; others get a chip.
   async function resolveMedia(container: HTMLElement | undefined) {
     if (!container || activeServerId === null) return;
@@ -3180,7 +3180,7 @@
         continue;
       }
       const file = files.find((f) => f.cid === cid);
-      if (!file) continue; // not in the index yet — retry when `files` updates
+      if (!file) continue; // not in the index yet: retry when `files` updates
       span.setAttribute("data-resolved", "1");
       const mime = safeMime(file.mime);
       const alt = span.getAttribute("data-alt") || file.name || "";
@@ -3194,7 +3194,7 @@
           const base64 = await invoke<string>("download_file", { server: activeServerId, cid });
           url = `data:${mime};base64,${base64}`;
           embedCache.set(cid, url);
-          // Bound the cache (each entry is a full decrypted blob) — FIFO-evict the oldest.
+          // Bound the cache (each entry is a full decrypted blob): FIFO-evict the oldest.
           if (embedCache.size > 48) {
             const oldest = embedCache.keys().next().value;
             if (oldest !== undefined) embedCache.delete(oldest);
@@ -3235,7 +3235,7 @@
       a.click();
       a.remove();
       if (downloads[key]) downloads[key].status = "done";
-      refreshFiles(); // the file's chunks are now held locally — update its availability
+      refreshFiles(); // the file's chunks are now held locally: update its availability
     } catch (e) {
       error = String(e);
       if (downloads[key]) downloads[key].status = "failed";
@@ -3251,7 +3251,7 @@
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
   // Tracked downloads keyed by file cid, for the Downloads tab + the file-info progress bar. Driven
   // by 'download-progress' events (per-chunk) from the actor. Only EXPLICIT downloads (the Download
-  // button) are tracked here — background embed/preview fetches emit progress but create no entry.
+  // button) are tracked here: background embed/preview fetches emit progress but create no entry.
   type DownloadInfo = {
     server: number;
     cid: string;
@@ -3281,7 +3281,7 @@
         delete downloads[k];
     }
   }
-  // Advisory eclipse hint for the active server (the node may be isolated — verify a member out of
+  // Advisory eclipse hint for the active server (the node may be isolated: verify a member out of
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
   let eclipseCaution = $state(false);
 
@@ -3308,7 +3308,7 @@
         // Guard against a race where the pane was closed/switched while fetching.
         if (fileInfo?.cid === f.cid) fileInfoPreview = `data:${f.mime};base64,${base64}`;
       } catch {
-        // The fetch failed (not held locally + no peer sharing it) — surface that instead of
+        // The fetch failed (not held locally + no peer sharing it): surface that instead of
         // leaving "Loading preview…" up forever.
         if (fileInfo?.cid === f.cid) fileInfoPreviewError = true;
       }
@@ -3390,7 +3390,7 @@
   // --- "+" insert picker: link/embed this server's own content into the message -----------------
   // Everything the group already holds is addressable from the composer: a fileshare file (inline
   // embed for media, a link chip otherwise), one of YOUR status posts, or a wiki page. Each inserts
-  // a marker the shared renderer resolves — nothing here leaves the group or touches the network.
+  // a marker the shared renderer resolves: nothing here leaves the group or touches the network.
   type InsertTab = "files" | "status" | "wiki" | "events";
   let showInsert = $state(false);
   let insertTab = $state<InsertTab>("files");
@@ -3406,7 +3406,7 @@
       .filter((f) => !q || f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q))
       .slice(0, 80);
   });
-  // "recent statuses we posted" — your own posts, newest first. A status with no id predates the
+  // "recent statuses we posted": your own posts, newest first. A status with no id predates the
   // stable-id slice and can't be addressed, so it's skipped rather than offered and broken.
   let insertStatuses = $derived.by(() => {
     const q = insertQuery.trim().toLowerCase();
@@ -3419,7 +3419,7 @@
   let insertWikiPages = $derived(
     wikiPages.filter((p) => !insertQuery.trim() || p.toLowerCase().includes(insertQuery.trim().toLowerCase())).slice(0, 80),
   );
-  // Upcoming first (soonest at the top), then recent past — anything addressable.
+  // Upcoming first (soonest at the top), then recent past: anything addressable.
   let insertEvents = $derived.by(() => {
     const q = insertQuery.trim().toLowerCase();
     const hit = (e: UiEvent) => !q || e.title.toLowerCase().includes(q);
@@ -3600,7 +3600,7 @@
   // unseen message that @-mentions me or replies to one of my messages (drives the sidebar badge).
   let mentionChannels = $state<Set<string>>(new Set());
   // Best-effort, name-based: collisions (two members with the same display name both match) and
-  // renames (old markers orphan) are accepted for advisory metadata — the `@[Name]` wire form keeps
+  // renames (old markers orphan) are accepted for advisory metadata: the `@[Name]` wire form keeps
   // the renderer member-list-free. `myMentionName` matches what `pickMention` would have inserted.
   function mentionsMe(text: string): boolean {
     return !!myMentionName && text.includes(`@[${myMentionName}]`);
@@ -3656,7 +3656,7 @@
     if (it.server !== activeServerId) await switchServer(it.server);
     view = "chat";
     // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
-    // sidebar list — register it so it renders + selects, then switch to it.
+    // sidebar list: register it so it renders + selects, then switch to it.
     if (cur && !cur.channels.some((c) => c.id === it.channel)) {
       cur.channels = [...cur.channels, { id: it.channel, name: inboxChannelName(it) }];
     }
@@ -3749,8 +3749,8 @@
     }
   }
   // Server-provided TURN: the operator sets one TURN endpoint (Server settings) that rides along
-  // the invite string, so members don't each have to configure a relay. It's only a hint — media is
-  // E2E (DTLS-SRTP), so a hostile/foreign TURN relays ciphertext at worst — hence no signing needed.
+  // the invite string, so members don't each have to configure a relay. It's only a hint: media is
+  // E2E (DTLS-SRTP), so a hostile/foreign TURN relays ciphertext at worst: hence no signing needed.
   type TurnCfg = { urls: string; username: string; credential: string };
   function serverTurnKey(id: number): string {
     return `catcoms.server.turn.${id}`;
@@ -3811,7 +3811,7 @@
     try {
       await invoke("send_call_signal", { server: callServer, targetFp, payload: b64enc(JSON.stringify(msg)) });
     } catch {
-      /* peer unreachable — ignore (mesh tolerates a missing edge) */
+      /* peer unreachable: ignore (mesh tolerates a missing edge) */
     }
   }
   // Send a signal to every online member of the call's server.
@@ -3892,7 +3892,7 @@
   function channelNameFor(server: number, channel: string): string {
     return servers.find((s) => s.id === server)?.channels.find((c) => c.id === channel)?.name ?? "voice";
   }
-  // Notify (chime + banner) when a room I'm NOT in just became active — gated by the server setting.
+  // Notify (chime + banner) when a room I'm NOT in just became active: gated by the server setting.
   function maybeNotifyRoom(server: number, channel: string, wasActive: boolean) {
     if (wasActive) return;
     const key = roomKey(server, channel);
@@ -3965,7 +3965,7 @@
       maybeNotifyRoom(server, cid, wasActive);
       if (type === "voice-ping") return; // presence only
     }
-    // WebRTC negotiation — only for MY current room.
+    // WebRTC negotiation: only for MY current room.
     if (!inCall || cid !== callChannel) return;
     if (type === "hello") {
       if (callPeers[fromFp]) return;
@@ -4002,7 +4002,7 @@
     draft = (key && drafts[key]) || "";
   }
 
-  // Wrap the composer's selection (or insert at the caret) with markdown markers — the formatting
+  // Wrap the composer's selection (or insert at the caret) with markdown markers: the formatting
   // toolbar's bold/italic/etc. After it, the wrapped text stays selected so toggling reads naturally.
   function wrapSelection(before: string, after = before) {
     const ta = composerEl;
@@ -4131,12 +4131,12 @@
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {
-      // Clipboard may be unavailable in the webview — the textarea allows manual copy.
+      // Clipboard may be unavailable in the webview: the textarea allows manual copy.
     }
   }
 
   let mintingInvite = $state(false);
-  // Mint a fresh single-use invite on demand (owner or admin — the backend gates on can_invite).
+  // Mint a fresh single-use invite on demand (owner or admin: the backend gates on can_invite).
   // The new invite carries the live bootstrap address, so it works even after a restart changed
   // the listen port. An admin's invitee is owner-serialized (admitted when the owner is online).
   async function generateInvite() {
@@ -4199,7 +4199,7 @@
         if (server === activeServerId && channel === cur?.active) {
           refreshTopic(); // topic edits ride the same channel-updated event
           refresh().then(() => {
-            // You're looking at this channel — only chime if the window isn't focused; use the
+            // You're looking at this channel: only chime if the window isn't focused; use the
             // mention chime if the just-arrived (newest) message is aimed at you.
             if (document.hasFocus()) return;
             const last = messages[messages.length - 1];
@@ -4217,16 +4217,16 @@
           if (!s.unread.includes(channel)) s.unread.push(channel);
           if (server !== activeServerId) s.dot = true;
           if (server !== activeServerId) {
-            playNotify(); // another server — no per-server identity here to detect a mention
+            playNotify(); // another server: no per-server identity here to detect a mention
           } else if (mentionChannels.has(channel)) {
-            playMention(); // already a known mention channel — new activity is still aimed at me
+            playMention(); // already a known mention channel: new activity is still aimed at me
           } else {
             // A non-active channel of the server I'm in: scan it for a message that @-mentions me or
             // replies to one of mine. A hit gets the distinct mention chime + a badge; else the
             // generic chime. (Already-badged channels are handled above without a re-scan.)
             invoke<Msg[]>("get_messages", { server, channel })
               .then((msgs) => {
-                if (server !== activeServerId) return; // switched servers mid-fetch — drop it
+                if (server !== activeServerId) return; // switched servers mid-fetch: drop it
                 if (targetsMe(channel, msgs)) {
                   if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
                   playMention();
@@ -4292,7 +4292,7 @@
         if (e.payload.server === activeServerId) refreshDevices();
       }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
-        // A friend request may have arrived over ANY server (active or not) — refresh that server's.
+        // A friend request may have arrived over ANY server (active or not): refresh that server's.
         refreshDmRequests(e.payload.server);
       }),
       listen<{ server: number; from_fp: string; payload: string }>("call-signal", (e) => {
@@ -4314,7 +4314,7 @@
               delete onlineSince[fp];
             }
           onlineMembers = next;
-          refreshFiles(); // a peer came/went — re-evaluate the availability hint (has_peers)
+          refreshFiles(); // a peer came/went: re-evaluate the availability hint (has_peers)
         }
       }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
@@ -4675,7 +4675,7 @@
 
 <!--
   The sidebar's contextual block: what the sidebar shows depends on the surface selected in the
-  content column's surface strip. Shared by the server and DM sidebars — `dm` suppresses the blocks
+  content column's surface strip. Shared by the server and DM sidebars: `dm` suppresses the blocks
   that only make sense on a server (channels, the status feed's blurb).
 -->
 {#snippet contextNav(dm: boolean)}
@@ -4731,11 +4731,11 @@
         <span class="ev-side-title">{e.title}</span>
       </div>
     {:else}
-      <p class="muted small">Nothing scheduled — add an event on the right.</p>
+      <p class="muted small">Nothing scheduled: add an event on the right.</p>
     {/each}
   {:else if view === "status" && !dm}
     <h3><span>Status</span></h3>
-    <p class="muted small">A slow feed for this server — one post at a time, no replies.</p>
+    <p class="muted small">A slow feed for this server: one post at a time, no replies.</p>
   {:else if !dm}
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
     <ul class="channel-list">
@@ -4789,14 +4789,14 @@
 <main>
   {#if eclipseCaution && activeServerId !== null && !locked}
     <div class="eclipse-banner" role="status">
-      ⚠ You may be isolated from this server — few members are reachable. Verify a member out of band.
+      ⚠ You may be isolated from this server: few members are reachable. Verify a member out of band.
     </div>
   {/if}
   {#if locked}
     <div class="start">
       <h1>CatComs</h1>
       <p class="muted">
-        Unlock your servers — with a passphrase, a spell, or a tune. All three seal the
+        Unlock your servers: with a passphrase, a spell, or a tune. All three seal the
         same vault; pick the one you'll actually remember.
       </p>
       <div class="ul-tabs" role="tablist">
@@ -4820,7 +4820,7 @@
         </label>
       {:else if unlockMethod === "spell"}
         <p class="muted small">
-          Cast your unlock spell — the same glyphs, in the same order, every time. Memorable,
+          Cast your unlock spell: the same glyphs, in the same order, every time. Memorable,
           but weaker than a good passphrase; longer spells are stronger.
         </p>
         <div class="spell-grid">
@@ -4838,11 +4838,11 @@
           {/if}
         </div>
         {#if spellSeq.length}
-          <div class="ul-meter {bitsTier(spellBits)}">≈ {spellBits} bits{spellBits < 28 ? " — too short, add more glyphs" : spellBits < 44 ? " — okay; longer is stronger" : " — strong"}</div>
+          <div class="ul-meter {bitsTier(spellBits)}">≈ {spellBits} bits{spellBits < 28 ? ": too short, add more glyphs" : spellBits < 44 ? ": okay; longer is stronger" : ": strong"}</div>
         {/if}
       {:else}
         <p class="muted small">
-          Play your unlock tune — octaves count (C6 is not C4), notes played together are one
+          Play your unlock tune: octaves count (C6 is not C4), notes played together are one
           chord, and how long you hold sets the note value. On-screen keys, the
           <span class="fp">a w s e d f t g y h u j</span> row (<span class="fp">z</span>/<span class="fp">x</span> shift register,
           <span class="fp">1</span>–<span class="fp">7</span> jump to it), and a MIDI keyboard all feed the same staff.
@@ -4936,16 +4936,16 @@
             <button type="button" class="ghost small" title="Remove the last note (Backspace)" onclick={() => { stopPlayback(); melodySeq = melodySeq.slice(0, -1); }}>⌫</button>
             <button type="button" class="ghost small" onclick={() => { stopPlayback(); melodySeq = []; }}>Clear</button>
           {:else}
-            <span class="muted small">No notes yet — hold a key to write one.</span>
+            <span class="muted small">No notes yet: hold a key to write one.</span>
           {/if}
         </div>
         {#if melodySeq.length}
-          <div class="ul-meter {bitsTier(melodyBits)}">≈ {melodyBits} bits{melodyBits < 28 ? " — too short, keep playing" : melodyBits < 44 ? " — okay; longer is stronger" : " — strong"}</div>
+          <div class="ul-meter {bitsTier(melodyBits)}">≈ {melodyBits} bits{melodyBits < 28 ? ": too short, keep playing" : melodyBits < 44 ? ": okay; longer is stronger" : ": strong"}</div>
         {/if}
         {#if melodyRhythm}
           <p class="muted small">
             Hold length becomes the note: under {DUR_MAX_MS[0]}ms an eighth, under {DUR_MAX_MS[1]}ms a
-            quarter, under {DUR_MAX_MS[2]}ms a half, longer a whole. Rhythm is part of the secret —
+            quarter, under {DUR_MAX_MS[2]}ms a half, longer a whole. Rhythm is part of the secret:
             turn it off above if you'd rather the tune be pitches only.
           </p>
         {/if}
@@ -4953,7 +4953,7 @@
       {/if}
       {#if error}<p class="error">{error}</p>{/if}
       <p class="muted small">
-        First run: whatever you enter here <em>becomes</em> the vault secret — practice your
+        First run: whatever you enter here <em>becomes</em> the vault secret: practice your
         sequence before committing, and prefer a passphrase for the strongest protection.
         There is no recovery.
       </p>
@@ -4975,7 +4975,7 @@
         <summary>Network (optional)</summary>
         <label class="field">
           <span class="muted">
-            Reachable address so others can join over a network — your LAN IP (e.g.
+            Reachable address so others can join over a network: your LAN IP (e.g.
             192.168.1.5), or a public IP / host:port if port-forwarded. Leave blank for
             same-machine only.
           </span>
@@ -4983,14 +4983,14 @@
         </label>
         <label class="field">
           <span class="muted">
-            Relay address (optional) — paste a relay node's multiaddr to be reachable over
+            Relay address (optional): paste a relay node's multiaddr to be reachable over
             the internet with no port-forward (zero-config NAT traversal).
           </span>
           <input bind:value={relay} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
         </label>
         <label class="field">
           <span class="muted">
-            Rendezvous address (optional) — paste a rendezvous node's multiaddr to register there,
+            Rendezvous address (optional): paste a rendezvous node's multiaddr to register there,
             so people can join with <em>just the invite</em> (no address needed). Saved as your
             default.
           </span>
@@ -5012,13 +5012,13 @@
         <p class="muted small">
           Your other device stays the master: it will show a code and ask permission before
           this device gets anything. Server admission for linked devices arrives with the
-          next protocol slice — the grant is stored until then.
+          next protocol slice: the grant is stored until then.
         </p>
         {#if !pairBlob}
           <button class="ghost" onclick={pairBegin}>Generate pairing code</button>
         {:else}
           {#if pairDeviceId}
-            <p class="muted small">This device's code: <span class="fp">{pairDeviceId.slice(0, 8)}</span> — the master shows the same one.</p>
+            <p class="muted small">This device's code: <span class="fp">{pairDeviceId.slice(0, 8)}</span>: the master shows the same one.</p>
           {/if}
           <textarea class="invite-code" rows="3" readonly value={pairBlob}></textarea>
           <canvas class="qr-canvas" use:qr={pairBlob}></canvas>
@@ -5042,13 +5042,13 @@
               <ul class="pair-results">
                 {#each pairJoinResults as r (r.name)}
                   <li class:ok={r.ok} class:err={!r.ok}>
-                    {r.ok ? "✓" : "✕"} {r.name}{r.error ? ` — ${r.error}` : ""}
+                    {r.ok ? "✓" : "✕"} {r.name}{r.error ? `: ${r.error}` : ""}
                   </li>
                 {/each}
               </ul>
               {#if pairJoinResults.some((r) => !r.ok)}
                 <p class="muted small">
-                  A failed server keeps its grant — the usual cause is its owner being offline
+                  A failed server keeps its grant: the usual cause is its owner being offline
                   (your admission is queued and completes when they return). Retry any time.
                 </p>
               {/if}
@@ -5077,7 +5077,7 @@
         <button
           class="server-icon inbox-circle"
           class:active={inboxView}
-          title="Inbox — mentions & replies"
+          title="Inbox: mentions & replies"
           onclick={openInbox}
         >
           {@render icoInbox()}
@@ -5147,7 +5147,7 @@
               {/if}
               <h3 class="ev-h"><span>Recent status</span></h3>
               {#if !newsFeed.length}
-                <p class="muted inbox-empty">No status posts yet — servers' Status surfaces feed this.</p>
+                <p class="muted inbox-empty">No status posts yet: servers' Status surfaces feed this.</p>
               {:else}
                 <ul class="inbox-list">
                   {#each newsFeed as n (n.server + ":" + n.ts + ":" + n.author)}
@@ -5170,7 +5170,7 @@
           {:else if !inboxItems.length}
             <p class="muted inbox-empty">
               Nothing yet. When someone <strong>@-mentions</strong> you or <strong>replies</strong> to one of your
-              messages, it shows up here — with who said it, where, and a jump straight to it.
+              messages, it shows up here: with who said it, where, and a jump straight to it.
             </p>
           {:else}
             <ul class="inbox-list">
@@ -5260,12 +5260,12 @@
                 </button>
               </li>
             {:else}
-              <li class="muted">No DMs yet — start one or accept a friend code.</li>
+              <li class="muted">No DMs yet: start one or accept a friend code.</li>
             {/each}
           </ul>
           {#if cur?.isDm && cur.invite}
             <div class="dm-code">
-              <span class="muted small">Friend code for {cur.name} — share it to connect:</span>
+              <span class="muted small">Friend code for {cur.name}: share it to connect:</span>
               <textarea class="invite-code" readonly rows="2" value={cur.invite}></textarea>
               <button class="ghost small" onclick={copyInvite}>Copy code</button>
             </div>
@@ -5292,7 +5292,7 @@
         {#if dmHome && !cur}
           <div class="dm-placeholder">
             <h2>Direct messages</h2>
-            <p class="muted">Pick a conversation on the left, or start a <strong>New DM</strong> / <strong>Add a friend</strong> with their code. A DM is a private, end-to-end-encrypted 1:1 — your identity here stays unlinkable to your servers.</p>
+            <p class="muted">Pick a conversation on the left, or start a <strong>New DM</strong> / <strong>Add a friend</strong> with their code. A DM is a private, end-to-end-encrypted 1:1: your identity here stays unlinkable to your servers.</p>
           </div>
         {:else}
         {#if cur}
@@ -5384,7 +5384,7 @@
               <input
                 bind:this={searchInput}
                 value={searchQuery}
-                placeholder={filterCount ? "Filtering — add text to narrow further…" : "Search this channel…"}
+                placeholder={filterCount ? "Filtering: add text to narrow further…" : "Search this channel…"}
                 oninput={(e) => onSearchInput(e.currentTarget.value)}
                 onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); stepMatch(e.shiftKey ? -1 : 1); } else if (e.key === "Escape") { e.preventDefault(); closeSearch(); } }}
               />
@@ -5508,7 +5508,7 @@
                   {/each}
                 </ul>
                 {#if searchMatches.length > SEARCH_RESULT_CAP}
-                  <p class="muted small sa-more">Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length} — narrow the filters to see the rest.</p>
+                  <p class="muted small sa-more">Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length}: narrow the filters to see the rest.</p>
                 {/if}
               {:else if searchQuery.trim() || filterCount}
                 <p class="muted small sa-more">
@@ -5655,7 +5655,7 @@
                 </div>
               </li>
             {:else}
-              <li class="muted">No messages yet — say hello.</li>
+              <li class="muted">No messages yet: say hello.</li>
             {/each}
           </ul>
           <div class="composer-wrap">
@@ -5750,7 +5750,7 @@
                         <span class="ip-mode">link</span>
                       </div>
                     {:else}
-                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No events match that." : "No events on this server yet — add one on the ⧗ Events surface."}</p>
+                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No events match that." : "No events on this server yet: add one on the ⧗ Events surface."}</p>
                     {/each}
                   {:else}
                     {#each insertWikiPages as p}
@@ -6060,7 +6060,7 @@
               <textarea bind:value={evBody} rows="2" maxlength="1024" placeholder="Details (optional)"></textarea>
               <button disabled={!evTitle.trim() || !evStart}>Create event</button>
             </form>
-            <h3 class="ev-h"><span>Upcoming — {upcomingEvents.length}</span></h3>
+            <h3 class="ev-h"><span>Upcoming: {upcomingEvents.length}</span></h3>
             <ul class="event-list">
               {#each upcomingEvents as e (e.id)}
                 <li class="event-row" class:flash={flashEventId === e.id}>
@@ -6083,7 +6083,7 @@
               {/each}
             </ul>
             {#if pastEvents.length}
-              <h3 class="ev-h"><span>Past — {pastEvents.length}</span></h3>
+              <h3 class="ev-h"><span>Past: {pastEvents.length}</span></h3>
               <ul class="event-list past">
                 {#each pastEvents as e (e.id)}
                   <li class="event-row">
@@ -6156,7 +6156,7 @@
             <p class="muted small">No matching members.</p>
           {/if}
           {#if onlineRoster.length}
-            <h3><span>online — {onlineRoster.length}</span></h3>
+            <h3><span>online: {onlineRoster.length}</span></h3>
             <ul>
               {#each onlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, true)}
@@ -6165,7 +6165,7 @@
             </ul>
           {/if}
           {#if offlineRoster.length}
-            <h3><span>offline — {offlineRoster.length}</span></h3>
+            <h3><span>offline: {offlineRoster.length}</span></h3>
             <ul>
               {#each offlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, false)}
@@ -6187,7 +6187,7 @@
       {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
       {#if activeDownloads}<span class="seg"><span class="warn-t">⇣ {activeDownloads} transfer{activeDownloads === 1 ? "" : "s"}</span></span>{/if}
       <span class="sb-spacer"></span>
-      {#if myFp}<span class="seg" title="Your fingerprint on this server — click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
+      {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
 
     {#if inCall}
@@ -6275,24 +6275,24 @@
           </header>
           <div class="overlay-body">
             <p class="muted small">
-              Compare these fingerprints over a channel you already trust — a voice call, video,
+              Compare these fingerprints over a channel you already trust: a voice call, video,
               or in person. If both match, you're talking to the real device: no relay or network
-              position can forge a fingerprint. Marking someone verified is a note for yourself —
+              position can forge a fingerprint. Marking someone verified is a note for yourself:
               it's stored only on this device and never shared.
             </p>
             <div class="vf-block">
-              <span class="vf-label">their fingerprint — {nameOf(vfp)} reads this to you</span>
+              <span class="vf-label">their fingerprint: {nameOf(vfp)} reads this to you</span>
               <code class="vf-fp">{fmtFp(vfp)}</code>
             </div>
             <div class="vf-block">
-              <span class="vf-label">your fingerprint — you read this to them</span>
+              <span class="vf-label">your fingerprint: you read this to them</span>
               <code class="vf-fp">{fmtFp(myFp)}</code>
             </div>
             <div class="pc-actions">
               {#if verifiedFps.has(vfp)}
                 <button class="ghost" onclick={() => setVerified(vfp, false)}>Remove verified mark</button>
               {:else}
-                <button onclick={() => { setVerified(vfp, true); verifyFor = null; }}>✓ They match — mark verified</button>
+                <button onclick={() => { setVerified(vfp, true); verifyFor = null; }}>✓ They match: mark verified</button>
               {/if}
               <button class="ghost" onclick={() => copyText(`you: ${fmtFp(myFp)}\nthem (${nameOf(vfp)}): ${fmtFp(vfp)}`)}>Copy both</button>
             </div>
@@ -6344,9 +6344,9 @@
                   <div class="grant-sas">{linkInfo.deviceId.slice(0, 8)}</div>
                   <p class="muted small">
                     <strong>The check:</strong> the new device shows this same 8-character device
-                    code on its screen — confirm they match before accepting.
+                    code on its screen: confirm they match before accepting.
                     <br />After you deliver the grant, the new device will also show code
-                    <span class="fp">{fmtSas(linkInfo.sas)}</span> — verify it there as the final
+                    <span class="fp">{fmtSas(linkInfo.sas)}</span>: verify it there as the final
                     step. Context (advisory only): pairing code pasted locally, just now.
                   </p>
                   <p class="muted small">
@@ -6360,13 +6360,13 @@
                   </label>
                   <label class="field">
                     <span class="muted small">
-                      Transport passphrase (min 8 characters) — seals the grant for the trip; type
+                      Transport passphrase (min 8 characters): seals the grant for the trip; type
                       it again on the new device. Not your vault passphrase.
                     </span>
                     <input type="password" bind:value={linkPass} placeholder="transport passphrase" />
                   </label>
                   <div class="pc-actions">
-                    <button disabled={linkBusy || linkPass.length < 8 || !linkName.trim()} onclick={linkMint}>✓ Codes match — grant access</button>
+                    <button disabled={linkBusy || linkPass.length < 8 || !linkName.trim()} onclick={linkMint}>✓ Codes match: grant access</button>
                     <button class="ghost" onclick={() => closeLinkDevice(true)}>Decline</button>
                   </div>
                 </div>
@@ -6374,13 +6374,13 @@
             {:else}
               <p class="muted small">
                 Grant minted for this device's servers. Carry it to the new device (paste it there
-                with the transport passphrase). It is sealed — but treat it like a key until used.
+                with the transport passphrase). It is sealed: but treat it like a key until used.
               </p>
               <textarea class="invite-code" rows="4" readonly value={linkBundle}></textarea>
               {#if linkBundle.length <= QR_MAX_CHARS}
                 <canvas class="qr-canvas" use:qr={linkBundle}></canvas>
               {:else}
-                <p class="muted small">Too large for a QR — copy/paste it.</p>
+                <p class="muted small">Too large for a QR: copy/paste it.</p>
               {/if}
               <div class="pc-actions">
                 <button class="ghost" onclick={() => copyText(linkBundle)}>Copy grant</button>
@@ -6420,7 +6420,7 @@
                 {/each}
               </div>
               <div class="field" style="margin-top:8px">
-                <span class="muted small">Accent override — keep the preset's mood, swap the highlight colour</span>
+                <span class="muted small">Accent override: keep the preset's mood, swap the highlight colour</span>
                 <div class="accent-row">
                   {#each ACCENT_CHOICES as a (a)}
                     <button
@@ -6449,7 +6449,7 @@
                   checked={appearance.density === "compact"}
                   onchange={() => (appearance = { ...appearance, density: appearance.density === "compact" ? "" : "compact" })}
                 />
-                <span>Compact density — tighter rows, smaller text, more on screen</span>
+                <span>Compact density: tighter rows, smaller text, more on screen</span>
               </label>
               <label class="toggle">
                 <input
@@ -6457,7 +6457,7 @@
                   checked={appearance.chrome !== "clean"}
                   onchange={() => (appearance = { ...appearance, chrome: appearance.chrome === "clean" ? "terminal" : "clean" })}
                 />
-                <span>Terminal chrome — scanlines &amp; glow on the frame</span>
+                <span>Terminal chrome: scanlines &amp; glow on the frame</span>
               </label>
               <label class="toggle">
                 <input
@@ -6465,7 +6465,7 @@
                   checked={appearance.flat}
                   onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
                 />
-                <span>Flatten messages — ignore other members' custom bubble backgrounds</span>
+                <span>Flatten messages: ignore other members' custom bubble backgrounds</span>
               </label>
               <label class="toggle">
                 <input
@@ -6473,7 +6473,7 @@
                   checked={appearance.icons === "flat"}
                   onchange={() => (appearance = { ...appearance, icons: appearance.icons === "flat" ? "" : "flat" })}
                 />
-                <span>Flat server icons — monograms instead of uploaded images</span>
+                <span>Flat server icons: monograms instead of uploaded images</span>
               </label>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <label class="toggle">
@@ -6494,8 +6494,8 @@
             <section class="set-section">
               <h3>Devices</h3>
               <p class="muted small">
-                Link another device to your identity. The new device gets its own key — nothing
-                is copied — and nothing at all happens until you approve it here on this device.
+                Link another device to your identity. The new device gets its own key: nothing
+                is copied: and nothing at all happens until you approve it here on this device.
               </p>
               <button class="ghost" onclick={() => (showLinkDevice = true)}>⛓ Link a new device…</button>
             </section>
@@ -6517,7 +6517,7 @@
                 (still encrypted) audio when a direct path can't be made. Blank STUN for LAN-only.
               </p>
               <label class="field">
-                <span class="muted small">STUN server(s) — space/comma separated</span>
+                <span class="muted small">STUN server(s): space/comma separated</span>
                 <input bind:value={callStun} placeholder="stun:stun.l.google.com:19302" />
               </label>
               <label class="field">
@@ -6559,7 +6559,7 @@
               <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
               <label class="field">
                 <span class="muted small">
-                  Default rendezvous address — pre-filled when you found a server, so people can
+                  Default rendezvous address: pre-filled when you found a server, so people can
                   join with just the invite (no address needed). Pasting a joiner invite that names
                   a rendezvous is discovered automatically.
                 </span>
@@ -6602,7 +6602,7 @@
               <div class="field">
                 <span class="muted">Shared voice relay (TURN)</span>
                 <p class="muted small">Optional. A TURN server for voice calls that can't hole-punch (symmetric NAT).
-                  It's folded into invites, so people you invite inherit it — set it once for everyone.
+                  It's folded into invites, so people you invite inherit it: set it once for everyone.
                   Media stays end-to-end encrypted; the relay only forwards ciphertext.</p>
                 <input bind:value={srvTurn} onchange={saveSrvTurn} placeholder="turn:your-host:3478" />
                 <div class="turn-creds">
@@ -6621,7 +6621,7 @@
                   (presence / mentions / danger) under any livery.
                 </p>
                 <div class="field">
-                  <span class="muted small">Server icon — shown on everyone's rail (they can prefer monograms)</span>
+                  <span class="muted small">Server icon: shown on everyone's rail (they can prefer monograms)</span>
                   <div class="avatar-row">
                     {#if livery.icon}
                       <img class="avatar lg" src={"data:image/jpeg;base64," + livery.icon} alt="" />
@@ -6712,7 +6712,7 @@
                   </div>
                 </div>
                 <div class="field">
-                  <span class="muted small">Custom cursor — a small image members' pointers become here (they can opt out of the whole livery)</span>
+                  <span class="muted small">Custom cursor: a small image members' pointers become here (they can opt out of the whole livery)</span>
                   <div class="avatar-row">
                     {#if livery.cursor}
                       <img class="cursor-preview" src={"data:image/png;base64," + livery.cursor} alt="" />
@@ -6778,7 +6778,7 @@
                         class="badge-label"
                         bind:value={badgeLabelDraft}
                         maxlength="24"
-                        placeholder="Badge text (e.g. ARTIST) — role names are taken"
+                        placeholder="Badge text (e.g. ARTIST): role names are taken"
                         onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveBadge(m.fingerprint, badgeLabelDraft, badgeColorDraft); } else if (e.key === "Escape") { e.preventDefault(); badgeEditFp = ""; } }}
                       />
                       <input type="color" class="accent-custom" title="Badge colour" aria-label="Badge colour" bind:value={badgeColorDraft} />
@@ -6792,8 +6792,8 @@
               </ul>
               <p class="muted small">
                 The owner is the founder (the MLS committer). Member removal is owner-only and
-                protocol-enforced. Admins can invite newcomers — the owner serializes each
-                admission, so it completes when the owner is next online — and a demotion is
+                protocol-enforced. Admins can invite newcomers: the owner serializes each
+                admission, so it completes when the owner is next online: and a demotion is
                 replay-proof (a removed admin can't re-grant itself).
               </p>
               {#if myRole === "owner" && Object.keys(deviceMap).length}
@@ -6816,7 +6816,7 @@
                   {/each}
                 </ul>
                 <p class="muted small">
-                  Revoke removes one of your own linked devices for good — its access ends and the
+                  Revoke removes one of your own linked devices for good: its access ends and the
                   same grant can't re-add it. Losing your original (founding) device means you can't
                   add or revoke devices here; recover by having the server owner re-admit you.
                 </p>
@@ -6829,7 +6829,7 @@
             {#if cur?.invite || canInvite}
               <section class="set-section">
                 <h3>Invite someone</h3>
-                <p class="muted small">Single-use — share it with one person to join this server. Generate a fresh
+                <p class="muted small">Single-use: share it with one person to join this server. Generate a fresh
                   one anytime (after a restart, or once the last one was used).</p>
                 {#if myRole === "admin"}
                   <p class="muted small">As an admin, the newcomer is admitted once the owner is next online.</p>
@@ -6908,7 +6908,7 @@
             {#if previewKind}
               <div class="file-preview">
                 {#if fileInfoPreviewError}
-                  <p class="muted small">Preview unavailable — the file isn't downloaded yet and no peer is sharing it right now.</p>
+                  <p class="muted small">Preview unavailable: the file isn't downloaded yet and no peer is sharing it right now.</p>
                 {:else if !fileInfoPreview}
                   <p class="muted small">Loading preview…</p>
                 {:else if previewKind === "image"}
@@ -6930,7 +6930,7 @@
                 {:else if fileInfoAvail}
                   <span class="avail yes">● Available on this device</span>
                 {:else}
-                  <span class="avail no">○ Not downloaded — fetched from a peer on demand</span>
+                  <span class="avail no">○ Not downloaded: fetched from a peer on demand</span>
                 {/if}
               </dd>
               <dt>Uploaded by</dt>
@@ -7020,7 +7020,7 @@
             <p>Wiki pages are written in <strong>Markdown</strong> and rendered in Read mode.</p>
             <h3>Link to another page</h3>
             <p>Wrap a page name in double brackets: <code>[[Getting Started]]</code>. Click a link to open it; a
-              <span class="wikilink missing">red link</span> means the page doesn't exist yet — click it to create it.</p>
+              <span class="wikilink missing">red link</span> means the page doesn't exist yet: click it to create it.</p>
             <h3>Embed an image / video / audio</h3>
             <p>In Edit mode, <strong>drag a file onto the editor</strong> or use the 📎 button. It's stored in the
               fileshare under <code>wiki/&lt;page&gt;/</code> and shown inline.</p>
