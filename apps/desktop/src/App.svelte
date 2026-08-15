@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
-  import { renderMessage, renderWiki } from "./render";
+  import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
   import QRCode from "qrcode";
   import jsQR from "jsqr";
@@ -1452,6 +1452,7 @@
     return q ? wikiPages.filter((p) => p.toLowerCase().includes(q)) : wikiPages;
   });
   let wikiMap = $state<Record<string, string>>({}); // name -> body (backlinks + link existence)
+  let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
   let wikiBody = $state("");
   let newWikiPage = $state("");
@@ -1459,13 +1460,31 @@
   let wikiEdit = $state(false); // edit (textarea) vs read (rendered) mode
   let wikiEl = $state<HTMLDivElement | undefined>(undefined); // rendered-page container (media resolve)
   let showWikiHelp = $state(false);
+  let wikiFormat = $derived(wikiMeta[activeWikiPage] === "wiki" ? "wiki" : "md");
+  let wikiPreview = $state(false); // live side-by-side preview in edit mode
+  let wikiPreviewEl = $state<HTMLDivElement | undefined>(undefined);
+  let wikiTextarea = $state<HTMLTextAreaElement | undefined>(undefined);
+  let wikiRedirectedFrom = $state(""); // the #REDIRECT page we auto-followed here from
+  let wikiRenaming = $state(false);
+  let wikiRenameTo = $state("");
+  let wikiDeleteArmed = $state(false); // two-step delete confirm in the page header
+  // The auto-contents box: built from the rendered page's headings (Wikipedia-style numbering).
+  type WikiTocItem = { level: number; text: string; id: string; num: string; occ: number };
+  let wikiToc = $state<WikiTocItem[]>([]);
+  let wikiTocCollapsed = $state(false);
+  let wikiTocDir = $derived(tocDirective(wikiBody));
+  let showWikiToc = $derived(wikiTocDir !== "notoc" && (wikiToc.length >= 3 || (wikiTocDir === "force" && wikiToc.length > 0)));
 
-  // Pages whose body links to the open page ([[Open Page]]).
+  // Pages whose body links to the open page: [[Open Page]] or piped [[Open Page|label]].
   let backlinks = $derived.by(() => {
     if (!activeWikiPage) return [] as string[];
-    const needle = `[[${activeWikiPage}]]`.toLowerCase();
+    const plain = `[[${activeWikiPage}]]`.toLowerCase();
+    const piped = `[[${activeWikiPage}|`.toLowerCase();
     return Object.entries(wikiMap)
-      .filter(([name, body]) => name !== activeWikiPage && (body ?? "").toLowerCase().includes(needle))
+      .filter(([name, body]) => {
+        const b = (body ?? "").toLowerCase();
+        return name !== activeWikiPage && (b.includes(plain) || b.includes(piped));
+      })
       .map(([name]) => name)
       .sort();
   });
@@ -1941,22 +1960,107 @@
     });
   });
 
-  // Resolve embeds + emoji + mark missing [[links]] in the rendered wiki page (read mode).
+  // Resolve embeds + emoji + mark missing [[links]] in the rendered wiki page (read mode),
+  // build the auto-contents box, and keep the edit-mode live preview resolved too.
   $effect(() => {
     void wikiBody;
     void wikiPages;
     void wikiEdit;
+    void wikiPreview;
+    void wikiFormat;
     void files;
     void emojiUrls;
     void view; // re-resolve after a tab switch recreates the wiki DOM
-    if (!wikiEdit) {
-      tick().then(() => {
+    tick().then(() => {
+      if (!wikiEdit) {
         resolveMedia(wikiEl);
         resolveEmoji(wikiEl);
         resolveWikiLinks(wikiEl);
-      });
-    }
+        decorateWikiHeadings(wikiEl);
+      } else if (wikiPreview) {
+        resolveMedia(wikiPreviewEl);
+        resolveEmoji(wikiPreviewEl);
+        resolveWikiLinks(wikiPreviewEl);
+      }
+    });
   });
+
+  // Give each rendered heading an anchor id + a hover "edit" jump, and derive the contents box
+  // (hierarchical numbering relative to the smallest heading level on the page, like Wikipedia).
+  function decorateWikiHeadings(container: HTMLElement | undefined) {
+    if (!container) {
+      wikiToc = [];
+      return;
+    }
+    for (const b of Array.from(container.querySelectorAll(".wiki-sec-edit"))) b.remove();
+    const hs = Array.from(container.querySelectorAll<HTMLElement>("h1, h2, h3, h4"));
+    if (hs.length === 0) {
+      wikiToc = [];
+      return;
+    }
+    const min = Math.min(...hs.map((h) => Number(h.tagName[1])));
+    const counts = [0, 0, 0, 0];
+    const occ = new Map<string, number>(); // nth heading with this text (for the source lookup)
+    const items: WikiTocItem[] = [];
+    hs.forEach((h, i) => {
+      const text = (h.textContent ?? "").trim();
+      const depth = Math.min(3, Number(h.tagName[1]) - min);
+      counts[depth]++;
+      for (let d = depth + 1; d < 4; d++) counts[d] = 0;
+      const num = counts.slice(0, depth + 1).join(".");
+      const n = occ.get(text) ?? 0;
+      occ.set(text, n + 1);
+      const id = `wh-${i}`;
+      h.id = id;
+      const btn = document.createElement("button");
+      btn.className = "wiki-sec-edit";
+      btn.textContent = "edit";
+      btn.title = "Edit this section";
+      btn.dataset.secText = text;
+      btn.dataset.secOcc = String(n);
+      h.appendChild(btn);
+      items.push({ level: depth, text, id, num, occ: n });
+    });
+    wikiToc = items;
+  }
+
+  function scrollToWikiHeading(id: string) {
+    wikiEl?.querySelector(`#${CSS.escape(id)}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  // A heading's hover "edit": open the editor with the caret on that section's source line.
+  function onWikiBodyClick(e: MouseEvent) {
+    const btn = (e.target as HTMLElement | null)?.closest<HTMLElement>(".wiki-sec-edit");
+    if (!btn) return;
+    e.stopPropagation();
+    void jumpToWikiSection(btn.dataset.secText ?? "", Number(btn.dataset.secOcc ?? 0));
+  }
+
+  function escapeWikiRe(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  async function jumpToWikiSection(text: string, occ: number) {
+    // Best-effort: the rendered heading text may differ from its source line (inline markup),
+    // so fall back to a plain-text search, then to the top of the page.
+    const re =
+      wikiFormat === "wiki"
+        ? new RegExp(`^=+[ \\t]*${escapeWikiRe(text)}`, "gm")
+        : new RegExp(`^#{1,6}[ \\t]*${escapeWikiRe(text)}`, "gm");
+    let m: RegExpExecArray | null = null;
+    for (let i = 0; (m = re.exec(wikiBody)) !== null; i++) if (i === occ) break;
+    const pos = m ? m.index : Math.max(0, wikiBody.indexOf(text));
+    const len = m ? m[0].length : 0;
+    wikiEdit = true;
+    await tick();
+    const ta = wikiTextarea;
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(pos, pos + len);
+    const line = wikiBody.slice(0, pos).split("\n").length - 1;
+    const lh = parseFloat(getComputedStyle(ta).lineHeight) || 18;
+    ta.scrollTop = Math.max(0, line * lh - ta.clientHeight / 3);
+  }
 
   // Pre-resolve every custom-emoji image (small) when the file index changes, into emojiUrls.
   $effect(() => {
@@ -2310,6 +2414,13 @@
     wikiBody = "";
     wikiDirty = false;
     wikiEdit = false;
+    wikiMeta = {};
+    wikiToc = [];
+    wikiPreview = false;
+    wikiRedirectedFrom = "";
+    wikiRenaming = false;
+    wikiDeleteArmed = false;
+    wikiDrafts.clear(); // wiki drafts are per-server (page names collide across servers)
     folder = "";
     newFolder = "";
     reactionPickerFor = "";
@@ -2844,6 +2955,16 @@
       { label: "Open page", icon: "⊞", onSelect: () => openWikiPage(p) },
       { label: "Post link to chat", icon: "➦", onSelect: () => appendToDraft(`[[${p}]]`) },
       { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[[${p}]]`) },
+      {
+        label: "Rename page…",
+        icon: "✎",
+        onSelect: () => void openWikiPage(p).then(() => startWikiRename()),
+      },
+      {
+        label: "Delete page…",
+        icon: "✕",
+        onSelect: () => void openWikiPage(p).then(() => armWikiDelete()), // confirmed in the page header
+      },
     ];
   }
 
@@ -2917,6 +3038,7 @@
     try {
       wikiPages = await invoke<string[]>("get_wiki_pages", { server: activeServerId });
       wikiMap = await invoke<Record<string, string>>("get_wiki_map", { server: activeServerId });
+      wikiMeta = await invoke<Record<string, string>>("get_wiki_meta", { server: activeServerId });
       // Reload the open page only if it still exists and the user isn't mid-edit.
       if (activeWikiPage && !wikiDirty && wikiPages.includes(activeWikiPage)) {
         wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name: activeWikiPage });
@@ -2925,17 +3047,185 @@
       error = String(e);
     }
   }
-  async function openWikiPage(name: string) {
+  // Unsaved page bodies survive navigation (in-memory, like per-channel chat drafts): following
+  // a [[link]] away from a half-edited page stashes the draft; coming back restores it.
+  const wikiDrafts = new Map<string, string>();
+  async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}) {
     if (activeServerId === null) return;
+    if (wikiDirty && activeWikiPage && activeWikiPage !== name) wikiDrafts.set(activeWikiPage, wikiBody);
     try {
-      wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+      let body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+      // Follow #REDIRECT [[Target]] pages Wikipedia-style (bounded; only to pages that exist),
+      // remembering where we came from so the notice can link back to the redirect itself.
+      let from = "";
+      if (!opts.noRedirect) {
+        for (let hops = 0; hops < 3; hops++) {
+          const target = parseRedirect(body);
+          if (!target || target === name || !wikiPages.includes(target)) break;
+          from = from || name;
+          name = target;
+          body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+        }
+      }
+      wikiRedirectedFrom = from;
+      wikiBody = body;
       activeWikiPage = name;
       wikiDirty = false;
+      wikiRenaming = false;
+      wikiDeleteArmed = false;
       view = "wiki";
       // Existing pages open in read mode; a not-yet-created page (e.g. a [[link]] target) in edit.
       wikiEdit = !wikiPages.includes(name);
+      const draft = wikiDrafts.get(name);
+      if (draft !== undefined && draft !== body) {
+        wikiBody = draft;
+        wikiDirty = true;
+        wikiEdit = true;
+      } else if (draft !== undefined) {
+        wikiDrafts.delete(name); // draft caught up with the saved page
+      }
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  // The per-page Markdown/Wikitext toggle: a shared page property (CRDT meta), not a local view.
+  async function setWikiPageFormat(fmt: "md" | "wiki") {
+    if (activeServerId === null || !activeWikiPage || wikiFormat === fmt) return;
+    try {
+      // A brand-new page (opened via a red link) has nothing saved yet; save it so the meta
+      // has a page to describe.
+      if (!wikiPages.includes(activeWikiPage)) await saveWikiPage();
+      await invoke("set_wiki_format", { server: activeServerId, name: activeWikiPage, format: fmt });
+      wikiMeta = { ...wikiMeta, [activeWikiPage]: fmt };
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function startWikiRename() {
+    wikiRenameTo = activeWikiPage;
+    wikiRenaming = true;
+  }
+  async function commitWikiRename() {
+    const to = wikiRenameTo.trim();
+    wikiRenaming = false;
+    if (!to || to === activeWikiPage || activeServerId === null || !activeWikiPage) return;
+    try {
+      await invoke("rename_wiki_page", { server: activeServerId, from: activeWikiPage, to });
+      await refreshWiki();
+      await openWikiPage(to, { noRedirect: true });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function armWikiDelete() {
+    wikiDeleteArmed = true;
+    setTimeout(() => (wikiDeleteArmed = false), 4000); // disarm if not confirmed promptly
+  }
+  async function deleteWikiPage(name: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("delete_wiki_page", { server: activeServerId, name });
+      wikiDeleteArmed = false;
+      if (activeWikiPage === name) {
+        activeWikiPage = "";
+        wikiBody = "";
+        wikiDirty = false;
+        wikiEdit = false;
+        wikiRedirectedFrom = "";
+      }
+      await refreshWiki();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // --- editor toolbar: format-aware syntax insertion at the textarea selection ---
+
+  async function wikiWrap(before: string, after = before, placeholder = "text") {
+    const ta = wikiTextarea;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const sel = wikiBody.slice(start, end) || placeholder;
+    wikiBody = wikiBody.slice(0, start) + before + sel + after + wikiBody.slice(end);
+    wikiDirty = true;
+    await tick();
+    ta.focus();
+    ta.setSelectionRange(start + before.length, start + before.length + sel.length);
+  }
+
+  async function wikiHeading(level: number) {
+    const ta = wikiTextarea;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const ls = wikiBody.lastIndexOf("\n", start - 1) + 1;
+    let le = wikiBody.indexOf("\n", start);
+    if (le < 0) le = wikiBody.length;
+    const line =
+      wikiBody
+        .slice(ls, le)
+        .replace(/^#{1,6}\s*/, "")
+        .replace(/^=+\s*/, "")
+        .replace(/\s*=+\s*$/, "")
+        .trim() || "Heading";
+    const rep = wikiFormat === "wiki" ? `${"=".repeat(level)} ${line} ${"=".repeat(level)}` : `${"#".repeat(level)} ${line}`;
+    wikiBody = wikiBody.slice(0, ls) + rep + wikiBody.slice(le);
+    wikiDirty = true;
+    await tick();
+    ta.focus();
+    ta.setSelectionRange(ls, ls + rep.length);
+  }
+
+  async function wikiList(ordered: boolean) {
+    const ta = wikiTextarea;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const ls = wikiBody.lastIndexOf("\n", start - 1) + 1;
+    const to = Math.max(end, ls);
+    const seg = wikiBody.slice(ls, to) || "item";
+    const mark = wikiFormat === "wiki" ? (ordered ? "# " : "* ") : ordered ? "1. " : "- ";
+    const rep = seg
+      .split("\n")
+      .map((l) => mark + l)
+      .join("\n");
+    wikiBody = wikiBody.slice(0, ls) + rep + wikiBody.slice(to);
+    wikiDirty = true;
+    await tick();
+    ta.focus();
+    ta.setSelectionRange(ls, ls + rep.length);
+  }
+
+  async function insertWikiTable() {
+    const ta = wikiTextarea;
+    if (!ta) return;
+    const tpl =
+      wikiFormat === "wiki"
+        ? "\n{|\n|+ Caption\n! Header !! Header\n|-\n| cell || cell\n|-\n| cell || cell\n|}\n"
+        : "\n| Header | Header |\n| --- | --- |\n| cell | cell |\n| cell | cell |\n";
+    const at = ta.selectionEnd;
+    wikiBody = wikiBody.slice(0, at) + tpl + wikiBody.slice(at);
+    wikiDirty = true;
+    await tick();
+    ta.focus();
+    ta.setSelectionRange(at + 1, at + tpl.length - 1);
+  }
+
+  function onWikiEditKey(e: KeyboardEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (k === "b") {
+      e.preventDefault();
+      void wikiWrap(wikiFormat === "wiki" ? "'''" : "**");
+    } else if (k === "i") {
+      e.preventDefault();
+      void wikiWrap(wikiFormat === "wiki" ? "''" : "*");
+    } else if (k === "s") {
+      e.preventDefault();
+      void saveWikiPage();
     }
   }
   async function createWikiPage() {
@@ -2988,6 +3278,7 @@
     try {
       await invoke("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
       wikiDirty = false;
+      wikiDrafts.delete(activeWikiPage);
     } catch (e) {
       error = String(e);
     }
@@ -4694,7 +4985,7 @@
             class:active={p === activeWikiPage}
             onclick={() => openWikiPage(p)}
             use:contextMenu={() => wikiPageMenu(p)}
-          >{p}</button>
+          >{p}{#if wikiMeta[p] === "wiki"}<span class="pg-fmt" title="Wikitext page">wt</span>{/if}</button>
         </li>
       {:else}
         <li class="muted small">{wikiFilter ? "No matching pages." : "No pages yet."}</li>
@@ -5907,48 +6198,130 @@
             {#if activeWikiPage}
               <div class="wiki-editor">
                 <div class="wiki-editor-head">
-                  <h2>{activeWikiPage} {#if wikiDirty}<span class="muted">· unsaved</span>{/if}</h2>
-                  <div class="wiki-mode">
-                    <button class:active={!wikiEdit} onclick={() => (wikiEdit = false)}>Read</button>
-                    <button class:active={wikiEdit} onclick={() => (wikiEdit = true)}>Edit</button>
+                  <h2 class="wiki-head">
+                    {#if wikiRenaming}
+                      <!-- svelte-ignore a11y_autofocus -->
+                      <input
+                        class="topic-edit wiki-rename"
+                        bind:value={wikiRenameTo}
+                        placeholder="New page name… (Enter to rename, Esc to cancel)"
+                        maxlength="120"
+                        autofocus
+                        onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); commitWikiRename(); } else if (e.key === "Escape") { e.preventDefault(); wikiRenaming = false; } }}
+                        onblur={() => (wikiRenaming = false)}
+                      />
+                    {:else}
+                      <span class="wiki-head-name">{activeWikiPage}</span>
+                      <span class="chip wiki-fmt" title="This page's formatting language: set it per page with the md / wiki switch in Edit mode">{wikiFormat === "wiki" ? "wikitext" : "markdown"}</span>
+                      {#if wikiDirty}<span class="muted small">· unsaved</span>{/if}
+                    {/if}
+                  </h2>
+                  <div class="wiki-head-tools">
+                    {#if !wikiRenaming && wikiPages.includes(activeWikiPage)}
+                      <button class="ghost small" title="Rename this page (links to the old name go red; they aren't rewritten)" onclick={startWikiRename}>rename</button>
+                      {#if wikiDeleteArmed}
+                        <button class="ghost small wiki-del armed" title="This deletes the page for every member" onclick={() => deleteWikiPage(activeWikiPage)}>confirm delete</button>
+                      {:else}
+                        <button class="ghost small wiki-del" title="Delete this page (for every member)" onclick={armWikiDelete}>delete</button>
+                      {/if}
+                    {/if}
+                    <div class="wiki-mode">
+                      <button class:active={!wikiEdit} onclick={() => (wikiEdit = false)}>Read</button>
+                      <button class:active={wikiEdit} onclick={() => (wikiEdit = true)}>Edit</button>
+                    </div>
                   </div>
                 </div>
                 {#if wikiEdit}
+                  <div class="wiki-toolbar">
+                    <div class="wiki-fmt-toggle" role="group" aria-label="Page format">
+                      <button class:active={wikiFormat === "md"} title="Markdown: **bold**, # Heading. The format is a page property, shared with everyone" onclick={() => setWikiPageFormat("md")}>md</button>
+                      <button class:active={wikiFormat === "wiki"} title="Wikitext: '''bold''', == Heading ==. The format is a page property, shared with everyone" onclick={() => setWikiPageFormat("wiki")}>wiki</button>
+                    </div>
+                    <span class="wiki-tb-sep"></span>
+                    <button class="wiki-tb" title={`Bold (${wikiFormat === "wiki" ? "'''text'''" : "**text**"}) · Ctrl+B`} onclick={() => wikiWrap(wikiFormat === "wiki" ? "'''" : "**")}><b>B</b></button>
+                    <button class="wiki-tb" title={`Italic (${wikiFormat === "wiki" ? "''text''" : "*text*"}) · Ctrl+I`} onclick={() => wikiWrap(wikiFormat === "wiki" ? "''" : "*")}><i>I</i></button>
+                    <button class="wiki-tb" title={`Section heading (${wikiFormat === "wiki" ? "== Heading ==" : "## Heading"})`} onclick={() => wikiHeading(2)}>H2</button>
+                    <button class="wiki-tb" title={`Subsection (${wikiFormat === "wiki" ? "=== Heading ===" : "### Heading"})`} onclick={() => wikiHeading(3)}>H3</button>
+                    <button class="wiki-tb" title="Link to a page ([[Page]], add |label for display text)" onclick={() => wikiWrap("[[", "]]", "Page Name")}>[[&nbsp;]]</button>
+                    <button class="wiki-tb" title="Bulleted list" onclick={() => wikiList(false)}>•≡</button>
+                    <button class="wiki-tb" title="Numbered list" onclick={() => wikiList(true)}>1≡</button>
+                    <button class="wiki-tb" title="Insert a table" onclick={insertWikiTable}>⊞</button>
+                    <span class="wiki-tb-spacer"></span>
+                    <button class="wiki-tb wide" class:active={wikiPreview} title="Live preview beside the editor" onclick={() => (wikiPreview = !wikiPreview)}>preview</button>
+                  </div>
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
                     class="wiki-edit"
+                    class:split={wikiPreview}
                     class:drag-over={dragOver}
                     ondragover={(e) => { e.preventDefault(); dragOver = true; }}
                     ondragleave={() => (dragOver = false)}
                     ondrop={onWikiDrop}
                   >
-                    <textarea bind:value={wikiBody} oninput={() => (wikiDirty = true)} rows="18"
-                      placeholder="Markdown. [[Page]] links to another page; drop or attach a file to embed it."></textarea>
-                    <div class="wiki-edit-actions">
-                      <label class="attach" title="Attach image / video / audio">
-                        📎
-                        <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
-                          onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
-                      </label>
-                      <button onclick={saveWikiPage} disabled={!wikiDirty}>Save page</button>
-                    </div>
+                    <textarea bind:this={wikiTextarea} bind:value={wikiBody} oninput={() => (wikiDirty = true)} onkeydown={onWikiEditKey} rows="18"
+                      placeholder={wikiFormat === "wiki"
+                        ? "Wikitext. == Heading ==, '''bold''', ''italic'', [[Page]] or [[Page|label]] links, * bullet / # numbered lists; drop or attach a file to embed it."
+                        : "Markdown. # Heading, **bold**, *italic*, [[Page]] or [[Page|label]] links, - lists; drop or attach a file to embed it."}></textarea>
+                    {#if wikiPreview}
+                      <div class="wiki-render preview" bind:this={wikiPreviewEl} use:richClicks>{@html renderWiki(wikiBody, wikiFormat)}</div>
+                    {/if}
+                  </div>
+                  <div class="wiki-edit-actions">
+                    <label class="attach" title="Attach image / video / audio">
+                      📎
+                      <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
+                        onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                    </label>
+                    <button onclick={saveWikiPage} disabled={!wikiDirty}>Save page</button>
+                    <span class="muted small">Ctrl+S saves · concurrent edits merge</span>
                   </div>
                 {:else}
-                  <div class="wiki-render" bind:this={wikiEl} use:richClicks>{@html renderWiki(wikiBody)}</div>
-                  {#if backlinks.length}
-                    <div class="wiki-backlinks">
-                      <h4>Linked from</h4>
-                      <ul>
-                        {#each backlinks as b}
-                          <li><button class="wikilink" onclick={() => openWikiPage(b)}>{b}</button></li>
-                        {/each}
-                      </ul>
+                  <div class="wiki-render article">
+                    <div class="wiki-title">
+                      {activeWikiPage}
+                      {#if wikiRedirectedFrom}
+                        <div class="wiki-redirect-note">↪ Redirected from <button class="wikilink" onclick={() => openWikiPage(wikiRedirectedFrom, { noRedirect: true })}>{wikiRedirectedFrom}</button></div>
+                      {/if}
                     </div>
-                  {/if}
+                    {#if showWikiToc}
+                      <nav class="wiki-toc" aria-label="Contents">
+                        <div class="wiki-toc-h">
+                          <span>contents</span>
+                          <button class="wiki-toc-toggle" onclick={() => (wikiTocCollapsed = !wikiTocCollapsed)}>[{wikiTocCollapsed ? "show" : "hide"}]</button>
+                        </div>
+                        {#if !wikiTocCollapsed}
+                          <ol>
+                            {#each wikiToc as t}
+                              <li class={`toc-lv${t.level}`}>
+                                <button class="wiki-toc-link" onclick={() => scrollToWikiHeading(t.id)}><span class="toc-num">{t.num}</span>{t.text}</button>
+                              </li>
+                            {/each}
+                          </ol>
+                        {/if}
+                      </nav>
+                    {/if}
+                    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+                    <div class="wiki-body" bind:this={wikiEl} use:richClicks onclick={onWikiBodyClick}>{@html renderWiki(wikiBody, wikiFormat)}</div>
+                    {#if backlinks.length}
+                      <div class="wiki-backlinks">
+                        <h4>What links here</h4>
+                        <ul>
+                          {#each backlinks as b}
+                            <li><button class="wikilink" onclick={() => openWikiPage(b)}>{b}</button></li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+                  </div>
                 {/if}
               </div>
             {:else}
-              <p class="muted wiki-empty">Select a page on the left, or create one. Use <code>[[Page Name]]</code> to link pages.</p>
+              <div class="wiki-empty-state">
+                <p class="muted">Select a page on the left, or create one.</p>
+                <p class="muted small">Link pages with <code>[[Page Name]]</code>: a <span class="wikilink missing">red link</span> creates its page.
+                  Each page is written in <strong>Markdown</strong> or <strong>Wikitext</strong> (the <code>md / wiki</code> switch in Edit mode),
+                  and 3+ headings get an automatic contents box.</p>
+              </div>
             {/if}
           </div>
         {:else if view === "profile"}
@@ -7017,19 +7390,40 @@
             <button class="ghost" onclick={() => (showWikiHelp = false)}>✕</button>
           </header>
           <div class="overlay-body wiki-help">
-            <p>Wiki pages are written in <strong>Markdown</strong> and rendered in Read mode.</p>
-            <h3>Link to another page</h3>
-            <p>Wrap a page name in double brackets: <code>[[Getting Started]]</code>. Click a link to open it; a
-              <span class="wikilink missing">red link</span> means the page doesn't exist yet: click it to create it.</p>
-            <h3>Embed an image / video / audio</h3>
+            <p>Each page is written in <strong>Markdown</strong> or <strong>Wikitext</strong>: pick per page with the
+              <code>md / wiki</code> switch in Edit mode. The choice is a page property shared with every member.
+              Pages with 3+ headings get an automatic <strong>Contents</strong> box.</p>
+            <h3>Link to another page (both formats)</h3>
+            <p><code>[[Getting Started]]</code>, or with display text: <code>[[Getting Started|the guide]]</code>.
+              Click a link to open it; a <span class="wikilink missing">red link</span> means the page doesn't exist
+              yet: click it to create it.</p>
+            <h3>Embed an image / video / audio (both formats)</h3>
             <p>In Edit mode, <strong>drag a file onto the editor</strong> or use the 📎 button. It's stored in the
               fileshare under <code>wiki/&lt;page&gt;/</code> and shown inline.</p>
-            <h3>Common Markdown</h3>
+            <h3>Markdown pages</h3>
             <ul>
               <li><code>**bold**</code>, <code>*italic*</code>, <code>`code`</code></li>
               <li><code># Heading</code>, <code>## Subheading</code></li>
               <li><code>- bullet</code> lists, <code>1. numbered</code> lists</li>
               <li><code>&gt; quote</code>, <code>---</code> divider, <code>[text](https://link)</code></li>
+            </ul>
+            <h3>Wikitext pages</h3>
+            <ul>
+              <li><code>'''bold'''</code>, <code>''italic''</code>, <code>'''''both'''''</code></li>
+              <li><code>== Heading ==</code>, <code>=== Subheading ===</code></li>
+              <li><code>* bullet</code> / <code># numbered</code> lists; nest by repeating (<code>**</code>, <code>##</code>)</li>
+              <li><code>; term : definition</code>, <code>:</code> indent, <code>----</code> divider</li>
+              <li><code>[https://link label]</code> external link</li>
+              <li><code>{"{|"}</code> … <code>{"|}"}</code> table, with <code>|-</code> rows, <code>!</code> header cells, <code>|+</code> caption</li>
+              <li><code>&lt;nowiki&gt;…&lt;/nowiki&gt;</code> shows markup literally</li>
+            </ul>
+            <h3>Page tools</h3>
+            <ul>
+              <li><strong>Contents box</strong>: automatic at 3+ headings; force with <code>__TOC__</code>, suppress with <code>__NOTOC__</code>.</li>
+              <li><strong>Sections</strong>: hover a heading in Read mode for a per-section <em>edit</em> jump.</li>
+              <li><strong>Redirects</strong>: a page whose first line is <code>#REDIRECT [[Target]]</code> forwards readers there.</li>
+              <li><strong>Rename / delete</strong>: in the page header (rename doesn't rewrite links: old links go red).</li>
+              <li><strong>What links here</strong>: pages linking to the open page, listed under it.</li>
             </ul>
           </div>
         </div>

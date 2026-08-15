@@ -4342,3 +4342,335 @@ button.you-panel:hover {
 }
 .pair-results li.ok { color: var(--ok); }
 .pair-results li.err { color: var(--danger); }
+
+/* ============================================================
+   Wiki overhaul — per-page md/wikitext, auto-contents, page tools.
+   The article view borrows Wikipedia's bones (title rule, contents
+   box, section rules, "what links here") in the operator-terminal
+   register: mono micro-labels, token colours, tight radii.
+   ============================================================ */
+
+.wiki-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  min-width: 0;
+}
+
+.wiki-head-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip.wiki-fmt {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 40%, transparent);
+  flex: none;
+}
+
+.wiki-rename {
+  flex: 1;
+  min-width: 0;
+}
+
+.wiki-head-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.wiki-del.armed {
+  color: var(--danger-hi);
+  border-color: var(--danger-brd);
+  background: var(--danger-dim);
+}
+
+/* --- editor toolbar --- */
+
+.wiki-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.wiki-tb {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  border-radius: var(--r);
+  padding: 0.15rem 0.5rem;
+  font-size: 0.78rem;
+  font-family: var(--mono);
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.wiki-tb:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+
+.wiki-tb.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.wiki-tb-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border-soft);
+  margin: 0 0.3rem;
+}
+
+.wiki-tb-spacer {
+  flex: 1;
+}
+
+/* The md/wiki format switch — a segmented pair; the page's format is a shared property. */
+.wiki-fmt-toggle {
+  display: flex;
+}
+
+.wiki-fmt-toggle button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.25rem 0.55rem;
+  cursor: pointer;
+}
+
+.wiki-fmt-toggle button:first-child {
+  border-radius: var(--r) 0 0 var(--r);
+}
+
+.wiki-fmt-toggle button:last-child {
+  border-radius: 0 var(--r) var(--r) 0;
+  border-left: none;
+}
+
+.wiki-fmt-toggle button.active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.wiki-fmt-toggle button.active + button {
+  border-left: none;
+}
+
+/* --- edit mode: split live preview --- */
+
+.wiki-edit.split {
+  flex-direction: row;
+  gap: 0.5rem;
+}
+
+.wiki-edit.split textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+.wiki-render.preview {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* --- read mode: the article --- */
+
+.wiki-title {
+  font-size: 1.35rem;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.35rem;
+  margin-bottom: 0.7rem;
+}
+
+.wiki-redirect-note {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--muted);
+  margin-top: 0.2rem;
+}
+
+.wiki-redirect-note .wikilink {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+/* Wikipedia-style section rules under top-level headings. */
+.wiki-body h1,
+.wiki-body h2 {
+  border-bottom: 1px solid var(--border-soft);
+  padding-bottom: 0.15rem;
+}
+
+/* --- the contents box --- */
+
+.wiki-toc {
+  display: inline-block;
+  min-width: 220px;
+  max-width: min(60%, 420px);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  border-radius: var(--r);
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 1rem;
+}
+
+.wiki-toc-h {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.wiki-toc-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  cursor: pointer;
+}
+
+.wiki-toc-toggle:hover {
+  color: var(--text);
+}
+
+.wiki-toc ol {
+  list-style: none;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.wiki-toc .toc-lv1 { padding-left: 0.9rem; }
+.wiki-toc .toc-lv2 { padding-left: 1.8rem; }
+.wiki-toc .toc-lv3 { padding-left: 2.7rem; }
+
+.wiki-toc-link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+}
+
+.wiki-toc-link:hover {
+  color: var(--accent-hi);
+  text-decoration: underline;
+}
+
+.toc-num {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  flex: none;
+}
+
+/* --- per-section edit jump (hover a heading in Read mode) --- */
+
+.wiki-sec-edit {
+  visibility: hidden;
+  margin-left: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 400;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 0.05rem 0.4rem;
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.wiki-body h1:hover .wiki-sec-edit,
+.wiki-body h2:hover .wiki-sec-edit,
+.wiki-body h3:hover .wiki-sec-edit,
+.wiki-body h4:hover .wiki-sec-edit {
+  visibility: visible;
+}
+
+.wiki-sec-edit:hover {
+  color: var(--text);
+  background: var(--bg-elev);
+}
+
+/* --- wikitext-only blocks --- */
+
+.wiki-render dl {
+  margin: 0.4rem 0;
+}
+
+.wiki-render dt {
+  font-weight: 600;
+}
+
+.wiki-render dd {
+  margin: 0 0 0.3rem 1.2rem;
+}
+
+.wiki-render caption {
+  caption-side: top;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--text-2);
+  padding-bottom: 0.25rem;
+}
+
+/* --- sidebar: wikitext page badge; empty state --- */
+
+.wiki-pages .pg-fmt {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--faint);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  padding: 0 0.25rem;
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+.wiki-pages button.active .pg-fmt {
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+.wiki-empty-state {
+  margin: auto;
+  text-align: center;
+  max-width: 460px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
