@@ -1351,6 +1351,61 @@ const F_PATH: &str = "path";
 // mime). The file's bytes are stored/shared as ciphertext keyed by the ciphertext CID; only
 // members with the group file-wrap key can open it. Size/mime/cid are read back from here.
 const F_REF: &str = "ref";
+// Circulation expiry for THIS listing (see [`FileExpiry`]): absent = never recorded (a listing
+// written before expiry existed), an explicit `null` = keep forever, an integer = the absolute
+// ms-epoch deadline. Additive: a reader that predates the field ignores it, and a listing
+// written by such a peer simply decodes as "not recorded".
+const F_EXPIRES: &str = "exp";
+
+/// How long a shared file stays in **circulation** — the default lifetime stamped on every new
+/// listing by [`Server::add_file`].
+///
+/// One month, matching `catcoms_storage::ONE_MONTH_MS` (the retention engine's global default);
+/// re-declared here rather than imported so the app-layer stamp and the storage-layer policy can
+/// drift apart deliberately rather than by accident.
+pub const FILE_EXPIRY_DEFAULT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// A listing's circulation deadline.
+///
+/// **What "expired" means (product rule):** the file stops being auto-circulated / auto-shared.
+/// It is **never deleted** from anyone's disk, and it stays fetchable by cid for as long as any
+/// peer still holds its chunks. Expiry is per **listing**, not per content: the same bytes listed
+/// under two names/folders (content dedup in [`Server::add_file`]) carry two independent
+/// deadlines.
+///
+/// **NOTHING ENFORCES THIS YET.** As of this change the deadline is *recorded and displayed*
+/// metadata only — no eviction, no drop-from-circulation, no GC consults it. `catcoms-storage`'s
+/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is a complete 3-scope expiry + GC engine,
+/// but it is **not wired into this layer at all**: the shared-file index records expiry, the blob
+/// store evicts nothing, and an "expired" file keeps circulating exactly as before. The point of
+/// stamping it now is that the eventual enforcement pass has honest inputs — including
+/// [`Server::wiki_pinned_cids`], which it MUST consult (wiki-embedded files never decay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileExpiry {
+    /// No deadline was ever recorded — a listing written before this field existed, or by a peer
+    /// that predates it. Distinct from [`FileExpiry::Never`]: we do not know what was intended,
+    /// so the UI says "not recorded (older share)" rather than promising anything.
+    Unrecorded,
+    /// Explicitly kept forever ("keep forever"): never drops out of circulation.
+    Never,
+    /// Drops out of circulation at this absolute ms-epoch instant.
+    At(u64),
+}
+
+impl FileExpiry {
+    /// The deadline in ms epoch, if one is recorded. Both [`FileExpiry::Unrecorded`] and
+    /// [`FileExpiry::Never`] answer `None` — use the variant itself to tell them apart.
+    pub fn deadline_ms(self) -> Option<u64> {
+        match self {
+            FileExpiry::At(ms) => Some(ms),
+            _ => None,
+        }
+    }
+    /// Whether a deadline (or an explicit keep-forever) was ever recorded for this listing.
+    pub fn is_recorded(self) -> bool {
+        !matches!(self, FileExpiry::Unrecorded)
+    }
+}
 
 /// Maximum file size accepted by [`Server::add_file`]. Chunked transfer splits a file into
 /// [`CHUNK_BYTES`] pieces, so this is a whole-**file** cap (256 MiB), no longer the per-blob
@@ -1383,6 +1438,9 @@ pub struct FileEntry {
     /// The encoded [`FileRef`] (wrapped per-file key + addresses) needed to decrypt. Carried
     /// in the encrypted index; not forwarded to the UI.
     pub file_ref: Vec<u8>,
+    /// When THIS listing drops out of circulation — see [`FileExpiry`] for the three states and
+    /// for the blunt truth that nothing enforces it yet.
+    pub expires: FileExpiry,
 }
 
 /// A listed file plus how many of its chunks this device already holds locally, for the file
@@ -1420,13 +1478,15 @@ fn normalize_path(path: &str) -> String {
         .join("/")
 }
 
-/// Append a file entry (name + author + folder path + encoded `FileRef`) to the index doc.
+/// Append a file entry (name + author + folder path + encoded `FileRef` + circulation expiry)
+/// to the index doc.
 fn write_file_entry(
     doc: &mut AutoCommit,
     name: &str,
     author: &str,
     path: &str,
     file_ref: &[u8],
+    expires: FileExpiry,
 ) -> Result<(), AutomergeError> {
     let list = match doc.get(ROOT, FILES)? {
         Some((Value::Object(ObjType::List), id)) => id,
@@ -1438,7 +1498,41 @@ fn write_file_entry(
     doc.put(&entry, F_AUTHOR, author)?;
     doc.put(&entry, F_PATH, path)?;
     doc.put(&entry, F_REF, ScalarValue::Bytes(file_ref.to_vec()))?;
+    put_expiry(doc, &entry, expires)?;
     Ok(())
+}
+
+/// Write a listing's circulation expiry. [`FileExpiry::Unrecorded`] leaves the key **absent** —
+/// that is exactly what a legacy entry looks like, so it is the one state we never fabricate on
+/// an entry that already has a deadline (`set_file_expiry` can only ask for the other two).
+fn put_expiry(
+    doc: &mut AutoCommit,
+    entry: &ObjId,
+    expires: FileExpiry,
+) -> Result<(), AutomergeError> {
+    match expires {
+        FileExpiry::Unrecorded => {}
+        // An explicit null is distinguishable from an absent key on read, which is what keeps
+        // "keep forever" and "never recorded" apart across a merge.
+        FileExpiry::Never => doc.put(entry, F_EXPIRES, ScalarValue::Null)?,
+        FileExpiry::At(ms) => doc.put(entry, F_EXPIRES, ScalarValue::Uint(ms))?,
+    }
+    Ok(())
+}
+
+/// Read a listing's circulation expiry. Absent (or any unexpected scalar type) decodes as
+/// [`FileExpiry::Unrecorded`], so a legacy entry — and any entry a future peer writes oddly —
+/// round-trips without claiming a deadline it never had.
+fn expiry_field(doc: &AutoCommit, obj: &ObjId) -> FileExpiry {
+    match doc.get(obj, F_EXPIRES) {
+        Ok(Some((Value::Scalar(s), _))) => match s.as_ref() {
+            ScalarValue::Null => FileExpiry::Never,
+            ScalarValue::Uint(u) => FileExpiry::At(*u),
+            ScalarValue::Int(i) if *i >= 0 => FileExpiry::At(*i as u64),
+            _ => FileExpiry::Unrecorded,
+        },
+        _ => FileExpiry::Unrecorded,
+    }
 }
 
 /// Materialize the file index document into the UI's file list (size/mime/cid come from the
@@ -1460,6 +1554,7 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
                         cid: manifest.plaintext_cid.as_bytes().to_vec(),
                         path: str_field(doc, &entry, F_PATH),
                         file_ref: ref_bytes,
+                        expires: expiry_field(doc, &entry),
                     });
                 }
             }
@@ -1498,6 +1593,94 @@ fn delete_file_entry(
         }
     }
     Ok(())
+}
+
+/// Set the circulation expiry on every index entry matching `cid` **in folder `folder`** (a
+/// concurrent double-add can leave more than one listing for the same content in one folder, and
+/// they are the same listing as far as the user is concerned). Other folders' listings of the
+/// same content keep their own deadlines — expiry is per listing, like unlisting.
+fn set_file_entry_expiry(
+    doc: &mut AutoCommit,
+    cid: &[u8],
+    folder: &str,
+    expires: FileExpiry,
+) -> Result<(), AutomergeError> {
+    let list = match doc.get(ROOT, FILES)? {
+        Some((Value::Object(ObjType::List), id)) => id,
+        _ => return Ok(()),
+    };
+    for i in 0..doc.length(&list) {
+        if let Some((Value::Object(ObjType::Map), entry)) = doc.get(&list, i)? {
+            let ref_bytes = bytes_field(doc, &entry, F_REF);
+            if let Ok(manifest) = FileManifest::decode_or_legacy(&ref_bytes) {
+                if manifest.plaintext_cid.as_bytes() == cid
+                    && str_field(doc, &entry, F_PATH).as_str() == folder
+                {
+                    put_expiry(doc, &entry, expires)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The two marker grammars the composer emits for a shared file (desktop `refs.ts::fileMarker`):
+/// `![alt](cid:HEX)` — an inline embed — and `[label](file:HEX)` — a reference chip. Both name a
+/// file by its whole-file plaintext content address, so both count as *using* the file.
+const FILE_MARKER_PREFIXES: [&str; 2] = ["](cid:", "](file:"];
+
+/// Collect the lowercase hex content addresses `text` references through either marker grammar.
+///
+/// Deliberately a scanner and not a parser: it reads any `](cid:HEX)` / `](file:HEX)` occurrence
+/// in the raw body, which is what the renderer would turn into an embed/chip. Erring toward
+/// *over*-detection is the safe direction here — a false positive pins a file (it keeps
+/// circulating) rather than dropping one that is still on a page.
+fn scan_file_markers(text: &str, out: &mut HashSet<String>) {
+    for prefix in FILE_MARKER_PREFIXES {
+        let mut rest = text;
+        while let Some(at) = rest.find(prefix) {
+            let after = &rest[at + prefix.len()..];
+            // Hex digits are ASCII, so the char count is also the byte offset.
+            let end = after
+                .bytes()
+                .take_while(u8::is_ascii_hexdigit)
+                .count()
+                .min(64);
+            if end > 0 && after.as_bytes().get(end) == Some(&b')') {
+                out.insert(after[..end].to_ascii_lowercase());
+            }
+            rest = &after[end..];
+        }
+    }
+}
+
+/// Where a shared file is referenced across this server's documents — the "Used in" answer, and
+/// the input to the never-decay rule for wiki-embedded files.
+///
+/// Usage is **content-addressed**: it is keyed by the file's whole-file plaintext cid, so every
+/// listing of the same bytes (content dedup lists one file under several names/folders) shares
+/// one usage answer. That is the honest semantic — a wiki page embeds *content*, not a listing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileUsage {
+    /// Names of the live wiki pages whose body references this file, sorted. Non-empty ⇒ the
+    /// file is **pinned** (see [`FileUsage::wiki_pinned`]).
+    pub wiki_pages: Vec<String>,
+    /// How many status-feed posts reference it.
+    pub status_count: usize,
+    /// How many chat messages, across every channel open on this device, reference it.
+    pub chat_count: usize,
+}
+
+impl FileUsage {
+    /// Whether the file is embedded in at least one live wiki page, and so must **never** drop
+    /// out of circulation regardless of its recorded deadline.
+    pub fn wiki_pinned(&self) -> bool {
+        !self.wiki_pages.is_empty()
+    }
+    /// Whether the file is referenced anywhere at all.
+    pub fn is_empty(&self) -> bool {
+        self.wiki_pages.is_empty() && self.status_count == 0 && self.chat_count == 0
+    }
 }
 
 /// Read a `Bytes` scalar field (empty if absent or another type).
@@ -2024,6 +2207,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Reuse also means the listing inherits the *first* upload's declared mime, and that a
     /// dedup against content this device has never downloaded adds a listing whose chunks are
     /// held elsewhere (re-fetchable, like any other file this device does not hold locally).
+    ///
+    /// **Circulation expiry**: every listing this creates is stamped
+    /// `now + `[`FILE_EXPIRY_DEFAULT_MS`] (one month), adjustable afterwards per listing via
+    /// [`set_file_expiry`](Self::set_file_expiry). Expiry is *per listing*, so a dedup re-list
+    /// gets its **own fresh** deadline rather than inheriting the twin's — re-sharing the same
+    /// bytes under a new name is a new act of sharing. Nothing enforces the deadline yet; see
+    /// [`FileExpiry`].
     pub async fn add_file(
         &mut self,
         name: &str,
@@ -2049,6 +2239,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         // file's identity is its whole-file plaintext cid.
         let author = self.my_fingerprint();
         let folder = normalize_path(path);
+        // Clock-injected (never ambient): the default one-month circulation deadline.
+        let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
         let plaintext_cid = Cid::of(bytes);
         // Dedup on the plaintext cid against the live index (a deleted entry is removed from the
         // list, so only still-shared files match; re-storing after a delete is harmless anyway).
@@ -2061,11 +2253,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             if twins.iter().any(|e| e.name == name && e.path == folder) {
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
-            // Same content, new name/folder: list it again against the SAME sealed blobs.
+            // Same content, new name/folder: list it again against the SAME sealed blobs — but
+            // with its own fresh deadline, not the twin's.
             let ref_bytes = twin.file_ref.clone();
             self.sync
                 .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                    write_file_entry(d, name, &author, &folder, &ref_bytes)
+                    write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
                 })
                 .await?;
             return Ok(plaintext_cid);
@@ -2091,7 +2284,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let ref_bytes = manifest.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
-                write_file_entry(d, name, &author, &folder, &ref_bytes)
+                write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
             })
             .await?;
         Ok(plaintext_cid)
@@ -2467,6 +2660,114 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
         }
         Ok(())
+    }
+
+    /// Adjust ONE listing's circulation expiry: `Some(ms)` sets an absolute ms-epoch deadline,
+    /// `None` means **keep forever**. Addressed by content address + folder, exactly like
+    /// [`delete_file_at`](Self::delete_file_at), because expiry is per listing — the same bytes
+    /// listed under two folders carry two independent deadlines.
+    ///
+    /// **Gate (honest-client, like the other R6 role gates):** the listing's **uploader**, the
+    /// **owner**, or an **admin**. A member adjusting someone else's share is refused locally;
+    /// the protocol residual is identical to invites and member removal.
+    ///
+    /// Setting a deadline does **not** cause anything to happen at that instant — see
+    /// [`FileExpiry`]: this records metadata for a retention pass that does not exist yet, and a
+    /// deadline on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids)
+    /// in any case.
+    pub async fn set_file_expiry(
+        &mut self,
+        cid: &Cid,
+        path: &str,
+        expires: Option<u64>,
+    ) -> Result<(), AppError> {
+        let folder = normalize_path(path);
+        let raw = cid.as_bytes().to_vec();
+        let me = self.my_fingerprint();
+        let listings: Vec<FileEntry> = self
+            .files()
+            .into_iter()
+            .filter(|e| e.cid == raw && e.path == folder)
+            .collect();
+        if listings.is_empty() {
+            return Err(AppError::Invalid("no such file".into()));
+        }
+        let privileged = matches!(self.my_role(), Role::Owner | Role::Admin);
+        if !privileged && !listings.iter().any(|e| e.author == me) {
+            return Err(AppError::Invalid(
+                "only the uploader, an admin, or the owner can change a file's expiry".into(),
+            ));
+        }
+        let expires = match expires {
+            Some(ms) => FileExpiry::At(ms),
+            None => FileExpiry::Never,
+        };
+        self.sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                set_file_entry_expiry(d, &raw, &folder, expires)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Every file content address referenced by a **live wiki page body**, lowercase hex, under
+    /// either marker grammar (`![alt](cid:HEX)` embeds and `[label](file:HEX)` chips).
+    ///
+    /// **The never-decay set.** Product rule: a file embedded in a wiki page must never drop out
+    /// of circulation. Any future retention/GC pass — in this crate or in
+    /// `catcoms-storage` — **MUST** consult this set and treat a member of it as un-expirable,
+    /// whatever [`FileEntry::expires`] says.
+    ///
+    /// It is **derived, never stored**: the answer is recomputed from the wiki document every
+    /// time, so editing the embed out of a page (or deleting the page) un-pins the file with no
+    /// bookkeeping, and no stale pin can outlive the page that justified it. Content-addressed,
+    /// so pinning one listing of some bytes pins the bytes for every listing of them.
+    pub fn wiki_pinned_cids(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for body in self.wiki_map().values() {
+            scan_file_markers(body, &mut out);
+        }
+        out
+    }
+
+    /// Where a file is used across this server: which wiki pages embed/reference it, and how many
+    /// status posts and chat messages do. Both marker grammars count.
+    ///
+    /// Scans the wiki map, the status document, and **every channel document open on this
+    /// device** in-process (the same mechanic as [`inbox`](Self::inbox)) — so the chat count is
+    /// necessarily scoped to the channels this device has open and synced, not to some global
+    /// truth no peer can see. Keyed by content address; see [`FileUsage`].
+    pub fn file_usage(&self, cid: &Cid) -> FileUsage {
+        let hex = cid.to_hex(); // lowercase, matching the scanner's normalization
+        let mentions = |text: &str| {
+            let mut found = HashSet::new();
+            scan_file_markers(text, &mut found);
+            found.contains(&hex)
+        };
+        let mut wiki_pages: Vec<String> = self
+            .wiki_map()
+            .into_iter()
+            .filter(|(_, body)| mentions(body))
+            .map(|(name, _)| name)
+            .collect();
+        wiki_pages.sort();
+        let status_count = self.statuses().iter().filter(|m| mentions(&m.text)).count();
+        let chat_count = self
+            .sync
+            .channel_ids()
+            .into_iter()
+            .map(|ch| {
+                self.messages(ch)
+                    .iter()
+                    .filter(|m| mentions(&m.text))
+                    .count()
+            })
+            .sum();
+        FileUsage {
+            wiki_pages,
+            status_count,
+            chat_count,
+        }
     }
 
     /// Catch up the file index document from `peer` (e.g. right after joining).
@@ -6165,6 +6466,393 @@ mod tests {
         assert_eq!(
             alice.download_file(&two).await.unwrap(),
             b"version two".to_vec()
+        );
+    }
+
+    // ---------- circulation expiry + wiki pinning ----------
+    //
+    // Every assertion below is about *recorded metadata*: nothing in the stack drops, evicts or
+    // deletes an expired file yet (see `FileExpiry`). These tests pin the inputs a future
+    // retention pass will consume.
+
+    /// A founder whose clock the test drives, so expiry stamps are exact.
+    fn founder_with_clock(clock: &ManualClock) -> Server<MemNetwork, ChaCha20Rng> {
+        let hub = Hub::new();
+        Server::found(
+            hub.join(PeerId::from_u64(1)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_shared_file_is_stamped_with_a_one_month_circulation_expiry() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice
+            .add_file("doc.txt", "text/plain", "docs", b"hello")
+            .await
+            .unwrap();
+
+        let entry = alice.files().remove(0);
+        assert_eq!(
+            entry.expires,
+            FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS),
+            "stamped from the INJECTED clock, one month out"
+        );
+        assert_eq!(
+            entry.expires.deadline_ms(),
+            Some(T0 + FILE_EXPIRY_DEFAULT_MS)
+        );
+        assert!(entry.expires.is_recorded());
+    }
+
+    #[tokio::test]
+    async fn a_legacy_file_entry_without_an_expiry_decodes_as_not_recorded() {
+        // A listing written before the field existed: same doc shape, no `exp` key. It must
+        // decode + round-trip intact, and read back as "not recorded" — NOT as keep-forever,
+        // which is a promise nobody made.
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        let cid = alice
+            .add_file("doc.txt", "text/plain", "docs", b"hello")
+            .await
+            .unwrap();
+        let legacy_ref = alice.files()[0].file_ref.clone();
+        let author = alice.my_fingerprint();
+
+        // Append an entry the way a pre-expiry peer would have: no `exp` key at all.
+        alice
+            .sync
+            .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                write_file_entry(
+                    d,
+                    "legacy.txt",
+                    &author,
+                    "docs",
+                    &legacy_ref,
+                    FileExpiry::Unrecorded,
+                )
+            })
+            .await
+            .unwrap();
+
+        let files = alice.files();
+        assert_eq!(files.len(), 2);
+        let legacy = files.iter().find(|e| e.name == "legacy.txt").unwrap();
+        assert_eq!(legacy.expires, FileExpiry::Unrecorded);
+        assert!(!legacy.expires.is_recorded(), "absent != keep-forever");
+        assert_eq!(legacy.expires.deadline_ms(), None);
+        // The rest of the entry survived the new field being added to the schema, and the
+        // content is still downloadable through the legacy listing.
+        assert_eq!(legacy.path, "docs");
+        assert_eq!(legacy.author, author);
+        assert_eq!(legacy.cid, cid.as_bytes().to_vec());
+        assert_eq!(alice.download_file(&cid).await.unwrap(), b"hello".to_vec());
+        // The modern entry alongside it is unaffected.
+        let modern = files.iter().find(|e| e.name == "doc.txt").unwrap();
+        assert_eq!(modern.expires, FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS));
+    }
+
+    #[tokio::test]
+    async fn keep_forever_round_trips_and_a_non_uploader_member_is_refused() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let clock = ManualClock::new(T0);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(clock.clone()),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+
+        alice.open_files().await.unwrap();
+        let cid = alice
+            .add_file("doc.txt", "text/plain", "docs", b"hello")
+            .await
+            .unwrap();
+
+        // Bob really can see the listing — so the refusal below is the ROLE gate, not "no such
+        // file" standing in for it.
+        bob.open_files().await.unwrap();
+        let _ = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
+        assert_eq!(bob.files().len(), 1, "bob sees alice's listing");
+        assert!(!bob.is_owner());
+
+        let err = bob.set_file_expiry(&cid, "docs", None).await;
+        assert!(
+            matches!(err, Err(AppError::Invalid(ref m)) if m.contains("uploader")),
+            "a plain member who is not the uploader cannot change expiry: {err:?}"
+        );
+        assert_eq!(
+            alice.files()[0].expires,
+            FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS),
+            "the refused call changed nothing"
+        );
+
+        // The uploader (also the owner here) keeps it forever, then sets an explicit date back.
+        alice.set_file_expiry(&cid, "docs", None).await.unwrap();
+        assert_eq!(alice.files()[0].expires, FileExpiry::Never);
+        assert_eq!(alice.files()[0].expires.deadline_ms(), None);
+        assert!(
+            alice.files()[0].expires.is_recorded(),
+            "keep-forever is a RECORDED decision, unlike a legacy entry"
+        );
+
+        alice
+            .set_file_expiry(&cid, "docs", Some(T0 + 5_000))
+            .await
+            .unwrap();
+        assert_eq!(alice.files()[0].expires, FileExpiry::At(T0 + 5_000));
+
+        // A listing that isn't there (wrong folder) errors rather than silently succeeding.
+        assert!(matches!(
+            alice.set_file_expiry(&cid, "elsewhere", None).await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn expiry_is_per_listing_and_a_dedup_relisting_gets_a_fresh_one() {
+        // Content dedup lists the same bytes twice against one set of sealed blobs. Each listing
+        // is its own act of sharing, so each carries its own deadline — the second must be
+        // stamped at the time IT was shared, not inherited from the twin.
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        let data = b"shared-bytes";
+        let cid = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", data)
+            .await
+            .unwrap();
+        let blobs = alice.sync().blob_cids().len();
+
+        clock.advance_ms(60_000);
+        let again = alice
+            .add_file("cat.png", "image/png", "emoji", data)
+            .await
+            .unwrap();
+        assert_eq!(cid, again, "same content, same address");
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            blobs,
+            "the dedup path stored no new blobs"
+        );
+
+        let files = alice.files();
+        assert_eq!(files.len(), 2);
+        let wiki = files.iter().find(|e| e.path == "wiki/Cats").unwrap();
+        let emoji = files.iter().find(|e| e.path == "emoji").unwrap();
+        assert_eq!(wiki.expires, FileExpiry::At(T0 + FILE_EXPIRY_DEFAULT_MS));
+        assert_eq!(
+            emoji.expires,
+            FileExpiry::At(T0 + 60_000 + FILE_EXPIRY_DEFAULT_MS),
+            "the re-listing is stamped fresh, not inherited"
+        );
+
+        // Adjusting one listing leaves the other alone.
+        alice
+            .set_file_expiry(&cid, "wiki/Cats", None)
+            .await
+            .unwrap();
+        let files = alice.files();
+        assert_eq!(
+            files
+                .iter()
+                .find(|e| e.path == "wiki/Cats")
+                .unwrap()
+                .expires,
+            FileExpiry::Never
+        );
+        assert_eq!(
+            files.iter().find(|e| e.path == "emoji").unwrap().expires,
+            FileExpiry::At(T0 + 60_000 + FILE_EXPIRY_DEFAULT_MS),
+            "the other folder's listing keeps its own deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn wiki_pinned_cids_catches_both_markers_and_unpins_when_the_page_changes() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice.open_wiki().await.unwrap();
+        let embedded = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", b"CAT")
+            .await
+            .unwrap();
+        let chipped = alice
+            .add_file("notes.pdf", "application/pdf", "docs", b"NOTES")
+            .await
+            .unwrap();
+        let lonely = alice
+            .add_file("nobody.bin", "application/octet-stream", "", b"NOBODY")
+            .await
+            .unwrap();
+
+        assert!(alice.wiki_pinned_cids().is_empty(), "no pages yet");
+
+        // Both grammars pin: `![alt](cid:HEX)` embeds and `[label](file:HEX)` ref chips.
+        alice
+            .write_wiki_page(
+                "Cats",
+                &format!(
+                    "Look: ![a cat](cid:{})\n\nSee also [the notes](file:{}).",
+                    embedded.to_hex(),
+                    chipped.to_hex()
+                ),
+            )
+            .await
+            .unwrap();
+        let pinned = alice.wiki_pinned_cids();
+        assert!(pinned.contains(&embedded.to_hex()), "embed marker pins");
+        assert!(pinned.contains(&chipped.to_hex()), "ref chip pins");
+        assert!(!pinned.contains(&lonely.to_hex()), "unreferenced, unpinned");
+        assert_eq!(pinned.len(), 2);
+
+        // Uppercase hex in the body still matches the lowercase cid form.
+        alice
+            .write_wiki_page(
+                "Shouty",
+                &format!("![A CAT](cid:{})", embedded.to_hex().to_uppercase()),
+            )
+            .await
+            .unwrap();
+        assert!(alice.wiki_pinned_cids().contains(&embedded.to_hex()));
+        alice.delete_wiki_page("Shouty").await.unwrap();
+
+        // Editing the embed out un-pins with no bookkeeping: the set is derived, never stored.
+        alice
+            .write_wiki_page("Cats", "Now the page has no media at all.")
+            .await
+            .unwrap();
+        assert!(
+            alice.wiki_pinned_cids().is_empty(),
+            "dropping the markers un-pins both files"
+        );
+
+        // ...and so does deleting the page outright.
+        alice
+            .write_wiki_page("Cats", &format!("![a cat](cid:{})", embedded.to_hex()))
+            .await
+            .unwrap();
+        assert_eq!(alice.wiki_pinned_cids().len(), 1);
+        alice.delete_wiki_page("Cats").await.unwrap();
+        assert!(
+            alice.wiki_pinned_cids().is_empty(),
+            "a deleted page pins nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_usage_counts_wiki_status_and_chat_references() {
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_with_clock(&clock);
+        alice.open_files().await.unwrap();
+        alice.open_wiki().await.unwrap();
+        alice.open_status().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+        let cid = alice
+            .add_file("cat.png", "image/png", "wiki/Cats", b"CAT")
+            .await
+            .unwrap();
+        let other = alice
+            .add_file("dog.png", "image/png", "wiki/Dogs", b"DOG")
+            .await
+            .unwrap();
+        let hex = cid.to_hex();
+
+        assert_eq!(alice.file_usage(&cid), FileUsage::default());
+        assert!(!alice.file_usage(&cid).wiki_pinned());
+        assert!(alice.file_usage(&cid).is_empty());
+
+        alice
+            .write_wiki_page("Cats", &format!("![a cat](cid:{hex})"))
+            .await
+            .unwrap();
+        alice
+            .write_wiki_page("Index", &format!("[the cat](file:{hex})"))
+            .await
+            .unwrap();
+        alice
+            .write_wiki_page("Dogs", &format!("![a dog](cid:{})", other.to_hex()))
+            .await
+            .unwrap();
+        alice
+            .post_status(&format!("new pic ![a cat](cid:{hex})"))
+            .await
+            .unwrap();
+        alice.post_status("nothing to see here").await.unwrap();
+        alice
+            .send_message(GENERAL, &format!("look ![a cat](cid:{hex})"))
+            .await
+            .unwrap();
+        alice
+            .send_message(GENERAL, &format!("and again [cat](file:{hex})"))
+            .await
+            .unwrap();
+        alice
+            .send_message(GENERAL, "unrelated chatter")
+            .await
+            .unwrap();
+
+        let usage = alice.file_usage(&cid);
+        assert_eq!(
+            usage.wiki_pages,
+            vec!["Cats".to_string(), "Index".to_string()],
+            "both grammars count, sorted, and the Dogs page is not listed"
+        );
+        assert_eq!(usage.status_count, 1);
+        assert_eq!(usage.chat_count, 2);
+        assert!(usage.wiki_pinned());
+        assert!(!usage.is_empty());
+
+        // The other file's usage is independent.
+        let dog = alice.file_usage(&other);
+        assert_eq!(dog.wiki_pages, vec!["Dogs".to_string()]);
+        assert_eq!((dog.status_count, dog.chat_count), (0, 0));
+    }
+
+    #[test]
+    fn the_marker_scanner_reads_both_grammars_and_ignores_near_misses() {
+        let mut out = HashSet::new();
+        let a = "ab".repeat(32); // 64 hex chars
+        scan_file_markers(
+            &format!(
+                "![x](cid:{a}) [y](file:{a}) [z](file:) ![w](cid:zzzz) [v](file:{a} \
+                 [u](status:{a}) ![t](cid:{})",
+                a.to_uppercase()
+            ),
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            HashSet::from([a.clone()]),
+            "both grammars hit (case-folded); an empty/non-hex/unterminated marker and a \
+             status ref do not"
         );
     }
 }

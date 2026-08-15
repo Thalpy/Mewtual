@@ -255,6 +255,27 @@ struct UiFile {
     held: u32,
     /// Total chunks the file is split into.
     total: u32,
+    /// When this listing drops out of circulation, ms epoch. `null` means either "keep forever"
+    /// or "never recorded" — `expires_known` tells those apart. Recorded metadata only: nothing
+    /// enforces it yet (see `catcoms_app::FileExpiry`).
+    expires: Option<u64>,
+    /// Whether an expiry was ever recorded for this listing. `false` = a legacy share from before
+    /// expiry existed ("not recorded"); `true` + `expires == null` = an explicit keep-forever.
+    expires_known: bool,
+}
+
+/// Where a file is referenced across the server — the Properties pane's "Used in" row.
+#[derive(Serialize, Clone)]
+struct UiFileUsage {
+    /// Live wiki pages whose body embeds/references this file (sorted).
+    wiki_pages: Vec<String>,
+    /// Status posts referencing it.
+    status_count: usize,
+    /// Chat messages referencing it, across every channel open on this device.
+    chat_count: usize,
+    /// `wiki_pages` is non-empty ⇒ the file is wiki-pinned and must never drop out of
+    /// circulation, whatever its recorded expiry says.
+    pinned: bool,
 }
 
 /// The shared file list plus whether any peer is currently reachable to fetch from — the payload
@@ -1404,6 +1425,8 @@ async fn get_files(state: State<'_, AppState>, server: u64) -> Result<FilesPaylo
             path: l.entry.path,
             held: l.held_chunks,
             total: l.total_chunks,
+            expires: l.entry.expires.deadline_ms(),
+            expires_known: l.entry.expires.is_recorded(),
         })
         .collect();
     Ok(FilesPayload {
@@ -1573,6 +1596,56 @@ async fn delete_file(state: State<'_, AppState>, server: u64, cid: String) -> Re
     actor.delete_file(raw).await?;
     persist_server(&state, server).await;
     Ok(())
+}
+
+/// Adjust ONE listing's circulation expiry: `expires` is an absolute ms-epoch deadline, or `null`
+/// to keep the file forever. Addressed by content-address hex + folder, because expiry is per
+/// listing. Uploader, owner or admin only (honest-client gate, like delete).
+///
+/// This records metadata. It does **not** cause the file to be dropped, deleted or evicted at the
+/// deadline — no retention pass consumes it yet.
+#[tauri::command]
+async fn set_file_expiry(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+    path: String,
+    expires: Option<u64>,
+) -> Result<(), String> {
+    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    let actor = actor_of(&state, server).await?;
+    actor.set_file_expiry(raw, path, expires).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Where a shared file is used: the wiki pages that embed it, plus status/chat reference counts.
+#[tauri::command]
+async fn get_file_usage(
+    state: State<'_, AppState>,
+    server: u64,
+    cid: String,
+) -> Result<UiFileUsage, String> {
+    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    let actor = actor_of(&state, server).await?;
+    let usage = actor.file_usage(raw).await;
+    Ok(UiFileUsage {
+        pinned: usage.wiki_pinned(),
+        wiki_pages: usage.wiki_pages,
+        status_count: usage.status_count,
+        chat_count: usage.chat_count,
+    })
+}
+
+/// The content addresses (lowercase hex) embedded in a live wiki page: files that must never drop
+/// out of circulation. Derived from the wiki each call — dropping the embed un-pins the file.
+#[tauri::command]
+async fn get_wiki_pinned_cids(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<String>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.wiki_pinned_cids().await)
 }
 
 /// Download a shared file by content-address hex; returns base64-encoded bytes. Fetches the file
@@ -2768,6 +2841,9 @@ pub fn run() {
             download_file,
             file_available,
             delete_file,
+            set_file_expiry,
+            get_file_usage,
+            get_wiki_pinned_cids,
             post_status,
             get_statuses,
             create_event,

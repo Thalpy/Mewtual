@@ -22,8 +22,8 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FilesView, InboxItem, Livery, MemberBadge,
-    MemberView, MessageStats, Profile, Server, ServerEvent,
+    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem, Livery,
+    MemberBadge, MemberView, MessageStats, Profile, Server, ServerEvent,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -231,6 +231,20 @@ pub enum AppCommand {
         cid: Vec<u8>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Adjust ONE listing's circulation expiry (`None` = keep forever); uploader/owner/admin.
+    SetFileExpiry {
+        cid: Vec<u8>,
+        path: String,
+        expires: Option<u64>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Where a file is referenced: wiki pages + status/chat counts.
+    FileUsage {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<FileUsage>,
+    },
+    /// The wiki-pinned content addresses (lowercase hex) — files that must never decay.
+    WikiPinnedCids { reply: oneshot::Sender<Vec<String>> },
     /// Pull the file index from `peer` (e.g. right after joining).
     CatchUpFiles { peer: PeerId },
     /// Post to the server status feed.
@@ -1157,6 +1171,59 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// Adjust ONE listing's circulation expiry (`None` = keep forever). Uploader/owner/admin
+    /// only. A `FilesUpdated` event follows on success.
+    pub async fn set_file_expiry(
+        &self,
+        cid: Vec<u8>,
+        path: String,
+        expires: Option<u64>,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetFileExpiry {
+                cid,
+                path,
+                expires,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Where a file is referenced (wiki pages + status/chat counts).
+    pub async fn file_usage(&self, cid: Vec<u8>) -> FileUsage {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FileUsage { cid, reply })
+            .await
+            .is_err()
+        {
+            return FileUsage::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// The wiki-pinned content addresses (lowercase hex): files that must never decay.
+    pub async fn wiki_pinned_cids(&self) -> Vec<String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiPinnedCids { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Pull the file index from `peer`.
     pub async fn catch_up_files(&self, peer: PeerId) {
         let _ = self.cmd_tx.send(AppCommand::CatchUpFiles { peer }).await;
@@ -1853,6 +1920,35 @@ where
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
+                    }
+                    Some(AppCommand::SetFileExpiry { cid, path, expires, reply }) => {
+                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server
+                                .set_file_expiry(&Cid::from_bytes(arr), &path, expires)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            Err(_) => Err("bad content address".to_string()),
+                        };
+                        let ok = res.is_ok();
+                        let _ = reply.send(res);
+                        // The listing count is unchanged, so `files_changed` can't see this —
+                        // announce it directly so every surface repaints the new expiry.
+                        if ok {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::FileUsage { cid, reply }) => {
+                        let usage = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server.file_usage(&Cid::from_bytes(arr)),
+                            Err(_) => FileUsage::default(),
+                        };
+                        let _ = reply.send(usage);
+                    }
+                    Some(AppCommand::WikiPinnedCids { reply }) => {
+                        let mut pinned: Vec<String> =
+                            server.wiki_pinned_cids().into_iter().collect();
+                        pinned.sort();
+                        let _ = reply.send(pinned);
                     }
                     Some(AppCommand::CatchUpFiles { peer }) => {
                         if let Err(e) = server.request_files_catchup(peer).await {
