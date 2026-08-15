@@ -555,6 +555,7 @@ dependencies = [
  "catcoms-storage",
  "catcoms-sync",
  "catcoms-wire",
+ "hex",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

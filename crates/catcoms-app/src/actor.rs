@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use catcoms_crypto::{DeviceCertificate, DeviceId};
 use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -303,6 +304,20 @@ pub enum AppCommand {
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    /// This member's origin identity on this server: its device id plus the group id.
+    /// Read-only — the grant ceremony (multi-device M2) needs both to anchor the SAS
+    /// and to tell the new device which group a grant is for.
+    OriginIdentity {
+        reply: oneshot::Sender<(DeviceId, Vec<u8>)>,
+    },
+    /// Sign a device certificate for a companion device with **this** server's origin
+    /// key (multi-device M2). Deliberately narrow: the key never leaves the actor, so
+    /// there is no command that exports it.
+    SignDeviceCert {
+        new_device_id: DeviceId,
+        device_name: String,
+        reply: oneshot::Sender<Result<DeviceCertificate, String>>,
     },
     /// Serialize the server's durable state for sealing to disk (Phase 9f).
     Snapshot {
@@ -640,6 +655,45 @@ impl ServerActor {
                 expires_at_ms,
                 bootstrap,
                 rendezvous,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server actor stopped".into());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
+    /// This member's origin identity on this server: `(device id, group id)`.
+    /// Returns `None` if the actor has stopped.
+    pub async fn origin_identity(&self) -> Option<(DeviceId, Vec<u8>)> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::OriginIdentity { reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok()
+    }
+
+    /// Sign a device certificate for a companion device with this server's origin key
+    /// (multi-device M2). The key never leaves the actor — only the certificate does.
+    pub async fn sign_device_cert(
+        &self,
+        new_device_id: DeviceId,
+        device_name: String,
+    ) -> Result<DeviceCertificate, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SignDeviceCert {
+                new_device_id,
+                device_name,
                 reply,
             })
             .await
@@ -1771,6 +1825,15 @@ where
                         let res = server
                             .mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous)
                             .map(|t| t.encode())
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::OriginIdentity { reply }) => {
+                        let _ = reply.send((server.device_id(), server.group_id()));
+                    }
+                    Some(AppCommand::SignDeviceCert { new_device_id, device_name, reply }) => {
+                        let res = server
+                            .issue_device_certificate(new_device_id, &device_name)
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }

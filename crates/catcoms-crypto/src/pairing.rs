@@ -1,5 +1,6 @@
 //! Multi-device pairing primitives: pairing requests, the short authentication
-//! string (SAS), and origin-signed device certificates / revocations.
+//! string (SAS), origin-signed device certificates / revocations, and the signed
+//! transfer of grant authority between a member's own devices.
 //!
 //! This is the **v2** multi-device model of `docs/design-multi-device.md`: a
 //! member's *original device* is the identity root. There is no separate account
@@ -10,9 +11,10 @@
 //! can never itself authorize a further device — nothing in this module lets a
 //! certificate name a signer other than the origin.
 //!
-//! (The older [`crate::cert`] module implements the superseded v1 model, where a
-//! separate account key rooted a multi-hop chain. Its signing domains are `/v1`
-//! and this module's are `/v2`, so the two can never cross-verify.)
+//! (The superseded v1 model — a separate account key rooting a multi-hop chain —
+//! was deleted with its module; every domain here is `/v2`, so no statement from
+//! that era could verify against this one even if one were replayed from a
+//! backup.)
 //!
 //! ## The ceremony, and what lives here
 //!
@@ -24,7 +26,8 @@
 //!    digits. A man-in-the-middle who substitutes its own key or nonce changes
 //!    the digits on one side, and the human declines.
 //! 3. On confirmation the origin mints a [`DeviceCertificate`]; later,
-//!    [`DeviceRevocation`] withdraws one.
+//!    [`DeviceRevocation`] withdraws one, and [`MasterHandoff`] moves the right to
+//!    mint either one to another device the member already controls.
 //!
 //! ## What this module deliberately does *not* do
 //!
@@ -36,10 +39,11 @@
 //! consumed by *ceremony state* — accepted or declined, it must never be usable
 //! twice — and that state lives in the pairing transport (M2), exactly as
 //! `InviteLedger` (not the token type) enforces single use for invites.
-//! Certificates and revocations here are **immutable value types**: they carry no
-//! consumption bit, and freshness (`issued_ts_ms`) and not-revoked checks are the
-//! admitting layer's job (M3/M5). Verification in this module answers only
-//! "is this a well-formed statement genuinely signed by that origin device?".
+//! Certificates, revocations and handoffs here are **immutable value types**: they
+//! carry no consumption bit, and freshness (`issued_ts_ms`), not-revoked and
+//! monotonic-`master_seq` checks are the admitting layer's job (M3/M5).
+//! Verification in this module answers only "is this a well-formed statement
+//! genuinely signed by that origin device?".
 
 use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
@@ -51,11 +55,12 @@ use crate::ids::DeviceId;
 
 const PAIRING_REQUEST_DOMAIN: &str = "catcoms/pairing-request/v1";
 const SAS_DOMAIN: &str = "catcoms/pairing-sas/v1";
-// `/v2` domains: the v1 device certificate (`crate::cert`) is rooted in an
-// account key and carries a `signer` discriminant. This shape is origin-rooted
-// and depth-1, so a v1 statement must never verify as a v2 one, or vice versa.
+// `/v2` domains: the deleted v1 device certificate was rooted in an account key
+// and carried a `signer` discriminant. This shape is origin-rooted and depth-1,
+// so a v1 statement must never verify as a v2 one, or vice versa.
 const CERT_DOMAIN: &str = "catcoms/device-cert/v2";
 const REVOKE_DOMAIN: &str = "catcoms/device-revocation/v2";
+const HANDOFF_DOMAIN: &str = "catcoms/master-handoff/v2";
 
 /// Maximum length of a human-set device name, in bytes (matches the badge-label
 /// bound used elsewhere in the app).
@@ -78,6 +83,9 @@ pub enum PairingError {
     /// A certificate may not name the origin device as its own subject.
     #[error("a device cannot certify itself")]
     SelfCertification,
+    /// A master handoff may not name the current master as its own successor.
+    #[error("a device cannot hand the master role to itself")]
+    SelfHandoff,
     /// The bytes were not a canonical encoding of this statement.
     #[error("malformed pairing request, certificate, or revocation")]
     Malformed,
@@ -92,7 +100,14 @@ pub fn validate_device_name(name: &str) -> Result<(), PairingError> {
     if name.is_empty() || name.len() > MAX_DEVICE_NAME_BYTES {
         return Err(PairingError::InvalidName);
     }
-    if name.chars().any(char::is_control) {
+    // Control characters could inject lines into the grant popup; bidi overrides and
+    // zero-width characters could make one name render as another wherever it appears
+    // (the popup now, message attribution at M4).
+    if name.chars().any(|c| {
+        char::is_control(c)
+            || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+    }) {
         return Err(PairingError::InvalidName);
     }
     Ok(())
@@ -229,6 +244,12 @@ pub struct DeviceCertificate {
     pub origin_public_key: [u8; 32],
     /// The certified companion device's id.
     pub new_device_id: DeviceId,
+    /// The MLS group id this certificate admits into, `1..=`[`MAX_CERT_GROUP_ID_BYTES`]
+    /// bytes, **bound into the signature** — so a certificate minted for one server can
+    /// never be replayed to admit the same device somewhere else, even if a member ever
+    /// reuses an origin key across groups. (Adversarial-review finding on the M2 slice;
+    /// mirrors `InviteToken`, which signs its `group_id` for the same reason.)
+    pub group_id: Vec<u8>,
     /// Human-set device name, `1..=`[`MAX_DEVICE_NAME_BYTES`] bytes.
     pub device_name: String,
     /// Issue time (ms since epoch), bound into the signature. Freshness policy
@@ -238,11 +259,22 @@ pub struct DeviceCertificate {
     pub signature: [u8; 64],
 }
 
+/// Upper bound on [`DeviceCertificate::group_id`] (MLS group ids are far smaller).
+pub const MAX_CERT_GROUP_ID_BYTES: usize = 64;
+
+fn validate_cert_group_id(group_id: &[u8]) -> Result<(), PairingError> {
+    if group_id.is_empty() || group_id.len() > MAX_CERT_GROUP_ID_BYTES {
+        return Err(PairingError::Malformed);
+    }
+    Ok(())
+}
+
 fn write_cert_unsigned(
     e: &mut Encoder,
     origin_id: &DeviceId,
     origin_public_key: &[u8; 32],
     new_device_id: &DeviceId,
+    group_id: &[u8],
     device_name: &str,
     issued_ts_ms: u64,
 ) {
@@ -250,6 +282,7 @@ fn write_cert_unsigned(
     e.put_bytes(origin_id.as_bytes()).expect("32 bytes fit");
     e.put_bytes(origin_public_key).expect("32 bytes fit");
     e.put_bytes(new_device_id.as_bytes()).expect("32 bytes fit");
+    e.put_bytes(group_id).expect("bounded group id fits");
     e.put_str(device_name).expect("bounded name fits");
     e.put_u64(issued_ts_ms);
 }
@@ -260,6 +293,7 @@ impl DeviceCertificate {
         origin_id: &DeviceId,
         origin_public_key: &[u8; 32],
         new_device_id: &DeviceId,
+        group_id: &[u8],
         device_name: &str,
         issued_ts_ms: u64,
     ) -> Vec<u8> {
@@ -269,24 +303,28 @@ impl DeviceCertificate {
             origin_id,
             origin_public_key,
             new_device_id,
+            group_id,
             device_name,
             issued_ts_ms,
         );
         e.finish()
     }
 
-    /// Mint a certificate for one companion device.
+    /// Mint a certificate admitting one companion device into one group.
     ///
-    /// Fails on a name outside [`validate_device_name`]'s bounds, and on
-    /// self-certification: a device naming itself as its own companion would
-    /// make the companion → origin mapping a self-loop while asserting nothing.
+    /// Fails on a name outside [`validate_device_name`]'s bounds, a group id outside
+    /// its bound, and on self-certification: a device naming itself as its own
+    /// companion would make the companion → origin mapping a self-loop while asserting
+    /// nothing.
     pub fn issue(
         origin: &DeviceKeypair,
         new_device_id: DeviceId,
+        group_id: &[u8],
         device_name: &str,
         now_ms: u64,
     ) -> Result<Self, PairingError> {
         validate_device_name(device_name)?;
+        validate_cert_group_id(group_id)?;
         let origin_id = origin.device_id();
         if new_device_id == origin_id {
             return Err(PairingError::SelfCertification);
@@ -296,6 +334,7 @@ impl DeviceCertificate {
             &origin_id,
             &origin_public_key,
             &new_device_id,
+            group_id,
             device_name,
             now_ms,
         );
@@ -303,6 +342,7 @@ impl DeviceCertificate {
             origin_id,
             origin_public_key,
             new_device_id,
+            group_id: group_id.to_vec(),
             device_name: device_name.to_string(),
             issued_ts_ms: now_ms,
             signature: origin.sign(&payload),
@@ -318,10 +358,11 @@ impl DeviceCertificate {
     /// 2. `origin_public_key` content-addresses `origin_id`;
     /// 3. the signature verifies (strictly) under that key over the canonical
     ///    payload — which covers every field, so any tamper invalidates it;
-    /// 4. the name is within bounds and the subject is not the origin itself.
+    /// 4. the name and group id are within bounds and the subject is not the origin
+    ///    itself.
     ///
-    /// Freshness and revocation are *not* checked here; they are the admitting
-    /// layer's responsibility.
+    /// Freshness, revocation, and *which* group this certificate must name are the
+    /// admitting layer's responsibility (it compares `group_id` to its own).
     pub fn verify(&self, expected_origin: &DeviceId) -> bool {
         if self.origin_id != *expected_origin {
             return false;
@@ -332,13 +373,16 @@ impl DeviceCertificate {
         if self.new_device_id == self.origin_id {
             return false;
         }
-        if validate_device_name(&self.device_name).is_err() {
+        if validate_device_name(&self.device_name).is_err()
+            || validate_cert_group_id(&self.group_id).is_err()
+        {
             return false;
         }
         let payload = Self::signing_payload(
             &self.origin_id,
             &self.origin_public_key,
             &self.new_device_id,
+            &self.group_id,
             &self.device_name,
             self.issued_ts_ms,
         );
@@ -353,6 +397,7 @@ impl DeviceCertificate {
             &self.origin_id,
             &self.origin_public_key,
             &self.new_device_id,
+            &self.group_id,
             &self.device_name,
             self.issued_ts_ms,
         );
@@ -371,6 +416,9 @@ impl DeviceCertificate {
         let origin_id = get_32(&mut d)?;
         let origin_public_key = get_32(&mut d)?;
         let new_device_id = get_32(&mut d)?;
+        let group_id = d.get_bytes().map_err(|_| PairingError::Malformed)?;
+        validate_cert_group_id(group_id)?;
+        let group_id = group_id.to_vec();
         // `get_str` rejects invalid UTF-8; the length bound is ours.
         let device_name = d.get_str().map_err(|_| PairingError::Malformed)?;
         validate_device_name(device_name)?;
@@ -381,6 +429,7 @@ impl DeviceCertificate {
             origin_id: DeviceId::from_bytes(origin_id),
             origin_public_key,
             new_device_id: DeviceId::from_bytes(new_device_id),
+            group_id,
             device_name: device_name.to_string(),
             issued_ts_ms,
             signature,
@@ -517,6 +566,190 @@ impl DeviceRevocation {
     }
 }
 
+/// A signed transfer of **grant authority** from the current master device to one
+/// other device the member already controls.
+///
+/// The master is *transferable, not distributable*
+/// (`docs/design-multi-device.md`): the member may **move** the right to mint
+/// [`DeviceCertificate`]s and [`DeviceRevocation`]s to an accepted device — the
+/// safe form of "elected master" — but nothing here hands out a second copy of it.
+/// Companion **self-election is rejected by construction**: only the current
+/// master's key produces a handoff that verifies, so surviving devices cannot
+/// crown one of their own without it.
+///
+/// Same carry-the-public-key shape as [`DeviceCertificate`], for the same reason:
+/// a verifier holding only the content-addressed id could not check a signature.
+///
+/// # `master_seq` is a fence this module does not enforce
+///
+/// `master_seq` exists so a *consumer* can reject a stale handoff — a replayed
+/// older statement that would hand the master back to a device the member has
+/// since retired. **Enforcing that is the admitting layer's job (M3/M5)**: it must
+/// remember the highest `master_seq` it has accepted for this identity and reject
+/// anything at or below it, exactly as it enforces certificate freshness and
+/// revocation. [`MasterHandoff::verify`] answers only "is this a well-formed
+/// statement genuinely signed by that master?" and will happily verify a handoff
+/// with `master_seq = 0` presented after one with `master_seq = 9`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MasterHandoff {
+    /// The **current** master (the identity root) making the transfer.
+    pub origin_id: DeviceId,
+    /// The current master's Ed25519 public key (raw bytes). Must content-address
+    /// `origin_id`.
+    pub origin_public_key: [u8; 32],
+    /// The device that becomes the master once this handoff is accepted.
+    pub new_master_device_id: DeviceId,
+    /// Monotonic transfer counter, bound into the signature. See the type docs:
+    /// monotonicity is enforced above this crate.
+    pub master_seq: u64,
+    /// Handoff time (ms since epoch), bound into the signature.
+    pub ts_ms: u64,
+    /// The current master's Ed25519 signature over the canonical payload.
+    pub signature: [u8; 64],
+}
+
+fn write_handoff_unsigned(
+    e: &mut Encoder,
+    origin_id: &DeviceId,
+    origin_public_key: &[u8; 32],
+    new_master_device_id: &DeviceId,
+    master_seq: u64,
+    ts_ms: u64,
+) {
+    e.put_str(HANDOFF_DOMAIN).expect("label fits");
+    e.put_bytes(origin_id.as_bytes()).expect("32 bytes fit");
+    e.put_bytes(origin_public_key).expect("32 bytes fit");
+    e.put_bytes(new_master_device_id.as_bytes())
+        .expect("32 bytes fit");
+    e.put_u64(master_seq);
+    e.put_u64(ts_ms);
+}
+
+impl MasterHandoff {
+    /// The canonical bytes the current master signs.
+    pub fn signing_payload(
+        origin_id: &DeviceId,
+        origin_public_key: &[u8; 32],
+        new_master_device_id: &DeviceId,
+        master_seq: u64,
+        ts_ms: u64,
+    ) -> Vec<u8> {
+        let mut e = Encoder::new();
+        write_handoff_unsigned(
+            &mut e,
+            origin_id,
+            origin_public_key,
+            new_master_device_id,
+            master_seq,
+            ts_ms,
+        );
+        e.finish()
+    }
+
+    /// Sign a transfer of the master role to `new_master_device_id` at
+    /// `master_seq`.
+    ///
+    /// Fails on a self-handoff: naming yourself as your own successor transfers
+    /// nothing while still consuming a sequence number, so its only effect would
+    /// be to move the replay fence. Rejecting it here beats reasoning about it at
+    /// every consumer.
+    pub fn issue(
+        master: &DeviceKeypair,
+        new_master_device_id: DeviceId,
+        master_seq: u64,
+        now_ms: u64,
+    ) -> Result<Self, PairingError> {
+        let origin_id = master.device_id();
+        if new_master_device_id == origin_id {
+            return Err(PairingError::SelfHandoff);
+        }
+        let origin_public_key = *master.verifying_key().as_bytes();
+        let payload = Self::signing_payload(
+            &origin_id,
+            &origin_public_key,
+            &new_master_device_id,
+            master_seq,
+            now_ms,
+        );
+        Ok(Self {
+            origin_id,
+            origin_public_key,
+            new_master_device_id,
+            master_seq,
+            ts_ms: now_ms,
+            signature: master.sign(&payload),
+        })
+    }
+
+    /// Whether this handoff is a well-formed statement genuinely signed by
+    /// `expected_origin` — the master the verifier currently believes in.
+    ///
+    /// Same checks as [`DeviceCertificate::verify`]: the embedded `origin_id` is
+    /// exactly `expected_origin`, the key content-addresses it, the signature
+    /// verifies strictly over every field, and the successor is not the master
+    /// itself. **`master_seq` monotonicity is not checked here** — see the type
+    /// docs.
+    pub fn verify(&self, expected_origin: &DeviceId) -> bool {
+        if self.origin_id != *expected_origin {
+            return false;
+        }
+        if DeviceId::from_public_key_bytes(&self.origin_public_key) != self.origin_id {
+            return false;
+        }
+        if self.new_master_device_id == self.origin_id {
+            return false;
+        }
+        let payload = Self::signing_payload(
+            &self.origin_id,
+            &self.origin_public_key,
+            &self.new_master_device_id,
+            self.master_seq,
+            self.ts_ms,
+        );
+        verify_with_public_bytes(&self.origin_public_key, &payload, &self.signature)
+    }
+
+    /// Serialize the full handoff (including signature).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        write_handoff_unsigned(
+            &mut e,
+            &self.origin_id,
+            &self.origin_public_key,
+            &self.new_master_device_id,
+            self.master_seq,
+            self.ts_ms,
+        );
+        e.put_bytes(&self.signature).expect("64 bytes fit");
+        e.finish()
+    }
+
+    /// Parse a handoff produced by [`MasterHandoff::encode`]. Structural only —
+    /// call [`MasterHandoff::verify`] before trusting it.
+    pub fn decode(bytes: &[u8]) -> Result<Self, PairingError> {
+        let mut d = Decoder::new(bytes);
+        let domain = d.get_str().map_err(|_| PairingError::Malformed)?;
+        if domain != HANDOFF_DOMAIN {
+            return Err(PairingError::Malformed);
+        }
+        let origin_id = get_32(&mut d)?;
+        let origin_public_key = get_32(&mut d)?;
+        let new_master_device_id = get_32(&mut d)?;
+        let master_seq = d.get_u64().map_err(|_| PairingError::Malformed)?;
+        let ts_ms = d.get_u64().map_err(|_| PairingError::Malformed)?;
+        let signature = get_64(&mut d)?;
+        d.finish().map_err(|_| PairingError::Malformed)?;
+        Ok(Self {
+            origin_id: DeviceId::from_bytes(origin_id),
+            origin_public_key,
+            new_master_device_id: DeviceId::from_bytes(new_master_device_id),
+            master_seq,
+            ts_ms,
+            signature,
+        })
+    }
+}
+
 fn get_32(d: &mut Decoder<'_>) -> Result<[u8; 32], PairingError> {
     d.get_bytes()
         .map_err(|_| PairingError::Malformed)?
@@ -536,6 +769,10 @@ mod tests {
     use super::*;
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
+
+    /// The group id every certificate test binds — group-scoping is part of the
+    /// signed payload (adversarial-review finding on the M2 slice).
+    const TG: &[u8] = b"test-group-id";
 
     fn rng(seed: u64) -> ChaCha20Rng {
         ChaCha20Rng::seed_from_u64(seed)
@@ -719,7 +956,7 @@ mod tests {
     fn certificate_round_trips_and_verifies() {
         let (origin, new_dev) = origin_and_new(6);
         let cert =
-            DeviceCertificate::issue(&origin, new_dev.device_id(), "phone", 1_700_000_000_000)
+            DeviceCertificate::issue(&origin, new_dev.device_id(), TG, "phone", 1_700_000_000_000)
                 .unwrap();
         assert!(cert.verify(&origin.device_id()));
 
@@ -735,7 +972,7 @@ mod tests {
     fn certificate_rejects_a_swapped_origin_key() {
         let (origin, new_dev) = origin_and_new(7);
         let impostor = DeviceKeypair::generate(&mut rng(700));
-        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), "phone", 1).unwrap();
+        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), TG, "phone", 1).unwrap();
 
         // Swap in another key while keeping the claimed id: the id no longer
         // content-addresses the key.
@@ -751,7 +988,7 @@ mod tests {
 
         // A certificate genuinely signed by the impostor is still not accepted
         // when the caller expects `origin`.
-        let other = DeviceCertificate::issue(&impostor, new_dev.device_id(), "phone", 1).unwrap();
+        let other = DeviceCertificate::issue(&impostor, new_dev.device_id(), TG, "phone", 1).unwrap();
         assert!(other.verify(&impostor.device_id()));
         assert!(!other.verify(&origin.device_id()));
     }
@@ -759,7 +996,7 @@ mod tests {
     #[test]
     fn certificate_rejects_every_tampered_field() {
         let (origin, new_dev) = origin_and_new(8);
-        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), "phone", 42).unwrap();
+        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), TG, "phone", 42).unwrap();
         let expected = origin.device_id();
         assert!(cert.verify(&expected));
 
@@ -792,7 +1029,7 @@ mod tests {
     #[test]
     fn certificate_rejects_mismatched_expected_origin() {
         let (origin, new_dev) = origin_and_new(9);
-        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), "phone", 1).unwrap();
+        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), TG, "phone", 1).unwrap();
         // A perfectly valid certificate, checked against the wrong origin.
         assert!(cert.verify(&origin.device_id()));
         assert!(!cert.verify(&new_dev.device_id()));
@@ -805,27 +1042,27 @@ mod tests {
         let id = new_dev.device_id();
 
         assert_eq!(
-            DeviceCertificate::issue(&origin, id, "", 1),
+            DeviceCertificate::issue(&origin, id, TG, "", 1),
             Err(PairingError::InvalidName)
         );
         // 25 bytes: one over the bound.
         assert_eq!(
-            DeviceCertificate::issue(&origin, id, &"x".repeat(MAX_DEVICE_NAME_BYTES + 1), 1),
+            DeviceCertificate::issue(&origin, id, TG, &"x".repeat(MAX_DEVICE_NAME_BYTES + 1), 1),
             Err(PairingError::InvalidName)
         );
         // Exactly at the bound is fine, and bytes (not chars) are what count:
         // six 4-byte emoji are 24 bytes and allowed, seven are not.
         assert!(
-            DeviceCertificate::issue(&origin, id, &"x".repeat(MAX_DEVICE_NAME_BYTES), 1).is_ok()
+            DeviceCertificate::issue(&origin, id, TG, &"x".repeat(MAX_DEVICE_NAME_BYTES), 1).is_ok()
         );
-        assert!(DeviceCertificate::issue(&origin, id, &"🐱".repeat(6), 1).is_ok());
+        assert!(DeviceCertificate::issue(&origin, id, TG, &"🐱".repeat(6), 1).is_ok());
         assert_eq!(
-            DeviceCertificate::issue(&origin, id, &"🐱".repeat(7), 1),
+            DeviceCertificate::issue(&origin, id, TG, &"🐱".repeat(7), 1),
             Err(PairingError::InvalidName)
         );
         // Control characters would let a name inject lines into the grant popup.
         assert_eq!(
-            DeviceCertificate::issue(&origin, id, "phone\nADMIN", 1),
+            DeviceCertificate::issue(&origin, id, TG, "phone\nADMIN", 1),
             Err(PairingError::InvalidName)
         );
 
@@ -834,11 +1071,12 @@ mod tests {
         let long = "y".repeat(MAX_DEVICE_NAME_BYTES + 1);
         let origin_id = origin.device_id();
         let pk = *origin.verifying_key().as_bytes();
-        let payload = DeviceCertificate::signing_payload(&origin_id, &pk, &id, &long, 1);
+        let payload = DeviceCertificate::signing_payload(&origin_id, &pk, &id, TG, &long, 1);
         let forged = DeviceCertificate {
             origin_id,
             origin_public_key: pk,
             new_device_id: id,
+            group_id: TG.to_vec(),
             device_name: long,
             issued_ts_ms: 1,
             signature: origin.sign(&payload),
@@ -859,6 +1097,7 @@ mod tests {
         e.put_bytes(origin.device_id().as_bytes()).unwrap();
         e.put_bytes(origin.verifying_key().as_bytes()).unwrap();
         e.put_bytes(new_dev.device_id().as_bytes()).unwrap();
+        e.put_bytes(TG).unwrap();
         e.put_bytes(&[0xFF, 0xFE]).unwrap(); // not UTF-8
         e.put_u64(1);
         e.put_bytes(&[0u8; 64]).unwrap();
@@ -871,7 +1110,7 @@ mod tests {
     #[test]
     fn certificate_decode_rejects_wrong_domain_and_trailing_bytes() {
         let (origin, new_dev) = origin_and_new(12);
-        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), "phone", 1).unwrap();
+        let cert = DeviceCertificate::issue(&origin, new_dev.device_id(), TG, "phone", 1).unwrap();
 
         let mut bytes = cert.encode();
         bytes.push(0);
@@ -896,17 +1135,18 @@ mod tests {
     fn certificate_rejects_self_certification() {
         let (origin, _) = origin_and_new(13);
         assert_eq!(
-            DeviceCertificate::issue(&origin, origin.device_id(), "me", 1),
+            DeviceCertificate::issue(&origin, origin.device_id(), TG, "me", 1),
             Err(PairingError::SelfCertification)
         );
         // Even hand-signed, a self-certificate does not verify (depth stays 1).
         let origin_id = origin.device_id();
         let pk = *origin.verifying_key().as_bytes();
-        let payload = DeviceCertificate::signing_payload(&origin_id, &pk, &origin_id, "me", 1);
+        let payload = DeviceCertificate::signing_payload(&origin_id, &pk, &origin_id, TG, "me", 1);
         let forged = DeviceCertificate {
             origin_id,
             origin_public_key: pk,
             new_device_id: origin_id,
+            group_id: TG.to_vec(),
             device_name: "me".into(),
             issued_ts_ms: 1,
             signature: origin.sign(&payload),
@@ -966,6 +1206,141 @@ mod tests {
         assert!(rev.verify(&origin.device_id()));
     }
 
+    // ---------- master handoff ----------
+
+    #[test]
+    fn master_handoff_round_trips_and_verifies() {
+        let (master, successor) = origin_and_new(20);
+        let h = MasterHandoff::issue(&master, successor.device_id(), 1, 1_700_000_000_002).unwrap();
+        assert!(h.verify(&master.device_id()));
+
+        let decoded = MasterHandoff::decode(&h.encode()).unwrap();
+        assert_eq!(decoded, h);
+        assert!(decoded.verify(&master.device_id()));
+        assert_eq!(decoded.new_master_device_id, successor.device_id());
+        assert_eq!(decoded.master_seq, 1);
+        assert_eq!(decoded.ts_ms, 1_700_000_000_002);
+    }
+
+    #[test]
+    fn master_handoff_rejects_every_tampered_field_and_wrong_master() {
+        let (master, successor) = origin_and_new(21);
+        let impostor = DeviceKeypair::generate(&mut rng(2100));
+        let h = MasterHandoff::issue(&master, successor.device_id(), 4, 99).unwrap();
+        let expected = master.device_id();
+        assert!(h.verify(&expected));
+
+        // Re-point the transfer at another device.
+        let mut t = h.clone();
+        t.new_master_device_id = impostor.device_id();
+        assert!(!t.verify(&expected));
+
+        // Move the replay fence.
+        let mut t = h.clone();
+        t.master_seq = 5;
+        assert!(!t.verify(&expected));
+
+        let mut t = h.clone();
+        t.ts_ms = 100;
+        assert!(!t.verify(&expected));
+
+        let mut t = h.clone();
+        t.signature[0] ^= 0xFF;
+        assert!(!t.verify(&expected));
+
+        // Swap in another key while keeping the claimed id: the id no longer
+        // content-addresses the key.
+        let mut t = h.clone();
+        t.origin_public_key = *impostor.verifying_key().as_bytes();
+        assert!(!t.verify(&expected));
+
+        // Swap both so they agree: the signature no longer verifies.
+        let mut t = h.clone();
+        t.origin_id = impostor.device_id();
+        t.origin_public_key = *impostor.verifying_key().as_bytes();
+        assert!(!t.verify(&impostor.device_id()));
+
+        // A handoff genuinely signed by someone else is not accepted for `master`
+        // — this is what blocks a companion from crowning itself.
+        let other = MasterHandoff::issue(&impostor, successor.device_id(), 4, 99).unwrap();
+        assert!(other.verify(&impostor.device_id()));
+        assert!(!other.verify(&expected));
+    }
+
+    #[test]
+    fn master_handoff_rejects_self_handoff() {
+        let (master, _) = origin_and_new(22);
+        assert_eq!(
+            MasterHandoff::issue(&master, master.device_id(), 1, 1),
+            Err(PairingError::SelfHandoff)
+        );
+        // Even hand-signed, a self-handoff does not verify.
+        let origin_id = master.device_id();
+        let pk = *master.verifying_key().as_bytes();
+        let payload = MasterHandoff::signing_payload(&origin_id, &pk, &origin_id, 1, 1);
+        let forged = MasterHandoff {
+            origin_id,
+            origin_public_key: pk,
+            new_master_device_id: origin_id,
+            master_seq: 1,
+            ts_ms: 1,
+            signature: master.sign(&payload),
+        };
+        assert!(!forged.verify(&origin_id));
+    }
+
+    #[test]
+    fn master_handoff_does_not_enforce_monotonic_seq() {
+        // Documented contract: this module verifies authenticity only. A *stale*
+        // handoff (a lower `master_seq` presented after a higher one) is perfectly
+        // well-signed and verifies here — rejecting it is the admitting layer's
+        // job (M3/M5), which must track the highest seq it has accepted.
+        let (master, successor) = origin_and_new(23);
+        let retired = DeviceKeypair::generate(&mut rng(2300));
+        let newer = MasterHandoff::issue(&master, successor.device_id(), 9, 2).unwrap();
+        let stale = MasterHandoff::issue(&master, retired.device_id(), 0, 1).unwrap();
+        assert!(newer.verify(&master.device_id()));
+        assert!(stale.verify(&master.device_id()));
+        assert!(stale.master_seq < newer.master_seq);
+    }
+
+    #[test]
+    fn master_handoff_decode_rejects_wrong_domain_and_trailing_bytes() {
+        let (master, successor) = origin_and_new(24);
+        let h = MasterHandoff::issue(&master, successor.device_id(), 1, 1).unwrap();
+
+        let mut bytes = h.encode();
+        bytes.push(0);
+        assert_eq!(MasterHandoff::decode(&bytes), Err(PairingError::Malformed));
+
+        let bytes = h.encode();
+        assert_eq!(
+            MasterHandoff::decode(&bytes[..bytes.len() - 4]),
+            Err(PairingError::Malformed)
+        );
+
+        // No cross-decoding between the three signed statements: the domain label
+        // is the first field of each.
+        let cert = DeviceCertificate::issue(&master, successor.device_id(), TG, "phone", 1).unwrap();
+        let rev = DeviceRevocation::issue(&master, successor.device_id(), 1);
+        assert_eq!(
+            MasterHandoff::decode(&cert.encode()),
+            Err(PairingError::Malformed)
+        );
+        assert_eq!(
+            MasterHandoff::decode(&rev.encode()),
+            Err(PairingError::Malformed)
+        );
+        assert_eq!(
+            DeviceCertificate::decode(&h.encode()),
+            Err(PairingError::Malformed)
+        );
+        assert_eq!(
+            DeviceRevocation::decode(&h.encode()),
+            Err(PairingError::Malformed)
+        );
+    }
+
     // ---------- golden vectors ----------
 
     #[test]
@@ -988,20 +1363,21 @@ mod tests {
             "405e4106e081dd008d77dc69bf66be5650f06efd5273661e7a7086bb77d17c44"
         );
 
-        // Certificate: 26-byte domain field + 3×36 id/key fields + 9-byte name
-        // field + 8-byte timestamp + 68-byte signature field = 219 bytes.
+        // Certificate: 26-byte domain field + 3×36 id/key fields + 17-byte group-id
+        // field ("test-group-id") + 9-byte name field + 8-byte timestamp + 68-byte
+        // signature field = 236 bytes.
         let cert =
-            DeviceCertificate::issue(&origin, new_dev.device_id(), "phone", 1_700_000_000_000)
+            DeviceCertificate::issue(&origin, new_dev.device_id(), TG, "phone", 1_700_000_000_000)
                 .unwrap();
-        assert_eq!(cert.encode().len(), 219);
+        assert_eq!(cert.encode().len(), 236);
         assert_eq!(
             hex(&cert.signature),
-            "d5c37c1e17b49fb8af440292989b315873a5864ba639bb0c8ccf51950f21a31b\
-             4e0ead7cdb458e3b92a368a2f46ed0cc5780f3b467a3e7a4af13ed5274d3c703"
+            "edbd50ac16b22ac4669a55d76d14101fe9312243034002086b88eff6de8679b4\
+             464a3accbfee2565127977308f3aa6a557d46222b3c70ff23981dcf9d795490d"
         );
         assert_eq!(
             hex(blake3::hash(&cert.encode()).as_bytes()),
-            "fa0aa4fbc0c6a30a2ad1282576e95ad85af2d1965b74bfa0a6f029a5fe1dbde5"
+            "9582fd066e5b59bc0f3cda540db16e8f9008fc1d038c49e3bad838a748992837"
         );
 
         let rev = DeviceRevocation::issue(&origin, new_dev.device_id(), 1_700_000_000_000);
@@ -1014,9 +1390,26 @@ mod tests {
             hex(blake3::hash(&rev.encode()).as_bytes()),
             "1d60b3306288b73401a7af721a84d4b7a0b9133df5c6a0116a36b946d267fca7"
         );
-        // The two statements share ids and timestamp yet cannot collide: the
+        // Handoff: 29-byte domain field + 3×36 id/key fields + 2×8 for
+        // `master_seq`/`ts_ms` + 68-byte signature field = 221 bytes.
+        let handoff =
+            MasterHandoff::issue(&origin, new_dev.device_id(), 1, 1_700_000_000_000).unwrap();
+        assert_eq!(handoff.encode().len(), 221);
+        assert_eq!(
+            hex(&handoff.signature),
+            "777d1b23858aaa1f1a476678bcbd17558f0c57769b7ae7dbcbb76bdcc71b210f\
+             d77efdae045c2764344b7edd80a96fc91409d48eb6a00d3ccd51ea32ea37c10c"
+        );
+        assert_eq!(
+            hex(blake3::hash(&handoff.encode()).as_bytes()),
+            "d1faabb1d2fabd9e967a799c987490fd5f08993aa7f9ed12c7f77af240281f54"
+        );
+
+        // The three statements share ids and timestamp yet cannot collide: the
         // domain label is the first signed field.
         assert_ne!(cert.signature, rev.signature);
+        assert_ne!(cert.signature, handoff.signature);
+        assert_ne!(rev.signature, handoff.signature);
 
         // The pairing request is small enough to pin byte-for-byte:
         // `0000001a` len(26) ‖ "catcoms/pairing-request/v1"

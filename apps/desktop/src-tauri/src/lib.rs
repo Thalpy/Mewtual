@@ -14,9 +14,9 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
-    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, Livery, Profile, Server,
-    ServerActor, ServerRecord, ServerStore, MAX_AVATAR_BYTES, MAX_SERVER_CURSOR_BYTES,
-    MAX_SERVER_ICON_BYTES,
+    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger,
+    PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerRecord, ServerStore,
+    MAX_AVATAR_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -62,6 +62,29 @@ struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
     next_id: Mutex<u64>,
     store: Mutex<Option<ServerStore>>,
+    /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
+    /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
+    /// pasted back. One slot — starting a new ceremony abandons any previous one — and, like
+    /// `store`, it is process state only: the key is never written to disk here.
+    pairing: Mutex<Option<PairingSecrets>>,
+    /// The **origin device's** record of which pairing nonces it has already granted, so one
+    /// pasted request mints at most one bundle. In-memory (a restart forgets), exactly as the
+    /// invite ledger began.
+    pairing_ledger: Mutex<PairingLedger>,
+    /// The **origin device's** pending ceremony: exactly the request (and SAS anchor) the
+    /// human saw at `pairing_read`. `pairing_mint` takes NO blob and mints only from here,
+    /// so what gets certified is provably what was approved — re-reading a caller-supplied
+    /// blob at mint time was a TOCTOU (the popup could show one device while a swapped blob
+    /// minted for another), and it left the backend with no notion of "confirmed" at all
+    /// (adversarial-review finding). Cleared on mint success and on decline.
+    pending_grant: Mutex<Option<PendingGrant>>,
+}
+
+/// The origin-side pending ceremony: what `pairing_read` decoded and anchored, held so
+/// `pairing_mint`/`pairing_decline` act on the approved request and nothing else.
+struct PendingGrant {
+    view: catcoms_app::PairingRequestView,
+    origin: DeviceId,
 }
 
 /// Clone out the actor for `server` (so we never hold the servers lock across an await).
@@ -2088,6 +2111,282 @@ async fn unlock(
     Ok(reloaded)
 }
 
+// ---------------------------------------------------------------------------
+// Multi-device grant ceremony (M2) — four paste-carried steps, no new transport.
+// ---------------------------------------------------------------------------
+
+/// What `pairing_begin` hands the **new** device.
+#[derive(Serialize, Clone)]
+struct PairingBegun {
+    /// The blob to carry to the origin device (copy/paste; QR at M6).
+    blob: String,
+    /// This device's id as full hex — its first 8 characters are the roster fingerprint.
+    device_id: String,
+}
+
+/// What the origin device's grant popup shows.
+#[derive(Serialize, Clone)]
+struct PairingRead {
+    /// The requesting device's id as full hex.
+    device_id: String,
+    /// The six-digit code, **as a string** so a leading zero survives the trip to JS
+    /// (`023602` is a valid code and `23602` is a different one).
+    sas: String,
+    /// The scope the grant will cover if accepted: every unlocked server's local label
+    /// (the popup must show what is about to be granted — adversarial-review finding).
+    servers: Vec<String>,
+    /// How many of those are DMs (surfaced separately in the popup copy).
+    dm_count: usize,
+}
+
+/// The sealed bundle to carry back to the new device.
+#[derive(Serialize, Clone)]
+struct PairingBundle {
+    bundle: String,
+}
+
+/// One server's grant, as summarized to the new device after the bundle opens.
+#[derive(Serialize, Clone)]
+struct PairingGrantSummary {
+    /// The origin device's local label for that server.
+    name: String,
+    /// The MLS group id (hex).
+    group_id: String,
+    /// The certifying origin's device id (hex) — different per server by design.
+    origin: String,
+    /// How many bootstrap / rendezvous hints came with it.
+    bootstrap: usize,
+    rendezvous: usize,
+}
+
+/// What `pairing_open` shows on the new device: the code to compare, and what arrived.
+#[derive(Serialize, Clone)]
+struct PairingOpened {
+    /// The six-digit code — the human's last check. It must match the one the origin
+    /// showed at its popup; if it does not, discard the grant.
+    sas: String,
+    /// The name the origin gave this device.
+    device_name: String,
+    servers: Vec<PairingGrantSummary>,
+}
+
+/// One server as `pairing_mint` sees it: the registry's half of a grant (local label +
+/// the live reach hints), plus the actor that will sign the certificate.
+struct GrantSource {
+    id: u64,
+    name: String,
+    bootstrap: Vec<String>,
+    rendezvous: Vec<String>,
+    actor: ServerActor,
+}
+
+/// The origin identity anchoring this ceremony's SAS: the **lowest-numbered** server's.
+///
+/// A member holds one origin identity *per server* — that is what stops servers from
+/// linking them — so a ceremony has to name one of them, and both ends must name the
+/// same one or the six digits will not match. Choosing it deterministically here means
+/// the popup and the new device's bundle-open agree with no extra value typed across
+/// (the choice is written into the bundle, and `open_grant_bundle` reads it back).
+async fn ceremony_origin(state: &AppState) -> Result<DeviceId, String> {
+    let actor = {
+        let servers = state.servers.lock().await;
+        let (_, entry) = servers
+            .iter()
+            .min_by_key(|(id, _)| **id)
+            .ok_or_else(|| "join or found a server before pairing a device".to_string())?;
+        entry.actor.clone()
+    };
+    actor
+        .origin_identity()
+        .await
+        .map(|(id, _)| id)
+        .ok_or_else(|| "server actor stopped".to_string())
+}
+
+/// Step 1, on the **new** device: mint its device identity and a single-use pairing
+/// request. The secrets stay in this process; only the request travels.
+#[tauri::command]
+async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, String> {
+    let mut rng = OsCryptoRng;
+    let (secrets, blob) = catcoms_app::begin_pairing(&mut rng).map_err(|e| e.to_string())?;
+    let device_id = secrets.device_id().to_string();
+    // Starting a ceremony abandons any earlier one: its nonce is never reused.
+    *state.pairing.lock().await = Some(secrets);
+    Ok(PairingBegun { blob, device_id })
+}
+
+/// Step 2, on the **origin** device: read a pasted request for the grant popup, and
+/// remember it as THE pending ceremony — `pairing_mint` acts on this stored view only,
+/// so the device the popup showed is the device that gets certified. Nothing is minted
+/// and the nonce is not consumed here — the popup may be reopened (re-reading replaces
+/// the pending view wholesale).
+#[tauri::command]
+async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<PairingRead, String> {
+    let origin = ceremony_origin(&state).await?;
+    let view = catcoms_app::read_pairing_blob(&blob, &origin).map_err(|e| e.to_string())?;
+    if state.pairing_ledger.lock().await.is_spent(&view.request.pairing_nonce) {
+        return Err("that pairing request has already been used".to_string());
+    }
+    // The scope the popup must disclose: everything an accept would grant.
+    let (servers, dm_count) = {
+        let guard = state.servers.lock().await;
+        let mut names: Vec<(u64, String, bool)> =
+            guard.iter().map(|(id, e)| (*id, e.name.clone(), e.is_dm)).collect();
+        names.sort_by_key(|(id, _, _)| *id);
+        let dm_count = names.iter().filter(|(_, _, dm)| *dm).count();
+        (names.into_iter().map(|(_, n, _)| n).collect::<Vec<_>>(), dm_count)
+    };
+    let read = PairingRead {
+        device_id: view.new_device_id.to_string(),
+        sas: format!("{:06}", view.sas),
+        servers,
+        dm_count,
+    };
+    *state.pending_grant.lock().await = Some(PendingGrant { view, origin });
+    Ok(read)
+}
+
+/// Decline the pending ceremony: burn its nonce (single-use **either way**, per the
+/// design — a declined request cannot be re-run by re-pasting the same blob) and clear
+/// the pending view.
+#[tauri::command]
+async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(pending) = state.pending_grant.lock().await.take() {
+        // Already-spent just means a mint won the race; either way the nonce is dead.
+        let _ = state
+            .pairing_ledger
+            .lock()
+            .await
+            .spend(pending.view.request.pairing_nonce);
+    }
+    Ok(())
+}
+
+/// Step 3, on the **origin** device, once the human has confirmed the popup: sign one
+/// certificate per unlocked server — each with *that server's* own origin key, inside
+/// its actor — and seal them all into one passphrase-wrapped bundle.
+///
+/// Each server contributes what only its actor knows (group id + signature) and what
+/// only the bridge knows (the local label and the live bootstrap / rendezvous hints,
+/// which are exactly what an invite carries and `join_server` consumes). The pairing
+/// nonce is spent inside `mint_grant_bundle`, so a re-paste of the same request fails.
+#[tauri::command]
+async fn pairing_mint(
+    state: State<'_, AppState>,
+    passphrase: String,
+    device_name: String,
+) -> Result<PairingBundle, String> {
+    // Mint ONLY from the pending view `pairing_read` stored — the popup's device is the
+    // certified device, closing the read→mint TOCTOU. The lock is held for the whole
+    // mint so a concurrent re-read cannot swap the ceremony out from under the accept.
+    let mut pending_guard = state.pending_grant.lock().await;
+    let pending = pending_guard
+        .as_ref()
+        .ok_or_else(|| "no pairing request has been read — paste one first".to_string())?;
+    let ceremony = pending.origin;
+    let view = &pending.view;
+
+    // A spent nonce costs zero signatures (and zero actor round-trips).
+    if state.pairing_ledger.lock().await.is_spent(&view.request.pairing_nonce) {
+        return Err("that pairing request has already been used".to_string());
+    }
+
+    // Snapshot what the registry knows about each server under the lock, then talk to
+    // each actor without holding it — the same shape as `get_inbox`. Sorted so the
+    // bundle's server order is stable.
+    let mut servers: Vec<GrantSource> = {
+        let guard = state.servers.lock().await;
+        guard
+            .iter()
+            .map(|(id, e)| GrantSource {
+                id: *id,
+                name: e.name.clone(),
+                bootstrap: e.bootstrap.clone(),
+                rendezvous: e.rendezvous.clone(),
+                actor: e.actor.clone(),
+            })
+            .collect()
+    };
+    servers.sort_by_key(|s| s.id);
+
+    let mut grants = Vec::with_capacity(servers.len());
+    for s in servers {
+        let (_, group_id) = s
+            .actor
+            .origin_identity()
+            .await
+            .ok_or_else(|| format!("server {} stopped", s.id))?;
+        let certificate = s
+            .actor
+            .sign_device_cert(view.new_device_id, device_name.clone())
+            .await?;
+        grants.push(PerServerGrant {
+            group_id,
+            server_name: s.name,
+            bootstrap: s.bootstrap,
+            rendezvous: s.rendezvous,
+            // The operator's shared TURN lives in the frontend's per-server storage
+            // (the invite's `.turn.` suffix), so the backend has none to pass through
+            // yet; the field carries that same opaque string once the UI supplies it.
+            turn: String::new(),
+            certificate,
+        });
+    }
+
+    let mut ledger = state.pairing_ledger.lock().await;
+    let mut rng = OsCryptoRng;
+    let bundle = catcoms_app::mint_grant_bundle(
+        passphrase.as_bytes(),
+        &device_name,
+        &view.request,
+        &ceremony,
+        &grants,
+        &mut ledger,
+        &mut rng,
+    )
+    .map_err(|e| e.to_string())?;
+    drop(ledger);
+    // The ceremony is complete; the pending view is done with (its nonce is now spent).
+    *pending_guard = None;
+    Ok(PairingBundle { bundle })
+}
+
+/// Step 4, on the **new** device: unseal the bundle and check it is this device's grant
+/// for this ceremony. Returns the code for the human's final comparison plus a summary
+/// of what arrived.
+///
+/// The [`PerServerGrant`]s themselves are **not** kept: M3 (admission) is what consumes
+/// them, and it will hold them alongside the ceremony secrets here. Until then the blob
+/// and passphrase can simply be opened again.
+#[tauri::command]
+async fn pairing_open(
+    state: State<'_, AppState>,
+    bundle: String,
+    passphrase: String,
+) -> Result<PairingOpened, String> {
+    let guard = state.pairing.lock().await;
+    let secrets = guard
+        .as_ref()
+        .ok_or_else(|| "no pairing in progress on this device".to_string())?;
+    let opened = catcoms_app::open_grant_bundle(passphrase.as_bytes(), &bundle, secrets)
+        .map_err(|e| e.to_string())?;
+    Ok(PairingOpened {
+        sas: format!("{:06}", opened.sas),
+        device_name: opened.device_name,
+        servers: opened
+            .grants
+            .into_iter()
+            .map(|g| PairingGrantSummary {
+                name: g.server_name,
+                group_id: hex::encode(&g.group_id),
+                origin: g.certificate.origin_id.to_string(),
+                bootstrap: g.bootstrap.len(),
+                rendezvous: g.rendezvous.len(),
+            })
+            .collect(),
+    })
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
@@ -2143,7 +2442,12 @@ pub fn run() {
             set_channel_topic,
             get_channel_topic,
             get_inbox,
-            get_messages
+            get_messages,
+            pairing_begin,
+            pairing_read,
+            pairing_mint,
+            pairing_decline,
+            pairing_open
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CatComs desktop app");

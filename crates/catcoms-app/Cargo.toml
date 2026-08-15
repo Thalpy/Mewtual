@@ -17,6 +17,8 @@ automerge = "0.10"
 # it (well-formed, and within the byte cap) before it is gossiped.
 base64 = "0.22"
 blake3 = "1"
+# Pasteable blobs (pairing request, grant bundle) are hex, exactly like an invite.
+hex = "0.4"
 zeroize = "1"
 thiserror.workspace = true
 tracing.workspace = true

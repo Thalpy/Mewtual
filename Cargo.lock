@@ -446,6 +446,7 @@ dependencies = [
  "catcoms-storage",
  "catcoms-sync",
  "catcoms-wire",
+ "hex",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "tempfile",

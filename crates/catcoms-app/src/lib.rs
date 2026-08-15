@@ -22,7 +22,9 @@ use automerge::{
 };
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use catcoms_crypto::DeviceId;
+// Re-export the device-identity type: it is part of the app's public surface (the
+// roster, the grant ceremony) and the bridge names it to drive pairing.
+pub use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
 use catcoms_storage::{BlobStore, FileManifest, FileRef};
@@ -37,8 +39,14 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+pub mod pairing;
 pub mod store;
 pub use actor::{spawn, AppCommand, AppEvent, ServerActor};
+pub use pairing::{
+    begin_pairing, decode_pairing_blob, mint_grant_bundle, open_grant_bundle, read_pairing_blob,
+    OpenedGrantBundle, PairingLedger, PairingRequestView, PairingSecrets, PerServerGrant,
+    GRANT_BLOB_PREFIX, PAIRING_BLOB_PREFIX,
+};
 pub use store::{ServerRecord, ServerStore};
 
 /// Errors surfaced to the UI/product layer.

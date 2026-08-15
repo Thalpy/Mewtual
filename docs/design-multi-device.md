@@ -1,10 +1,30 @@
-# Multi-device identity — design (v2)
+# Multi-device identity — design (v2.2)
 
-Status: **reviewed direction, v2.** v1 (user-keypair + device cap) was reviewed by the
-project owner on 2026-08-15 and simplified: **one device per grant, single-use**, the
-**origin device is the identity root** (no separate user keypair), one **all-server grant
-bundle** per ceremony, and an explicit **grant-confirmation popup on the origin device**
-as the human gate. Phased; each slice adversarially reviewable before landing.
+Status: **M1 + M2 implemented (adversarially reviewed).** v1 (user-keypair + device cap)
+was reviewed by the project owner on 2026-08-15 and simplified: **one device per grant,
+single-use**, the **origin device is the identity root** (no separate user keypair), one
+**all-server grant bundle** per ceremony, and an explicit **grant-confirmation popup on
+the origin device** as the human gate. v2.1 added pre-confirm gating, the transferable
+master, and three-tier loss recovery. v2.2 records the M2 adversarial-review outcomes:
+
+- **The pre-mint comparator in the offline ceremony is the device code** (8-hex, 32
+  bits), shown on both screens — the new device *cannot* compute the SAS before the
+  bundle arrives (the SAS binds the origin id, which it doesn't yet know). The **SAS is
+  the post-delivery check**: `open_grant_bundle` recomputes it from authenticated sealed
+  contents and the human confirms it matches what the origin's popup showed. The popup
+  labels both honestly. (Review finding: the earlier UI headlined the SAS at the gate,
+  where it could not be compared.)
+- **Certificates are group-bound**: `group_id` is inside the signed payload, so a cert
+  minted for one server can never admit into another — M3 verifies scope
+  cryptographically, mirroring `InviteToken`. Certificates carry **no expiry**; M3
+  enforces `issued_ts` freshness at admission instead (decision recorded here).
+- **The gate lives in the backend**: `pairing_read` stores the decoded request as THE
+  pending ceremony; `pairing_mint` takes no blob and mints only from that stored view
+  (closing a read→mint TOCTOU), and decline burns the nonce.
+- The popup **discloses scope** (every server and DM the grant will cover) before
+  accept, and the transport passphrase has an enforced 8-character floor (the bundle is
+  designed to travel; the vault's interactive-tier KDF alone is not enough for a
+  trivially guessable passphrase).
 
 ## Where we are (and the trap to avoid)
 

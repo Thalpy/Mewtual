@@ -478,6 +478,99 @@
     return unlockMethod === "pass" ? passphrase : unlockMethod === "spell" ? spellSecret : melodySecret;
   }
 
+  // --- Multi-device pairing (design-multi-device.md v2.1; ceremony is offline-first) ---
+  // Origin side: paste the new device's pairing blob → confirm the SAS (the human gate;
+  // nothing is minted or sent before Accept) → mint the sealed all-server grant bundle.
+  // The bundle's wrap passphrase is a TRANSPORT passphrase invented for the trip — never
+  // the vault passphrase. Admission itself lands in M3; until then the new device holds
+  // its grants locally.
+  let showLinkDevice = $state(false);
+  let linkBlob = $state("");
+  let linkInfo = $state<{ deviceId: string; sas: string; servers: string[]; dmCount: number } | null>(null);
+  let linkName = $state("");
+  let linkPass = $state("");
+  let linkBundle = $state("");
+  let linkBusy = $state(false);
+  function fmtSas(s: string): string {
+    return s.length === 6 ? `${s.slice(0, 3)} ${s.slice(3)}` : s;
+  }
+  async function linkRead() {
+    linkBusy = true;
+    try {
+      const r = await invoke<{ device_id: string; sas: string; servers: string[]; dm_count: number }>(
+        "pairing_read",
+        { blob: linkBlob.trim() },
+      );
+      linkInfo = { deviceId: r.device_id, sas: r.sas, servers: r.servers, dmCount: r.dm_count };
+    } catch (e) {
+      error = String(e);
+      linkInfo = null;
+    } finally {
+      linkBusy = false;
+    }
+  }
+  // Mint takes NO blob: the backend mints only the request the popup showed (the pending
+  // ceremony stored at pairing_read), so approved-device === certified-device.
+  async function linkMint() {
+    if (!linkInfo) return;
+    linkBusy = true;
+    try {
+      const r = await invoke<{ bundle: string }>("pairing_mint", {
+        passphrase: linkPass,
+        deviceName: linkName.trim() || "device",
+      });
+      linkBundle = r.bundle;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      linkBusy = false;
+    }
+  }
+  function closeLinkDevice(declined = false) {
+    // Declining (or closing on an un-minted read) burns the nonce backend-side: the
+    // design makes a pairing request single-use either way.
+    if (declined || (linkInfo && !linkBundle)) invoke("pairing_decline").catch(() => {});
+    showLinkDevice = false;
+    linkBlob = "";
+    linkInfo = null;
+    linkName = "";
+    linkPass = "";
+    linkBundle = "";
+  }
+  // New-device side (onboarding): generate the pairing blob to carry to the master device,
+  // then paste the returned bundle + transport passphrase.
+  let pairBlob = $state("");
+  let pairDeviceId = $state(""); // this device's id short-code — eyeball-match on the master's popup
+  let pairBundle = $state("");
+  let pairPass = $state("");
+  let pairSummary = $state("");
+  async function pairBegin() {
+    try {
+      const r = await invoke<{ blob: string; device_id: string }>("pairing_begin");
+      pairBlob = r.blob;
+      pairDeviceId = r.device_id;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function pairOpen() {
+    try {
+      const r = await invoke<{ sas: string; device_name: string; servers: { name: string; group_id: string; origin: string }[] }>(
+        "pairing_open",
+        { bundle: pairBundle.trim(), passphrase: pairPass },
+      );
+      pairSummary =
+        `Grant opened — this device is "${r.device_name}". Final check: this code must match the one the master's popup showed — ${fmtSas(r.sas)}. If it doesn't, discard this grant. ` +
+        `Granted for ${r.servers.length} server${r.servers.length === 1 ? "" : "s"}: ${r.servers.map((s) => s.name).join(", ")}. ` +
+        `Server admission arrives with the next protocol slice; the grant is held on this device until then.`;
+      // The blob and transport passphrase have done their job — don't keep them around.
+      pairBundle = "";
+      pairPass = "";
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
@@ -3877,6 +3970,7 @@
       }
       if (e.key === "Escape") {
         if (showQuickSwitch) closeQuickSwitch();
+        else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
         else if (menu) menu = null;
         else if (reactionPickerFor) reactionPickerFor = "";
@@ -4408,6 +4502,30 @@
       <p class="muted">…or join an existing server with an invite:</p>
       <textarea class="invite-code" bind:value={joinInvite} rows="3" placeholder="paste invite here"></textarea>
       <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
+      <details>
+        <summary>Link this device to another device you own</summary>
+        <p class="muted small">
+          Your other device stays the master: it will show a code and ask permission before
+          this device gets anything. Server admission for linked devices arrives with the
+          next protocol slice — the grant is stored until then.
+        </p>
+        {#if !pairBlob}
+          <button class="ghost" onclick={pairBegin}>Generate pairing code</button>
+        {:else}
+          {#if pairDeviceId}
+            <p class="muted small">This device's code: <span class="fp">{pairDeviceId.slice(0, 8)}</span> — the master shows the same one.</p>
+          {/if}
+          <textarea class="invite-code" rows="3" readonly value={pairBlob}></textarea>
+          <button class="ghost small" onclick={() => copyText(pairBlob)}>Copy pairing code</button>
+          <label class="field">
+            <span class="muted small">Then paste the grant from the master device:</span>
+            <textarea class="invite-code" rows="3" bind:value={pairBundle} placeholder="paste grant bundle…"></textarea>
+          </label>
+          <input type="password" bind:value={pairPass} placeholder="transport passphrase (set on the master)" />
+          <button class="ghost small" disabled={!pairBundle.trim() || !pairPass} onclick={pairOpen}>Open grant</button>
+          {#if pairSummary}<p class="muted small">{pairSummary}</p>{/if}
+        {/if}
+      </details>
       {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
     </div>
   {:else}
@@ -5649,6 +5767,71 @@
       </div>
     {/if}
 
+    {#if showLinkDevice}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeLinkDevice(); }}>
+        <div class="overlay-card">
+          <header class="overlay-head">
+            <h2>Link a device</h2>
+            <button class="ghost" onclick={() => closeLinkDevice()}>✕</button>
+          </header>
+          <div class="overlay-body">
+            {#if !linkBundle}
+              <p class="muted small">
+                On the new device, choose <em>Link this device</em> on its start screen and bring
+                its pairing code here (paste, or read it across the room).
+              </p>
+              <textarea class="invite-code" rows="3" bind:value={linkBlob} placeholder="Paste the new device's pairing code…"></textarea>
+              <button class="ghost small" disabled={linkBusy || !linkBlob.trim()} onclick={linkRead}>Read pairing code</button>
+              {#if linkInfo}
+                <div class="grant-box">
+                  <div class="vf-label">grant device access?</div>
+                  <div class="grant-sas">{linkInfo.deviceId.slice(0, 8)}</div>
+                  <p class="muted small">
+                    <strong>The check:</strong> the new device shows this same 8-character device
+                    code on its screen — confirm they match before accepting.
+                    <br />After you deliver the grant, the new device will also show code
+                    <span class="fp">{fmtSas(linkInfo.sas)}</span> — verify it there as the final
+                    step. Context (advisory only): pairing code pasted locally, just now.
+                  </p>
+                  <p class="muted small">
+                    Accepting grants access to
+                    <strong>{linkInfo.servers.length - linkInfo.dmCount} server{linkInfo.servers.length - linkInfo.dmCount === 1 ? "" : "s"}{linkInfo.dmCount ? ` and ${linkInfo.dmCount} DM${linkInfo.dmCount === 1 ? "" : "s"}` : ""}</strong>:
+                    {linkInfo.servers.join(", ")}.
+                  </p>
+                  <label class="field">
+                    <span class="muted small">Name for the new device (shown on its messages)</span>
+                    <input bind:value={linkName} maxlength="24" placeholder="phone / laptop / deck…" />
+                  </label>
+                  <label class="field">
+                    <span class="muted small">
+                      Transport passphrase (min 8 characters) — seals the grant for the trip; type
+                      it again on the new device. Not your vault passphrase.
+                    </span>
+                    <input type="password" bind:value={linkPass} placeholder="transport passphrase" />
+                  </label>
+                  <div class="pc-actions">
+                    <button disabled={linkBusy || linkPass.length < 8 || !linkName.trim()} onclick={linkMint}>✓ Codes match — grant access</button>
+                    <button class="ghost" onclick={() => closeLinkDevice(true)}>Decline</button>
+                  </div>
+                </div>
+              {/if}
+            {:else}
+              <p class="muted small">
+                Grant minted for this device's servers. Carry it to the new device (paste it there
+                with the transport passphrase). It is sealed — but treat it like a key until used.
+              </p>
+              <textarea class="invite-code" rows="4" readonly value={linkBundle}></textarea>
+              <div class="pc-actions">
+                <button class="ghost" onclick={() => copyText(linkBundle)}>Copy grant</button>
+                <button class="ghost" onclick={() => closeLinkDevice()}>Done</button>
+              </div>
+            {/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if showSettings}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showSettings = false; }}>
@@ -5746,6 +5929,15 @@
                   </span>
                 </label>
               {/if}
+            </section>
+
+            <section class="set-section">
+              <h3>Devices</h3>
+              <p class="muted small">
+                Link another device to your identity. The new device gets its own key — nothing
+                is copied — and nothing at all happens until you approve it here on this device.
+              </p>
+              <button class="ghost" onclick={() => (showLinkDevice = true)}>⛓ Link a new device…</button>
             </section>
 
             <section class="set-section">

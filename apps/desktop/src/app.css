@@ -4189,3 +4189,23 @@ button.you-panel:hover {
   padding: 1.1rem 0 0.3rem;
   min-width: 0;
 }
+
+/* --- Device-link grant dialog --- */
+.grant-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-0);
+  padding: 12px;
+  margin-top: 8px;
+}
+.grant-sas {
+  font-family: var(--mono);
+  font-size: 2rem;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}

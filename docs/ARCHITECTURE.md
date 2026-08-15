@@ -44,8 +44,10 @@ is broken. The load-bearing fixes:
    SERVICE key (background sync of ciphertext) + an auth-bound CONTENT key (decrypt
    plaintext for display). `SecureKeyStore` reports a tier enum; a downgrade forces a
    passphrase before the store opens.
-8. **Also:** account key never leaves a device (device-to-device cross-cert chain +
-   DeviceCert revocation); blob-fetch padding/quantization + per-session outer
+8. **Also:** no device key ever leaves a device (multi-device is origin-rooted
+   certificates at chain depth 1 — `design-multi-device.md` v2 — with origin-signed
+   revocation; the earlier account-key cross-cert chain design was superseded and its
+   module deleted); blob-fetch padding/quantization + per-session outer
    re-encryption; eclipse resistance (≥2 rendezvous + member peer-exchange + roster-size
    check + cached addresses); decorrelated cache eviction (jitter) + holder liveness probe
    + mandatory archive-pin role; deterministic byte-identical compaction at an all-acked

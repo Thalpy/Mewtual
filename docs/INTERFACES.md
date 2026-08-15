@@ -111,18 +111,20 @@ pub struct UserId([u8;32]);     // = BLAKE3("catcoms/user-id/v1" ‖ account_pub
 
 pub struct DeviceKeypair;  generate(rng); from_seed(&[u8;32]); seed()->[u8;32];
   verifying_key(); device_id(); sign(&[u8])->[u8;64];
-pub struct AccountKeypair; generate(rng); ...; user_id(); sign(...);
 pub fn verify(&VerifyingKey, msg, &[u8;64]) -> bool;                 // strict
 pub fn verify_with_public_bytes(pubkey: &[u8], msg, &[u8;64]) -> bool;
 
-// Device-cert chains (account key signs founding device; devices cross-certify).
-pub enum CertSigner { Account, Device(DeviceId) }
-pub struct DeviceCert { user_id, device_id, device_pubkey:[u8;32], signer, created_at_ms, nonce:[u8;16], signature:[u8;64] }
-  new_account_signed(&AccountKeypair, &VerifyingKey, created, nonce); new_device_signed(&DeviceKeypair, user_id, ...);
-pub struct DeviceRevocation { ... }   new_account_signed/new_device_signed
-pub struct RosterConfig { max_chain_depth, max_devices }
-pub struct Roster;  build(&account_vk, &[DeviceCert], &[DeviceRevocation], &RosterConfig) -> Result<Roster, CertError>;
-  contains(&DeviceId); verifying_key(&DeviceId); device_count(); device_ids();
+// Multi-device pairing (design-multi-device.md v2: origin device is the identity root,
+// chain depth 1, no account key — the v1 account-rooted chain module was deleted; all
+// domains here are /v2 so no v1 statement can cross-verify).
+pub const MAX_DEVICE_NAME_BYTES; pub const MAX_CERT_GROUP_ID_BYTES; pub const SAS_DIGITS/SAS_MODULUS;
+pub fn validate_device_name(&str) -> Result<(), PairingError>;   // bounds + control/bidi/zero-width rejects
+pub fn sas(new_device_pk:&[u8;32], pairing_nonce:&[u8;32], origin_id:&DeviceId) -> u32; // 6-digit SAS
+pub struct PairingRequest { new_device_pk:[u8;32], pairing_nonce:[u8;32] }  new(rng); new_device_id(); sas(origin); encode/decode;
+pub struct DeviceCertificate { origin_id, origin_public_key:[u8;32], new_device_id, group_id, device_name, issued_ts_ms, signature }
+  issue(&DeviceKeypair, new_device_id, group_id, name, now_ms); verify(&expected_origin);  // group-bound; carry-the-pubkey
+pub struct DeviceRevocation { origin_id, origin_public_key, revoked_device_id, rev_ts_ms, signature }  issue/verify (self-revoke allowed);
+pub struct MasterHandoff { origin_id, origin_public_key, new_master_device_id, master_seq, ts_ms, signature }  issue/verify (monotonic seq enforced by consumers);
 
 // One key hierarchy.
 pub struct Dek;  generate(rng); from_bytes([u8;32]); expose_bytes()->&[u8;32]; subkey(label)->[u8;32];
