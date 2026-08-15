@@ -135,6 +135,11 @@ pub enum AppCommand {
         icon: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Set (or clear, with `""`) the shared server cursor (owner/admin only).
+    SetServerCursor {
+        cursor: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query the server's published livery.
     Livery { reply: oneshot::Sender<Livery> },
     /// Pull the livery document from `peer` (e.g. right after joining).
@@ -698,6 +703,22 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::SetServerIcon { icon, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Set (or clear, with `""`) the shared server cursor — base64 image bytes (owner/admin
+    /// only; a `LiveryUpdated` event follows). Publishing colours, or the icon, never
+    /// disturbs it.
+    pub async fn set_server_cursor(&self, cursor: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetServerCursor { cursor, reply })
             .await
             .is_err()
         {
@@ -1367,6 +1388,16 @@ where
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
                         }
                     }
+                    Some(AppCommand::SetServerCursor { cursor, reply }) => {
+                        let res = server
+                            .set_server_cursor(cursor)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
+                    }
                     Some(AppCommand::Livery { reply }) => {
                         let _ = reply.send(server.livery());
                     }
@@ -1807,9 +1838,10 @@ where
 }
 
 /// Whether the server livery changed since last seen (updating the record). Compares the
-/// whole materialized [`Livery`], so an **icon-only** write is caught like a colour change.
-/// The colour fields are a handful of short strings; the icon is a bounded base64 blob
-/// (≤ `MAX_SERVER_ICON_BYTES` decoded), so this stays a cheap memcmp per convergence.
+/// whole materialized [`Livery`], so an **icon-only** or **cursor-only** write is caught like a
+/// colour change. The colour fields are a handful of short strings; the icon and cursor are
+/// bounded base64 blobs (≤ `MAX_SERVER_ICON_BYTES` / `MAX_SERVER_CURSOR_BYTES` decoded), so
+/// this stays a cheap memcmp per convergence.
 fn livery_changed<T, R>(server: &Server<T, R>, last: &mut Livery) -> bool
 where
     T: MeshTransport,

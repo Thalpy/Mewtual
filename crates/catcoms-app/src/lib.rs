@@ -546,6 +546,9 @@ const L_TOKENS: &str = "tokens";
 /// The shared server icon (base64 image bytes). Additive to the v1 schema: an older doc
 /// simply lacks the key, which reads as "no icon".
 const L_ICON: &str = "icon";
+/// The shared server cursor (base64 image bytes). Additive to the v1 schema in the same way
+/// as the icon: an older doc simply lacks the key, which reads as "no cursor".
+const L_CURSOR: &str = "cursor";
 
 /// Maximum length of a livery preset id (a short key like `nightshade`).
 pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
@@ -562,6 +565,11 @@ pub const MAX_LIVERY_TOKEN_VALUE_BYTES: usize = 16;
 /// kind of small downscaled image. Unlike an avatar the icon rides *inline* (base64) in the
 /// livery document rather than by content address, so this cap also bounds what gossips.
 pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
+/// Maximum **decoded** size of a server cursor accepted by [`Server::set_server_cursor`]. A
+/// cursor image is at most 64×64 (a hotspot-bearing pointer, not artwork), so it gets a far
+/// tighter budget than the icon — and, like the icon, it rides *inline* (base64) in the livery
+/// document, so this also bounds what gossips.
+pub const MAX_SERVER_CURSOR_BYTES: usize = 16 * 1024;
 
 /// A server's published UI livery. Empty fields mean "no livery" / "no override"; every
 /// value is opaque to the backend and validated by the client on read.
@@ -577,17 +585,23 @@ pub struct Livery {
     /// [`Server::set_server_icon`] — [`Server::set_livery`] ignores this field and preserves
     /// whatever is stored, so publishing colours never resends or drops the image.
     pub icon: String,
+    /// The shared server cursor as base64 image bytes; empty = no cursor. Set/cleared only by
+    /// [`Server::set_server_cursor`], exactly like the icon: [`Server::set_livery`] ignores
+    /// this field and preserves whatever is stored. The two images are independent — setting
+    /// one never disturbs the other.
+    pub cursor: String,
 }
 
 /// Write the livery document (last-writer-wins on each field; the token map is replaced
 /// wholesale so removing an override actually removes it). Writes **every** field, the icon
-/// included, so callers that must not disturb the stored icon read it back into `l.icon`
-/// first (see [`Server::set_livery`]).
+/// and cursor included, so callers that must not disturb the stored images read them back
+/// into `l.icon`/`l.cursor` first (see [`Server::set_livery`]).
 fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> {
     doc.put(ROOT, L_V, LIVERY_VERSION)?;
     doc.put(ROOT, L_PRESET, l.preset.as_str())?;
     doc.put(ROOT, L_ACCENT, l.accent.as_str())?;
     doc.put(ROOT, L_ICON, l.icon.as_str())?;
+    doc.put(ROOT, L_CURSOR, l.cursor.as_str())?;
     let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
     for (k, v) in &l.tokens {
         doc.put(&tokens, k.as_str(), v.as_str())?;
@@ -604,8 +618,17 @@ fn write_server_icon(doc: &mut AutoCommit, icon: &str) -> Result<(), AutomergeEr
     Ok(())
 }
 
+/// Write **only** the server cursor (`""` clears it), leaving the colour fields *and the icon*
+/// untouched — the mirror of [`write_server_icon`], so the two images have wholly independent
+/// lifetimes and neither has to be republished with the other.
+fn write_server_cursor(doc: &mut AutoCommit, cursor: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_CURSOR, cursor)?;
+    Ok(())
+}
+
 /// Materialize the livery document (a missing/foreign-shaped field reads as empty — so a
-/// doc written before the icon key existed reads back with no icon).
+/// doc written before the icon/cursor keys existed reads back with neither).
 fn read_livery(doc: &AutoCommit) -> Livery {
     let mut tokens = HashMap::new();
     if let Ok(Some((Value::Object(ObjType::Map), map))) = doc.get(ROOT, L_TOKENS) {
@@ -619,6 +642,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
         accent: str_field(doc, &ROOT, L_ACCENT),
         tokens,
         icon: str_field(doc, &ROOT, L_ICON),
+        cursor: str_field(doc, &ROOT, L_CURSOR),
     }
 }
 
@@ -1935,9 +1959,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Values are opaque here and bounded only by size (the client validates them on read);
     /// an over-long field or too many tokens is rejected, like an over-large avatar.
     ///
-    /// `livery.icon` is **ignored**: this is a read-modify-write of preset/accent/tokens that
-    /// carries the stored icon through unchanged, so republishing colours never resends the
-    /// image (nor clears it). Use [`Server::set_server_icon`] to change the icon.
+    /// `livery.icon` and `livery.cursor` are **ignored**: this is a read-modify-write of
+    /// preset/accent/tokens that carries the stored images through unchanged, so republishing
+    /// colours never resends them (nor clears them). Use [`Server::set_server_icon`] /
+    /// [`Server::set_server_cursor`] to change those.
     pub async fn set_livery(&mut self, livery: Livery) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
@@ -1978,11 +2003,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         self.sync
             .post(DocType::Livery, LIVERY_DOC, |d| {
-                // Read-modify-write inside the edit itself: take the icon that is already in
-                // the document and write it back verbatim, so a colour publish is a no-op for
-                // the (comparatively huge) image.
+                // Read-modify-write inside the edit itself: take the images that are already in
+                // the document and write them back verbatim, so a colour publish is a no-op for
+                // the (comparatively huge) icon and the cursor alike.
                 let kept = Livery {
                     icon: str_field(d, &ROOT, L_ICON),
+                    cursor: str_field(d, &ROOT, L_CURSOR),
                     ..livery
                 };
                 write_livery(d, &kept)
@@ -2014,6 +2040,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         self.sync
             .post(DocType::Livery, LIVERY_DOC, |d| write_server_icon(d, &icon))
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `""`) the shared **server cursor** — base64 image bytes stored in
+    /// the livery document, the exact mirror of [`Server::set_server_icon`]. **Owner or admin
+    /// only**, and likewise left alone by [`Server::set_livery`] and by an icon write. Rejects
+    /// malformed base64 and anything over [`MAX_SERVER_CURSOR_BYTES`] decoded bytes.
+    pub async fn set_server_cursor(&mut self, cursor: String) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the server cursor".into(),
+            ));
+        }
+        if !cursor.is_empty() {
+            let bytes = B64
+                .decode(cursor.as_bytes())
+                .map_err(|e| AppError::Invalid(format!("bad server cursor: {e}")))?;
+            if bytes.len() > MAX_SERVER_CURSOR_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "server cursor too large: {} bytes (max {MAX_SERVER_CURSOR_BYTES})",
+                    bytes.len()
+                )));
+            }
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| {
+                write_server_cursor(d, &cursor)
+            })
             .await?;
         Ok(())
     }
@@ -3350,6 +3405,7 @@ mod tests {
             accent: "#ffcc00".into(),
             tokens: HashMap::from([("--accent-hi".to_string(), "#ffe680".to_string())]),
             icon: String::new(),
+            cursor: String::new(),
         };
         alice.set_livery(l.clone()).await.unwrap();
         assert_eq!(alice.livery(), l);
@@ -3409,6 +3465,64 @@ mod tests {
             alice.livery(),
             Livery::default(),
             "no rejected write landed"
+        );
+
+        // --- the shared server cursor (mirrors the icon, independent lifetime) ---
+        let cursor = B64.encode([0x89, b'P', b'N', b'G', 9, 8, 7]); // stand-in PNG bytes
+        alice.set_server_cursor(cursor.clone()).await.unwrap();
+        assert_eq!(alice.livery().cursor, cursor, "the cursor reads back");
+
+        // Publishing colours carries the cursor through untouched, exactly like the icon…
+        alice.set_livery(l.clone()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.cursor, cursor, "the cursor survived a colour publish");
+        assert_eq!(after.preset, l.preset);
+        // …and an empty livery does not clear it either.
+        alice.set_livery(Livery::default()).await.unwrap();
+        assert_eq!(
+            alice.livery().cursor,
+            cursor,
+            "removing the livery keeps the cursor"
+        );
+
+        // The two images have wholly independent lifetimes, both ways round: writing or
+        // clearing one never disturbs the other.
+        alice.set_server_icon(icon.clone()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.cursor, cursor, "setting the icon kept the cursor");
+        assert_eq!(after.icon, icon);
+        alice.set_server_cursor(cursor.clone()).await.unwrap();
+        assert_eq!(
+            alice.livery().icon,
+            icon,
+            "setting the cursor kept the icon"
+        );
+        alice.set_server_icon(String::new()).await.unwrap();
+        assert_eq!(
+            alice.livery().cursor,
+            cursor,
+            "clearing the icon kept the cursor"
+        );
+
+        // `""` clears the cursor.
+        alice.set_server_cursor(String::new()).await.unwrap();
+        assert_eq!(alice.livery(), Livery::default(), "the cursor is gone");
+
+        // An over-large cursor is rejected on its own (tighter) decoded-size cap…
+        let too_big = B64.encode(vec![0u8; MAX_SERVER_CURSOR_BYTES + 1]);
+        assert!(matches!(
+            alice.set_server_cursor(too_big).await,
+            Err(AppError::Invalid(_))
+        ));
+        // …as is anything that is not base64 at all.
+        assert!(matches!(
+            alice.set_server_cursor("not base64!!".into()).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(
+            alice.livery(),
+            Livery::default(),
+            "no rejected cursor write landed"
         );
     }
 

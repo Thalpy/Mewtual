@@ -15,7 +15,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, Livery, Profile, Server,
-    ServerActor, ServerRecord, ServerStore, MAX_AVATAR_BYTES, MAX_SERVER_ICON_BYTES,
+    ServerActor, ServerRecord, ServerStore, MAX_AVATAR_BYTES, MAX_SERVER_CURSOR_BYTES,
+    MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -171,6 +172,9 @@ struct UiLivery {
     /// The shared server icon as base64 image bytes (empty = none). Untrusted like the rest:
     /// the frontend must render it as an image only, never interpret it.
     icon: String,
+    /// The shared server cursor as base64 image bytes (empty = none). Untrusted exactly like
+    /// the icon: render it as an image only (a `cursor: url(data:…)`), never interpret it.
+    cursor: String,
 }
 
 /// One member's custom badge as serialized to the frontend, keyed by fingerprint in
@@ -1150,8 +1154,8 @@ async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiP
 
 /// Publish the server livery (owner/admin only); re-seals the server. An all-empty livery
 /// removes it. Sizes are bounded by the backend; the *values* are validated in the UI. The
-/// published **icon is preserved** — it has its own command (`set_server_icon`), so changing
-/// colours never resends or clears the image (the `icon` sent here is ignored).
+/// published **icon and cursor are preserved** — each has its own command (`set_server_icon` /
+/// `set_server_cursor`), so changing colours never resends or clears either image.
 #[tauri::command]
 async fn set_livery(
     state: State<'_, AppState>,
@@ -1167,6 +1171,7 @@ async fn set_livery(
             accent,
             tokens,
             icon: String::new(),
+            cursor: String::new(),
         })
         .await?;
     persist_server(&state, server).await;
@@ -1198,6 +1203,31 @@ async fn set_server_icon(
     Ok(())
 }
 
+/// Set (or clear, with `""`) the shared server cursor (owner/admin only); re-seals the server.
+/// `cursor` is base64-encoded image bytes, capped far below the icon (a cursor is ≤64×64).
+#[tauri::command]
+async fn set_server_cursor(
+    state: State<'_, AppState>,
+    server: u64,
+    cursor: String,
+) -> Result<(), String> {
+    if !cursor.is_empty() {
+        let bytes = B64
+            .decode(cursor.as_bytes())
+            .map_err(|e| format!("bad server cursor: {e}"))?;
+        if bytes.len() > MAX_SERVER_CURSOR_BYTES {
+            return Err(format!(
+                "server cursor too large: {} bytes (max {MAX_SERVER_CURSOR_BYTES})",
+                bytes.len()
+            ));
+        }
+    }
+    let actor = actor_of(&state, server).await?;
+    actor.set_server_cursor(cursor).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// The server's published livery (all-empty if none).
 #[tauri::command]
 async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery, String> {
@@ -1208,6 +1238,7 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
         accent: l.accent,
         tokens: l.tokens,
         icon: l.icon,
+        cursor: l.cursor,
     })
 }
 
@@ -2011,6 +2042,7 @@ pub fn run() {
             get_profiles,
             set_livery,
             set_server_icon,
+            set_server_cursor,
             get_livery,
             set_member_badge,
             get_badges,
