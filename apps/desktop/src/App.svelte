@@ -748,6 +748,7 @@
     { label: "Files", tab: "files" },
     { label: "Status", tab: "status" },
     { label: "Wiki", tab: "wiki" },
+    { label: "Events", tab: "events" },
     { label: "Transfers", tab: "downloads" },
   ];
   let quickItems = $derived.by(() => {
@@ -973,7 +974,7 @@
   });
 
   // The main pane shows one tab at a time.
-  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads";
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events";
   let view = $state<Tab>("chat");
   let wikiPages = $state<string[]>([]);
   let wikiFilter = $state("");
@@ -1108,6 +1109,99 @@
   // Fingerprint in 4-char groups for reading aloud ("A4F2 9C11 0B7D …").
   function fmtFp(fp: string): string {
     return (fp.match(/.{1,4}/g) ?? [fp]).join(" ");
+  }
+
+  // Server events (the calendar doc) — any member creates; author or owner/admin deletes.
+  type UiEvent = { id: string; title: string; body: string; start_ts: number; end_ts: number; author: string };
+  let events = $state<UiEvent[]>([]);
+  let evTitle = $state("");
+  let evBody = $state("");
+  let evStart = $state("");
+  let evEnd = $state("");
+  let confirmDeleteEventId = $state("");
+  async function refreshEvents() {
+    if (activeServerId === null) {
+      events = [];
+      return;
+    }
+    try {
+      events = await invoke<UiEvent[]>("get_events", { server: activeServerId });
+    } catch {
+      events = [];
+    }
+  }
+  async function createEvent() {
+    if (activeServerId === null) return;
+    const startTs = evStart ? new Date(evStart).getTime() : 0;
+    const endTs = evEnd ? new Date(evEnd).getTime() : 0;
+    if (!evTitle.trim() || !startTs) return;
+    try {
+      await invoke("create_event", { server: activeServerId, title: evTitle, body: evBody, startTs, endTs });
+      evTitle = ""; evBody = ""; evStart = ""; evEnd = "";
+      await refreshEvents();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function deleteEvent(id: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("delete_event", { server: activeServerId, id });
+      confirmDeleteEventId = "";
+      await refreshEvents();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  // "Still relevant": hasn't ended yet (or, with no end, started less than an hour ago).
+  function eventLive(e: UiEvent, now: number): boolean {
+    return (e.end_ts || e.start_ts + 3_600_000) >= now;
+  }
+  let upcomingEvents = $derived(events.filter((e) => eventLive(e, nowTick)));
+  let pastEvents = $derived(events.filter((e) => !eventLive(e, nowTick)).slice().reverse());
+  function fmtEventWhen(e: UiEvent): string {
+    const s = new Date(e.start_ts);
+    const day = dayLabel(e.start_ts);
+    const t = s.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const end = e.end_ts ? `–${new Date(e.end_ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}` : "";
+    return `${day} · ${t}${end}`;
+  }
+
+  // News feed (inbox): recent status posts + upcoming events across every server.
+  // Client-side aggregation over existing per-server invokes — nothing new on the wire.
+  type NewsItem = { server: number; serverName: string; kind: "status" | "event"; ts: number; text: string; author: string };
+  let inboxMode = $state<"mentions" | "news">("mentions");
+  let newsItems = $state<NewsItem[]>([]);
+  let newsLoading = $state(false);
+  async function loadNews() {
+    newsLoading = true;
+    const items: NewsItem[] = [];
+    const now = Date.now();
+    await Promise.all(
+      servers.filter((s) => !s.isDm).map(async (s) => {
+        try {
+          const [sts, evs] = await Promise.all([
+            invoke<Msg[]>("get_statuses", { server: s.id }),
+            invoke<UiEvent[]>("get_events", { server: s.id }).catch(() => [] as UiEvent[]),
+          ]);
+          for (const st of sts.slice(-5))
+            items.push({ server: s.id, serverName: s.name, kind: "status", ts: st.ts, text: st.text, author: st.author });
+          for (const ev of evs)
+            if (eventLive(ev, now))
+              items.push({ server: s.id, serverName: s.name, kind: "event", ts: ev.start_ts, text: ev.title, author: ev.author });
+        } catch {
+          /* unreachable server actor — skip it */
+        }
+      }),
+    );
+    newsItems = items;
+    newsLoading = false;
+  }
+  let newsUpcoming = $derived(newsItems.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
+  let newsFeed = $derived(newsItems.filter((n) => n.kind === "status").sort((a, b) => b.ts - a.ts).slice(0, 30));
+  function jumpToNews(n: NewsItem) {
+    inboxView = false;
+    switchServer(n.server).then(() => switchView(n.kind === "event" ? "events" : "status"));
   }
 
   // Admin-assigned member badges (shared doc; untrusted on read like everything else).
@@ -1669,6 +1763,7 @@
       refreshTopic(),
       refreshDelivery(),
       refreshBadges(),
+      refreshEvents(),
     ]);
     syncProfileEditor();
   }
@@ -3579,6 +3674,9 @@
       listen<{ server: number }>("badges-changed", (e) => {
         if (e.payload.server === activeServerId) refreshBadges();
       }),
+      listen<{ server: number }>("events-changed", (e) => {
+        if (e.payload.server === activeServerId) refreshEvents();
+      }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
         // A friend request may have arrived over ANY server (active or not) — refresh that server's.
         refreshDmRequests(e.payload.server);
@@ -3645,8 +3743,8 @@
         return;
       }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
-        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads"];
-        if (e.key >= "1" && e.key <= "6") {
+        const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads", "events"];
+        if (e.key >= "1" && e.key <= "7") {
           e.preventDefault();
           if (activeServerId !== null) switchView(tabs[Number(e.key) - 1]);
         } else if (e.key.toLowerCase() === "k") {
@@ -3945,6 +4043,16 @@
   {:else if view === "downloads"}
     <h3><span>Transfers</span></h3>
     <button class="ghost small ctx-action" onclick={clearFinishedDownloads}>Clear finished</button>
+  {:else if view === "events"}
+    <h3><span>Upcoming</span></h3>
+    {#each upcomingEvents.slice(0, 5) as e (e.id)}
+      <div class="ev-side">
+        <span class="ev-side-when">{fmtEventWhen(e)}</span>
+        <span class="ev-side-title">{e.title}</span>
+      </div>
+    {:else}
+      <p class="muted small">Nothing scheduled — add an event on the right.</p>
+    {/each}
   {:else if view === "status" && !dm}
     <h3><span>Status</span></h3>
     <p class="muted small">A slow feed for this server — one post at a time, no replies.</p>
@@ -4128,11 +4236,58 @@
       {#if inboxView}
         <section class="inbox-screen">
           <div class="inbox-head">
-            <h2>📥 Inbox</h2>
-            <span class="muted small">Mentions &amp; replies, across every server &amp; DM</span>
-            <button class="ghost small inbox-refresh" onclick={loadInbox} disabled={inboxLoading}>↻ Refresh</button>
+            <h2>Inbox</h2>
+            <div class="inbox-mode">
+              <button class:active={inboxMode === "mentions"} onclick={() => (inboxMode = "mentions")}>Mentions</button>
+              <button class:active={inboxMode === "news"} onclick={() => { inboxMode = "news"; loadNews(); }}>News</button>
+            </div>
+            <span class="muted small">
+              {inboxMode === "mentions" ? "Mentions & replies, across every server & DM" : "Status posts & upcoming events, across your servers"}
+            </span>
+            <button class="ghost small inbox-refresh" onclick={() => (inboxMode === "mentions" ? loadInbox() : loadNews())} disabled={inboxMode === "mentions" ? inboxLoading : newsLoading}>↻ Refresh</button>
           </div>
-          {#if inboxLoading && !inboxItems.length}
+          {#if inboxMode === "news"}
+            {#if newsLoading && !newsItems.length}
+              <p class="muted inbox-empty">Loading…</p>
+            {:else}
+              {#if newsUpcoming.length}
+                <h3 class="ev-h"><span>Upcoming events</span></h3>
+                <ul class="inbox-list">
+                  {#each newsUpcoming as n (n.server + ":" + n.kind + ":" + n.ts + n.text)}
+                    <li class="inbox-item">
+                      <button class="inbox-jump" onclick={() => jumpToNews(n)}>
+                        <div class="inbox-meta">
+                          <span class="inbox-tag event-tag">⧗ event</span>
+                          <span class="inbox-where">{n.serverName}</span>
+                          <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{dayLabel(n.ts)}</span>
+                        </div>
+                        <div class="inbox-body"><span class="inbox-text">{n.text}</span></div>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+              <h3 class="ev-h"><span>Recent status</span></h3>
+              {#if !newsFeed.length}
+                <p class="muted inbox-empty">No status posts yet — servers' Status surfaces feed this.</p>
+              {:else}
+                <ul class="inbox-list">
+                  {#each newsFeed as n (n.server + ":" + n.ts + ":" + n.author)}
+                    <li class="inbox-item">
+                      <button class="inbox-jump" onclick={() => jumpToNews(n)}>
+                        <div class="inbox-meta">
+                          <span class="inbox-tag reply-tag">◇ status</span>
+                          <span class="inbox-where">{n.serverName}</span>
+                          <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{fmtTime(n.ts)}</span>
+                        </div>
+                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            {/if}
+          {:else if inboxLoading && !inboxItems.length}
             <p class="muted inbox-empty">Loading…</p>
           {:else if !inboxItems.length}
             <p class="muted inbox-empty">
@@ -4285,6 +4440,10 @@
             </button>
             <button type="button" class:active={view === "wiki"} onclick={() => switchView("wiki")}>
               <span class="sb-ico">✎</span>wiki
+            </button>
+            <button type="button" class:active={view === "events"} onclick={() => switchView("events")}>
+              <span class="sb-ico">⧗</span>events
+              {#if upcomingEvents.length}<span class="tab-count">{upcomingEvents.length}</span>{/if}
             </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
               <span class="sb-ico">↓</span>transfers
@@ -4994,6 +5153,62 @@
               Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
             </p>
             <button onclick={saveProfile}>Save profile</button>
+          </div>
+        {:else if view === "events"}
+          <h2>Events</h2>
+          <div class="events-tab tab-pane">
+            <form class="event-form" onsubmit={(e) => { e.preventDefault(); createEvent(); }}>
+              <input bind:value={evTitle} maxlength="120" placeholder="Event title" />
+              <div class="event-times">
+                <label><span class="muted small">Starts</span><input type="datetime-local" bind:value={evStart} /></label>
+                <label><span class="muted small">Ends (optional)</span><input type="datetime-local" bind:value={evEnd} /></label>
+              </div>
+              <textarea bind:value={evBody} rows="2" maxlength="1024" placeholder="Details (optional)"></textarea>
+              <button disabled={!evTitle.trim() || !evStart}>Create event</button>
+            </form>
+            <h3 class="ev-h"><span>Upcoming — {upcomingEvents.length}</span></h3>
+            <ul class="event-list">
+              {#each upcomingEvents as e (e.id)}
+                <li class="event-row">
+                  <div class="ev-when">{fmtEventWhen(e)}</div>
+                  <div class="ev-main">
+                    <div class="ev-title">{e.title}</div>
+                    {#if e.body}<div class="ev-body">{e.body}</div>{/if}
+                    <div class="ev-meta">by {@render nameTag(e.author)}</div>
+                  </div>
+                  {#if e.author === myFp || canModerate}
+                    {#if confirmDeleteEventId === e.id}
+                      <button class="ghost small danger-btn" onclick={() => deleteEvent(e.id)}>Confirm</button>
+                    {:else}
+                      <button class="ghost small danger-btn" onclick={() => (confirmDeleteEventId = e.id)}>Delete</button>
+                    {/if}
+                  {/if}
+                </li>
+              {:else}
+                <li class="muted small">Nothing scheduled yet.</li>
+              {/each}
+            </ul>
+            {#if pastEvents.length}
+              <h3 class="ev-h"><span>Past — {pastEvents.length}</span></h3>
+              <ul class="event-list past">
+                {#each pastEvents as e (e.id)}
+                  <li class="event-row">
+                    <div class="ev-when">{fmtEventWhen(e)}</div>
+                    <div class="ev-main">
+                      <div class="ev-title">{e.title}</div>
+                      <div class="ev-meta">by {@render nameTag(e.author)}</div>
+                    </div>
+                    {#if e.author === myFp || canModerate}
+                      {#if confirmDeleteEventId === e.id}
+                        <button class="ghost small danger-btn" onclick={() => deleteEvent(e.id)}>Confirm</button>
+                      {:else}
+                        <button class="ghost small danger-btn" onclick={() => (confirmDeleteEventId = e.id)}>Delete</button>
+                      {/if}
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           </div>
         {:else if view === "downloads"}
           <h2>Downloads</h2>
