@@ -287,40 +287,173 @@
   let messages = $state<Msg[]>([]);
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
+  // Beyond the plain substring there's an advanced filter set (Ctrl+Shift+F) — author, date range,
+  // attachment kind, reactions, reply/pin/edit state — plus a sort order, so the same pass answers
+  // "the clip Dana posted last week" as well as "where did we say quorum". Filters stand on their
+  // own: with an empty query the filters alone select the matches.
+  type SearchSort = "oldest" | "newest" | "author" | "reactions";
+  type SearchFilters = ReturnType<typeof noFilters>;
+  const SEARCH_RESULT_CAP = 50; // rows rendered in the results list (stepping still covers them all)
+  function noFilters() {
+    return {
+      from: "", // author fingerprint ("" = anyone)
+      after: "", // yyyy-mm-dd (inclusive, local day)
+      before: "", // yyyy-mm-dd (inclusive, local day)
+      hasImage: false,
+      hasVideo: false,
+      hasAudio: false,
+      hasFile: false, // a non-media attachment
+      hasLink: false,
+      isReply: false,
+      hasReplies: false,
+      isPinned: false,
+      isEdited: false,
+      mentionsMe: false,
+      fromMe: false,
+      reacted: false,
+      reactedByMe: false,
+      emoji: "", // a specific reaction emoji
+      sort: "oldest" as SearchSort,
+    };
+  }
   let showSearch = $state(false);
+  let showSearchAdv = $state(false);
   let searchQuery = $state("");
   let searchPos = $state(0);
   let searchInput = $state<HTMLInputElement | undefined>(undefined);
+  let filters = $state<SearchFilters>(noFilters());
+  // cid → MIME, from the fileshare index, for classifying a message's `![alt](cid:…)` embeds.
+  let fileMime = $derived.by(() => new Map(files.map((f) => [f.cid.toLowerCase(), f.mime] as const)));
+  const EMBED_RE = /!\[[^\]]*\]\(cid:([0-9a-fA-F]{1,64})\)/g;
+  // What a message carries. `safeMime` accepts only image/video/audio, so anything else — and any
+  // cid not in the index yet — reads as a plain attachment, matching how the embed resolver treats it.
+  function msgKinds(text: string) {
+    const k = { image: false, video: false, audio: false, file: false, link: false };
+    for (const m of text.matchAll(EMBED_RE)) {
+      const mime = safeMime(fileMime.get(m[1].toLowerCase()) ?? "");
+      if (mime.startsWith("image/")) k.image = true;
+      else if (mime.startsWith("video/")) k.video = true;
+      else if (mime.startsWith("audio/")) k.audio = true;
+      else k.file = true;
+    }
+    k.link = /\bhttps?:\/\/\S/i.test(text);
+    return k;
+  }
+  // A yyyy-mm-dd date input → a local-time bound (start of that day, or its last millisecond so
+  // "before" is inclusive). Returns null for an empty/half-typed value, which disables the bound.
+  function dayBound(s: string, end: boolean): number | null {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if (!m) return null;
+    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+    if (Number.isNaN(d.getTime())) return null;
+    if (end) d.setHours(23, 59, 59, 999);
+    return d.getTime();
+  }
+  // How many facets are narrowing the result (sort order isn't one) — drives the "Filters (n)" badge.
+  let filterCount = $derived(
+    Object.entries(filters).filter(([k, v]) => k !== "sort" && v !== "" && v !== false).length
+  );
+  function reactionCount(m: Msg): number {
+    return m.reactions.reduce((n, r) => n + r.by.length, 0);
+  }
   let searchMatches = $derived.by(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return [] as number[];
+    if (!q && !filterCount) return [] as number[];
+    const after = dayBound(filters.after, false);
+    const before = dayBound(filters.before, true);
+    const wantKind = filters.hasImage || filters.hasVideo || filters.hasAudio || filters.hasFile || filters.hasLink;
     const out: number[] = [];
     messages.forEach((m, i) => {
-      if (m.text.toLowerCase().includes(q)) out.push(i);
+      if (q && !m.text.toLowerCase().includes(q)) return;
+      if (filters.from && m.author !== filters.from) return;
+      if (filters.fromMe && m.author !== myFp) return;
+      if (after !== null && m.ts < after) return;
+      if (before !== null && m.ts > before) return;
+      if (filters.isReply && !m.reply_to) return;
+      if (filters.hasReplies && !(m.id && replyCounts.get(m.id))) return;
+      if (filters.isPinned && !m.pinned) return;
+      if (filters.isEdited && !m.edited) return;
+      if (filters.mentionsMe && !mentionsMe(m.text)) return;
+      if (filters.reacted && !m.reactions.length) return;
+      if (filters.reactedByMe && !m.reactions.some((r) => r.by.includes(myFp))) return;
+      if (filters.emoji && !m.reactions.some((r) => r.emoji === filters.emoji)) return;
+      if (wantKind) {
+        const k = msgKinds(m.text);
+        if (filters.hasImage && !k.image) return;
+        if (filters.hasVideo && !k.video) return;
+        if (filters.hasAudio && !k.audio) return;
+        if (filters.hasFile && !k.file) return;
+        if (filters.hasLink && !k.link) return;
+      }
+      out.push(i);
     });
-    return out;
+    return sortMatches(out);
   });
+  // `out` arrives chronological (message order), so "oldest" is a no-op and "newest" a reverse.
+  function sortMatches(idx: number[]): number[] {
+    if (filters.sort === "oldest") return idx;
+    if (filters.sort === "newest") return idx.slice().reverse();
+    return idx.slice().sort((a, b) => {
+      const x = messages[a];
+      const y = messages[b];
+      if (filters.sort === "author") {
+        const c = nameOf(x.author).localeCompare(nameOf(y.author), undefined, { sensitivity: "base" });
+        return c || x.ts - y.ts;
+      }
+      return reactionCount(y) - reactionCount(x) || y.ts - x.ts;
+    });
+  }
   let searchMatchSet = $derived(new Set(searchMatches));
+  // The cursor is clamped rather than reset: a filter edit or an incoming message can shrink the
+  // match list under it, and an out-of-range `searchPos` would otherwise blank the highlight.
+  let searchPosClamped = $derived(searchMatches.length ? Math.min(searchPos, searchMatches.length - 1) : 0);
+  let searchCur = $derived(searchMatches.length ? searchMatches[searchPosClamped] : -1);
+  // Authors / reaction emoji actually present in the loaded messages — the filter pickers offer
+  // only what could match (lazily computed: nothing reads these while the panel is closed).
+  let searchAuthors = $derived.by(() => {
+    const seen = new Map<string, string>();
+    for (const m of messages) if (!seen.has(m.author)) seen.set(m.author, nameOf(m.author));
+    return [...seen]
+      .map(([fp, name]) => ({ fp, name }))
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  });
+  let searchEmoji = $derived.by(() => {
+    const seen = new Set<string>();
+    for (const m of messages) for (const r of m.reactions) seen.add(r.emoji);
+    return [...seen].sort();
+  });
   function scrollToMatch(msgIdx: number) {
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
   function stepMatch(dir: number) {
     if (!searchMatches.length) return;
-    searchPos = (searchPos + dir + searchMatches.length) % searchMatches.length;
+    searchPos = (searchPosClamped + dir + searchMatches.length) % searchMatches.length;
     scrollToMatch(searchMatches[searchPos]);
   }
   function onSearchInput(v: string) {
     searchQuery = v;
+    refilter();
+  }
+  // Re-run from the top after any query/filter change (deriveds recompute on read, so the first
+  // match below is already the new one).
+  function refilter() {
     searchPos = 0;
     if (searchMatches.length) scrollToMatch(searchMatches[0]);
   }
-  function openSearch() {
+  function clearFilters() {
+    Object.assign(filters, noFilters());
+    searchPos = 0;
+  }
+  function openSearch(advanced = false) {
     showSearch = true;
+    if (advanced) showSearchAdv = true;
     queueMicrotask(() => searchInput?.focus());
   }
   function closeSearch() {
     showSearch = false;
+    showSearchAdv = false;
     searchQuery = "";
+    clearFilters();
   }
 
   // Quick switcher (Ctrl/Cmd+K): one palette over channels, server surfaces, servers and DMs.
@@ -2956,6 +3089,15 @@
         else if (showSearch) closeSearch();
         return;
       }
+      // Ctrl/Cmd+Shift+F: search with the advanced filter panel already open.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.shiftKey && e.key.toLowerCase() === "f") {
+        if (activeServerId !== null) {
+          e.preventDefault();
+          view = "chat";
+          openSearch(true);
+        }
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
         const tabs: Tab[] = ["chat", "files", "status", "wiki", "profile", "downloads"];
         if (e.key >= "1" && e.key <= "6") {
@@ -3079,6 +3221,20 @@
     <circle cx="10.5" cy="10.5" r="6.2" />
     <path d="M15.1 15.1 20.4 20.4" />
   </svg>
+{/snippet}
+
+<!-- One toggle in the advanced-search panel; `set` writes back into `filters`. -->
+{#snippet fchip(label: string, on: boolean, set: (v: boolean) => void, hint: string)}
+  <button
+    type="button"
+    class="fchip"
+    class:on
+    title={hint}
+    aria-pressed={on}
+    onclick={() => { set(!on); refilter(); }}
+  >
+    {label}
+  </button>
 {/snippet}
 
 {#snippet icoWrench()}
@@ -3555,7 +3711,7 @@
             {:else}
               <button type="button" class="chan-topic empty" title="Set a channel topic (any member can)" onclick={() => { topicDraft = ""; editingTopic = true; }}>+ topic</button>
             {/if}
-            <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>{@render icoSearch()}</button>
+            <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F · Ctrl+Shift+F for filters)" onclick={() => openSearch()}>{@render icoSearch()}</button>
             {#if !(inCall && callChannel === cur?.active)}
               {@const n = roomMembers(activeServerId ?? -1, cur?.active ?? "").length}
               <button class="ghost small call-start btn-ico" title="Join this channel's voice room (E2E)" onclick={joinActiveVoice}>{@render icoPhone()} {n ? `Join voice (${n})` : "Voice"}</button>
@@ -3590,16 +3746,110 @@
               <input
                 bind:this={searchInput}
                 value={searchQuery}
-                placeholder="Search this channel…"
+                placeholder={filterCount ? "Filtering — add text to narrow further…" : "Search this channel…"}
                 oninput={(e) => onSearchInput(e.currentTarget.value)}
                 onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); stepMatch(e.shiftKey ? -1 : 1); } else if (e.key === "Escape") { e.preventDefault(); closeSearch(); } }}
               />
               <span class="muted small">
-                {searchQuery.trim() ? (searchMatches.length ? `${searchPos + 1} / ${searchMatches.length}` : "no matches") : ""}
+                {searchQuery.trim() || filterCount ? (searchMatches.length ? `${searchPosClamped + 1} / ${searchMatches.length}` : "no matches") : ""}
               </span>
               <button class="ghost small" title="Previous (Shift+Enter)" disabled={!searchMatches.length} onclick={() => stepMatch(-1)}>↑</button>
               <button class="ghost small" title="Next (Enter)" disabled={!searchMatches.length} onclick={() => stepMatch(1)}>↓</button>
+              <button
+                class="ghost small search-filters-toggle"
+                class:active={showSearchAdv}
+                title="Advanced filters (Ctrl+Shift+F)"
+                aria-expanded={showSearchAdv}
+                onclick={() => (showSearchAdv = !showSearchAdv)}
+              >
+                Filters{filterCount ? ` (${filterCount})` : ""}
+              </button>
               <button class="ghost small" title="Close (Esc)" onclick={closeSearch}>✕</button>
+            </div>
+          {/if}
+          {#if showSearch && showSearchAdv}
+            <div class="search-adv">
+              <div class="sa-row">
+                <label class="sa-field">
+                  <span class="muted small">From</span>
+                  <select bind:value={filters.from} onchange={refilter}>
+                    <option value="">Anyone</option>
+                    {#each searchAuthors as a (a.fp)}
+                      <option value={a.fp}>{a.name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label class="sa-field">
+                  <span class="muted small">After</span>
+                  <input type="date" bind:value={filters.after} onchange={refilter} />
+                </label>
+                <label class="sa-field">
+                  <span class="muted small">Before</span>
+                  <input type="date" bind:value={filters.before} onchange={refilter} />
+                </label>
+                <label class="sa-field">
+                  <span class="muted small">Sort</span>
+                  <select bind:value={filters.sort} onchange={refilter}>
+                    <option value="oldest">Oldest first</option>
+                    <option value="newest">Newest first</option>
+                    <option value="author">Name (A–Z)</option>
+                    <option value="reactions">Most reactions</option>
+                  </select>
+                </label>
+              </div>
+              <div class="sa-row">
+                <span class="muted small sa-label">Has</span>
+                {@render fchip("Image", filters.hasImage, (v) => (filters.hasImage = v), "Messages embedding an image")}
+                {@render fchip("Video", filters.hasVideo, (v) => (filters.hasVideo = v), "Messages embedding a video")}
+                {@render fchip("Audio", filters.hasAudio, (v) => (filters.hasAudio = v), "Messages embedding an audio clip")}
+                {@render fchip("File", filters.hasFile, (v) => (filters.hasFile = v), "Messages with a non-media attachment")}
+                {@render fchip("Link", filters.hasLink, (v) => (filters.hasLink = v), "Messages containing an http(s) link")}
+              </div>
+              <div class="sa-row">
+                <span class="muted small sa-label">Is</span>
+                {@render fchip("Reply", filters.isReply, (v) => (filters.isReply = v), "Messages that reply to another")}
+                {@render fchip("Has replies", filters.hasReplies, (v) => (filters.hasReplies = v), "Messages someone replied to")}
+                {@render fchip("Pinned", filters.isPinned, (v) => (filters.isPinned = v), "Pinned messages")}
+                {@render fchip("Edited", filters.isEdited, (v) => (filters.isEdited = v), "Messages edited after sending")}
+                {@render fchip("Mentions me", filters.mentionsMe, (v) => (filters.mentionsMe = v), "Messages that @-mention you")}
+                {@render fchip("From me", filters.fromMe, (v) => (filters.fromMe = v), "Your own messages")}
+              </div>
+              <div class="sa-row">
+                <span class="muted small sa-label">Reactions</span>
+                {@render fchip("Any", filters.reacted, (v) => (filters.reacted = v), "Messages with at least one reaction")}
+                {@render fchip("Mine", filters.reactedByMe, (v) => (filters.reactedByMe = v), "Messages you reacted to")}
+                <select class="sa-emoji" bind:value={filters.emoji} onchange={refilter} title="A specific reaction">
+                  <option value="">Any emoji</option>
+                  {#each searchEmoji as e (e)}
+                    <option value={e}>{e}</option>
+                  {/each}
+                </select>
+                <button class="ghost small sa-clear" disabled={!filterCount} onclick={clearFilters}>Clear filters</button>
+              </div>
+              {#if searchMatches.length}
+                <ul class="search-results">
+                  {#each searchMatches.slice(0, SEARCH_RESULT_CAP) as mi, ri (mi)}
+                    {@const m = messages[mi]}
+                    <li>
+                      <button
+                        class="search-result"
+                        class:current={mi === searchCur}
+                        onclick={() => { searchPos = ri; scrollToMatch(mi); }}
+                      >
+                        <span class="sr-name">{nameOf(m.author)}</span>
+                        <span class="sr-ts muted small">{new Date(m.ts).toLocaleString()}</span>
+                        {#if reactionCount(m)}<span class="sr-rx muted small">♥ {reactionCount(m)}</span>{/if}
+                        <span class="sr-text">{msgSnippet(m.text, 90)}</span>
+                      </button>
+                    </li>
+                  {/each}
+                </ul>
+                {#if searchMatches.length > SEARCH_RESULT_CAP}
+                  <p class="muted small sa-more">Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length} — narrow the filters to see the rest.</p>
+                {/if}
+              {:else if searchQuery.trim() || filterCount}
+                <p class="muted small sa-more">Nothing in this conversation matches.</p>
+              {/if}
             </div>
           {/if}
           <ul class="messages" bind:this={messagesEl} use:richClicks>
@@ -3625,7 +3875,7 @@
                 class:grouped
                 class:has-bubble={!!bubble}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
-                class:search-current={showSearch && searchMatches[searchPos] === mi}
+                class:search-current={showSearch && searchCur === mi}
                 class:flash={!!m.id && m.id === flashId}
                 style={bubble}
                 use:contextMenu={() => messageMenu(m)}

@@ -1985,11 +1985,13 @@ button.primary:hover:not(:disabled) {
 .msg-search {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 4px 0 6px;
 }
 .msg-search input {
   flex: 1;
+  min-width: 12rem;
 }
 .messages li.search-match {
   background: var(--warn-faint);
@@ -1998,6 +2000,119 @@ button.primary:hover:not(:disabled) {
 .messages li.search-current {
   background: var(--warn-dim);
   border-radius: var(--r);
+}
+
+/* --- Advanced search: filter facets + the sorted result list --- */
+.search-filters-toggle.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.search-adv {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  margin-bottom: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+}
+.search-adv .sa-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.search-adv .sa-label {
+  min-width: 4.5rem;
+}
+.search-adv .sa-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.search-adv .sa-field select,
+.search-adv .sa-field input,
+.search-adv .sa-emoji {
+  font-size: 0.78rem;
+  padding: 2px 5px;
+}
+/* Every preset is a dark theme — tell the native date picker so its glyph isn't dark-on-dark. */
+.search-adv input[type="date"] {
+  color-scheme: dark;
+}
+.search-adv .sa-clear {
+  margin-left: auto;
+}
+.search-adv .sa-more {
+  margin: 2px 0 0;
+}
+/* A facet toggle — same silhouette as .chip, but interactive and accent-lit when on. */
+.fchip {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  padding: 3px 8px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.fchip:hover {
+  color: var(--text-2);
+  border-color: var(--accent);
+}
+.fchip.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent-hi);
+}
+.search-results {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-soft);
+}
+.search-result {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--r);
+  background: none;
+  color: var(--text-2);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.search-result:hover {
+  background: var(--bg-elev);
+}
+.search-result.current {
+  background: var(--warn-dim);
+  color: var(--text);
+}
+.search-result .sr-name {
+  flex: none;
+  font-weight: 600;
+  color: var(--text);
+}
+.search-result .sr-ts,
+.search-result .sr-rx {
+  flex: none;
+  white-space: nowrap;
+}
+.search-result .sr-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Inline message edit + the "(edited)" tag. */

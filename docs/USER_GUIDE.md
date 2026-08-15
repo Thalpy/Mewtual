@@ -88,6 +88,22 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - The **member list** and **wiki page list** get a search box once they grow; server icons show
   an **unread badge**.
 
+### Searching a conversation
+- **Ctrl/Cmd+F** (or the 🔍 in the channel header) searches the open conversation. Matches
+  highlight in place; **Enter / Shift+Enter** (or ↑ / ↓) step through them, with an _n / m_
+  counter. **Esc** closes it.
+- **Filters** (the button in the search bar, or **Ctrl/Cmd+Shift+F** to open straight into it)
+  narrow it further — they combine, and they work **with or without** any typed text:
+  - **From** a specific member · **After** / **Before** a date.
+  - **Has**: image · video · audio · file (a non-media attachment) · link.
+  - **Is**: reply · has replies · pinned · edited · mentions me · from me.
+  - **Reactions**: any · ones you reacted to · a specific emoji.
+- **Sort** the results **oldest / newest first**, by sender **name (A–Z)**, or by **most
+  reactions**; the result list under the filters lists each hit (sender, time, snippet) and
+  clicking one jumps to it. Stepping with ↑ / ↓ follows the same order.
+- Search covers the messages **loaded** for the open conversation — the backlog you've pulled,
+  not the whole of history that other members still hold.
+
 ### Channels
 - Every server starts with **#general**. Create/join a channel by typing its name into
   **join #channel…**. Anyone who opens the same name lands in the same channel.
