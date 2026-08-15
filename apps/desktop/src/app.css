@@ -3311,3 +3311,14 @@ button.you-panel:hover {
   font-size: 1.05rem;
   line-height: 1;
 }
+
+/* --- Rail server icons (shared via the livery doc; "flat icons" shows monograms) --- */
+.server-icon {
+  overflow: hidden;
+}
+.rail-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}

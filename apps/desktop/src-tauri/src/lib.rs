@@ -15,7 +15,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, Livery, Profile, Server,
-    ServerActor, ServerRecord, ServerStore, MAX_AVATAR_BYTES,
+    ServerActor, ServerRecord, ServerStore, MAX_AVATAR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -168,6 +168,9 @@ struct UiLivery {
     preset: String,
     accent: String,
     tokens: HashMap<String, String>,
+    /// The shared server icon as base64 image bytes (empty = none). Untrusted like the rest:
+    /// the frontend must render it as an image only, never interpret it.
+    icon: String,
 }
 
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
@@ -1095,7 +1098,9 @@ async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiP
 }
 
 /// Publish the server livery (owner/admin only); re-seals the server. An all-empty livery
-/// removes it. Sizes are bounded by the backend; the *values* are validated in the UI.
+/// removes it. Sizes are bounded by the backend; the *values* are validated in the UI. The
+/// published **icon is preserved** — it has its own command (`set_server_icon`), so changing
+/// colours never resends or clears the image (the `icon` sent here is ignored).
 #[tauri::command]
 async fn set_livery(
     state: State<'_, AppState>,
@@ -1110,8 +1115,34 @@ async fn set_livery(
             preset,
             accent,
             tokens,
+            icon: String::new(),
         })
         .await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Set (or clear, with `""`) the shared server icon (owner/admin only); re-seals the server.
+/// `icon` is base64-encoded image bytes, capped like an avatar.
+#[tauri::command]
+async fn set_server_icon(
+    state: State<'_, AppState>,
+    server: u64,
+    icon: String,
+) -> Result<(), String> {
+    if !icon.is_empty() {
+        let bytes = B64
+            .decode(icon.as_bytes())
+            .map_err(|e| format!("bad server icon: {e}"))?;
+        if bytes.len() > MAX_SERVER_ICON_BYTES {
+            return Err(format!(
+                "server icon too large: {} bytes (max {MAX_SERVER_ICON_BYTES})",
+                bytes.len()
+            ));
+        }
+    }
+    let actor = actor_of(&state, server).await?;
+    actor.set_server_icon(icon).await?;
     persist_server(&state, server).await;
     Ok(())
 }
@@ -1125,6 +1156,7 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
         preset: l.preset,
         accent: l.accent,
         tokens: l.tokens,
+        icon: l.icon,
     })
 }
 
@@ -1844,6 +1876,7 @@ pub fn run() {
             set_profile,
             get_profiles,
             set_livery,
+            set_server_icon,
             get_livery,
             add_file,
             get_files,

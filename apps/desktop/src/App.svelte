@@ -82,7 +82,8 @@
   function openServerSettings(id: number | null = null) {
     if (id !== null && id !== activeServerId) switchServer(id);
     serverNameDraft = cur?.name ?? "";
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens } };
+    // The draft never carries the icon — set_livery ignores it (set_server_icon owns it).
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "" };
     showServerSettings = true;
   }
   async function renameServer() {
@@ -109,9 +110,9 @@
   // Appearance: the whole theme is a token map in app.css; these choices only flip
   // data-attributes / one CSS variable on <html>, so they can never fork the layout.
   // Semantic colours (green=presence, gold=mentions, red=danger) are constant in every preset.
-  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean };
+  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string };
   const APPEARANCE_KEY = "catcoms.appearance";
-  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true };
+  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true, icons: "" };
   function loadAppearance(): Appearance {
     try {
       return { ...APPEARANCE_DEFAULT, ...JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") };
@@ -132,15 +133,20 @@
   // UNTRUSTED (any member's client may have written the doc) — sanitized on read, and only
   // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
   // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
-  type Livery = { preset: string; accent: string; tokens: Record<string, string> };
-  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {} });
+  type Livery = { preset: string; accent: string; tokens: Record<string, string>; icon: string };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {}, icon: "" });
   let livery = $state<Livery>(emptyLivery());
+  // Rail icons for every (non-DM) server, fetched from each server's livery doc and kept
+  // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
+  let serverIcons = $state<Record<number, string>>({});
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
   const LIVERY_TOKENS = [
     "--bg-0", "--panel", "--bg-elev", "--border", "--border-soft",
     "--text", "--text-2", "--muted", "--faint", "--accent", "--accent-hi",
   ];
   const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+  // 64 KiB decoded ≈ 87.4k base64 chars; anything longer or non-base64 is dropped.
+  const ICON_B64 = /^[A-Za-z0-9+/=]{0,90000}$/;
   function sanitizeLivery(l: Livery): Livery {
     const out = emptyLivery();
     if (PRESETS.some((p) => p.id === l.preset)) out.preset = l.preset;
@@ -148,6 +154,7 @@
     for (const [k, v] of Object.entries(l.tokens ?? {})) {
       if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) out.tokens[k] = v;
     }
+    if (typeof l.icon === "string" && ICON_B64.test(l.icon)) out.icon = l.icon;
     return out;
   }
   let liveryActive = $derived(!!(livery.preset || livery.accent || Object.keys(livery.tokens).length));
@@ -198,6 +205,38 @@
       await refreshLivery();
     } catch (e) {
       error = String(e);
+    }
+  }
+  // Fetch one server's icon into the rail store (any server, active or not).
+  async function refreshServerIconFor(id: number) {
+    try {
+      const l = sanitizeLivery(await invoke<Livery>("get_livery", { server: id }));
+      if (l.icon) serverIcons[id] = l.icon;
+      else delete serverIcons[id];
+    } catch {
+      /* unreachable server actor — keep whatever we had */
+    }
+  }
+  function refreshAllServerIcons() {
+    for (const s of servers) if (!s.isDm) refreshServerIconFor(s.id);
+  }
+  async function setServerIcon(icon: string) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_server_icon", { server: activeServerId, icon });
+      await refreshLivery();
+      await refreshServerIconFor(activeServerId);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function loadServerIcon(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      await setServerIcon(await fileToSquareJpegB64(file, 128));
+    } catch (err) {
+      error = String(err);
     }
   }
 
@@ -888,6 +927,7 @@
       const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
       if (firstServer) switchServer(firstServer.id);
       loadInbox(); // populate the inbox badge once the reloaded servers are live
+      refreshAllServerIcons(); // rail icons come from each server's livery doc
     } catch (e) {
       error = String(e);
     } finally {
@@ -1666,18 +1706,17 @@
     }
   }
 
-  async function loadAvatar(fileList: FileList | null) {
-    const file = fileList?.[0];
-    if (!file) return;
+  // Centre-crop an image file to a size×size JPEG, returned as raw base64 (no data: prefix).
+  // Shared by the avatar editor and the server-icon uploader.
+  async function fileToSquareJpegB64(file: File, size: number): Promise<string> {
+    const url = URL.createObjectURL(file);
     try {
-      const url = URL.createObjectURL(file);
       const img = new Image();
       await new Promise((resolve, reject) => {
         img.onload = () => resolve(null);
         img.onerror = () => reject(new Error("could not load image"));
         img.src = url;
       });
-      const size = 128;
       const canvas = document.createElement("canvas");
       canvas.width = size;
       canvas.height = size;
@@ -1688,8 +1727,17 @@
         const h = img.height * scale;
         ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
       }
+      return canvas.toDataURL("image/jpeg", 0.8).split(",")[1] ?? "";
+    } finally {
       URL.revokeObjectURL(url);
-      pAvatar = canvas.toDataURL("image/jpeg", 0.8).split(",")[1] ?? "";
+    }
+  }
+
+  async function loadAvatar(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      pAvatar = await fileToSquareJpegB64(file, 128);
     } catch (err) {
       error = String(err);
     }
@@ -2785,6 +2833,7 @@
         if (e.payload.server === activeServerId) refreshRoles();
       }),
       listen<{ server: number }>("livery-changed", (e) => {
+        refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
         if (e.payload.server === activeServerId) refreshLivery();
       }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
@@ -3168,7 +3217,11 @@
             onclick={() => switchServer(s.id)}
             use:contextMenu={() => serverMenu(s)}
           >
-            {monogram(s.name)}
+            {#if serverIcons[s.id] && appearance.icons !== "flat"}
+              <img class="rail-img" src={"data:image/jpeg;base64," + serverIcons[s.id]} alt="" />
+            {:else}
+              {monogram(s.name)}
+            {/if}
             {#if s.unread.length}
               <span class="rail-badge">{s.unread.length}</span>
             {:else if s.dot}
@@ -4048,6 +4101,14 @@
                 />
                 <span>Flatten messages — ignore other members' custom bubble backgrounds</span>
               </label>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  checked={appearance.icons === "flat"}
+                  onchange={() => (appearance = { ...appearance, icons: appearance.icons === "flat" ? "" : "flat" })}
+                />
+                <span>Flat server icons — monograms instead of uploaded images</span>
+              </label>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <label class="toggle">
                   <input
@@ -4184,6 +4245,21 @@
                   out in their own Appearance settings, and green/gold/red keep their meanings
                   (presence / mentions / danger) under any livery.
                 </p>
+                <div class="field">
+                  <span class="muted small">Server icon — shown on everyone's rail (they can prefer monograms)</span>
+                  <div class="avatar-row">
+                    {#if livery.icon}
+                      <img class="avatar lg" src={"data:image/jpeg;base64," + livery.icon} alt="" />
+                    {/if}
+                    <label class="upload-btn">
+                      {livery.icon ? "Replace icon" : "Upload icon"}
+                      <input type="file" accept="image/png,image/jpeg,image/webp" onchange={(e) => loadServerIcon(e.currentTarget.files)} />
+                    </label>
+                    {#if livery.icon}
+                      <button class="ghost small" disabled={busy} onclick={() => setServerIcon("")}>Remove icon</button>
+                    {/if}
+                  </div>
+                </div>
                 <div class="preset-row">
                   {#each PRESETS as p (p.id)}
                     <button

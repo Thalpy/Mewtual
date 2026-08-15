@@ -547,6 +547,7 @@ name = "catcoms-app"
 version = "0.0.0"
 dependencies = [
  "automerge",
+ "base64 0.22.1",
  "blake3",
  "catcoms-crypto",
  "catcoms-mls",

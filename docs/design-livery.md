@@ -6,8 +6,10 @@ owner/admin-gated in `Server::set_livery` (same policy layer as roles — the at
 not-rejected residual applies, as scoped below); the client validates on read, applies with
 the precedence below, and ships the Server-settings Livery section + the per-server
 Appearance follow-toggle. `tokens` overrides are plumbed but the publisher UI writes an
-empty map in v1 (preset + accent only). Not yet done: rail-monogram tint (optional), the
-contrast floor and debounce mitigations (noted below, revisit if abused).
+empty map in v1 (preset + accent only). The shared **server icon** (`icon` key,
+`set_server_icon` invoke) has its backend half in place — no publisher UI yet. Not yet done:
+rail-monogram tint (optional), the contrast floor and debounce mitigations (noted below,
+revisit if abused).
 
 ## Goals / non-goals
 
@@ -33,9 +35,18 @@ New `DocType::Livery` (next free discriminant in `catcoms-wire/src/context.rs` a
   v: 1,
   preset: "aurum" | "nightshade" | "verdant" | "garnet" | "slate" | "",  // "" = default
   accent: "#rrggbb" | "",                    // optional accent override
-  tokens: { "<allow-listed token>": "#rrggbb", ... }   // v1: may be empty/absent
+  tokens: { "<allow-listed token>": "#rrggbb", ... },  // v1: may be empty/absent
+  icon: "<base64 image bytes>" | ""          // shared server icon; absent = "" = none
 }
 ```
+
+- **`icon`** is an *additive* key (still `v: 1`; an older doc simply lacks it and reads as
+  `""`). It carries the image **inline** — unlike a member avatar, which gossips a content
+  address — so it is capped at `MAX_SERVER_ICON_BYTES` (64 KiB decoded, the avatar budget)
+  and rejected if it is not valid base64. It has its **own** command (`set_server_icon`,
+  same owner/admin gate): `set_livery` is a read-modify-write of preset/accent/tokens that
+  carries the stored icon through untouched, so republishing colours never resends the image
+  and removing the livery never clears it. `""` clears the icon.
 
 - **Write policy**: owner/admin only, enforced at the same policy layer as `MemberRoles`
   (same caveat as roles: cryptographic enforcement is the existing named follow-up; the op

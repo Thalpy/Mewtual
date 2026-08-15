@@ -18,6 +18,8 @@ use std::collections::HashMap;
 
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
@@ -520,6 +522,9 @@ const L_V: &str = "v";
 const L_PRESET: &str = "preset";
 const L_ACCENT: &str = "accent";
 const L_TOKENS: &str = "tokens";
+/// The shared server icon (base64 image bytes). Additive to the v1 schema: an older doc
+/// simply lacks the key, which reads as "no icon".
+const L_ICON: &str = "icon";
 
 /// Maximum length of a livery preset id (a short key like `nightshade`).
 pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
@@ -531,6 +536,11 @@ pub const MAX_LIVERY_TOKENS: usize = 16;
 pub const MAX_LIVERY_TOKEN_KEY_BYTES: usize = 32;
 /// Maximum length of a livery token value (`#rrggbb` plus slack).
 pub const MAX_LIVERY_TOKEN_VALUE_BYTES: usize = 16;
+/// Maximum **decoded** size of a server icon accepted by [`Server::set_server_icon`] — the
+/// same budget as a member avatar ([`MAX_AVATAR_BYTES`]), since the UI produces the same
+/// kind of small downscaled image. Unlike an avatar the icon rides *inline* (base64) in the
+/// livery document rather than by content address, so this cap also bounds what gossips.
+pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
 
 /// A server's published UI livery. Empty fields mean "no livery" / "no override"; every
 /// value is opaque to the backend and validated by the client on read.
@@ -542,14 +552,21 @@ pub struct Livery {
     pub accent: String,
     /// Bounded colour-token overrides (token name -> colour); empty in v1 liveries.
     pub tokens: HashMap<String, String>,
+    /// The shared server icon as base64 image bytes; empty = no icon. Set/cleared only by
+    /// [`Server::set_server_icon`] — [`Server::set_livery`] ignores this field and preserves
+    /// whatever is stored, so publishing colours never resends or drops the image.
+    pub icon: String,
 }
 
 /// Write the livery document (last-writer-wins on each field; the token map is replaced
-/// wholesale so removing an override actually removes it).
+/// wholesale so removing an override actually removes it). Writes **every** field, the icon
+/// included, so callers that must not disturb the stored icon read it back into `l.icon`
+/// first (see [`Server::set_livery`]).
 fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> {
     doc.put(ROOT, L_V, LIVERY_VERSION)?;
     doc.put(ROOT, L_PRESET, l.preset.as_str())?;
     doc.put(ROOT, L_ACCENT, l.accent.as_str())?;
+    doc.put(ROOT, L_ICON, l.icon.as_str())?;
     let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
     for (k, v) in &l.tokens {
         doc.put(&tokens, k.as_str(), v.as_str())?;
@@ -557,7 +574,17 @@ fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> 
     Ok(())
 }
 
-/// Materialize the livery document (a missing/foreign-shaped field reads as empty).
+/// Write **only** the server icon (`""` clears it), leaving the colour fields untouched —
+/// the image is a separate, much larger value with its own command, so the two never have
+/// to be republished together.
+fn write_server_icon(doc: &mut AutoCommit, icon: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_ICON, icon)?;
+    Ok(())
+}
+
+/// Materialize the livery document (a missing/foreign-shaped field reads as empty — so a
+/// doc written before the icon key existed reads back with no icon).
 fn read_livery(doc: &AutoCommit) -> Livery {
     let mut tokens = HashMap::new();
     if let Ok(Some((Value::Object(ObjType::Map), map))) = doc.get(ROOT, L_TOKENS) {
@@ -570,6 +597,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
         preset: str_field(doc, &ROOT, L_PRESET),
         accent: str_field(doc, &ROOT, L_ACCENT),
         tokens,
+        icon: str_field(doc, &ROOT, L_ICON),
     }
 }
 
@@ -1673,6 +1701,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// gating, the same policy layer as roles/pins). An all-empty [`Livery`] removes it.
     /// Values are opaque here and bounded only by size (the client validates them on read);
     /// an over-long field or too many tokens is rejected, like an over-large avatar.
+    ///
+    /// `livery.icon` is **ignored**: this is a read-modify-write of preset/accent/tokens that
+    /// carries the stored icon through unchanged, so republishing colours never resends the
+    /// image (nor clears it). Use [`Server::set_server_icon`] to change the icon.
     pub async fn set_livery(&mut self, livery: Livery) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
             return Err(AppError::Invalid(
@@ -1712,7 +1744,43 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
         }
         self.sync
-            .post(DocType::Livery, LIVERY_DOC, |d| write_livery(d, &livery))
+            .post(DocType::Livery, LIVERY_DOC, |d| {
+                // Read-modify-write inside the edit itself: take the icon that is already in
+                // the document and write it back verbatim, so a colour publish is a no-op for
+                // the (comparatively huge) image.
+                let kept = Livery {
+                    icon: str_field(d, &ROOT, L_ICON),
+                    ..livery
+                };
+                write_livery(d, &kept)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Set (or clear, with `""`) the shared **server icon** — base64 image bytes stored in
+    /// the livery document. **Owner or admin only**, exactly like [`Server::set_livery`],
+    /// which leaves this value alone. Rejects malformed base64 and anything over
+    /// [`MAX_SERVER_ICON_BYTES`] decoded bytes, the same way an over-large avatar is rejected.
+    pub async fn set_server_icon(&mut self, icon: String) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the server icon".into(),
+            ));
+        }
+        if !icon.is_empty() {
+            let bytes = B64
+                .decode(icon.as_bytes())
+                .map_err(|e| AppError::Invalid(format!("bad server icon: {e}")))?;
+            if bytes.len() > MAX_SERVER_ICON_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "server icon too large: {} bytes (max {MAX_SERVER_ICON_BYTES})",
+                    bytes.len()
+                )));
+            }
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| write_server_icon(d, &icon))
             .await?;
         Ok(())
     }
@@ -2880,6 +2948,7 @@ mod tests {
             preset: "aurum".into(),
             accent: "#ffcc00".into(),
             tokens: HashMap::from([("--accent-hi".to_string(), "#ffe680".to_string())]),
+            icon: String::new(),
         };
         alice.set_livery(l.clone()).await.unwrap();
         assert_eq!(alice.livery(), l);
@@ -2897,6 +2966,49 @@ mod tests {
             alice.set_livery(too_long).await,
             Err(AppError::Invalid(_))
         ));
+
+        // --- the shared server icon (its own command, its own lifetime) --------
+        let icon = B64.encode([0xff, 0xd8, 0xff, 0x00, 1, 2, 3]); // stand-in JPEG bytes
+        alice.set_server_icon(icon.clone()).await.unwrap();
+        assert_eq!(alice.livery().icon, icon, "the icon reads back");
+
+        // Publishing colours must NOT resend or drop the image: set_livery is a
+        // read-modify-write that carries the stored icon through untouched.
+        alice.set_livery(l.clone()).await.unwrap();
+        let after = alice.livery();
+        assert_eq!(after.icon, icon, "the icon survived a colour publish");
+        assert_eq!(after.preset, l.preset);
+        assert_eq!(after.accent, l.accent);
+        assert_eq!(after.tokens, l.tokens);
+
+        // …and an empty livery does not clear it either (only set_server_icon does).
+        alice.set_livery(Livery::default()).await.unwrap();
+        assert_eq!(
+            alice.livery().icon,
+            icon,
+            "removing the livery keeps the icon"
+        );
+
+        // `""` clears the icon.
+        alice.set_server_icon(String::new()).await.unwrap();
+        assert_eq!(alice.livery(), Livery::default(), "the icon is gone");
+
+        // An over-large icon is rejected on decoded size, like an over-large avatar…
+        let too_big = B64.encode(vec![0u8; MAX_SERVER_ICON_BYTES + 1]);
+        assert!(matches!(
+            alice.set_server_icon(too_big).await,
+            Err(AppError::Invalid(_))
+        ));
+        // …as is anything that is not base64 at all.
+        assert!(matches!(
+            alice.set_server_icon("not base64!!".into()).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(
+            alice.livery(),
+            Livery::default(),
+            "no rejected write landed"
+        );
     }
 
     #[tokio::test]

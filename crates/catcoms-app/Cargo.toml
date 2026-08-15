@@ -13,6 +13,9 @@ catcoms-sync = { path = "../catcoms-sync" }
 catcoms-storage = { path = "../catcoms-storage" }
 catcoms-wire = { path = "../catcoms-wire" }
 automerge = "0.10"
+# The server icon rides base64 inside the livery document; decoded here only to validate
+# it (well-formed, and within the byte cap) before it is gossiped.
+base64 = "0.22"
 blake3 = "1"
 zeroize = "1"
 thiserror.workspace = true
