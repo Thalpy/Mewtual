@@ -168,10 +168,21 @@ peers behind NATs. It is **zero-knowledge** — it only routes ciphertext.
 The **Files** tab is a folder browser:
 
 - **Share a file here** uploads into the current folder; **＋ new folder** organises them.
-- **Click a file to open its info pane** — a preview (for images/video/audio), whether it's
-  already on your device or will be fetched from a peer, who uploaded it, its size, type and
-  folder, plus a **Download** button. Owners and admins also get a two-click **Delete** there
-  (deleting unlists the file for everyone; members who already downloaded it keep their copy).
+  Uploads (everywhere: files, chat, status, wiki) show **toast notifications** for each step,
+  and sharing a file whose **content already exists** on the server reuses the existing copy
+  instead of storing a duplicate.
+- **Click a file to open its info pane (Properties)** — a preview (for images/video/audio),
+  whether it's already on your device or will be fetched from a peer, who uploaded it, its
+  size, type and folder, plus a **Download** button. Owners and admins also get a two-click
+  **Delete** there (deleting unlists the file for everyone; members who already downloaded it
+  keep their copy). You can also **right-click any embedded image/video/audio or file chip**
+  in chat, status, or a wiki page and pick **Properties**.
+- Properties also shows **Circulates until** — every shared file gets a **30-day circulation
+  window** (the date it stops being offered around automatically; nothing is ever deleted
+  from anyone's device, and it stays fetchable while any member holds a copy). The uploader
+  or an owner/admin can toggle **Keep forever**. A file **embedded in a wiki page never
+  expires** (marked 📌 in the file list) — and **Used in** lists exactly where the file
+  appears: the wiki pages (click to open) plus chat/status reference counts.
 - Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
   rest, and only members can open them.
 
@@ -189,8 +200,11 @@ type a `code` and upload an image. Then anyone types `:code:` to use it.
   automatic Contents box** (`__TOC__` forces it, `__NOTOC__` hides it); hover a heading in
   Read mode to **edit that section**; `#REDIRECT [[Target]]` pages forward readers; a **What
   links here** list; **rename/delete** in the page header; an editor **toolbar + live
-  preview**; drag images/video/audio into the editor to embed them. The **?** button shows
-  in-app formatting help. Same-page edits from two members merge character-by-character.
+  preview**; drag images/video/audio into the editor (or use the toolbar 📎) to embed them
+  **at the caret**, and the toolbar's **+ insert** opens the same picker as the chat composer
+  (link/embed shared files, status posts, other pages, events). Files embedded in a wiki page
+  are **pinned — they never drop out of circulation**. The **?** button shows in-app
+  formatting help. Same-page edits from two members merge character-by-character.
 - **Status** — a per-server feed of short posts (announcements/activity). Supports the same
   rich text + media embeds.
 
