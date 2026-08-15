@@ -1197,6 +1197,7 @@
       refreshInvite(),
       refreshRoles(),
       refreshLivery(),
+      refreshTopic(),
     ]);
     syncProfileEditor();
   }
@@ -1259,6 +1260,35 @@
     }
     captureDivider(); // snapshot the read boundary before refresh advances the mark
     refresh();
+    refreshTopic();
+  }
+
+  // The active channel's topic (a shared LWW scalar in the channel doc; any member may set it).
+  let channelTopic = $state("");
+  let editingTopic = $state(false);
+  let topicDraft = $state("");
+  async function refreshTopic() {
+    if (activeServerId === null || !cur?.active) {
+      channelTopic = "";
+      return;
+    }
+    try {
+      channelTopic = await invoke<string>("get_channel_topic", { server: activeServerId, channel: cur.active });
+    } catch {
+      channelTopic = "";
+    }
+  }
+  async function saveTopic() {
+    if (activeServerId === null || !cur?.active) return;
+    const t = topicDraft.trim();
+    editingTopic = false;
+    if (t === channelTopic) return;
+    try {
+      await invoke("set_channel_topic", { server: activeServerId, channel: cur.active, topic: t });
+      channelTopic = t;
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   async function refresh() {
@@ -2790,6 +2820,7 @@
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
         if (dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
         if (server === activeServerId && channel === cur?.active) {
+          refreshTopic(); // topic edits ride the same channel-updated event
           refresh().then(() => {
             // You're looking at this channel — only chime if the window isn't focused; use the
             // mention chime if the just-arrived (newest) message is aimed at you.
@@ -3508,6 +3539,22 @@
           <h2>
             #{activeName()} <span class="muted">· {members} member{members === 1 ? "" : "s"}</span>
             <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
+            {#if editingTopic}
+              <!-- svelte-ignore a11y_autofocus -->
+              <input
+                class="topic-edit"
+                bind:value={topicDraft}
+                placeholder="Set a channel topic… (Enter to save, Esc to cancel)"
+                maxlength="256"
+                autofocus
+                onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveTopic(); } else if (e.key === "Escape") { e.preventDefault(); editingTopic = false; } }}
+                onblur={() => (editingTopic = false)}
+              />
+            {:else if channelTopic}
+              <button type="button" class="chan-topic" title={`${channelTopic}\n\nClick to edit (any member can)`} onclick={() => { topicDraft = channelTopic; editingTopic = true; }}>{channelTopic}</button>
+            {:else}
+              <button type="button" class="chan-topic empty" title="Set a channel topic (any member can)" onclick={() => { topicDraft = ""; editingTopic = true; }}>+ topic</button>
+            {/if}
             <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>{@render icoSearch()}</button>
             {#if !(inCall && callChannel === cur?.active)}
               {@const n = roomMembers(activeServerId ?? -1, cur?.active ?? "").length}

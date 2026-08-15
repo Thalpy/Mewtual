@@ -1584,6 +1584,35 @@ async fn set_pin(
     Ok(())
 }
 
+/// Set (or clear, with `""`) a channel's topic — its short description. **Any member may**, like
+/// creating the channel itself; rejected over 256 UTF-8 bytes. A `channel-updated` event for this
+/// channel follows, so the UI re-reads it exactly as it re-reads messages.
+#[tauri::command]
+async fn set_channel_topic(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    topic: String,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    actor.set_channel_topic(id, topic).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Read a channel's current topic (empty if none is set).
+#[tauri::command]
+async fn get_channel_topic(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+) -> Result<String, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.channel_topic(id).await)
+}
+
 /// Read a channel's current messages (by id).
 #[tauri::command]
 async fn get_messages(
@@ -1904,6 +1933,8 @@ pub fn run() {
             delete_message,
             toggle_reaction,
             set_pin,
+            set_channel_topic,
+            get_channel_topic,
             get_inbox,
             get_messages
         ])

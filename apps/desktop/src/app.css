@@ -3368,3 +3368,37 @@ button.you-panel:hover {
 .verify-card .pc-actions {
   margin-top: 12px;
 }
+
+/* --- Channel topic in the chat header (click to edit; any member may set it) --- */
+.chan-topic {
+  flex: 1;
+  min-width: 80px;
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 0 0 10px;
+  font-size: 0.78rem;
+  font-weight: 400;
+  color: var(--muted);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: text;
+}
+.chan-topic:hover {
+  background: none;
+  color: var(--text);
+}
+.chan-topic.empty {
+  color: var(--faint);
+  flex: 0 1 auto;
+}
+.topic-edit {
+  flex: 1;
+  min-width: 120px;
+  font-size: 0.78rem;
+  padding: 2px 8px;
+  background: var(--bg-elev);
+}

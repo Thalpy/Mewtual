@@ -75,6 +75,17 @@ pub enum AppCommand {
         pinned: bool,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Set (or clear) a channel's topic (any member).
+    SetChannelTopic {
+        channel: u128,
+        topic: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query a channel's current topic.
+    ChannelTopic {
+        channel: u128,
+        reply: oneshot::Sender<String>,
+    },
     /// Pull a channel's history from `peer` (e.g. right after joining).
     CatchUp { peer: PeerId, channel: u128 },
     /// Pull a channel's history from the best known peer (no peer named).
@@ -420,6 +431,39 @@ impl ServerActor {
             return Err("server stopped".into());
         }
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Set (or clear, with `""`) a channel's topic. Any member may — see
+    /// [`Server::set_channel_topic`]. A `ChannelUpdated` event follows if it changed.
+    pub async fn set_channel_topic(&self, channel: u128, topic: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetChannelTopic {
+                channel,
+                topic,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch a channel's current topic (empty if unset).
+    pub async fn channel_topic(&self, channel: u128) -> String {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ChannelTopic { channel, reply })
+            .await
+            .is_err()
+        {
+            return String::new();
+        }
+        rx.await.unwrap_or_default()
     }
 
     /// Pull a channel's history from `peer`.
@@ -1146,6 +1190,23 @@ where
                             let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
                         }
                     }
+                    Some(AppCommand::SetChannelTopic {
+                        channel,
+                        topic,
+                        reply,
+                    }) => {
+                        let res = server
+                            .set_channel_topic(channel, &topic)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
+                    Some(AppCommand::ChannelTopic { channel, reply }) => {
+                        let _ = reply.send(server.channel_topic(channel));
+                    }
                     Some(AppCommand::CatchUp { peer, channel }) => {
                         if let Err(e) = server.request_channel_catchup(peer, channel).await {
                             tracing::warn!(error = %e, channel, "catch-up failed");
@@ -1509,7 +1570,8 @@ where
     (ServerActor { cmd_tx }, event_rx, handle)
 }
 
-/// Whether a channel's message count changed since last seen (updating the record).
+/// Whether a channel's rendered content (its messages or its topic) changed since last seen
+/// (updating the record).
 /// Synchronous — the `&Server` borrow ends before the caller awaits the event send, so
 /// the actor future stays `Send` (a `&Server` held across an await would require
 /// `Server: Sync`, which it is not).
@@ -1527,6 +1589,9 @@ where
     // detected too, both locally and when a peer's edit arrives. `DefaultHasher::new()` has a fixed
     // seed, so the same content hashes the same across ticks. Cheap over a channel's message list.
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // The topic is part of the channel's rendered state, so a peer's topic change refreshes the
+    // UI through the same `ChannelUpdated` the message list uses.
+    server.channel_topic(channel).hash(&mut h);
     for m in &server.messages(channel) {
         m.id.hash(&mut h);
         m.text.hash(&mut h);

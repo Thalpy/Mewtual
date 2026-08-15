@@ -180,7 +180,7 @@ pub fn channel_id(name: &str) -> u128 {
 const JOIN_TIMEOUT_SECS: u64 = 120;
 
 // --- the canonical channel-document schema ----------------------------------
-// A channel doc is `{ messages: [ { author: str, text: str } ] }`.
+// A channel doc is `{ topic: str, messages: [ { author: str, text: str } ] }`.
 
 const MESSAGES: &str = "messages";
 const AUTHOR: &str = "author";
@@ -190,6 +190,12 @@ const MSG_ID: &str = "id";
 const EDITED: &str = "edited";
 const REPLY_TO: &str = "reply_to";
 const PINNED: &str = "pinned";
+const TOPIC: &str = "topic";
+
+/// Maximum length of a channel topic, in UTF-8 bytes. The topic lives in the channel
+/// document, so this bounds what every member replicates — the same reason the livery and
+/// avatar values are capped.
+pub const MAX_CHANNEL_TOPIC_BYTES: usize = 256;
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -320,6 +326,19 @@ fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, 
         return Ok(true);
     }
     Ok(false)
+}
+
+/// Read a channel document's topic (empty when it was never set — every channel written before
+/// topics existed simply has no `topic` key, which reads as "no topic").
+fn read_topic(doc: &AutoCommit) -> String {
+    str_field(doc, &ROOT, TOPIC)
+}
+
+/// Set a channel document's topic: one scalar key at the document ROOT (which always exists), so
+/// — like `pinned` on a message map — there is no container two members could concurrently create
+/// and lose one of, and a concurrent set is a clean last-writer-wins.
+fn set_topic_in_doc(doc: &mut AutoCommit, topic: &str) -> Result<(), AutomergeError> {
+    doc.put(ROOT, TOPIC, topic)
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
@@ -1108,6 +1127,41 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             })
             .await?;
         Ok(())
+    }
+
+    /// Set (or clear, with `""`) a channel's **topic** — the short description shown in its
+    /// header. **Any member may set it**: channels themselves are open to create (they are
+    /// name-addressed, with no registry and no gate), and a topic is channel *content* like a
+    /// message, not presentation like the livery — so this is deliberately not owner/admin gated.
+    /// The op is inner-signed by this device, so authorship is attributable exactly as for a
+    /// message. Rejects a topic over [`MAX_CHANNEL_TOPIC_BYTES`] UTF-8 bytes; an unchanged topic
+    /// is a no-op (no redundant op), like an unchanged pin.
+    pub async fn set_channel_topic(&mut self, channel: u128, topic: &str) -> Result<(), AppError> {
+        if topic.len() > MAX_CHANNEL_TOPIC_BYTES {
+            return Err(AppError::Invalid(format!(
+                "channel topic too long: {} bytes (max {MAX_CHANNEL_TOPIC_BYTES})",
+                topic.len()
+            )));
+        }
+        if self.channel_topic(channel) == topic {
+            return Ok(()); // already the requested topic — don't post a redundant op
+        }
+        let topic = topic.to_string();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                set_topic_in_doc(d, &topic)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// A channel's current topic (empty if unset, or if the channel is not open). It lives in the
+    /// channel's own document, so it replicates, persists and catches up exactly like its messages.
+    pub fn channel_topic(&self, channel: u128) -> String {
+        self.sync
+            .doc(DocType::Channel, channel)
+            .map(|d| read_topic(d.doc()))
+            .unwrap_or_default()
     }
 
     /// This device's short fingerprint (the key its messages + profile are stored under).
@@ -2233,6 +2287,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_channel_topic_round_trips_and_is_size_capped() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        assert_eq!(alice.channel_topic(GENERAL), "", "no topic by default");
+
+        alice
+            .set_channel_topic(GENERAL, "shipping the thing")
+            .await
+            .unwrap();
+        assert_eq!(alice.channel_topic(GENERAL), "shipping the thing");
+        // Setting it again is an idempotent no-op, and the messages are untouched by a topic op.
+        alice
+            .set_channel_topic(GENERAL, "shipping the thing")
+            .await
+            .unwrap();
+        assert!(alice.messages(GENERAL).is_empty());
+
+        // A topic is replaced (last-writer-wins) and can be cleared.
+        alice.set_channel_topic(GENERAL, "shipped").await.unwrap();
+        assert_eq!(alice.channel_topic(GENERAL), "shipped");
+        alice.set_channel_topic(GENERAL, "").await.unwrap();
+        assert_eq!(alice.channel_topic(GENERAL), "");
+
+        // Exactly at the cap is fine; one byte over is refused (and changes nothing).
+        let at_cap = "t".repeat(MAX_CHANNEL_TOPIC_BYTES);
+        alice.set_channel_topic(GENERAL, &at_cap).await.unwrap();
+        assert_eq!(alice.channel_topic(GENERAL), at_cap);
+        let over = "t".repeat(MAX_CHANNEL_TOPIC_BYTES + 1);
+        assert!(alice.set_channel_topic(GENERAL, &over).await.is_err());
+        assert_eq!(alice.channel_topic(GENERAL), at_cap, "unchanged");
+        // The cap counts UTF-8 *bytes*, not chars — a multi-byte topic over budget is refused too.
+        let multibyte = "é".repeat(MAX_CHANNEL_TOPIC_BYTES / 2 + 1); // 2 bytes each
+        assert!(alice.set_channel_topic(GENERAL, &multibyte).await.is_err());
+    }
+
+    #[tokio::test]
     async fn a_member_edits_and_deletes_its_own_messages_by_stable_id() {
         let mut alice = founder();
         alice.open_channel(GENERAL).await.unwrap();
@@ -2545,6 +2635,10 @@ mod tests {
         let mut alice = founder();
         alice.open_channel(GENERAL).await.unwrap();
         alice.send_message(GENERAL, "persist me").await.unwrap();
+        alice
+            .set_channel_topic(GENERAL, "persist me too")
+            .await
+            .unwrap();
         let snap = alice.snapshot().unwrap();
 
         {
@@ -2578,10 +2672,11 @@ mod tests {
         )
         .unwrap();
 
-        // The channel history, display name and roster all survived — read offline.
+        // The channel history, topic, display name and roster all survived — read offline.
         let msgs = restored.messages(GENERAL);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "persist me");
+        assert_eq!(restored.channel_topic(GENERAL), "persist me too");
         assert_eq!(restored.display_name(), "alice");
         assert_eq!(restored.member_count(), 1);
     }
@@ -2640,6 +2735,10 @@ mod tests {
         alice.subscribe_control().await.unwrap();
         alice.open_channel(GENERAL).await.unwrap();
         alice.send_message(GENERAL, "welcome!").await.unwrap();
+        alice
+            .set_channel_topic(GENERAL, "the main room")
+            .await
+            .unwrap();
 
         // Bob joins via an invite, over the hub (Alice serves the join with a tick).
         let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
@@ -2672,13 +2771,21 @@ mod tests {
             bob.request_channel_catchup(alice_peer, GENERAL),
             alice.sync_once(),
         );
-        assert_eq!(applied.unwrap(), 1, "Bob applied Alice's one message");
+        assert_eq!(applied.unwrap(), 2, "Bob applied Alice's message + topic");
 
         let msgs = bob.messages(GENERAL);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "welcome!");
         // Authored by Alice's device fingerprint (the name resolves from her profile).
         assert_eq!(msgs[0].author, alice.my_fingerprint());
+        // The topic rides in the same channel document, so catch-up delivers it too.
+        assert_eq!(bob.channel_topic(GENERAL), "the main room");
+        // …and *any* member may set it — Bob is not the owner and is not refused.
+        assert_ne!(bob.my_role(), Role::Owner);
+        bob.set_channel_topic(GENERAL, "bob was here")
+            .await
+            .unwrap();
+        assert_eq!(bob.channel_topic(GENERAL), "bob was here");
     }
 
     #[tokio::test]
