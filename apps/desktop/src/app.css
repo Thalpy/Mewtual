@@ -4209,3 +4209,20 @@ button.you-panel:hover {
   text-align: center;
   font-variant-numeric: tabular-nums;
 }
+
+/* --- M6 carry channels: QR display + camera scan --- */
+.qr-canvas {
+  align-self: center;
+  background: #fff;
+  border-radius: var(--r);
+  padding: 6px;
+  image-rendering: pixelated;
+}
+.scan-card {
+  width: min(420px, 92vw);
+}
+.scan-video {
+  width: 100%;
+  border-radius: var(--r);
+  background: var(--bg-0);
+}

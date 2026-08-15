@@ -4,6 +4,9 @@
   import { onMount, tick } from "svelte";
   import { renderMessage, renderWiki } from "./render";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
+  import QRCode from "qrcode";
+  import jsQR from "jsqr";
+  import { decodeAudio, encodeAudio, MAX_AUDIO_PAYLOAD } from "./audiocode";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -476,6 +479,141 @@
   }
   function unlockSecret(): string {
     return unlockMethod === "pass" ? passphrase : unlockMethod === "spell" ? spellSecret : melodySecret;
+  }
+
+  // --- M6: alternate carry channels for pairing blobs (QR + sound) -----------------------
+  // Paste remains the baseline; QR and the acoustic channel are conveniences for the same
+  // strings. QR fits both legs when small enough; sound is request-leg-sized only.
+  const QR_MAX_CHARS = 2600; // v40-L capacity headroom; beyond this we say "use paste"
+  // Svelte action: render `text` as a QR into the canvas (re-renders when text changes).
+  function qr(canvas: HTMLCanvasElement, text: string) {
+    const draw = (t: string) => {
+      if (!t || t.length > QR_MAX_CHARS) return;
+      QRCode.toCanvas(canvas, t, { margin: 1, width: 220 }).catch(() => {});
+    };
+    draw(text);
+    return {
+      update(t: string) {
+        draw(t);
+      },
+    };
+  }
+  // Camera QR scan: one shot — resolves with the decoded text or null (no camera / denied
+  // / closed). The video runs in a small overlay; jsQR scans frames until a hit.
+  let scanOpen = $state(false);
+  let scanVideoEl = $state<HTMLVideoElement | undefined>(undefined);
+  let scanStream: MediaStream | null = null;
+  let scanTimer: ReturnType<typeof setInterval> | null = null;
+  let scanTarget: ((text: string | null) => void) | null = null;
+  async function scanQr(into: (text: string | null) => void) {
+    if (scanOpen) return;
+    scanTarget = into;
+    scanOpen = true;
+    try {
+      scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      await tick();
+      if (!scanVideoEl) throw new Error("no video element");
+      scanVideoEl.srcObject = scanStream;
+      await scanVideoEl.play();
+      const c = document.createElement("canvas");
+      const ctx = c.getContext("2d", { willReadFrequently: true });
+      scanTimer = setInterval(() => {
+        if (!scanVideoEl || !ctx || scanVideoEl.videoWidth === 0) return;
+        c.width = scanVideoEl.videoWidth;
+        c.height = scanVideoEl.videoHeight;
+        ctx.drawImage(scanVideoEl, 0, 0);
+        const img = ctx.getImageData(0, 0, c.width, c.height);
+        const hit = jsQR(img.data, img.width, img.height);
+        if (hit?.data) closeScan(hit.data);
+      }, 180);
+    } catch {
+      closeScan(null);
+      error = "Camera unavailable — paste the code instead.";
+    }
+  }
+  function closeScan(result: string | null) {
+    if (scanTimer) clearInterval(scanTimer);
+    scanTimer = null;
+    scanStream?.getTracks().forEach((t) => t.stop());
+    scanStream = null;
+    scanOpen = false;
+    const cb = scanTarget;
+    scanTarget = null;
+    cb?.(result);
+  }
+  // Acoustic channel. Send: render the blob as FSK and play it. Receive: record ~30s of
+  // mic audio and try to decode — stops early on success.
+  let soundBusy = $state<"" | "send" | "listen">("");
+  async function sendBySound(text: string) {
+    if (soundBusy) return;
+    const payload = new TextEncoder().encode(text);
+    if (payload.length > MAX_AUDIO_PAYLOAD) {
+      error = "Too large to send as sound — use QR or paste.";
+      return;
+    }
+    soundBusy = "send";
+    try {
+      const ctx = new AudioContext();
+      const wave = encodeAudio(payload, ctx.sampleRate);
+      const buf = ctx.createBuffer(1, wave.length, ctx.sampleRate);
+      buf.copyToChannel(new Float32Array(wave), 0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      await new Promise<void>((res) => {
+        src.onended = () => res();
+        src.start();
+      });
+      await ctx.close();
+    } catch {
+      error = "Audio output unavailable.";
+    } finally {
+      soundBusy = "";
+    }
+  }
+  async function listenForSound(into: (text: string) => void) {
+    if (soundBusy) return;
+    soundBusy = "listen";
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new AudioContext();
+      const src = ctx.createMediaStreamSource(stream);
+      const proc = ctx.createScriptProcessor(4096, 1, 1);
+      const chunks: Float32Array[] = [];
+      let total = 0;
+      const done = new Promise<Uint8Array | null>((res) => {
+        proc.onaudioprocess = (e) => {
+          const d = e.inputBuffer.getChannelData(0);
+          chunks.push(new Float32Array(d));
+          total += d.length;
+          // Try a decode once a second over the accumulated tail; stop at ~35s.
+          if (chunks.length % 12 === 0 || total > ctx.sampleRate * 35) {
+            const all = new Float32Array(total);
+            let at = 0;
+            for (const c of chunks) {
+              all.set(c, at);
+              at += c.length;
+            }
+            const hit = decodeAudio(all, ctx.sampleRate);
+            if (hit || total > ctx.sampleRate * 35) res(hit);
+          }
+        };
+      });
+      src.connect(proc);
+      proc.connect(ctx.destination);
+      const hit = await done;
+      proc.disconnect();
+      src.disconnect();
+      await ctx.close();
+      if (hit) into(new TextDecoder().decode(hit));
+      else error = "Didn't catch a transmission — try again closer to the speaker, or paste it.";
+    } catch {
+      error = "Microphone unavailable — paste the code instead.";
+    } finally {
+      stream?.getTracks().forEach((t) => t.stop());
+      soundBusy = "";
+    }
   }
 
   // --- Multi-device pairing (design-multi-device.md v2.1; ceremony is offline-first) ---
@@ -3970,6 +4108,7 @@
       }
       if (e.key === "Escape") {
         if (showQuickSwitch) closeQuickSwitch();
+        else if (scanOpen) closeScan(null);
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
         else if (menu) menu = null;
@@ -4501,7 +4640,10 @@
       <hr />
       <p class="muted">…or join an existing server with an invite:</p>
       <textarea class="invite-code" bind:value={joinInvite} rows="3" placeholder="paste invite here"></textarea>
-      <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
+      <div class="pc-actions">
+        <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
+        <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => { if (t) joinInvite = t; })}>⛶ Scan invite QR</button>
+      </div>
       <details>
         <summary>Link this device to another device you own</summary>
         <p class="muted small">
@@ -4516,11 +4658,16 @@
             <p class="muted small">This device's code: <span class="fp">{pairDeviceId.slice(0, 8)}</span> — the master shows the same one.</p>
           {/if}
           <textarea class="invite-code" rows="3" readonly value={pairBlob}></textarea>
-          <button class="ghost small" onclick={() => copyText(pairBlob)}>Copy pairing code</button>
+          <canvas class="qr-canvas" use:qr={pairBlob}></canvas>
+          <div class="pc-actions">
+            <button class="ghost small" onclick={() => copyText(pairBlob)}>Copy pairing code</button>
+            <button class="ghost small" disabled={soundBusy !== ""} onclick={() => sendBySound(pairBlob)}>{soundBusy === "send" ? "Playing…" : "🔊 Send by sound"}</button>
+          </div>
           <label class="field">
             <span class="muted small">Then paste the grant from the master device:</span>
             <textarea class="invite-code" rows="3" bind:value={pairBundle} placeholder="paste grant bundle…"></textarea>
           </label>
+          <button class="ghost small" disabled={scanOpen} onclick={() => scanQr((t) => { if (t) pairBundle = t; })}>⛶ Scan grant QR</button>
           <input type="password" bind:value={pairPass} placeholder="transport passphrase (set on the master)" />
           <button class="ghost small" disabled={!pairBundle.trim() || !pairPass} onclick={pairOpen}>Open grant</button>
           {#if pairSummary}<p class="muted small">{pairSummary}</p>{/if}
@@ -5767,6 +5914,23 @@
       </div>
     {/if}
 
+    {#if scanOpen}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeScan(null); }}>
+        <div class="overlay-card scan-card">
+          <header class="overlay-head">
+            <h2>Scan a code</h2>
+            <button class="ghost" onclick={() => closeScan(null)}>✕</button>
+          </header>
+          <div class="overlay-body">
+            <!-- svelte-ignore a11y_media_has_caption -->
+            <video bind:this={scanVideoEl} class="scan-video" playsinline muted></video>
+            <p class="muted small">Point the camera at the QR code. Esc cancels.</p>
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if showLinkDevice}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeLinkDevice(); }}>
@@ -5782,7 +5946,11 @@
                 its pairing code here (paste, or read it across the room).
               </p>
               <textarea class="invite-code" rows="3" bind:value={linkBlob} placeholder="Paste the new device's pairing code…"></textarea>
-              <button class="ghost small" disabled={linkBusy || !linkBlob.trim()} onclick={linkRead}>Read pairing code</button>
+              <div class="pc-actions">
+                <button class="ghost small" disabled={linkBusy || !linkBlob.trim()} onclick={linkRead}>Read pairing code</button>
+                <button class="ghost small" disabled={linkBusy || scanOpen} onclick={() => scanQr((t) => { if (t) { linkBlob = t; linkRead(); } })}>⛶ Scan QR</button>
+                <button class="ghost small" disabled={linkBusy || soundBusy !== ""} onclick={() => listenForSound((t) => { linkBlob = t; linkRead(); })}>{soundBusy === "listen" ? "Listening…" : "🎙 Listen for sound"}</button>
+              </div>
               {#if linkInfo}
                 <div class="grant-box">
                   <div class="vf-label">grant device access?</div>
@@ -5822,6 +5990,11 @@
                 with the transport passphrase). It is sealed — but treat it like a key until used.
               </p>
               <textarea class="invite-code" rows="4" readonly value={linkBundle}></textarea>
+              {#if linkBundle.length <= QR_MAX_CHARS}
+                <canvas class="qr-canvas" use:qr={linkBundle}></canvas>
+              {:else}
+                <p class="muted small">Too large for a QR — copy/paste it.</p>
+              {/if}
               <div class="pc-actions">
                 <button class="ghost" onclick={() => copyText(linkBundle)}>Copy grant</button>
                 <button class="ghost" onclick={() => closeLinkDevice()}>Done</button>
@@ -6251,6 +6424,9 @@
                 {/if}
                 {#if cur?.invite}
                   <textarea class="invite-code" readonly rows="3" value={wrapInvite(cur.invite, cur.id)}></textarea>
+                  {#if wrapInvite(cur.invite, cur.id).length <= QR_MAX_CHARS}
+                    <canvas class="qr-canvas" use:qr={wrapInvite(cur.invite, cur.id)}></canvas>
+                  {/if}
                   <div class="invite-actions">
                     <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
                     {#if canInvite}

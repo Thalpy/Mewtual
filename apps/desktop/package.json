@@ -14,12 +14,15 @@
   "dependencies": {
     "@tauri-apps/api": "^2",
     "dompurify": "^3.4.11",
-    "marked": "^18.0.5"
+    "jsqr": "^1.4.0",
+    "marked": "^18.0.5",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5",
     "@tauri-apps/cli": "^2",
     "@tsconfig/svelte": "^5",
+    "@types/qrcode": "^1.5.6",
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",
