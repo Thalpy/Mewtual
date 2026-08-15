@@ -890,7 +890,6 @@ button.ghost:hover {
 .server-icon.gear {
   margin-top: auto;
   background: transparent;
-  font-size: 1.1rem;
 }
 
 .invite-quick {
@@ -2341,6 +2340,7 @@ button.primary:hover:not(:disabled) {
 
 /* Pinned messages: the inline mark, the header toggle, and the dropdown panel. */
 .pin-mark {
+  display: inline-flex;
   font-size: 0.72rem;
   opacity: 0.85;
 }
@@ -2672,7 +2672,10 @@ button.primary:hover:not(:disabled) {
 }
 
 /* Voice call: the header button, the floating call bar, and the incoming-call prompt. */
-.call-start {
+/* `button.ghost` (0,1,1) out-specifies a bare `.call-start` (0,1,0), so the green never
+   reached the label — pin it on the element form so currentColor tints the handset icon. */
+.call-start,
+button.call-start {
   color: var(--ok);
 }
 .call-bar {
@@ -2692,8 +2695,10 @@ button.primary:hover:not(:disabled) {
 }
 .call-dot {
   flex: none;
+  display: inline-flex;
   font-size: 0.95rem;
   line-height: 1;
+  color: var(--ok);
 }
 .call-title {
   font-weight: 600;
@@ -2947,16 +2952,8 @@ button.primary:hover:not(:disabled) {
   margin-top: auto;
 }
 
-/* Emoji glyphs used as chrome icons render in full colour and fight the terminal
-   register — desaturate them when the control is idle; active states keep colour. */
-.server-icon.gear,
-.icon-btn,
-.search-toggle,
-.msg-action,
-.pin-mark,
-.pinned-toggle:not(.active) {
-  filter: grayscale(1);
-}
+/* No grayscale() filter on chrome controls any more: they draw inline line-icons that
+   already follow currentColor, so desaturating only flattened their hover/active tints. */
 
 /* "Join/create #channel" is an action, not a channel row — dashed, quiet, mono hint. */
 .join-channel input {
@@ -3269,7 +3266,7 @@ button.you-panel:hover {
   }
 }
 
-/* --- Inline line-icons (DM / inbox / cat) --- */
+/* --- Inline line-icons (stroke = currentColor, so every state tints them) --- */
 .ico {
   width: 1.25em;
   height: 1.25em;
@@ -3289,6 +3286,18 @@ button.you-panel:hover {
   width: 15px;
   height: 15px;
   display: block;
+}
+/* Icon sitting inline before a text label: size to the label's own type scale and drop it
+   onto the baseline, so the pair reads as one word rather than a badge plus text. */
+.btn-ico .ico {
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.15em;
+}
+/* Bare chrome-icon buttons (search, server settings) — match the glyph they replaced. */
+.icon-btn .ico {
+  width: 1.05em;
+  height: 1.05em;
 }
 
 /* --- Emoji picker: section labels + more room for the default sets --- */

@@ -3043,6 +3043,71 @@
   </svg>
 {/snippet}
 
+{#snippet icoSearch()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="10.5" cy="10.5" r="6.2" />
+    <path d="M15.1 15.1 20.4 20.4" />
+  </svg>
+{/snippet}
+
+{#snippet icoWrench()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+  </svg>
+{/snippet}
+
+{#snippet icoPin()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M20 10c0 5.6-8 12-8 12s-8-6.4-8-12a8 8 0 0 1 16 0z" />
+    <circle cx="12" cy="10" r="2.9" />
+  </svg>
+{/snippet}
+
+{#snippet icoPhone()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21.5 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 1.6 4.2a2 2 0 0 1 2-2.2h3a2 2 0 0 1 2 1.7c.13.96.36 1.9.7 2.8a2 2 0 0 1-.45 2.1L7.6 9.9a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.45c.9.34 1.84.57 2.8.7a2 2 0 0 1 1.8 2.05z" />
+  </svg>
+{/snippet}
+
+{#snippet icoHangup()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21.5 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 1.6 4.2a2 2 0 0 1 2-2.2h3a2 2 0 0 1 2 1.7c.13.96.36 1.9.7 2.8a2 2 0 0 1-.45 2.1L7.6 9.9a16 16 0 0 0 6 6l1.2-1.2a2 2 0 0 1 2.1-.45c.9.34 1.84.57 2.8.7a2 2 0 0 1 1.8 2.05z" />
+    <path d="M21 3 3.4 20.6" />
+  </svg>
+{/snippet}
+
+{#snippet icoGear()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="5.2" />
+    <circle cx="12" cy="12" r="2" />
+    <path d="M12 6.8V4M12 17.2V20M6.8 12H4M17.2 12H20M8.32 8.32 6.34 6.34M15.68 15.68 17.66 17.66M15.68 8.32 17.66 6.34M8.32 15.68 6.34 17.66" />
+  </svg>
+{/snippet}
+
+{#snippet icoSpeaker()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 9.4h3.4L12 5.4v13.2L7.4 14.6H4z" />
+    <path d="M15.7 9.2a4 4 0 0 1 0 5.6" />
+  </svg>
+{/snippet}
+
+{#snippet icoMic()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="9.2" y="2.6" width="5.6" height="10.4" rx="2.8" />
+    <path d="M5.8 11.2a6.2 6.2 0 0 0 12.4 0" />
+    <path d="M12 17.4V20.6M9 20.6h6" />
+  </svg>
+{/snippet}
+
+{#snippet icoMicOff()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="9.2" y="2.6" width="5.6" height="10.4" rx="2.8" />
+    <path d="M5.8 11.2a6.2 6.2 0 0 0 12.4 0" />
+    <path d="M12 17.4V20.6M9 20.6h6" />
+    <path d="M3.4 3.4 20.6 20.6" />
+  </svg>
+{/snippet}
+
 <!--
   The sidebar's contextual block: what the sidebar shows depends on the surface selected in the
   content column's surface strip. Shared by the server and DM sidebars — `dm` suppresses the blocks
@@ -3115,11 +3180,11 @@
             {@const vn = roomMembers(sv, c.id).length}
             {#if vn}
               <button
-                class="voice-pill"
+                class="voice-pill btn-ico"
                 class:in={inCall && callChannel === c.id}
                 title={inCall && callChannel === c.id ? "You're in this voice room" : `Join voice (${vn} in)`}
                 onclick={() => joinVoice(c.id, sv, c.name)}
-              >🔊 {vn}</button>
+              >{@render icoSpeaker()} {vn}</button>
             {/if}
           {/if}
         </li>
@@ -3269,7 +3334,7 @@
         {/each}
         <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
         <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" onclick={() => (showFeedback = true)}>FB</button>
-        <button class="server-icon gear" title="Settings" onclick={() => (showSettings = true)}>⚙</button>
+        <button class="server-icon gear" title="Settings" onclick={() => (showSettings = true)}>{@render icoGear()}</button>
       </nav>
 
       {#if inboxView}
@@ -3391,7 +3456,7 @@
         {:else}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
-          <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>🛠</button>
+          <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>{@render icoWrench()}</button>
         </div>
         {@render contextNav(false)}
 
@@ -3443,13 +3508,13 @@
           <h2>
             #{activeName()} <span class="muted">· {members} member{members === 1 ? "" : "s"}</span>
             <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
-            <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
+            <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>{@render icoSearch()}</button>
             {#if !(inCall && callChannel === cur?.active)}
               {@const n = roomMembers(activeServerId ?? -1, cur?.active ?? "").length}
-              <button class="ghost small call-start" title="Join this channel's voice room (E2E)" onclick={joinActiveVoice}>📞 {n ? `Join voice (${n})` : "Voice"}</button>
+              <button class="ghost small call-start btn-ico" title="Join this channel's voice room (E2E)" onclick={joinActiveVoice}>{@render icoPhone()} {n ? `Join voice (${n})` : "Voice"}</button>
             {/if}
             {#if pinnedMsgs.length}
-              <button class="ghost small pinned-toggle" class:active={showPinned} title="Pinned messages" onclick={() => (showPinned = !showPinned)}>📌 {pinnedMsgs.length}</button>
+              <button class="ghost small pinned-toggle btn-ico" class:active={showPinned} title="Pinned messages" onclick={() => (showPinned = !showPinned)}>{@render icoPin()} {pinnedMsgs.length}</button>
             {/if}
             {#if firstUnreadIdx >= 0}
               <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => scrollToMatch(firstUnreadIdx)}>↑ New</button>
@@ -3457,7 +3522,7 @@
           </h2>
           {#if showPinned && pinnedMsgs.length}
             <div class="pinned-panel">
-              <div class="pinned-head"><strong>📌 Pinned</strong><button class="ghost small" onclick={() => (showPinned = false)}>✕</button></div>
+              <div class="pinned-head"><strong class="btn-ico">{@render icoPin()} Pinned</strong><button class="ghost small" onclick={() => (showPinned = false)}>✕</button></div>
               <ul class="pinned-list">
                 {#each pinnedMsgs as p (p.id)}
                   <li>
@@ -3543,10 +3608,10 @@
                       {@render avatarTag(m.author)}
                       {@render nameTag(m.author)}
                     </span>
-                    {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
+                    {#if m.pinned}<span class="pin-mark" title="Pinned message">{@render icoPin()}</span>{/if}
                   </span>
                 {:else if m.pinned}
-                  <span class="author"><span class="pin-mark" title="Pinned message">📌</span></span>
+                  <span class="author"><span class="pin-mark" title="Pinned message">{@render icoPin()}</span></span>
                 {/if}
                 {#if m.id && editingId !== m.id}
                   <div class="msg-actions">
@@ -4006,21 +4071,21 @@
 
     {#if inCall}
       <div class="call-bar">
-        <span class="call-dot">🔊</span>
+        <span class="call-dot">{@render icoSpeaker()}</span>
         <span class="call-title">Voice · #{callChannelName}</span>
         <span class="call-status muted">{callStatusText}</span>
         <div class="call-avatars">
           {@render avatarTag(myFp)}
           {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
         </div>
-        <button class="ghost small" class:active={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{callMuted ? "🔇 Muted" : "🎙 Mute"}</button>
-        <button class="call-hangup" title="Leave voice" onclick={leaveVoice}>📴 Leave</button>
+        <button class="ghost small btn-ico" class:active={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
+        <button class="call-hangup btn-ico" title="Leave voice" onclick={leaveVoice}>{@render icoHangup()} Leave</button>
       </div>
     {/if}
 
     {#if voiceAlert}
       <div class="call-incoming">
-        <span>📞 Voice call in <strong>#{voiceAlert.name}</strong></span>
+        <span class="btn-ico">{@render icoPhone()} Voice call in <strong>#{voiceAlert.name}</strong></span>
         <button onclick={() => voiceAlert && joinVoice(voiceAlert.channel, voiceAlert.server, voiceAlert.name)}>Join</button>
         <button class="ghost" onclick={() => (voiceAlert = null)}>Dismiss</button>
       </div>
@@ -4116,7 +4181,7 @@
       <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showSettings = false; }}>
         <div class="overlay-card">
           <header class="overlay-head">
-            <h2>⚙ Settings</h2>
+            <h2>Settings</h2>
             <button class="ghost" onclick={() => (showSettings = false)}>✕</button>
           </header>
           <div class="overlay-body">
@@ -4285,7 +4350,7 @@
       <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showServerSettings = false; }}>
         <div class="overlay-card">
           <header class="overlay-head">
-            <h2>🛠 Server settings</h2>
+            <h2>Server settings</h2>
             <button class="ghost" onclick={() => (showServerSettings = false)}>✕</button>
           </header>
           <div class="overlay-body">
@@ -4374,7 +4439,7 @@
               {:else}
                 <p class="muted small">
                   {liveryActive
-                    ? "This server publishes a livery. You can opt out in ⚙ Settings → Appearance."
+                    ? "This server publishes a livery. You can opt out in Settings → Appearance."
                     : "No livery published. Owners and admins can set one."}
                 </p>
               {/if}
