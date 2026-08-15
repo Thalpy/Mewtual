@@ -4226,3 +4226,40 @@ button.you-panel:hover {
   border-radius: var(--r);
   background: var(--bg-0);
 }
+
+/* --- Multi-device M4: device tags, nested companion rows, owner device panel --- */
+.dev-tag {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: none;
+}
+.member-row.companion {
+  padding-left: 26px;
+  opacity: 0.85;
+}
+.dev-panel {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.dev-panel li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pair-results {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pair-results li.ok { color: var(--ok); }
+.pair-results li.err { color: var(--danger); }

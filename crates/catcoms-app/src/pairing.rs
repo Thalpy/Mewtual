@@ -68,7 +68,12 @@ pub const GRANT_BLOB_PREFIX: &str = "catcoms-device-grant:v1:";
 
 /// Domain label opening the (sealed) grant-bundle body, so a body sealed for some
 /// other purpose can never be read back as one of these.
-const GRANT_BODY_DOMAIN: &str = "catcoms/device-grant-bundle/v1";
+///
+/// Bumped `v1` → `v2` in M3 (hard cutover, pre-release — the same treatment `InviteToken` got at
+/// 6e-3d-9) when each grant gained `owner_public_key`: the body shape changed, so a v1 bundle
+/// must never half-decode as a v2 one. A stale bundle now unseals and then fails as malformed;
+/// the member simply re-runs the ceremony.
+const GRANT_BODY_DOMAIN: &str = "catcoms/device-grant-bundle/v2";
 /// HKDF label deriving the body-sealing key from the bundle's one-shot DEK.
 const GRANT_BODY_KEY_LABEL: &str = "catcoms/device-grant-body/v1";
 /// Sealed-frame version byte, mirroring the vault file's leading version.
@@ -246,6 +251,37 @@ impl PairingLedger {
         }
         Ok(())
     }
+
+    /// Serialize the spent set for persistence, exactly as `InviteLedger::snapshot` does for
+    /// invites — single use has to survive a restart, or a re-pasted request would mint a second
+    /// bundle. The bridge seals this under the vault
+    /// ([`crate::store::ServerStore::save_pairing_ledger`]).
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_u32(self.spent.len() as u32);
+        for n in &self.spent {
+            e.put_bytes(n).expect("32 fits");
+        }
+        e.finish()
+    }
+
+    /// Reconstruct a ledger from a [`PairingLedger::snapshot`] blob.
+    pub fn restore(bytes: &[u8]) -> Result<Self, AppError> {
+        let bad = |_| invalid("corrupt pairing ledger");
+        let mut d = Decoder::new(bytes);
+        let count = d.get_u32().map_err(bad)?;
+        let mut spent = HashSet::new();
+        for _ in 0..count {
+            let n: [u8; 32] = d
+                .get_bytes()
+                .map_err(bad)?
+                .try_into()
+                .map_err(|_| invalid("corrupt pairing ledger"))?;
+            spent.insert(n);
+        }
+        d.finish().map_err(bad)?;
+        Ok(Self { spent })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +311,17 @@ pub struct PerServerGrant {
     /// The operator's shared TURN config, opaque and exactly as the invite's
     /// `.turn.` suffix carries it (base64 JSON; empty when unset).
     pub turn: String,
+    /// The **server owner's** (designated committer's) Ed25519 signature key, read by the origin
+    /// from its live roster at mint time.
+    ///
+    /// M3 needs this and an invite does not, for a structural reason: only the owner ever runs an
+    /// MLS Add, so the owner is the only device that can sign the Welcome — and the new device has
+    /// no roster to look that key up in before it is admitted. An invited joiner pins
+    /// `InviteToken::inviter_public_key` for exactly the same purpose (defeating a relay that
+    /// substitutes a group it controls); this is that pin, carried by the one object the member
+    /// hand-delivers between their own two devices. If the owner changes before the grant is
+    /// used, the admission fails closed and the member pairs again.
+    pub owner_public_key: [u8; 32],
     /// This server's origin-signed certificate for the new device.
     pub certificate: DeviceCertificate,
 }
@@ -362,7 +409,9 @@ pub fn mint_grant_bundle(
     // needs device access), so a trivial passphrase is offline-crackable in seconds.
     // Floor it here, not just in the UI.
     if passphrase.len() < 8 {
-        return Err(invalid("transport passphrase too short (minimum 8 characters)"));
+        return Err(invalid(
+            "transport passphrase too short (minimum 8 characters)",
+        ));
     }
     if grants.is_empty() {
         return Err(invalid("no servers to grant"));
@@ -417,6 +466,11 @@ fn check_grant(
     }
     if g.certificate.group_id != g.group_id {
         return Err(invalid("a certificate is bound to a different group"));
+    }
+    // An absent owner key would leave the new device with nothing to authenticate its Welcome
+    // against; a *wrong* one simply fails closed at admission (the signature will not verify).
+    if g.owner_public_key == [0u8; 32] {
+        return Err(invalid("a grant carries no server owner key"));
     }
     // Self-consistency: the embedded key content-addresses the claimed origin and
     // signed every field. Freshness and revocation are the admitting layer's (M3).
@@ -519,6 +573,7 @@ fn encode_bundle_body(
             e.put_str(a).map_err(wire)?;
         }
         e.put_str(&g.turn).map_err(wire)?;
+        e.put_bytes(&g.owner_public_key).map_err(wire)?;
         e.put_bytes(&g.certificate.encode()).map_err(wire)?;
     }
     Ok(e.finish())
@@ -548,6 +603,7 @@ fn decode_bundle_body(bytes: &[u8]) -> Result<BundleBody, AppError> {
         let bootstrap = get_addrs(&mut d)?;
         let rendezvous = get_addrs(&mut d)?;
         let turn = d.get_str().map_err(bad)?.to_string();
+        let owner_public_key = get_32(&mut d)?;
         let certificate = DeviceCertificate::decode(d.get_bytes().map_err(bad)?)
             .map_err(|e| invalid(e.to_string()))?;
         grants.push(PerServerGrant {
@@ -556,6 +612,7 @@ fn decode_bundle_body(bytes: &[u8]) -> Result<BundleBody, AppError> {
             bootstrap,
             rendezvous,
             turn,
+            owner_public_key,
             certificate,
         });
     }
@@ -702,6 +759,8 @@ mod tests {
             bootstrap: vec![format!("/ip4/127.0.0.1/tcp/900{group}/p2p/12D3KooWfake")],
             rendezvous: vec![format!("/ip4/198.51.100.{group}/tcp/4001/p2p/12D3KooWrz")],
             turn: String::new(),
+            // The founder-is-origin case: the origin device is also the server owner.
+            owner_public_key: *origin.verifying_key().as_bytes(),
             certificate: DeviceCertificate::issue(
                 origin,
                 new_device_id,
@@ -812,6 +871,7 @@ mod tests {
             bootstrap: Vec::new(),
             rendezvous: Vec::new(),
             turn: String::new(),
+            owner_public_key: server.owner_public_key().expect("founder is the owner"),
             certificate: cert,
         }];
         let bundle = mint_grant_bundle(

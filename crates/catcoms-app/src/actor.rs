@@ -22,8 +22,8 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, FileEntry, FilesView, InboxItem, Livery, MemberBadge, MemberView,
-    MessageStats, Profile, Server, ServerEvent,
+    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FilesView, InboxItem, Livery, MemberBadge,
+    MemberView, MessageStats, Profile, Server, ServerEvent,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -158,6 +158,12 @@ pub enum AppCommand {
     },
     /// Pull the badge document from `peer` (e.g. right after joining).
     CatchUpBadges { peer: PeerId },
+    /// Query the companion-device registry (multi-device M3), keyed by companion fingerprint.
+    Devices {
+        reply: oneshot::Sender<HashMap<String, DeviceEntry>>,
+    },
+    /// Pull the companion-device registry from `peer` (e.g. right after joining).
+    CatchUpDevices { peer: PeerId },
     /// Share a file under folder `path`; replies with its content-address hex, or an error.
     AddFile {
         name: String,
@@ -311,6 +317,11 @@ pub enum AppCommand {
     OriginIdentity {
         reply: oneshot::Sender<(DeviceId, Vec<u8>)>,
     },
+    /// The **server owner's** signature key, which a grant pins so the new device can
+    /// authenticate the owner's Welcome before it has a roster (multi-device M3).
+    OwnerPublicKey {
+        reply: oneshot::Sender<Option<[u8; 32]>>,
+    },
     /// Sign a device certificate for a companion device with **this** server's origin
     /// key (multi-device M2). Deliberately narrow: the key never leaves the actor, so
     /// there is no command that exports it.
@@ -346,6 +357,9 @@ pub enum AppEvent {
     LiveryUpdated,
     /// A custom member badge changed — the UI should re-fetch badges (`badges`).
     BadgesUpdated,
+    /// The companion-device registry changed — the UI should re-fetch it (`devices`) and
+    /// re-resolve message attribution (multi-device M3/M4).
+    DevicesUpdated,
     /// The shared file list changed — the UI should re-fetch it (`files`).
     FilesUpdated,
     /// The status feed changed — the UI should re-fetch it (`statuses`).
@@ -681,6 +695,21 @@ impl ServerActor {
         rx.await.ok()
     }
 
+    /// The server owner's signature key, to pin into a device grant (multi-device M3).
+    /// `None` if the actor has stopped or the group has no readable owner key.
+    pub async fn owner_public_key(&self) -> Option<[u8; 32]> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::OwnerPublicKey { reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
     /// Sign a device certificate for a companion device with this server's origin key
     /// (multi-device M2). The key never leaves the actor — only the certificate does.
     pub async fn sign_device_cert(
@@ -863,6 +892,25 @@ impl ServerActor {
     /// Pull the badge document from `peer`.
     pub async fn catch_up_badges(&self, peer: PeerId) {
         let _ = self.cmd_tx.send(AppCommand::CatchUpBadges { peer }).await;
+    }
+
+    /// Fetch the companion-device registry, keyed by companion fingerprint (multi-device M3).
+    pub async fn devices(&self) -> HashMap<String, DeviceEntry> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Devices { reply })
+            .await
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the companion-device registry from `peer`.
+    pub async fn catch_up_devices(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpDevices { peer }).await;
     }
 
     /// Share a file (bytes) under folder `path`; returns its content-address hex, or an error.
@@ -1336,6 +1384,12 @@ where
             tracing::warn!(error = %e, "open_badges failed");
         }
         let mut last_badges = server.badges();
+        // …and the companion-device registry, so a member's second device is attributable to the
+        // member (multi-device M3) and the owner's admission gate sees the current map.
+        if let Err(e) = server.open_devices().await {
+            tracing::warn!(error = %e, "open_devices failed");
+        }
+        let mut last_devices = server.devices();
         // Open the per-server file index too.
         if let Err(e) = server.open_files().await {
             tracing::warn!(error = %e, "open_files failed");
@@ -1569,6 +1623,17 @@ where
                         }
                         if badges_changed(&server, &mut last_badges) {
                             let _ = event_tx.send(AppEvent::BadgesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Devices { reply }) => {
+                        let _ = reply.send(server.devices());
+                    }
+                    Some(AppCommand::CatchUpDevices { peer }) => {
+                        if let Err(e) = server.request_devices_catchup(peer).await {
+                            tracing::warn!(error = %e, "devices catch-up failed");
+                        }
+                        if devices_changed(&server, &mut last_devices) {
+                            let _ = event_tx.send(AppEvent::DevicesUpdated).await;
                         }
                     }
                     Some(AppCommand::AddFile { name, mime, path, bytes, reply }) => {
@@ -1831,6 +1896,9 @@ where
                     Some(AppCommand::OriginIdentity { reply }) => {
                         let _ = reply.send((server.device_id(), server.group_id()));
                     }
+                    Some(AppCommand::OwnerPublicKey { reply }) => {
+                        let _ = reply.send(server.owner_public_key());
+                    }
                     Some(AppCommand::SignDeviceCert { new_device_id, device_name, reply }) => {
                         let res = server
                             .issue_device_certificate(new_device_id, &device_name)
@@ -1860,6 +1928,9 @@ where
                         }
                         if badges_changed(&server, &mut last_badges) {
                             let _ = event_tx.send(AppEvent::BadgesUpdated).await;
+                        }
+                        if devices_changed(&server, &mut last_devices) {
+                            let _ = event_tx.send(AppEvent::DevicesUpdated).await;
                         }
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
@@ -2063,6 +2134,22 @@ where
     R: CryptoRngCore,
 {
     let now = server.badges();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the companion-device registry changed since last seen (updating the record).
+/// Bounded by `MAX_DEVICES` short entries, like the badge map.
+fn devices_changed<T, R>(server: &Server<T, R>, last: &mut HashMap<String, DeviceEntry>) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.devices();
     if now != *last {
         *last = now;
         true

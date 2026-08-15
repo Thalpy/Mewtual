@@ -14,7 +14,7 @@
 //! [`Server::sync_once`]. The background run-loop + live event stream and multi-server
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use automerge::transaction::Transactable;
 use automerge::{
@@ -25,6 +25,9 @@ use base64::Engine;
 // Re-export the device-identity type: it is part of the app's public surface (the
 // roster, the grant ceremony) and the bridge names it to drive pairing.
 pub use catcoms_crypto::DeviceId;
+// The companion-device statements the `Devices` registry stores + verifies (multi-device M3).
+use catcoms_crypto::verify_with_public_bytes;
+pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
 use catcoms_storage::{BlobStore, FileManifest, FileRef};
@@ -33,7 +36,8 @@ use catcoms_storage::{BlobStore, FileManifest, FileRef};
 pub use catcoms_storage::Cid;
 pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{
-    fingerprint, read_published_roster, request_join, ChannelSync, SyncError, ROLES_DOC,
+    fingerprint, read_published_roster, request_device_join, request_join, ChannelSync, SyncError,
+    ROLES_DOC,
 };
 use catcoms_wire::DocType;
 use thiserror::Error;
@@ -47,6 +51,9 @@ pub use pairing::{
     OpenedGrantBundle, PairingLedger, PairingRequestView, PairingSecrets, PerServerGrant,
     GRANT_BLOB_PREFIX, PAIRING_BLOB_PREFIX,
 };
+// The companion device identity a grant is redeemed with (multi-device M3): the bridge holds one
+// `PairingSecrets` and duplicates its device per granted server.
+pub use catcoms_mls::MlsDevice as PairedDevice;
 pub use store::{ServerRecord, ServerStore};
 
 /// Errors surfaced to the UI/product layer.
@@ -758,6 +765,205 @@ fn is_reserved_badge_label(label: &str) -> bool {
         .any(|r| label.eq_ignore_ascii_case(r))
 }
 
+// --- companion devices (multi-device M3) -------------------------------------
+//
+// One shared CRDT document per server (`DocType::Devices`, id `DEVICES_DOC`): a map keyed by
+// **companion device fingerprint** → `{ origin fingerprint, device name, certificate }`. It is
+// what lets any member attribute a companion's ops to the member's origin identity, which is how
+// profiles/roles/badges stay origin-keyed with no doc re-keying at all
+// (`docs/design-multi-device.md`).
+//
+// The **owner writes it, at admission time**. Admission is owner-serialized — only the designated
+// committer runs the MLS Add — so unlike every other shared document here there is exactly one
+// writer and no write race to reason about.
+//
+// Every entry is re-derived from its stored certificate on read: it survives only if the
+// certificate verifies under the origin it names, is bound to THIS group, and its subject, origin
+// and name match the key and the fields stored beside it. A modified client that writes a bogus
+// entry therefore changes nothing — forging one would take an origin's private key. That matters
+// more here than for the livery or badges, because the owner's **depth-1 admission gate** reads
+// this map: without the re-derivation, a member could nominate someone as a "companion" and stop
+// them ever certifying a device of their own.
+
+/// The reserved document id for the per-server companion-device registry.
+const DEVICES_DOC: u128 = 0;
+/// Schema version written into every devices document.
+const DEVICES_VERSION: i64 = 1;
+const D_V: &str = "v";
+/// The map of `companion fingerprint -> { origin, name, cert }`, under its own key so the schema
+/// version can live beside it without ever colliding with a fingerprint.
+const D_DEVICES: &str = "devices";
+/// **Reserved for M5 (revocation).** A sibling map of `revoked fingerprint -> revocation bytes`,
+/// which an origin writes to withdraw one of its own companions. Nothing writes it today; the
+/// reader ([`read_device_revocations`]) and the owner's admission refusal are already in place, so
+/// M5 is a write path plus the MLS Remove, with no change to the checks.
+const D_REVOCATIONS: &str = "revocations";
+const D_ORIGIN: &str = "origin";
+const D_NAME: &str = "name";
+const D_CERT: &str = "cert";
+/// The **owner's** signing public key (32 bytes) stored beside each entry.
+const D_OWNER_PK: &str = "opk";
+/// The **owner's** signature over the entry (see [`device_entry_payload`]). A valid device
+/// certificate only proves an origin *wanted* this device; the owner's signature proves the
+/// owner *admitted* it. Without this, any member could `post` a self-minted (genuinely signed)
+/// certificate naming an arbitrary subject straight into the doc — poisoning the depth-1 gate,
+/// spoofing attribution, or marking the owner a companion. So the reader requires it, exactly as
+/// the member-roles roster requires the owner's signature (adversarial-review BLOCKING finding).
+const D_OWNER_SIG: &str = "osig";
+
+/// Domain separator for the owner's per-entry devices-registry signature.
+const DEVICES_DOMAIN: &[u8] = b"catcoms/devices-registry/v1";
+
+/// The canonical bytes the owner signs to attest one admitted companion entry: domain, then the
+/// group id, companion fingerprint, and full certificate bytes, each length-prefixed so no field
+/// boundary can be shifted. Binding the group means an entry signed for one server can't be
+/// replayed into another's registry.
+fn device_entry_payload(group_id: &[u8], companion_fp: &str, cert_bytes: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(DEVICES_DOMAIN.len() + 12 + group_id.len() + cert_bytes.len());
+    p.extend_from_slice(DEVICES_DOMAIN);
+    p.extend_from_slice(&(group_id.len() as u32).to_be_bytes());
+    p.extend_from_slice(group_id);
+    p.extend_from_slice(&(companion_fp.len() as u32).to_be_bytes());
+    p.extend_from_slice(companion_fp.as_bytes());
+    p.extend_from_slice(&(cert_bytes.len() as u32).to_be_bytes());
+    p.extend_from_slice(cert_bytes);
+    p
+}
+
+/// Maximum number of companion devices one server's registry may carry — the whole map gossips
+/// with every change, so this bounds what members replicate. Generous next to [`MAX_BADGES`]:
+/// every member may have several devices.
+pub const MAX_DEVICES: usize = 256;
+
+/// One companion device as the product layer sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceEntry {
+    /// The **origin** device's fingerprint — the member identity this device's ops belong to, and
+    /// the key its profile / roles / badges are stored under.
+    pub origin: String,
+    /// The human-set device name the origin certified (e.g. `phone`), rendered as the mono device
+    /// tag beside a message author at M4. Already bounded and control-character-free: it is
+    /// inside the certificate's signature and [`catcoms_crypto::validate_device_name`] gates it.
+    pub name: String,
+}
+
+/// Record one admitted companion. Called by the **owner only**, from the admission drain.
+///
+/// `owner_pk` is the owner's signing key and `owner_sig` its signature over
+/// [`device_entry_payload`] for this entry — the reader requires both, so an entry a non-owner
+/// forges into the doc (a genuinely-signed certificate for an arbitrary subject) is dropped.
+fn write_device_entry(
+    doc: &mut AutoCommit,
+    cert: &DeviceCertificate,
+    owner_pk: &[u8],
+    owner_sig: &[u8; 64],
+) -> Result<(), AutomergeError> {
+    doc.put(ROOT, D_V, DEVICES_VERSION)?;
+    let devices = match doc.get(ROOT, D_DEVICES)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(ROOT, D_DEVICES, ObjType::Map)?,
+    };
+    let fp = fingerprint(&cert.new_device_id);
+    let entry = match doc.get(&devices, &fp)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(&devices, &fp, ObjType::Map)?,
+    };
+    doc.put(&entry, D_ORIGIN, fingerprint(&cert.origin_id).as_str())?;
+    doc.put(&entry, D_NAME, cert.device_name.as_str())?;
+    doc.put(&entry, D_CERT, ScalarValue::Bytes(cert.encode()))?;
+    doc.put(&entry, D_OWNER_PK, ScalarValue::Bytes(owner_pk.to_vec()))?;
+    doc.put(&entry, D_OWNER_SIG, ScalarValue::Bytes(owner_sig.to_vec()))?;
+    Ok(())
+}
+
+/// Every companion certificate in the registry that is **genuine for this group**.
+///
+/// An entry is kept only if its certificate decodes, verifies under the origin it names, is bound
+/// to `group_id`, and agrees with the key and sibling fields it was stored with. Anything else is
+/// skipped, so a malformed or forged document degrades to "no companions" rather than to a wrong
+/// attribution or a bogus depth-1 refusal.
+///
+/// **The owner's signature is what makes an entry trustworthy.** A device certificate only
+/// proves that some origin device *wanted* this companion; it does not prove the group *admitted*
+/// it, and its subject can be any device id. So every entry must additionally carry the current
+/// owner's signature over [`device_entry_payload`] (`owner_id` is the group's designated
+/// committer), and an entry missing or failing that check is dropped — closing the forged-entry
+/// attack. Certificate re-verification stays as defence in depth.
+fn read_device_certs(
+    doc: &AutoCommit,
+    group_id: &[u8],
+    owner_id: &DeviceId,
+) -> Vec<DeviceCertificate> {
+    let mut out = Vec::new();
+    let Ok(Some((Value::Object(ObjType::Map), devices))) = doc.get(ROOT, D_DEVICES) else {
+        return out;
+    };
+    for fp in doc.keys(&devices) {
+        let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&devices, &fp) else {
+            continue;
+        };
+        let cert_bytes = bytes_field(doc, &entry, D_CERT);
+        let Ok(cert) = DeviceCertificate::decode(&cert_bytes) else {
+            continue;
+        };
+        // The current owner must have signed this exact (group, companion, certificate) entry.
+        let owner_pk = bytes_field(doc, &entry, D_OWNER_PK);
+        let owner_sig = bytes_field(doc, &entry, D_OWNER_SIG);
+        let Ok(sig): Result<[u8; 64], _> = owner_sig.as_slice().try_into() else {
+            continue;
+        };
+        if DeviceId::from_public_key_bytes(&owner_pk) != *owner_id
+            || !verify_with_public_bytes(
+                &owner_pk,
+                &device_entry_payload(group_id, &fp, &cert_bytes),
+                &sig,
+            )
+        {
+            continue;
+        }
+        if cert.group_id != group_id
+            || !cert.verify(&cert.origin_id)
+            || fingerprint(&cert.new_device_id) != fp
+            || fingerprint(&cert.origin_id) != str_field(doc, &entry, D_ORIGIN)
+            || cert.device_name != str_field(doc, &entry, D_NAME)
+        {
+            continue;
+        }
+        out.push(cert);
+        if out.len() >= MAX_DEVICES {
+            break;
+        }
+    }
+    out
+}
+
+/// Every genuine device revocation in the registry (**M5**; empty until the revocation verb
+/// lands, since nothing writes [`D_REVOCATIONS`] yet). Same re-derivation rule as the
+/// certificates: only a revocation actually signed by the origin it names counts, so a member
+/// cannot evict someone else's device by editing the CRDT.
+fn read_device_revocations(doc: &AutoCommit) -> Vec<DeviceRevocation> {
+    let mut out = Vec::new();
+    let Ok(Some((Value::Object(ObjType::Map), revs))) = doc.get(ROOT, D_REVOCATIONS) else {
+        return out;
+    };
+    for fp in doc.keys(&revs) {
+        let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&revs, &fp) else {
+            continue;
+        };
+        let Ok(rev) = DeviceRevocation::decode(&bytes_field(doc, &entry, D_CERT)) else {
+            continue;
+        };
+        if !rev.verify(&rev.origin_id) || fingerprint(&rev.revoked_device_id) != fp {
+            continue;
+        }
+        out.push(rev);
+        if out.len() >= MAX_DEVICES {
+            break;
+        }
+    }
+    out
+}
+
 // --- fileshare: a per-server file index --------------------------------------
 //
 // One shared CRDT document per server (`DocType::FileIndex`, id `FILE_INDEX_DOC`): an
@@ -1148,6 +1354,10 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// mapping is gone, so older messages report no delivery state at all rather than a wrong
     /// one. Only own messages are tracked; a peer's delivery is not ours to display.
     own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
+    /// A cheap (crypto-free) content signature of the `Devices` document at the last reconcile.
+    /// Re-validating that registry costs one signature check per entry, so it is rebuilt only
+    /// when the document actually changed — not on every tick. `None` = never reconciled.
+    devices_sig: Option<u64>,
 }
 
 /// How many of this device's most recent messages per channel carry delivery state. Bounded so a
@@ -1197,6 +1407,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            devices_sig: None,
         })
     }
 
@@ -1226,6 +1437,56 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            devices_sig: None,
+        })
+    }
+
+    /// Join a server as a **companion device**, presenting a [`PerServerGrant`] from a grant
+    /// bundle instead of an invite (multi-device M3).
+    ///
+    /// This rides the invite join's shape exactly — the caller has already connected to `contact`
+    /// using the grant's `bootstrap` / `rendezvous` (which are the invite's own reach fields) —
+    /// with two substitutions:
+    ///
+    /// - the **ledger check becomes certificate verification** on the admitting owner, and
+    /// - the Welcome is authenticated under the **owner's** key pinned in the grant rather than
+    ///   the inviter's key pinned in an invite (only the owner ever runs the Add, and the
+    ///   companion has no roster to look a key up in).
+    ///
+    /// `contact` need not be the owner: any member relays to the owner and forwards the Welcome,
+    /// so a companion can pair against whichever member its grant could reach.
+    pub async fn join_with_grant(
+        transport: T,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        contact: PeerId,
+        grant: &PerServerGrant,
+    ) -> Result<Self, AppError> {
+        let device_id = device.device_id();
+        let now_ms = clock.now_ms();
+        // Bounded like the invite join: an owner that never comes online to serialize the Add
+        // must not wedge the device forever.
+        let (group, routing) = tokio::time::timeout(
+            std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
+            request_device_join(
+                &transport,
+                contact,
+                &device,
+                &grant.certificate,
+                &grant.owner_public_key,
+                now_ms,
+            ),
+        )
+        .await
+        .map_err(|_| AppError::JoinTimeout)??;
+        Ok(Self {
+            sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
+            display_name: display_name.into(),
+            device_id,
+            own_message_changes: HashMap::new(),
+            devices_sig: None,
         })
     }
 
@@ -1253,6 +1514,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
+            devices_sig: None,
         })
     }
 
@@ -2408,6 +2670,177 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
+    // --- companion devices (multi-device M3) -------------------------------
+
+    /// Open (create/subscribe) the per-server **companion-device registry**. Call once after
+    /// founding/joining.
+    pub async fn open_devices(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::Devices, DEVICES_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// Every admitted companion device, keyed by its own fingerprint. Empty until some member
+    /// pairs a second device. Only entries whose stored certificate genuinely verifies for this
+    /// group are returned — see the module notes on the `Devices` document.
+    pub fn devices(&self) -> HashMap<String, DeviceEntry> {
+        self.device_certs()
+            .into_iter()
+            .map(|c| {
+                (
+                    fingerprint(&c.new_device_id),
+                    DeviceEntry {
+                        origin: fingerprint(&c.origin_id),
+                        name: c.device_name,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The **member identity** an author fingerprint belongs to: the certifying origin's
+    /// fingerprint if `fp` is a companion device, otherwise `fp` itself.
+    ///
+    /// This is the whole point of the registry — profiles, roles and badges stay keyed by the
+    /// origin, so a companion's message renders under the member's name (M4 adds the device tag
+    /// beside it) with no document re-keying anywhere.
+    pub fn origin_of(&self, fp: &str) -> String {
+        self.devices()
+            .get(fp)
+            .map(|d| d.origin.clone())
+            .unwrap_or_else(|| fp.to_string())
+    }
+
+    /// Catch up the device registry from `peer` (e.g. right after joining).
+    pub async fn request_devices_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        let applied = self
+            .sync
+            .request_catchup(peer, DocType::Devices, DEVICES_DOC)
+            .await?;
+        Ok(applied)
+    }
+
+    /// The **designated committer's** (server owner's) signature public key.
+    ///
+    /// Read by the grant ceremony: a companion device has no roster before it is admitted, so the
+    /// origin captures this key from its *live* group and puts it in the grant, and the companion
+    /// pins it to authenticate the owner's Welcome — the role `InviteToken::inviter_public_key`
+    /// plays for an invited joiner. `None` only for a group with no members (impossible in
+    /// practice) or a non-Ed25519 roster key.
+    pub fn owner_public_key(&self) -> Option<[u8; 32]> {
+        let owner = self.sync.designated_committer_id()?;
+        self.sync.member_public_key(&owner)?.try_into().ok()
+    }
+
+    /// The validated certificates in the registry (empty if the document is not open, or the
+    /// group somehow has no owner).
+    fn device_certs(&self) -> Vec<DeviceCertificate> {
+        let group_id = self.sync.group_id();
+        let Some(owner) = self.sync.designated_committer_id() else {
+            return Vec::new();
+        };
+        self.sync
+            .doc(DocType::Devices, DEVICES_DOC)
+            .map(|d| read_device_certs(d.doc(), &group_id, &owner))
+            .unwrap_or_default()
+    }
+
+    /// A crypto-free content signature of the raw registry document, so the validated map (one
+    /// signature check per entry) is only rebuilt when the bytes changed.
+    fn devices_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let Some(doc) = self
+            .sync
+            .doc(DocType::Devices, DEVICES_DOC)
+            .map(|d| d.doc())
+        else {
+            return 0;
+        };
+        for (key, map) in [(D_DEVICES, 0u8), (D_REVOCATIONS, 1u8)] {
+            map.hash(&mut h);
+            if let Ok(Some((Value::Object(ObjType::Map), obj))) = doc.get(ROOT, key) {
+                for fp in doc.keys(&obj) {
+                    fp.hash(&mut h);
+                    if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&obj, &fp) {
+                        str_field(doc, &entry, D_ORIGIN).hash(&mut h);
+                        str_field(doc, &entry, D_NAME).hash(&mut h);
+                        bytes_field(doc, &entry, D_CERT).hash(&mut h);
+                    }
+                }
+            }
+        }
+        h.finish()
+    }
+
+    /// Publish any companion this device just admitted into the shared registry, then push the
+    /// re-validated companion → origin map and revocation set down to the sync layer, where the
+    /// owner's depth-1 admission gate reads them.
+    ///
+    /// Runs on every tick for every member. The **write** half only ever fires on the owner —
+    /// admission is owner-serialized, so nobody else has an admitted certificate to publish, and
+    /// the document has exactly one writer. The **read** half is what keeps a joiner's
+    /// attribution map current after a catch-up.
+    async fn reconcile_devices(&mut self) {
+        let admitted = self.sync.take_admitted_devices();
+        if !admitted.is_empty() {
+            // The owner may have admitted before anything opened the registry (a founder that
+            // never called `open_devices`); opening is idempotent.
+            if let Err(e) = self.open_devices().await {
+                tracing::warn!(error = %e, "opening the device registry failed");
+            }
+            // The owner signs each entry so no other member can forge one (see D_OWNER_SIG).
+            let group_id = self.sync.group_id();
+            let owner_pk = self.sync.my_public_key();
+            for cert in admitted {
+                let fp = fingerprint(&cert.new_device_id);
+                let payload = device_entry_payload(&group_id, &fp, &cert.encode());
+                let owner_sig = match self.sync.sign_blob(&payload) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "signing a device-registry entry failed");
+                        continue;
+                    }
+                };
+                let owner_pk = owner_pk.clone();
+                if let Err(e) = self
+                    .sync
+                    .post(DocType::Devices, DEVICES_DOC, move |d| {
+                        write_device_entry(d, &cert, &owner_pk, &owner_sig)
+                    })
+                    .await
+                {
+                    tracing::warn!(error = %e, "recording an admitted companion device failed");
+                }
+            }
+        }
+        let sig = self.devices_signature();
+        if self.devices_sig == Some(sig) {
+            return; // unchanged — skip the per-entry signature checks
+        }
+        self.devices_sig = Some(sig);
+        let group_id = self.sync.group_id();
+        let owner_id = self.sync.designated_committer_id();
+        let (companions, revoked) = match (self.sync.doc(DocType::Devices, DEVICES_DOC), owner_id) {
+            (Some(d), Some(owner)) => {
+                let doc = d.doc();
+                (
+                    read_device_certs(doc, &group_id, &owner)
+                        .into_iter()
+                        .map(|c| (c.new_device_id, c.origin_id))
+                        .collect::<HashMap<_, _>>(),
+                    read_device_revocations(doc)
+                        .into_iter()
+                        .map(|r| r.revoked_device_id)
+                        .collect::<HashSet<_>>(),
+                )
+            }
+            _ => (HashMap::new(), HashSet::new()),
+        };
+        self.sync.set_device_registry(companions, revoked);
+    }
+
     // --- member roles / permissions (Phase 10h) ----------------------------
 
     /// Open (create/subscribe) the per-server member-roles document. Call once after
@@ -2710,7 +3143,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// and any recovery). Returns `false` once the transport has closed. The bridge
     /// layer drives this in a background loop; tests drive it explicitly.
     pub async fn sync_once(&mut self) -> Result<bool, AppError> {
-        Ok(self.sync.run_once().await?)
+        let cont = self.sync.run_once().await?;
+        // Publish anything the tick admitted, and refresh the companion → origin registry the
+        // sync layer's depth-1 admission gate reads (multi-device M3).
+        self.reconcile_devices().await;
+        Ok(cont)
     }
 
     // --- steady-state rendezvous discovery (driven by the actor) -----------------------------
@@ -2807,6 +3244,611 @@ mod tests {
             "alice",
         )
         .unwrap()
+    }
+
+    // ---------- multi-device: companion admission by certificate (M3) ----------
+    //
+    // The founder is the owner *and* the origin here (a two-member group), which is the shape
+    // the design's happy path allows: the member pairing a second device is the same member that
+    // serializes admissions. The certificate path is identical for any other member — only the
+    // relay hop differs, and that is the already-reviewed admin-invite machinery.
+
+    /// Time the M3 tests start at, well past any freshness horizon so `abs_diff` is meaningful.
+    const T0: u64 = 1_700_000_000_000;
+    /// `MAX_DEVICE_CERT_AGE_MS` in `catcoms-sync` — the window a certificate may be admitted in.
+    const CERT_AGE: u64 = 3_600_000;
+
+    /// A founder over `hub` whose clock the test controls.
+    fn founder_on(
+        hub: &std::sync::Arc<Hub>,
+        peer: PeerId,
+        clock: &ManualClock,
+        seed: u64,
+    ) -> Server<MemNetwork, ChaCha20Rng> {
+        Server::found(
+            hub.join(peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(seed),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap()
+    }
+
+    /// The grant a member's origin device mints for one companion — exactly the object
+    /// `pairing_mint` assembles per server, with a certificate this server actually signed.
+    fn grant_from(
+        server: &Server<MemNetwork, ChaCha20Rng>,
+        device: DeviceId,
+        name: &str,
+    ) -> PerServerGrant {
+        PerServerGrant {
+            group_id: server.group_id(),
+            server_name: "cat cafe".into(),
+            bootstrap: Vec::new(),
+            rendezvous: Vec::new(),
+            turn: String::new(),
+            owner_public_key: server.owner_public_key().expect("the founder is the owner"),
+            certificate: server
+                .issue_device_certificate(device, name)
+                .expect("origin signs a certificate"),
+        }
+    }
+
+    /// A grant whose certificate came from somewhere other than this server's origin.
+    fn grant_with(
+        server: &Server<MemNetwork, ChaCha20Rng>,
+        certificate: DeviceCertificate,
+    ) -> PerServerGrant {
+        PerServerGrant {
+            group_id: server.group_id(),
+            server_name: "cat cafe".into(),
+            bootstrap: Vec::new(),
+            rendezvous: Vec::new(),
+            turn: String::new(),
+            owner_public_key: server.owner_public_key().expect("the founder is the owner"),
+            certificate,
+        }
+    }
+
+    /// Present `grant` from a fresh companion device while `owner` serves the admission.
+    ///
+    /// The owner is ticked in a `select!` loop rather than `join!`ed, because a rejection the
+    /// *presenting* device makes locally (a certificate that does not verify, or is not for this
+    /// device) never reaches the wire — so there would be no event for the owner's tick to
+    /// consume and a `join!` would simply hang.
+    async fn present(
+        hub: &std::sync::Arc<Hub>,
+        peer: u64,
+        owner_peer: PeerId,
+        owner: &mut Server<MemNetwork, ChaCha20Rng>,
+        clock: &ManualClock,
+        device: MlsDevice,
+        grant: &PerServerGrant,
+    ) -> Result<Server<MemNetwork, ChaCha20Rng>, AppError> {
+        let joining = Server::join_with_grant(
+            hub.join(PeerId::from_u64(peer)),
+            device,
+            ChaCha20Rng::seed_from_u64(peer),
+            Box::new(clock.clone()),
+            "phone",
+            owner_peer,
+            grant,
+        );
+        let mut joining = std::pin::pin!(joining);
+        loop {
+            tokio::select! {
+                joined = &mut joining => return joined,
+                _ = owner.sync_once() => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_companion_device_joins_by_grant_and_is_attributable() {
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.open_devices().await.unwrap();
+        assert!(alice.devices().is_empty(), "no companions yet");
+
+        // The M2 ceremony's output, on the two devices: a fresh device key here, and a grant the
+        // origin signed for exactly that key over there.
+        let (secrets, _blob) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let phone_id = secrets.device_id();
+        let grant = grant_from(&alice, phone_id, "phone");
+
+        let mut phone = present(
+            &hub,
+            2,
+            alice_peer,
+            &mut alice,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .expect("the origin's certificate admits the companion");
+
+        // The companion is a real member with its own leaf — not a second holder of one key.
+        assert_eq!(phone.member_count(), 2);
+        assert_eq!(alice.member_count(), 2);
+        assert!(alice.members().contains(&phone_id));
+        assert_ne!(phone.device_id(), alice.device_id());
+
+        // …and the owner published it into the `Devices` registry as part of admitting it.
+        let phone_fp = fingerprint(&phone_id);
+        let devices = alice.devices();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[&phone_fp].origin, alice.my_fingerprint());
+        assert_eq!(devices[&phone_fp].name, "phone");
+
+        // Attribution (what M4 renders): a companion's ops resolve to the member's origin
+        // identity, and anything not in the registry is its own identity.
+        assert_eq!(alice.origin_of(&phone_fp), alice.my_fingerprint());
+        assert_eq!(alice.origin_of("deadbeef"), "deadbeef");
+
+        // A message from the companion is authored by the *device* and attributable to the member.
+        phone.open_channel(GENERAL).await.unwrap();
+        phone.send_message(GENERAL, "from my phone").await.unwrap();
+        assert!(alice.sync_once().await.unwrap());
+        let msg = alice
+            .messages(GENERAL)
+            .into_iter()
+            .find(|m| m.text == "from my phone")
+            .expect("the companion's message reached the origin");
+        assert_eq!(msg.author, phone_fp, "signed by the companion's own key");
+        assert_eq!(
+            alice.origin_of(&msg.author),
+            alice.my_fingerprint(),
+            "and renders under the member's identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_origin_cannot_admit_unbounded_devices() {
+        // Adversarial-review BLOCKING: without a per-origin cap, one member could drive the owner
+        // to run unbounded MLS Adds (the ceremony's human gate is on the origin, i.e. the
+        // attacker's own device). The owner caps how many companions one origin may have.
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.open_devices().await.unwrap();
+
+        // Present far more devices than the cap, all certified by the same origin (alice). Count
+        // how many the owner admits; the count must plateau and later presentations must fail.
+        let mut admitted = 0usize;
+        let mut saw_refusal = false;
+        for i in 0..12u64 {
+            let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(100 + i)).unwrap();
+            let grant = grant_from(&alice, secrets.device_id(), "dev");
+            let r = present(
+                &hub,
+                200 + i,
+                alice_peer,
+                &mut alice,
+                &clock,
+                secrets.device().duplicate().unwrap(),
+                &grant,
+            )
+            .await;
+            match r {
+                Ok(_) => admitted += 1,
+                Err(_) => saw_refusal = true,
+            }
+        }
+        assert!(saw_refusal, "the owner must refuse past the per-origin cap");
+        assert!(
+            admitted < 12,
+            "not every presented device may be admitted (got {admitted})"
+        );
+        // Every admitted companion is a real leaf; the count is 1 (alice) + the capped companions.
+        assert_eq!(alice.member_count(), 1 + admitted);
+        assert_eq!(alice.devices().len(), admitted);
+    }
+
+    #[tokio::test]
+    async fn a_certificate_minted_for_another_server_cannot_admit_here() {
+        // The M2 review's requirement, enforced cryptographically: `group_id` is inside the
+        // origin's signature, so a certificate minted on server A is inert on server B.
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let a_peer = PeerId::from_u64(1);
+        let b_peer = PeerId::from_u64(2);
+        let mut server_a = founder_on(&hub, a_peer, &clock, 1);
+        let mut server_b = founder_on(&hub, b_peer, &clock, 2);
+        server_a.subscribe_control().await.unwrap();
+        server_b.subscribe_control().await.unwrap();
+        assert_ne!(server_a.group_id(), server_b.group_id());
+
+        let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        // A *valid* grant — for server A — presented to server B.
+        let for_a = grant_from(&server_a, secrets.device_id(), "phone");
+        let smuggled = PerServerGrant {
+            group_id: server_b.group_id(),
+            owner_public_key: server_b.owner_public_key().unwrap(),
+            ..for_a
+        };
+        let err = present(
+            &hub,
+            3,
+            b_peer,
+            &mut server_b,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &smuggled,
+        )
+        .await
+        .expect_err("a certificate for another group must not admit");
+        assert!(matches!(err, AppError::Sync(_)), "rejected, not timed out");
+        assert_eq!(server_b.member_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_certificate_from_a_non_member_origin_is_refused() {
+        // The forgery a new device could always attempt: mint its own "origin" keypair and sign
+        // itself a certificate. Nothing stops it *signing* one — it is inert because the signer
+        // is not on the roster.
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+
+        let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let stranger = catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(77));
+        let forged = DeviceCertificate::issue(
+            &stranger,
+            secrets.device_id(),
+            &alice.group_id(),
+            "phone",
+            T0,
+        )
+        .unwrap();
+        // It is a perfectly well-formed statement…
+        assert!(forged.verify(&forged.origin_id));
+        // …and admits nothing.
+        let grant = grant_with(&alice, forged);
+        assert!(present(
+            &hub,
+            2,
+            alice_peer,
+            &mut alice,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .is_err());
+        assert_eq!(alice.member_count(), 1);
+
+        // And there is no "I certify myself" statement to make in the first place.
+        assert!(DeviceCertificate::issue(
+            &stranger,
+            stranger.device_id(),
+            &alice.group_id(),
+            "me",
+            T0
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stale_certificate_is_refused() {
+        // Certificates carry no expiry by design, so the admitting owner enforces `issued_ts`
+        // freshness instead (design-multi-device.md v2.2).
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+
+        let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let grant = grant_from(&alice, secrets.device_id(), "phone");
+        assert_eq!(grant.certificate.issued_ts_ms, T0);
+
+        // Just inside the window: still admitted.
+        clock.set_ms(T0 + CERT_AGE - 1);
+        assert!(present(
+            &hub,
+            2,
+            alice_peer,
+            &mut alice,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .is_ok());
+
+        // A second, equally valid grant, presented one millisecond past the window.
+        let (later, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(10)).unwrap();
+        let stale = grant_from(&alice, later.device_id(), "laptop");
+        clock.set_ms(T0 + 2 * CERT_AGE + 1);
+        assert!(present(
+            &hub,
+            3,
+            alice_peer,
+            &mut alice,
+            &clock,
+            later.device().duplicate().unwrap(),
+            &stale,
+        )
+        .await
+        .is_err());
+        assert_eq!(alice.member_count(), 2, "only the fresh one landed");
+    }
+
+    #[tokio::test]
+    async fn one_certificate_admits_one_device_once() {
+        // Replay: a device removed from the group re-presents the certificate it was admitted
+        // with. The bind nonce is consumed in the (persisted) invite ledger, so it is inert —
+        // "already a member" is not the only thing standing in the way.
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_devices().await.unwrap();
+
+        let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let grant = grant_from(&alice, secrets.device_id(), "phone");
+        assert!(present(
+            &hub,
+            2,
+            alice_peer,
+            &mut alice,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .is_ok());
+        assert_eq!(alice.member_count(), 2);
+
+        // The owner removes it…
+        let phone_fp = fingerprint(&secrets.device_id());
+        alice.remove_member(&phone_fp).await.unwrap();
+        assert_eq!(alice.member_count(), 1);
+
+        // …and the same grant, on a fresh KeyPackage, admits nothing a second time.
+        assert!(present(
+            &hub,
+            3,
+            alice_peer,
+            &mut alice,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .is_err());
+        assert_eq!(alice.member_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_companion_may_not_certify_a_further_device() {
+        // Chain depth is 1: a stolen companion must never be an identity factory. The owner
+        // refuses because the certifier is in the `Devices` registry as somebody's companion.
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_devices().await.unwrap();
+
+        let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let grant = grant_from(&alice, secrets.device_id(), "phone");
+        let phone = present(
+            &hub,
+            2,
+            alice_peer,
+            &mut alice,
+            &clock,
+            secrets.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .unwrap();
+        assert!(alice
+            .devices()
+            .contains_key(&fingerprint(&secrets.device_id())));
+
+        // The companion is a full member, so it *can* sign a certificate — its own key is on the
+        // roster. The gate is that the owner knows it is a companion, not an origin.
+        let (tablet, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(11)).unwrap();
+        let sub_grant = PerServerGrant {
+            owner_public_key: alice.owner_public_key().unwrap(),
+            certificate: phone
+                .issue_device_certificate(tablet.device_id(), "tablet")
+                .unwrap(),
+            ..grant_from(&alice, tablet.device_id(), "tablet")
+        };
+        assert!(present(
+            &hub,
+            3,
+            alice_peer,
+            &mut alice,
+            &clock,
+            tablet.device().duplicate().unwrap(),
+            &sub_grant,
+        )
+        .await
+        .is_err());
+        assert_eq!(alice.member_count(), 2, "the second-hop device stayed out");
+    }
+
+    #[tokio::test]
+    async fn a_tampered_certificate_is_refused() {
+        // Every field is inside the signature, so any edit invalidates it. Both ends apply the
+        // same predicate (`DeviceCertificate::verify`), so an honest client refuses to present a
+        // tampered certificate at all — and a modified one gets nowhere either.
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+
+        let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let good = grant_from(&alice, secrets.device_id(), "phone");
+
+        for mutate in [0u8, 1, 2] {
+            let mut cert = good.certificate.clone();
+            match mutate {
+                0 => cert.device_name = "ADMIN".into(),
+                1 => cert.issued_ts_ms = T0 - 1,
+                _ => cert.signature[0] ^= 0x01,
+            }
+            assert!(
+                !cert.verify(&cert.origin_id),
+                "tamper {mutate} must not verify"
+            );
+            let grant = grant_with(&alice, cert);
+            assert!(present(
+                &hub,
+                2 + u64::from(mutate),
+                alice_peer,
+                &mut alice,
+                &clock,
+                secrets.device().duplicate().unwrap(),
+                &grant,
+            )
+            .await
+            .is_err());
+        }
+        assert_eq!(alice.member_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_grant_admitted_for_one_device_cannot_be_completed_on_another() {
+        let hub = Hub::new();
+        let clock = ManualClock::new(T0);
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+
+        let (mine, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
+        let (other, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(10)).unwrap();
+        let grant = grant_from(&alice, mine.device_id(), "phone");
+
+        // The nearest thing to a redirect an honest client can even attempt: another device
+        // presenting this grant. Refused before a byte leaves — the certificate names one key.
+        assert!(present(
+            &hub,
+            2,
+            alice_peer,
+            &mut alice,
+            &clock,
+            other.device().duplicate().unwrap(),
+            &grant,
+        )
+        .await
+        .is_err());
+        assert_eq!(alice.member_count(), 1);
+
+        // And the reason a *modified* client (or a relay that steals the Welcome off the wire)
+        // gains nothing either: MLS seals a Welcome's group secrets to the init key of the
+        // KeyPackage it was built for, and that private key exists only in that device's
+        // provider. The device keypair itself is what binds a Welcome to its device.
+        let owner = MlsDevice::generate().unwrap();
+        let mut group = ServerGroup::create(&owner).unwrap();
+        let x = MlsDevice::generate().unwrap();
+        let y = MlsDevice::generate().unwrap();
+        let outcome = group.add_member(&owner, x.key_package().unwrap()).unwrap();
+        assert!(
+            ServerGroup::join(&y, &outcome.welcome).is_err(),
+            "a Welcome minted for X is inert on Y"
+        );
+        assert!(ServerGroup::join(&x, &outcome.welcome).is_ok());
+    }
+
+    // Write an entry the way the owner does: certificate + the owner's signature over it.
+    fn owner_sign_entry(
+        doc: &mut AutoCommit,
+        cert: &DeviceCertificate,
+        gid: &[u8],
+        owner: &catcoms_crypto::DeviceKeypair,
+    ) {
+        let fp = fingerprint(&cert.new_device_id);
+        let payload = device_entry_payload(gid, &fp, &cert.encode());
+        let sig = owner.sign(&payload);
+        let vk = owner.verifying_key();
+        write_device_entry(doc, cert, vk.as_bytes(), &sig).unwrap();
+    }
+
+    #[test]
+    fn a_forged_devices_document_entry_is_ignored() {
+        // The registry is a CRDT any member can write into. An entry is trusted only if the
+        // CURRENT OWNER signed it — a device certificate alone proves an origin *wanted* a device,
+        // never that the group *admitted* it, and its subject can be any device id.
+        let owner = catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(9));
+        let owner_id = owner.device_id();
+        let alice = catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(1));
+        let victim = catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(2));
+        let gid = vec![7u8; 8];
+        let real = DeviceCertificate::issue(&alice, victim.device_id(), &gid, "phone", T0).unwrap();
+
+        // An owner-signed entry reads.
+        let mut doc = AutoCommit::new();
+        owner_sign_entry(&mut doc, &real, &gid, &owner);
+        assert_eq!(
+            read_device_certs(&doc, &gid, &owner_id).len(),
+            1,
+            "a genuine entry reads"
+        );
+        // Group-bound: the same doc read against another group is empty.
+        assert!(read_device_certs(&doc, b"other-group", &owner_id).is_empty());
+        // Owner-bound: a DIFFERENT owner id rejects it (a new owner cannot inherit stale entries).
+        let other_owner =
+            catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(8));
+        assert!(read_device_certs(&doc, &gid, &other_owner.device_id()).is_empty());
+
+        // THE FORGERY (BLOCKING 1): a member writes its own genuinely-signed certificate directly,
+        // with NO owner signature. Alice certifies the victim's own origin id as a "companion" —
+        // a real signature by a real member — and posts it. It must NOT read, or it would poison
+        // the depth-1 gate and spoof the victim's attribution.
+        let forged =
+            DeviceCertificate::issue(&alice, victim.device_id(), &gid, "phone", T0).unwrap();
+        let mut poisoned = AutoCommit::new();
+        write_device_entry(&mut poisoned, &forged, &[0u8; 32], &[0u8; 64]).unwrap();
+        assert!(
+            read_device_certs(&poisoned, &gid, &owner_id).is_empty(),
+            "an entry the owner never signed must be ignored"
+        );
+
+        // An entry signed by a member pretending to be the owner (their own key) is rejected —
+        // the signing key must content-address the owner id.
+        let mut impostor = AutoCommit::new();
+        owner_sign_entry(&mut impostor, &real, &gid, &alice);
+        assert!(read_device_certs(&impostor, &gid, &owner_id).is_empty());
+
+        // Sibling-field tamper and junk-cert entries still drop even when owner-signed over the
+        // ORIGINAL cert (the signature is over the stored cert bytes, so mutating a sibling breaks
+        // the field cross-check; mutating the cert bytes breaks the owner signature).
+        let mut lying = AutoCommit::new();
+        owner_sign_entry(&mut lying, &real, &gid, &owner);
+        let devices = match lying.get(ROOT, D_DEVICES).unwrap() {
+            Some((Value::Object(ObjType::Map), id)) => id,
+            _ => unreachable!(),
+        };
+        let entry = match lying
+            .get(&devices, fingerprint(&victim.device_id()))
+            .unwrap()
+        {
+            Some((Value::Object(ObjType::Map), id)) => id,
+            _ => unreachable!(),
+        };
+        lying.put(&entry, D_NAME, "ADMIN").unwrap();
+        assert!(read_device_certs(&lying, &gid, &owner_id).is_empty());
+
+        // The revocation slot is empty until M5 writes it.
+        assert!(read_device_revocations(&doc).is_empty());
     }
 
     #[test]

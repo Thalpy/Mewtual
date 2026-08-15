@@ -65,6 +65,33 @@ impl ServerStore {
         self.dir.join("registry.bin")
     }
 
+    fn pairing_ledger_path(&self) -> PathBuf {
+        self.dir.join("pairing.bin")
+    }
+
+    /// Seal + atomically write the **pairing ledger** (which grant-ceremony nonces this device has
+    /// already acted on). Single use has to survive a restart, or a re-pasted pairing request
+    /// would mint a second grant bundle — the same reason `InviteLedger` is persisted.
+    pub fn save_pairing_ledger(
+        &self,
+        snapshot: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let sealed = seal(&self.keys.db_key()?, snapshot, rng)?;
+        atomic_write(&self.pairing_ledger_path(), &frame(&sealed))
+    }
+
+    /// Read + unseal the pairing-ledger snapshot (empty if none yet).
+    pub fn load_pairing_ledger(&self) -> Result<Vec<u8>, AppError> {
+        if !self.pairing_ledger_path().exists() {
+            return Ok(Vec::new());
+        }
+        let bytes =
+            fs::read(self.pairing_ledger_path()).map_err(|e| AppError::Io(e.to_string()))?;
+        let sealed = unframe(&bytes)?;
+        Ok(unseal(&self.keys.db_key()?, &sealed)?)
+    }
+
     /// Seal + atomically write a server's snapshot.
     pub fn save_server(
         &self,

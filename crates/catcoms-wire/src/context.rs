@@ -56,6 +56,12 @@ pub enum DocType {
     /// next to a member's name (e.g. `ARTIST`). A single shared CRDT document per server,
     /// keyed by member device fingerprint.
     Badges = 11,
+    /// The **companion-device registry** (multi-device M3): `companion fingerprint →
+    /// { origin fingerprint, device name, certificate }`, written by the **owner** at
+    /// admission time (admission is owner-serialized, so there are no write races). Read by
+    /// every member to attribute a companion's ops to the member's origin identity. A single
+    /// shared CRDT document per server.
+    Devices = 12,
 }
 
 impl DocType {
@@ -78,6 +84,7 @@ impl DocType {
             9 => DocType::Profile,
             10 => DocType::Livery,
             11 => DocType::Badges,
+            12 => DocType::Devices,
             _ => return None,
         })
     }
@@ -138,6 +145,11 @@ mod tests {
             exporter_context(DocType::Badges, 0),
             [0x00, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
+        // Devices (tag 12), id = 0 — the companion-device registry.
+        assert_eq!(
+            exporter_context(DocType::Devices, 0),
+            [0x00, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
+        );
     }
 
     #[test]
@@ -154,12 +166,13 @@ mod tests {
             DocType::Profile,
             DocType::Livery,
             DocType::Badges,
+            DocType::Devices,
         ] {
             assert_eq!(DocType::from_tag(dt.tag()), Some(dt));
         }
         // Unknown tags decode to None (stable: 0 and the first unused value).
         assert_eq!(DocType::from_tag(0), None);
-        assert_eq!(DocType::from_tag(12), None);
+        assert_eq!(DocType::from_tag(13), None);
     }
 
     #[test]

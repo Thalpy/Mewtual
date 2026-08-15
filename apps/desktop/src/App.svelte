@@ -656,6 +656,7 @@
       const r = await invoke<{ bundle: string }>("pairing_mint", {
         passphrase: linkPass,
         deviceName: linkName.trim() || "device",
+        turn: turnMapForMint(),
       });
       linkBundle = r.bundle;
     } catch (e) {
@@ -699,8 +700,7 @@
       );
       pairSummary =
         `Grant opened — this device is "${r.device_name}". Final check: this code must match the one the master's popup showed — ${fmtSas(r.sas)}. If it doesn't, discard this grant. ` +
-        `Granted for ${r.servers.length} server${r.servers.length === 1 ? "" : "s"}: ${r.servers.map((s) => s.name).join(", ")}. ` +
-        `Server admission arrives with the next protocol slice; the grant is held on this device until then.`;
+        `Granted for ${r.servers.length} server${r.servers.length === 1 ? "" : "s"}: ${r.servers.map((s) => s.name).join(", ")}.`;
       // The blob and transport passphrase have done their job — don't keep them around.
       pairBundle = "";
       pairPass = "";
@@ -1197,9 +1197,15 @@
     );
   });
   // The member column is split into an "online" then an "offline" group (the offline group is
-  // omitted entirely when empty). Both are filtered by the roster search first.
-  let onlineRoster = $derived(filteredRoster.filter((m) => m.you || onlineMembers.has(m.fingerprint)));
-  let offlineRoster = $derived(filteredRoster.filter((m) => !(m.you || onlineMembers.has(m.fingerprint))));
+  // omitted entirely when empty). Both are filtered by the roster search first. Companion
+  // devices never appear top-level — they nest under their origin (multi-device M4), and a
+  // member counts as online when ANY of their devices is reachable.
+  let memberOnline = (m: Member) =>
+    m.you ||
+    onlineMembers.has(m.fingerprint) ||
+    Object.entries(deviceMap).some(([fp, d]) => d.origin === m.fingerprint && onlineMembers.has(fp));
+  let onlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && memberOnline(m)));
+  let offlineRoster = $derived(filteredRoster.filter((m) => !deviceMap[m.fingerprint] && !memberOnline(m)));
   // Members reachable right now (self always counts) — the roster header's "N online".
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
   // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
@@ -1382,7 +1388,10 @@
     return cur?.channels.find((c) => c.id === cur?.active)?.name ?? "";
   }
   function nameOf(fp: string): string {
-    return profiles[fp]?.name?.trim() || fp;
+    // A companion device with no profile of its own renders under its origin's name
+    // (attribution is per member; the device tag is added where devices are shown).
+    const p = profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
+    return p?.name?.trim() || fp;
   }
   // Two-letter mono monogram for a rail circle (one letter for a one-character name).
   function monogram(name: string): string {
@@ -1520,6 +1529,88 @@
   function jumpToNews(n: NewsItem) {
     inboxView = false;
     switchServer(n.server).then(() => switchView(n.kind === "event" ? "events" : "status"));
+  }
+
+  // Companion devices (multi-device M4): the Devices doc maps a companion's fingerprint to
+  // its origin + a device tag. Attribution renders the ORIGIN's identity plus the tag; the
+  // tag is member-chosen text, so it renders as content, never chrome.
+  type UiDevice = { origin: string; name: string };
+  let deviceMap = $state<Record<string, UiDevice>>({});
+  async function refreshDevices() {
+    if (activeServerId === null) {
+      deviceMap = {};
+      return;
+    }
+    try {
+      deviceMap = await invoke<Record<string, UiDevice>>("get_devices", { server: activeServerId });
+    } catch {
+      deviceMap = {};
+    }
+  }
+  // Resolve a fingerprint for display: a companion renders as its origin (+ tag).
+  function identityOf(fp: string): { fp: string; tag: string } {
+    const d = deviceMap[fp];
+    return d ? { fp: d.origin, tag: d.name } : { fp, tag: "" };
+  }
+  // Roster grouping: origins (and never-mapped members) at the top level, companions
+  // nested under their origin with their device tag.
+  let rosterGrouped = $derived.by(() => {
+    const companions = new Map<string, { m: Member; tag: string }[]>();
+    const top: Member[] = [];
+    for (const m of filteredRoster) {
+      const d = deviceMap[m.fingerprint];
+      if (d) {
+        const list = companions.get(d.origin) ?? [];
+        list.push({ m, tag: d.name });
+        companions.set(d.origin, list);
+      } else {
+        top.push(m);
+      }
+    }
+    return { top, companions };
+  });
+  // The origin's TURN strings for every non-DM server, for pairing_mint's passthrough
+  // (they live in the frontend's per-server localStorage, invisible to the backend).
+  function turnMapForMint(): Record<string, string> {
+    const map: Record<string, string> = {};
+    for (const s of servers) {
+      if (s.isDm) continue;
+      try {
+        const t = localStorage.getItem(serverTurnKey(s.id));
+        if (t) map[String(s.id)] = t;
+      } catch {
+        /* best-effort */
+      }
+    }
+    return map;
+  }
+  // Redeem held grants (new device, after pairing_open): join every granted server and
+  // register the successes in the rail exactly as an invite join would.
+  type PairingJoinResult = { name: string; ok: boolean; error?: string; server?: number };
+  let pairJoining = $state(false);
+  let pairJoinResults = $state<PairingJoinResult[]>([]);
+  async function pairJoinAll() {
+    pairJoining = true;
+    try {
+      const results = await invoke<PairingJoinResult[]>("pairing_join", {});
+      pairJoinResults = results;
+      for (const r of results) {
+        if (!r.ok || r.server === undefined || r.server === null) continue;
+        if (servers.some((s) => s.id === r.server)) continue;
+        // Same-name hashing means opening "general" lands every member in the same channel.
+        const channel = await invoke<string>("open_channel", { server: r.server, name: "general" });
+        servers = [
+          ...servers,
+          { id: r.server, name: r.name, channels: [{ id: channel, name: "general" }], active: channel, unread: [], invite: "", dot: false, isDm: false },
+        ];
+      }
+      const first = results.find((r) => r.ok && r.server !== undefined && r.server !== null);
+      if (first?.server !== undefined && first.server !== null) switchServer(first.server);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      pairJoining = false;
+    }
   }
 
   // Admin-assigned member badges (shared doc; untrusted on read like everything else).
@@ -2086,6 +2177,7 @@
       refreshDelivery(),
       refreshBadges(),
       refreshEvents(),
+      refreshDevices(),
     ]);
     syncProfileEditor();
   }
@@ -4037,6 +4129,9 @@
       listen<{ server: number }>("events-changed", (e) => {
         if (e.payload.server === activeServerId) refreshEvents();
       }),
+      listen<{ server: number }>("devices-changed", (e) => {
+        if (e.payload.server === activeServerId) refreshDevices();
+      }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
         // A friend request may have arrived over ANY server (active or not) — refresh that server's.
         refreshDmRequests(e.payload.server);
@@ -4228,6 +4323,17 @@
       <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
     {/if}
   </li>
+{/snippet}
+
+<!-- A member's linked devices, nested under their roster row (multi-device M4). -->
+{#snippet companionRows(originFp: string)}
+  {#each Object.entries(deviceMap).filter(([, d]) => d.origin === originFp) as [cfp, d] (cfp)}
+    {@const conline = onlineMembers.has(cfp)}
+    <li class="member-row companion" title={cfp}>
+      <span class="presence" class:online={conline} title={conline ? "Device online" : "Device offline"}>●</span>
+      <span class="dev-tag">· {d.name}</span>
+    </li>
+  {/each}
 {/snippet}
 
 <!-- Inline line-icons: stroke follows currentColor, so active/hover states tint them via the button's color. -->
@@ -4670,7 +4776,27 @@
           <button class="ghost small" disabled={scanOpen} onclick={() => scanQr((t) => { if (t) pairBundle = t; })}>⛶ Scan grant QR</button>
           <input type="password" bind:value={pairPass} placeholder="transport passphrase (set on the master)" />
           <button class="ghost small" disabled={!pairBundle.trim() || !pairPass} onclick={pairOpen}>Open grant</button>
-          {#if pairSummary}<p class="muted small">{pairSummary}</p>{/if}
+          {#if pairSummary}
+            <p class="muted small">{pairSummary}</p>
+            <button disabled={pairJoining} onclick={pairJoinAll}>
+              {pairJoining ? "Joining…" : "Join granted servers now"}
+            </button>
+            {#if pairJoinResults.length}
+              <ul class="pair-results">
+                {#each pairJoinResults as r (r.name)}
+                  <li class:ok={r.ok} class:err={!r.ok}>
+                    {r.ok ? "✓" : "✕"} {r.name}{r.error ? ` — ${r.error}` : ""}
+                  </li>
+                {/each}
+              </ul>
+              {#if pairJoinResults.some((r) => !r.ok)}
+                <p class="muted small">
+                  A failed server keeps its grant — the usual cause is its owner being offline
+                  (your admission is queued and completes when they return). Retry any time.
+                </p>
+              {/if}
+            {/if}
+          {/if}
         {/if}
       </details>
       {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
@@ -5184,12 +5310,14 @@
                   </button>
                 {/if}
                 {#if !grouped}
+                  {@const ident = identityOf(m.author)}
                   <span class="author">
                     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-                    <span class="author-link" role="button" tabindex="0" onclick={() => showProfile(m.author)}>
-                      {@render avatarTag(m.author)}
-                      {@render nameTag(m.author)}
+                    <span class="author-link" role="button" tabindex="0" onclick={() => showProfile(ident.fp)}>
+                      {@render avatarTag(ident.fp)}
+                      {@render nameTag(ident.fp)}
                     </span>
+                    {#if ident.tag}<span class="dev-tag" title="Sent from this member's linked device">· {ident.tag}</span>{/if}
                     {#if m.author !== myFp && verifiedFps.has(m.author)}
                       <span class="vf-check" title="You verified this member out of band">✓</span>
                     {/if}
@@ -5775,6 +5903,7 @@
             <ul>
               {#each onlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, true)}
+                {@render companionRows(m.fingerprint)}
               {/each}
             </ul>
           {/if}
@@ -5783,6 +5912,7 @@
             <ul>
               {#each offlineRoster as m (m.fingerprint)}
                 {@render memberRow(m, false)}
+                {@render companionRows(m.fingerprint)}
               {/each}
             </ul>
           {/if}
@@ -6409,6 +6539,20 @@
                 admission, so it completes when the owner is next online — and a demotion is
                 replay-proof (a removed admin can't re-grant itself).
               </p>
+              {#if myRole === "owner" && Object.keys(deviceMap).length}
+                <h3 style="margin-top:10px"><span>Linked devices</span></h3>
+                <ul class="dev-panel">
+                  {#each Object.entries(deviceMap) as [cfp, d] (cfp)}
+                    <li title={cfp}>
+                      {@render nameTag(d.origin)}
+                      <span class="dev-tag">· {d.name}</span>
+                      <span class="fp small">{cfp.slice(0, 8)}</span>
+                      <span class="muted small">{onlineMembers.has(cfp) ? "online" : "offline"}</span>
+                    </li>
+                  {/each}
+                </ul>
+                <p class="muted small">Device revocation lands with the next slice (M5).</p>
+              {/if}
               {#if myRole !== "owner"}
                 <p class="muted small">Only the owner can change roles.</p>
               {/if}

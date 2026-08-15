@@ -78,6 +78,13 @@ struct AppState {
     /// minted for another), and it left the backend with no notion of "confirmed" at all
     /// (adversarial-review finding). Cleared on mint success and on decline.
     pending_grant: Mutex<Option<PendingGrant>>,
+    /// The **new device's** opened grants (multi-device M3), held between `pairing_open` and
+    /// `pairing_join`. A grant is dropped once its server has actually been joined; a grant that
+    /// *failed* is kept so the user can retry — the expected failure is "the owner is offline",
+    /// which is exactly what the offline-queued admission is built to survive. Starting a fresh
+    /// ceremony (`pairing_begin`) replaces the lot, and the ceremony secrets are dropped once the
+    /// last grant has been redeemed.
+    pairing_grants: Mutex<Vec<PerServerGrant>>,
 }
 
 /// The origin-side pending ceremony: what `pairing_read` decoded and anchored, held so
@@ -208,6 +215,17 @@ struct UiLivery {
 struct UiBadge {
     label: String,
     color: String,
+}
+
+/// One companion device as serialized to the frontend, keyed by its own fingerprint: which member
+/// (origin fingerprint) it belongs to, and the name the origin certified. `name` is safe to render
+/// as text — it is inside the certificate's signature and bounded/control-character-free by
+/// `validate_device_name` — but it is still a *member-chosen* string, so render it as a tag, never
+/// as chrome.
+#[derive(Serialize, Clone)]
+struct UiDevice {
+    origin: String,
+    name: String,
 }
 
 /// One scheduled server event as serialized to the frontend. `start_ts`/`end_ts` are epoch-millis
@@ -361,6 +379,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::BadgesUpdated => {
                     let _ = app.emit("badges-changed", ServerEvt { server });
+                }
+                AppEvent::DevicesUpdated => {
+                    let _ = app.emit("devices-changed", ServerEvt { server });
                 }
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
@@ -1299,6 +1320,31 @@ async fn set_member_badge(
     Ok(())
 }
 
+/// Every admitted companion device, keyed by the **companion's** fingerprint (empty until some
+/// member pairs a second device). The UI resolves a message author through this map: an author
+/// that appears here renders under `origin`'s profile with `name` as a device tag.
+#[tauri::command]
+async fn get_devices(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<HashMap<String, UiDevice>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .devices()
+        .await
+        .into_iter()
+        .map(|(fp, d)| {
+            (
+                fp,
+                UiDevice {
+                    origin: d.origin,
+                    name: d.name,
+                },
+            )
+        })
+        .collect())
+}
+
 /// Every assigned member badge, keyed by member fingerprint (empty if none).
 #[tauri::command]
 async fn get_badges(
@@ -2068,6 +2114,18 @@ async fn unlock(
 
     let records = store.load_registry().map_err(|e| e.to_string())?;
 
+    // Restore the grant-ceremony ledger: a pairing request must stay single-use across a restart,
+    // or re-pasting one would mint a second bundle. A corrupt/missing blob leaves an empty ledger
+    // (the pre-persistence behaviour) rather than blocking unlock.
+    match store.load_pairing_ledger() {
+        Ok(bytes) if !bytes.is_empty() => match PairingLedger::restore(&bytes) {
+            Ok(led) => *state.pairing_ledger.lock().await = led,
+            Err(e) => eprintln!("unlock: the pairing ledger did not restore: {e}"),
+        },
+        Ok(_) => {}
+        Err(e) => eprintln!("unlock: reading the pairing ledger failed: {e}"),
+    }
+
     // Load every server's sealed snapshot up front, while we still own `store` locally.
     let snapshots: Vec<_> = records
         .iter()
@@ -2210,8 +2268,10 @@ async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, Strin
     let mut rng = OsCryptoRng;
     let (secrets, blob) = catcoms_app::begin_pairing(&mut rng).map_err(|e| e.to_string())?;
     let device_id = secrets.device_id().to_string();
-    // Starting a ceremony abandons any earlier one: its nonce is never reused.
+    // Starting a ceremony abandons any earlier one: its nonce is never reused, and any grants
+    // still held from it are dropped (they were minted for a device key we are replacing).
     *state.pairing.lock().await = Some(secrets);
+    state.pairing_grants.lock().await.clear();
     Ok(PairingBegun { blob, device_id })
 }
 
@@ -2258,8 +2318,22 @@ async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
             .lock()
             .await
             .spend(pending.view.request.pairing_nonce);
+        persist_pairing_ledger(&state).await;
     }
     Ok(())
+}
+
+/// Seal the pairing ledger to disk, so a declined or spent request stays spent across a restart
+/// (best-effort, like every other persist here: a locked vault is not an error).
+async fn persist_pairing_ledger(state: &AppState) {
+    let snapshot = state.pairing_ledger.lock().await.snapshot();
+    let guard = state.store.lock().await;
+    if let Some(store) = guard.as_ref() {
+        let mut rng = OsCryptoRng;
+        if let Err(e) = store.save_pairing_ledger(&snapshot, &mut rng) {
+            eprintln!("persist: sealing the pairing ledger failed: {e}");
+        }
+    }
 }
 
 /// Step 3, on the **origin** device, once the human has confirmed the popup: sign one
@@ -2275,6 +2349,7 @@ async fn pairing_mint(
     state: State<'_, AppState>,
     passphrase: String,
     device_name: String,
+    turn: Option<HashMap<String, String>>,
 ) -> Result<PairingBundle, String> {
     // Mint ONLY from the pending view `pairing_read` stored — the popup's device is the
     // certified device, closing the read→mint TOCTOU. The lock is held for the whole
@@ -2309,6 +2384,12 @@ async fn pairing_mint(
     };
     servers.sort_by_key(|s| s.id);
 
+    // The operator's shared TURN lives in the frontend's per-server storage (the invite's
+    // `.turn.` suffix), not in the backend, so the caller passes it in keyed by server id as a
+    // string (JSON object keys always are). Absent = no TURN for that server, which is exactly
+    // what an invite without a `.turn.` suffix carries.
+    let turn = turn.unwrap_or_default();
+
     let mut grants = Vec::with_capacity(servers.len());
     for s in servers {
         let (_, group_id) = s
@@ -2316,6 +2397,13 @@ async fn pairing_mint(
             .origin_identity()
             .await
             .ok_or_else(|| format!("server {} stopped", s.id))?;
+        // The owner's key, read from the LIVE roster: the new device pins it to authenticate the
+        // Welcome it will be admitted with (see `PerServerGrant::owner_public_key`).
+        let owner_public_key = s
+            .actor
+            .owner_public_key()
+            .await
+            .ok_or_else(|| format!("server '{}' has no readable owner key", s.name))?;
         let certificate = s
             .actor
             .sign_device_cert(view.new_device_id, device_name.clone())
@@ -2325,10 +2413,8 @@ async fn pairing_mint(
             server_name: s.name,
             bootstrap: s.bootstrap,
             rendezvous: s.rendezvous,
-            // The operator's shared TURN lives in the frontend's per-server storage
-            // (the invite's `.turn.` suffix), so the backend has none to pass through
-            // yet; the field carries that same opaque string once the UI supplies it.
-            turn: String::new(),
+            turn: turn.get(&s.id.to_string()).cloned().unwrap_or_default(),
+            owner_public_key,
             certificate,
         });
     }
@@ -2348,6 +2434,8 @@ async fn pairing_mint(
     drop(ledger);
     // The ceremony is complete; the pending view is done with (its nonce is now spent).
     *pending_guard = None;
+    drop(pending_guard);
+    persist_pairing_ledger(&state).await;
     Ok(PairingBundle { bundle })
 }
 
@@ -2355,9 +2443,8 @@ async fn pairing_mint(
 /// for this ceremony. Returns the code for the human's final comparison plus a summary
 /// of what arrived.
 ///
-/// The [`PerServerGrant`]s themselves are **not** kept: M3 (admission) is what consumes
-/// them, and it will hold them alongside the ceremony secrets here. Until then the blob
-/// and passphrase can simply be opened again.
+/// The opened [`PerServerGrant`]s are **held** alongside the ceremony secrets — `pairing_join`
+/// (step 5) redeems them. Opening again simply replaces them, so a re-paste is harmless.
 #[tauri::command]
 async fn pairing_open(
     state: State<'_, AppState>,
@@ -2370,21 +2457,217 @@ async fn pairing_open(
         .ok_or_else(|| "no pairing in progress on this device".to_string())?;
     let opened = catcoms_app::open_grant_bundle(passphrase.as_bytes(), &bundle, secrets)
         .map_err(|e| e.to_string())?;
+    let summaries = opened
+        .grants
+        .iter()
+        .map(|g| PairingGrantSummary {
+            name: g.server_name.clone(),
+            group_id: hex::encode(&g.group_id),
+            origin: g.certificate.origin_id.to_string(),
+            bootstrap: g.bootstrap.len(),
+            rendezvous: g.rendezvous.len(),
+        })
+        .collect();
+    *state.pairing_grants.lock().await = opened.grants;
     Ok(PairingOpened {
         sas: format!("{:06}", opened.sas),
         device_name: opened.device_name,
-        servers: opened
-            .grants
-            .into_iter()
-            .map(|g| PairingGrantSummary {
-                name: g.server_name,
-                group_id: hex::encode(&g.group_id),
-                origin: g.certificate.origin_id.to_string(),
-                bootstrap: g.bootstrap.len(),
-                rendezvous: g.rendezvous.len(),
-            })
-            .collect(),
+        servers: summaries,
     })
+}
+
+/// One server's outcome from `pairing_join`.
+#[derive(Serialize, Clone)]
+struct PairingJoinResult {
+    /// The origin device's local label for that server (what the user recognises it by).
+    name: String,
+    /// Whether this device is now admitted to that server.
+    ok: bool,
+    /// Why it is not, when `ok` is false. A failure is **retryable** — the grant is kept.
+    error: Option<String>,
+    /// The bridge server id, once joined (so the UI can select it).
+    server: Option<u64>,
+}
+
+/// Step 5, on the **new** device: redeem the held grants — connect to each server the way an
+/// invite join does, present the origin-signed certificate through the owner-serialized add
+/// queue, and register every admitted server exactly like `join_server` does.
+///
+/// `server_index` selects one grant (indexing the list `pairing_open` returned); omit it to run
+/// every remaining grant. Results come back per server, in that same order. A grant that failed
+/// stays held so the user can retry — the common failure is an owner that has not come online
+/// yet, and the admission is offline-queued precisely for that. Once every grant has been
+/// redeemed the ceremony secrets are dropped.
+#[tauri::command]
+async fn pairing_join(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server_index: Option<usize>,
+) -> Result<Vec<PairingJoinResult>, String> {
+    let grants = state.pairing_grants.lock().await.clone();
+    if grants.is_empty() {
+        return Err("no grants to join — open a grant bundle first".to_string());
+    }
+    let targets: Vec<usize> = match server_index {
+        Some(i) if i < grants.len() => vec![i],
+        Some(_) => return Err("no such server in this grant bundle".to_string()),
+        None => (0..grants.len()).collect(),
+    };
+
+    let mut results = Vec::with_capacity(targets.len());
+    let mut joined: Vec<usize> = Vec::new();
+    for i in targets {
+        let grant = &grants[i];
+        match join_one_grant(&app, &state, grant).await {
+            Ok(server) => {
+                joined.push(i);
+                results.push(PairingJoinResult {
+                    name: grant.server_name.clone(),
+                    ok: true,
+                    error: None,
+                    server: Some(server),
+                });
+            }
+            Err(e) => results.push(PairingJoinResult {
+                name: grant.server_name.clone(),
+                ok: false,
+                error: Some(e),
+                server: None,
+            }),
+        }
+    }
+
+    // Drop the redeemed grants; if that was the last one, the ceremony is over and the device
+    // key held for it is no longer needed here (each joined server owns its own copy).
+    {
+        let mut held = state.pairing_grants.lock().await;
+        let mut keep = Vec::new();
+        for (i, g) in grants.into_iter().enumerate() {
+            if !joined.contains(&i) {
+                keep.push(g);
+            }
+        }
+        *held = keep;
+        if held.is_empty() {
+            *state.pairing.lock().await = None;
+        }
+    }
+    Ok(results)
+}
+
+/// Join one granted server: dial it, run the certificate admission, and register the result in
+/// the bridge registry with the same post-join sequence `join_server` uses.
+async fn join_one_grant(
+    app: &AppHandle,
+    state: &AppState,
+    grant: &PerServerGrant,
+) -> Result<u64, String> {
+    // The device identity the certificate names. Every granted server needs its own MLS provider
+    // but the SAME signature key (one certified device id across the bundle), so each join takes
+    // a duplicate and the ceremony secrets stay intact for a retry.
+    let device = {
+        let guard = state.pairing.lock().await;
+        let secrets = guard
+            .as_ref()
+            .ok_or_else(|| "no pairing in progress on this device".to_string())?;
+        secrets.device().duplicate().map_err(|e| e.to_string())?
+    };
+
+    // Reach the server exactly as an invite join does — via the grant's bootstrap addresses,
+    // which are the invite's own field, passed through by the origin.
+    //
+    // Rendezvous discovery is NOT available here: the pre-join namespace is keyed by an *invite
+    // nonce* (`join_namespace(group_id, invite_nonce, …)`), and a grant carries a certificate
+    // instead. A companion whose grant has only rendezvous hints therefore cannot discover the
+    // group yet; that needs a certificate-keyed pre-join namespace (M4 backlog).
+    let addrs: Vec<Multiaddr> = grant
+        .bootstrap
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if addrs.is_empty() {
+        return Err(if grant.rendezvous.is_empty() {
+            "this grant carries no usable address for that server".to_string()
+        } else {
+            "this grant is rendezvous-only; pairing needs a directly-dialable server".to_string()
+        });
+    }
+    let contact_lp = addrs
+        .iter()
+        .find_map(target_peer_in_multiaddr)
+        .ok_or_else(|| "grant address has no peer id".to_string())?;
+    let contact = phase0_peer_id(&contact_lp);
+    let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                if p == contact {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "timed out connecting to the server".to_string())?;
+
+    let name = grant.server_name.clone();
+    let mut server = Server::join_with_grant(
+        mesh,
+        device,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        name.clone(),
+        contact,
+        grant,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    attach_blob_store(state, &mut server).await;
+    // Steady-state discovery: keep the grant's rendezvous nodes so this companion can re-find the
+    // group after a restart (post-join, group-keyed — unlike the pre-join namespace above, this
+    // works from a grant). Mirrors `join_server`.
+    let rz_config: Vec<(String, Vec<u8>)> = grant
+        .rendezvous
+        .iter()
+        .filter_map(|s| s.parse::<Multiaddr>().ok())
+        .filter_map(|a| target_peer_in_multiaddr(&a).map(|p| (a.to_string(), p.to_bytes())))
+        .collect();
+    if !rz_config.is_empty() {
+        server.set_rendezvous_nodes(rz_config);
+    }
+
+    let general = channel_id("general");
+    let (actor, events, _task) = spawn(server);
+    actor.open_channel(general).await;
+    actor.catch_up(contact, general).await;
+    actor.catch_up_profiles(contact).await;
+    actor.catch_up_livery(contact).await;
+    actor.catch_up_badges(contact).await;
+    actor.catch_up_devices(contact).await;
+    actor.catch_up_files(contact).await;
+    actor.catch_up_status(contact).await;
+    actor.catch_up_calendar(contact).await;
+    actor.catch_up_wiki(contact).await;
+    actor.catch_up_roles(contact).await;
+    // A companion mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its
+    // own — the same registry shape a joiner gets. `is_dm` is not in the grant yet, so a DM pairs
+    // in as a server on the rail until M4 carries the flag.
+    let server_id = register_server(
+        app,
+        state,
+        actor,
+        events,
+        None,
+        name,
+        Vec::new(),
+        Vec::new(),
+        None,
+        false,
+    )
+    .await;
+    persist_server(state, server_id).await;
+    persist_registry(state).await;
+    Ok(server_id)
 }
 
 /// Build and run the Tauri application.
@@ -2409,6 +2692,7 @@ pub fn run() {
             get_livery,
             set_member_badge,
             get_badges,
+            get_devices,
             add_file,
             get_files,
             get_online_members,
@@ -2447,7 +2731,8 @@ pub fn run() {
             pairing_read,
             pairing_mint,
             pairing_decline,
-            pairing_open
+            pairing_open,
+            pairing_join
         ])
         .run(tauri::generate_context!())
         .expect("error while running the CatComs desktop app");

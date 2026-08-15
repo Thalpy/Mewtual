@@ -222,7 +222,9 @@ async fn delivery_evidence_names_the_peer_that_built_on_a_change() {
         "from Bob's side only the change's own author is proven to hold it"
     );
     let bob_change = bsy
-        .post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "reply", "got it"))
+        .post(DocType::Channel, CHANNEL, |d| {
+            d.put(ROOT, "reply", "got it")
+        })
         .await
         .unwrap();
     assert!(asy.run_once().await.unwrap());
@@ -476,18 +478,39 @@ async fn a_non_committer_cannot_admit() {
     );
     let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
 
-    // Bob invites Carol and tries to admit her — refused, Bob is not the committer.
+    // Bob (a plain member) invites Carol and tries to admit her. Bob is not the committer, and
+    // there is no published admin roster here — so Bob cannot *predict* the owner's decision and
+    // relays the request (rather than self-gating; treating an unreadable roster as "unknown, not
+    // unauthorized" is what stops a junk roster-overwrite from disabling every admin's relay).
+    // The owner is not driven in this test, so the Welcome never comes: the join must NOT succeed,
+    // and Carol must never be admitted. (In production a caller-side timeout — `Server::join`'s
+    // `JOIN_TIMEOUT_SECS` — turns the un-pushed Welcome into a clean error; the sync crate itself
+    // holds no timer, so the test bounds the wait.)
     let invite_c = bsy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
     let carol = MlsDevice::generate().unwrap();
     let carol_net = hub.join(PeerId::from_u64(3));
-    let (carol_joined, _) = tokio::join!(
-        catcoms_sync::request_join(&carol_net, bob_peer, &carol, &invite_c),
-        bsy.run_once(),
+    let joined = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        let (r, _) = tokio::join!(
+            catcoms_sync::request_join(&carol_net, bob_peer, &carol, &invite_c),
+            async {
+                for _ in 0..4 {
+                    let _ = bsy.run_once().await;
+                }
+            },
+        );
+        r
+    })
+    .await;
+    // Either the relayed request is refused outright, or it hangs waiting for a Welcome that never
+    // comes (the timeout) — never a successful join.
+    assert!(
+        matches!(joined, Err(_) | Ok(Err(_))),
+        "a non-committer's relayed admission must not succeed"
     );
-    assert!(matches!(
-        carol_joined,
-        Err(catcoms_sync::SyncError::JoinRejected)
-    ));
+    assert!(
+        !bsy.contains_member(&carol.device_id()),
+        "Carol was never admitted"
+    );
 }
 
 /// 6d-1b: an op sealed under the epoch just before a membership change still

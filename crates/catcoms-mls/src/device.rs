@@ -19,6 +19,15 @@ pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsErr
         .map_err(proto)
 }
 
+/// The raw Ed25519 **leaf signature key** of a parsed KeyPackage.
+///
+/// Exposed so the admitting layer can verify a signature the *presenting device* made over its
+/// own admission request without depending on openmls: a `DeviceId` is a one-way hash of this
+/// key, so it cannot be recovered from the id.
+pub fn key_package_signature_key(key_package: &KeyPackage) -> Vec<u8> {
+    key_package.leaf_node().signature_key().as_slice().to_vec()
+}
+
 /// One device's MLS identity: its signature keypair, Basic credential, and the
 /// openmls provider holding its key/group state. The device id is the
 /// content-address of the signature public key, so the leaf key *is* the device
@@ -80,6 +89,38 @@ impl MlsDevice {
     /// This device's content-addressed id.
     pub fn device_id(&self) -> DeviceId {
         self.device_id
+    }
+
+    /// A second handle on the **same device identity**, backed by its own fresh provider.
+    ///
+    /// One `MlsDevice` owns exactly one openmls provider, and one provider backs exactly one
+    /// group — so a device that belongs to several servers needs one `MlsDevice` per server.
+    /// For a *founder/joiner* those are deliberately unrelated identities (per-server
+    /// unlinkability, see `docs/design-multi-device.md`), which is why nothing else in the
+    /// codebase duplicates a device. A **companion** admitted by a grant bundle is the one
+    /// case that cannot work that way: every certificate in the bundle names one
+    /// `new_device_id`, so the same signature key must back every server the companion joins.
+    ///
+    /// This copies key material *within the process* into a new in-memory provider; it never
+    /// serializes a key to disk or to the wire (the design's hard "no device key is ever
+    /// exported" rule is about crossing the process boundary, which this does not).
+    pub fn duplicate(&self) -> Result<Self, MlsError> {
+        let provider = OpenMlsRustCrypto::default();
+        {
+            let src = self
+                .provider
+                .storage()
+                .values
+                .read()
+                .map_err(|_| MlsError::Internal("MLS storage lock poisoned"))?;
+            let mut dst = provider
+                .storage()
+                .values
+                .write()
+                .map_err(|_| MlsError::Internal("MLS storage lock poisoned"))?;
+            *dst = src.clone();
+        }
+        Self::restore(provider, &self.public_key_bytes())
     }
 
     /// Build a fresh single-use KeyPackage to be published for joining a group.

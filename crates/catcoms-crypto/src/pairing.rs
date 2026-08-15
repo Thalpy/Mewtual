@@ -988,7 +988,8 @@ mod tests {
 
         // A certificate genuinely signed by the impostor is still not accepted
         // when the caller expects `origin`.
-        let other = DeviceCertificate::issue(&impostor, new_dev.device_id(), TG, "phone", 1).unwrap();
+        let other =
+            DeviceCertificate::issue(&impostor, new_dev.device_id(), TG, "phone", 1).unwrap();
         assert!(other.verify(&impostor.device_id()));
         assert!(!other.verify(&origin.device_id()));
     }
@@ -1053,7 +1054,8 @@ mod tests {
         // Exactly at the bound is fine, and bytes (not chars) are what count:
         // six 4-byte emoji are 24 bytes and allowed, seven are not.
         assert!(
-            DeviceCertificate::issue(&origin, id, TG, &"x".repeat(MAX_DEVICE_NAME_BYTES), 1).is_ok()
+            DeviceCertificate::issue(&origin, id, TG, &"x".repeat(MAX_DEVICE_NAME_BYTES), 1)
+                .is_ok()
         );
         assert!(DeviceCertificate::issue(&origin, id, TG, &"🐱".repeat(6), 1).is_ok());
         assert_eq!(
@@ -1321,7 +1323,8 @@ mod tests {
 
         // No cross-decoding between the three signed statements: the domain label
         // is the first field of each.
-        let cert = DeviceCertificate::issue(&master, successor.device_id(), TG, "phone", 1).unwrap();
+        let cert =
+            DeviceCertificate::issue(&master, successor.device_id(), TG, "phone", 1).unwrap();
         let rev = DeviceRevocation::issue(&master, successor.device_id(), 1);
         assert_eq!(
             MasterHandoff::decode(&cert.encode()),

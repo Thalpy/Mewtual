@@ -29,7 +29,9 @@ use std::fmt;
 
 use automerge::{AutoCommit, AutomergeError, ChangeHash};
 use bytes::Bytes;
-use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
+use catcoms_crypto::{
+    seal, unseal, verify_with_public_bytes, DeviceCertificate, DeviceId, SealedBlob,
+};
 use catcoms_discovery::{
     Candidate, DiscoveryPolicy, EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservation,
     PolicyConfig, Source,
@@ -98,6 +100,19 @@ const MAX_PENDING_DM_INVITES: usize = 64;
 /// `{callId, type, data}`); the core only proves "a current member sent you this" + relays it. Unlike
 /// DM invites these are NOT deduped — every ICE candidate must arrive — so the queue is plain FIFO.
 const KIND_CALL_SIGNAL: u8 = 8;
+/// Request kind: a **companion device's admission request** (multi-device M3) — the pre-admission
+/// analogue of `KIND_JOIN`. The new device presents an origin-signed [`DeviceCertificate`] plus a
+/// cert-bound KeyPackage to whichever member the grant's bootstrap/rendezvous reached. If that
+/// member is the designated committer it admits synchronously (`JOIN_READY`); otherwise it relays
+/// the request to the owner as `CTRL_DEVICE_ADD` and answers `JOIN_PENDING`, exactly as an admin
+/// relays an invite join. See `docs/design-multi-device.md`.
+const KIND_DEVICE_ADD: u8 = 9;
+/// Request kind: the owner delivering a finalized **companion** admission back to the member that
+/// relayed the request: `bind_nonce ‖ welcome ‖ sealed_routing ‖ owner_sig`. Distinct from
+/// `KIND_ADMIT_RESULT` because it is keyed by the certificate-derived bind nonce and the relay
+/// **forwards** the owner's signature rather than re-signing (the companion holds the owner's key
+/// from its grant, not the relay's).
+const KIND_DEVICE_ADMIT_RESULT: u8 = 10;
 /// Bound on buffered inbound call signals before the actor drains them (FIFO-evicted if exceeded), so
 /// a member can't flood the queue.
 const MAX_PENDING_CALL_SIGNALS: usize = 256;
@@ -897,6 +912,125 @@ fn decode_admit_result(bytes: &[u8]) -> Result<AdmitResult, SyncError> {
     Ok((nonce, welcome, sealed_routing, owner_sig))
 }
 
+// --- multi-device companion admission (M3): request + admit-result codecs -------------------
+
+/// The 16-byte **bind nonce** a certificate admits under.
+///
+/// A device admission has no invite nonce, but every place the invite path uses one — the
+/// joiner's leaf credential ([`MlsDevice::key_package_for_invite`]), the single-use ledger, and
+/// the admit-result cache key — needs a value of that shape. Deriving it from the certificate's
+/// canonical bytes gives all three at once: both sides compute it independently (no extra wire
+/// field to tamper with), it is unique per certificate (so one certificate admits one device
+/// once), and a KeyPackage minted against certificate A can never be relayed into an admission
+/// for certificate B.
+fn device_bind_nonce(cert: &DeviceCertificate) -> [u8; 16] {
+    let digest = blake3::derive_key(DEVICE_BIND_DOMAIN, &cert.encode());
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+/// The transcript the **companion** signs over its admission request: binds the target group,
+/// the certificate (by hash), its KeyPackage (by hash, so a relay can't swap it under a valid
+/// signature), its own key, and a freshness timestamp. Signed by the new device itself, which
+/// is what proves it actually holds the key the certificate names.
+fn device_add_transcript(
+    group_id: &[u8],
+    cert_hash: &[u8; 32],
+    kp_hash: &[u8; 32],
+    device_pubkey: &[u8],
+    ts: u64,
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(DEVICE_ADD_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(cert_hash).expect("32 fits");
+    e.put_bytes(kp_hash).expect("32 fits");
+    e.put_bytes(device_pubkey).expect("pubkey fits");
+    e.put_u64(ts);
+    e.finish()
+}
+
+/// The transcript the **owner** signs to authenticate a companion's Welcome — the device
+/// analogue of [`join_transcript`], with the certificate hash standing in for the invite nonce
+/// (the invite-specific binding a device admission has no equivalent of).
+fn device_join_transcript(
+    group_id: &[u8],
+    cert_hash: &[u8; 32],
+    welcome: &[u8],
+    sealed_routing: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(DEVICE_JOIN_RESP_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(cert_hash).expect("32 fits");
+    e.put_bytes(welcome).expect("welcome fits");
+    e.put_bytes(sealed_routing).expect("sealed routing fits");
+    e.finish()
+}
+
+/// The hash a device admission is identified by in its transcripts: the content address of the
+/// certificate's canonical encoding. Both ends compute it from the certificate they hold.
+fn cert_hash(cert: &DeviceCertificate) -> [u8; 32] {
+    *Cid::of(&cert.encode()).as_bytes()
+}
+
+/// Encode a signed device-add request body: `certificate ‖ key_package ‖ requester_pubkey ‖ ts ‖
+/// sig` — the same field order as [`encode_add_request`], with the certificate standing in for
+/// the invite. `requester_pubkey` is redundant (it content-addresses `cert.new_device_id` and is
+/// the KeyPackage's leaf key) and is cross-checked against both, which lets the owner reject a
+/// mismatched request before paying for KeyPackage validation.
+fn encode_device_add(
+    certificate: &[u8],
+    key_package: &[u8],
+    requester_pubkey: &[u8],
+    ts: u64,
+    signature: &[u8; 64],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(certificate).expect("certificate fits");
+    e.put_bytes(key_package).expect("kp fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(ts);
+    e.put_bytes(signature).expect("64 fits");
+    e.finish()
+}
+
+/// (certificate bytes, key_package bytes, requester_pubkey, ts, signature)
+type DeviceAddRequest = (Vec<u8>, Vec<u8>, Vec<u8>, u64, [u8; 64]);
+
+fn decode_device_add(bytes: &[u8]) -> Result<DeviceAddRequest, SyncError> {
+    let mut d = Decoder::new(bytes);
+    let certificate = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let key_package = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let ts = d.get_u64().map_err(|_| SyncError::Malformed)?;
+    let signature: [u8; 64] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((certificate, key_package, pubkey, ts, signature))
+}
+
+/// Encode the owner→relay device-admit-result push: `bind_nonce ‖ welcome ‖ sealed_routing ‖
+/// owner_sig`. Structurally identical to [`encode_admit_result`], but the signature is the one
+/// the **companion** verifies (against the owner key pinned in its grant), so the relay only
+/// forwards it.
+fn encode_device_admit_result(
+    bind_nonce: &[u8; 16],
+    welcome: &[u8],
+    sealed_routing: &[u8],
+    owner_sig: &[u8; 64],
+) -> Vec<u8> {
+    encode_admit_result(bind_nonce, welcome, sealed_routing, owner_sig)
+}
+
+fn decode_device_admit_result(bytes: &[u8]) -> Result<AdmitResult, SyncError> {
+    decode_admit_result(bytes)
+}
+
 /// Encode the committer→joiner Welcome push payload (a winning staged admission):
 /// `[JOIN_READY] ‖ welcome ‖ signature`.
 fn encode_welcome_push(welcome: &[u8], signature: &[u8; 64], sealed_routing: &[u8]) -> Vec<u8> {
@@ -1254,6 +1388,11 @@ const CTRL_REMOVE_REQUEST: u8 = 1;
 /// joiner (so the joiner's verification is unchanged — see docs/design-admin-invites.md).
 #[allow(dead_code)] // wired into serve_join/on_control in the next slice
 const CTRL_ADD_REQUEST: u8 = 2;
+/// Control-topic tag: a member relaying a **companion device's** admission request to the
+/// designated committer (multi-device M3). Same single-serializer shape as `CTRL_ADD_REQUEST` —
+/// only the owner runs the MLS Add, so no fork — but the validity condition is a certificate
+/// signed by an admitted member's *origin* device rather than an invite-ledger entry.
+const CTRL_DEVICE_ADD: u8 = 3;
 
 /// Domain separator for the committer's per-commit authorization signature.
 const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
@@ -1261,6 +1400,34 @@ const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
 const REMOVE_REQ_DOMAIN: &str = "catcoms/remove-req/v1";
 /// Domain separator for an authorized inviter's signed add request.
 const ADD_REQ_DOMAIN: &str = "catcoms/add-req/v1";
+/// Domain separator for a **companion device's** signed admission request (M3).
+const DEVICE_ADD_DOMAIN: &str = "catcoms/device-add/v1";
+/// Domain separator for deriving a certificate's admission **bind nonce** — the 16-byte value
+/// that plays the invite nonce's role for a device admission (leaf-credential binding, single
+/// use in the invite ledger, and the admit-result key).
+const DEVICE_BIND_DOMAIN: &str = "catcoms/device-add-bind/v1";
+/// Domain separator for the owner's signature over a **companion** join response.
+const DEVICE_JOIN_RESP_DOMAIN: &str = "catcoms/device-join-resp/v1";
+/// How stale a [`DeviceCertificate`]'s `issued_ts_ms` may be at admission.
+///
+/// Certificates deliberately carry no expiry (`docs/design-multi-device.md` v2.2), so the
+/// admitting owner enforces freshness. `MAX_REQUEST_AGE_MS` (60 s) is the wrong window here —
+/// it bounds a *live signed request*, whereas a certificate is minted, sealed into a bundle,
+/// hand-carried to the other device, unsealed under a typed passphrase and only then presented.
+/// One hour matches the expiry the product already puts on a minted invite (the desktop bridge
+/// mints invites at `now + 3_600_000`), which is the same "capability, carried by a human"
+/// shape. The *request* wrapping the certificate is still held to `MAX_REQUEST_AGE_MS`.
+const MAX_DEVICE_CERT_AGE_MS: u64 = 3_600_000;
+/// Clock-skew allowance on a certificate / request timestamp. Freshness is checked
+/// *asymmetrically* — a stamp far in the past is stale, but one only slightly in the future is a
+/// clock difference, not an attack. (Using `abs_diff` symmetrically would let a future-dated
+/// certificate enjoy a doubled effective window — an adversarial-review finding.)
+const DEVICE_CERT_SKEW_MS: u64 = 120_000;
+/// The most companion devices any single origin (member) may have admitted at once. One origin
+/// driving unbounded certificates means unbounded owner-executed MLS Adds, and the ceremony's
+/// human gate lives on the origin device itself — so the owner caps it. "One device per grant" is
+/// the design's intent; this is the enforcement (adversarial-review BLOCKING finding). Generous.
+const MAX_DEVICES_PER_ORIGIN: usize = 8;
 /// DoS bound: the owner queues at most this many pending Add-requests (drop-oldest, deduped on
 /// invite nonce) so a flood can't force unbounded MLS Adds or memory.
 const MAX_ADD_REQUESTS: usize = 64;
@@ -1523,6 +1690,27 @@ struct OutgoingAdd {
 /// (invite_encoded, kp_bytes, invite_nonce, group_id) — one Add-request to re-broadcast.
 type Rebroadcast = (Vec<u8>, Vec<u8>, [u8; 16], Vec<u8>);
 
+/// Owner-side (multi-device M3): a verified companion admission awaiting the next admit drain.
+struct PendingDeviceAdd {
+    certificate: DeviceCertificate,
+    kp_bytes: Vec<u8>,
+    /// The member that relayed the request — where the finalized result is pushed back.
+    relay: PeerId,
+}
+
+/// Relay-side (multi-device M3): a companion admission this node is driving to completion. The
+/// verbatim signed request is re-broadcast (the owner may be offline), and the resulting Welcome
+/// is forwarded — unchanged, owner signature intact — to the waiting device.
+struct OutgoingDeviceAdd {
+    body: Vec<u8>,
+    /// The certificate hash the owner's signature will be bound to (so this node can sanity-check
+    /// the result it is about to forward).
+    cert_hash: [u8; 32],
+    device: PeerId,
+    next_retry_ms: u64,
+    expires_at_ms: u64,
+}
+
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
     group: ServerGroup,
@@ -1616,6 +1804,32 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     admit_result_outbox: Vec<(PeerId, Vec<u8>)>,
     /// Admin-side: Add-requests this node is driving to completion, keyed by invite nonce.
     outgoing_add_requests: HashMap<[u8; 16], OutgoingAdd>,
+    /// Multi-device M3 — owner-side: accepted companion admissions awaiting the MLS Add
+    /// (bounded `MAX_ADD_REQUESTS`, deduped on the certificate bind nonce).
+    device_add_queue: VecDeque<PendingDeviceAdd>,
+    /// Owner-side: finalized companion admit results by bind nonce, to re-deliver on a
+    /// retransmit (the certificate's ledger entry is consumed, so re-admitting is impossible).
+    device_admit_results: HashMap<[u8; 16], CachedAdmit>,
+    /// Owner-side: `KIND_DEVICE_ADMIT_RESULT` pushes to deliver to relaying members.
+    device_admit_outbox: Vec<(PeerId, Vec<u8>)>,
+    /// Relay-side: companion admissions this node is driving to completion (re-broadcast until
+    /// the owner returns the result, then the Welcome is forwarded to the waiting device).
+    outgoing_device_adds: HashMap<[u8; 16], OutgoingDeviceAdd>,
+    /// Every **companion** device known to this node, mapped to the origin that certified it.
+    ///
+    /// Two sources, unioned: the shared `Devices` document (pushed down by the product layer via
+    /// [`ChannelSync::set_device_registry`], which owns that document's schema) and every
+    /// admission this node performed itself. The self-recorded half closes the window between
+    /// admitting a companion and the document write landing — without it, a device certified by
+    /// a *just-admitted* companion could slip past the depth-1 check.
+    companion_devices: HashMap<DeviceId, DeviceId>,
+    /// Devices revoked by their origin (multi-device M5), pushed down with the companion map.
+    /// Empty today — the revocation *verb* is M5; the admission-side check is here already so
+    /// that a revoked device can never be re-admitted once the verb lands.
+    revoked_devices: HashSet<DeviceId>,
+    /// Companion certificates this node admitted and has not yet handed to the product layer,
+    /// which writes them into the shared `Devices` document. Drained by `take_admitted_devices`.
+    admitted_devices: Vec<DeviceCertificate>,
     /// **Owner-local authoritative** admin set (fingerprints), persisted in the snapshot. This is
     /// the security source of truth for the admission gate (`inviter_is_authorized`): a malicious
     /// member cannot write it, so the demoted-admin grant-replay residual is closed (THREAT-MODEL
@@ -1715,6 +1929,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             admit_results: HashMap::new(),
             admit_result_outbox: Vec::new(),
             outgoing_add_requests: HashMap::new(),
+            device_add_queue: VecDeque::new(),
+            device_admit_results: HashMap::new(),
+            device_admit_outbox: Vec::new(),
+            outgoing_device_adds: HashMap::new(),
+            companion_devices: HashMap::new(),
+            revoked_devices: HashSet::new(),
+            admitted_devices: Vec::new(),
             admin_roster: BTreeSet::new(),
             roster_gen: 0,
             rendezvous_nodes: Vec::new(),
@@ -1925,11 +2146,35 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // it, so a demoted admin cannot re-authorize itself (THREAT-MODEL item 3).
             return self.admin_roster.contains(&fp);
         }
-        // Non-owner: this is display/fallback only and does not gate admission. Trust the
-        // owner-signed published roster (a stale replay here is cosmetic, never an admission).
+        // Non-owner: this never gates admission (only the owner commits, against its local
+        // roster). It IS consulted for the relay self-gate via `published_roster_omits`, which
+        // treats an unreadable roster as "unknown" so a junk overwrite cannot deny relays — so a
+        // tampered published roster is at worst a per-reader display glitch, never a liveness or
+        // admission effect. Trust a cleanly-read owner-signed roster.
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
             Some(doc) => roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner)
                 .is_some_and(|s| s.contains(&fp)),
+            None => false,
+        }
+    }
+
+    /// Whether the **published** roster reads successfully AND positively omits `device` — the
+    /// only case in which a non-owner should self-gate a relay. Returns `false` when the roster is
+    /// present-and-includes-us OR is unreadable/absent (the "unknown" case: relay and let the owner
+    /// decide, so a junk-overwritten roster scalar cannot disable every admin's relay). Never
+    /// consulted on the owner (it commits directly), and never an admission gate.
+    fn published_roster_omits(&self, device: &DeviceId) -> bool {
+        let Some(owner) = self.group.designated_committer() else {
+            return false;
+        };
+        let fp = roles::fingerprint(device);
+        match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
+            Some(doc) => {
+                match roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner) {
+                    Some(set) => !set.contains(&fp), // read cleanly → trust the positive omission
+                    None => false, // unreadable/absent → unknown, not unauthorized
+                }
+            }
             None => false,
         }
     }
@@ -2174,6 +2419,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // the admin relays it to the joiner here (in single-committer mode the contest path that
         // normally drains the Welcome outbox never runs).
         self.drive_outgoing_add_requests();
+        // Same, for a companion device's admission we are relaying (multi-device M3).
+        self.drive_outgoing_device_adds();
         // Flush any queued membership-commit broadcasts + Add-request retransmits.
         self.drain_outbox().await;
         self.drain_welcome_outbox().await;
@@ -2181,6 +2428,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // cancelled (in a select!-driven loop) after publishing the commit but before sending the
         // result, so draining at the top each tick makes delivery robust.
         self.drain_admit_result_outbox().await;
+        self.drain_device_admit_outbox().await;
         // Apply any routing-label rotation from a previous tick: subscribe the new
         // label's topics and drop the ones that aged out of the grandfather window.
         self.resync_if_needed().await;
@@ -2210,6 +2458,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // here; the result push to the admin happens at the top of the next tick
                     // (robust against this tick being cancelled mid-flight).
                     self.drain_add_request_queue();
+                    // …and a relayed companion admission (multi-device M3), same shape.
+                    self.drain_device_add_queue();
                     self.drain_outbox().await;
                     self.resync_if_needed().await;
                 } else {
@@ -3898,6 +4148,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.on_add_request(from, rest);
                 return;
             }
+            Some((&CTRL_DEVICE_ADD, rest)) => {
+                // `from` is the relaying member's peer — where the owner returns the result.
+                self.on_device_add_request(from, rest);
+                return;
+            }
             _ => {
                 tracing::warn!("dropping control message with unknown tag");
                 return;
@@ -4393,6 +4648,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.serve_call_signal(rest);
                 Vec::new()
             }
+            Some((&KIND_DEVICE_ADD, rest)) => {
+                // Multi-device M3: a companion device presenting its origin-signed certificate.
+                self.serve_device_add(from, rest).unwrap_or_default()
+            }
+            Some((&KIND_DEVICE_ADMIT_RESULT, rest)) => {
+                // The owner finalized a companion admission we relayed; forward the Welcome.
+                self.on_device_admit_result(rest);
+                Vec::new()
+            }
             _ => Vec::new(),
         }
     }
@@ -4587,10 +4851,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // A non-committer (an Admin, in the single-committer model) cannot run the Add itself —
         // that would be a second committer (a fork). Instead it asks the owner to admit
         // (Option C): broadcast a signed Add-request, drive it to completion, and tell the joiner
-        // to wait for the pushed Welcome. The OWNER re-checks the inviter's role authoritatively
-        // (against its own live roles doc) before committing, so we don't self-gate here — our
-        // local roles view may lag, and only the owner ever commits anyway (no fork).
+        // to wait for the pushed Welcome.
+        //
+        // We DO self-gate first, as a liveness courtesy, not as the security gate: the inviter
+        // named in this invite is *this device* (checked above), and if our own best view says
+        // we are not owner/admin, the owner is certain to refuse the relayed request — parking
+        // the joiner on a Welcome push that never comes. Rejecting here is synchronous and
+        // retryable (a freshly-promoted admin whose published roster hasn't synced yet just
+        // retries once it has). The OWNER still re-checks authoritatively against its local
+        // roster before committing (THREAT-MODEL item 3); this check can never admit anyone.
         if my_rank > self.config.max_committer_rank {
+            // Self-gate as a liveness courtesy (a non-admin relaying its own invite would strand
+            // the joiner on a Welcome the owner will never send). It must be reject-ONLY on a
+            // *positively-read* roster that omits us: an unreadable or absent published roster
+            // means "unknown", not "unauthorized" — otherwise any member could overwrite the
+            // published-roster scalar with junk and disable every admin's relay server-wide. When
+            // unknown we relay and let the owner's authoritative check decide (adversarial-review
+            // finding). This never admits anyone; only the owner commits.
+            if self.published_roster_omits(&self.device.device_id()) {
+                tracing::warn!("refusing to relay a join for an invite this non-admin minted");
+                return None;
+            }
             self.request_add(invite, kp_bytes, from, now);
             return Some(vec![JOIN_PENDING]);
         }
@@ -4946,6 +5227,506 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    // --- multi-device: companion admission (M3) -------------------------------------------
+
+    /// Install the companion → origin map and the revoked-device set read from the shared
+    /// `Devices` document (whose schema the product layer owns).
+    ///
+    /// Companion entries are **merged, never replaced**: this node's own admissions are recorded
+    /// the moment they happen, and the depth-1 gate must not forget one because the document write
+    /// has not converged yet. Forging an entry needs a genuine origin signature over a
+    /// group-bound certificate (the reader validates that before calling), so a merge cannot be
+    /// poisoned by a malicious writer. The revocation set is replaced wholesale — it is only ever
+    /// read to *refuse*, so a stale copy fails closed.
+    /// Replace (not merge) the validated registry: the product layer re-derives the whole
+    /// companion → origin map from the owner-signed `Devices` doc each time it changes, so this is
+    /// the authoritative set as of that read. Replacing rather than `extend`ing means an entry the
+    /// owner removed (M5) or a doc that shrank actually drops here, instead of lingering forever.
+    pub fn set_device_registry(
+        &mut self,
+        companions: HashMap<DeviceId, DeviceId>,
+        revoked: HashSet<DeviceId>,
+    ) {
+        self.companion_devices = companions;
+        self.revoked_devices = revoked;
+    }
+
+    /// Take the companion certificates this node admitted since the last call, so the product
+    /// layer can write them into the shared `Devices` document. Only ever non-empty on the owner
+    /// (admission is owner-serialized), which is exactly why that document has no write races.
+    pub fn take_admitted_devices(&mut self) -> Vec<DeviceCertificate> {
+        std::mem::take(&mut self.admitted_devices)
+    }
+
+    /// The raw Ed25519 signature public key of a current member, by device id — a roster lookup
+    /// (a [`DeviceId`] is a one-way hash of the key). The grant ceremony reads the **owner's**
+    /// key through this, so a companion can pin it before it is admitted.
+    pub fn member_public_key(&self, device: &DeviceId) -> Option<Vec<u8>> {
+        self.group.member_signature_key(device)
+    }
+
+    /// Serve a companion device's admission request (`KIND_DEVICE_ADD`) — the certificate-bound
+    /// analogue of [`ChannelSync::serve_join`]. If this node is the designated committer it runs
+    /// the whole admission synchronously and answers with the signed Welcome; otherwise it relays
+    /// the (self-authenticating) request to the owner on the control topic and answers
+    /// `JOIN_PENDING`, driving it to completion exactly as an admin drives an invite Add-request.
+    fn serve_device_add(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (cert_bytes, kp_bytes, pubkey, ts, sig) = decode_device_add(data).ok()?;
+        let cert = DeviceCertificate::decode(&cert_bytes).ok()?;
+        // Cheapest possible scope check: the certificate's signed `group_id` names this group.
+        if cert.group_id != self.group.group_id() {
+            return None;
+        }
+        if !self.group.is_designated_committer(&self.device) {
+            // We are not the serializer. Authenticate the request BEFORE relaying it — a relay
+            // must not launder an unauthenticated stranger's bytes onto the members-only control
+            // topic. Liveness-only (the owner re-checks in full); the ledger/KeyPackage half is
+            // skipped because only the owner holds the ledger and pays for the Add.
+            if let Err(why) = self.precheck_device_add(&cert, &kp_bytes, &pubkey, ts, &sig) {
+                tracing::warn!(
+                    reason = why,
+                    "refusing to relay an unauthenticated device-add"
+                );
+                return None;
+            }
+            self.request_device_add(&cert, data.to_vec(), from, self.clock.now_ms());
+            return Some(vec![JOIN_PENDING]);
+        }
+        // Authenticate before touching the cache, so a public certificate alone (which anyone in
+        // the group holds — it is published in the Devices doc) cannot pull a cached Welcome as a
+        // free amplification / admission-confirmation oracle. Only the device that holds the key
+        // can produce the transcript signature `precheck` requires.
+        if let Err(why) = self.precheck_device_add(&cert, &kp_bytes, &pubkey, ts, &sig) {
+            tracing::warn!(reason = why, "device-add request rejected");
+            self.stats.requests_rejected += 1;
+            return None;
+        }
+        let bind = device_bind_nonce(&cert);
+        // A device that missed our response and retried gets the cached result, not a re-admit
+        // (its certificate's ledger entry is already consumed, so the full check below would
+        // reject it — the cache is how an authenticated retry still completes).
+        if let Some(cached) = self.device_admit_results.get(&bind) {
+            return Some(encode_welcome_push(
+                &cached.welcome,
+                &cached.owner_sig,
+                &cached.sealed_routing,
+            ));
+        }
+        if let Err(why) = self.check_device_add(&cert, &kp_bytes, &pubkey, ts, &sig) {
+            tracing::warn!(reason = why, "device-add request rejected");
+            self.stats.requests_rejected += 1;
+            return None;
+        }
+        let (welcome, sealed_routing, owner_sig) = self.admit_device_now(&cert, &kp_bytes)?;
+        self.cache_device_admit(bind, &welcome, &sealed_routing, owner_sig);
+        Some(encode_welcome_push(&welcome, &owner_sig, &sealed_routing))
+    }
+
+    /// **The owner-side validity condition for a companion admission.** Every check must hold;
+    /// the order is cheap-first, so a junk request never pays for KeyPackage validation.
+    ///
+    /// This is the device-certificate analogue of the invite path's
+    /// `verify_self` + ledger + `validate_invite_binding` triple, plus the two rules a
+    /// certificate needs that an invite does not: the certifier must be an **origin** (depth-1)
+    /// and the certificate must be fresh (certificates carry no expiry).
+    fn check_device_add(
+        &self,
+        cert: &DeviceCertificate,
+        kp_bytes: &[u8],
+        pubkey: &[u8],
+        ts: u64,
+        sig: &[u8; 64],
+    ) -> Result<(), &'static str> {
+        // The cheap, no-ledger-no-KeyPackage-parse half — authenticity, membership, depth-1, the
+        // per-origin cap, freshness, requester identity, and the device's own signature.
+        self.precheck_device_add(cert, kp_bytes, pubkey, ts, sig)?;
+
+        // 7. Single use, persisted: the certificate's bind nonce rides the invite ledger, so one
+        //    certificate admits one device once — across restarts, and across relays.
+        let bind = device_bind_nonce(cert);
+        if self.ledger.is_consumed(&bind) || self.ledger.is_revoked(&bind) {
+            return Err("that certificate has already been used");
+        }
+        // 9. The expensive part: the KeyPackage parses, its leaf key is the request key, and its
+        //    credential binds it to (this group, THIS certificate) — so a relay cannot swap a
+        //    KeyPackage minted against a different certificate into this admission.
+        let Ok(key_package) = self.device.parse_key_package(kp_bytes) else {
+            return Err("malformed key package");
+        };
+        if catcoms_mls::key_package_signature_key(&key_package) != pubkey {
+            return Err("key package leaf key does not match the request");
+        }
+        if self
+            .group
+            .validate_device_binding(&key_package, &cert.new_device_id, &bind)
+            .is_err()
+        {
+            return Err("key package is not bound to this certificate");
+        }
+        Ok(())
+    }
+
+    /// The cheap half of [`ChannelSync::check_device_add`]: everything that does **not** touch the
+    /// single-use ledger or parse the KeyPackage. It fully authenticates the request as coming
+    /// from a real member's real origin device for a real subject device — which is exactly what a
+    /// non-committer needs before **relaying** it onto the members-only control topic (a relay must
+    /// not launder an unauthenticated stranger's bytes), and what `serve_device_add` needs before
+    /// consulting its admit-result cache (else the cache is a free oracle for anyone holding a
+    /// public certificate). Liveness-only there: the owner still runs the full check before it
+    /// commits. (Adversarial-review BLOCKING finding: the relay path had *no* gate.)
+    fn precheck_device_add(
+        &self,
+        cert: &DeviceCertificate,
+        kp_bytes: &[u8],
+        pubkey: &[u8],
+        ts: u64,
+        sig: &[u8; 64],
+    ) -> Result<(), &'static str> {
+        // 1. Scope. `group_id` is inside the origin's signature, so a certificate minted for
+        //    another server can never admit here (the M2 review's requirement).
+        if cert.group_id != self.group.group_id() {
+            return Err("certificate is for a different group");
+        }
+        // 2. Authenticity: the embedded key content-addresses the named origin and signed every
+        //    field, so any tamper (name, subject, timestamp, group) invalidates it.
+        if !cert.verify(&cert.origin_id) {
+            return Err("certificate does not verify");
+        }
+        // 3. The certifier is a currently-admitted member of this group. This is what makes a
+        //    self-certified forgery inert: a stranger's key is not on the roster.
+        if !self.group.contains_device(&cert.origin_id) {
+            return Err("certifying origin is not a member of this group");
+        }
+        // 4. …and it is that member's ORIGIN device, not one of its companions — chain depth
+        //    stays 1, so a stolen companion is never an identity factory. Until the registry has
+        //    entries every admitted member *is* an origin, which is exactly this predicate.
+        if self.companion_devices.contains_key(&cert.origin_id) {
+            return Err("a companion device may not certify another device");
+        }
+        // 4b. Per-origin device cap — bound how many devices one member can drive the owner to Add.
+        if self
+            .companion_devices
+            .values()
+            .filter(|o| **o == cert.origin_id)
+            .count()
+            >= MAX_DEVICES_PER_ORIGIN
+        {
+            return Err("that member has reached its device limit");
+        }
+        // 5. The subject is new, and neither end of the certificate has been revoked.
+        if self.group.contains_device(&cert.new_device_id) {
+            return Err("that device is already a member");
+        }
+        if self.revoked_devices.contains(&cert.new_device_id)
+            || self.revoked_devices.contains(&cert.origin_id)
+        {
+            return Err("certificate names a revoked device");
+        }
+        // 6. Freshness, ASYMMETRIC: a stamp far in the past is stale; one slightly in the future is
+        //    clock skew, not a doubled window. See MAX_DEVICE_CERT_AGE_MS — a certificate is a
+        //    hand-carried capability, so it gets the invite-style window, not the 60 s live one.
+        //    The request `ts` shares it (a relaying member cannot re-sign it — only the device can).
+        let now = self.clock.now_ms();
+        if now.saturating_sub(cert.issued_ts_ms) > MAX_DEVICE_CERT_AGE_MS
+            || cert.issued_ts_ms > now.saturating_add(DEVICE_CERT_SKEW_MS)
+        {
+            return Err("certificate is too old to admit");
+        }
+        if now.saturating_sub(ts) > MAX_DEVICE_CERT_AGE_MS
+            || ts > now.saturating_add(DEVICE_CERT_SKEW_MS)
+        {
+            return Err("device-add request is stale");
+        }
+        // 8. The requester really is the certified device (its key content-addresses the subject).
+        if DeviceId::from_public_key_bytes(pubkey) != cert.new_device_id {
+            return Err("request key is not the certified device");
+        }
+        // 10. And the device signed the whole thing, proving it holds the key the certificate
+        //     names (the certificate alone is public once it leaves the origin). The KeyPackage is
+        //     bound by hash, so a relay cannot swap it under this signature.
+        let transcript = device_add_transcript(
+            &cert.group_id,
+            &cert_hash(cert),
+            Cid::of(kp_bytes).as_bytes(),
+            pubkey,
+            ts,
+        );
+        if !verify_with_public_bytes(pubkey, &transcript, sig) {
+            return Err("device-add signature is invalid");
+        }
+        Ok(())
+    }
+
+    /// Run the companion admission as the designated committer: MLS Add, burn the certificate,
+    /// fan the commit out, seal the routing transfer, and sign the join transcript the **device**
+    /// verifies. Returns `(welcome, sealed_routing, owner_signature)`.
+    fn admit_device_now(
+        &mut self,
+        cert: &DeviceCertificate,
+        kp_bytes: &[u8],
+    ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        let key_package = self.device.parse_key_package(kp_bytes).ok()?;
+        let bind = device_bind_nonce(cert);
+        // Re-check the leaf binding at the moment of the Add (a queued request may have waited).
+        self.group
+            .validate_device_binding(&key_package, &cert.new_device_id, &bind)
+            .ok()?;
+        let base_authenticator = self.group.epoch_authenticator_id();
+        self.snapshot_epoch_keys();
+        let outcome = self.group.add_member(&self.device, key_package).ok()?;
+        self.evict_past_keys();
+        // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can
+        // only fail on a re-entrant path — treat it as already-burned rather than unwinding a
+        // commit that has landed.
+        let _ = self.ledger.consume(bind);
+        let record =
+            self.sign_add_record(outcome.commit_epoch, &outcome.commit, base_authenticator);
+        self.record_commit(record.clone());
+        let mut framed = vec![CTRL_COMMIT];
+        framed.extend_from_slice(&record.encode());
+        self.outbox.push((self.control_topic.clone(), framed));
+        // Record the companion → origin edge NOW — before the fallible signing below — so the
+        // invariant "the leaf is in the group ⇒ it is recorded as a companion" cannot be broken by
+        // a mid-admission failure (which would leave a permanent depth-1 hole). The depth-1 gate
+        // must know about the edge before the `Devices` write converges anyway, and the product
+        // layer drains the certificate to publish it (adversarial-review ordering finding).
+        self.companion_devices
+            .insert(cert.new_device_id, cert.origin_id);
+        self.admitted_devices.push(cert.clone());
+        // Seal the routing transfer first so the transcript binds it (the device verifies the
+        // Welcome + routing together, exactly as an invited joiner does).
+        let sealed_routing = self.seal_routing_state();
+        let transcript = device_join_transcript(
+            &cert.group_id,
+            &cert_hash(cert),
+            &outcome.welcome,
+            &sealed_routing,
+        );
+        let signature = self.device.sign(&transcript).ok()?;
+        tracing::info!(
+            epoch = self.group.epoch(),
+            "admitted a companion device via certificate"
+        );
+        Some((outcome.welcome, sealed_routing, signature))
+    }
+
+    /// Cache a finalized companion admission (bounded) so a retransmit re-delivers it instead of
+    /// hitting the now-consumed ledger entry.
+    fn cache_device_admit(
+        &mut self,
+        bind: [u8; 16],
+        welcome: &[u8],
+        sealed_routing: &[u8],
+        owner_sig: [u8; 64],
+    ) {
+        while self.device_admit_results.len() >= MAX_ADD_REQUESTS {
+            let Some(victim) = self.device_admit_results.keys().next().copied() else {
+                break;
+            };
+            self.device_admit_results.remove(&victim);
+        }
+        self.device_admit_results.insert(
+            bind,
+            CachedAdmit {
+                welcome: welcome.to_vec(),
+                sealed_routing: sealed_routing.to_vec(),
+                owner_sig,
+            },
+        );
+    }
+
+    /// Relay side: broadcast a companion's admission request to the owner and remember it, so we
+    /// re-broadcast until the owner (which may be offline) returns the result — then forward the
+    /// Welcome to the waiting device.
+    fn request_device_add(
+        &mut self,
+        cert: &DeviceCertificate,
+        body: Vec<u8>,
+        device: PeerId,
+        now: u64,
+    ) {
+        let mut framed = vec![CTRL_DEVICE_ADD];
+        framed.extend_from_slice(&body);
+        self.outbox.push((self.control_topic.clone(), framed));
+        let bind = device_bind_nonce(cert);
+        while self.outgoing_device_adds.len() >= MAX_ADD_REQUESTS {
+            let Some(victim) = self
+                .outgoing_device_adds
+                .iter()
+                .min_by_key(|(_, o)| o.expires_at_ms)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            self.outgoing_device_adds.remove(&victim);
+        }
+        // Clamp the retry lifetime to the certificate's own remaining freshness: once the owner
+        // would reject the certificate as too old, there is no point re-broadcasting it (an
+        // adversarial-review finding — a flat hour let one request fan out for the full window
+        // regardless of how stale its certificate already was).
+        let cert_deadline = cert
+            .issued_ts_ms
+            .saturating_add(MAX_DEVICE_CERT_AGE_MS)
+            .saturating_add(DEVICE_CERT_SKEW_MS);
+        let expires_at_ms = now
+            .saturating_add(MAX_ADD_REQUEST_LIFETIME_MS)
+            .min(cert_deadline);
+        self.outgoing_device_adds.insert(
+            bind,
+            OutgoingDeviceAdd {
+                body,
+                cert_hash: cert_hash(cert),
+                device,
+                next_retry_ms: now + ADD_REQ_RETRY_MS,
+                expires_at_ms,
+            },
+        );
+    }
+
+    /// Relay side: re-broadcast any pending companion request whose retry interval elapsed (and
+    /// drop expired ones). The request is re-sent **verbatim** — it is self-authenticating
+    /// (origin-signed certificate + device-signed request), so this node adds no authority to it.
+    fn drive_outgoing_device_adds(&mut self) {
+        let now = self.clock.now_ms();
+        let mut to_send: Vec<Vec<u8>> = Vec::new();
+        self.outgoing_device_adds.retain(|_, out| {
+            if now > out.expires_at_ms {
+                return false;
+            }
+            if now >= out.next_retry_ms {
+                out.next_retry_ms = now + ADD_REQ_RETRY_MS;
+                to_send.push(out.body.clone());
+            }
+            true
+        });
+        for body in to_send {
+            let mut framed = vec![CTRL_DEVICE_ADD];
+            framed.extend_from_slice(&body);
+            self.outbox.push((self.control_topic.clone(), framed));
+        }
+    }
+
+    /// Owner side: a member relayed a companion's admission request. Re-check everything against
+    /// the live group + device registry, then queue the admission (or re-deliver a cached result).
+    /// Only the owner acts, so no second committer — and therefore no fork — can arise.
+    // `from` is the relaying member's peer (the gossipsub publisher, authenticated because the
+    // mesh is configured `MessageAuthenticity::Signed` — see `on_add_request`'s note), used only
+    // to route the result back. The request itself carries all of its own authority.
+    fn on_device_add_request(&mut self, from: PeerId, data: &[u8]) {
+        if !self.group.is_designated_committer(&self.device) {
+            return; // some other node is the serializer
+        }
+        let Ok((cert_bytes, kp_bytes, pubkey, ts, sig)) = decode_device_add(data) else {
+            return;
+        };
+        let Ok(cert) = DeviceCertificate::decode(&cert_bytes) else {
+            return;
+        };
+        // Authenticate before the cache, matching `on_add_request` (and `serve_device_add`): a
+        // bare public certificate must not pull a cached result.
+        if let Err(why) = self.precheck_device_add(&cert, &kp_bytes, &pubkey, ts, &sig) {
+            tracing::warn!(reason = why, "relayed device-add request rejected");
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        let bind = device_bind_nonce(&cert);
+        if let Some(cached) = self.device_admit_results.get(&bind) {
+            let payload = encode_device_admit_result(
+                &bind,
+                &cached.welcome,
+                &cached.sealed_routing,
+                &cached.owner_sig,
+            );
+            self.device_admit_outbox.push((from, payload));
+            return;
+        }
+        if let Err(why) = self.check_device_add(&cert, &kp_bytes, &pubkey, ts, &sig) {
+            tracing::warn!(reason = why, "relayed device-add request rejected");
+            self.stats.requests_rejected += 1;
+            return;
+        }
+        if self
+            .device_add_queue
+            .iter()
+            .any(|p| device_bind_nonce(&p.certificate) == bind)
+        {
+            return; // already queued (a retry arrived before we drained)
+        }
+        while self.device_add_queue.len() >= MAX_ADD_REQUESTS {
+            self.device_add_queue.pop_front();
+        }
+        self.device_add_queue.push_back(PendingDeviceAdd {
+            certificate: cert,
+            kp_bytes,
+            relay: from,
+        });
+    }
+
+    /// Owner side: admit each queued companion — run the MLS Add, cache the result, and push it
+    /// back to the member that relayed the request.
+    fn drain_device_add_queue(&mut self) {
+        let queued = std::mem::take(&mut self.device_add_queue);
+        for p in queued {
+            let bind = device_bind_nonce(&p.certificate);
+            let Some((welcome, sealed_routing, owner_sig)) =
+                self.admit_device_now(&p.certificate, &p.kp_bytes)
+            else {
+                continue;
+            };
+            self.cache_device_admit(bind, &welcome, &sealed_routing, owner_sig);
+            let payload = encode_device_admit_result(&bind, &welcome, &sealed_routing, &owner_sig);
+            self.device_admit_outbox.push((p.relay, payload));
+        }
+    }
+
+    /// Relay side: the owner delivered a finalized companion admission. Sanity-check the owner's
+    /// signature against its roster key, then forward the Welcome **verbatim** to the waiting
+    /// device. Unlike the admin-invite relay this node does *not* re-sign: the companion pins the
+    /// owner's key in its grant, so the owner's own signature is the one it verifies.
+    fn on_device_admit_result(&mut self, data: &[u8]) {
+        let Ok((bind, welcome, sealed_routing, owner_sig)) = decode_device_admit_result(data)
+        else {
+            return;
+        };
+        let Some(out) = self.outgoing_device_adds.get(&bind) else {
+            return; // not ours / already completed
+        };
+        let transcript = device_join_transcript(
+            &self.group.group_id(),
+            &out.cert_hash,
+            &welcome,
+            &sealed_routing,
+        );
+        let Some(owner_id) = self.group.designated_committer() else {
+            return;
+        };
+        let Some(owner_key) = self.group.member_signature_key(&owner_id) else {
+            return;
+        };
+        if !verify_with_public_bytes(&owner_key, &transcript, &owner_sig) {
+            tracing::warn!("device admit result with an invalid owner signature; ignored");
+            return;
+        }
+        if let Some(out) = self.outgoing_device_adds.remove(&bind) {
+            let payload = encode_welcome_push(&welcome, &owner_sig, &sealed_routing);
+            self.welcome_outbox.push((out.device, payload));
+        }
+    }
+
+    /// Owner side: push finalized companion admit results to the relaying members over RR
+    /// (best-effort; the relay re-broadcasts if its result doesn't arrive).
+    async fn drain_device_admit_outbox(&mut self) {
+        let pending = std::mem::take(&mut self.device_admit_outbox);
+        for (relay, payload) in pending {
+            let mut req = vec![KIND_DEVICE_ADMIT_RESULT];
+            req.extend_from_slice(&payload);
+            let _ = self
+                .transport
+                .request(relay, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await;
+        }
+    }
+
     /// Build the signed [`CommitRecord`] for an Add produced via the synchronous
     /// (already-merged) path.
     fn sign_add_record(
@@ -5056,9 +5837,180 @@ fn finish_join(
     Ok((group, routing))
 }
 
+/// Join a server as a **companion device**, presenting the origin-signed [`DeviceCertificate`]
+/// from a grant bundle instead of an invite (multi-device M3).
+///
+/// The shape is [`request_join`]'s, with the certificate in the invite's place: mint a KeyPackage
+/// bound to `(group, certificate)`, send it to whichever member the grant's bootstrap reached,
+/// and finish from the returned (or pushed) Welcome. `owner_public_key` is the designated
+/// committer's signature key, captured by the origin from its live roster at mint time and
+/// carried in the grant — it is the key this device pins to authenticate the Welcome, exactly as
+/// an invited joiner pins `InviteToken::inviter_public_key`.
+///
+/// The caller must already be transport-connected to `contact`.
+pub async fn request_device_join<T: MeshTransport>(
+    transport: &T,
+    contact: PeerId,
+    device: &MlsDevice,
+    certificate: &DeviceCertificate,
+    owner_public_key: &[u8; 32],
+    now_ms: u64,
+) -> Result<(ServerGroup, RoutingState), SyncError> {
+    // Authenticate our own grant before spending anything on it (the analogue of an invited
+    // joiner's `verify_self`), and confirm it is for *this* device.
+    if !certificate.verify(&certificate.origin_id) {
+        tracing::warn!("device certificate failed self-verification");
+        return Err(SyncError::JoinRejected);
+    }
+    if certificate.new_device_id != device.device_id() {
+        tracing::warn!("device certificate is for another device");
+        return Err(SyncError::JoinRejected);
+    }
+
+    // The credential binds the leaf to (this group, THIS certificate), so the KeyPackage cannot
+    // be replayed into another group or against another certificate — the invite nonce's job,
+    // done by a value both ends derive from the certificate itself.
+    let bind = device_bind_nonce(certificate);
+    let key_package = device.key_package_for_invite(&certificate.group_id, bind)?;
+    let kp_bytes = serialize_key_package(&key_package)?;
+    let pubkey = device.public_key_bytes();
+    let transcript = device_add_transcript(
+        &certificate.group_id,
+        &cert_hash(certificate),
+        Cid::of(&kp_bytes).as_bytes(),
+        &pubkey,
+        now_ms,
+    );
+    let signature = device.sign(&transcript)?;
+
+    let mut payload = vec![KIND_DEVICE_ADD];
+    payload.extend_from_slice(&encode_device_add(
+        &certificate.encode(),
+        &kp_bytes,
+        &pubkey,
+        now_ms,
+        &signature,
+    ));
+
+    tracing::debug!("sending device-add request");
+    let resp = transport
+        .request(contact, ProtocolId(RR_PROTOCOL), Bytes::from(payload))
+        .await?;
+    match resp.split_first() {
+        // The contact was the owner: it admitted us synchronously.
+        Some((&JOIN_READY, rest)) => {
+            let (welcome, sig, sealed_routing) = decode_join_resp(rest)?;
+            finish_device_join(
+                device,
+                certificate,
+                owner_public_key,
+                &welcome,
+                &sig,
+                &sealed_routing,
+            )
+        }
+        // The contact relayed to the owner; the Welcome is pushed when the owner serializes it.
+        Some((&JOIN_PENDING, _)) => {
+            tracing::debug!("device admission relayed to the owner; awaiting the Welcome push");
+            await_device_welcome(transport, device, certificate, owner_public_key).await
+        }
+        _ => Err(SyncError::JoinRejected),
+    }
+}
+
+/// Verify a companion's Welcome and join from it — [`finish_join`] with the certificate's
+/// bindings in place of the invite's.
+///
+/// Three independent things must hold, and each defeats a distinct attacker:
+///
+/// 1. **The owner signed it.** The transcript is verified under `owner_public_key`, pinned in the
+///    grant before this device ever spoke to the network. This is the no-substitution property
+///    the invite path gets from the inviter signature: a relay cannot mint its own group and pass
+///    it off as this one, because it cannot produce that signature.
+/// 2. **It was built for *this* device.** `ServerGroup::join` can only open a Welcome whose group
+///    secrets were HPKE-sealed to the init key of the KeyPackage this device published — a key
+///    that exists solely in this device's provider. So a Welcome minted for device X is inert on
+///    device Y even if an attacker delivers it there; the device keypair *is* the binding.
+/// 3. **It is the group the certificate names.** `group_id` is inside the origin's signature, and
+///    the origin must be a member of the group we landed in.
+fn finish_device_join(
+    device: &MlsDevice,
+    certificate: &DeviceCertificate,
+    owner_public_key: &[u8; 32],
+    welcome: &[u8],
+    signature: &[u8; 64],
+    sealed_routing: &[u8],
+) -> Result<(ServerGroup, RoutingState), SyncError> {
+    let transcript = device_join_transcript(
+        &certificate.group_id,
+        &cert_hash(certificate),
+        welcome,
+        sealed_routing,
+    );
+    if !verify_with_public_bytes(owner_public_key, &transcript, signature) {
+        tracing::warn!("Welcome was not signed by the granted owner (or transfer tampered)");
+        return Err(SyncError::JoinRejected);
+    }
+    let group = ServerGroup::join(device, welcome)?;
+    if group.group_id() != certificate.group_id {
+        tracing::warn!("joined group id does not match the device certificate");
+        return Err(SyncError::JoinRejected);
+    }
+    if !group.contains_device(&certificate.origin_id) {
+        tracing::warn!("the certifying origin is not a member of the joined group");
+        return Err(SyncError::JoinRejected);
+    }
+    let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    tracing::info!(epoch = group.epoch(), "joined server as a companion device");
+    Ok((group, routing))
+}
+
+/// Await the owner's Welcome push for a relayed companion admission (`KIND_WELCOME`), the device
+/// analogue of [`await_welcome_push`] — unbounded for the same reason; the app layer's
+/// `Server::join_with_grant` applies the join timeout.
+async fn await_device_welcome<T: MeshTransport>(
+    transport: &T,
+    device: &MlsDevice,
+    certificate: &DeviceCertificate,
+    owner_public_key: &[u8; 32],
+) -> Result<(ServerGroup, RoutingState), SyncError> {
+    loop {
+        match transport.next_event().await {
+            Some(TransportEvent::Request {
+                data, responder, ..
+            }) if data.first() == Some(&KIND_WELCOME) => {
+                responder.respond(Bytes::new()); // ack the push
+                match data[1..].split_first() {
+                    Some((&JOIN_READY, body)) => {
+                        let (welcome, signature, sealed_routing) = decode_join_resp(body)?;
+                        return finish_device_join(
+                            device,
+                            certificate,
+                            owner_public_key,
+                            &welcome,
+                            &signature,
+                            &sealed_routing,
+                        );
+                    }
+                    _ => return Err(SyncError::JoinRejected),
+                }
+            }
+            // Ignore unrelated requests (ack so the sender isn't left hanging).
+            Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
+            Some(_) => continue,
+            None => return Err(SyncError::JoinRejected),
+        }
+    }
+}
+
 /// Await the committer's provisional-Welcome push (`KIND_WELCOME`) for a staged
 /// admission: an empty body means the committer lost its fork (the join is
 /// rejected; the caller retries), otherwise it carries the signed Welcome.
+///
+/// Unbounded: this crate is runtime-agnostic and holds no timer. A refused relayed
+/// admission produces no push at all, so **callers must bound the whole join** — the app
+/// layer wraps `request_join` in its runtime's timeout (`Server::join`'s
+/// `JOIN_TIMEOUT_SECS`); anything calling this API directly must do the same.
 async fn await_welcome_push<T: MeshTransport>(
     transport: &T,
     device: &MlsDevice,
@@ -5783,6 +6735,40 @@ mod tests {
         }
         members.insert(0, founder_sync);
         (hub, members, ids)
+    }
+
+    #[tokio::test]
+    async fn a_non_committer_does_not_relay_an_unauthenticated_device_add() {
+        // Adversarial-review BLOCKING: `serve_device_add`'s relay branch must authenticate a
+        // request before republishing it onto the members-only control topic — otherwise any peer
+        // that knows the group id (it is in every invite) could launder arbitrary bytes through an
+        // honest member and amplify them. A certificate for the right group but signed by a
+        // NON-MEMBER origin must be dropped without a relay.
+        let (_hub, mut members, _ids) = build_members(2).await;
+        let group_id = members[1].group.group_id();
+        assert!(
+            !members[1].group.is_designated_committer(&members[1].device),
+            "members[1] is not the owner, so it takes the relay branch"
+        );
+
+        // A stranger (not in the group) certifies some device for THIS group.
+        let stranger = catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(77));
+        let target = MlsDevice::generate().unwrap();
+        let cert =
+            DeviceCertificate::issue(&stranger, target.device_id(), &group_id, "x", 1_000).unwrap();
+        // The device-add body: a decodable certificate, plus placeholder kp/pubkey/signature — the
+        // non-member check fires before any of those are examined.
+        let target_pk = target.public_key_bytes();
+        let body = encode_device_add(&cert.encode(), b"kp", &target_pk, 1_000, &[0u8; 64]);
+
+        let before = members[1].outbox.len();
+        let resp = members[1].serve_device_add(PeerId::from_u64(99), &body);
+        assert!(resp.is_none(), "an unauthenticated device-add is refused");
+        assert_eq!(
+            members[1].outbox.len(),
+            before,
+            "nothing was relayed onto the control topic"
+        );
     }
 
     #[tokio::test]

@@ -315,6 +315,35 @@ impl ServerGroup {
         Ok(())
     }
 
+    /// Validate that `key_package` is admissible as `expected_device`'s leaf, bound to
+    /// `(this group, bind_nonce)` — the **certificate-bound** analogue of
+    /// [`ServerGroup::validate_invite_binding`], for the multi-device companion admission
+    /// (`docs/design-multi-device.md` M3), which carries a device certificate instead of an
+    /// invite token.
+    ///
+    /// `bind_nonce` is derived deterministically from the certificate by the admitting layer,
+    /// so a KeyPackage minted against one certificate can never be relayed into an admission
+    /// for another — the same non-replayability the invite nonce gives the invite path, and
+    /// the same leaf-credential shape every member re-checks in
+    /// [`ServerGroup::process_incoming`].
+    pub fn validate_device_binding(
+        &self,
+        key_package: &KeyPackage,
+        expected_device: &DeviceId,
+        bind_nonce: &[u8; 16],
+    ) -> Result<(), MlsError> {
+        let membership = membership_from_key_package(key_package)?;
+        let leaf_pk = key_package.leaf_node().signature_key().as_slice();
+        if membership.group_id != self.group_id()
+            || membership.invite_nonce != *bind_nonce
+            || membership.device_id != *expected_device
+            || DeviceId::from_public_key_bytes(leaf_pk) != membership.device_id
+        {
+            return Err(InviteError::CredentialMismatch.into());
+        }
+        Ok(())
+    }
+
     /// Remove the member with `target` device id and merge the commit (this
     /// advances the epoch, healing forward secrecy / post-compromise security).
     pub fn remove_member(&mut self, device: &MlsDevice, target: &DeviceId) -> Result<(), MlsError> {
