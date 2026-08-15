@@ -10,6 +10,14 @@
 //!   devices, applying revocation, chain-depth and device-count limits, and binds
 //!   every certificate to its `user_id` so a cert can't be replayed under another
 //!   account.
+//! - [`pairing`] — the **v2** multi-device model (`docs/design-multi-device.md`):
+//!   the member's *origin device* is the identity root, so a
+//!   [`pairing::DeviceCertificate`] is `sig_origin(origin ‖ companion ‖ name ‖ ts)`
+//!   minted during a SAS-gated grant ceremony, and the chain is exactly one deep.
+//!   Supersedes [`cert`]'s account-rooted chain; the two use different signing
+//!   domains (`/v2` vs `/v1`) and can never cross-verify. Note the two modules
+//!   each define a `DeviceRevocation`; only [`cert`]'s is re-exported at the crate
+//!   root, so name the v2 one as [`pairing::DeviceRevocation`].
 //! - [`keystore`] — one key hierarchy (a DEK → HKDF subkeys for the DB, MLS value
 //!   sealing and blobs), XChaCha20-Poly1305 sealing, a tiered
 //!   [`keystore::SecureKeyStore`], and a portable Argon2id passphrase store.
@@ -21,6 +29,7 @@ pub mod cert;
 pub mod identity;
 pub mod ids;
 pub mod keystore;
+pub mod pairing;
 
 pub use cert::{CertError, CertSigner, DeviceCert, DeviceRevocation, Roster, RosterConfig};
 pub use identity::{verify, verify_with_public_bytes, AccountKeypair, DeviceKeypair};
@@ -28,4 +37,8 @@ pub use ids::{DeviceId, UserId};
 pub use keystore::{
     requires_passphrase_confirmation, seal, unseal, Dek, InMemoryKeyStore, KeyHierarchy, KeyTier,
     KeystoreError, PassphraseKeyStore, SealedBlob, SecureKeyStore,
+};
+pub use pairing::{
+    sas, validate_device_name, DeviceCertificate, PairingError, PairingRequest,
+    MAX_DEVICE_NAME_BYTES, SAS_DIGITS, SAS_MODULUS,
 };
