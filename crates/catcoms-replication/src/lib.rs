@@ -24,7 +24,7 @@ pub mod op;
 
 use thiserror::Error;
 
-pub use doc::EncryptedDoc;
+pub use doc::{EncryptedDoc, MAX_DELIVERY_TARGETS};
 pub use op::{SealedOp, SignedOp};
 
 /// Errors from the replication engine.

@@ -14,10 +14,12 @@
 //! [`Server::sync_once`]. The background run-loop + live event stream and multi-server
 //! management land with the Tauri bridge (8b), where the real async runtime lives.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use automerge::transaction::Transactable;
-use automerge::{AutoCommit, AutomergeError, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT};
+use automerge::{
+    AutoCommit, AutomergeError, ChangeHash, ObjId, ObjType, ReadDoc, ScalarValue, Value, ROOT,
+};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_crypto::DeviceId;
@@ -884,6 +886,33 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     sync: ChannelSync<T, R>,
     display_name: String,
     device_id: DeviceId,
+    /// Per channel, the automerge change that authored each of this device's most recent
+    /// messages: `(message id, change hash)`, oldest first, capped at
+    /// [`MAX_TRACKED_OWN_MESSAGES`]. This is the only thing that ties a UI-visible message id to
+    /// the delivery evidence in the document, and it is **not persisted** — after a restart the
+    /// mapping is gone, so older messages report no delivery state at all rather than a wrong
+    /// one. Only own messages are tracked; a peer's delivery is not ours to display.
+    own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
+}
+
+/// How many of this device's most recent messages per channel carry delivery state. Bounded so a
+/// long-running session cannot grow the map, and comfortably under the sync layer's per-query
+/// target cap.
+pub const MAX_TRACKED_OWN_MESSAGES: usize = 50;
+
+/// Delivery state for one of this device's messages (`docs/design-delivery-states.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryState {
+    /// The message id, as it appears in [`ChatMessage::id`].
+    pub id: String,
+    /// How many **other** members have proved they hold this message. Evidence-based and
+    /// one-sided: it only ever rises, and `0` means "no proof yet", *not* "not delivered" — so
+    /// a renderer must show nothing rather than a failure for `0`.
+    pub delivered: usize,
+    /// How many members are reachable right now — the same count that drives the presence
+    /// indicators ([`Server::online_members`]). Independent of `delivered`, which can exceed it
+    /// (a member that received the message and has since gone offline still holds it).
+    pub reachable: usize,
 }
 
 /// A UI-facing view of one member: a short device-id **fingerprint** (display names are
@@ -912,6 +941,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             sync: ChannelSync::new(transport, group, device, rng, clock),
             display_name: display_name.into(),
             device_id,
+            own_message_changes: HashMap::new(),
         })
     }
 
@@ -940,6 +970,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
             display_name: display_name.into(),
             device_id,
+            own_message_changes: HashMap::new(),
         })
     }
 
@@ -966,6 +997,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             sync,
             display_name: display_name.into(),
             device_id,
+            own_message_changes: HashMap::new(),
         })
     }
 
@@ -1012,11 +1044,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let ts = self.sync.now_ms();
         let id = self.sync.random_id();
         let reply_to = reply_to.to_string();
-        self.sync
+        let change = self
+            .sync
             .post(DocType::Channel, channel, |d| {
                 append_message(d, &id, &author, text, ts, &reply_to)
             })
             .await?;
+        // Remember which automerge change carried this message, so its delivery state can be
+        // read back later (`delivery_snapshot`). Bounded ring: the UI only ever shows state for
+        // recent own messages.
+        let recent = self.own_message_changes.entry(channel).or_default();
+        recent.push_back((id, change));
+        while recent.len() > MAX_TRACKED_OWN_MESSAGES {
+            recent.pop_front();
+        }
         Ok(())
     }
 
@@ -1543,6 +1584,40 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// [`ChannelSync::connected_member_fingerprints`].
     pub fn online_members(&self) -> Vec<String> {
         self.sync.connected_member_fingerprints()
+    }
+
+    /// Milliseconds since the Unix epoch on this server's injected clock — the same seam message
+    /// timestamps use, so throttles stay deterministic under a test clock.
+    pub fn now_ms(&self) -> u64 {
+        self.sync.now_ms()
+    }
+
+    /// Delivery state for this device's recent messages in `channel`, oldest first
+    /// (`docs/design-delivery-states.md`, D2). Empty for a channel this session has not sent to
+    /// — including every channel right after a restart, since the `message id → change` mapping
+    /// is deliberately not persisted.
+    ///
+    /// Read-only over state that already exists: `delivered` comes from the document's own causal
+    /// evidence ([`ChannelSync::peers_with_change`]) and `reachable` from the presence set that
+    /// drives [`Server::online_members`]. No new wire traffic, and nothing here is observable by
+    /// anyone else.
+    pub fn delivery_snapshot(&mut self, channel: u128) -> Vec<DeliveryState> {
+        let Some(recent) = self.own_message_changes.get(&channel) else {
+            return Vec::new();
+        };
+        let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
+        let reachable = self.online_members().len();
+        let holders = self
+            .sync
+            .peers_with_changes(DocType::Channel, channel, &changes);
+        ids.into_iter()
+            .zip(holders)
+            .map(|(id, peers)| DeliveryState {
+                id,
+                delivered: peers.len(),
+                reachable,
+            })
+            .collect()
     }
 
     /// Pending incoming DM (friend) requests, each as `(sender fingerprint, sender display name,
@@ -2780,12 +2855,36 @@ mod tests {
         assert_eq!(msgs[0].author, alice.my_fingerprint());
         // The topic rides in the same channel document, so catch-up delivers it too.
         assert_eq!(bob.channel_topic(GENERAL), "the main room");
+
+        // Delivery state (D2). Bob demonstrably has "welcome!" now, but nothing Alice holds
+        // proves it yet — so her snapshot still reports no delivery, which the UI must render as
+        // "unknown" rather than as a failure.
+        let snapshot = alice.delivery_snapshot(GENERAL);
+        assert_eq!(snapshot.len(), 1, "only own messages are tracked");
+        assert_eq!(snapshot[0].id, msgs[0].id);
+        assert_eq!(snapshot[0].delivered, 0);
+        assert!(
+            bob.delivery_snapshot(GENERAL).is_empty(),
+            "Bob has sent nothing, so he has nothing to report"
+        );
+
         // …and *any* member may set it — Bob is not the owner and is not refused.
         assert_ne!(bob.my_role(), Role::Owner);
         bob.set_channel_topic(GENERAL, "bob was here")
             .await
             .unwrap();
         assert_eq!(bob.channel_topic(GENERAL), "bob was here");
+
+        // Bob's topic op necessarily builds on Alice's message, so once it reaches Alice she can
+        // prove he holds it.
+        assert!(alice.sync_once().await.unwrap());
+        assert_eq!(alice.channel_topic(GENERAL), "bob was here");
+        let snapshot = alice.delivery_snapshot(GENERAL);
+        assert_eq!(snapshot[0].delivered, 1, "Bob provably holds the message");
+        // `reachable` is the presence count, tracked independently — the in-memory hub models no
+        // connect/disconnect, so it stays 0 here even though delivery is proven. The two are not
+        // a fraction: a member can hold a message and be offline.
+        assert_eq!(snapshot[0].reachable, alice.online_members().len());
     }
 
     #[tokio::test]

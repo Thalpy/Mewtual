@@ -9,10 +9,10 @@
 //! latecomer converges without ever needing old epoch keys (forward secrecy is
 //! preserved) while still verifying each op's original authorship.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use automerge::{ActorId, AutoCommit};
+use automerge::{ActorId, AutoCommit, Change, ChangeHash};
 use catcoms_crypto::DeviceId;
 use catcoms_mls::{MlsDevice, ServerGroup};
 use catcoms_rt::CryptoRngCore;
@@ -21,6 +21,10 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
 
+/// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about — each
+/// target takes one bit of the propagation mask the single DAG pass carries.
+pub const MAX_DELIVERY_TARGETS: usize = 64;
+
 /// One encrypted, replicated CRDT document.
 pub struct EncryptedDoc {
     doc_type: DocType,
@@ -28,6 +32,14 @@ pub struct EncryptedDoc {
     doc: AutoCommit,
     log: Vec<SignedOp>,
     applied: HashSet<[u8; 32]>,
+    /// `automerge change hash → the device that signed the op carrying it`, for the delivery
+    /// query ([`EncryptedDoc::holders_of`]). Attribution comes from the **signed** op envelope,
+    /// not the change's automerge actor id, so a member cannot forge a change that looks like
+    /// another member's. Built lazily and incrementally from `log` (see `index_authors`), so a
+    /// caller that never asks about delivery pays nothing. Derived state — never persisted.
+    change_authors: HashMap<ChangeHash, DeviceId>,
+    /// How many entries of `log` are already reflected in `change_authors`.
+    authors_indexed: usize,
 }
 
 impl EncryptedDoc {
@@ -42,6 +54,8 @@ impl EncryptedDoc {
             doc,
             log: Vec::new(),
             applied: HashSet::new(),
+            change_authors: HashMap::new(),
+            authors_indexed: 0,
         }
     }
 
@@ -63,6 +77,85 @@ impl EncryptedDoc {
     /// Number of ops in this document's log.
     pub fn op_count(&self) -> usize {
         self.log.len()
+    }
+
+    /// Which devices **provably hold** each of `targets` (automerge change hashes), from the
+    /// document alone — the read-only half of the delivery-state query.
+    ///
+    /// A device `D` counts for target `C` when `D` authored some change whose causal history
+    /// contains `C`: `D` could not have built on `C` without holding it, and the change carrying
+    /// that proof is signed by `D`. This is the same predicate the design's `their_heads` route
+    /// describes ("the peer's confirmed heads causally include the op"), evaluated against
+    /// evidence already in the doc rather than against a sync session — CatComs replicates by
+    /// broadcasting sealed ops, so no per-peer automerge sync state exists to read.
+    ///
+    /// The result is *sound but incomplete*: a device that received `C` and has not written since
+    /// leaves no evidence and is simply absent. Callers must render absence as "unknown", never
+    /// as "not delivered". Returns one entry per element of `targets` (sorted, deduped); targets
+    /// past [`MAX_DELIVERY_TARGETS`] always come back empty.
+    pub fn holders_of(&mut self, targets: &[ChangeHash]) -> Vec<Vec<DeviceId>> {
+        let mut out = vec![Vec::new(); targets.len()];
+        let n = targets.len().min(MAX_DELIVERY_TARGETS);
+        if n == 0 {
+            return out;
+        }
+        self.index_authors();
+        let mut bit_of: HashMap<ChangeHash, u64> = HashMap::with_capacity(n);
+        for (i, h) in targets[..n].iter().enumerate() {
+            *bit_of.entry(*h).or_default() |= 1u64 << i;
+        }
+        // One pass over the change DAG. `get_changes_meta(&[])` yields every change in the order
+        // it entered the graph, and automerge only admits a change once all its dependencies are
+        // present — so dependencies are always visited before dependents and `carried` is complete
+        // by the time it is read. If that ever stopped holding, a dep would simply be missing from
+        // the map and the mask would lose a bit: an under-count (silence), never a false claim.
+        let mut carried: HashMap<ChangeHash, u64> = HashMap::new();
+        let mut by_device: HashMap<DeviceId, u64> = HashMap::new();
+        for meta in self.doc.get_changes_meta(&[]) {
+            let mut mask = bit_of.get(&meta.hash).copied().unwrap_or(0);
+            for dep in &meta.deps {
+                mask |= carried.get(dep).copied().unwrap_or(0);
+            }
+            if mask != 0 {
+                // Only changes at or after a target can carry bits, so the map stays proportional
+                // to the recent tail of history rather than to the whole document (a missing
+                // entry reads as 0, which is exactly what a pruned change means).
+                carried.insert(meta.hash, mask);
+                if let Some(device) = self.change_authors.get(&meta.hash) {
+                    *by_device.entry(*device).or_default() |= mask;
+                }
+            }
+        }
+        for (device, mask) in by_device {
+            for (i, slot) in out.iter_mut().enumerate().take(n) {
+                if mask & (1u64 << i) != 0 {
+                    slot.push(device);
+                }
+            }
+        }
+        for slot in &mut out {
+            slot.sort_unstable();
+        }
+        out
+    }
+
+    /// Bring `change_authors` up to date with `log`. Each op's `delta` is exactly the one
+    /// automerge change [`EncryptedDoc::edit_tracked`] produced, so parsing it recovers that
+    /// change's hash and pairs it with the op's signature-verified author. Incremental: every op
+    /// is parsed at most once, and only if a delivery query is ever made.
+    fn index_authors(&mut self) {
+        for i in self.authors_indexed..self.log.len() {
+            let (delta, author) = {
+                let op = &self.log[i];
+                (op.delta.clone(), op.author_device)
+            };
+            // A malformed or multi-change delta simply goes unattributed (it can still carry
+            // other members' evidence forward through the DAG pass; it just proves nothing).
+            if let Ok(change) = Change::from_bytes(delta) {
+                self.change_authors.insert(change.hash(), author);
+            }
+        }
+        self.authors_indexed = self.log.len();
     }
 
     /// Serialize this document for persistence (Phase 9d): the materialized automerge state
@@ -108,6 +201,8 @@ impl EncryptedDoc {
             doc,
             log,
             applied,
+            change_authors: HashMap::new(),
+            authors_indexed: 0,
         })
     }
 
@@ -123,18 +218,35 @@ impl EncryptedDoc {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
     {
+        self.edit_tracked(device, group, rng, edit).map(|(op, _)| op)
+    }
+
+    /// [`EncryptedDoc::edit`], also returning the **automerge change hash** the edit produced —
+    /// the stable, content-addressed handle a caller needs to later ask [`EncryptedDoc::holders_of`]
+    /// who has received this particular edit.
+    pub fn edit_tracked<F>(
+        &mut self,
+        device: &MlsDevice,
+        group: &ServerGroup,
+        rng: &mut impl CryptoRngCore,
+        edit: F,
+    ) -> Result<(SealedOp, ChangeHash), ReplError>
+    where
+        F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
+    {
         edit(&mut self.doc).map_err(|e| ReplError::Automerge(e.to_string()))?;
         self.doc.commit();
         let change = self
             .doc
             .get_last_local_change()
             .ok_or(ReplError::NoChange)?;
+        let hash = change.hash();
         let delta = change.raw_bytes().to_vec();
 
         let op = SignedOp::sign(device, self.doc_type, self.doc_id, delta)?;
         let sealed = SealedOp::seal(&op, group, device, rng)?;
         self.record(op);
-        Ok(sealed)
+        Ok((sealed, hash))
     }
 
     /// Decrypt, verify and apply an inbound sealed op. Returns `true` if it was

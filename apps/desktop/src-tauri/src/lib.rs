@@ -237,6 +237,33 @@ struct OnlineEvt {
     server: u64,
     online: Vec<String>,
 }
+/// Delivery state for one of this device's messages. `delivered` is evidence-based and one-sided:
+/// it counts members that have provably received the message, so `0` means "nothing proves it
+/// arrived yet", never "it failed". `reachable` is the presence count, and may be smaller than
+/// `delivered` (a member that got the message and then went offline still holds it).
+#[derive(Serialize, Clone)]
+struct DeliveryStateEvt {
+    id: String,
+    delivered: usize,
+    reachable: usize,
+}
+#[derive(Serialize, Clone)]
+struct DeliveryEvt {
+    server: u64,
+    channel: String,
+    states: Vec<DeliveryStateEvt>,
+}
+
+fn delivery_payload(states: Vec<catcoms_app::DeliveryState>) -> Vec<DeliveryStateEvt> {
+    states
+        .into_iter()
+        .map(|s| DeliveryStateEvt {
+            id: s.id,
+            delivered: s.delivered,
+            reachable: s.reachable,
+        })
+        .collect()
+}
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
 /// How often the bridge nudges a server's actor to drive steady-state rendezvous discovery. The
@@ -299,6 +326,16 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::ConnectivityChanged { online } => {
                     let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
+                }
+                AppEvent::DeliveryChanged { channel, states } => {
+                    let _ = app.emit(
+                        "delivery-changed",
+                        DeliveryEvt {
+                            server,
+                            channel: channel.to_string(),
+                            states: delivery_payload(states),
+                        },
+                    );
                 }
                 AppEvent::DmRequestsChanged => {
                     let _ = app.emit("dm-requests-changed", ServerEvt { server });
@@ -1211,6 +1248,20 @@ async fn get_online_members(state: State<'_, AppState>, server: u64) -> Result<V
     Ok(actor.online_members().await)
 }
 
+/// Delivery state for this device's recent messages in a channel — the seed a UI paints on open,
+/// before the throttled `delivery-changed` event next fires. Empty until this session sends a
+/// message (the message-id → change mapping is not persisted across a restart).
+#[tauri::command]
+async fn get_delivery(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+) -> Result<Vec<DeliveryStateEvt>, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    Ok(delivery_payload(actor.delivery_snapshot(id).await))
+}
+
 /// Per-DM activity stats (no message text) for the friends-list sortings, one entry per DM group.
 #[derive(Serialize, Clone)]
 struct DmStat {
@@ -1910,6 +1961,7 @@ pub fn run() {
             add_file,
             get_files,
             get_online_members,
+            get_delivery,
             dm_stats,
             send_dm_invite,
             get_dm_requests,

@@ -7,7 +7,7 @@ use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ReadDoc, ROOT};
 use catcoms_mls::{InviteLedger, MlsDevice, ServerGroup};
 use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
-use catcoms_sync::{ChannelSync, SyncError};
+use catcoms_sync::{fingerprint, ChannelSync, SyncError};
 use catcoms_wire::DocType;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -193,6 +193,69 @@ async fn bidirectional_gossip_converges() {
         assert_eq!(get_str(s, "from_a").as_deref(), Some("a"));
         assert_eq!(get_str(s, "from_b").as_deref(), Some("b"));
     }
+}
+
+#[tokio::test]
+async fn delivery_evidence_names_the_peer_that_built_on_a_change() {
+    catcoms_log::init_test();
+    let (mut asy, mut bsy, _, _) = pair();
+    asy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    bsy.open_channel(DocType::Channel, CHANNEL).await.unwrap();
+    let alice_fp = fingerprint(&asy.device_id());
+    let bob_fp = fingerprint(&bsy.device_id());
+
+    let change = asy
+        .post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "msg", "hi"))
+        .await
+        .unwrap();
+    // Publishing proves nothing: gossip is fire-and-forget, so until a peer writes on top of
+    // the change there is no evidence anyone received it.
+    assert!(asy
+        .peers_with_change(DocType::Channel, CHANNEL, change)
+        .is_empty());
+
+    // Bob ingests the op, then authors his own — which necessarily descends from Alice's.
+    assert!(bsy.run_once().await.unwrap());
+    assert_eq!(
+        bsy.peers_with_change(DocType::Channel, CHANNEL, change),
+        vec![alice_fp.clone()],
+        "from Bob's side only the change's own author is proven to hold it"
+    );
+    let bob_change = bsy
+        .post(DocType::Channel, CHANNEL, |d| d.put(ROOT, "reply", "got it"))
+        .await
+        .unwrap();
+    assert!(asy.run_once().await.unwrap());
+
+    assert_eq!(
+        asy.peers_with_change(DocType::Channel, CHANNEL, change),
+        vec![bob_fp.clone()],
+        "Bob's change builds on Alice's, so he provably holds it"
+    );
+    // Bob still has no evidence for his *own* op: Alice holds it but has not written on top of
+    // it, so nothing proves she did. Absence is "unknown", never "not delivered".
+    assert!(bsy
+        .peers_with_change(DocType::Channel, CHANNEL, bob_change)
+        .is_empty());
+    assert!(
+        !asy.peers_with_change(DocType::Channel, CHANNEL, change)
+            .contains(&alice_fp),
+        "the querying device never counts itself"
+    );
+
+    // A change the document doesn't hold, and an unopened document, both report nothing.
+    assert!(asy
+        .peers_with_change(DocType::Channel, CHANNEL, automerge::ChangeHash([9u8; 32]))
+        .is_empty());
+    assert!(asy
+        .peers_with_change(DocType::Channel, CHANNEL + 1, change)
+        .is_empty());
+
+    // The batch form answers the whole set in one pass, index-aligned with its input.
+    let batch = asy.peers_with_changes(DocType::Channel, CHANNEL, &[change, bob_change]);
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0], vec![bob_fp.clone()]);
+    assert_eq!(batch[1], vec![bob_fp], "Bob authored it, and he is not us");
 }
 
 #[tokio::test]

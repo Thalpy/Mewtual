@@ -27,7 +27,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 
-use automerge::{AutoCommit, AutomergeError};
+use automerge::{AutoCommit, AutomergeError, ChangeHash};
 use bytes::Bytes;
 use catcoms_crypto::{seal, unseal, verify_with_public_bytes, DeviceId, SealedBlob};
 use catcoms_discovery::{
@@ -1975,7 +1975,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             d.put(ROOT, roles::ROSTER_KEY, ScalarValue::Bytes(value))?;
             Ok(())
         })
-        .await
+        .await?;
+        Ok(())
     }
 
     /// Sign a blob with this device's signature key (for owner-signed capability records like
@@ -2132,19 +2133,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.resync_subscriptions().await
     }
 
-    /// Apply a local edit to a document and broadcast the resulting sealed op.
+    /// Apply a local edit to a document and broadcast the resulting sealed op. Returns the
+    /// **automerge change hash** of the edit — the handle [`ChannelSync::peers_with_change`]
+    /// takes to report who has since proved they hold it. Callers that don't track delivery
+    /// simply drop it.
     pub async fn post<F>(
         &mut self,
         doc_type: DocType,
         doc_id: u128,
         edit: F,
-    ) -> Result<(), SyncError>
+    ) -> Result<ChangeHash, SyncError>
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
         let key = (doc_type, doc_id);
         let doc = self.docs.get_mut(&key).ok_or(SyncError::NoSuchDoc)?;
-        let sealed = doc.edit(&self.device, &self.group, &mut self.rng, edit)?;
+        let (sealed, change) = doc.edit_tracked(&self.device, &self.group, &mut self.rng, edit)?;
         // Publish on the current routing label's channel topic.
         let topic = self
             .channel_topic_for(doc_type, doc_id, self.routing_label)
@@ -2158,7 +2162,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             "post op"
         );
         self.transport.publish(topic, Bytes::from(bytes)).await?;
-        Ok(())
+        Ok(change)
     }
 
     /// Process one inbound transport event (gossiped op, membership commit, or a
@@ -2983,6 +2987,67 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         fps.into_iter().collect()
+    }
+
+    /// The current members that **provably hold** `change` in `(doc_type, doc_id)`, as sorted
+    /// fingerprints — the delivery-state query (`docs/design-delivery-states.md`, D1).
+    ///
+    /// The design's primary route (read each peer's confirmed heads out of an automerge
+    /// `sync::State`) does not exist here and its documented fallback ("outgoing sync reports
+    /// nothing pending toward them") does not either: CatComs does not run automerge's sync
+    /// protocol. Ops are sealed, signed and **broadcast** on a blinded gossip topic
+    /// ([`ChannelSync::post`]), and a lagging member pulls the whole signed-op log over
+    /// request/response — so there is no per-peer, per-doc sync session to interrogate, and
+    /// publishing tells us nothing about who received anything.
+    ///
+    /// What the document itself proves is used instead: a member counts when it authored a
+    /// change that causally descends from `change` (see [`EncryptedDoc::holders_of`]). That is
+    /// the design's own predicate — "the peer's heads causally include the op" — backed by the
+    /// peer's *signature* rather than by its self-report, so it is if anything harder to lie
+    /// with. It is one-sided: a member that received `change` and has not written since is
+    /// indistinguishable from one that never got it, so **absence means "unknown", not "not
+    /// delivered"**, and the count only ever rises. The local device is excluded (it authored
+    /// the change), as is any device no longer on the roster.
+    ///
+    /// Nothing here is persisted: the evidence lives in the replicated document, so it survives
+    /// restart, but the caller's `message id → change hash` mapping does not (see the app layer).
+    pub fn peers_with_change(
+        &mut self,
+        doc_type: DocType,
+        doc_id: u128,
+        change: ChangeHash,
+    ) -> Vec<String> {
+        self.peers_with_changes(doc_type, doc_id, &[change])
+            .pop()
+            .unwrap_or_default()
+    }
+
+    /// [`ChannelSync::peers_with_change`] for many changes at once — one pass over the document's
+    /// change graph for the whole batch, which is what makes a per-tick delivery snapshot cheap.
+    /// Returns one entry per element of `changes`.
+    pub fn peers_with_changes(
+        &mut self,
+        doc_type: DocType,
+        doc_id: u128,
+        changes: &[ChangeHash],
+    ) -> Vec<Vec<String>> {
+        let own = self.device.device_id();
+        let Some(doc) = self.docs.get_mut(&(doc_type, doc_id)) else {
+            return vec![Vec::new(); changes.len()];
+        };
+        doc.holders_of(changes)
+            .into_iter()
+            .map(|devices| {
+                let mut fps: Vec<String> = devices
+                    .into_iter()
+                    .filter(|d| *d != own && self.group.contains_device(d))
+                    .map(|d| roles::fingerprint(&d))
+                    .collect();
+                fps.sort_unstable();
+                fps.dedup();
+                fps
+            })
+            .collect()
     }
 
     /// Test-only: drive the live-connection set without a real transport (the in-memory transport

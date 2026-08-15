@@ -21,11 +21,17 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, FileEntry, FilesView, InboxItem, Livery, MemberView, MessageStats, Profile, Server,
+    ChatMessage, DeliveryState, FileEntry, FilesView, InboxItem, Livery, MemberView, MessageStats,
+    Profile, Server,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
+/// Minimum gap between delivery snapshots for one channel (ms, on the injected clock). Delivery
+/// evidence is derived by walking the channel document's change graph, so it is recomputed on a
+/// timer rather than on every inbound op — and the event only fires when the result actually
+/// changed.
+const DELIVERY_THROTTLE_MS: u64 = 1_000;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
 const MAX_DISCOVERED_PER_TICK: usize = 16;
 
@@ -149,6 +155,12 @@ pub enum AppCommand {
     FilesView { reply: oneshot::Sender<FilesView> },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    /// Query delivery state for this device's recent messages in a channel, so a UI can paint it
+    /// on open instead of waiting for the next throttled `DeliveryChanged`.
+    DeliverySnapshot {
+        channel: u128,
+        reply: oneshot::Sender<Vec<DeliveryState>>,
+    },
     /// Query pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
     DmRequests {
         reply: oneshot::Sender<Vec<(String, String, Vec<u8>)>>,
@@ -294,6 +306,13 @@ pub enum AppEvent {
     /// The set of members reachable right now (a live connection) changed — `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
+    /// Delivery state changed for this device's recent messages in `channel` (oldest first).
+    /// Recomputed at most once a second per channel and emitted only on a real change, so a UI
+    /// can render it directly without polling.
+    DeliveryChanged {
+        channel: u128,
+        states: Vec<DeliveryState>,
+    },
     /// The set of pending incoming DM (friend) requests changed — the UI should re-fetch them.
     DmRequestsChanged,
     /// An inbound call-signalling message arrived: `(sender fingerprint, opaque payload)`. One event
@@ -758,6 +777,20 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    /// Fetch delivery state for this device's recent messages in a channel (oldest first).
+    pub async fn delivery_snapshot(&self, channel: u128) -> Vec<DeliveryState> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeliverySnapshot { channel, reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Fetch pending incoming DM (friend) requests: `(sender fp, sender name, invite bytes)`.
     pub async fn dm_requests(&self) -> Vec<(String, String, Vec<u8>)> {
         let (reply, rx) = oneshot::channel();
@@ -1107,6 +1140,9 @@ where
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
         let mut last_dm_requests = server.dm_requests();
+        // Per channel: when delivery state was last recomputed, and what it was — the throttle
+        // plus the change detector for `DeliveryChanged`.
+        let mut delivery: HashMap<u128, (u64, Vec<DeliveryState>)> = HashMap::new();
         loop {
             tokio::select! {
                 biased;
@@ -1297,6 +1333,9 @@ where
                     }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
+                    }
+                    Some(AppCommand::DeliverySnapshot { channel, reply }) => {
+                        let _ = reply.send(server.delivery_snapshot(channel));
                     }
                     Some(AppCommand::DmRequests { reply }) => {
                         let _ = reply.send(server.dm_requests());
@@ -1546,6 +1585,27 @@ where
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
                                 .await;
+                        }
+                        // Delivery: a peer's inbound op may be the evidence that it received one of
+                        // our messages. Recomputing walks the channel's change graph, so it is
+                        // rate-limited per channel; the event then fires only on a real change.
+                        for channel in counts.keys().copied().collect::<Vec<_>>() {
+                            let now = server.now_ms();
+                            if let Some((at, _)) = delivery.get(&channel) {
+                                if now.saturating_sub(*at) < DELIVERY_THROTTLE_MS {
+                                    continue;
+                                }
+                            }
+                            let states = server.delivery_snapshot(channel);
+                            let changed = match delivery.insert(channel, (now, states.clone())) {
+                                Some((_, previous)) => previous != states,
+                                None => !states.is_empty(),
+                            };
+                            if changed {
+                                let _ = event_tx
+                                    .send(AppEvent::DeliveryChanged { channel, states })
+                                    .await;
+                            }
                         }
                         // A DM (friend) request may have arrived over this group — surface a change.
                         if dm_requests_changed(&server, &mut last_dm_requests) {
