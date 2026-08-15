@@ -4056,3 +4056,113 @@ button.you-panel:hover {
 .event-row.flash {
   animation: flashPulse 1.5s ease-out;
 }
+
+/* --- Unlock minigames (lock screen) --- */
+.ul-tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.ul-tabs button {
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  padding: 0.3rem 0.8rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ul-tabs button:hover { background: transparent; color: var(--text); }
+.ul-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+.ul-rec {
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ok);
+  border: 1px solid color-mix(in oklab, var(--ok) 40%, transparent);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+.spell-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+.spell-glyph {
+  font-size: 1.3rem;
+  padding: 0.45rem 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  line-height: 1;
+}
+.spell-glyph:hover { background: var(--bg-elev); border-color: var(--accent); }
+.piano {
+  display: flex;
+  gap: 3px;
+}
+.piano-key {
+  flex: 1;
+  padding: 1.4rem 0 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  background: var(--bg-elev);
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 0 0 var(--r) var(--r);
+}
+.piano-key.sharp {
+  background: var(--bg-0);
+  color: var(--muted);
+  margin: 0 -6px;
+  z-index: 1;
+  flex: 0.72;
+  padding-top: 0.6rem;
+  align-self: flex-start;
+  border-radius: 0 0 var(--r) var(--r);
+}
+.piano-key:hover { border-color: var(--accent); background: var(--accent-dim); }
+.ul-seq {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  flex-wrap: wrap;
+}
+.ul-seq-chips {
+  display: inline-flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+.ul-seq-chips span {
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  padding: 1px 6px;
+  font-size: 0.9rem;
+}
+.ul-seq-chips.mono span {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-2);
+}
+.ul-meter {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ul-meter.ok { color: var(--ok); }
+.ul-meter.warn { color: var(--warn); }
+.ul-meter.danger { color: var(--danger); }
+.ul-midi {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  color: var(--info);
+}

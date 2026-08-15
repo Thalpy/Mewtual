@@ -391,6 +391,85 @@
   let passphrase = $state("");
   let unlocking = $state(false);
 
+  // --- Unlock minigames -----------------------------------------------------------------
+  // Input surfaces ONLY: every method deterministically encodes to a scheme-prefixed string
+  // that feeds the SAME vault KDF ("unlock" invoke) — the vault crypto is untouched, and a
+  // passphrase remains the recommended, highest-entropy option. The scheme prefix means the
+  // same finger pattern on different games can never collide into the same secret.
+  type UnlockMethod = "pass" | "spell" | "melody";
+  let unlockMethod = $state<UnlockMethod>("pass");
+  // Spell lock: glyphs picked in order from a fixed catalog, encoded by INDEX (stable even
+  // if the glyph art changes): "spell:v1:3-17-9-…". ~4.6 bits per pick.
+  const SPELL_GLYPHS = ["🐱", "🌙", "⭐", "🔥", "❄️", "🍀", "🗝️", "🕯️", "💀", "🌿", "🍄", "⚡", "🌊", "🪶", "🔔", "🫧", "🦴", "🌸", "☄️", "🐟", "🧶", "🪙", "🎐", "🕸️"];
+  let spellSeq = $state<number[]>([]);
+  let spellSecret = $derived(spellSeq.length ? `spell:v1:${spellSeq.join("-")}` : "");
+  let spellBits = $derived(Math.round(spellSeq.length * Math.log2(SPELL_GLYPHS.length)));
+  // Melody lock: pitch-classes (octave-folded), so the on-screen keys, the computer keyboard
+  // and a MIDI controller all produce the same secret: "melody:v1:0-4-7-…". ~3.6 bits/note.
+  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  let melodySeq = $state<number[]>([]);
+  let melodySecret = $derived(melodySeq.length ? `melody:v1:${melodySeq.join("-")}` : "");
+  let melodyBits = $derived(Math.round(melodySeq.length * Math.log2(12)));
+  function bitsTier(b: number): "danger" | "warn" | "ok" {
+    return b >= 44 ? "ok" : b >= 28 ? "warn" : "danger";
+  }
+  // A small synth so the keys sing (its own context — the notification chime has one too).
+  let synthCtx: AudioContext | null = null;
+  function playPc(pc: number) {
+    try {
+      synthCtx ??= new AudioContext();
+      const o = synthCtx.createOscillator();
+      const g = synthCtx.createGain();
+      o.type = "triangle";
+      o.frequency.value = 261.63 * Math.pow(2, pc / 12); // C4-rooted
+      g.gain.setValueAtTime(0.16, synthCtx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.0001, synthCtx.currentTime + 0.35);
+      o.connect(g).connect(synthCtx.destination);
+      o.start();
+      o.stop(synthCtx.currentTime + 0.4);
+    } catch {
+      /* no audio output — the note still registers */
+    }
+  }
+  function pressNote(pc: number) {
+    melodySeq = [...melodySeq, pc];
+    playPc(pc);
+  }
+  // DAW-style computer-keyboard mapping while the melody tab is up (a=C … j=B, k=C again).
+  const KEY_TO_PC: Record<string, number> = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 0 };
+  // Web MIDI (Chromium/WebView2): a connected controller feeds the same pitch-class handler,
+  // so you can literally play your unlock tune. Feature-detected; denied/absent is fine.
+  let midiName = $state("");
+  let midiTried = false;
+  async function initMidi() {
+    if (midiTried) return;
+    midiTried = true;
+    try {
+      const nav = navigator as Navigator & { requestMIDIAccess?: () => Promise<MIDIAccess> };
+      if (!nav.requestMIDIAccess) return;
+      const access = await nav.requestMIDIAccess();
+      const wire = () => {
+        let name = "";
+        for (const input of access.inputs.values()) {
+          name = input.name ?? "MIDI device";
+          input.onmidimessage = (m: MIDIMessageEvent) => {
+            const d = m.data;
+            if (!d || d.length < 3) return;
+            if ((d[0] & 0xf0) === 0x90 && d[2] > 0 && locked && unlockMethod === "melody") pressNote(d[1] % 12);
+          };
+        }
+        midiName = name;
+      };
+      access.onstatechange = wire;
+      wire();
+    } catch {
+      midiName = ""; // permission denied or no MIDI subsystem — on-screen keys remain
+    }
+  }
+  function unlockSecret(): string {
+    return unlockMethod === "pass" ? passphrase : unlockMethod === "spell" ? spellSecret : melodySecret;
+  }
+
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
@@ -1500,11 +1579,15 @@
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
-  async function unlock() {
+  async function unlock(secret = unlockSecret()) {
+    if (!secret) return;
     unlocking = true;
     error = "";
     try {
-      const reloaded = await invoke<Reloaded[]>("unlock", { passphrase });
+      const reloaded = await invoke<Reloaded[]>("unlock", { passphrase: secret });
+      passphrase = "";
+      spellSeq = [];
+      melodySeq = [];
       for (const r of reloaded) {
         servers = [
           ...servers,
@@ -3755,6 +3838,25 @@
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
     const onKey = (e: KeyboardEvent) => {
+      // Melody unlock: the home row is a piano while the lock screen's melody tab is up.
+      if (locked && unlockMethod === "melody" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const pc = KEY_TO_PC[e.key.toLowerCase()];
+        if (pc !== undefined) {
+          e.preventDefault();
+          pressNote(pc);
+          return;
+        }
+        if (e.key === "Backspace") {
+          e.preventDefault();
+          melodySeq = melodySeq.slice(0, -1);
+          return;
+        }
+        if (e.key === "Enter" && melodySeq.length) {
+          e.preventDefault();
+          unlock();
+          return;
+        }
+      }
       if (e.key === "Escape") {
         if (showQuickSwitch) closeQuickSwitch();
         else if (verifyFor) verifyFor = null;
@@ -4154,22 +4256,82 @@
     <div class="start">
       <h1>CatComs</h1>
       <p class="muted">
-        Enter your passphrase to unlock your servers. On first run, the passphrase you
-        choose here encrypts everything at rest — there is no recovery if you forget it.
+        Unlock your servers — with a passphrase, a spell, or a tune. All three seal the
+        same vault; pick the one you'll actually remember.
       </p>
-      <label class="field">
-        <span class="muted">Passphrase</span>
-        <!-- svelte-ignore a11y_autofocus -->
-        <input
-          type="password"
-          bind:value={passphrase}
-          onkeydown={(e) => e.key === "Enter" && passphrase && unlock()}
-          placeholder="passphrase"
-          autofocus
-        />
-      </label>
+      <div class="ul-tabs" role="tablist">
+        <button type="button" role="tab" class:active={unlockMethod === "pass"} aria-selected={unlockMethod === "pass"} onclick={() => (unlockMethod = "pass")}>
+          Passphrase <span class="ul-rec">recommended</span>
+        </button>
+        <button type="button" role="tab" class:active={unlockMethod === "spell"} aria-selected={unlockMethod === "spell"} onclick={() => (unlockMethod = "spell")}>Spell</button>
+        <button type="button" role="tab" class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; initMidi(); }}>Melody</button>
+      </div>
+      {#if unlockMethod === "pass"}
+        <label class="field">
+          <span class="muted">Passphrase</span>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            type="password"
+            bind:value={passphrase}
+            onkeydown={(e) => e.key === "Enter" && passphrase && unlock()}
+            placeholder="passphrase"
+            autofocus
+          />
+        </label>
+      {:else if unlockMethod === "spell"}
+        <p class="muted small">
+          Cast your unlock spell — the same glyphs, in the same order, every time. Memorable,
+          but weaker than a good passphrase; longer spells are stronger.
+        </p>
+        <div class="spell-grid">
+          {#each SPELL_GLYPHS as g, i (i)}
+            <button type="button" class="spell-glyph" title={`glyph ${i + 1}`} onclick={() => (spellSeq = [...spellSeq, i])}>{g}</button>
+          {/each}
+        </div>
+        <div class="ul-seq">
+          {#if spellSeq.length}
+            <span class="ul-seq-chips">{#each spellSeq as s, i (i)}<span>{SPELL_GLYPHS[s]}</span>{/each}</span>
+            <button type="button" class="ghost small" title="Remove the last glyph" onclick={() => (spellSeq = spellSeq.slice(0, -1))}>⌫</button>
+            <button type="button" class="ghost small" onclick={() => (spellSeq = [])}>Clear</button>
+          {:else}
+            <span class="muted small">Nothing cast yet.</span>
+          {/if}
+        </div>
+        {#if spellSeq.length}
+          <div class="ul-meter {bitsTier(spellBits)}">≈ {spellBits} bits{spellBits < 28 ? " — too short, add more glyphs" : spellBits < 44 ? " — okay; longer is stronger" : " — strong"}</div>
+        {/if}
+      {:else}
+        <p class="muted small">
+          Play your unlock tune — notes fold to one octave, so the on-screen keys, the
+          <span class="fp">a w s e d f t g y h u j</span> row, and a MIDI keyboard all match.
+          Avoid famous tunes; they're guessable.
+        </p>
+        <div class="piano">
+          {#each NOTE_NAMES as n, pc (pc)}
+            <button type="button" class="piano-key" class:sharp={n.includes("#")} title={n} onclick={() => pressNote(pc)}>{n}</button>
+          {/each}
+        </div>
+        <div class="ul-seq">
+          {#if melodySeq.length}
+            <span class="ul-seq-chips mono">{#each melodySeq as pc, i (i)}<span>{NOTE_NAMES[pc]}</span>{/each}</span>
+            <button type="button" class="ghost small" title="Remove the last note (Backspace)" onclick={() => (melodySeq = melodySeq.slice(0, -1))}>⌫</button>
+            <button type="button" class="ghost small" onclick={() => (melodySeq = [])}>Clear</button>
+          {:else}
+            <span class="muted small">No notes yet.</span>
+          {/if}
+        </div>
+        {#if melodySeq.length}
+          <div class="ul-meter {bitsTier(melodyBits)}">≈ {melodyBits} bits{melodyBits < 28 ? " — too short, keep playing" : melodyBits < 44 ? " — okay; longer is stronger" : " — strong"}</div>
+        {/if}
+        {#if midiName}<div class="ul-midi">⌁ MIDI: {midiName}</div>{/if}
+      {/if}
       {#if error}<p class="error">{error}</p>{/if}
-      <button onclick={unlock} disabled={unlocking || !passphrase}>
+      <p class="muted small">
+        First run: whatever you enter here <em>becomes</em> the vault secret — practice your
+        sequence before committing, and prefer a passphrase for the strongest protection.
+        There is no recovery.
+      </p>
+      <button onclick={() => unlock()} disabled={unlocking || !unlockSecret()}>
         {unlocking ? "Unlocking…" : "Unlock"}
       </button>
     </div>
