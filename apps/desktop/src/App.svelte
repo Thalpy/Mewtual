@@ -988,6 +988,59 @@
   function fmtFp(fp: string): string {
     return (fp.match(/.{1,4}/g) ?? [fp]).join(" ");
   }
+
+  // Admin-assigned member badges (shared doc; untrusted on read like everything else).
+  // Reserved role names are rejected by the backend AND ignored here in case one predates
+  // that gate; colours must be #rrggbb or the badge renders in the default chrome colour.
+  type MemberBadge = { label: string; color: string };
+  const RESERVED_BADGES = new Set(["owner", "admin", "mod", "moderator"]);
+  let badges = $state<Record<string, MemberBadge>>({});
+  function sanitizeBadge(b: MemberBadge): MemberBadge | null {
+    const label = (b.label ?? "").trim();
+    if (!label || label.length > 24 || RESERVED_BADGES.has(label.toLowerCase())) return null;
+    const color = HEX_COLOR.test(b.color ?? "") ? b.color : "";
+    return { label, color };
+  }
+  async function refreshBadges() {
+    if (activeServerId === null) {
+      badges = {};
+      return;
+    }
+    try {
+      const raw = await invoke<Record<string, MemberBadge>>("get_badges", { server: activeServerId });
+      const map: Record<string, MemberBadge> = {};
+      for (const [fp, b] of Object.entries(raw)) {
+        const ok = sanitizeBadge(b);
+        if (ok) map[fp] = ok;
+      }
+      badges = map;
+    } catch {
+      badges = {};
+    }
+  }
+  // The badge editor row in Server settings (admin-only affordance).
+  let badgeEditFp = $state("");
+  let badgeLabelDraft = $state("");
+  let badgeColorDraft = $state("#6ca0d8");
+  function openBadgeEditor(fp: string) {
+    badgeEditFp = fp;
+    badgeLabelDraft = badges[fp]?.label ?? "";
+    badgeColorDraft = badges[fp]?.color || "#6ca0d8";
+  }
+  async function saveBadge(fp: string, label: string, color: string) {
+    if (activeServerId === null) return;
+    if (RESERVED_BADGES.has(label.trim().toLowerCase())) {
+      error = `"${label.trim()}" is in use already (reserved for roles).`;
+      return;
+    }
+    try {
+      await invoke("set_member_badge", { server: activeServerId, fp, label: label.trim(), color });
+      badgeEditFp = "";
+      await refreshBadges();
+    } catch (e) {
+      error = String(e);
+    }
+  }
   // Font/effect ids are opaque strings in the profile document (the backend stores them
   // verbatim), so a value from a peer on a newer build is tolerated: an unknown font falls
   // back to the system face, an unknown effect to a class with no rule (i.e. plain text).
@@ -1494,6 +1547,7 @@
       refreshLivery(),
       refreshTopic(),
       refreshDelivery(),
+      refreshBadges(),
     ]);
     syncProfileEditor();
   }
@@ -3401,6 +3455,9 @@
         if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
         for (const s of e.payload.states) delivery[s.id] = s;
       }),
+      listen<{ server: number }>("badges-changed", (e) => {
+        if (e.payload.server === activeServerId) refreshBadges();
+      }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
         // A friend request may have arrived over ANY server (active or not) — refresh that server's.
         refreshDmRequests(e.payload.server);
@@ -3548,6 +3605,10 @@
     </button>
     {#if !m.you && verifiedFps.has(m.fingerprint)}
       <span class="vf-check" title="You verified this member out of band">✓</span>
+    {/if}
+    {#if badges[m.fingerprint]}
+      {@const b = badges[m.fingerprint]}
+      <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
     {/if}
     {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
       <span class="role-badge {roles[m.fingerprint]}" title={roles[m.fingerprint]}>{roleAbbr(roles[m.fingerprint])}</span>
@@ -4942,6 +5003,10 @@
                   {#if roles[fp] && roles[fp] !== "member"}<span class="role-badge {roles[fp]}">{roles[fp]}</span>{/if}
                   {#if fp === myFp}<span class="you-badge">you</span>{/if}
                   {#if fp !== myFp && verifiedFps.has(fp)}<span class="vf-check" title="You verified this member out of band">✓ verified</span>{/if}
+                  {#if badges[fp]}
+                    {@const b = badges[fp]}
+                    <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
+                  {/if}
                   <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "online" : "offline"}</span>
                 </div>
               </div>
@@ -5298,6 +5363,15 @@
                     {@render avatarTag(m.fingerprint)}
                     {@render nameTag(m.fingerprint)}
                     <span class="role-badge {r}">{r}</span>
+                    {#if badges[m.fingerprint]}
+                      {@const b = badges[m.fingerprint]}
+                      <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""}>{b.label}</span>
+                    {/if}
+                    {#if canModerate}
+                      <button class="ghost small" onclick={() => (badgeEditFp === m.fingerprint ? (badgeEditFp = "") : openBadgeEditor(m.fingerprint))}>
+                        {badges[m.fingerprint] ? "Edit badge" : "Badge…"}
+                      </button>
+                    {/if}
                     {#if myRole === "owner" && !m.you && r !== "owner"}
                       {#if r === "admin"}
                         <button class="ghost small" onclick={() => setAdmin(m.fingerprint, false)}>Remove admin</button>
@@ -5311,6 +5385,22 @@
                       {/if}
                     {/if}
                   </li>
+                  {#if badgeEditFp === m.fingerprint && canModerate}
+                    <li class="badge-editor">
+                      <input
+                        class="badge-label"
+                        bind:value={badgeLabelDraft}
+                        maxlength="24"
+                        placeholder="Badge text (e.g. ARTIST) — role names are taken"
+                        onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveBadge(m.fingerprint, badgeLabelDraft, badgeColorDraft); } else if (e.key === "Escape") { e.preventDefault(); badgeEditFp = ""; } }}
+                      />
+                      <input type="color" class="accent-custom" title="Badge colour" aria-label="Badge colour" bind:value={badgeColorDraft} />
+                      <button class="ghost small" disabled={!badgeLabelDraft.trim()} onclick={() => saveBadge(m.fingerprint, badgeLabelDraft, badgeColorDraft)}>Save</button>
+                      {#if badges[m.fingerprint]}
+                        <button class="ghost small danger-btn" onclick={() => saveBadge(m.fingerprint, "", "")}>Remove badge</button>
+                      {/if}
+                    </li>
+                  {/if}
                 {/each}
               </ul>
               <p class="muted small">
