@@ -187,6 +187,19 @@ struct UiBadge {
     color: String,
 }
 
+/// One scheduled server event as serialized to the frontend. `start_ts`/`end_ts` are epoch-millis
+/// (`end_ts == 0` = no end time) and `author` is the creator's device fingerprint, resolved to a
+/// display name via the profiles map exactly like a message author.
+#[derive(Serialize, Clone)]
+struct UiEvent {
+    id: String,
+    title: String,
+    body: String,
+    start_ts: u64,
+    end_ts: u64,
+    author: String,
+}
+
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
 /// download it.
 #[derive(Serialize, Clone)]
@@ -331,6 +344,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::StatusUpdated => {
                     let _ = app.emit("status-updated", ServerEvt { server });
+                }
+                AppEvent::EventsUpdated => {
+                    let _ = app.emit("events-changed", ServerEvt { server });
                 }
                 AppEvent::WikiUpdated => {
                     let _ = app.emit("wiki-updated", ServerEvt { server });
@@ -939,6 +955,7 @@ async fn join_server(
     actor.catch_up_badges(inviter).await;
     actor.catch_up_files(inviter).await;
     actor.catch_up_status(inviter).await;
+    actor.catch_up_calendar(inviter).await;
     actor.catch_up_wiki(inviter).await;
     actor.catch_up_roles(inviter).await;
     // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
@@ -1566,6 +1583,53 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .collect())
 }
 
+/// Create a server event; re-seals the server. **Any member may** — an event is server content,
+/// like a channel or a status post. Rejected with a message when the title is blank or over 120
+/// UTF-8 bytes, the body is over 1024, or the end time precedes the start (`endTs: 0` = no end).
+/// An `events-changed` event follows, so the UI re-reads the calendar.
+#[tauri::command]
+async fn create_event(
+    state: State<'_, AppState>,
+    server: u64,
+    title: String,
+    body: String,
+    start_ts: u64,
+    end_ts: u64,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.create_event(title, body, start_ts, end_ts).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Delete a server event by id (its author, or an owner/admin); re-seals the server.
+#[tauri::command]
+async fn delete_event(state: State<'_, AppState>, server: u64, id: String) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.delete_event(id).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// The server's events, sorted by start time ascending.
+#[tauri::command]
+async fn get_events(state: State<'_, AppState>, server: u64) -> Result<Vec<UiEvent>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .events()
+        .await
+        .into_iter()
+        .map(|e| UiEvent {
+            id: e.id,
+            title: e.title,
+            body: e.body,
+            start_ts: e.start_ts,
+            end_ts: e.end_ts,
+            author: e.author,
+        })
+        .collect())
+}
+
 /// The wiki page names (sorted).
 #[tauri::command]
 async fn get_wiki_pages(state: State<'_, AppState>, server: u64) -> Result<Vec<String>, String> {
@@ -2061,6 +2125,9 @@ pub fn run() {
             delete_file,
             post_status,
             get_statuses,
+            create_event,
+            delete_event,
+            get_events,
             get_wiki_pages,
             get_wiki_map,
             get_wiki_page,

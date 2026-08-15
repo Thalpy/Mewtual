@@ -22,7 +22,7 @@ use catcoms_storage::Cid;
 
 use crate::{
     ChatMessage, DeliveryState, FileEntry, FilesView, InboxItem, Livery, MemberBadge, MemberView,
-    MessageStats, Profile, Server,
+    MessageStats, Profile, Server, ServerEvent,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -234,6 +234,25 @@ pub enum AppCommand {
     },
     /// Pull the status feed from `peer` (e.g. right after joining).
     CatchUpStatus { peer: PeerId },
+    /// Create a server event (any member); replies with its id, or a validation error.
+    CreateEvent {
+        title: String,
+        body: String,
+        start_ts: u64,
+        end_ts: u64,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Delete a server event by id (its author, or an owner/admin).
+    DeleteEvent {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query the server events, sorted by start time ascending.
+    Events {
+        reply: oneshot::Sender<Vec<ServerEvent>>,
+    },
+    /// Pull the calendar document from `peer` (e.g. right after joining).
+    CatchUpCalendar { peer: PeerId },
     /// Query the wiki page names (sorted).
     WikiPages { reply: oneshot::Sender<Vec<String>> },
     /// Query the whole wiki as a name -> body map (for backlinks / link existence).
@@ -316,6 +335,8 @@ pub enum AppEvent {
     FilesUpdated,
     /// The status feed changed — the UI should re-fetch it (`statuses`).
     StatusUpdated,
+    /// The server events (calendar) changed — the UI should re-fetch them (`events`).
+    EventsUpdated,
     /// The wiki changed — the UI should re-fetch pages / the open page.
     WikiUpdated,
     /// Member roles changed — the UI should re-fetch roles.
@@ -1038,6 +1059,67 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpStatus { peer }).await;
     }
 
+    /// Create a server event (any member); replies with its id. An `EventsUpdated` event follows
+    /// on success.
+    pub async fn create_event(
+        &self,
+        title: String,
+        body: String,
+        start_ts: u64,
+        end_ts: u64,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::CreateEvent {
+                title,
+                body,
+                start_ts,
+                end_ts,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Delete a server event by id (its author, or an owner/admin). An `EventsUpdated` event
+    /// follows on success.
+    pub async fn delete_event(&self, id: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeleteEvent { id, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch the server events, sorted by start time ascending.
+    pub async fn events(&self) -> Vec<ServerEvent> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Events { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the calendar document from `peer`.
+    pub async fn catch_up_calendar(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpCalendar { peer }).await;
+    }
+
     /// Fetch the wiki page names (sorted).
     pub async fn wiki_pages(&self) -> Vec<String> {
         let (reply, rx) = oneshot::channel();
@@ -1210,6 +1292,11 @@ where
             tracing::warn!(error = %e, "open_status failed");
         }
         let mut status_count = server.statuses().len();
+        // …and the calendar, so the server's scheduled events reach this client.
+        if let Err(e) = server.open_calendar().await {
+            tracing::warn!(error = %e, "open_calendar failed");
+        }
+        let mut last_events = server.events();
         // …and the wiki.
         if let Err(e) = server.open_wiki().await {
             tracing::warn!(error = %e, "open_wiki failed");
@@ -1557,6 +1644,34 @@ where
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
+                    Some(AppCommand::CreateEvent { title, body, start_ts, end_ts, reply }) => {
+                        let res = server
+                            .create_event(&title, &body, start_ts, end_ts)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if events_changed(&server, &mut last_events) {
+                            let _ = event_tx.send(AppEvent::EventsUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::DeleteEvent { id, reply }) => {
+                        let res = server.delete_event(&id).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if events_changed(&server, &mut last_events) {
+                            let _ = event_tx.send(AppEvent::EventsUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Events { reply }) => {
+                        let _ = reply.send(server.events());
+                    }
+                    Some(AppCommand::CatchUpCalendar { peer }) => {
+                        if let Err(e) = server.request_calendar_catchup(peer).await {
+                            tracing::warn!(error = %e, "calendar catch-up failed");
+                        }
+                        if events_changed(&server, &mut last_events) {
+                            let _ = event_tx.send(AppEvent::EventsUpdated).await;
+                        }
+                    }
                     Some(AppCommand::WikiPages { reply }) => {
                         let _ = reply.send(server.wiki_pages());
                     }
@@ -1689,6 +1804,9 @@ where
                         if status_changed(&server, &mut status_count) {
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
+                        if events_changed(&server, &mut last_events) {
+                            let _ = event_tx.send(AppEvent::EventsUpdated).await;
+                        }
                         if wiki_changed(&server, &mut last_wiki) {
                             let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
@@ -1815,6 +1933,24 @@ where
     let n = server.statuses().len();
     if *last != n {
         *last = n;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the server events changed since last seen (updating the record). A count alone would
+/// miss a concurrent create+delete converging in one tick, so this compares the full list — which
+/// `Server::events` already returns in a deterministic order, and whose entries are size-bounded
+/// (`MAX_EVENT_TITLE_BYTES` / `MAX_EVENT_BODY_BYTES`).
+fn events_changed<T, R>(server: &Server<T, R>, last: &mut Vec<ServerEvent>) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.events();
+    if now != *last {
+        *last = now;
         true
     } else {
         false

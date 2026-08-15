@@ -792,6 +792,125 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
     }
     out
 }
+
+// --- server events (the calendar) -------------------------------------------
+//
+// One shared CRDT document per server (`DocType::Calendar`, id `CALENDAR_DOC`): a versioned map
+// (like the livery/badge docs) of **event id → `{ title, body, start, end, author, created }`**.
+// Each event lives under its own random id key, so two members creating events concurrently
+// write *distinct* keys that both survive a merge — there is no container two writers could
+// create twice and lose one of.
+//
+// **Any member may create an event**: an event is server *content*, like a channel, a status post
+// or a channel topic — not presentation like the livery — so this is deliberately not owner/admin
+// gated. Deletion is the author's, or an owner/admin's (moderation), exactly like a chat message;
+// the gate is honest-client-enforced (the op log is inner-signed, so authorship of a forged write
+// is attributable either way — the documented R6 residual).
+
+/// The reserved document id for the per-server calendar document.
+const CALENDAR_DOC: u128 = 0;
+/// Schema version written into every calendar doc, so a later shape can be told apart.
+const CALENDAR_VERSION: i64 = 1;
+const C_V: &str = "v";
+/// The map of `event id -> { … }` inside the calendar document. Kept under its own key (like the
+/// badge map) so the schema version can live beside it without ever colliding with an event id.
+const C_EVENTS: &str = "events";
+const C_TITLE: &str = "title";
+const C_BODY: &str = "body";
+const C_START: &str = "start";
+const C_END: &str = "end";
+const C_AUTHOR: &str = "author";
+const C_CREATED: &str = "created";
+
+/// Maximum length of a server-event title, in UTF-8 bytes. Events live in a document every
+/// member replicates, so — like the channel topic and the livery values — they are size-bounded.
+pub const MAX_EVENT_TITLE_BYTES: usize = 120;
+/// Maximum length of a server-event body (its longer description), in UTF-8 bytes.
+pub const MAX_EVENT_BODY_BYTES: usize = 1024;
+
+/// One scheduled server event as the UI sees it. The `author` is the creator's **device
+/// fingerprint** (the key its [`Profile`] is stored under), resolved to a display name at
+/// render time exactly like a message author.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerEvent {
+    /// A stable per-event id (random hex), minted like a message id — so a delete addresses
+    /// exactly one event under concurrent merges.
+    pub id: String,
+    /// The event title (never empty in a stored entry).
+    pub title: String,
+    /// A longer description; empty if none.
+    pub body: String,
+    /// When the event starts, epoch-millis.
+    pub start_ts: u64,
+    /// When the event ends, epoch-millis; `0` = no end time.
+    pub end_ts: u64,
+    /// The creator's device fingerprint.
+    pub author: String,
+    /// When the event was created, epoch-millis (the creator's injected clock).
+    pub created_ts: u64,
+}
+
+/// Write one event entry into the calendar document, keyed by its id.
+fn write_event(doc: &mut AutoCommit, e: &ServerEvent) -> Result<(), AutomergeError> {
+    doc.put(ROOT, C_V, CALENDAR_VERSION)?;
+    let events = match doc.get(ROOT, C_EVENTS)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(ROOT, C_EVENTS, ObjType::Map)?,
+    };
+    let entry = match doc.get(&events, e.id.as_str())? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(&events, e.id.as_str(), ObjType::Map)?,
+    };
+    doc.put(&entry, C_TITLE, e.title.as_str())?;
+    doc.put(&entry, C_BODY, e.body.as_str())?;
+    doc.put(&entry, C_START, e.start_ts as i64)?;
+    doc.put(&entry, C_END, e.end_ts as i64)?;
+    doc.put(&entry, C_AUTHOR, e.author.as_str())?;
+    doc.put(&entry, C_CREATED, e.created_ts as i64)?;
+    Ok(())
+}
+
+/// Remove the event with `id` from the calendar document. Ids are unique keys, so this removes
+/// (at most) the single matching entry. Returns whether one was there.
+fn delete_event_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
+    let Some((Value::Object(ObjType::Map), events)) = doc.get(ROOT, C_EVENTS)? else {
+        return Ok(false);
+    };
+    if doc.get(&events, id)?.is_none() {
+        return Ok(false);
+    }
+    doc.delete(&events, id)?;
+    Ok(true)
+}
+
+/// Materialize the calendar document into events sorted by **start time ascending** (ties broken
+/// by id, so every member reads the same order). A missing/foreign-shaped or title-less entry is
+/// skipped, so a malformed doc degrades to "fewer events" rather than junk rows.
+fn read_events(doc: &AutoCommit) -> Vec<ServerEvent> {
+    let mut out = Vec::new();
+    if let Ok(Some((Value::Object(ObjType::Map), events))) = doc.get(ROOT, C_EVENTS) {
+        for id in doc.keys(&events) {
+            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&events, &id) {
+                let title = str_field(doc, &entry, C_TITLE);
+                if title.is_empty() {
+                    continue; // a cleared/malformed entry is not an event
+                }
+                out.push(ServerEvent {
+                    id,
+                    title,
+                    body: str_field(doc, &entry, C_BODY),
+                    start_ts: int_field(doc, &entry, C_START),
+                    end_ts: int_field(doc, &entry, C_END),
+                    author: str_field(doc, &entry, C_AUTHOR),
+                    created_ts: int_field(doc, &entry, C_CREATED),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.start_ts.cmp(&b.start_ts).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
 // --- member roles (Phase 10h + item 3) -------------------------------------
 //
 // The **owner** is the MLS designated committer (the founder — cryptographically anchored, not
@@ -1889,6 +2008,107 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self
             .sync
             .request_catchup(peer, DocType::Status, STATUS_DOC)
+            .await?)
+    }
+
+    /// Open (create/subscribe) the per-server **calendar** — the shared document holding the
+    /// server's scheduled events. Call once after founding/joining.
+    pub async fn open_calendar(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::Calendar, CALENDAR_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// Create a server event (authored by this device's fingerprint, clock-stamped); replies with
+    /// its fresh id. **Any member may** — an event is server *content*, like a channel, a status
+    /// post or a channel topic, so this is deliberately not owner/admin gated. The op is
+    /// inner-signed by this device, so authorship is attributable exactly as for a message.
+    ///
+    /// Rejects a blank title, a title over [`MAX_EVENT_TITLE_BYTES`] / a body over
+    /// [`MAX_EVENT_BODY_BYTES`] UTF-8 bytes, and an `end_ts` before `start_ts` (`0` = no end).
+    pub async fn create_event(
+        &mut self,
+        title: &str,
+        body: &str,
+        start_ts: u64,
+        end_ts: u64,
+    ) -> Result<String, AppError> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err(AppError::Invalid("an event needs a title".into()));
+        }
+        if title.len() > MAX_EVENT_TITLE_BYTES {
+            return Err(AppError::Invalid(format!(
+                "event title too long: {} bytes (max {MAX_EVENT_TITLE_BYTES})",
+                title.len()
+            )));
+        }
+        if body.len() > MAX_EVENT_BODY_BYTES {
+            return Err(AppError::Invalid(format!(
+                "event body too long: {} bytes (max {MAX_EVENT_BODY_BYTES})",
+                body.len()
+            )));
+        }
+        if end_ts != 0 && end_ts < start_ts {
+            return Err(AppError::Invalid(
+                "an event cannot end before it starts".into(),
+            ));
+        }
+        let event = ServerEvent {
+            id: self.sync.random_id(),
+            title: title.to_string(),
+            body: body.to_string(),
+            start_ts,
+            end_ts,
+            author: self.my_fingerprint(),
+            created_ts: self.sync.now_ms(),
+        };
+        let id = event.id.clone();
+        self.sync
+            .post(DocType::Calendar, CALENDAR_DOC, |d| write_event(d, &event))
+            .await?;
+        Ok(id)
+    }
+
+    /// Delete a server event (by id): **your own**, or — if you are the owner/admin — anyone's
+    /// (moderation), exactly like [`Server::delete_message`]. Honest-client gating (a modified
+    /// client could post a raw delete op regardless — the documented R6 residual). Errors if the
+    /// event is gone or you may not delete it.
+    pub async fn delete_event(&mut self, id: &str) -> Result<(), AppError> {
+        let me = self.my_fingerprint();
+        let Some(event) = self.events().into_iter().find(|e| e.id == id) else {
+            return Err(AppError::Invalid("no such event".into()));
+        };
+        let moderator = matches!(self.my_role(), Role::Owner | Role::Admin);
+        if event.author != me && !moderator {
+            return Err(AppError::Invalid(
+                "you can only delete your own events".into(),
+            ));
+        }
+        let id = id.to_string();
+        self.sync
+            .post(DocType::Calendar, CALENDAR_DOC, move |d| {
+                delete_event_in_doc(d, &id).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Every server event, sorted by **start time ascending** (empty if none, or if the calendar
+    /// is not open).
+    pub fn events(&self) -> Vec<ServerEvent> {
+        self.sync
+            .doc(DocType::Calendar, CALENDAR_DOC)
+            .map(|d| read_events(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Catch up the calendar document from `peer` (e.g. right after joining).
+    pub async fn request_calendar_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Calendar, CALENDAR_DOC)
             .await?)
     }
 
@@ -3135,6 +3355,35 @@ mod tests {
         // connect/disconnect, so it stays 0 here even though delivery is proven. The two are not
         // a fraction: a member can hold a message and be offline.
         assert_eq!(snapshot[0].reachable, alice.online_members().len());
+
+        // The calendar is its own document (`DocType::Calendar`), caught up exactly like the
+        // channel — so an event Alice created reaches the joiner.
+        alice.open_calendar().await.unwrap();
+        alice
+            .create_event("Launch party", "bring cake", 9_000, 0)
+            .await
+            .unwrap();
+        bob.open_calendar().await.unwrap();
+        let (applied, _) =
+            tokio::join!(bob.request_calendar_catchup(alice_peer), alice.sync_once());
+        assert!(applied.unwrap() >= 1, "Bob applied Alice's calendar op");
+        let events = bob.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].title, "Launch party");
+        assert_eq!(events[0].body, "bring cake");
+        assert_eq!(events[0].author, alice.my_fingerprint());
+
+        // Any member may create an event, but deletion is the author's or a moderator's: Bob is
+        // neither the owner nor an admin, so Alice's event is not his to remove — his own is.
+        assert_ne!(bob.my_role(), Role::Owner);
+        assert!(
+            bob.delete_event(&events[0].id).await.is_err(),
+            "a non-author, non-moderator cannot delete someone else's event"
+        );
+        let bobs = bob.create_event("Bob's raid", "", 8_000, 0).await.unwrap();
+        assert_eq!(bob.events().len(), 2);
+        bob.delete_event(&bobs).await.unwrap();
+        assert_eq!(bob.events().len(), 1, "Bob removed his own event");
     }
 
     #[tokio::test]
@@ -3764,6 +4013,77 @@ mod tests {
         assert_eq!(feed[0].text, "server is live");
         assert_eq!(feed[0].author, alice.my_fingerprint());
         assert_eq!(feed[0].ts, 1_000);
+    }
+
+    #[tokio::test]
+    async fn server_events_round_trip_sorted_capped_and_author_deletable() {
+        let mut alice = founder();
+        alice.open_calendar().await.unwrap();
+        assert!(alice.events().is_empty(), "no events by default");
+
+        // Created out of order; `events()` returns them by start time ascending.
+        let later = alice
+            .create_event("Retro", "how did it go", 5_000, 6_000)
+            .await
+            .unwrap();
+        let sooner = alice
+            .create_event("  Standup  ", "", 2_000, 0)
+            .await
+            .unwrap();
+        let feed = alice.events();
+        assert_eq!(feed.len(), 2);
+        assert_eq!(feed[0].id, sooner);
+        assert_eq!(feed[1].id, later);
+        // The title is trimmed; authorship + creation stamp come from the signed op's device
+        // fingerprint and the injected clock, exactly like a status post.
+        assert_eq!(feed[0].title, "Standup");
+        assert_eq!(feed[0].start_ts, 2_000);
+        assert_eq!(feed[0].end_ts, 0, "0 = no end time");
+        assert_eq!(feed[0].author, alice.my_fingerprint());
+        assert_eq!(feed[0].created_ts, 1_000);
+        assert_eq!(feed[1].body, "how did it go");
+        assert_eq!(feed[1].end_ts, 6_000);
+
+        // Validation: a blank title, over-cap title/body, and an end before the start are refused.
+        assert!(matches!(
+            alice.create_event("   ", "b", 1, 0).await,
+            Err(AppError::Invalid(_))
+        ));
+        let over_title = "t".repeat(MAX_EVENT_TITLE_BYTES + 1);
+        assert!(matches!(
+            alice.create_event(&over_title, "", 1, 0).await,
+            Err(AppError::Invalid(_))
+        ));
+        let over_body = "b".repeat(MAX_EVENT_BODY_BYTES + 1);
+        assert!(matches!(
+            alice.create_event("ok", &over_body, 1, 0).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.create_event("backwards", "", 5_000, 4_999).await,
+            Err(AppError::Invalid(_))
+        ));
+        // …but exactly at each cap is accepted, and `end_ts == start_ts` is a zero-length event.
+        alice
+            .create_event(
+                &"t".repeat(MAX_EVENT_TITLE_BYTES),
+                &"b".repeat(MAX_EVENT_BODY_BYTES),
+                7_000,
+                7_000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(alice.events().len(), 3, "only the valid creates landed");
+
+        // The author may delete their own event; an unknown id is refused.
+        alice.delete_event(&sooner).await.unwrap();
+        let ids: Vec<String> = alice.events().into_iter().map(|e| e.id).collect();
+        assert!(!ids.contains(&sooner));
+        assert_eq!(ids.len(), 2);
+        assert!(matches!(
+            alice.delete_event("no-such-event").await,
+            Err(AppError::Invalid(_))
+        ));
     }
 
     #[tokio::test]
