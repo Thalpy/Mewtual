@@ -4106,19 +4106,24 @@ button.you-panel:hover {
   display: flex;
   gap: 3px;
 }
+/* A real keyboard's colours: naturals are ivory, accidentals are ebony. The lock screen is
+   the one dark-chrome surface where the light keys are the point, not an inconsistency. */
 .piano-key {
   flex: 1;
   padding: 1.4rem 0 0.4rem;
   font-family: var(--mono);
   font-size: 0.65rem;
-  background: var(--bg-elev);
-  color: var(--text-2);
-  border: 1px solid var(--border);
+  background: linear-gradient(#fffdf6, #ece7db);
+  color: #3a352c;
+  border: 1px solid #a9a294;
   border-radius: 0 0 var(--r) var(--r);
+  box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.13);
 }
 .piano-key.sharp {
-  background: var(--bg-0);
-  color: var(--muted);
+  background: linear-gradient(#33323a, #15141a);
+  color: #b9b3a6;
+  border-color: #0a0a0e;
+  box-shadow: inset 0 -3px 0 rgba(0, 0, 0, 0.5);
   margin: 0 -6px;
   z-index: 1;
   flex: 0.72;
@@ -4126,7 +4131,18 @@ button.you-panel:hover {
   align-self: flex-start;
   border-radius: 0 0 var(--r) var(--r);
 }
-.piano-key:hover { border-color: var(--accent); background: var(--accent-dim); }
+.piano-key:hover { border-color: var(--accent); }
+.piano-key:hover:not(.sharp) { background: #fffefa; }
+.piano-key.sharp:hover { background: linear-gradient(#3f3d47, #1d1c23); }
+/* Held = sounding right now; the key stays lit for exactly as long as the note is recorded. */
+.piano-key.held,
+.piano-key.sharp.held {
+  background: var(--accent);
+  color: var(--bg-0);
+  border-color: var(--accent);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.28);
+  transform: translateY(1px);
+}
 .ul-seq {
   display: flex;
   align-items: center;
@@ -4189,6 +4205,69 @@ button.you-panel:hover {
   padding: 1.1rem 0 0.3rem;
   min-width: 0;
 }
+.rhythm-toggle {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+}
+.rhythm-toggle.on { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, transparent); }
+
+/* Melody lock: the sequence is engraved on a grand staff rather than listed as note names —
+   pitch, register, chords and note values are all one glance. Scrolls when the tune is long. */
+.sheet-wrap {
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  padding: 4px 0;
+}
+.sheet-wrap.empty { opacity: 0.55; }
+.sheet { display: block; }
+.sheet-line {
+  stroke: var(--muted);
+  stroke-width: 1;
+  opacity: 0.65;
+  shape-rendering: crispEdges;
+}
+.sheet-line.bar { stroke-width: 1.4; opacity: 0.8; }
+.sheet-clef {
+  font-family: "Bravura", "Segoe UI Symbol", "Noto Music", "Noto Sans Symbols 2", serif;
+  font-size: 44px;
+  fill: var(--text-2);
+}
+.sheet-clef.small { font-size: 30px; }
+.sheet-head { fill: var(--text); stroke: var(--text); stroke-width: 1; }
+.sheet-head.hollow { fill: none; stroke-width: 1.6; }
+.sheet-stem { stroke: var(--text); stroke-width: 1.4; }
+.sheet-flag { fill: var(--text); }
+.sheet-acc {
+  font-family: "Bravura", "Segoe UI Symbol", "Noto Music", serif;
+  font-size: 13px;
+  fill: var(--text-2);
+  text-anchor: middle;
+}
+.sheet-chord {
+  font-family: var(--mono);
+  font-size: 9px;
+  fill: var(--accent);
+  text-anchor: middle;
+}
+/* The event currently sounding during playback, so you can follow the tune on the staff. */
+.sheet-ev.sounding .sheet-head,
+.sheet-ev.sounding .sheet-stem,
+.sheet-ev.sounding .sheet-flag { fill: var(--accent); stroke: var(--accent); }
+.sheet-ev.sounding .sheet-head.hollow { fill: none; }
+.ghost.small.playing { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, transparent); }
+.sheet-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  color: var(--accent);
+}
+.sheet-live em { font-style: normal; color: var(--text-2); }
 
 /* --- Device-link grant dialog --- */
 .grant-box {

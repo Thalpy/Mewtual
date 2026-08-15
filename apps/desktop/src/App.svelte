@@ -7,6 +7,11 @@
   import QRCode from "qrcode";
   import jsQR from "jsqr";
   import { decodeAudio, encodeAudio, MAX_AUDIO_PAYLOAD } from "./audiocode";
+  import {
+    type MelodyEvent, NOTE_NAMES, noteName, DUR_MAX_MS, DUR_NAMES, durClass, normalizeEvent,
+    encodeMelody, melodyBits as bitsOf, chordName, PC_SHARP, TREBLE_LINES, BASS_LINES, yOf,
+    STAFF_TOP, STAFF_BOT, HEAD_RX, HEAD_RY, buildSheet, scoreText,
+  } from "./melody";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -409,45 +414,181 @@
   let spellBits = $derived(Math.round(spellSeq.length * Math.log2(SPELL_GLYPHS.length)));
   // Melody lock: ABSOLUTE MIDI notes — C6 is not C4; octaves carry meaning (and entropy).
   // The on-screen piano shows two octaves with a shift, so any register a MIDI controller
-  // played is reachable on screen too. Encoded "melody:v2:60-64-67-…" (v2: v1 was
-  // pitch-class-folded and is retired — a v1-sealed melody vault must be re-entered as v1
-  // can no longer be produced).
-  const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  const noteName = (n: number) => `${NOTE_NAMES[n % 12]}${Math.floor(n / 12) - 1}`;
-  let melodySeq = $state<number[]>([]);
+  // played is reachable on screen too. v3 records what a score records: notes that overlap
+  // in time collapse into ONE chord event, and how long the event was held quantises to a
+  // note value. Encoded "melody:v3:60+64+67.1-62.0-…" (chord tones joined by "+", ascending
+  // and de-duplicated so fingering order can't change the secret; ".N" is the duration class
+  // and is omitted entirely when rhythm is off). v1 (pitch-class-folded) and v2 (bare notes)
+  // are retired — a vault sealed under either must be re-entered under a scheme this build
+  // can still produce. The theory and the engraving live in `melody.ts` (pure + unit-tested);
+  // only the audio and the input handling need to be here.
+  let melodySeq = $state<MelodyEvent[]>([]);
   let melodyOctave = $state(4); // base octave of the on-screen keys (C4 = MIDI 60)
-  let melodySecret = $derived(melodySeq.length ? `melody:v2:${melodySeq.join("-")}` : "");
-  // ~4.6 bits/note models a ~two-octave working range; a wider register is worth more.
-  let melodyBits = $derived(Math.round(melodySeq.length * Math.log2(24)));
+  // Rhythm is opt-out because it is the one setting that can lock a correct player out; the
+  // choice is remembered locally (it leaks nothing about the tune itself).
+  let melodyRhythm = $state(typeof localStorage !== "undefined" ? localStorage.getItem("catcoms.melody.rhythm") !== "off" : true);
+  function toggleRhythm() {
+    melodyRhythm = !melodyRhythm;
+    try { localStorage.setItem("catcoms.melody.rhythm", melodyRhythm ? "on" : "off"); } catch { /* ignore */ }
+  }
+  let melodySecret = $derived(encodeMelody(melodySeq, melodyRhythm));
+  let melodyBits = $derived(bitsOf(melodySeq, melodyRhythm));
   function bitsTier(b: number): "danger" | "warn" | "ok" {
     return b >= 44 ? "ok" : b >= 28 ? "warn" : "danger";
   }
   // A small synth so the keys sing (its own context — the notification chime has one too).
+  // Notes sustain while held, so what you hear is the note length you are about to record.
   let synthCtx: AudioContext | null = null;
-  function playNote(note: number) {
+  const noteHz = (note: number) => 440 * Math.pow(2, (note - 69) / 12); // A4 = 440
+  const voices = new Map<number, { osc: OscillatorNode; gain: GainNode }>();
+  function startTone(note: number) {
     try {
       synthCtx ??= new AudioContext();
+      if (synthCtx.state === "suspended") void synthCtx.resume();
+      stopTone(note);
       const o = synthCtx.createOscillator();
       const g = synthCtx.createGain();
       o.type = "triangle";
-      o.frequency.value = 440 * Math.pow(2, (note - 69) / 12); // A4 = 440
-      g.gain.setValueAtTime(0.16, synthCtx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.0001, synthCtx.currentTime + 0.35);
+      o.frequency.value = noteHz(note);
+      const t = synthCtx.currentTime;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.16, t + 0.012); // quick attack
+      g.gain.exponentialRampToValueAtTime(0.07, t + 0.4); // settle to a sustain that holds
       o.connect(g).connect(synthCtx.destination);
       o.start();
-      o.stop(synthCtx.currentTime + 0.4);
+      o.stop(t + 8); // hard backstop so a lost note-off can never leave a drone
+      voices.set(note, { osc: o, gain: g });
     } catch {
       /* no audio output — the note still registers */
     }
   }
-  function pressNote(note: number) {
-    melodySeq = [...melodySeq, note];
-    playNote(note);
+  function stopTone(note: number) {
+    const v = voices.get(note);
+    if (!v || !synthCtx) return;
+    voices.delete(note);
+    try {
+      const t = synthCtx.currentTime;
+      v.gain.gain.cancelScheduledValues(t);
+      v.gain.gain.setValueAtTime(Math.max(v.gain.gain.value, 0.0001), t);
+      v.gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+      v.osc.stop(t + 0.16);
+    } catch {
+      /* already stopped */
+    }
+  }
+  // A short confirmation blip — used by the register controls (z/x and 1–7), which must NEVER
+  // land in the sequence. It sounds the C you just moved to, so the shift is audible.
+  function playBlip(note: number) {
+    try {
+      synthCtx ??= new AudioContext();
+      if (synthCtx.state === "suspended") void synthCtx.resume();
+      const o = synthCtx.createOscillator();
+      const g = synthCtx.createGain();
+      o.type = "sine";
+      o.frequency.value = noteHz(note);
+      const t = synthCtx.currentTime;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.1, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      o.connect(g).connect(synthCtx.destination);
+      o.start();
+      o.stop(t + 0.18);
+    } catch {
+      /* silent is fine */
+    }
+  }
+  // --- Note on/off: overlapping notes are one chord, hold time is the note value -----------
+  // A group opens on the first note-down and commits when the LAST held note lifts, so legato
+  // playing groups (as it does on a real keyboard) and staccato playing does not.
+  let heldNotes = $state<number[]>([]); // sounding right now — drives key highlighting
+  let chordBuf = $state<number[]>([]); // everything the open group has touched
+  let holdMs = $state(0); // live length of the open group, for the "holding…" readout
+  let groupStart = 0;
+  let holdTimer: ReturnType<typeof setInterval> | null = null;
+  function noteOn(note: number) {
+    if (heldNotes.includes(note)) return; // key repeat / duplicate note-on
+    if (playing) stopPlayback(); // playing over the playback would just be two tunes at once
+    if (!chordBuf.length) {
+      groupStart = performance.now();
+      holdMs = 0;
+      holdTimer ??= setInterval(() => (holdMs = performance.now() - groupStart), 40);
+    }
+    heldNotes = [...heldNotes, note];
+    if (!chordBuf.includes(note)) chordBuf = [...chordBuf, note];
+    startTone(note);
+  }
+  function noteOff(note: number) {
+    if (!heldNotes.includes(note)) return;
+    heldNotes = heldNotes.filter((n) => n !== note);
+    stopTone(note);
+    if (!heldNotes.length) commitGroup();
+  }
+  function commitGroup() {
+    if (!chordBuf.length) return;
+    // normalizeEvent sorts + de-dupes: the secret must depend on which notes, not on finger order.
+    melodySeq = [...melodySeq, normalizeEvent(chordBuf, durClass(performance.now() - groupStart))];
+    chordBuf = [];
+    holdMs = 0;
+    if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
+  }
+  // Panic release — window blur or leaving the melody tab must not strand a held note.
+  function releaseAll() {
+    for (const n of heldNotes) stopTone(n);
+    heldNotes = [];
+    chordBuf = [];
+    holdMs = 0;
+    if (holdTimer) { clearInterval(holdTimer); holdTimer = null; }
   }
   // DAW-style computer-keyboard mapping while the melody tab is up (a=C … j=B, k=C an
-  // octave up; z/x shift the octave down/up).
+  // octave up; z/x shift the register down/up and 1–7 jump straight to it).
   const KEY_TO_PC: Record<string, number> = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12 };
   const noteAt = (pc: number) => (melodyOctave + 1) * 12 + pc;
+  // key → note fixed at press time, so shifting register mid-hold still releases the right note.
+  const keyNotes = new Map<string, number>();
+  function setOctave(oct: number) {
+    melodyOctave = Math.min(7, Math.max(1, oct));
+    playBlip((melodyOctave + 1) * 12); // sound the new bottom C so the shift is audible
+  }
+
+  // --- Playback -----------------------------------------------------------------------------
+  // Hearing the sequence back is how you learn a tune well enough to reproduce it, and with
+  // rhythm on it is the only way to check that your "half" really read as a half. Plays the
+  // RECORDED durations, not the ones you happened to hold — what you hear is what is sealed.
+  const PLAY_MS = [170, 360, 680, 1050];
+  let playing = $state(false);
+  let playIdx = $state(-1); // event currently sounding — highlighted on the staff
+  let playToken = 0; // bumping this cancels an in-flight playback
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  function stopPlayback() {
+    playToken++;
+    for (const n of [...voices.keys()]) if (!heldNotes.includes(n)) stopTone(n);
+    playing = false;
+    playIdx = -1;
+  }
+  async function playMelody() {
+    if (playing) return stopPlayback(); // the button is a play/stop toggle
+    if (!melodySeq.length || heldNotes.length) return;
+    const token = ++playToken;
+    playing = true;
+    for (let i = 0; i < melodySeq.length && token === playToken; i++) {
+      const ev = melodySeq[i];
+      playIdx = i;
+      for (const n of ev.notes) startTone(n);
+      await sleep(PLAY_MS[melodyRhythm ? ev.dur : 1]);
+      for (const n of ev.notes) stopTone(n);
+      await sleep(70); // a hair of silence so repeated notes are audibly separate
+    }
+    if (token === playToken) {
+      playing = false;
+      playIdx = -1;
+    }
+  }
+
+  // Engraving geometry comes from melody.ts; the width is whatever the lock column gives us, so
+  // the staff always spans the panel and only a long tune scrolls.
+  let sheetW = $state(560);
+  let sheet = $derived(buildSheet(melodySeq, melodyRhythm, sheetW));
+  let sheetText = $derived(scoreText(melodySeq, melodyRhythm));
   // Web MIDI (Chromium/WebView2): a connected controller feeds the same pitch-class handler,
   // so you can literally play your unlock tune. Feature-detected; denied/absent is fine.
   let midiName = $state("");
@@ -466,7 +607,11 @@
           input.onmidimessage = (m: MIDIMessageEvent) => {
             const d = m.data;
             if (!d || d.length < 3) return;
-            if ((d[0] & 0xf0) === 0x90 && d[2] > 0 && locked && unlockMethod === "melody") pressNote(d[1]);
+            if (!locked || unlockMethod !== "melody") return;
+            const status = d[0] & 0xf0;
+            // Note-off is either 0x80 or a 0x90 with zero velocity — controllers disagree.
+            if (status === 0x90 && d[2] > 0) noteOn(d[1]);
+            else if (status === 0x80 || (status === 0x90 && d[2] === 0)) noteOff(d[1]);
           };
         }
         midiName = name;
@@ -1930,6 +2075,7 @@
       const reloaded = await invoke<Reloaded[]>("unlock", { passphrase: secret });
       passphrase = "";
       spellSeq = [];
+      stopPlayback();
       melodySeq = [];
       for (const r of reloaded) {
         servers = [
@@ -4187,28 +4333,33 @@
     const onKey = (e: KeyboardEvent) => {
       // Melody unlock: the home row is a piano while the lock screen's melody tab is up.
       if (locked && unlockMethod === "melody" && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const pc = KEY_TO_PC[e.key.toLowerCase()];
+        const k = e.key.toLowerCase();
+        const pc = KEY_TO_PC[k];
         if (pc !== undefined) {
           e.preventDefault();
-          pressNote(noteAt(pc));
+          if (e.repeat) return; // auto-repeat is one long hold, not a stream of notes
+          const note = noteAt(pc);
+          keyNotes.set(k, note); // pin it: shifting register mid-hold must still release THIS note
+          noteOn(note);
           return;
         }
-        if (e.key.toLowerCase() === "z") {
+        if (k === "z" || k === "x") {
           e.preventDefault();
-          melodyOctave = Math.max(1, melodyOctave - 1);
+          if (!e.repeat) setOctave(melodyOctave + (k === "x" ? 1 : -1));
           return;
         }
-        if (e.key.toLowerCase() === "x") {
+        if (k >= "1" && k <= "7") {
           e.preventDefault();
-          melodyOctave = Math.min(7, melodyOctave + 1);
+          if (!e.repeat) setOctave(Number(k));
           return;
         }
         if (e.key === "Backspace") {
           e.preventDefault();
+          stopPlayback();
           melodySeq = melodySeq.slice(0, -1);
           return;
         }
-        if (e.key === "Enter" && melodySeq.length) {
+        if (e.key === "Enter" && melodySeq.length && !heldNotes.length) {
           e.preventDefault();
           unlock();
           return;
@@ -4259,7 +4410,22 @@
         }
       }
     };
+    // Melody keys are held instruments, not triggers: the lift is what commits the note value.
+    const onKeyUp = (e: KeyboardEvent) => {
+      const note = keyNotes.get(e.key.toLowerCase());
+      if (note === undefined) return;
+      keyNotes.delete(e.key.toLowerCase());
+      noteOff(note);
+    };
+    // Losing focus mid-hold would otherwise strand a sounding note and an open chord group.
+    const onBlur = () => {
+      keyNotes.clear();
+      releaseAll();
+      stopPlayback();
+    };
     window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
     // Keep relative presence times current.
     const tick = setInterval(() => (nowTick = Date.now()), 60_000);
     // Prune stale voice-room presence so indicators clear when people leave/crash without a "bye",
@@ -4279,6 +4445,10 @@
     }, 4000);
     return () => {
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+      releaseAll();
+      stopPlayback();
       clearInterval(tick);
       clearInterval(callCleanup);
       clearTimeout(inboxTimer);
@@ -4630,10 +4800,10 @@
         same vault; pick the one you'll actually remember.
       </p>
       <div class="ul-tabs" role="tablist">
-        <button type="button" role="tab" class:active={unlockMethod === "pass"} aria-selected={unlockMethod === "pass"} onclick={() => (unlockMethod = "pass")}>
+        <button type="button" role="tab" class:active={unlockMethod === "pass"} aria-selected={unlockMethod === "pass"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "pass"; }}>
           Passphrase <span class="ul-rec">recommended</span>
         </button>
-        <button type="button" role="tab" class:active={unlockMethod === "spell"} aria-selected={unlockMethod === "spell"} onclick={() => (unlockMethod = "spell")}>Spell</button>
+        <button type="button" role="tab" class:active={unlockMethod === "spell"} aria-selected={unlockMethod === "spell"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "spell"; }}>Spell</button>
         <button type="button" role="tab" class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; initMidi(); }}>Melody</button>
       </div>
       {#if unlockMethod === "pass"}
@@ -4672,14 +4842,23 @@
         {/if}
       {:else}
         <p class="muted small">
-          Play your unlock tune — octaves count (C6 is not C4). On-screen keys, the
-          <span class="fp">a w s e d f t g y h u j</span> row (<span class="fp">z</span>/<span class="fp">x</span> shift octave),
-          and a MIDI keyboard all feed the same notes. Avoid famous tunes; they're guessable.
+          Play your unlock tune — octaves count (C6 is not C4), notes played together are one
+          chord, and how long you hold sets the note value. On-screen keys, the
+          <span class="fp">a w s e d f t g y h u j</span> row (<span class="fp">z</span>/<span class="fp">x</span> shift register,
+          <span class="fp">1</span>–<span class="fp">7</span> jump to it), and a MIDI keyboard all feed the same staff.
+          Avoid famous tunes; they're guessable.
         </p>
         <div class="piano-head">
-          <button type="button" class="ghost small" title="Octave down (z)" onclick={() => (melodyOctave = Math.max(1, melodyOctave - 1))}>−</button>
+          <button type="button" class="ghost small" title="Register down (z)" onclick={() => setOctave(melodyOctave - 1)}>−</button>
           <span class="piano-oct">C{melodyOctave}–C{melodyOctave + 2}</span>
-          <button type="button" class="ghost small" title="Octave up (x)" onclick={() => (melodyOctave = Math.min(7, melodyOctave + 1))}>＋</button>
+          <button type="button" class="ghost small" title="Register up (x)" onclick={() => setOctave(melodyOctave + 1)}>＋</button>
+          <button
+            type="button"
+            class="ghost small rhythm-toggle"
+            class:on={melodyRhythm}
+            title="Count how long each note is held as part of the secret. Off = pitches only."
+            onclick={toggleRhythm}
+          >{melodyRhythm ? "♩ rhythm on" : "rhythm off"}</button>
         </div>
         <div class="piano">
           {#each Array.from({ length: 25 }, (_, i) => (melodyOctave + 1) * 12 + i) as note (note)}
@@ -4687,23 +4866,88 @@
             <button
               type="button"
               class="piano-key"
-              class:sharp={NOTE_NAMES[pc].includes("#")}
+              class:sharp={PC_SHARP[pc]}
+              class:held={heldNotes.includes(note)}
               title={noteName(note)}
-              onclick={() => pressNote(note)}
+              onpointerdown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); noteOn(note); }}
+              onpointerup={() => noteOff(note)}
+              onpointercancel={() => noteOff(note)}
             >{pc === 0 ? noteName(note) : NOTE_NAMES[pc]}</button>
           {/each}
         </div>
+        <div class="sheet-wrap" class:empty={!melodySeq.length} bind:clientWidth={sheetW}>
+          <svg
+            class="sheet"
+            width={sheet.w}
+            height={sheet.h}
+            viewBox={`0 ${sheet.minY} ${sheet.w} ${sheet.h}`}
+            role="img"
+            aria-label={melodySeq.length ? `Score: ${sheetText}` : "Empty score"}
+          >
+            <!-- Grand staff: treble above, bass below, joined at both ends. -->
+            {#each [...TREBLE_LINES, ...BASS_LINES] as s (s)}
+              <line class="sheet-line" x1="6" y1={yOf(s)} x2={sheet.w - 14} y2={yOf(s)} />
+            {/each}
+            <line class="sheet-line bar" x1="6.5" y1={STAFF_TOP} x2="6.5" y2={STAFF_BOT} />
+            <line class="sheet-line bar" x1={sheet.w - 14.5} y1={STAFF_TOP} x2={sheet.w - 14.5} y2={STAFF_BOT} />
+            <text class="sheet-clef" x="14" y="58">𝄞</text>
+            <text class="sheet-clef small" x="14" y="80">𝄢</text>
+            {#each sheet.events as ev, i (i)}
+              <g class="sheet-ev" class:sounding={i === playIdx}>
+                {#each ev.ledgers as l, j (j)}
+                  <line class="sheet-line" x1={l.x - 9} y1={l.y} x2={l.x + 9} y2={l.y} />
+                {/each}
+                {#if ev.stem}
+                  <line class="sheet-stem" x1={ev.stem.x} y1={ev.stem.y1} x2={ev.stem.x} y2={ev.stem.y2} />
+                  {#if ev.flag}
+                    <!-- Eighth-note flag, curling back from the free end of the stem. -->
+                    <path
+                      class="sheet-flag"
+                      d={`M ${ev.stem.x} ${ev.stem.y2} q 9 5 8 13 q 3 -9 -8 -18 z`}
+                      transform={ev.stem.y2 < ev.stem.y1 ? "" : `rotate(180 ${ev.stem.x} ${ev.stem.y2})`}
+                    />
+                  {/if}
+                {/if}
+                {#each ev.heads as h, j (j)}
+                  {#if h.sharp}<text class="sheet-acc" x={h.x - 9} y={h.y + 3.4}>♯</text>{/if}
+                  <ellipse class="sheet-head" class:hollow={!ev.filled} cx={h.x} cy={h.y} rx={HEAD_RX} ry={HEAD_RY} transform={`rotate(-18 ${h.x} ${h.y})`} />
+                {/each}
+                {#if ev.label}<text class="sheet-chord" x={ev.x} y={sheet.labelY}>{ev.label}</text>{/if}
+              </g>
+            {/each}
+          </svg>
+        </div>
         <div class="ul-seq">
-          {#if melodySeq.length}
-            <span class="ul-seq-chips mono">{#each melodySeq as n, i (i)}<span>{noteName(n)}</span>{/each}</span>
-            <button type="button" class="ghost small" title="Remove the last note (Backspace)" onclick={() => (melodySeq = melodySeq.slice(0, -1))}>⌫</button>
-            <button type="button" class="ghost small" onclick={() => (melodySeq = [])}>Clear</button>
+          {#if heldNotes.length || chordBuf.length}
+            <span class="sheet-live mono">
+              ▮ {chordBuf.map((n) => noteName(n)).join(" ")}
+              {#if chordBuf.length > 1}<em>{chordName([...chordBuf].sort((a, b) => a - b))}</em>{/if}
+              {#if melodyRhythm}· {DUR_NAMES[durClass(holdMs)]}{/if}
+            </span>
+          {:else if melodySeq.length}
+            <button
+              type="button"
+              class="ghost small"
+              class:playing
+              title={playing ? "Stop" : "Play the sequence back"}
+              onclick={playMelody}
+            >{playing ? "■ stop" : "▶ play"}</button>
+            <span class="muted small mono">{melodySeq.length} event{melodySeq.length === 1 ? "" : "s"}</span>
+            <button type="button" class="ghost small" title="Remove the last note (Backspace)" onclick={() => { stopPlayback(); melodySeq = melodySeq.slice(0, -1); }}>⌫</button>
+            <button type="button" class="ghost small" onclick={() => { stopPlayback(); melodySeq = []; }}>Clear</button>
           {:else}
-            <span class="muted small">No notes yet.</span>
+            <span class="muted small">No notes yet — hold a key to write one.</span>
           {/if}
         </div>
         {#if melodySeq.length}
           <div class="ul-meter {bitsTier(melodyBits)}">≈ {melodyBits} bits{melodyBits < 28 ? " — too short, keep playing" : melodyBits < 44 ? " — okay; longer is stronger" : " — strong"}</div>
+        {/if}
+        {#if melodyRhythm}
+          <p class="muted small">
+            Hold length becomes the note: under {DUR_MAX_MS[0]}ms an eighth, under {DUR_MAX_MS[1]}ms a
+            quarter, under {DUR_MAX_MS[2]}ms a half, longer a whole. Rhythm is part of the secret —
+            turn it off above if you'd rather the tune be pitches only.
+          </p>
         {/if}
         {#if midiName}<div class="ul-midi">⌁ MIDI: {midiName}</div>{/if}
       {/if}
