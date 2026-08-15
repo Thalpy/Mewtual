@@ -1,7 +1,91 @@
+/* ============================================================
+   TOKEN LAYER — the entire theme is this block. Presets, the
+   accent override, and density only ever change these values;
+   component rules below never hardcode a colour.
+   ============================================================ */
 :root {
-  font-family: system-ui, -apple-system, Segoe UI, sans-serif;
-  color: #e6e6e6;
-  background: #1b1d21;
+  /* grounds — purple-shifted slate ("Nightshade", the default preset) */
+  --bg-0: #131218;        /* app floor: rail, code blocks         */
+  --panel: #1a1922;       /* panels: sidebar, cards, overlays     */
+  --bg-elev: #232130;     /* elevated: inputs, hover, chips       */
+  --border: #2e2b3d;
+  --border-soft: #24222f;
+
+  /* text */
+  --text: #e8e6f0;
+  --text-2: #c6c2d6;      /* secondary: channel names, snippets   */
+  --muted: #8f8ba3;
+  --faint: #5c5870;
+
+  /* identity accent — user-swappable, carries no semantic meaning */
+  --accent: #977df2;
+  --accent-hi: #ab95f5;                                   /* hover     */
+  --accent-dim: color-mix(in oklab, var(--accent) 16%, var(--panel)); /* tint bg */
+  --on-accent: #131218;   /* text on a solid accent background    */
+
+  /* semantic — constant across presets; these colours have jobs */
+  --ok: #5ec96e;          /* presence · connected · encrypted     */
+  --ok-dim: color-mix(in oklab, var(--ok) 14%, var(--panel));
+  --ok-brd: color-mix(in oklab, var(--ok) 40%, var(--panel));
+  --warn: #d8a657;        /* mentions · pings · advisories        */
+  --warn-dim: color-mix(in oklab, var(--warn) 16%, var(--panel));
+  --warn-faint: color-mix(in oklab, var(--warn) 8%, transparent);
+  --danger: #e0574b;      /* destructive · failures · live        */
+  --danger-hi: #ef6f63;
+  --danger-dim: color-mix(in oklab, var(--danger) 14%, var(--panel));
+  --danger-brd: color-mix(in oklab, var(--danger) 40%, var(--panel));
+
+  /* type */
+  --ui: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: "Cascadia Code", ui-monospace, Consolas, monospace;
+
+  /* shape */
+  --r: 4px;               /* controls, rows, chips                */
+  --r-lg: 8px;            /* cards, overlays, panels              */
+
+  /* density (default "cozy"; compact overrides below) */
+  --fs-msg: 0.84rem;
+  --lh-msg: 1.45;
+  --row-pad: 3px;
+  --panel-pad: 0.75rem;
+
+  font-family: var(--ui);
+  color: var(--text);
+  background: var(--bg-0);
+}
+
+/* -------- presets: values only, never structure -------- */
+:root[data-preset="aurum"] {
+  --bg-0: #141109; --panel: #1a160c; --bg-elev: #251e10;
+  --border: #3a3120; --border-soft: #2c2517;
+  --text: #f0e8d8; --text-2: #d4c9ae; --muted: #a3987e; --faint: #6e6448;
+  --accent: #e2a83d; --accent-hi: #ecbc61; --on-accent: #141109;
+}
+:root[data-preset="verdant"] {
+  --bg-0: #0f1512; --panel: #141b17; --bg-elev: #1c2620;
+  --border: #27362d; --border-soft: #1f2b24;
+  --text: #e2efe6; --text-2: #bed2c6; --muted: #84a091; --faint: #4f6559;
+  --accent: #57c77a; --accent-hi: #74d492; --on-accent: #0f1512;
+}
+:root[data-preset="garnet"] {
+  --bg-0: #161012; --panel: #1d1417; --bg-elev: #291b1f;
+  --border: #3b262c; --border-soft: #2d1e23;
+  --text: #f0e6e8; --text-2: #d6c4c9; --muted: #a38b92; --faint: #6e565c;
+  --accent: #e0574b; --accent-hi: #ef7568; --on-accent: #161012;
+}
+:root[data-preset="slate"] {
+  --bg-0: #12151a; --panel: #171b21; --bg-elev: #20262e;
+  --border: #2b333d; --border-soft: #222932;
+  --text: #e4e9f0; --text-2: #c2ccd8; --muted: #8a97a8; --faint: #566374;
+  --accent: #6ca0d8; --accent-hi: #88b4e2; --on-accent: #12151a;
+}
+
+/* -------- density -------- */
+:root[data-density="compact"] {
+  --fs-msg: 0.78rem;
+  --lh-msg: 1.32;
+  --row-pad: 1px;
+  --panel-pad: 0.5rem;
 }
 
 * {
@@ -37,8 +121,8 @@ main {
 .rail {
   width: 56px;
   flex-shrink: 0;
-  background: #15171a;
-  border-right: 1px solid #3a3d44;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -51,12 +135,13 @@ main {
   position: relative;
   width: 40px;
   height: 40px;
-  border-radius: 50%;
-  background: #2a2d33;
-  color: #cdd2da;
-  font-weight: 700;
-  font-size: 1rem;
-  border: none;
+  border-radius: var(--r);
+  background: var(--bg-elev);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 0.85rem;
+  border: 1px solid transparent;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -66,18 +151,21 @@ main {
 }
 
 .server-icon:hover {
-  background: #34527e;
+  background: var(--bg-elev);
+  border-color: var(--border);
+  color: var(--text);
 }
 
 .server-icon.active {
-  background: #4f8cff;
-  color: white;
+  background: color-mix(in oklab, var(--accent) 12%, var(--panel));
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .server-icon.add {
   background: transparent;
-  border: 1px dashed #555;
-  color: #9aa0aa;
+  border: 1px dashed var(--border);
+  color: var(--muted);
   font-size: 1.2rem;
 }
 
@@ -85,7 +173,7 @@ main {
   position: absolute;
   top: -2px;
   right: -2px;
-  color: #4f8cff;
+  color: var(--accent);
   font-size: 0.7rem;
 }
 
@@ -97,20 +185,41 @@ main {
 .sidebar {
   width: 220px;
   flex-shrink: 0;
-  border-right: 1px solid #3a3d44;
-  padding: 0.75rem;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  padding: var(--panel-pad);
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
   overflow-y: auto;
 }
 
-.sidebar h3 {
+/* Mono micro-label — the "operator terminal" register lives in these. */
+.sidebar h3,
+.roster h3,
+.set-section h3,
+.members-h4,
+.wiki-backlinks h4,
+.members-col h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   margin: 0;
-  font-size: 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #9aa0aa;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+
+.sidebar h3::after,
+.roster h3::after,
+.members-col h3::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
 }
 
 .channel-list {
@@ -126,22 +235,23 @@ main {
   width: 100%;
   text-align: left;
   background: transparent;
-  color: #cdd2da;
+  color: var(--text-2);
   font-weight: 500;
   padding: 0.35rem 0.5rem;
 }
 
 .channel-list button:hover {
-  background: #2a2d33;
+  background: var(--bg-elev);
 }
 
 .channel-list button.active {
-  background: #34527e;
-  color: white;
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .dot {
-  color: #4f8cff;
+  color: var(--accent);
   font-size: 0.6rem;
   vertical-align: middle;
 }
@@ -155,6 +265,24 @@ main {
   padding: 0.4rem 0.5rem;
 }
 
+/* Pane header bar — the "#channel · N member(s)" line and its inline actions. */
+.channel > h2 {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 1rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.channel > h2 button {
+  flex: none;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.5rem;
+  line-height: 1.3;
+}
+
 h1,
 h2 {
   margin: 0.25rem 0;
@@ -163,9 +291,9 @@ h2 {
 input,
 textarea {
   padding: 0.5rem 0.6rem;
-  border-radius: 6px;
-  border: 1px solid #3a3d44;
-  background: #24262b;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
   color: inherit;
   font-size: 0.95rem;
   font-family: inherit;
@@ -174,7 +302,18 @@ textarea {
 
 textarea {
   resize: vertical;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Raw invite / friend-code blobs: unbroken hex needs hard breaking. Scoped here
+   so ordinary textareas (composer, wiki, feedback) keep normal word wrapping. */
+.dm-code textarea,
+.invite-code {
   word-break: break-all;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
 }
 
 .field {
@@ -186,15 +325,15 @@ textarea {
 hr {
   width: 100%;
   border: none;
-  border-top: 1px solid #3a3d44;
+  border-top: 1px solid var(--border);
   margin: 0.5rem 0;
 }
 
 details {
-  border: 1px solid #3a3d44;
-  border-radius: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   padding: 0.5rem 0.75rem;
-  background: #1f2126;
+  background: var(--panel);
 }
 
 details summary {
@@ -208,44 +347,125 @@ details > * {
 
 button {
   padding: 0.5rem 0.9rem;
-  border-radius: 6px;
+  border-radius: var(--r);
   border: none;
-  background: #4f8cff;
-  color: white;
+  background: var(--accent);
+  color: var(--on-accent);
   font-weight: 600;
   cursor: pointer;
 }
 
 button:hover {
-  background: #3b78ec;
+  background: var(--accent-hi);
 }
 
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Error text (used on the lock screen / onboarding). */
+.error {
+  color: var(--danger);
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+/* Flat message log — full-width rows, no bubbles. Density tokens set the rhythm. */
 .messages {
   flex: 1;
   overflow-y: auto;
   list-style: none;
   margin: 0;
-  padding: 0.25rem 0.1rem;
+  padding: 0.25rem 0;
   border: none;
   background: transparent;
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 1px;
 }
 
 .messages li {
-  display: flex;
-  flex-direction: column;
-  max-width: 75%;
-  padding: 0.35rem 0.6rem;
-  border-radius: 10px;
-  background: #2a2d33;
-  align-self: flex-start;
+  display: grid;
+  grid-template-columns: 3.4rem minmax(0, 1fr);
+  gap: 0 10px;
+  max-width: none;
+  padding: var(--row-pad) 0.6rem;
+  border-radius: var(--r);
+  background: transparent;
+  align-self: stretch;
+  font-size: var(--fs-msg);
 }
 
-.messages li.own {
-  align-self: flex-end;
-  background: #34527e;
+/* Timestamp gutter: every message's time, right-aligned in a mono column. */
+.messages li > .t {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  text-align: right;
+  padding-top: 5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  user-select: none;
+}
+
+.messages .m-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Divider/empty rows are not gutter rows. */
+.messages li.unread-divider,
+.messages li.day-divider,
+.messages li.muted {
+  display: flex;
+}
+
+.messages li.day-divider {
+  align-items: center;
+  gap: 10px;
+  margin: 8px 2px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+
+.messages li.day-divider::before,
+.messages li.day-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
+
+.messages li.unread-divider {
+  font-family: var(--mono);
+}
+
+.messages li:hover {
+  background: color-mix(in oklab, var(--bg-elev) 55%, transparent);
+}
+
+.messages li .text {
+  line-height: var(--lh-msg);
 }
 
 .messages li.muted {
@@ -255,13 +475,9 @@ button:hover {
 }
 
 .messages .author {
-  font-size: 0.72rem;
-  color: #9aa0aa;
+  font-size: 0.78rem;
+  color: var(--muted);
   margin-bottom: 1px;
-}
-
-.messages li.own .author {
-  color: #cdd9f5;
 }
 
 .roster h3 {
@@ -285,16 +501,17 @@ button:hover {
 }
 
 .fp {
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
-  color: #cdd2da;
+  font-family: var(--mono);
+  font-size: 0.85em;
+  color: var(--text-2);
 }
 
 .you-badge {
   font-size: 0.65rem;
-  background: #34527e;
-  color: white;
+  background: var(--accent-dim);
+  color: var(--text);
   padding: 0 0.3rem;
-  border-radius: 4px;
+  border-radius: var(--r);
 }
 
 /* --- member profile styling ------------------------------------------------ */
@@ -308,7 +525,18 @@ button:hover {
 }
 
 .font-mono {
-  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-family: var(--mono);
+}
+
+.font-script {
+  font-family: "Segoe Script", "Comic Sans MS", cursive;
+}
+
+/* Same family as the system font, set in small caps. */
+.font-caps {
+  font-family: var(--ui);
+  font-variant-caps: small-caps;
+  letter-spacing: 0.03em;
 }
 
 @keyframes fx-rainbow {
@@ -357,6 +585,24 @@ button:hover {
   animation: fx-pulse 1.4s ease-in-out infinite;
 }
 
+/* Static two-stop gradient derived from the member's own colour: the style attribute sets
+   `color`, so `currentcolor` is that colour. Unlike .fx-rainbow this must NOT set
+   `color: transparent` — that would collapse currentcolor and kill the gradient; only the
+   text *fill* is cleared so the clipped background shows through. */
+.fx-gradient {
+  background-image: linear-gradient(90deg, currentcolor, color-mix(in oklab, currentcolor 45%, var(--accent)));
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Glow in the member's own colour. */
+.fx-neon {
+  text-shadow:
+    0 0 4px currentcolor,
+    0 0 10px color-mix(in oklab, currentcolor 60%, transparent);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .fx-rainbow,
   .fx-wave,
@@ -367,9 +613,9 @@ button:hover {
 
 select {
   padding: 0.4rem 0.5rem;
-  border-radius: 6px;
-  border: 1px solid #3a3d44;
-  background: #24262b;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
   color: inherit;
   font-size: 0.9rem;
   font-family: inherit;
@@ -392,16 +638,6 @@ select {
   margin: 0.4rem 0;
 }
 
-.upload {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.upload input[type="file"] {
-  font-size: 0.78rem;
-}
-
 .file-list {
   list-style: none;
   margin: 0.4rem 0 0;
@@ -420,7 +656,7 @@ select {
 .file-name {
   background: transparent;
   border: none;
-  color: #6ab0ff;
+  color: var(--accent);
   padding: 0.15rem 0;
   font-weight: 500;
   text-align: left;
@@ -475,16 +711,16 @@ select {
 
 .view-tabs button {
   background: transparent;
-  color: #cdd2da;
+  color: var(--text-2);
   font-weight: 500;
   padding: 0.3rem 0.8rem;
-  border: 1px solid #3a3d44;
+  border: 1px solid var(--border);
 }
 
 .view-tabs button.active {
-  background: #34527e;
-  color: white;
-  border-color: #34527e;
+  background: var(--accent-dim);
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 .wiki {
@@ -492,37 +728,6 @@ select {
   display: flex;
   min-height: 0;
   gap: 0.75rem;
-}
-
-.wiki-pages {
-  width: 160px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-  border-right: 1px solid #3a3d44;
-  padding-right: 0.5rem;
-}
-
-.wiki-pages button {
-  background: transparent;
-  color: #cdd2da;
-  font-weight: 500;
-  text-align: left;
-  padding: 0.35rem 0.5rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.wiki-pages button:hover {
-  background: #2a2d33;
-}
-
-.wiki-pages button.active {
-  background: #34527e;
-  color: white;
 }
 
 .wiki-editor {
@@ -564,8 +769,8 @@ select {
   justify-content: center;
   font-size: 0.7rem;
   font-weight: 700;
-  color: #fff;
-  background: #4f8cff;
+  color: var(--on-accent);
+  background: var(--accent);
   text-transform: uppercase;
 }
 
@@ -596,32 +801,49 @@ select {
 }
 
 .messages .time {
-  font-size: 0.62rem;
-  color: #777e8a;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--muted);
   font-weight: 400;
   margin-left: 0.4rem;
+  font-variant-numeric: tabular-nums;
 }
 
 button.ghost {
   background: transparent;
-  border: 1px solid #3a3d44;
-  color: #cdd2da;
+  border: 1px solid var(--border);
+  color: var(--text-2);
   font-weight: 500;
   padding: 0.3rem 0.6rem;
 }
 
 button.ghost:hover {
-  background: #2a2d33;
+  background: var(--bg-elev);
 }
 
+/* Composer: one bordered box holding attach · input · emoji · send. */
 .composer {
   display: flex;
-  gap: 0.5rem;
+  gap: 0.25rem;
   align-items: flex-end;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--panel);
+  padding: 3px 4px;
+}
+
+.composer:focus-within {
+  border-color: var(--accent);
 }
 
 .composer input {
   flex: 1;
+  border: none;
+  background: transparent;
+}
+
+.composer input:focus {
+  border: none;
 }
 
 .composer .composer-input {
@@ -629,63 +851,45 @@ button.ghost:hover {
   resize: none;
   overflow-y: auto;
   font: inherit;
+  font-size: var(--fs-msg);
   line-height: 1.35;
   max-height: 140px;
   word-break: normal;
   overflow-wrap: anywhere;
+  border: none;
+  background: transparent;
+}
+
+.composer .composer-input:focus {
+  border: none;
+}
+
+.composer button[type="submit"] {
+  padding: 0.35rem 0.8rem;
+  font-size: 0.82rem;
+  align-self: flex-end;
+  margin: 2px;
 }
 
 .muted {
-  color: #9aa0aa;
+  color: var(--muted);
   font-size: 0.85rem;
 }
 
-/* --- Phase 10a: tabbed nav + Settings overlay --- */
-
-.tab-bar {
-  display: flex;
-  gap: 0.25rem;
-  margin-bottom: 0.25rem;
-}
-
-.tab-bar button {
-  background: transparent;
-  color: #cdd2da;
-  font-weight: 500;
-  padding: 0.35rem 0.85rem;
-  border: 1px solid #3a3d44;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-}
-
-.tab-bar button:hover {
-  background: #2a2d33;
-}
-
-.tab-bar button.active {
-  background: #34527e;
-  color: white;
-  border-color: #34527e;
-}
+/* --- Phase 10a: Settings overlay --- */
 
 .tab-count {
   font-size: 0.68rem;
-  background: #3a3d44;
-  color: #cdd2da;
-  border-radius: 9px;
+  background: var(--bg-elev);
+  color: var(--text-2);
+  border-radius: 999px;
   padding: 0 0.4rem;
   line-height: 1.4;
 }
 
-.tab-bar button.active .tab-count {
-  background: rgba(255, 255, 255, 0.25);
-  color: #fff;
-}
-
 .server-icon.gear {
   margin-top: auto;
-  background: #15171a;
+  background: transparent;
   font-size: 1.1rem;
 }
 
@@ -729,9 +933,9 @@ button.ghost:hover {
   max-height: 86vh;
   display: flex;
   flex-direction: column;
-  background: #1f2227;
-  border: 1px solid #3a3d44;
-  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
 }
 
@@ -740,7 +944,7 @@ button.ghost:hover {
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid #2a2d33;
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .overlay-head h2 {
@@ -755,7 +959,7 @@ button.ghost:hover {
 
 .set-section {
   padding: 0.75rem 0;
-  border-bottom: 1px solid #2a2d33;
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .set-section:last-child {
@@ -767,12 +971,12 @@ button.ghost:hover {
   font-size: 0.78rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #9aa0aa;
+  color: var(--muted);
 }
 
 .set-section.danger .leave {
-  color: #ff8080;
-  border-color: #5a3636;
+  color: var(--danger-hi);
+  border-color: var(--danger-brd);
 }
 
 .small {
@@ -793,14 +997,14 @@ button.ghost:hover {
 /* --- Phase 10b: rich-text rendering --- */
 
 .wikilink {
-  color: #7fa8ff;
+  color: var(--accent);
   cursor: pointer;
   text-decoration: none;
-  border-bottom: 1px dotted #7fa8ff;
+  border-bottom: 1px dotted var(--accent);
 }
 
 .wikilink:hover {
-  color: #a9c4ff;
+  color: var(--accent-hi);
 }
 
 .emoji {
@@ -817,18 +1021,18 @@ img.emoji {
 .text code,
 .status-text code,
 .wiki-render code {
-  background: #15171a;
-  border: 1px solid #2a2d33;
-  border-radius: 4px;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
   padding: 0 0.3em;
   font-size: 0.9em;
 }
 
 .text pre,
 .wiki-render pre {
-  background: #15171a;
-  border: 1px solid #2a2d33;
-  border-radius: 6px;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
   padding: 0.5rem 0.7rem;
   overflow-x: auto;
 }
@@ -843,14 +1047,14 @@ img.emoji {
 .text a,
 .status-text a,
 .wiki-render a {
-  color: #7fa8ff;
+  color: var(--accent);
 }
 
 .embed-media {
   display: block;
   max-width: 320px;
   max-height: 240px;
-  border-radius: 6px;
+  border-radius: var(--r);
   margin: 0.25rem 0;
 }
 
@@ -862,9 +1066,9 @@ img.emoji {
 /* --- Phase 10c: folder browser + drag-drop embeds --- */
 
 .composer.drag-over {
-  outline: 2px dashed #4f8cff;
+  outline: 2px dashed var(--accent);
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: var(--r);
 }
 
 .attach {
@@ -874,6 +1078,32 @@ img.emoji {
   font-size: 1.1rem;
   padding: 0 0.35rem;
   user-select: none;
+  align-self: flex-end;
+  line-height: 2;
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.attach:hover {
+  opacity: 1;
+}
+
+button.attach {
+  background: transparent;
+  border: none;
+}
+
+/* The attach/emoji controls inherit the solid-button text colour (--on-accent, near-black)
+   from the global button rule — repin them to chrome colours so the icons are visible. */
+.attach,
+button.attach {
+  color: var(--muted);
+}
+
+.attach:hover,
+button.attach:hover {
+  color: var(--text);
+  background: transparent;
 }
 
 .attach input[type="file"] {
@@ -897,7 +1127,7 @@ img.emoji {
 .crumb {
   background: transparent;
   border: none;
-  color: #7fa8ff;
+  color: var(--accent);
   padding: 0.1rem 0.25rem;
   font-size: 0.85rem;
 }
@@ -907,60 +1137,42 @@ img.emoji {
 }
 
 .crumb-sep {
-  color: #777e8a;
-}
-
-.files-actions {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  margin: 0.5rem 0;
-  flex-wrap: wrap;
-}
-
-.new-folder input {
-  width: 140px;
+  color: var(--faint);
 }
 
 .folder-name {
   background: transparent;
   border: none;
-  color: #e6e6e6;
+  color: var(--text);
   font-weight: 500;
   padding: 0.15rem 0;
   text-align: left;
 }
 
 .folder-name:hover {
-  color: #7fa8ff;
+  color: var(--accent);
 }
 
 .embed-chip {
-  background: #15171a;
-  border: 1px solid #2a2d33;
-  border-radius: 6px;
-  color: #cdd2da;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  color: var(--text-2);
   padding: 0.2rem 0.5rem;
   font-size: 0.85rem;
   cursor: pointer;
 }
 
 .embed-chip:hover {
-  background: #2a2d33;
+  background: var(--bg-elev);
 }
 
 /* --- Phase 10d: wiki overhaul --- */
 
-.wiki-pages-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
 .wiki-help-btn {
   background: transparent;
-  border: 1px solid #3a3d44;
-  color: #9aa0aa;
+  border: 1px solid var(--border);
+  color: var(--muted);
   border-radius: 50%;
   width: 22px;
   height: 22px;
@@ -993,16 +1205,16 @@ img.emoji {
 
 .wiki-mode button {
   background: transparent;
-  border: 1px solid #3a3d44;
-  color: #cdd2da;
+  border: 1px solid var(--border);
+  color: var(--text-2);
   padding: 0.2rem 0.7rem;
   font-size: 0.82rem;
 }
 
 .wiki-mode button.active {
-  background: #34527e;
-  color: white;
-  border-color: #34527e;
+  background: var(--accent-dim);
+  color: var(--text);
+  border-color: var(--accent);
 }
 
 .wiki-edit {
@@ -1014,9 +1226,9 @@ img.emoji {
 }
 
 .wiki-edit.drag-over {
-  outline: 2px dashed #4f8cff;
+  outline: 2px dashed var(--accent);
   outline-offset: 2px;
-  border-radius: 6px;
+  border-radius: var(--r);
 }
 
 .wiki-edit textarea {
@@ -1034,9 +1246,9 @@ img.emoji {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  border: 1px solid #3a3d44;
-  border-radius: 8px;
-  background: #1f2126;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
   padding: 0.75rem 1rem;
   line-height: 1.5;
 }
@@ -1053,10 +1265,10 @@ img.emoji {
 }
 
 .wiki-render blockquote {
-  border-left: 3px solid #3a3d44;
+  border-left: 3px solid var(--border);
   margin: 0.5rem 0;
   padding-left: 0.75rem;
-  color: #b5bcc7;
+  color: var(--muted);
 }
 
 .wiki-render table {
@@ -1065,17 +1277,17 @@ img.emoji {
 
 .wiki-render th,
 .wiki-render td {
-  border: 1px solid #3a3d44;
+  border: 1px solid var(--border);
   padding: 0.2rem 0.5rem;
 }
 
 .wikilink.missing {
-  color: #ff7b7b;
-  border-bottom-color: #ff7b7b;
+  color: var(--danger-hi);
+  border-bottom-color: var(--danger-hi);
 }
 
 .wiki-backlinks {
-  border-top: 1px solid #2a2d33;
+  border-top: 1px solid var(--border-soft);
   padding-top: 0.5rem;
 }
 
@@ -1084,7 +1296,7 @@ img.emoji {
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #9aa0aa;
+  color: var(--muted);
 }
 
 .wiki-backlinks ul {
@@ -1108,9 +1320,9 @@ img.emoji {
 }
 
 .wiki-help code {
-  background: #15171a;
-  border: 1px solid #2a2d33;
-  border-radius: 4px;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
   padding: 0 0.3em;
 }
 
@@ -1127,9 +1339,9 @@ img.emoji {
   right: 0;
   max-height: 200px;
   overflow-y: auto;
-  background: #1f2227;
-  border: 1px solid #3a3d44;
-  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   padding: 0.5rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   z-index: 20;
@@ -1148,7 +1360,7 @@ img.emoji {
 .emoji-pick {
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--r);
   padding: 0.2rem;
   cursor: pointer;
   display: inline-flex;
@@ -1159,8 +1371,8 @@ img.emoji {
 }
 
 button.emoji-pick:hover {
-  background: #2a2d33;
-  border-color: #3a3d44;
+  background: var(--bg-elev);
+  border-color: var(--border);
 }
 
 .emoji-pick img {
@@ -1179,12 +1391,12 @@ button.emoji-pick:hover {
   display: inline-flex;
   align-items: center;
   white-space: nowrap;
-  background: #4f8cff;
-  color: white;
+  background: var(--accent);
+  color: var(--on-accent);
   font-weight: 600;
   font-size: 0.85rem;
   padding: 0.4rem 0.7rem;
-  border-radius: 6px;
+  border-radius: var(--r);
   cursor: pointer;
 }
 
@@ -1195,30 +1407,31 @@ button.emoji-pick:hover {
 /* --- Phase 10h: roles / permissions --- */
 
 .role-badge {
+  font-family: var(--mono);
   font-size: 0.6rem;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.08em;
   padding: 0 0.35rem;
-  border-radius: 4px;
+  border-radius: var(--r);
   font-weight: 700;
-  background: #3a3d44;
-  color: #cdd2da;
+  background: var(--bg-elev);
+  color: var(--text-2);
 }
 
 .role-badge.owner {
-  background: #7a5b1e;
-  color: #ffd98a;
+  background: var(--warn-dim);
+  color: var(--warn);
 }
 
 .role-badge.admin {
-  background: #2f5b8a;
-  color: #cfe3ff;
+  background: var(--accent-dim);
+  color: var(--accent-hi);
 }
 
 .members-h4 {
   margin: 0.6rem 0 0.3rem;
   font-size: 0.78rem;
-  color: #9aa0aa;
+  color: var(--muted);
 }
 
 .role-list {
@@ -1240,23 +1453,37 @@ button.emoji-pick:hover {
   margin-left: auto;
 }
 
+/* Solid-accent call-to-action (File info, Feedback) — restates the default
+   button look so an ancestor rule can't quietly demote it. */
+button.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+}
+
 /* Member-removal (danger) button in the role manager. */
 .danger-btn {
-  color: #ff8080;
-  border-color: #5a3636;
+  color: var(--danger-hi);
+  border-color: var(--danger-brd);
 }
 .danger-btn:hover {
-  background: #3a2626;
+  background: var(--danger-dim);
 }
 
 /* File info pane (click a file in the Files tab) */
+.file-info-title {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .file-info .file-preview {
   display: flex;
   justify-content: center;
   align-items: center;
-  background: var(--bg-elev, #1a1a1f);
-  border: 1px solid var(--border, #2a2a33);
-  border-radius: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   padding: 8px;
   margin-bottom: 14px;
   min-height: 80px;
@@ -1265,7 +1492,7 @@ button.emoji-pick:hover {
 .file-info .file-preview video {
   max-width: 100%;
   max-height: 320px;
-  border-radius: 4px;
+  border-radius: var(--r);
 }
 .file-info .file-preview audio { width: 100%; }
 .file-meta {
@@ -1275,7 +1502,7 @@ button.emoji-pick:hover {
   margin: 0 0 16px;
 }
 .file-meta dt {
-  color: var(--muted, #8a8a96);
+  color: var(--muted);
   font-size: 0.85em;
 }
 .file-meta dd {
@@ -1283,20 +1510,20 @@ button.emoji-pick:hover {
   word-break: break-word;
 }
 .file-meta dd.cid {
-  font-family: var(--mono, monospace);
+  font-family: var(--mono);
   font-size: 0.85em;
-  color: var(--muted, #8a8a96);
+  color: var(--muted);
 }
-.avail.yes { color: #4caf86; }
-.avail.no { color: var(--muted, #8a8a96); }
+.avail.yes { color: var(--ok); }
+.avail.no { color: var(--muted); }
 .file-info-actions {
   display: flex;
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
-.danger-text { color: #e0574b; }
-.danger-text:hover { color: #ff6b5e; }
+.danger-text { color: var(--danger); }
+.danger-text:hover { color: var(--danger-hi); }
 
 /* Send-feedback overlay */
 .feedback .fb-seg {
@@ -1307,19 +1534,19 @@ button.emoji-pick:hover {
 .feedback .fb-seg button {
   flex: 1;
   padding: 8px 10px;
-  border: 1px solid var(--border, #2a2a33);
-  border-radius: 6px;
-  background: var(--bg-elev, #1a1a1f);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
   cursor: pointer;
 }
 .feedback .fb-seg button.active {
-  border-color: var(--accent, #6c8cff);
-  background: var(--accent-dim, #232a44);
+  border-color: var(--accent);
+  background: var(--accent-dim);
 }
 .fb-label {
   display: block;
   margin-bottom: 6px;
-  color: var(--muted, #8a8a96);
+  color: var(--muted);
   font-size: 0.9em;
 }
 .fb-text {
@@ -1327,16 +1554,22 @@ button.emoji-pick:hover {
   resize: vertical;
   font: inherit;
   padding: 8px;
-  border-radius: 6px;
-  border: 1px solid var(--border, #2a2a33);
-  background: var(--bg-elev, #1a1a1f);
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
   color: inherit;
   box-sizing: border-box;
   margin-bottom: 10px;
 }
-.server-icon.feedback-btn { font-size: 1.05em; }
-
 .invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Generic inline segment (status-bar cells, the feedback kind switcher).
+   Container-scoped rules below/above refine it; this is just the base row. */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 
 /* Right-click context menu */
 .ctx-backdrop {
@@ -1350,9 +1583,9 @@ button.emoji-pick:hover {
   min-width: 180px;
   max-width: 280px;
   padding: 4px;
-  background: var(--bg-elev, #1d1d24);
-  border: 1px solid var(--border, #33333d);
-  border-radius: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
   outline: none;
 }
@@ -1363,7 +1596,7 @@ button.emoji-pick:hover {
   width: 100%;
   padding: 7px 10px;
   border: none;
-  border-radius: 5px;
+  border-radius: var(--r);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -1372,7 +1605,7 @@ button.emoji-pick:hover {
 }
 .ctx-item:hover:not(:disabled),
 .ctx-item:focus-visible {
-  background: var(--accent-dim, #2a3150);
+  background: var(--accent-dim);
   outline: none;
 }
 .ctx-item:disabled {
@@ -1380,11 +1613,11 @@ button.emoji-pick:hover {
   cursor: default;
 }
 .ctx-item.danger {
-  color: #e0574b;
+  color: var(--danger);
 }
 .ctx-item.danger:hover:not(:disabled),
 .ctx-item.danger:focus-visible {
-  background: rgba(224, 87, 75, 0.16);
+  background: var(--danger-dim);
 }
 .ctx-icon {
   width: 1.1em;
@@ -1398,11 +1631,11 @@ button.emoji-pick:hover {
 .ctx-divider {
   height: 1px;
   margin: 4px 6px;
-  background: var(--border, #33333d);
+  background: var(--border);
 }
 .roster li.is-you {
   background: rgba(255, 255, 255, 0.04);
-  border-radius: 5px;
+  border-radius: var(--r);
 }
 
 /* QoL: list search inputs + unread count badge */
@@ -1412,9 +1645,9 @@ button.emoji-pick:hover {
   margin-bottom: 6px;
   padding: 4px 8px;
   font-size: 0.85em;
-  border: 1px solid var(--border, #2a2a33);
-  border-radius: 5px;
-  background: var(--bg-elev, #1a1a1f);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-elev);
   color: inherit;
 }
 .rail-badge {
@@ -1425,8 +1658,8 @@ button.emoji-pick:hover {
   height: 16px;
   padding: 0 4px;
   box-sizing: border-box;
-  border-radius: 8px;
-  background: #e0574b;
+  border-radius: 999px;
+  background: var(--danger);
   color: #fff;
   font-size: 0.7em;
   line-height: 16px;
@@ -1464,8 +1697,9 @@ button.emoji-pick:hover {
 
 /* Advisory eclipse-isolation banner (never gates; verify a member out of band). */
 .eclipse-banner {
-  background: #8a6d1a;
-  color: #fff;
+  background: var(--warn-dim);
+  color: var(--warn);
+  border-bottom: 1px solid color-mix(in oklab, var(--warn) 40%, transparent);
   padding: 8px 14px;
   text-align: center;
   font-size: 0.85rem;
@@ -1509,8 +1743,8 @@ button.emoji-pick:hover {
   gap: 4px 12px;
   align-items: center;
   padding: 8px 10px;
-  background: #1f2126;
-  border-radius: 6px;
+  background: var(--panel);
+  border-radius: var(--r);
 }
 .dl-item-main {
   display: flex;
@@ -1529,21 +1763,34 @@ button.emoji-pick:hover {
   white-space: nowrap;
 }
 .dl-item-status.done {
-  color: #57c759;
+  color: var(--ok);
 }
 .dl-item-status.failed {
-  color: #ff6b6b;
+  color: var(--danger);
 }
 .dl-item-status.queued {
-  color: #9aa0a6;
+  color: var(--muted);
 }
 .dl-item-status.downloading {
-  color: #6ab0ff;
+  color: var(--accent);
 }
 .dl-item-bar {
   grid-column: 1 / -1;
   width: 100%;
   height: 6px;
+}
+
+/* Progress bars read as pills. */
+.dl-item-bar,
+.dl-progress progress {
+  border-radius: 999px;
+  overflow: hidden;
+}
+.dl-item-bar::-webkit-progress-bar,
+.dl-progress progress::-webkit-progress-bar,
+.dl-item-bar::-webkit-progress-value,
+.dl-progress progress::-webkit-progress-value {
+  border-radius: 999px;
 }
 
 /* File availability indicator — the colour signals whether a file is held locally, partial,
@@ -1557,23 +1804,23 @@ button.emoji-pick:hover {
 }
 .file-avail.local,
 .avail-text.local {
-  color: #4caf86;
+  color: var(--ok);
 }
 .file-avail.partial,
 .avail-text.partial {
-  color: #d8a657;
+  color: var(--warn);
 }
 .file-avail.remote,
 .avail-text.remote {
-  color: #6ab0ff;
+  color: var(--accent);
 }
 .file-avail.offline,
 .avail-text.offline {
-  color: #8a8a96;
+  color: var(--muted);
 }
 .file-avail.downloading,
 .avail-text.downloading {
-  color: #6ab0ff;
+  color: var(--accent);
 }
 
 /* Roster presence dot — green when the member is reachable right now, dim when not. */
@@ -1581,25 +1828,27 @@ button.emoji-pick:hover {
   flex-shrink: 0;
   font-size: 0.55rem;
   line-height: 1;
-  color: #555b66;
+  color: var(--faint);
 }
 .presence.online {
-  color: #57c759;
+  color: var(--ok);
 }
 
 /* Roster: how long ago an offline member was last seen (only when observed this session). */
 .last-seen {
   flex-shrink: 0;
   margin-left: auto;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 0.7rem;
-  color: #6b7280;
+  color: var(--faint);
 }
 
 /* Rail separator between the DMs circle and the servers. */
 .rail-sep {
   width: 24px;
   height: 1px;
-  background: #3a3d44;
+  background: var(--bg-elev);
   flex: none;
 }
 
@@ -1633,16 +1882,17 @@ button.emoji-pick:hover {
   gap: 0.4rem;
   text-align: left;
   background: transparent;
-  color: #cdd2da;
+  color: var(--text-2);
   font-weight: 500;
   padding: 0.3rem 0.4rem;
 }
 .dm-list button:hover {
-  background: #2a2d33;
+  background: var(--bg-elev);
 }
 .dm-list button.active {
-  background: #34527e;
-  color: #fff;
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .dm-ava {
   display: inline-flex;
@@ -1650,9 +1900,10 @@ button.emoji-pick:hover {
   justify-content: center;
   width: 1.4rem;
   height: 1.4rem;
-  border-radius: 50%;
-  background: #34527e;
-  color: #fff;
+  border-radius: var(--r);
+  background: var(--accent-dim);
+  color: var(--text);
+  font-family: var(--mono);
   font-size: 0.7rem;
   flex: none;
 }
@@ -1692,6 +1943,8 @@ button.emoji-pick:hover {
 }
 .dm-hint {
   flex: none;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: 0.7rem;
 }
 
@@ -1713,8 +1966,8 @@ button.emoji-pick:hover {
   flex-direction: column;
   gap: 4px;
   padding: 6px 8px;
-  background: #1f2126;
-  border-radius: 6px;
+  background: var(--panel);
+  border-radius: var(--r);
 }
 .dm-req-name {
   font-size: 0.85rem;
@@ -1740,12 +1993,12 @@ button.emoji-pick:hover {
   flex: 1;
 }
 .messages li.search-match {
-  background: rgba(255, 213, 79, 0.08);
-  border-radius: 5px;
+  background: var(--warn-faint);
+  border-radius: var(--r);
 }
 .messages li.search-current {
-  background: rgba(255, 213, 79, 0.24);
-  border-radius: 5px;
+  background: var(--warn-dim);
+  border-radius: var(--r);
 }
 
 /* Inline message edit + the "(edited)" tag. */
@@ -1774,7 +2027,7 @@ button.emoji-pick:hover {
   align-items: center;
   gap: 8px;
   margin: 8px 2px;
-  color: var(--accent, #6c8cff);
+  color: var(--accent);
   font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1784,11 +2037,11 @@ button.emoji-pick:hover {
   content: "";
   flex: 1;
   height: 1px;
-  background: var(--accent, #6c8cff);
+  background: var(--accent);
   opacity: 0.45;
 }
 .jump-unread {
-  color: var(--accent, #6c8cff);
+  color: var(--accent);
 }
 
 /* Emoji reactions: the per-message reaction chips + the quick-picker. */
@@ -1804,9 +2057,9 @@ button.emoji-pick:hover {
   align-items: center;
   gap: 3px;
   padding: 1px 7px;
-  border-radius: 11px;
-  border: 1px solid var(--border, #2a2a36);
-  background: var(--panel, #1c1c24);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
   font-size: 0.8rem;
   line-height: 1.5;
   cursor: pointer;
@@ -1815,8 +2068,8 @@ button.emoji-pick:hover {
   filter: brightness(1.25);
 }
 .reaction.mine {
-  border-color: var(--accent, #6c8cff);
-  background: var(--accent-dim, #232a44);
+  border-color: var(--accent);
+  background: var(--accent-dim);
 }
 .add-reaction {
   opacity: 0.5;
@@ -1828,9 +2081,9 @@ button.emoji-pick:hover {
   display: inline-flex;
   gap: 1px;
   padding: 2px 4px;
-  border-radius: 11px;
-  border: 1px solid var(--border, #2a2a36);
-  background: var(--panel, #1c1c24);
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
 }
 .reaction-picker .qe {
   border: none;
@@ -1838,11 +2091,11 @@ button.emoji-pick:hover {
   cursor: pointer;
   font-size: 1.05rem;
   padding: 1px 3px;
-  border-radius: 6px;
+  border-radius: var(--r);
   line-height: 1;
 }
 .reaction-picker .qe:hover {
-  background: var(--accent-dim, #232a44);
+  background: var(--accent-dim);
 }
 
 /* Reply / threading: the parent quote on a message + the composer reply banner. */
@@ -1855,7 +2108,7 @@ button.emoji-pick:hover {
   padding: 1px 6px 1px 2px;
   border: none;
   background: none;
-  border-left: 2px solid var(--border, #2a2a36);
+  border-left: 2px solid var(--border);
   color: inherit;
   font-size: 0.78rem;
   cursor: pointer;
@@ -1866,7 +2119,7 @@ button.emoji-pick:hover {
 }
 .reply-quote:hover {
   opacity: 1;
-  border-left-color: var(--accent, #6c8cff);
+  border-left-color: var(--accent);
 }
 .reply-arrow {
   opacity: 0.7;
@@ -1877,9 +2130,9 @@ button.emoji-pick:hover {
   gap: 6px;
   padding: 4px 8px;
   margin-bottom: 4px;
-  border-radius: 8px;
-  background: var(--accent-dim, #232a44);
-  border: 1px solid var(--border, #2a2a36);
+  border-radius: var(--r-lg);
+  background: var(--accent-dim);
+  border: 1px solid var(--border);
   font-size: 0.82rem;
 }
 .reply-banner .reply-cancel {
@@ -1889,7 +2142,7 @@ button.emoji-pick:hover {
 /* Flash a message you jumped to from a reply quote. */
 @keyframes flashPulse {
   0% {
-    background: var(--accent-dim, #232a44);
+    background: var(--accent-dim);
   }
   100% {
     background: transparent;
@@ -1897,20 +2150,20 @@ button.emoji-pick:hover {
 }
 .messages li.flash {
   animation: flashPulse 1.3s ease-out;
-  border-radius: 6px;
+  border-radius: var(--r);
 }
 
 /* @-mentions: the rendered chip, the self-highlight, the composer autocomplete, the channel badge. */
 .mention {
-  color: var(--accent, #6c8cff);
-  background: var(--accent-dim, #232a44);
-  border-radius: 4px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  border-radius: var(--r);
   padding: 0 3px;
   font-weight: 600;
 }
 .mention.mention-me {
-  color: #ffd479;
-  background: rgba(255, 196, 0, 0.16);
+  color: var(--warn);
+  background: var(--warn-dim);
 }
 .mention-popup {
   display: flex;
@@ -1918,9 +2171,9 @@ button.emoji-pick:hover {
   gap: 1px;
   margin-bottom: 4px;
   padding: 3px;
-  border-radius: 8px;
-  border: 1px solid var(--border, #2a2a36);
-  background: var(--panel, #1c1c24);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  background: var(--panel);
   max-height: 200px;
   overflow-y: auto;
 }
@@ -1931,22 +2184,22 @@ button.emoji-pick:hover {
   padding: 4px 6px;
   border: none;
   background: none;
-  border-radius: 6px;
+  border-radius: var(--r);
   cursor: pointer;
   text-align: left;
   color: inherit;
 }
 .mention-option:hover,
 .mention-option.active {
-  background: var(--accent-dim, #232a44);
+  background: var(--accent-dim);
 }
 .mention-badge {
   display: inline-block;
   margin-left: 4px;
   padding: 0 5px;
-  border-radius: 8px;
-  background: rgba(255, 196, 0, 0.2);
-  color: #ffd479;
+  border-radius: 999px;
+  background: var(--warn-dim);
+  color: var(--warn);
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -1966,8 +2219,11 @@ button.emoji-pick:hover {
 }
 
 /* Inbox screen: the cross-server mention/reply list. */
-.inbox-circle {
-  font-size: 1.05rem;
+.inbox-kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
 }
 .inbox-screen {
   flex: 1;
@@ -2006,18 +2262,18 @@ button.emoji-pick:hover {
   width: 100%;
   text-align: left;
   padding: 8px 12px;
-  border: 1px solid var(--border, #2a2a36);
-  border-radius: 10px;
-  background: var(--panel, #1c1c24);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
   color: inherit;
   cursor: pointer;
 }
 .inbox-jump:hover {
-  border-color: var(--accent, #6c8cff);
+  border-color: var(--accent);
 }
 .inbox-item.unseen .inbox-jump {
-  border-left: 3px solid var(--accent, #6c8cff);
-  background: var(--accent-dim, #232a44);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-dim);
 }
 .inbox-meta {
   display: flex;
@@ -2027,24 +2283,26 @@ button.emoji-pick:hover {
   margin-bottom: 4px;
 }
 .inbox-where {
-  color: var(--muted, #9aa0b5);
+  color: var(--muted);
 }
 .inbox-time {
   margin-left: auto;
-  color: var(--muted, #9aa0b5);
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
 .inbox-tag {
   padding: 0 6px;
-  border-radius: 8px;
+  border-radius: 999px;
   font-weight: 600;
 }
 .mention-tag {
-  background: rgba(255, 196, 0, 0.18);
-  color: #ffd479;
+  background: var(--warn-dim);
+  color: var(--warn);
 }
 .reply-tag {
-  background: var(--accent-dim, #232a44);
-  color: var(--accent, #6c8cff);
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 .inbox-body {
   display: flex;
@@ -2056,7 +2314,7 @@ button.emoji-pick:hover {
   flex: 0 0 auto;
 }
 .inbox-text {
-  color: var(--muted, #c9cede);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2070,15 +2328,15 @@ button.emoji-pick:hover {
   gap: 4px;
   margin-top: 2px;
   padding: 1px 8px;
-  border: 1px solid var(--border, #2a2a36);
-  border-radius: 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
   background: none;
-  color: var(--accent, #6c8cff);
+  color: var(--accent);
   font-size: 0.74rem;
   cursor: pointer;
 }
 .reply-count:hover {
-  background: var(--accent-dim, #232a44);
+  background: var(--accent-dim);
 }
 
 /* Pinned messages: the inline mark, the header toggle, and the dropdown panel. */
@@ -2087,14 +2345,14 @@ button.emoji-pick:hover {
   opacity: 0.85;
 }
 .pinned-toggle.active {
-  background: var(--accent-dim, #232a44);
-  color: var(--accent, #6c8cff);
+  background: var(--accent-dim);
+  color: var(--accent);
 }
 .pinned-panel {
   margin: 4px 0 8px;
-  border: 1px solid var(--border, #2a2a36);
-  border-radius: 10px;
-  background: var(--panel, #1c1c24);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--panel);
   overflow: hidden;
 }
 .pinned-head {
@@ -2102,7 +2360,7 @@ button.emoji-pick:hover {
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border, #2a2a36);
+  border-bottom: 1px solid var(--border);
 }
 .pinned-list {
   list-style: none;
@@ -2125,16 +2383,16 @@ button.emoji-pick:hover {
   padding: 5px 8px;
   border: none;
   background: none;
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   cursor: pointer;
   color: inherit;
   text-align: left;
 }
 .pinned-item:hover {
-  background: var(--accent-dim, #232a44);
+  background: var(--accent-dim);
 }
 .pinned-text {
-  color: var(--muted, #c9cede);
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2155,15 +2413,21 @@ button.emoji-pick:hover {
   display: none;
   gap: 1px;
   padding: 1px;
-  background: var(--panel, #1c1c24);
-  border: 1px solid var(--border, #2a2a36);
-  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   z-index: 3;
 }
 .messages li:hover .msg-actions,
 .msg-actions:focus-within {
   display: flex;
+}
+
+/* The first row has no message above it to overlap — pull the toolbar inside
+   the row so the list edge doesn't clip it. */
+.messages li:first-child .msg-actions {
+  top: 2px;
 }
 .msg-action {
   border: none;
@@ -2172,25 +2436,25 @@ button.emoji-pick:hover {
   font-size: 0.92rem;
   line-height: 1;
   padding: 3px 6px;
-  border-radius: 6px;
-  color: var(--text, #e4e4ef);
+  border-radius: var(--r);
+  color: var(--text);
 }
 .msg-action:hover {
-  background: var(--accent-dim, #232a44);
+  background: var(--accent-dim);
 }
 
 /* Spoiler tags: a blacked-out block until clicked to reveal. */
 .spoiler {
-  background: #45454f;
+  background: var(--bg-elev);
   color: transparent;
-  border-radius: 4px;
+  border-radius: var(--r);
   padding: 0 3px;
   cursor: pointer;
   user-select: none;
   transition: background 0.12s ease;
 }
 .spoiler:hover {
-  background: #54545f;
+  background: var(--border);
 }
 .spoiler.revealed {
   background: rgba(255, 255, 255, 0.07);
@@ -2216,9 +2480,9 @@ button.emoji-pick:hover {
   flex-wrap: wrap;
 }
 .format-help code {
-  background: var(--accent-dim, #232a44);
+  background: var(--accent-dim);
   padding: 0 5px;
-  border-radius: 4px;
+  border-radius: var(--r);
   font-size: 0.82rem;
 }
 
@@ -2234,10 +2498,10 @@ button.emoji-pick:hover {
   gap: 8px;
   margin: 4px 0 0;
   padding: 6px 10px;
-  border-radius: 8px;
-  background: rgba(255, 107, 107, 0.12);
-  border: 1px solid rgba(255, 107, 107, 0.4);
-  color: #ff8a8a;
+  border-radius: var(--r-lg);
+  background: var(--danger-dim);
+  border: 1px solid var(--danger-brd);
+  color: var(--danger-hi);
   font-size: 0.85rem;
 }
 .error-toast span {
@@ -2278,6 +2542,12 @@ button.emoji-pick:hover {
   align-items: center;
   margin-bottom: 12px;
 }
+.pc-id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
 .pc-name {
   font-size: 1.1rem;
 }
@@ -2290,9 +2560,9 @@ button.emoji-pick:hover {
 .pc-desc {
   white-space: pre-wrap;
   word-break: break-word;
-  background: var(--panel, #1c1c24);
-  border: 1px solid var(--border, #2a2a36);
-  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
   padding: 8px 10px;
   margin: 0 0 12px;
 }
@@ -2310,15 +2580,70 @@ button.emoji-pick:hover {
 .bubble-swatch {
   width: 46px;
   height: 30px;
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   border: 2px solid transparent;
-  background: #3a3f4b;
+  background: var(--bg-elev);
   cursor: pointer;
-  color: #e4e4ef;
+  color: var(--text);
   font-size: 0.78rem;
 }
 .bubble-swatch.active {
-  border-color: #fff;
+  border-color: var(--text);
+}
+
+/* Name-style picker in the profile editor: font/effect tiles + colour swatches. Each tile
+   previews its own choice (the font it selects / the effect applied to its label). */
+.ns-tiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ns-tile {
+  min-width: 44px;
+  height: 34px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.86rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.ns-tile:hover {
+  background: var(--bg-elev);
+  border-color: var(--accent-hi);
+}
+.ns-tile.active,
+.ns-tile.active:hover {
+  border-color: var(--accent);
+}
+.ns-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.ns-swatches input[type="color"] {
+  flex-shrink: 0;
+}
+.ns-swatch {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--r);
+  border: 2px solid transparent;
+  cursor: pointer;
+}
+.ns-swatch:hover {
+  filter: brightness(1.15);
+}
+.ns-swatch.active {
+  border-color: var(--text);
 }
 
 /* The clickable avatar+name inside a roster row (unstyled button → opens the profile card). */
@@ -2348,7 +2673,7 @@ button.emoji-pick:hover {
 
 /* Voice call: the header button, the floating call bar, and the incoming-call prompt. */
 .call-start {
-  color: #4ade80;
+  color: var(--ok);
 }
 .call-bar {
   position: fixed;
@@ -2359,27 +2684,37 @@ button.emoji-pick:hover {
   align-items: center;
   gap: 10px;
   padding: 8px 14px;
-  border-radius: 12px;
-  background: #1d3a2e;
-  border: 1px solid #2e6b4f;
+  border-radius: var(--r-lg);
+  background: var(--ok-dim);
+  border: 1px solid var(--ok-brd);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
   z-index: 60;
 }
+.call-dot {
+  flex: none;
+  font-size: 0.95rem;
+  line-height: 1;
+}
 .call-title {
   font-weight: 600;
+}
+.call-status {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--muted);
 }
 .call-avatars {
   display: flex;
 }
 .call-avatars :global(.avatar) {
   margin-left: -6px;
-  border: 2px solid #1d3a2e;
+  border: 2px solid var(--ok-dim);
 }
 .call-hangup {
-  background: #c0392b;
+  background: var(--danger);
 }
 .call-hangup:hover {
-  background: #e04b3a;
+  background: var(--danger-hi);
 }
 .call-incoming {
   position: fixed;
@@ -2390,9 +2725,9 @@ button.emoji-pick:hover {
   align-items: center;
   gap: 10px;
   padding: 10px 16px;
-  border-radius: 12px;
-  background: #1c1c24;
-  border: 1px solid var(--accent, #6c8cff);
+  border-radius: var(--r-lg);
+  background: var(--panel);
+  border: 1px solid var(--accent);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
   z-index: 60;
 }
@@ -2411,17 +2746,17 @@ button.emoji-pick:hover {
 .voice-pill {
   flex: 0 0 auto;
   padding: 1px 7px;
-  border-radius: 10px;
-  background: #1d3a2e;
-  border: 1px solid #2e6b4f;
-  color: #7fe0a8;
+  border-radius: 999px;
+  background: var(--ok-dim);
+  border: 1px solid var(--ok-brd);
+  color: var(--ok);
   font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
 }
 .voice-pill.in {
-  background: #2e6b4f;
-  color: #fff;
+  background: var(--ok-brd);
+  color: var(--text);
 }
 .voice-pill:hover {
   filter: brightness(1.25);
@@ -2438,4 +2773,541 @@ button.emoji-pick:hover {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* --- UI overhaul: global status bar (self-connectivity — node, peers, session) --- */
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 5px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow-x: auto;
+  flex: none;
+}
+.statusbar .seg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.statusbar .sb-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+}
+.statusbar .sb-dot.off {
+  background: var(--faint);
+}
+.statusbar .ok-t { color: var(--ok); }
+.statusbar .warn-t { color: var(--warn); }
+.statusbar .sb-spacer { flex: 1; }
+
+/* --- UI overhaul: dedicated member column (right of the content area) --- */
+.members-col {
+  width: 200px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  padding: var(--panel-pad);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.members-col ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.members-col li {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  padding: var(--row-pad) 4px;
+  border-radius: var(--r);
+}
+.members-col li:hover {
+  background: var(--bg-elev);
+}
+
+/* --- UI overhaul: terminal chrome (subtle scanline wash; off in "clean") --- */
+:root[data-chrome="terminal"] main::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 200;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.09) 0 1px, transparent 1px 3px);
+  opacity: 0.35;
+}
+:root[data-chrome="terminal"] .sidebar h3,
+:root[data-chrome="terminal"] .members-col h3,
+:root[data-chrome="terminal"] .statusbar .ok-t {
+  text-shadow: 0 0 6px color-mix(in oklab, currentcolor 35%, transparent);
+}
+
+/* --- UI overhaul: Appearance settings controls --- */
+.preset-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.preset-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-align: left;
+}
+.preset-btn:hover {
+  color: var(--text);
+  background: var(--bg-0);
+}
+.preset-btn.active {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.preset-sw {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--r);
+  flex-shrink: 0;
+}
+.accent-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.accent-sw {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--r);
+  cursor: pointer;
+  border: 2px solid transparent;
+}
+.accent-sw:hover {
+  filter: brightness(1.15);
+}
+.accent-sw.active {
+  border-color: var(--text);
+}
+
+/* --- Polish pass 2 (from first live screenshot) --- */
+
+/* Themed thin scrollbars (WebView2/Chromium + Firefox syntax). */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+}
+*::-webkit-scrollbar-button {
+  display: none;
+  height: 0;
+  width: 0;
+}
+
+/* Anchor the log to the bottom (chat reads up from the composer, not down from the void). */
+.messages > li:first-child {
+  margin-top: auto;
+}
+
+/* Emoji glyphs used as chrome icons render in full colour and fight the terminal
+   register — desaturate them when the control is idle; active states keep colour. */
+.server-icon.gear,
+.icon-btn,
+.search-toggle,
+.msg-action,
+.pin-mark,
+.pinned-toggle:not(.active) {
+  filter: grayscale(1);
+}
+
+/* "Join/create #channel" is an action, not a channel row — dashed, quiet, mono hint. */
+.join-channel input {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.5rem;
+}
+.join-channel input::placeholder {
+  color: var(--faint);
+}
+.join-channel input:focus {
+  border-style: solid;
+  color: var(--text);
+}
+
+/* --- Surface strip: the content column's own nav (chat · files · status · wiki · transfers).
+       Ruled line under the whole strip, accent underline on the active surface. --- */
+.surface-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+  flex: none;
+  padding: 1px 0 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.surface-bar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.3rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.surface-bar button:hover {
+  background: transparent;
+  color: var(--text);
+}
+.surface-bar button.active {
+  background: transparent;
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.surface-bar .sb-ico {
+  color: var(--faint);
+  font-size: 0.78rem;
+  line-height: 1;
+}
+.surface-bar button.active .sb-ico {
+  color: var(--accent);
+}
+.surface-bar button.active .tab-count {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+/* Unread (accent dot) / mention (warn @) marker on the chat surface. */
+.surface-bar .sb-mark {
+  color: var(--accent);
+  font-size: 0.6rem;
+  line-height: 1;
+}
+.surface-bar .sb-mark.at {
+  color: var(--warn);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* --- Contextual sidebar blocks (pages · folders · transfers) --- */
+/* The wiki help "?" sits past the h3's ruled line, on the section's right edge. */
+.sidebar h3.ctx-h::after {
+  order: 1;
+}
+.sidebar h3 .wiki-help-btn {
+  order: 2;
+  width: 18px;
+  height: 18px;
+  font-size: 0.62rem;
+  flex: none;
+}
+/* Page names can be long — one row each, clipped like a channel row. */
+.wiki-pages button {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* "+ new page" / "+ new folder" are actions, not rows — same quiet dashed field as join-channel. */
+.new-page input,
+.new-folder input {
+  width: 100%;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 0.3rem 0.5rem;
+}
+.new-page input::placeholder,
+.new-folder input::placeholder {
+  color: var(--faint);
+}
+.new-page input:focus,
+.new-folder input:focus {
+  border-style: solid;
+  color: var(--text);
+}
+.folder-nav button {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+.ctx-action {
+  align-self: flex-start;
+}
+.sidebar .upload-btn {
+  justify-content: center;
+}
+
+/* --- You-panel: your identity on this server, pinned to the sidebar bottom --- */
+button.you-panel {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.45rem 0.4rem;
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+button.you-panel:hover {
+  background: var(--bg-elev);
+  border-color: var(--border);
+}
+.you-panel .who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.you-panel .nm {
+  font-size: 0.82rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.you-panel .st {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+.you-panel .you-edit {
+  color: var(--muted);
+  font-size: 0.9rem;
+  flex: none;
+}
+
+/* --- Header chip (crypto/status badges in the channel header) --- */
+.chip {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 2px 7px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+  font-weight: 400;
+}
+.chip.ok {
+  color: var(--ok);
+  border-color: color-mix(in oklab, var(--ok) 40%, transparent);
+}
+
+/* --- Member column: online / offline groups --- */
+/* The role badge sits on the row's right edge (abbreviated OWN / ADM in the markup). */
+.member-row .role-badge {
+  margin-left: auto;
+  flex: none;
+}
+
+/* --- Quick switcher (Ctrl+K): channels · surfaces · servers · DMs --- */
+/* Shortcut hint next to the sidebar's "Channels" label (the ruled line still fills after it). */
+.sidebar h3 .key {
+  color: var(--accent);
+  letter-spacing: 0.08em;
+}
+
+.qs-overlay {
+  align-items: flex-start;
+}
+
+.qs-card {
+  margin-top: 15vh;
+  width: min(440px, 92vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.qs-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--border-soft);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  padding: 0.7rem 0.85rem;
+  flex: none;
+}
+
+.qs-input::placeholder {
+  color: var(--faint);
+}
+
+.qs-input:focus,
+.qs-input:focus-visible {
+  border-color: transparent;
+  border-bottom-color: var(--accent);
+  outline: none;
+}
+
+.qs-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.qs-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--r);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.qs-item:hover,
+.qs-item.active {
+  background: var(--accent-dim);
+  outline: none;
+}
+
+.qs-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qs-hint {
+  margin-left: auto;
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.qs-empty {
+  padding: 8px 10px;
+}
+
+/* --- Composer keybinding hint --- */
+.composer .c-hint {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  align-self: center;
+  white-space: nowrap;
+  user-select: none;
+}
+
+@media (max-width: 700px) {
+  .composer .c-hint {
+    display: none;
+  }
+}
+
+/* --- Inline line-icons (DM / inbox / cat) --- */
+.ico {
+  width: 1.25em;
+  height: 1.25em;
+  display: inline-block;
+  vertical-align: middle;
+  flex: none;
+}
+.server-icon .ico {
+  width: 20px;
+  height: 20px;
+}
+.attach .ico {
+  width: 18px;
+  height: 18px;
+}
+.msg-action .ico {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+/* --- Emoji picker: section labels + more room for the default sets --- */
+.emoji-picker {
+  max-height: 300px;
+}
+.emoji-set-label {
+  margin: 8px 0 4px;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+.emoji-set-label:first-child {
+  margin-top: 0;
+}
+.emoji-pick {
+  font-size: 1.05rem;
+  line-height: 1;
 }

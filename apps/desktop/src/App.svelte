@@ -82,6 +82,7 @@
   function openServerSettings(id: number | null = null) {
     if (id !== null && id !== activeServerId) switchServer(id);
     serverNameDraft = cur?.name ?? "";
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens } };
     showServerSettings = true;
   }
   async function renameServer() {
@@ -104,6 +105,123 @@
     soundOn = !soundOn;
     try { localStorage.setItem("catcoms.sound", soundOn ? "on" : "off"); } catch { /* ignore */ }
   }
+
+  // Appearance: the whole theme is a token map in app.css; these choices only flip
+  // data-attributes / one CSS variable on <html>, so they can never fork the layout.
+  // Semantic colours (green=presence, gold=mentions, red=danger) are constant in every preset.
+  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean };
+  const APPEARANCE_KEY = "catcoms.appearance";
+  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true };
+  function loadAppearance(): Appearance {
+    try {
+      return { ...APPEARANCE_DEFAULT, ...JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") };
+    } catch {
+      return { ...APPEARANCE_DEFAULT };
+    }
+  }
+  let appearance = $state<Appearance>(loadAppearance());
+  const PRESETS = [
+    { id: "", name: "Nightshade", sw: "#977df2" },
+    { id: "aurum", name: "Aurum", sw: "#e2a83d" },
+    { id: "verdant", name: "Verdant", sw: "#57c77a" },
+    { id: "garnet", name: "Garnet", sw: "#e0574b" },
+    { id: "slate", name: "Slate", sw: "#6ca0d8" },
+  ];
+  const ACCENT_CHOICES = ["#977df2", "#e2a83d", "#e0574b", "#57c77a", "#6ca0d8"];
+  // Server livery (design-livery.md): the active server's published scheme. Every value is
+  // UNTRUSTED (any member's client may have written the doc) — sanitized on read, and only
+  // ever able to recolor: preset id, accent, and an allow-list of colour tokens. Semantic
+  // tokens (--ok/--warn/--danger) and layout are never livery-controllable.
+  type Livery = { preset: string; accent: string; tokens: Record<string, string> };
+  const emptyLivery = (): Livery => ({ preset: "", accent: "", tokens: {} });
+  let livery = $state<Livery>(emptyLivery());
+  let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
+  const LIVERY_TOKENS = [
+    "--bg-0", "--panel", "--bg-elev", "--border", "--border-soft",
+    "--text", "--text-2", "--muted", "--faint", "--accent", "--accent-hi",
+  ];
+  const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+  function sanitizeLivery(l: Livery): Livery {
+    const out = emptyLivery();
+    if (PRESETS.some((p) => p.id === l.preset)) out.preset = l.preset;
+    if (HEX_COLOR.test(l.accent)) out.accent = l.accent;
+    for (const [k, v] of Object.entries(l.tokens ?? {})) {
+      if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) out.tokens[k] = v;
+    }
+    return out;
+  }
+  let liveryActive = $derived(!!(livery.preset || livery.accent || Object.keys(livery.tokens).length));
+  // Per-server "use my own theme" opt-out (precedence rule 1 in the design doc).
+  const liveryOptOutKey = (id: number) => `catcoms.appearance.override.${id}`;
+  let liveryOptOut = $state(false);
+  function loadLiveryOptOut(id: number) {
+    try { liveryOptOut = localStorage.getItem(liveryOptOutKey(id)) === "1"; } catch { liveryOptOut = false; }
+  }
+  function setLiveryOptOut(v: boolean) {
+    liveryOptOut = v;
+    if (activeServerId === null) return;
+    try {
+      if (v) localStorage.setItem(liveryOptOutKey(activeServerId), "1");
+      else localStorage.removeItem(liveryOptOutKey(activeServerId));
+    } catch { /* best-effort */ }
+  }
+  async function refreshLivery() {
+    if (activeServerId === null || cur?.isDm) {
+      livery = emptyLivery();
+      return;
+    }
+    try {
+      livery = sanitizeLivery(await invoke<Livery>("get_livery", { server: activeServerId }));
+    } catch {
+      livery = emptyLivery(); // failed/malformed reads degrade to "no livery", never an error
+    }
+  }
+  async function publishLivery() {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_livery", {
+        server: activeServerId,
+        preset: liveryDraft.preset,
+        accent: liveryDraft.accent,
+        tokens: {},
+      });
+      await refreshLivery();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function removeLivery() {
+    if (activeServerId === null) return;
+    try {
+      await invoke("set_livery", { server: activeServerId, preset: "", accent: "", tokens: {} });
+      liveryDraft = emptyLivery();
+      await refreshLivery();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Apply the effective theme: user per-server opt-out > server livery > user appearance.
+  // Density and terminal-chrome are always personal — a livery only recolors.
+  $effect(() => {
+    const el = document.documentElement;
+    const set = (k: string, v: string) => (v ? el.setAttribute("data-" + k, v) : el.removeAttribute("data-" + k));
+    const followLivery = liveryActive && !liveryOptOut && !dmHome && !inboxView && activeServerId !== null;
+    const preset = followLivery ? livery.preset : appearance.preset;
+    const accent = followLivery ? livery.accent : appearance.accent;
+    set("preset", preset);
+    set("density", appearance.density);
+    set("chrome", appearance.chrome === "clean" ? "clean" : "terminal");
+    for (const t of LIVERY_TOKENS) el.style.removeProperty(t);
+    if (followLivery) {
+      for (const [k, v] of Object.entries(livery.tokens)) el.style.setProperty(k, v);
+    }
+    if (accent) {
+      el.style.setProperty("--accent", accent);
+      el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
+    }
+    try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); } catch { /* best-effort */ }
+  });
 
   // Persistence (9f): a passphrase gate. On launch the app is locked until the user enters
   // their passphrase, which unlocks the on-disk vault and reloads their servers (or, on
@@ -166,6 +284,70 @@
     searchQuery = "";
   }
 
+  // Quick switcher (Ctrl/Cmd+K): one palette over channels, server surfaces, servers and DMs.
+  type QuickItem = { label: string; hint: string; run: () => void };
+  let showQuickSwitch = $state(false);
+  let quickQuery = $state("");
+  let quickIdx = $state(0);
+  const QUICK_SURFACES: { label: string; tab: Tab }[] = [
+    { label: "Files", tab: "files" },
+    { label: "Status", tab: "status" },
+    { label: "Wiki", tab: "wiki" },
+    { label: "Transfers", tab: "downloads" },
+  ];
+  let quickItems = $derived.by(() => {
+    const out: QuickItem[] = [];
+    for (const c of cur?.channels ?? []) {
+      out.push({ label: `#${c.name}`, hint: "channel", run: () => { switchTo(c.id); view = "chat"; } });
+    }
+    if (cur) {
+      for (const s of QUICK_SURFACES) out.push({ label: s.label, hint: "surface", run: () => switchView(s.tab) });
+    }
+    for (const s of railServers) {
+      if (s.id !== activeServerId) out.push({ label: s.name, hint: "server", run: () => switchServer(s.id) });
+    }
+    for (const d of dmList) {
+      if (d.id !== activeServerId) out.push({ label: d.name, hint: "dm", run: () => switchServer(d.id) });
+    }
+    return out;
+  });
+  let quickResults = $derived.by(() => {
+    const q = quickQuery.trim().toLowerCase();
+    const hits = q ? quickItems.filter((i) => i.label.toLowerCase().includes(q)) : quickItems;
+    return hits.slice(0, 10);
+  });
+  function openQuickSwitch() {
+    quickQuery = "";
+    quickIdx = 0;
+    showQuickSwitch = true;
+  }
+  function closeQuickSwitch() {
+    showQuickSwitch = false;
+    quickQuery = "";
+    quickIdx = 0;
+  }
+  function runQuick(item: QuickItem) {
+    closeQuickSwitch();
+    item.run();
+  }
+  function onQuickKey(e: KeyboardEvent) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      quickIdx = Math.min(quickIdx + 1, Math.max(quickResults.length - 1, 0));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      quickIdx = Math.max(quickIdx - 1, 0);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const item = quickResults[quickIdx];
+      if (item) runQuick(item);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation(); // the global Escape chain would otherwise close a second layer too
+      closeQuickSwitch();
+    }
+  }
+
   // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen, persisted
   // to localStorage. Entering a channel snapshots the PRIOR mark as `dividerTs` (so a "New" divider
   // renders before the first message past it), then the mark advances to the latest once loaded.
@@ -203,7 +385,21 @@
     }
   }
   // Index of the first message newer than the read boundary (-1 if all read).
-  let firstUnreadIdx = $derived(messages.findIndex((m) => m.ts > dividerTs));
+  // Own messages never count as unread — sending shouldn't raise a "New messages" divider.
+  let firstUnreadIdx = $derived(messages.findIndex((m) => m.ts > dividerTs && m.author !== myFp));
+
+  // Day dividers in the log ("thu 2026-08-14" between messages from different days).
+  function sameDay(a: number, b: number): boolean {
+    const da = new Date(a), db = new Date(b);
+    return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
+  }
+  function dayLabel(ts: number): string {
+    const d = new Date(ts);
+    const wd = d.toLocaleDateString(undefined, { weekday: "short" }).toLowerCase();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${wd} ${d.getFullYear()}-${mm}-${dd}`;
+  }
 
   let draft = $state("");
   let members = $state(1);
@@ -226,8 +422,16 @@
       (m) => m.fingerprint.toLowerCase().includes(q) || nameOf(m.fingerprint).toLowerCase().includes(q),
     );
   });
+  // The member column is split into an "online" then an "offline" group (the offline group is
+  // omitted entirely when empty). Both are filtered by the roster search first.
+  let onlineRoster = $derived(filteredRoster.filter((m) => m.you || onlineMembers.has(m.fingerprint)));
+  let offlineRoster = $derived(filteredRoster.filter((m) => !(m.you || onlineMembers.has(m.fingerprint))));
   // Members reachable right now (self always counts) — the roster header's "N online".
   let onlineCount = $derived(roster.filter((m) => m.you || onlineMembers.has(m.fingerprint)).length);
+  // Compact mono abbreviation for a role badge in a narrow roster row (owner → OWN, admin → ADM).
+  function roleAbbr(role: string): string {
+    return role === "owner" ? "OWN" : role === "admin" ? "ADM" : role.slice(0, 3).toUpperCase();
+  }
   let profiles = $state<Record<string, Prof>>({});
   let files = $state<UiFile[]>([]);
   // Whether ≥1 peer is currently reachable to fetch missing chunks from (a soft availability hint;
@@ -349,6 +553,25 @@
   let pDescription = $state("");
   let pBubble = $state("");
   let pAvatar = $state("");
+  // The name-style picker's choices (font face / text effect / colour). Ids are the opaque
+  // strings stored in the profile; the tiles preview each one live.
+  const NAME_FONTS: { id: string; label: string }[] = [
+    { id: "system", label: "System" },
+    { id: "serif", label: "Serif" },
+    { id: "mono", label: "Mono" },
+    { id: "script", label: "Script" },
+    { id: "caps", label: "Small caps" },
+  ];
+  const NAME_EFFECTS: { id: string; label: string }[] = [
+    { id: "none", label: "Solid" },
+    { id: "gradient", label: "Gradient" },
+    { id: "neon", label: "Neon" },
+    { id: "rainbow", label: "Rainbow" },
+    { id: "wave", label: "Wave" },
+    { id: "pulse", label: "Pulse" },
+  ];
+  // Curated name colours that stay legible on the dark grounds (content, not theme).
+  const NAME_COLORS = ["#977df2", "#6ca0d8", "#57c77a", "#d8a657", "#e0574b", "#e879c0", "#6ee7d8", "#c6c2d6"];
   // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default. All chosen
   // dark enough for the white message text (and a text-shadow on custom bubbles backs it up).
   const BUBBLE_PRESETS: { label: string; value: string }[] = [
@@ -387,6 +610,10 @@
   function nameOf(fp: string): string {
     return profiles[fp]?.name?.trim() || fp;
   }
+  // Two-letter mono monogram for a rail circle (one letter for a one-character name).
+  function monogram(name: string): string {
+    return (name ?? "").trim().slice(0, 2).toUpperCase() || "?";
+  }
   // A member's custom message-bubble background (CSS), or "" for the default. The value comes from an
   // untrusted profile, so allow only simple colors/gradients — no `url(...)`, `;`, `@`, `{` etc. that
   // could inject CSS.
@@ -401,8 +628,19 @@
   function showProfile(fp: string) {
     if (fp) profileCard = fp;
   }
+  // Font/effect ids are opaque strings in the profile document (the backend stores them
+  // verbatim), so a value from a peer on a newer build is tolerated: an unknown font falls
+  // back to the system face, an unknown effect to a class with no rule (i.e. plain text).
   function fontClass(font: string): string {
-    return font === "serif" ? "font-serif" : font === "mono" ? "font-mono" : "";
+    return font === "serif"
+      ? "font-serif"
+      : font === "mono"
+        ? "font-mono"
+        : font === "script"
+          ? "font-script"
+          : font === "caps"
+            ? "font-caps"
+            : "";
   }
   // A file-type glyph from the MIME prefix (a small QoL cue in the file browser).
   function fileIcon(mime: string): string {
@@ -414,8 +652,12 @@
     if (mime.includes("zip") || mime.includes("compressed")) return "🗜";
     return "📄";
   }
+  // Known: none | gradient | neon | rainbow | wave | pulse. Anything else still maps to
+  // `fx-<id>` (harmless — no rule matches), but the id is stripped to [a-z0-9-] first so an
+  // untrusted profile can't smuggle extra class names into the span.
   function fxClass(effect: string): string {
-    return effect && effect !== "none" ? `fx-${effect}` : "";
+    const id = effect.toLowerCase().replace(/[^a-z0-9-]/g, "");
+    return id && id !== "none" ? `fx-${id}` : "";
   }
   function colorStyle(color: string): string {
     return color ? `color:${color}` : "";
@@ -610,6 +852,21 @@
   }
   function insertEmoji(code: string) {
     draft = draft ? `${draft} :${code}:` : `:${code}:`;
+    showEmoji = false;
+  }
+
+  // Default unicode emoji, shown under the server's custom set (Discord-style). Curated,
+  // not exhaustive — cats lead, obviously.
+  const EMOJI_SETS: { label: string; list: string[] }[] = [
+    { label: "cats & critters", list: ["🐱", "🐈", "🐈‍⬛", "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾", "🐾", "🐶", "🦊", "🐺", "🐻", "🐼", "🐸", "🦉", "🦄", "🐝", "🦋", "🐢", "🐍", "🐙", "🦀", "🐬", "🦈"] },
+    { label: "smileys", list: ["😀", "😄", "😁", "😆", "😅", "😂", "🤣", "🙂", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😋", "😜", "🤪", "😎", "🥳", "😏", "😒", "😞", "😢", "😭", "😤", "😠", "🤯", "😳", "🥺", "😱", "😨", "😴", "🤤", "🫠", "🤔", "🤨", "🫡", "🤗", "🤫", "🤭", "🙄", "😬", "😶"] },
+    { label: "gestures", list: ["👍", "👎", "👌", "🤌", "✌️", "🤞", "🤘", "🤙", "👏", "🙌", "🫶", "🤝", "🙏", "💪", "👉", "👈", "👋", "✊", "👊", "🖖"] },
+    { label: "hearts", list: ["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "💕", "💞", "💗", "💖", "💘", "💔", "❤️‍🔥"] },
+    { label: "food & drink", list: ["☕", "🍵", "🧋", "🥤", "🍺", "🍕", "🍔", "🌮", "🍜", "🍣", "🍙", "🍪", "🍰", "🧁", "🍫", "🍿", "🥐"] },
+    { label: "things", list: ["🔥", "✨", "⭐", "⚡", "🌈", "🌙", "☀️", "❄️", "🎉", "🎊", "🎁", "🏆", "🎮", "🎲", "🎧", "🎵", "💻", "⌨️", "📱", "🔒", "🔑", "🛠️", "📌", "📎", "🔍", "💡", "📖", "✏️", "💀", "👻", "🤖", "👾", "🚀", "💯"] },
+  ];
+  function insertUnicodeEmoji(e: string) {
+    draft = draft + e;
     showEmoji = false;
   }
 
@@ -861,6 +1118,7 @@
     mentionChannels = new Set(); // mention badges are scoped to the active server
     acceptCallsHere = loadAccept(id); // this server's call-notification preference
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
+    loadLiveryOptOut(id); // whether the user opted out of this server's livery
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
@@ -871,6 +1129,7 @@
       refreshStatuses(),
       refreshInvite(),
       refreshRoles(),
+      refreshLivery(),
     ]);
     syncProfileEditor();
   }
@@ -2525,6 +2784,9 @@
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
       }),
+      listen<{ server: number }>("livery-changed", (e) => {
+        if (e.payload.server === activeServerId) refreshLivery();
+      }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
         // A friend request may have arrived over ANY server (active or not) — refresh that server's.
         refreshDmRequests(e.payload.server);
@@ -2563,10 +2825,11 @@
       }),
     ];
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
-    // tabs; Ctrl/Cmd+K jumps to the chat composer.
+    // tabs; Ctrl/Cmd+K opens the quick switcher.
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (menu) menu = null;
+        if (showQuickSwitch) closeQuickSwitch();
+        else if (menu) menu = null;
         else if (reactionPickerFor) reactionPickerFor = "";
         else if (replyingTo) replyingTo = "";
         else if (showEmoji) showEmoji = false;
@@ -2585,8 +2848,7 @@
           if (activeServerId !== null) switchView(tabs[Number(e.key) - 1]);
         } else if (e.key.toLowerCase() === "k") {
           e.preventDefault();
-          view = "chat";
-          composerEl?.focus();
+          openQuickSwitch();
         } else if (e.key.toLowerCase() === "f") {
           // Search messages in the active conversation (no browser find in the webview).
           if (activeServerId !== null) {
@@ -2643,6 +2905,156 @@
     <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
       {nameOf(fp).slice(0, 1).toUpperCase()}
     </span>
+  {/if}
+{/snippet}
+
+<!-- One roster row in the member column (rendered under the online / offline group heads). -->
+{#snippet memberRow(m: Member, online: boolean)}
+  <li
+    title={m.fingerprint}
+    class:is-you={m.you}
+    class="member-row"
+    use:contextMenu={() => memberMenu(m)}
+  >
+    <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
+    <button type="button" class="member-link" onclick={() => showProfile(m.fingerprint)}>
+      {@render avatarTag(m.fingerprint)}
+      {@render nameTag(m.fingerprint)}
+    </button>
+    {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
+      <span class="role-badge {roles[m.fingerprint]}" title={roles[m.fingerprint]}>{roleAbbr(roles[m.fingerprint])}</span>
+    {/if}
+    {#if m.you}<span class="you-badge">you</span>{/if}
+    {#if !m.you && !online && lastSeen[m.fingerprint]}
+      <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
+    {/if}
+  </li>
+{/snippet}
+
+<!-- Inline line-icons: stroke follows currentColor, so active/hover states tint them via the button's color. -->
+{#snippet icoDm()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M3.5 5.5h11.5v8H8.5l-4 3.2v-3.2h-1z" />
+    <path d="M18 9.5h2.5v7.7l-3.3-2.4H11" />
+  </svg>
+{/snippet}
+
+{#snippet icoInbox()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M3.5 13.5 6 5.5h12l2.5 8v5H3.5z" />
+    <path d="M3.5 13.5h5l1.8 2.7h3.4l1.8-2.7h5" />
+  </svg>
+{/snippet}
+
+{#snippet icoCat()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M5 10c0-1.2.25-2.3.72-3.25L4.6 2.9l4 1.9C9.7 4.3 10.8 4 12 4s2.3.3 3.4.8l4-1.9-1.12 3.85c.47.95.72 2.05.72 3.25 0 4.6-3.1 7.6-7 7.6s-7-3-7-7.6z" />
+    <circle cx="9.2" cy="10.6" r="0.9" fill="currentColor" stroke="none" />
+    <circle cx="14.8" cy="10.6" r="0.9" fill="currentColor" stroke="none" />
+    <path d="M1.8 11.2l3.1.5M2 14.3l3-.6M22.2 11.2l-3.1.5M22 14.3l-3-.6" stroke-width="1.2" />
+    <path d="M12 13.4l-.9 1.1h1.8z" fill="currentColor" stroke="none" />
+  </svg>
+{/snippet}
+
+<!--
+  The sidebar's contextual block: what the sidebar shows depends on the surface selected in the
+  content column's surface strip. Shared by the server and DM sidebars — `dm` suppresses the blocks
+  that only make sense on a server (channels, the status feed's blurb).
+-->
+{#snippet contextNav(dm: boolean)}
+  {#if view === "wiki"}
+    <h3 class="ctx-h">
+      <span>Pages</span>
+      <button class="wiki-help-btn" title="Formatting help" onclick={() => (showWikiHelp = true)}>?</button>
+    </h3>
+    {#if wikiPages.length > 6}
+      <input class="list-search" bind:value={wikiFilter} placeholder="Search pages…" />
+    {/if}
+    <ul class="channel-list wiki-pages">
+      {#each filteredWikiPages as p}
+        <li>
+          <button
+            class:active={p === activeWikiPage}
+            onclick={() => openWikiPage(p)}
+            use:contextMenu={() => wikiPageMenu(p)}
+          >{p}</button>
+        </li>
+      {:else}
+        <li class="muted small">{wikiFilter ? "No matching pages." : "No pages yet."}</li>
+      {/each}
+    </ul>
+    <form class="new-page" onsubmit={(e) => { e.preventDefault(); createWikiPage(); }}>
+      <input bind:value={newWikiPage} placeholder="+ new page" />
+    </form>
+  {:else if view === "files"}
+    <h3><span>Folders</span></h3>
+    <ul class="channel-list folder-nav">
+      <li>
+        <button class:active={folder === ""} onclick={() => (folder = "")}>⌂ Home</button>
+      </li>
+      {#each folderView.subs as sub}
+        <li><button onclick={() => enterFolder(sub)}>▸ {sub}</button></li>
+      {/each}
+    </ul>
+    <label class="upload-btn">
+      {uploading ? "Uploading…" : "＋ Share a file here"}
+      <input type="file" disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+    </label>
+    <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
+      <input bind:value={newFolder} placeholder="＋ new folder…" />
+    </form>
+  {:else if view === "downloads"}
+    <h3><span>Transfers</span></h3>
+    <button class="ghost small ctx-action" onclick={clearFinishedDownloads}>Clear finished</button>
+  {:else if view === "status" && !dm}
+    <h3><span>Status</span></h3>
+    <p class="muted small">A slow feed for this server — one post at a time, no replies.</p>
+  {:else if !dm}
+    <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
+    <ul class="channel-list">
+      {#each cur?.channels ?? [] as c}
+        <li class="channel-row">
+          <button
+            class="channel-name"
+            class:active={c.id === cur?.active && view === "chat"}
+            onclick={() => { switchTo(c.id); view = "chat"; }}
+          >
+            #{c.name}
+            {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
+            {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
+          </button>
+          {#if activeServerId !== null}
+            {@const sv = activeServerId}
+            {@const vn = roomMembers(sv, c.id).length}
+            {#if vn}
+              <button
+                class="voice-pill"
+                class:in={inCall && callChannel === c.id}
+                title={inCall && callChannel === c.id ? "You're in this voice room" : `Join voice (${vn} in)`}
+                onclick={() => joinVoice(c.id, sv, c.name)}
+              >🔊 {vn}</button>
+            {/if}
+          {/if}
+        </li>
+      {/each}
+    </ul>
+    <form class="join-channel" onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
+      <input bind:value={newChannel} placeholder="+ join or create #channel" />
+    </form>
+  {/if}
+{/snippet}
+
+<!-- Your identity on this server, pinned to the sidebar's bottom edge → opens the profile editor. -->
+{#snippet youPanel()}
+  {#if myFp}
+    <button type="button" class="you-panel" title="Edit your profile & name style on this server" onclick={() => switchView("profile")}>
+      {@render avatarTag(myFp)}
+      <span class="who">
+        <span class="nm">{@render nameTag(myFp)}</span>
+        <span class="st">online · e2e</span>
+      </span>
+      <span class="you-edit">☰</span>
+    </button>
   {/if}
 {/snippet}
 
@@ -2716,7 +3128,7 @@
       </button>
       <hr />
       <p class="muted">…or join an existing server with an invite:</p>
-      <textarea bind:value={joinInvite} rows="3" placeholder="paste invite here"></textarea>
+      <textarea class="invite-code" bind:value={joinInvite} rows="3" placeholder="paste invite here"></textarea>
       <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
       {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
     </div>
@@ -2729,7 +3141,7 @@
           title="Direct messages & friends"
           onclick={enterDmHome}
         >
-          👥
+          {@render icoDm()}
           {#if dmRequests.length}
             <span class="rail-badge">{dmRequests.length}</span>
           {:else if dmList.some((d) => d.unread.length || d.dot)}
@@ -2742,7 +3154,7 @@
           title="Inbox — mentions & replies"
           onclick={openInbox}
         >
-          📥
+          {@render icoInbox()}
           {#if inboxUnseenCount}
             <span class="rail-badge">{inboxUnseenCount}</span>
           {/if}
@@ -2756,7 +3168,7 @@
             onclick={() => switchServer(s.id)}
             use:contextMenu={() => serverMenu(s)}
           >
-            {s.name.slice(0, 1).toUpperCase()}
+            {monogram(s.name)}
             {#if s.unread.length}
               <span class="rail-badge">{s.unread.length}</span>
             {:else if s.dot}
@@ -2765,7 +3177,7 @@
           </button>
         {/each}
         <button class="server-icon add" title="Add a server" onclick={() => (showAdd = true)}>+</button>
-        <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" onclick={() => (showFeedback = true)}>💬</button>
+        <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" onclick={() => (showFeedback = true)}>FB</button>
         <button class="server-icon gear" title="Settings" onclick={() => (showSettings = true)}>⚙</button>
       </nav>
 
@@ -2841,7 +3253,7 @@
           {#if showAddFriend}
             <form class="dm-form" onsubmit={(e) => { e.preventDefault(); addFriend(); }}>
               <input bind:value={dmName} placeholder="Friend's name…" />
-              <textarea bind:value={dmInvite} rows="2" placeholder="Paste their friend code…"></textarea>
+              <textarea class="invite-code" bind:value={dmInvite} rows="2" placeholder="Paste their friend code…"></textarea>
               <button disabled={busy || !dmName.trim() || !dmInvite.trim()}>Connect</button>
             </form>
           {/if}
@@ -2877,87 +3289,25 @@
           {#if cur?.isDm && cur.invite}
             <div class="dm-code">
               <span class="muted small">Friend code for {cur.name} — share it to connect:</span>
-              <textarea readonly rows="2" value={cur.invite}></textarea>
+              <textarea class="invite-code" readonly rows="2" value={cur.invite}></textarea>
               <button class="ghost small" onclick={copyInvite}>Copy code</button>
             </div>
+          {/if}
+          {#if cur?.isDm}
+            {@render contextNav(true)}
+            {@render youPanel()}
           {/if}
         {:else}
         <div class="server-head">
           <strong class="server-title" title={cur?.name}>{cur?.name ?? ""}</strong>
           <button class="ghost icon-btn" title="Server settings" onclick={() => openServerSettings()}>🛠</button>
         </div>
-        {#if view === "chat"}
-          <h3>Channels</h3>
-          <ul class="channel-list">
-            {#each cur?.channels ?? [] as c}
-              <li class="channel-row">
-                <button
-                  class="channel-name"
-                  class:active={c.id === cur?.active && view === "chat"}
-                  onclick={() => { switchTo(c.id); view = "chat"; }}
-                >
-                  #{c.name}
-                  {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
-                  {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
-                </button>
-                {#if activeServerId !== null}
-                  {@const sv = activeServerId}
-                  {@const vn = roomMembers(sv, c.id).length}
-                  {#if vn}
-                    <button
-                      class="voice-pill"
-                      class:in={inCall && callChannel === c.id}
-                      title={inCall && callChannel === c.id ? "You're in this voice room" : `Join voice (${vn} in)`}
-                      onclick={() => joinVoice(c.id, sv, c.name)}
-                    >🔊 {vn}</button>
-                  {/if}
-                {/if}
-              </li>
-            {/each}
-          </ul>
-          <form onsubmit={(e) => { e.preventDefault(); addChannel(); }}>
-            <input bind:value={newChannel} placeholder="join #channel…" />
-          </form>
-        {/if}
-
-        {#if view === "chat"}
-        <div class="roster">
-          <h3>Members <span class="muted">({members}{#if members > 1} · {onlineCount} online{/if})</span></h3>
-          {#if roster.length > 6}
-            <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
-          {/if}
-          <ul>
-            {#each filteredRoster as m}
-              {@const online = m.you || onlineMembers.has(m.fingerprint)}
-              <li
-                title={m.fingerprint}
-                class:is-you={m.you}
-                class="member-row"
-                use:contextMenu={() => memberMenu(m)}
-              >
-                <span class="presence" class:online title={presenceText(m.fingerprint, m.you)}>●</span>
-                <button type="button" class="member-link" onclick={() => showProfile(m.fingerprint)}>
-                  {@render avatarTag(m.fingerprint)}
-                  {@render nameTag(m.fingerprint)}
-                </button>
-                {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
-                  <span class="role-badge {roles[m.fingerprint]}">{roles[m.fingerprint]}</span>
-                {/if}
-                {#if m.you}<span class="you-badge">you</span>{/if}
-                {#if !m.you && !online && lastSeen[m.fingerprint]}
-                  <span class="last-seen" title={presenceText(m.fingerprint, false)}>{relTime(nowTick - lastSeen[m.fingerprint])}</span>
-                {/if}
-              </li>
-            {:else}
-              <li class="muted">No matching members.</li>
-            {/each}
-          </ul>
-        </div>
-        {/if}
+        {@render contextNav(false)}
 
         {#if canInvite || cur?.invite}
           <button class="ghost invite-quick" onclick={() => openServerSettings()}>＋ Invite someone</button>
         {/if}
+        {@render youPanel()}
         {/if}
       </aside>
 
@@ -2968,22 +3318,40 @@
             <p class="muted">Pick a conversation on the left, or start a <strong>New DM</strong> / <strong>Add a friend</strong> with their code. A DM is a private, end-to-end-encrypted 1:1 — your identity here stays unlinkable to your servers.</p>
           </div>
         {:else}
-        <div class="tab-bar">
-          <button class:active={view === "chat"} onclick={() => switchView("chat")}>Chat</button>
-          <button class:active={view === "files"} onclick={() => switchView("files")}>
-            Files {#if files.length}<span class="tab-count">{files.length}</span>{/if}
-          </button>
-          <button class:active={view === "status"} onclick={() => switchView("status")}>Status</button>
-          <button class:active={view === "wiki"} onclick={() => switchView("wiki")}>Wiki</button>
-          <button class:active={view === "profile"} onclick={() => switchView("profile")}>Profile</button>
-          <button class:active={view === "downloads"} onclick={() => switchView("downloads")}>
-            Downloads {#if activeDownloads}<span class="tab-count">{activeDownloads}</span>{/if}
-          </button>
-        </div>
-
+        {#if cur}
+          <!-- Surface strip: the content column's own nav. The sidebar is contextual to whatever
+               is selected here (channels for chat, pages for the wiki, folders for files, …). -->
+          <nav class="surface-bar" aria-label="Surfaces">
+            <button type="button" class:active={view === "chat"} onclick={() => switchView("chat")}>
+              <span class="sb-ico">#</span>chat
+              {#if view !== "chat"}
+                {#if mentionChannels.size > 0}
+                  <span class="sb-mark at" title="You were mentioned">@</span>
+                {:else if cur.unread.length}
+                  <span class="sb-mark" title="Unread messages">●</span>
+                {/if}
+              {/if}
+            </button>
+            <button type="button" class:active={view === "files"} onclick={() => switchView("files")}>
+              <span class="sb-ico">▤</span>files
+              {#if files.length}<span class="tab-count">{files.length}</span>{/if}
+            </button>
+            <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
+              <span class="sb-ico">◇</span>status
+            </button>
+            <button type="button" class:active={view === "wiki"} onclick={() => switchView("wiki")}>
+              <span class="sb-ico">✎</span>wiki
+            </button>
+            <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
+              <span class="sb-ico">↓</span>transfers
+              {#if activeDownloads}<span class="tab-count">{activeDownloads}</span>{/if}
+            </button>
+          </nav>
+        {/if}
         {#if view === "chat"}
           <h2>
-            #{activeName()} <span class="muted">· {members} member(s)</span>
+            #{activeName()} <span class="muted">· {members} member{members === 1 ? "" : "s"}</span>
+            <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
             <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F)" onclick={openSearch}>🔍</button>
             {#if !(inCall && callChannel === cur?.active)}
               {@const n = roomMembers(activeServerId ?? -1, cur?.active ?? "").length}
@@ -3033,16 +3401,21 @@
           {/if}
           <ul class="messages" bind:this={messagesEl} use:richClicks>
             {#each messages as m, mi}
+              {@const newDay = mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
+              {#if newDay}
+                <li class="day-divider" aria-hidden="true"><span>{dayLabel(m.ts)}</span></li>
+              {/if}
               {#if mi === firstUnreadIdx}
                 <li class="unread-divider" aria-hidden="true"><span>New messages</span></li>
               {/if}
               {@const grouped =
                 mi > 0 &&
                 mi !== firstUnreadIdx &&
+                !newDay &&
                 !m.reply_to &&
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
-              {@const bubble = bubbleStyle(m.author)}
+              {@const bubble = appearance.flat ? "" : bubbleStyle(m.author)}
               <li
                 data-mi={mi}
                 class:own={m.author === myFp}
@@ -3054,6 +3427,8 @@
                 style={bubble}
                 use:contextMenu={() => messageMenu(m)}
               >
+                <span class="t" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
+                <div class="m-body">
                 {#if m.reply_to}
                   {@const parent = msgById.get(m.reply_to)}
                   <button
@@ -3077,7 +3452,6 @@
                       {@render avatarTag(m.author)}
                       {@render nameTag(m.author)}
                     </span>
-                    <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                     {#if m.pinned}<span class="pin-mark" title="Pinned message">📌</span>{/if}
                   </span>
                 {:else if m.pinned}
@@ -3085,7 +3459,7 @@
                 {/if}
                 {#if m.id && editingId !== m.id}
                   <div class="msg-actions">
-                    <button class="msg-action" type="button" title="Add reaction" aria-label="Add reaction" onclick={() => toggleReactionPicker(m)}>😊</button>
+                    <button class="msg-action" type="button" title="Add reaction" aria-label="Add reaction" onclick={() => toggleReactionPicker(m)}>{@render icoCat()}</button>
                     <button class="msg-action" type="button" title="Reply" aria-label="Reply" onclick={() => startReply(m)}>↰</button>
                     {#if m.author === myFp}
                       <button class="msg-action" type="button" title="Edit" aria-label="Edit" onclick={() => startEdit(m)}>✎</button>
@@ -3152,6 +3526,7 @@
                     {/if}
                   </div>
                 {/if}
+                </div>
               </li>
             {:else}
               <li class="muted">No messages yet — say hello.</li>
@@ -3186,6 +3561,7 @@
             {#if showEmoji}
               <div class="emoji-picker">
                 {#if Object.keys(emojiMap).length}
+                  <h4 class="emoji-set-label">server emoji</h4>
                   <div class="emoji-grid">
                     {#each Object.keys(emojiMap) as code}
                       <button class="emoji-pick" type="button" title={":" + code + ":"} onclick={() => insertEmoji(code)}>
@@ -3193,9 +3569,15 @@
                       </button>
                     {/each}
                   </div>
-                {:else}
-                  <p class="muted small">No custom emoji yet — add some in ⚙ Settings → Emoji.</p>
                 {/if}
+                {#each EMOJI_SETS as set (set.label)}
+                  <h4 class="emoji-set-label">{set.label}</h4>
+                  <div class="emoji-grid">
+                    {#each set.list as e (e)}
+                      <button class="emoji-pick" type="button" onclick={() => insertUnicodeEmoji(e)}>{e}</button>
+                    {/each}
+                  </div>
+                {/each}
               </div>
             {/if}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -3227,7 +3609,8 @@
                 onkeydown={onComposerKeydown}
                 onblur={() => queueMicrotask(() => (mentionQuery = null))}
               ></textarea>
-              <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>😀</button>
+              <span class="c-hint">enter to send · shift+enter newline</span>
+              <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
               <button type="submit" disabled={uploading}>Send</button>
             </form>
           </div>
@@ -3241,15 +3624,6 @@
                 <button class="crumb" onclick={() => gotoCrumb(i)}>{seg}</button>
               {/each}
             </nav>
-          </div>
-          <div class="files-actions">
-            <label class="upload">
-              <span class="muted">{uploading ? "Uploading…" : "＋ Share a file here"}</span>
-              <input type="file" disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
-            </label>
-            <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
-              <input bind:value={newFolder} placeholder="＋ new folder…" />
-            </form>
           </div>
           <ul class="file-list tab-pane">
             {#each folderView.subs as sub}
@@ -3311,23 +3685,6 @@
           </ul>
         {:else if view === "wiki"}
           <div class="wiki">
-            <div class="wiki-pages">
-              <div class="wiki-pages-head">
-                <span class="muted">Pages</span>
-                <button class="wiki-help-btn" title="Formatting help" onclick={() => (showWikiHelp = true)}>?</button>
-              </div>
-              {#if wikiPages.length > 6}
-                <input class="list-search" bind:value={wikiFilter} placeholder="Search pages…" />
-              {/if}
-              {#each filteredWikiPages as p}
-                <button class:active={p === activeWikiPage} onclick={() => openWikiPage(p)} use:contextMenu={() => wikiPageMenu(p)}>{p}</button>
-              {:else}
-                <span class="muted">{wikiFilter ? "No matching pages." : "No pages yet."}</span>
-              {/each}
-              <form onsubmit={(e) => { e.preventDefault(); createWikiPage(); }}>
-                <input bind:value={newWikiPage} placeholder="+ new page" />
-              </form>
-            </div>
             {#if activeWikiPage}
               <div class="wiki-editor">
                 <div class="wiki-editor-head">
@@ -3382,27 +3739,56 @@
               <span class="muted">Name</span>
               <input bind:value={pName} placeholder="display name" />
             </label>
-            <label class="field row">
-              <span class="muted">Color</span>
-              <input type="color" bind:value={pColor} />
-            </label>
-            <label class="field">
+            <div class="field">
               <span class="muted">Font</span>
-              <select bind:value={pFont}>
-                <option value="system">System</option>
-                <option value="serif">Serif</option>
-                <option value="mono">Mono</option>
-              </select>
-            </label>
-            <label class="field">
+              <div class="ns-tiles">
+                {#each NAME_FONTS as f}
+                  <button
+                    type="button"
+                    class="ns-tile"
+                    class:active={pFont === f.id}
+                    title={f.label}
+                    aria-label={f.label}
+                    aria-pressed={pFont === f.id}
+                    onclick={() => (pFont = f.id)}
+                  ><span class="name {fontClass(f.id)}">Gg</span></button>
+                {/each}
+              </div>
+            </div>
+            <div class="field">
               <span class="muted">Effect</span>
-              <select bind:value={pEffect}>
-                <option value="none">None</option>
-                <option value="rainbow">Rainbow wave</option>
-                <option value="wave">Wave</option>
-                <option value="pulse">Pulse</option>
-              </select>
-            </label>
+              <div class="ns-tiles">
+                {#each NAME_EFFECTS as fx}
+                  <button
+                    type="button"
+                    class="ns-tile"
+                    class:active={pEffect === fx.id}
+                    title={fx.label}
+                    aria-label={fx.label}
+                    aria-pressed={pEffect === fx.id}
+                    onclick={() => (pEffect = fx.id)}
+                  ><span class="name {fxClass(fx.id)}" style={colorStyle(pColor)}>{fx.label}</span></button>
+                {/each}
+              </div>
+            </div>
+            <div class="field">
+              <span class="muted">Colour</span>
+              <div class="ns-swatches">
+                <input type="color" bind:value={pColor} aria-label="Custom name colour" />
+                {#each NAME_COLORS as c}
+                  <button
+                    type="button"
+                    class="ns-swatch"
+                    class:active={pColor === c}
+                    title={c}
+                    aria-label={`Name colour ${c}`}
+                    aria-pressed={pColor === c}
+                    style={`background:${c}`}
+                    onclick={() => (pColor = c)}
+                  ></button>
+                {/each}
+              </div>
+            </div>
             <label class="field">
               <span class="muted">About you</span>
               <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
@@ -3451,7 +3837,6 @@
             {:else}
               <div class="dl-toolbar">
                 <span class="muted small">{activeDownloads} active · {downloadList.length} total</span>
-                <button class="ghost small" onclick={clearFinishedDownloads}>Clear finished</button>
               </div>
               <ul class="dl-list">
                 {#each downloadList as d (d.cid)}
@@ -3485,8 +3870,48 @@
           </div>
         {/if}
       </section>
+
+      {#if !dmHome && cur && !cur.isDm}
+        <aside class="members-col" aria-label="Members">
+          <h3><span>Members · {onlineCount}/{members}</span></h3>
+          {#if roster.length > 6}
+            <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
+          {/if}
+          {#if !filteredRoster.length}
+            <p class="muted small">No matching members.</p>
+          {/if}
+          {#if onlineRoster.length}
+            <h3><span>online — {onlineRoster.length}</span></h3>
+            <ul>
+              {#each onlineRoster as m (m.fingerprint)}
+                {@render memberRow(m, true)}
+              {/each}
+            </ul>
+          {/if}
+          {#if offlineRoster.length}
+            <h3><span>offline — {offlineRoster.length}</span></h3>
+            <ul>
+              {#each offlineRoster as m (m.fingerprint)}
+                {@render memberRow(m, false)}
+              {/each}
+            </ul>
+          {/if}
+        </aside>
+      {/if}
       {/if}
     </div>
+
+    <footer class="statusbar">
+      <span class="seg"><span class="sb-dot"></span><span class="ok-t">node online</span></span>
+      {#if cur && !dmHome && !inboxView}
+        <span class="seg">peers <span><span class="ok-t">{Math.max(onlineCount - 1, 0)}</span>/{Math.max(members - 1, 0)}</span></span>
+      {/if}
+      <span class="seg">vault <span class="ok-t">unlocked</span></span>
+      {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
+      {#if activeDownloads}<span class="seg"><span class="warn-t">⇣ {activeDownloads} transfer{activeDownloads === 1 ? "" : "s"}</span></span>{/if}
+      <span class="sb-spacer"></span>
+      {#if myFp}<span class="seg" title="Your fingerprint on this server — click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
+    </footer>
 
     {#if inCall}
       <div class="call-bar">
@@ -3565,6 +3990,80 @@
             <button class="ghost" onclick={() => (showSettings = false)}>✕</button>
           </header>
           <div class="overlay-body">
+            <section class="set-section">
+              <h3>Appearance</h3>
+              <p class="muted small">
+                Presets restyle the whole app. Whatever you pick, colours keep their jobs:
+                green = presence, gold = mentions, red = danger.
+              </p>
+              <div class="preset-row">
+                {#each PRESETS as p (p.id)}
+                  <button
+                    type="button"
+                    class="preset-btn"
+                    class:active={appearance.preset === p.id}
+                    onclick={() => (appearance = { ...appearance, preset: p.id, accent: "" })}
+                  >
+                    <span class="preset-sw" style={`background:${p.sw}`}></span>{p.name}
+                  </button>
+                {/each}
+              </div>
+              <div class="field" style="margin-top:8px">
+                <span class="muted small">Accent override — keep the preset's mood, swap the highlight colour</span>
+                <div class="accent-row">
+                  {#each ACCENT_CHOICES as a (a)}
+                    <button
+                      type="button"
+                      class="accent-sw"
+                      class:active={appearance.accent === a}
+                      style={`background:${a}`}
+                      aria-label={`Accent colour ${a}`}
+                      title={a}
+                      onclick={() => (appearance = { ...appearance, accent: appearance.accent === a ? "" : a })}
+                    ></button>
+                  {/each}
+                </div>
+              </div>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  checked={appearance.density === "compact"}
+                  onchange={() => (appearance = { ...appearance, density: appearance.density === "compact" ? "" : "compact" })}
+                />
+                <span>Compact density — tighter rows, smaller text, more on screen</span>
+              </label>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  checked={appearance.chrome !== "clean"}
+                  onchange={() => (appearance = { ...appearance, chrome: appearance.chrome === "clean" ? "terminal" : "clean" })}
+                />
+                <span>Terminal chrome — scanlines &amp; glow on the frame</span>
+              </label>
+              <label class="toggle">
+                <input
+                  type="checkbox"
+                  checked={appearance.flat}
+                  onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
+                />
+                <span>Flatten messages — ignore other members' custom bubble backgrounds</span>
+              </label>
+              {#if liveryActive && activeServerId !== null && !cur?.isDm}
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={!liveryOptOut}
+                    onchange={() => setLiveryOptOut(!liveryOptOut)}
+                  />
+                  <span>
+                    Follow this server's livery{livery.preset
+                      ? ` (${PRESETS.find((p) => p.id === livery.preset)?.name ?? livery.preset})`
+                      : ""}
+                  </span>
+                </label>
+              {/if}
+            </section>
+
             <section class="set-section">
               <h3>Notifications</h3>
               <label class="toggle">
@@ -3678,6 +4177,57 @@
             </section>
 
             <section class="set-section">
+              <h3>Livery</h3>
+              {#if canModerate}
+                <p class="muted small">
+                  Publish a colour scheme members see while they're on this server. Anyone can opt
+                  out in their own Appearance settings, and green/gold/red keep their meanings
+                  (presence / mentions / danger) under any livery.
+                </p>
+                <div class="preset-row">
+                  {#each PRESETS as p (p.id)}
+                    <button
+                      type="button"
+                      class="preset-btn"
+                      class:active={liveryDraft.preset === p.id}
+                      onclick={() => (liveryDraft = { ...liveryDraft, preset: p.id })}
+                    >
+                      <span class="preset-sw" style={`background:${p.sw}`}></span>{p.name}
+                    </button>
+                  {/each}
+                </div>
+                <div class="field" style="margin-top:8px">
+                  <span class="muted small">Accent (optional)</span>
+                  <div class="accent-row">
+                    {#each ACCENT_CHOICES as a (a)}
+                      <button
+                        type="button"
+                        class="accent-sw"
+                        class:active={liveryDraft.accent === a}
+                        style={`background:${a}`}
+                        aria-label={`Accent colour ${a}`}
+                        title={a}
+                        onclick={() => (liveryDraft = { ...liveryDraft, accent: liveryDraft.accent === a ? "" : a })}
+                      ></button>
+                    {/each}
+                  </div>
+                </div>
+                <div class="invite-actions">
+                  <button class="ghost small" disabled={busy} onclick={publishLivery}>Publish livery</button>
+                  {#if liveryActive}
+                    <button class="ghost small danger-btn" disabled={busy} onclick={removeLivery}>Remove livery</button>
+                  {/if}
+                </div>
+              {:else}
+                <p class="muted small">
+                  {liveryActive
+                    ? "This server publishes a livery. You can opt out in ⚙ Settings → Appearance."
+                    : "No livery published. Owners and admins can set one."}
+                </p>
+              {/if}
+            </section>
+
+            <section class="set-section">
               <h4 class="members-h4">Members &amp; roles</h4>
               <ul class="role-list">
                 {#each roster as m}
@@ -3721,7 +4271,7 @@
                   <p class="muted small">As an admin, the newcomer is admitted once the owner is next online.</p>
                 {/if}
                 {#if cur?.invite}
-                  <textarea readonly rows="3" value={wrapInvite(cur.invite, cur.id)}></textarea>
+                  <textarea class="invite-code" readonly rows="3" value={wrapInvite(cur.invite, cur.id)}></textarea>
                   <div class="invite-actions">
                     <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
                     {#if canInvite}
@@ -3915,6 +4465,42 @@
               <li><code>&gt; quote</code>, <code>---</code> divider, <code>[text](https://link)</code></li>
             </ul>
           </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showQuickSwitch}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay qs-overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) closeQuickSwitch(); }}>
+        <div class="qs-card">
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="qs-input"
+            bind:value={quickQuery}
+            oninput={() => (quickIdx = 0)}
+            onkeydown={onQuickKey}
+            placeholder="Jump to a channel, surface, server or DM…"
+            aria-label="Quick switcher"
+            autofocus
+          />
+          <ul class="qs-list">
+            {#each quickResults as item, i}
+              <li>
+                <button
+                  type="button"
+                  class="qs-item"
+                  class:active={i === quickIdx}
+                  onmouseenter={() => (quickIdx = i)}
+                  onclick={() => runQuick(item)}
+                >
+                  <span class="qs-label">{item.label}</span>
+                  <span class="qs-hint">{item.hint}</span>
+                </button>
+              </li>
+            {:else}
+              <li class="qs-empty muted">Nothing matches.</li>
+            {/each}
+          </ul>
         </div>
       </div>
     {/if}
