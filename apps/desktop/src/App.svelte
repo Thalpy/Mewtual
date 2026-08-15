@@ -404,24 +404,30 @@
   let spellSeq = $state<number[]>([]);
   let spellSecret = $derived(spellSeq.length ? `spell:v1:${spellSeq.join("-")}` : "");
   let spellBits = $derived(Math.round(spellSeq.length * Math.log2(SPELL_GLYPHS.length)));
-  // Melody lock: pitch-classes (octave-folded), so the on-screen keys, the computer keyboard
-  // and a MIDI controller all produce the same secret: "melody:v1:0-4-7-…". ~3.6 bits/note.
+  // Melody lock: ABSOLUTE MIDI notes — C6 is not C4; octaves carry meaning (and entropy).
+  // The on-screen piano shows two octaves with a shift, so any register a MIDI controller
+  // played is reachable on screen too. Encoded "melody:v2:60-64-67-…" (v2: v1 was
+  // pitch-class-folded and is retired — a v1-sealed melody vault must be re-entered as v1
+  // can no longer be produced).
   const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const noteName = (n: number) => `${NOTE_NAMES[n % 12]}${Math.floor(n / 12) - 1}`;
   let melodySeq = $state<number[]>([]);
-  let melodySecret = $derived(melodySeq.length ? `melody:v1:${melodySeq.join("-")}` : "");
-  let melodyBits = $derived(Math.round(melodySeq.length * Math.log2(12)));
+  let melodyOctave = $state(4); // base octave of the on-screen keys (C4 = MIDI 60)
+  let melodySecret = $derived(melodySeq.length ? `melody:v2:${melodySeq.join("-")}` : "");
+  // ~4.6 bits/note models a ~two-octave working range; a wider register is worth more.
+  let melodyBits = $derived(Math.round(melodySeq.length * Math.log2(24)));
   function bitsTier(b: number): "danger" | "warn" | "ok" {
     return b >= 44 ? "ok" : b >= 28 ? "warn" : "danger";
   }
   // A small synth so the keys sing (its own context — the notification chime has one too).
   let synthCtx: AudioContext | null = null;
-  function playPc(pc: number) {
+  function playNote(note: number) {
     try {
       synthCtx ??= new AudioContext();
       const o = synthCtx.createOscillator();
       const g = synthCtx.createGain();
       o.type = "triangle";
-      o.frequency.value = 261.63 * Math.pow(2, pc / 12); // C4-rooted
+      o.frequency.value = 440 * Math.pow(2, (note - 69) / 12); // A4 = 440
       g.gain.setValueAtTime(0.16, synthCtx.currentTime);
       g.gain.exponentialRampToValueAtTime(0.0001, synthCtx.currentTime + 0.35);
       o.connect(g).connect(synthCtx.destination);
@@ -431,12 +437,14 @@
       /* no audio output — the note still registers */
     }
   }
-  function pressNote(pc: number) {
-    melodySeq = [...melodySeq, pc];
-    playPc(pc);
+  function pressNote(note: number) {
+    melodySeq = [...melodySeq, note];
+    playNote(note);
   }
-  // DAW-style computer-keyboard mapping while the melody tab is up (a=C … j=B, k=C again).
-  const KEY_TO_PC: Record<string, number> = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 0 };
+  // DAW-style computer-keyboard mapping while the melody tab is up (a=C … j=B, k=C an
+  // octave up; z/x shift the octave down/up).
+  const KEY_TO_PC: Record<string, number> = { a: 0, w: 1, s: 2, e: 3, d: 4, f: 5, t: 6, g: 7, y: 8, h: 9, u: 10, j: 11, k: 12 };
+  const noteAt = (pc: number) => (melodyOctave + 1) * 12 + pc;
   // Web MIDI (Chromium/WebView2): a connected controller feeds the same pitch-class handler,
   // so you can literally play your unlock tune. Feature-detected; denied/absent is fine.
   let midiName = $state("");
@@ -455,7 +463,7 @@
           input.onmidimessage = (m: MIDIMessageEvent) => {
             const d = m.data;
             if (!d || d.length < 3) return;
-            if ((d[0] & 0xf0) === 0x90 && d[2] > 0 && locked && unlockMethod === "melody") pressNote(d[1] % 12);
+            if ((d[0] & 0xf0) === 0x90 && d[2] > 0 && locked && unlockMethod === "melody") pressNote(d[1]);
           };
         }
         midiName = name;
@@ -3843,7 +3851,17 @@
         const pc = KEY_TO_PC[e.key.toLowerCase()];
         if (pc !== undefined) {
           e.preventDefault();
-          pressNote(pc);
+          pressNote(noteAt(pc));
+          return;
+        }
+        if (e.key.toLowerCase() === "z") {
+          e.preventDefault();
+          melodyOctave = Math.max(1, melodyOctave - 1);
+          return;
+        }
+        if (e.key.toLowerCase() === "x") {
+          e.preventDefault();
+          melodyOctave = Math.min(7, melodyOctave + 1);
           return;
         }
         if (e.key === "Backspace") {
@@ -4302,18 +4320,30 @@
         {/if}
       {:else}
         <p class="muted small">
-          Play your unlock tune — notes fold to one octave, so the on-screen keys, the
-          <span class="fp">a w s e d f t g y h u j</span> row, and a MIDI keyboard all match.
-          Avoid famous tunes; they're guessable.
+          Play your unlock tune — octaves count (C6 is not C4). On-screen keys, the
+          <span class="fp">a w s e d f t g y h u j</span> row (<span class="fp">z</span>/<span class="fp">x</span> shift octave),
+          and a MIDI keyboard all feed the same notes. Avoid famous tunes; they're guessable.
         </p>
+        <div class="piano-head">
+          <button type="button" class="ghost small" title="Octave down (z)" onclick={() => (melodyOctave = Math.max(1, melodyOctave - 1))}>−</button>
+          <span class="piano-oct">C{melodyOctave}–C{melodyOctave + 2}</span>
+          <button type="button" class="ghost small" title="Octave up (x)" onclick={() => (melodyOctave = Math.min(7, melodyOctave + 1))}>＋</button>
+        </div>
         <div class="piano">
-          {#each NOTE_NAMES as n, pc (pc)}
-            <button type="button" class="piano-key" class:sharp={n.includes("#")} title={n} onclick={() => pressNote(pc)}>{n}</button>
+          {#each Array.from({ length: 25 }, (_, i) => (melodyOctave + 1) * 12 + i) as note (note)}
+            {@const pc = note % 12}
+            <button
+              type="button"
+              class="piano-key"
+              class:sharp={NOTE_NAMES[pc].includes("#")}
+              title={noteName(note)}
+              onclick={() => pressNote(note)}
+            >{pc === 0 ? noteName(note) : NOTE_NAMES[pc]}</button>
           {/each}
         </div>
         <div class="ul-seq">
           {#if melodySeq.length}
-            <span class="ul-seq-chips mono">{#each melodySeq as pc, i (i)}<span>{NOTE_NAMES[pc]}</span>{/each}</span>
+            <span class="ul-seq-chips mono">{#each melodySeq as n, i (i)}<span>{noteName(n)}</span>{/each}</span>
             <button type="button" class="ghost small" title="Remove the last note (Backspace)" onclick={() => (melodySeq = melodySeq.slice(0, -1))}>⌫</button>
             <button type="button" class="ghost small" onclick={() => (melodySeq = [])}>Clear</button>
           {:else}

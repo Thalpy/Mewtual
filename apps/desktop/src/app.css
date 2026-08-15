@@ -4166,3 +4166,26 @@ button.you-panel:hover {
   letter-spacing: 0.08em;
   color: var(--info);
 }
+
+/* Melody lock: octave header + slimmer keys (two octaves fit the lock column). */
+.piano-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.piano-oct {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  min-width: 4.5em;
+  text-align: center;
+}
+.piano {
+  gap: 1px;
+}
+.piano-key {
+  font-size: 0.5rem;
+  padding: 1.1rem 0 0.3rem;
+  min-width: 0;
+}
