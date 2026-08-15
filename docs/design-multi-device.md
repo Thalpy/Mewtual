@@ -31,8 +31,16 @@ impossible anyway. Rejected permanently; nothing below ever exports a device key
   the client maps companion → origin via the certificate table and renders the origin's
   name/style plus a mono device tag ("· phone") when a member has >1 device.
   **Consequence: no doc re-keying phase exists at all** (v1's M3 is deleted).
-- **Chain depth is 1**: only the origin device may certify. A companion cannot mint
-  further devices. (Lost-origin recovery: see Revocation.)
+- **Chain depth is 1**: only the **master** device may certify; a companion can never
+  mint devices (a stolen companion must not be an identity factory, and depth-1 keeps
+  verification chain-free). Reviewed and reaffirmed 2026-08-15.
+- **The master is transferable, not distributable**: the current master may sign a
+  monotonic handoff (`sig_master(master_seq+1 ‖ new_master_device_id)`) moving grant
+  authority to one accepted device — the safe form of "elected master". Same
+  replay-proof posture as grant revocation (owners reject stale `master_seq`).
+  Companion **self-election is rejected**: surviving devices crowning a master without
+  the old master's signature is exactly the takeover a stolen companion wants.
+  (Veto-delay election schemes are noted as possible future work, not v1.)
 
 ## The grant ceremony (one QR, all servers)
 
@@ -41,7 +49,11 @@ impossible anyway. Rejected permanently; nothing below ever exports a device key
 2. **Origin device** ingests the request (scan / paste) and derives a **short
    authentication string (SAS)** — e.g. 6 digits or 3 words — from
    `KDF(new_device_pk ‖ pairing_nonce ‖ origin_id)`. Both devices display the SAS.
-3. **The grant popup (the human gate)** appears on the **origin** device:
+3. **The grant popup (the human gate)** appears on the **origin** device — and gates
+   everything: until it is accepted, **no bundle exists, no `CTRL_DEVICE_ADD` may be
+   emitted, and no server learns a pairing was ever attempted**. The new device holds
+   only its own keypair and a single-use nonce.
+   The popup reads:
    *"Grant device access? New device `<petname>` — code `738 214` — does the new device
    show the same code?"* plus **context, clearly labelled as context**: the transport
    address the request arrived from ("192.168.1.22 — same network as you") and recency.
@@ -72,10 +84,18 @@ two devices, never on the wire as one object.
 - **Server kicks a member**: remove the origin's *and* all companions' leaves; ledger-ban
   the origin id (the replay-proof machinery from
   [`design-grant-revocation.md`](design-grant-revocation.md) applies to the origin id).
-- **Lost origin device**: companions keep working (their leaves and certs stand) but no
-  new devices can be added and revocations can't be signed — document this loudly in the
-  export UX. Escape hatch: server-side re-admission of the member under a fresh origin
-  (ownership-transfer machinery, already on the backlog) or per-server re-invite.
+- **Destroyed/lost master — three tiers, in order**:
+  1. **The vault is the identity, not the hardware.** The master's signing key lives in
+     the passphrase-sealed vault on disk; restoring a vault backup on new hardware
+     restores the master (grant authority included) with zero protocol involvement. The
+     export/backup UX must say this loudly — vault backup is the primary recovery story.
+  2. **Planned migration**: the voluntary master handoff above (old device still alive).
+  3. **True loss (no backup)**: companions keep working (leaves and certs stand) but no
+     new grants and no revocations can be signed. Per server, the **owner re-roots the
+     member** — out-of-band verification (the Verify dialog exists for exactly this) and
+     owner-serialized re-admission under a fresh master. For servers the member *owns*,
+     ownership transfer (existing backlog item) is the only remaining door; said plainly
+     rather than papered over.
 
 ## Threat notes
 
