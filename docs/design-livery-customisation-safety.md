@@ -60,12 +60,15 @@ becomes markup or a network fetch. This is the same shape as the existing livery
    server HTML** (attacker-to-attacker at DM range, no admin framing), so it goes last if
    ever.
 
-## Prerequisite hardening (do regardless)
+## Prerequisite hardening — ✅ done
 
-Set a real **CSP** in `tauri.conf.json` (`default-src 'self'`, `img-src 'self' data:`,
-`connect-src 'self' ipc:`, no `unsafe-inline` for scripts). Even with today's sanitizer this
-is defence-in-depth; before *any* customisation widening it's mandatory. Tracked as its own
-slice.
+`tauri.conf.json` now ships a real **CSP** (plus a `devCsp` allowing only Vite's HMR
+socket): scripts locked to `'self'` (Tauri auto-nonces its own bootstrap), images/media
+allow `data:`/`blob:` (the content-addressed embed pipeline), `object-src 'none'`,
+`frame-src 'none'`, connect limited to the IPC scheme. Style attributes keep
+`'unsafe-inline'` (profile colours/bubbles are inline styles; style attrs cannot execute
+script). With this, a sanitizer slip degrades to "markup appeared" rather than "peer code
+ran with bridge access" — the second wall the doc above assumes.
 
 ## Verdict
 
