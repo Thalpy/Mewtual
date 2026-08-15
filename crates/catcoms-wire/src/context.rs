@@ -48,6 +48,10 @@ pub enum DocType {
     /// Per-member profiles (display name, color, font, text effect) — a single
     /// shared CRDT document per server keyed by member device fingerprint.
     Profile = 9,
+    /// The server **livery** — an owner/admin-published UI colour scheme (preset id,
+    /// accent, bounded colour-token overrides) that members' clients apply while that
+    /// server is active. A single shared CRDT document per server.
+    Livery = 10,
 }
 
 impl DocType {
@@ -68,6 +72,7 @@ impl DocType {
             7 => DocType::FileIndex,
             8 => DocType::Routing,
             9 => DocType::Profile,
+            10 => DocType::Livery,
             _ => return None,
         })
     }
@@ -118,6 +123,11 @@ mod tests {
             exporter_context(DocType::Profile, 0),
             [0x00, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
+        // Livery (tag 10), id = 0 — the server livery document.
+        assert_eq!(
+            exporter_context(DocType::Livery, 0),
+            [0x00, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
+        );
     }
 
     #[test]
@@ -132,12 +142,13 @@ mod tests {
             DocType::FileIndex,
             DocType::Routing,
             DocType::Profile,
+            DocType::Livery,
         ] {
             assert_eq!(DocType::from_tag(dt.tag()), Some(dt));
         }
         // Unknown tags decode to None (stable: 0 and the first unused value).
         assert_eq!(DocType::from_tag(0), None);
-        assert_eq!(DocType::from_tag(10), None);
+        assert_eq!(DocType::from_tag(11), None);
     }
 
     #[test]

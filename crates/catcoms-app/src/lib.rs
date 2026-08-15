@@ -500,6 +500,79 @@ fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
     Some(Cid::from_bytes(arr))
 }
 
+// --- server livery ----------------------------------------------------------
+//
+// One shared CRDT document per server (`DocType::Livery`, id `LIVERY_DOC`): the
+// owner/admin-published UI colour scheme every member's client applies while that server is
+// active (`docs/design-livery.md`). Written by owners/admins only — honest-client gating at
+// the same policy layer as roles/pins (the op log is inner-signed, so authorship of a
+// forged write is attributable either way).
+//
+// The values are stored **opaquely**: the backend bounds their sizes, the *client* validates
+// them on read (known preset ids, `#rrggbb` accents, an allow-list of colour tokens) and
+// degrades a malformed doc to "no livery". Nothing here can reach layout or fetch a URL.
+
+/// The reserved document id for the per-server livery document.
+const LIVERY_DOC: u128 = 0;
+/// Schema version written into every livery doc, so a later shape can be told apart.
+const LIVERY_VERSION: i64 = 1;
+const L_V: &str = "v";
+const L_PRESET: &str = "preset";
+const L_ACCENT: &str = "accent";
+const L_TOKENS: &str = "tokens";
+
+/// Maximum length of a livery preset id (a short key like `nightshade`).
+pub const MAX_LIVERY_PRESET_BYTES: usize = 32;
+/// Maximum length of a livery accent value (`#rrggbb` plus slack).
+pub const MAX_LIVERY_ACCENT_BYTES: usize = 16;
+/// Maximum number of colour-token overrides a livery may carry.
+pub const MAX_LIVERY_TOKENS: usize = 16;
+/// Maximum length of a livery token name (e.g. `--accent-hi`).
+pub const MAX_LIVERY_TOKEN_KEY_BYTES: usize = 32;
+/// Maximum length of a livery token value (`#rrggbb` plus slack).
+pub const MAX_LIVERY_TOKEN_VALUE_BYTES: usize = 16;
+
+/// A server's published UI livery. Empty fields mean "no livery" / "no override"; every
+/// value is opaque to the backend and validated by the client on read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Livery {
+    /// A preset id (e.g. `nightshade`); empty = the client's own scheme.
+    pub preset: String,
+    /// An accent colour override (`#rrggbb`); empty = the preset's own accent.
+    pub accent: String,
+    /// Bounded colour-token overrides (token name -> colour); empty in v1 liveries.
+    pub tokens: HashMap<String, String>,
+}
+
+/// Write the livery document (last-writer-wins on each field; the token map is replaced
+/// wholesale so removing an override actually removes it).
+fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> {
+    doc.put(ROOT, L_V, LIVERY_VERSION)?;
+    doc.put(ROOT, L_PRESET, l.preset.as_str())?;
+    doc.put(ROOT, L_ACCENT, l.accent.as_str())?;
+    let tokens = doc.put_object(ROOT, L_TOKENS, ObjType::Map)?;
+    for (k, v) in &l.tokens {
+        doc.put(&tokens, k.as_str(), v.as_str())?;
+    }
+    Ok(())
+}
+
+/// Materialize the livery document (a missing/foreign-shaped field reads as empty).
+fn read_livery(doc: &AutoCommit) -> Livery {
+    let mut tokens = HashMap::new();
+    if let Ok(Some((Value::Object(ObjType::Map), map))) = doc.get(ROOT, L_TOKENS) {
+        for k in doc.keys(&map) {
+            let v = str_field(doc, &map, &k);
+            tokens.insert(k, v);
+        }
+    }
+    Livery {
+        preset: str_field(doc, &ROOT, L_PRESET),
+        accent: str_field(doc, &ROOT, L_ACCENT),
+        tokens,
+    }
+}
+
 // --- fileshare: a per-server file index --------------------------------------
 //
 // One shared CRDT document per server (`DocType::FileIndex`, id `FILE_INDEX_DOC`): an
@@ -1586,6 +1659,77 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self
             .sync
             .request_catchup(peer, DocType::Profile, PROFILE_DOC)
+            .await?)
+    }
+
+    /// Open (create/subscribe) the per-server **livery** document. Call once after
+    /// founding/joining.
+    pub async fn open_livery(&mut self) -> Result<(), AppError> {
+        self.sync.open_channel(DocType::Livery, LIVERY_DOC).await?;
+        Ok(())
+    }
+
+    /// Publish the server livery. **Owner or admin only** — errors otherwise (honest-client
+    /// gating, the same policy layer as roles/pins). An all-empty [`Livery`] removes it.
+    /// Values are opaque here and bounded only by size (the client validates them on read);
+    /// an over-long field or too many tokens is rejected, like an over-large avatar.
+    pub async fn set_livery(&mut self, livery: Livery) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the livery".into(),
+            ));
+        }
+        if livery.preset.len() > MAX_LIVERY_PRESET_BYTES {
+            return Err(AppError::Invalid(format!(
+                "livery preset too long: {} bytes (max {MAX_LIVERY_PRESET_BYTES})",
+                livery.preset.len()
+            )));
+        }
+        if livery.accent.len() > MAX_LIVERY_ACCENT_BYTES {
+            return Err(AppError::Invalid(format!(
+                "livery accent too long: {} bytes (max {MAX_LIVERY_ACCENT_BYTES})",
+                livery.accent.len()
+            )));
+        }
+        if livery.tokens.len() > MAX_LIVERY_TOKENS {
+            return Err(AppError::Invalid(format!(
+                "too many livery tokens: {} (max {MAX_LIVERY_TOKENS})",
+                livery.tokens.len()
+            )));
+        }
+        for (k, v) in &livery.tokens {
+            if k.len() > MAX_LIVERY_TOKEN_KEY_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "livery token name too long: {} bytes (max {MAX_LIVERY_TOKEN_KEY_BYTES})",
+                    k.len()
+                )));
+            }
+            if v.len() > MAX_LIVERY_TOKEN_VALUE_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "livery token value too long: {} bytes (max {MAX_LIVERY_TOKEN_VALUE_BYTES})",
+                    v.len()
+                )));
+            }
+        }
+        self.sync
+            .post(DocType::Livery, LIVERY_DOC, |d| write_livery(d, &livery))
+            .await?;
+        Ok(())
+    }
+
+    /// The server's published livery (all-empty if none was published).
+    pub fn livery(&self) -> Livery {
+        self.sync
+            .doc(DocType::Livery, LIVERY_DOC)
+            .map(|d| read_livery(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Catch up the livery document from `peer` (e.g. right after joining).
+    pub async fn request_livery_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Livery, LIVERY_DOC)
             .await?)
     }
 
@@ -2723,6 +2867,36 @@ mod tests {
         let profiles = alice.profiles();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles.get(&alice.my_fingerprint()), Some(&p));
+    }
+
+    #[tokio::test]
+    async fn a_server_livery_is_published_and_read_back() {
+        let mut alice = founder();
+        alice.open_livery().await.unwrap();
+        alice.open_roles().await.unwrap();
+        assert_eq!(alice.livery(), Livery::default());
+
+        let l = Livery {
+            preset: "aurum".into(),
+            accent: "#ffcc00".into(),
+            tokens: HashMap::from([("--accent-hi".to_string(), "#ffe680".to_string())]),
+        };
+        alice.set_livery(l.clone()).await.unwrap();
+        assert_eq!(alice.livery(), l);
+
+        // Removing the livery clears the token map too (it is replaced wholesale).
+        alice.set_livery(Livery::default()).await.unwrap();
+        assert_eq!(alice.livery(), Livery::default());
+
+        // Oversized values are rejected, like an over-large avatar.
+        let too_long = Livery {
+            preset: "x".repeat(MAX_LIVERY_PRESET_BYTES + 1),
+            ..Default::default()
+        };
+        assert!(matches!(
+            alice.set_livery(too_long).await,
+            Err(AppError::Invalid(_))
+        ));
     }
 
     #[tokio::test]

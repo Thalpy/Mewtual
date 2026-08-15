@@ -14,8 +14,8 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
-    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, Profile, Server, ServerActor,
-    ServerRecord, ServerStore, MAX_AVATAR_BYTES,
+    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, Livery, Profile, Server,
+    ServerActor, ServerRecord, ServerStore, MAX_AVATAR_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -160,6 +160,16 @@ struct UiProfile {
     avatar: String,
 }
 
+/// The server's published livery as serialized to the frontend. Every value is **untrusted**
+/// (any member's client may have written it): the frontend validates the preset id, the
+/// `#rrggbb` accent and the token allow-list on read, and ignores anything else.
+#[derive(Serialize, Clone)]
+struct UiLivery {
+    preset: String,
+    accent: String,
+    tokens: HashMap<String, String>,
+}
+
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
 /// download it.
 #[derive(Serialize, Clone)]
@@ -265,6 +275,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::ProfilesUpdated => {
                     let _ = app.emit("profiles-updated", ServerEvt { server });
+                }
+                AppEvent::LiveryUpdated => {
+                    let _ = app.emit("livery-changed", ServerEvt { server });
                 }
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
@@ -865,6 +878,7 @@ async fn join_server(
     actor.open_channel(general).await;
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
+    actor.catch_up_livery(inviter).await;
     actor.catch_up_files(inviter).await;
     actor.catch_up_status(inviter).await;
     actor.catch_up_wiki(inviter).await;
@@ -1078,6 +1092,40 @@ async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiP
             },
         })
         .collect())
+}
+
+/// Publish the server livery (owner/admin only); re-seals the server. An all-empty livery
+/// removes it. Sizes are bounded by the backend; the *values* are validated in the UI.
+#[tauri::command]
+async fn set_livery(
+    state: State<'_, AppState>,
+    server: u64,
+    preset: String,
+    accent: String,
+    tokens: HashMap<String, String>,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor
+        .set_livery(Livery {
+            preset,
+            accent,
+            tokens,
+        })
+        .await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// The server's published livery (all-empty if none).
+#[tauri::command]
+async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery, String> {
+    let actor = actor_of(&state, server).await?;
+    let l = actor.livery().await;
+    Ok(UiLivery {
+        preset: l.preset,
+        accent: l.accent,
+        tokens: l.tokens,
+    })
 }
 
 /// Share a file (base64-encoded bytes); returns its content-address hex.
@@ -1795,6 +1843,8 @@ pub fn run() {
             get_members,
             set_profile,
             get_profiles,
+            set_livery,
+            get_livery,
             add_file,
             get_files,
             get_online_members,

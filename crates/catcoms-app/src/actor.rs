@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, FileEntry, FilesView, InboxItem, MemberView, MessageStats, Profile, Server,
+    ChatMessage, FileEntry, FilesView, InboxItem, Livery, MemberView, MessageStats, Profile, Server,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -108,6 +108,15 @@ pub enum AppCommand {
     Profiles {
         reply: oneshot::Sender<HashMap<String, Profile>>,
     },
+    /// Publish the server livery (owner/admin only).
+    SetLivery {
+        livery: Livery,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query the server's published livery.
+    Livery { reply: oneshot::Sender<Livery> },
+    /// Pull the livery document from `peer` (e.g. right after joining).
+    CatchUpLivery { peer: PeerId },
     /// Share a file under folder `path`; replies with its content-address hex, or an error.
     AddFile {
         name: String,
@@ -253,6 +262,8 @@ pub enum AppEvent {
     MembersChanged { count: usize },
     /// A member profile changed — the UI should re-fetch profiles (`profiles`).
     ProfilesUpdated,
+    /// The server livery changed — the UI should re-fetch it (`livery`) and re-apply it.
+    LiveryUpdated,
     /// The shared file list changed — the UI should re-fetch it (`files`).
     FilesUpdated,
     /// The status feed changed — the UI should re-fetch it (`statuses`).
@@ -581,6 +592,39 @@ impl ServerActor {
             return HashMap::new();
         }
         rx.await.unwrap_or_default()
+    }
+
+    /// Publish the server livery (owner/admin only; a `LiveryUpdated` event follows).
+    pub async fn set_livery(&self, livery: Livery) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetLivery { livery, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch the server's published livery.
+    pub async fn livery(&self) -> Livery {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Livery { reply })
+            .await
+            .is_err()
+        {
+            return Livery::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the livery document from `peer`.
+    pub async fn catch_up_livery(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpLivery { peer }).await;
     }
 
     /// Share a file (bytes) under folder `path`; returns its content-address hex, or an error.
@@ -969,6 +1013,11 @@ where
             }
         }
         let mut last_profiles = server.profiles();
+        // …and the livery doc, so an owner/admin's published scheme reaches this client.
+        if let Err(e) = server.open_livery().await {
+            tracing::warn!(error = %e, "open_livery failed");
+        }
+        let mut last_livery = server.livery();
         // Open the per-server file index too.
         if let Err(e) = server.open_files().await {
             tracing::warn!(error = %e, "open_files failed");
@@ -1122,6 +1171,24 @@ where
                     }
                     Some(AppCommand::Profiles { reply }) => {
                         let _ = reply.send(server.profiles());
+                    }
+                    Some(AppCommand::SetLivery { livery, reply }) => {
+                        let res = server.set_livery(livery).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Livery { reply }) => {
+                        let _ = reply.send(server.livery());
+                    }
+                    Some(AppCommand::CatchUpLivery { peer }) => {
+                        if let Err(e) = server.request_livery_catchup(peer).await {
+                            tracing::warn!(error = %e, "livery catch-up failed");
+                        }
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
                     }
                     Some(AppCommand::AddFile { name, mime, path, bytes, reply }) => {
                         let res = server
@@ -1367,6 +1434,9 @@ where
                             let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
                         }
                         sync_profiles(&mut server, &mut last_profiles, &event_tx).await;
+                        if livery_changed(&server, &mut last_livery) {
+                            let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
@@ -1488,6 +1558,22 @@ where
     R: CryptoRngCore,
 {
     let now = server.wiki_map();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the server livery changed since last seen (updating the record). The doc is a
+/// handful of short strings, so comparing it per tick is cheap.
+fn livery_changed<T, R>(server: &Server<T, R>, last: &mut Livery) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.livery();
     if now != *last {
         *last = now;
         true
