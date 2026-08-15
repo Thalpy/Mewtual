@@ -3785,3 +3785,53 @@ button.you-panel:hover {
   animation: flashPulse 1.3s ease-out;
   border-radius: var(--r);
 }
+
+/* --- Delivery ticks in the timestamp gutter (own messages; evidence-based) --- */
+:root {
+  /* info-blue: full-roster delivery + informational accents. Constant across presets,
+     like --ok/--warn/--danger — a semantic job, not an identity colour. */
+  --info: #6ca0d8;
+}
+.messages li > .t {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+}
+.dtick {
+  font-size: 0.62rem;
+  line-height: 1;
+  letter-spacing: -0.08em;
+  cursor: help;
+}
+.dtick.d-all { color: var(--info); }
+.dtick.d-ok { color: var(--ok); }
+.dtick.d-part { color: var(--warn); }
+.dtick.d-none { color: var(--danger); }
+.dtick.d-wait { color: var(--faint); }
+
+/* --- Channel rows: separate hash, accent when active/unread --- */
+.channel-list .chan-hash {
+  font-family: var(--mono);
+  color: var(--faint);
+  margin-right: 3px;
+}
+.channel-list button.active .chan-hash,
+.channel-list button.unread .chan-hash {
+  color: var(--accent);
+}
+.channel-list button.unread {
+  color: var(--text);
+  font-weight: 600;
+}
+
+/* --- Custom accent colour picker (Appearance + livery editor) --- */
+.accent-custom {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px dashed var(--border);
+  border-radius: var(--r);
+  background: transparent;
+  cursor: pointer;
+}

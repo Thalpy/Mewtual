@@ -1493,6 +1493,7 @@
       refreshRoles(),
       refreshLivery(),
       refreshTopic(),
+      refreshDelivery(),
     ]);
     syncProfileEditor();
   }
@@ -1558,6 +1559,7 @@
     captureDivider(); // snapshot the read boundary before refresh advances the mark
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
     refreshTopic();
+    refreshDelivery();
   }
 
   // The active channel's topic (a shared LWW scalar in the channel doc; any member may set it).
@@ -1596,6 +1598,46 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  // Delivery states for OWN messages (docs/design-delivery-states.md). Evidence-based lower
+  // bounds: a member is counted only once it has provably built on the message, so counts
+  // only rise and 0 means "no proof yet", never "failed". Red is reserved for the one true
+  // negative signal we have — no peers reachable at all.
+  type DeliveryState = { id: string; delivered: number; reachable: number };
+  let delivery = $state<Record<string, DeliveryState>>({});
+  async function refreshDelivery() {
+    if (activeServerId === null || !cur?.active) {
+      delivery = {};
+      return;
+    }
+    try {
+      const list = await invoke<DeliveryState[]>("get_delivery", { server: activeServerId, channel: cur.active });
+      const map: Record<string, DeliveryState> = {};
+      for (const s of list) map[s.id] = s;
+      delivery = map;
+    } catch {
+      delivery = {}; // older backend or closed actor — ticks simply don't render
+    }
+  }
+  // The gutter tick for one of your messages: ✕ no peers · ◌ no proof yet · ~ partial ·
+  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed.
+  function deliveryTick(m: Msg): { g: string; cls: string; tip: string } | null {
+    if (m.author !== myFp || !m.id) return null;
+    const total = Math.max(members - 1, 0);
+    if (total === 0) return null; // alone here — nothing to deliver to
+    const d = delivery[m.id];
+    const del = d?.delivered ?? 0;
+    const reach = d?.reachable ?? Math.max(onlineCount - 1, 0);
+    if (del >= total)
+      return { g: "✓✓", cls: "d-all", tip: `Delivered to everyone — all ${total} other member${total === 1 ? "" : "s"} proved they hold this message.` };
+    if (reach === 0)
+      return { g: "✕", cls: "d-none", tip: "No peers reachable — queued; it gossips automatically when members reconnect. Not lost." };
+    if (del >= reach)
+      return { g: "✓", cls: "d-ok", tip: `Delivered to all ${reach} reachable member${reach === 1 ? "" : "s"} (${del}/${total} confirmed overall). Confirmation is proof-based — silent receivers may also have it.` };
+    if (del > 0)
+      return { g: "~", cls: "d-part", tip: `Delivering — ${del} of ${reach} reachable confirmed (${total} members in total). Members confirm by building on the message.` };
+    return { g: "◌", cls: "d-wait", tip: `Sent — no confirmations yet from ${reach} reachable member${reach === 1 ? "" : "s"}. Silent receipt isn't visible; the count only rises.` };
   }
   async function refreshMembers() {
     const id = activeServerId;
@@ -3355,6 +3397,10 @@
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
         if (e.payload.server === activeServerId) refreshLivery();
       }),
+      listen<{ server: number; channel: string; states: DeliveryState[] }>("delivery-changed", (e) => {
+        if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
+        for (const s of e.payload.states) delivery[s.id] = s;
+      }),
       listen<{ server: number }>("dm-requests-changed", (e) => {
         // A friend request may have arrived over ANY server (active or not) — refresh that server's.
         refreshDmRequests(e.payload.server);
@@ -3728,9 +3774,10 @@
           <button
             class="channel-name"
             class:active={c.id === cur?.active && view === "chat"}
+            class:unread={cur?.unread.includes(c.id)}
             onclick={() => { switchTo(c.id); view = "chat"; }}
           >
-            #{c.name}
+            <span class="chan-hash">#</span>{c.name}
             {#if mentionChannels.has(c.id)}<span class="mention-badge" title="You were mentioned">@</span>{/if}
             {#if cur?.unread.includes(c.id)}<span class="dot">●</span>{/if}
           </button>
@@ -4268,6 +4315,7 @@
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
               {@const bubble = appearance.flat ? "" : bubbleStyle(m.author)}
+              {@const tick = deliveryTick(m)}
               <li
                 data-mi={mi}
                 class:own={m.author === myFp}
@@ -4279,7 +4327,9 @@
                 style={bubble}
                 use:contextMenu={() => messageMenu(m)}
               >
-                <span class="t" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
+                <span class="t" title={new Date(m.ts).toLocaleString()}>
+                  {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}{fmtTime(m.ts)}
+                </span>
                 <div class="m-body">
                 {#if m.reply_to}
                   {@const parent = msgById.get(m.reply_to)}
@@ -4304,6 +4354,9 @@
                       {@render avatarTag(m.author)}
                       {@render nameTag(m.author)}
                     </span>
+                    {#if m.author !== myFp && verifiedFps.has(m.author)}
+                      <span class="vf-check" title="You verified this member out of band">✓</span>
+                    {/if}
                     {#if m.pinned}<span class="pin-mark" title="Pinned message">{@render icoPin()}</span>{/if}
                   </span>
                 {:else if m.pinned}
@@ -4992,6 +5045,14 @@
                       onclick={() => (appearance = { ...appearance, accent: appearance.accent === a ? "" : a })}
                     ></button>
                   {/each}
+                  <input
+                    type="color"
+                    class="accent-custom"
+                    title="Custom accent colour"
+                    aria-label="Custom accent colour"
+                    value={appearance.accent || "#977df2"}
+                    oninput={(e) => (appearance = { ...appearance, accent: e.currentTarget.value })}
+                  />
                 </div>
               </div>
               <label class="toggle">
@@ -5203,6 +5264,14 @@
                         onclick={() => (liveryDraft = { ...liveryDraft, accent: liveryDraft.accent === a ? "" : a })}
                       ></button>
                     {/each}
+                    <input
+                      type="color"
+                      class="accent-custom"
+                      title="Custom accent colour"
+                      aria-label="Custom accent colour"
+                      value={liveryDraft.accent || "#977df2"}
+                      oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
+                    />
                   </div>
                 </div>
                 <div class="invite-actions">
