@@ -3053,6 +3053,7 @@
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}) {
     if (activeServerId === null) return;
     if (wikiDirty && activeWikiPage && activeWikiPage !== name) wikiDrafts.set(activeWikiPage, wikiBody);
+    if (showInsert && insertTarget === "wiki") closeInsert();
     try {
       let body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
       // Follow #REDIRECT [[Target]] pages Wikipedia-style (bounded; only to pages that exist),
@@ -3098,8 +3099,9 @@
       if (!wikiPages.includes(activeWikiPage)) await saveWikiPage();
       await invoke("set_wiki_format", { server: activeServerId, name: activeWikiPage, format: fmt });
       wikiMeta = { ...wikiMeta, [activeWikiPage]: fmt };
+      toast(`Page format set to ${fmt === "wiki" ? "wikitext" : "markdown"} for everyone`, "info", 2500);
     } catch (e) {
-      error = String(e);
+      toast(`Setting the page format failed: ${e}`, "err", 9000);
     }
   }
 
@@ -3115,8 +3117,9 @@
       await invoke("rename_wiki_page", { server: activeServerId, from: activeWikiPage, to });
       await refreshWiki();
       await openWikiPage(to, { noRedirect: true });
+      toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
     } catch (e) {
-      error = String(e);
+      toast(`Rename failed: ${e}`, "err", 9000);
     }
   }
 
@@ -3137,8 +3140,9 @@
         wikiRedirectedFrom = "";
       }
       await refreshWiki();
+      toast(`Deleted "${name}"`, "ok");
     } catch (e) {
-      error = String(e);
+      toast(`Deleting "${name}" failed: ${e}`, "err", 9000);
     }
   }
 
@@ -3244,26 +3248,49 @@
     }
   }
 
-  // Embed media into the open wiki page: upload under wiki/<page>/, append a marker.
+  // Insert into the wiki textarea at the caret (attach, drop, and the "+" picker all use this),
+  // switching into edit mode first if needed so the insertion is visible.
+  function insertIntoWikiBody(insert: string) {
+    wikiEdit = true;
+    const ta = wikiTextarea;
+    const start = ta?.selectionStart ?? wikiBody.length;
+    const end = ta?.selectionEnd ?? wikiBody.length;
+    const { text, caret } = insertInto(wikiBody, start, end, insert);
+    wikiBody = text;
+    wikiDirty = true;
+    tick().then(() => {
+      const t = wikiTextarea;
+      if (t) {
+        t.focus();
+        t.selectionStart = t.selectionEnd = caret;
+      }
+    });
+  }
+
+  // Embed media into the open wiki page: upload under wiki/<page>/, insert a marker at the caret.
+  // Each file gets a live toast (uploading -> embedded / failed) so nothing happens silently.
   async function wikiEmbed(fileList: FileList | null) {
     if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
     uploading = true;
     try {
       for (const file of Array.from(fileList)) {
-        const cid = await invoke<string>("add_file", {
-          server: activeServerId,
-          name: file.name,
-          mime: file.type || "application/octet-stream",
-          path: `wiki/${activeWikiPage}`,
-          data: await readBase64(file),
-        });
-        const alt = file.name.replace(/[[\]]/g, " ");
-        wikiBody = wikiBody ? `${wikiBody}\n\n![${alt}](cid:${cid})` : `![${alt}](cid:${cid})`;
-        wikiDirty = true;
+        const tid = toast(`Uploading ${file.name}…`, "info", 0);
+        try {
+          const cid = await invoke<string>("add_file", {
+            server: activeServerId,
+            name: file.name,
+            mime: file.type || "application/octet-stream",
+            path: `wiki/${activeWikiPage}`,
+            data: await readBase64(file),
+          });
+          const alt = file.name.replace(/[[\]]/g, " ");
+          insertIntoWikiBody(`![${alt}](cid:${cid})`);
+          updateToast(tid, `Embedded ${file.name} · save the page to publish`, "ok", 5000);
+        } catch (e) {
+          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+        }
       }
       await refreshFiles();
-    } catch (e) {
-      error = String(e);
     } finally {
       uploading = false;
     }
@@ -3279,8 +3306,9 @@
       await invoke("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
       wikiDirty = false;
       wikiDrafts.delete(activeWikiPage);
+      toast(`Saved "${activeWikiPage}"`, "ok", 2500);
     } catch (e) {
-      error = String(e);
+      toast(`Saving "${activeWikiPage}" failed: ${e}`, "err", 9000);
     }
   }
   async function refreshInvite() {
@@ -3375,6 +3403,7 @@
     const file = fileList?.[0];
     if (!file || activeServerId === null) return;
     uploading = true;
+    const tid = toast(`Sharing ${file.name}…`, "info", 0);
     try {
       await invoke("add_file", {
         server: activeServerId,
@@ -3383,9 +3412,10 @@
         path: folder,
         data: await readBase64(file),
       });
+      updateToast(tid, `Shared ${file.name}`, "ok");
       await refreshFiles();
     } catch (e) {
-      error = String(e);
+      updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
     } finally {
       uploading = false;
     }
@@ -3399,22 +3429,26 @@
     uploading = true;
     try {
       for (const file of Array.from(fileList)) {
-        const cid = await invoke<string>("add_file", {
-          server: activeServerId,
-          name: file.name,
-          mime: file.type || "application/octet-stream",
-          path: myEmbedFolder,
-          data: await readBase64(file),
-        });
-        // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
-        const alt = file.name.replace(/[[\]]/g, " ");
-        const marker = `![${alt}](cid:${cid})`;
-        if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
-        else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
+        const tid = toast(`Uploading ${file.name}…`, "info", 0);
+        try {
+          const cid = await invoke<string>("add_file", {
+            server: activeServerId,
+            name: file.name,
+            mime: file.type || "application/octet-stream",
+            path: myEmbedFolder,
+            data: await readBase64(file),
+          });
+          // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
+          const alt = file.name.replace(/[[\]]/g, " ");
+          const marker = `![${alt}](cid:${cid})`;
+          if (target === "chat") draft = draft ? `${draft} ${marker}` : marker;
+          else statusDraft = statusDraft ? `${statusDraft} ${marker}` : marker;
+          updateToast(tid, `Attached ${file.name}`, "ok");
+        } catch (e) {
+          updateToast(tid, `Upload of ${file.name} failed: ${e}`, "err", 9000);
+        }
       }
       await refreshFiles();
-    } catch (e) {
-      error = String(e);
     } finally {
       uploading = false;
     }
@@ -3678,12 +3712,44 @@
     return t.length > n ? t.slice(0, n) + "…" : t;
   }
 
+  // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
+  type Toast = { id: number; kind: "info" | "ok" | "err"; text: string };
+  let toasts = $state<Toast[]>([]);
+  let toastSeq = 0;
+  const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** Show a toast; `ms` 0 = sticky until updated/dismissed. Returns an id for updateToast. */
+  function toast(text: string, kind: Toast["kind"] = "info", ms = 3500): number {
+    const id = ++toastSeq;
+    toasts = [...toasts, { id, kind, text }];
+    if (ms > 0) toastTimers.set(id, setTimeout(() => dismissToast(id), ms));
+    return id;
+  }
+  /** Morph an existing toast in place (e.g. "Uploading…" -> "Embedded"). */
+  function updateToast(id: number, text: string, kind: Toast["kind"], ms = 3500) {
+    const timer = toastTimers.get(id);
+    if (timer) clearTimeout(timer);
+    toastTimers.delete(id);
+    if (!toasts.some((t) => t.id === id)) {
+      toast(text, kind, ms);
+      return;
+    }
+    toasts = toasts.map((t) => (t.id === id ? { ...t, text, kind } : t));
+    if (ms > 0) toastTimers.set(id, setTimeout(() => dismissToast(id), ms));
+  }
+  function dismissToast(id: number) {
+    const timer = toastTimers.get(id);
+    if (timer) clearTimeout(timer);
+    toastTimers.delete(id);
+    toasts = toasts.filter((t) => t.id !== id);
+  }
+
   // --- "+" insert picker: link/embed this server's own content into the message -----------------
   // Everything the group already holds is addressable from the composer: a fileshare file (inline
   // embed for media, a link chip otherwise), one of YOUR status posts, or a wiki page. Each inserts
   // a marker the shared renderer resolves: nothing here leaves the group or touches the network.
   type InsertTab = "files" | "status" | "wiki" | "events";
   let showInsert = $state(false);
+  let insertTarget = $state<"chat" | "wiki">("chat"); // which editor the picker inserts into
   let insertTab = $state<InsertTab>("files");
   let insertQuery = $state("");
   let insertInput = $state<HTMLInputElement | undefined>(undefined);
@@ -3726,11 +3792,12 @@
           : insertWikiPages.length,
   );
 
-  async function toggleInsert() {
-    if (showInsert) {
+  async function toggleInsert(target: "chat" | "wiki" = "chat") {
+    if (showInsert && insertTarget === target) {
       closeInsert();
       return;
     }
+    insertTarget = target;
     showInsert = true;
     showEmoji = false;
     insertQuery = "";
@@ -3755,9 +3822,14 @@
     insertLoading = false;
   }
 
-  // Insert at the composer caret (mirrors pickMention), leaving the caret just after it. The string
-  // maths lives in refs.ts so it can be unit-tested away from the DOM.
+  // Insert at the target editor's caret (mirrors pickMention), leaving the caret just after it.
+  // The string maths lives in refs.ts so it can be unit-tested away from the DOM. The picker
+  // serves two editors: the chat composer and the wiki page editor (insertTarget).
   function insertAtCaret(insert: string) {
+    if (insertTarget === "wiki") {
+      insertIntoWikiBody(insert);
+      return;
+    }
     const start = composerEl?.selectionStart ?? draft.length;
     const end = composerEl?.selectionEnd ?? draft.length;
     const { text, caret } = insertInto(draft, start, end, insert);
@@ -4969,6 +5041,94 @@
   content column's surface strip. Shared by the server and DM sidebars: `dm` suppresses the blocks
   that only make sense on a server (channels, the status feed's blurb).
 -->
+<!-- The "+" insert panel: link/embed this server's own content. One snippet, two homes — the
+  chat composer (above it) and the wiki editor's toolbar (below it); insertTarget routes the
+  insertion to the right caret. -->
+{#snippet insertPanel()}
+  <div class="insert-picker">
+    <div class="ip-tabs" role="tablist">
+      <button type="button" role="tab" aria-selected={insertTab === "files"} class:active={insertTab === "files"} onclick={() => (insertTab = "files")}>Files</button>
+      {#if !cur?.isDm}
+        <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Status</button>
+        <button type="button" role="tab" aria-selected={insertTab === "wiki"} class:active={insertTab === "wiki"} onclick={() => (insertTab = "wiki")}>Wiki</button>
+        <button type="button" role="tab" aria-selected={insertTab === "events"} class:active={insertTab === "events"} onclick={() => (insertTab = "events")}>Events</button>
+      {/if}
+      <span class="ip-count">{insertCount}</span>
+      <button type="button" class="ghost small ip-close" title="Close (Esc)" onclick={closeInsert}>✕</button>
+    </div>
+    <input
+      bind:this={insertInput}
+      class="ip-search"
+      bind:value={insertQuery}
+      placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
+      onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeInsert(); (insertTarget === "wiki" ? wikiTextarea : composerEl)?.focus(); } }}
+    />
+    <div class="ip-list">
+      {#if insertTab === "files"}
+        {#each insertFiles as f}
+          {@const media = !!safeMime(f.mime)}
+          <div class="ip-row">
+            <button
+              type="button"
+              class="ip-item"
+              title={media ? "Embed this file inline" : "Insert a link to this file"}
+              onclick={() => insertFileRef(f, media)}
+            >
+              <span class="ip-ico">{fileIcon(f.mime)}</span>
+              <span class="ip-name">{f.name}</span>
+              <span class="ip-meta">{f.path ? f.path + " · " : ""}{fmtSize(f.size)}</span>
+            </button>
+            {#if media}
+              <button type="button" class="ip-alt" title="Insert a link instead of an inline embed" onclick={() => insertFileRef(f, false)}>link</button>
+            {/if}
+            <span class="ip-mode">{media ? "embed" : "link"}</span>
+          </div>
+        {:else}
+          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No files match that." : "No files shared on this server yet."}</p>
+        {/each}
+      {:else if insertTab === "status"}
+        {#each insertStatuses as s}
+          <div class="ip-row">
+            <button type="button" class="ip-item" title="Insert a link to this post" onclick={() => insertStatusRef(s)}>
+              <span class="ip-ico">◈</span>
+              <span class="ip-name">{msgSnippet(s.text, 70) || "(empty post)"}</span>
+              <span class="ip-meta">{fmtTime(s.ts)}</span>
+            </button>
+            <span class="ip-mode">link</span>
+          </div>
+        {:else}
+          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your posts match that." : "You haven't posted a status on this server yet."}</p>
+        {/each}
+      {:else if insertTab === "events"}
+        {#each insertEvents as ev (ev.id)}
+          <div class="ip-row">
+            <button type="button" class="ip-item" title="Insert a link to this event" onclick={() => insertEventRef(ev)}>
+              <span class="ip-ico">⧗</span>
+              <span class="ip-name">{ev.title}</span>
+              <span class="ip-meta">{fmtEventWhen(ev)}</span>
+            </button>
+            <span class="ip-mode">link</span>
+          </div>
+        {:else}
+          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No events match that." : "No events on this server yet: add one on the ⧗ Events surface."}</p>
+        {/each}
+      {:else}
+        {#each insertWikiPages as p}
+          <div class="ip-row">
+            <button type="button" class="ip-item" title="Insert a link to this page" onclick={() => insertWikiRef(p)}>
+              <span class="ip-ico">📖</span>
+              <span class="ip-name">{p}</span>
+            </button>
+            <span class="ip-mode">link</span>
+          </div>
+        {:else}
+          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No pages match that." : "This server's wiki is empty."}</p>
+        {/each}
+      {/if}
+    </div>
+  </div>
+{/snippet}
+
 {#snippet contextNav(dm: boolean)}
   {#if view === "wiki"}
     <h3 class="ctx-h">
@@ -5975,89 +6135,8 @@
                 <button class="ghost small reply-cancel" type="button" title="Cancel reply (Esc)" onclick={cancelReply}>✕</button>
               </div>
             {/if}
-            {#if showInsert}
-              <div class="insert-picker">
-                <div class="ip-tabs" role="tablist">
-                  <button type="button" role="tab" aria-selected={insertTab === "files"} class:active={insertTab === "files"} onclick={() => (insertTab = "files")}>Files</button>
-                  {#if !cur?.isDm}
-                    <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Status</button>
-                    <button type="button" role="tab" aria-selected={insertTab === "wiki"} class:active={insertTab === "wiki"} onclick={() => (insertTab = "wiki")}>Wiki</button>
-                    <button type="button" role="tab" aria-selected={insertTab === "events"} class:active={insertTab === "events"} onclick={() => (insertTab = "events")}>Events</button>
-                  {/if}
-                  <span class="ip-count">{insertCount}</span>
-                  <button type="button" class="ghost small ip-close" title="Close (Esc)" onclick={closeInsert}>✕</button>
-                </div>
-                <input
-                  bind:this={insertInput}
-                  class="ip-search"
-                  bind:value={insertQuery}
-                  placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
-                  onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeInsert(); composerEl?.focus(); } }}
-                />
-                <div class="ip-list">
-                  {#if insertTab === "files"}
-                    {#each insertFiles as f}
-                      {@const media = !!safeMime(f.mime)}
-                      <div class="ip-row">
-                        <button
-                          type="button"
-                          class="ip-item"
-                          title={media ? "Embed this file inline" : "Insert a link to this file"}
-                          onclick={() => insertFileRef(f, media)}
-                        >
-                          <span class="ip-ico">{fileIcon(f.mime)}</span>
-                          <span class="ip-name">{f.name}</span>
-                          <span class="ip-meta">{f.path ? f.path + " · " : ""}{fmtSize(f.size)}</span>
-                        </button>
-                        {#if media}
-                          <button type="button" class="ip-alt" title="Insert a link instead of an inline embed" onclick={() => insertFileRef(f, false)}>link</button>
-                        {/if}
-                        <span class="ip-mode">{media ? "embed" : "link"}</span>
-                      </div>
-                    {:else}
-                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No files match that." : "No files shared on this server yet."}</p>
-                    {/each}
-                  {:else if insertTab === "status"}
-                    {#each insertStatuses as s}
-                      <div class="ip-row">
-                        <button type="button" class="ip-item" title="Insert a link to this post" onclick={() => insertStatusRef(s)}>
-                          <span class="ip-ico">◈</span>
-                          <span class="ip-name">{msgSnippet(s.text, 70) || "(empty post)"}</span>
-                          <span class="ip-meta">{fmtTime(s.ts)}</span>
-                        </button>
-                        <span class="ip-mode">link</span>
-                      </div>
-                    {:else}
-                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your posts match that." : "You haven't posted a status on this server yet."}</p>
-                    {/each}
-                  {:else if insertTab === "events"}
-                    {#each insertEvents as ev (ev.id)}
-                      <div class="ip-row">
-                        <button type="button" class="ip-item" title="Insert a link to this event" onclick={() => insertEventRef(ev)}>
-                          <span class="ip-ico">⧗</span>
-                          <span class="ip-name">{ev.title}</span>
-                          <span class="ip-meta">{fmtEventWhen(ev)}</span>
-                        </button>
-                        <span class="ip-mode">link</span>
-                      </div>
-                    {:else}
-                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No events match that." : "No events on this server yet: add one on the ⧗ Events surface."}</p>
-                    {/each}
-                  {:else}
-                    {#each insertWikiPages as p}
-                      <div class="ip-row">
-                        <button type="button" class="ip-item" title="Insert a link to this page" onclick={() => insertWikiRef(p)}>
-                          <span class="ip-ico">📖</span>
-                          <span class="ip-name">{p}</span>
-                        </button>
-                        <span class="ip-mode">link</span>
-                      </div>
-                    {:else}
-                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No pages match that." : "This server's wiki is empty."}</p>
-                    {/each}
-                  {/if}
-                </div>
-              </div>
+            {#if showInsert && insertTarget === "chat"}
+              {@render insertPanel()}
             {/if}
             {#if showEmoji}
               <div class="emoji-picker">
@@ -6093,11 +6172,11 @@
               <button
                 type="button"
                 class="attach ip-toggle"
-                class:on={showInsert}
+                class:on={showInsert && insertTarget === "chat"}
                 title="Link or embed a file, one of your status posts, or a wiki page"
                 aria-label="Insert a link or embed"
-                aria-expanded={showInsert}
-                onclick={toggleInsert}
+                aria-expanded={showInsert && insertTarget === "chat"}
+                onclick={() => toggleInsert("chat")}
               >{@render icoPlus()}</button>
               <label class="attach" title="Attach image / video / audio">
                 📎
@@ -6246,6 +6325,24 @@
                     <button class="wiki-tb" title="Bulleted list" onclick={() => wikiList(false)}>•≡</button>
                     <button class="wiki-tb" title="Numbered list" onclick={() => wikiList(true)}>1≡</button>
                     <button class="wiki-tb" title="Insert a table" onclick={insertWikiTable}>⊞</button>
+                    <span class="wiki-tb-sep"></span>
+                    <div class="wiki-ip-anchor">
+                      <button
+                        class="wiki-tb"
+                        class:active={showInsert && insertTarget === "wiki"}
+                        title="Link or embed a shared file, a status post, another page, or an event"
+                        aria-expanded={showInsert && insertTarget === "wiki"}
+                        onclick={() => toggleInsert("wiki")}
+                      >+ insert</button>
+                      {#if showInsert && insertTarget === "wiki"}
+                        {@render insertPanel()}
+                      {/if}
+                    </div>
+                    <label class="wiki-tb wiki-tb-attach" title="Upload an image / video / audio and embed it at the caret">
+                      📎 attach
+                      <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
+                        onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
+                    </label>
                     <span class="wiki-tb-spacer"></span>
                     <button class="wiki-tb wide" class:active={wikiPreview} title="Live preview beside the editor" onclick={() => (wikiPreview = !wikiPreview)}>preview</button>
                   </div>
@@ -6267,13 +6364,8 @@
                     {/if}
                   </div>
                   <div class="wiki-edit-actions">
-                    <label class="attach" title="Attach image / video / audio">
-                      📎
-                      <input type="file" accept="image/*,video/*,audio/*" multiple disabled={uploading}
-                        onchange={(e) => { wikiEmbed(e.currentTarget.files); e.currentTarget.value = ''; }} />
-                    </label>
                     <button onclick={saveWikiPage} disabled={!wikiDirty}>Save page</button>
-                    <span class="muted small">Ctrl+S saves · concurrent edits merge</span>
+                    <span class="muted small">Ctrl+S saves · concurrent edits merge · drop a file anywhere in the editor to embed it</span>
                   </div>
                 {:else}
                   <div class="wiki-render article">
@@ -7463,6 +7555,17 @@
             {/each}
           </ul>
         </div>
+      </div>
+    {/if}
+
+    {#if toasts.length}
+      <div class="toast-stack" aria-live="polite">
+        {#each toasts as t (t.id)}
+          <div class="toast {t.kind}" role="status">
+            <span class="toast-text">{t.text}</span>
+            <button class="toast-x" aria-label="Dismiss" title="Dismiss" onclick={() => dismissToast(t.id)}>✕</button>
+          </div>
+        {/each}
       </div>
     {/if}
 

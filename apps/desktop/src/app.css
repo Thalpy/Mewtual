@@ -4674,3 +4674,89 @@ button.you-panel:hover {
   flex-direction: column;
   gap: 0.4rem;
 }
+
+/* --- wiki toolbar: the "+" insert panel drops DOWN from the toolbar (the composer's drops up) --- */
+
+.wiki-ip-anchor {
+  position: relative;
+}
+
+.wiki-ip-anchor .insert-picker {
+  bottom: auto;
+  top: calc(100% + 6px);
+  left: auto;
+  right: 0;
+  width: min(480px, 70vw);
+}
+
+.wiki-tb-attach {
+  cursor: pointer;
+  user-select: none;
+}
+
+.wiki-tb-attach input[type="file"] {
+  display: none;
+}
+
+/* --- toasts: transient feedback, stacked above the status bar --- */
+
+.toast-stack {
+  position: fixed;
+  right: 14px;
+  bottom: 42px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 300;
+  max-width: 360px;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r);
+  padding: 0.45rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-2);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+  animation: toast-in 0.15s ease-out;
+}
+
+.toast.ok {
+  border-left-color: var(--ok);
+}
+
+.toast.err {
+  border-left-color: var(--danger);
+  color: var(--text);
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-x {
+  background: none;
+  border: none;
+  color: var(--faint);
+  cursor: pointer;
+  padding: 0;
+  flex: none;
+}
+
+.toast-x:hover {
+  color: var(--text);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
