@@ -218,7 +218,8 @@ impl EncryptedDoc {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), automerge::AutomergeError>,
     {
-        self.edit_tracked(device, group, rng, edit).map(|(op, _)| op)
+        self.edit_tracked(device, group, rng, edit)
+            .map(|(op, _)| op)
     }
 
     /// [`EncryptedDoc::edit`], also returning the **automerge change hash** the edit produced —

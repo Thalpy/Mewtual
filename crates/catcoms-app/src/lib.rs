@@ -1019,6 +1019,24 @@ const STATUS_DOC: u128 = 0;
 /// map of page name → page body.
 const WIKI_DOC: u128 = 0;
 
+/// The reserved root key holding the wiki's **per-page metadata** map (`page name -> format`).
+///
+/// NUL-prefixed on purpose: a NUL is untypeable as a page name, so it can never collide with a
+/// real page, and — because it holds an automerge **`Map`**, not a `Text` — [`read_wiki_map`]
+/// (which only materializes `Text` values) is blind to it. That is the backward-compatibility
+/// mechanism: an older peer that has never heard of formats merges this key through the CRDT
+/// without ever showing it as a page.
+const WIKI_META_KEY: &str = "\u{0}meta";
+
+/// Maximum length of a wiki page name, in characters — the cap the frontend's `[[link]]` grammar
+/// enforces, mirrored here so an over-long name can never be *written* either.
+pub const MAX_WIKI_NAME_CHARS: usize = 120;
+
+/// The render formats a page may declare. A page **absent** from the metadata map has no
+/// declared format and renders as markdown — the default is "missing", never a written value,
+/// so a doc written before formats existed reads correctly.
+const WIKI_FORMATS: [&str; 2] = ["md", "wiki"];
+
 /// Write a wiki page's body. Each page body is an automerge **`Text`** object, so concurrent
 /// edits to the *same* page **merge character-by-character** (a real collaborative CRDT
 /// document), not last-writer-wins. `update_text` diffs the stored text against `body` and
@@ -1033,9 +1051,16 @@ fn write_wiki_page(doc: &mut AutoCommit, name: &str, body: &str) -> Result<(), A
 }
 
 /// Materialize the wiki document into a `page name -> body` map (each body a `Text` object).
+///
+/// Reserved (NUL-prefixed) root keys are skipped explicitly — defence in depth beside the
+/// `Text`-only type filter, so a reserved key can never surface as a page even if a future
+/// schema stores something text-shaped under one.
 fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for key in doc.keys(ROOT) {
+        if key.starts_with('\u{0}') {
+            continue;
+        }
         if let Ok(Some((Value::Object(ObjType::Text), id))) = doc.get(ROOT, &key) {
             if let Ok(body) = doc.text(&id) {
                 out.insert(key, body);
@@ -1043,6 +1068,104 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
         }
     }
     out
+}
+
+/// Trim and validate a wiki page name: non-empty, not reserved (no leading NUL), and within
+/// [`MAX_WIKI_NAME_CHARS`] — the same cap the frontend's `[[link]]` grammar enforces, so a name
+/// that can be written is always a name that can be linked.
+fn valid_wiki_name(name: &str) -> Result<String, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::Invalid("empty wiki page name".into()));
+    }
+    if name.starts_with('\u{0}') {
+        return Err(AppError::Invalid("reserved wiki page name".into()));
+    }
+    if name.chars().count() > MAX_WIKI_NAME_CHARS {
+        return Err(AppError::Invalid(format!(
+            "wiki page name longer than {MAX_WIKI_NAME_CHARS} characters"
+        )));
+    }
+    Ok(name.to_string())
+}
+
+/// Every metadata map currently living at the reserved key, in automerge's conflict order —
+/// the **last** is the winner `doc.get` would return.
+///
+/// There is normally exactly one. But the map is created lazily by whoever first sets a format,
+/// so two members who do that concurrently each `put_object` a *fresh* `Map` at the same root
+/// key; on merge automerge keeps both objects and picks one winner. Reads therefore union all
+/// of them (winner last, so it takes precedence) and deletes hit all of them — otherwise a
+/// format set on the losing side would silently vanish, or a deleted page's entry resurface.
+fn wiki_meta_objs(doc: &AutoCommit) -> Vec<ObjId> {
+    doc.get_all(ROOT, WIKI_META_KEY)
+        .into_iter()
+        .flatten()
+        .filter_map(|(v, id)| matches!(v, Value::Object(ObjType::Map)).then_some(id))
+        .collect()
+}
+
+/// Get (or create) the wiki's metadata map — the conflict winner if several exist.
+fn wiki_meta_obj(doc: &mut AutoCommit) -> Result<ObjId, AutomergeError> {
+    match doc.get(ROOT, WIKI_META_KEY)? {
+        Some((Value::Object(ObjType::Map), id)) => Ok(id),
+        _ => doc.put_object(ROOT, WIKI_META_KEY, ObjType::Map),
+    }
+}
+
+/// Record a page's render `format` (`"md"` or `"wiki"`). A plain last-writer-wins scalar put:
+/// a format is a toggle, so a concurrent flip resolving to one of the two values is correct —
+/// unlike the body, which merges character-by-character.
+fn set_wiki_format(doc: &mut AutoCommit, name: &str, format: &str) -> Result<(), AutomergeError> {
+    let meta = wiki_meta_obj(doc)?;
+    doc.put(&meta, name, format)?;
+    Ok(())
+}
+
+/// Materialize the wiki's `page name -> format` metadata (empty if the doc has none). A page
+/// absent from this map has no declared format and renders as markdown.
+fn read_wiki_meta(doc: &AutoCommit) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for meta in wiki_meta_objs(doc) {
+        for key in doc.keys(&meta) {
+            let format = str_field(doc, &meta, &key);
+            if WIKI_FORMATS.contains(&format.as_str()) {
+                out.insert(key, format);
+            }
+        }
+    }
+    out
+}
+
+/// Delete a wiki page — its body and its metadata entry.
+fn delete_wiki_page_op(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeError> {
+    doc.delete(ROOT, name)?;
+    for meta in wiki_meta_objs(doc) {
+        if doc.get(&meta, name)?.is_some() {
+            doc.delete(&meta, name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Rename a wiki page: copy its body to `to`, carry its format, delete `from`.
+///
+/// automerge has no "move", so this is a **copy + delete**, and the new `Text` object is a fresh
+/// CRDT identity. Consequence, accepted deliberately: an edit made concurrently on the *old* key
+/// is lost by the rename (it merges into a page that no longer exists), where an edit made
+/// concurrently on the *new* key merges character-by-character as usual. Renames are rare and
+/// deliberate; the alternative (keeping a tombstone alias) buys little for the complexity.
+fn rename_wiki_page_op(doc: &mut AutoCommit, from: &str, to: &str) -> Result<(), AutomergeError> {
+    let body = match doc.get(ROOT, from)? {
+        Some((Value::Object(ObjType::Text), id)) => doc.text(&id)?,
+        _ => String::new(),
+    };
+    write_wiki_page(doc, to, &body)?;
+    let format = read_wiki_meta(doc).get(from).cloned();
+    if let Some(format) = format {
+        set_wiki_format(doc, to, &format)?;
+    }
+    delete_wiki_page_op(doc, from)
 }
 
 // --- server events (the calendar) -------------------------------------------
@@ -2447,14 +2570,77 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.wiki_map().get(name).cloned().unwrap_or_default()
     }
 
-    /// Create or update a wiki page (last-writer-wins on the body).
+    /// The wiki's per-page render formats (`page name -> "md" | "wiki"`). A page missing from
+    /// this map renders as markdown (the default).
+    pub fn wiki_meta(&self) -> HashMap<String, String> {
+        self.sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| read_wiki_meta(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Create or update a wiki page (the body merges character-by-character).
     pub async fn write_wiki_page(&mut self, name: &str, body: &str) -> Result<(), AppError> {
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            return Err(AppError::Invalid("empty wiki page name".into()));
-        }
+        let name = valid_wiki_name(name)?;
         self.sync
             .post(DocType::Wiki, WIKI_DOC, |d| write_wiki_page(d, &name, body))
+            .await?;
+        Ok(())
+    }
+
+    /// Set a wiki page's render format — `"md"` or `"wiki"`; any other value is refused.
+    ///
+    /// The format lives in a reserved NUL-prefixed root key holding a `Map`, which older peers'
+    /// readers skip, so declaring a format never disturbs a peer that predates the feature.
+    pub async fn set_wiki_page_format(&mut self, name: &str, format: &str) -> Result<(), AppError> {
+        let name = valid_wiki_name(name)?;
+        if !WIKI_FORMATS.contains(&format) {
+            return Err(AppError::Invalid(format!(
+                "unknown wiki format {format:?} (expected \"md\" or \"wiki\")"
+            )));
+        }
+        let format = format.to_string();
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| {
+                set_wiki_format(d, &name, &format)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Delete a wiki page (and its format metadata). Errors if the page does not exist.
+    pub async fn delete_wiki_page(&mut self, name: &str) -> Result<(), AppError> {
+        let name = valid_wiki_name(name)?;
+        if !self.wiki_map().contains_key(&name) {
+            return Err(AppError::Invalid(format!("no such wiki page {name:?}")));
+        }
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| delete_wiki_page_op(d, &name))
+            .await?;
+        Ok(())
+    }
+
+    /// Rename a wiki page, carrying its body and format. Errors if `from` does not exist or
+    /// `to` already does (a rename never silently clobbers a page).
+    pub async fn rename_wiki_page(&mut self, from: &str, to: &str) -> Result<(), AppError> {
+        let from = valid_wiki_name(from)?;
+        let to = valid_wiki_name(to)?;
+        let pages = self.wiki_map();
+        if !pages.contains_key(&from) {
+            return Err(AppError::Invalid(format!("no such wiki page {from:?}")));
+        }
+        if from != to && pages.contains_key(&to) {
+            return Err(AppError::Invalid(format!(
+                "wiki page {to:?} already exists"
+            )));
+        }
+        if from == to {
+            return Ok(());
+        }
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| {
+                rename_wiki_page_op(d, &from, &to)
+            })
             .await?;
         Ok(())
     }
@@ -5371,6 +5557,162 @@ mod tests {
             alice.write_wiki_page("  ", "x").await,
             Err(AppError::Invalid(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_wiki_page_declares_a_render_format() {
+        let mut alice = founder();
+        alice.open_wiki().await.unwrap();
+        alice.write_wiki_page("Home", "hello").await.unwrap();
+
+        // Default: no metadata entry at all — the frontend reads "missing" as markdown, so a
+        // doc written before formats existed keeps rendering the same way.
+        assert!(alice.wiki_meta().is_empty());
+
+        alice.set_wiki_page_format("Home", "wiki").await.unwrap();
+        assert_eq!(
+            alice.wiki_meta().get("Home").map(String::as_str),
+            Some("wiki")
+        );
+        // A format is a toggle: setting it back is a plain overwrite.
+        alice.set_wiki_page_format("Home", "md").await.unwrap();
+        assert_eq!(
+            alice.wiki_meta().get("Home").map(String::as_str),
+            Some("md")
+        );
+
+        // Anything but "md"/"wiki" is refused.
+        for bad in ["html", "MD", "", "markdown"] {
+            assert!(
+                matches!(
+                    alice.set_wiki_page_format("Home", bad).await,
+                    Err(AppError::Invalid(_))
+                ),
+                "format {bad:?} should be rejected"
+            );
+        }
+
+        // The reserved metadata key is invisible to every page reader — it holds a Map, not a
+        // Text, and is NUL-prefixed besides.
+        assert_eq!(alice.wiki_pages(), vec!["Home".to_string()]);
+        assert_eq!(alice.wiki_map().len(), 1);
+        assert!(!alice.wiki_map().contains_key(WIKI_META_KEY));
+        assert!(alice.read_wiki_page(WIKI_META_KEY).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reserved_or_oversize_wiki_page_name_is_rejected() {
+        let mut alice = founder();
+        alice.open_wiki().await.unwrap();
+
+        let long = "x".repeat(MAX_WIKI_NAME_CHARS + 1);
+        for bad in [WIKI_META_KEY, "\u{0}anything", long.as_str(), "  "] {
+            assert!(
+                matches!(
+                    alice.write_wiki_page(bad, "body").await,
+                    Err(AppError::Invalid(_))
+                ),
+                "name {bad:?} should be rejected"
+            );
+            assert!(matches!(
+                alice.set_wiki_page_format(bad, "wiki").await,
+                Err(AppError::Invalid(_))
+            ));
+        }
+        // Exactly at the cap is fine — the bound is inclusive, like the frontend's grammar.
+        let at_cap = "y".repeat(MAX_WIKI_NAME_CHARS);
+        alice.write_wiki_page(&at_cap, "ok").await.unwrap();
+        assert_eq!(alice.read_wiki_page(&at_cap), "ok");
+        assert_eq!(alice.wiki_pages(), vec![at_cap]);
+    }
+
+    #[tokio::test]
+    async fn a_wiki_page_is_deleted_with_its_metadata() {
+        let mut alice = founder();
+        alice.open_wiki().await.unwrap();
+        alice.write_wiki_page("Home", "hello").await.unwrap();
+        alice.write_wiki_page("Rules", "be nice").await.unwrap();
+        alice.set_wiki_page_format("Home", "wiki").await.unwrap();
+
+        alice.delete_wiki_page("Home").await.unwrap();
+        assert_eq!(alice.wiki_pages(), vec!["Rules".to_string()]);
+        assert!(
+            !alice.wiki_meta().contains_key("Home"),
+            "the metadata entry goes with the page — a recreated page starts at the default"
+        );
+
+        // Deleting a page that is not there is an error, not a silent no-op.
+        assert!(matches!(
+            alice.delete_wiki_page("Home").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.delete_wiki_page("never-existed").await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_wiki_page_rename_carries_body_and_format() {
+        let mut alice = founder();
+        alice.open_wiki().await.unwrap();
+        alice.write_wiki_page("Old", "the body").await.unwrap();
+        alice.write_wiki_page("Other", "elsewhere").await.unwrap();
+        alice.set_wiki_page_format("Old", "wiki").await.unwrap();
+
+        alice.rename_wiki_page("Old", "New").await.unwrap();
+        assert_eq!(
+            alice.wiki_pages(),
+            vec!["New".to_string(), "Other".to_string()]
+        );
+        assert_eq!(alice.read_wiki_page("New"), "the body");
+        assert_eq!(
+            alice.wiki_meta().get("New").map(String::as_str),
+            Some("wiki")
+        );
+        assert!(!alice.wiki_meta().contains_key("Old"));
+
+        // A rename never clobbers an existing page, and a missing source is an error.
+        alice.write_wiki_page("Taken", "keep me").await.unwrap();
+        assert!(matches!(
+            alice.rename_wiki_page("New", "Taken").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(alice.read_wiki_page("Taken"), "keep me");
+        assert!(matches!(
+            alice.rename_wiki_page("Old", "Elsewhere").await,
+            Err(AppError::Invalid(_))
+        ));
+        // The destination is validated like any new page name.
+        assert!(matches!(
+            alice
+                .rename_wiki_page("New", &"z".repeat(MAX_WIKI_NAME_CHARS + 1))
+                .await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn wiki_formats_on_different_pages_both_survive_a_merge() {
+        // Two members concurrently declare a format on DIFFERENT pages. The metadata map is a
+        // single container created by whoever gets there first, so this is the case that would
+        // lose a write if each fork put a *fresh* Map at the reserved key.
+        let mut base = AutoCommit::new();
+        write_wiki_page(&mut base, "A", "a").unwrap();
+        write_wiki_page(&mut base, "B", "b").unwrap();
+        let mut a = base.fork();
+        let mut b = base.fork();
+        set_wiki_format(&mut a, "A", "wiki").unwrap();
+        set_wiki_format(&mut b, "B", "md").unwrap();
+        a.merge(&mut b).unwrap();
+
+        let meta = read_wiki_meta(&a);
+        assert_eq!(meta.get("A").map(String::as_str), Some("wiki"));
+        assert_eq!(meta.get("B").map(String::as_str), Some("md"));
+        // …and the metadata still never shows up as a page.
+        let mut pages: Vec<String> = read_wiki_map(&a).into_keys().collect();
+        pages.sort();
+        assert_eq!(pages, vec!["A".to_string(), "B".to_string()]);
     }
 
     #[test]

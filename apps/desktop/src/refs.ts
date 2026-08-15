@@ -35,9 +35,13 @@ export function statusMarker(text: string, id: string): string {
   return `[${refLabel(text, 48) || "status"}](status:${id})`;
 }
 
-/** A wiki page — the long-standing `[[Page]]` form the wiki already uses everywhere. */
+/**
+ * A wiki page — the long-standing `[[Page]]` form the wiki already uses everywhere. `|` is dropped
+ * as well as the bracket characters: it now separates `[[Page|label]]`, so a page name containing
+ * one would otherwise build a marker that links somewhere else entirely.
+ */
 export function wikiMarker(page: string): string {
-  return `[[${refLabel(page, 120) || "page"}]]`;
+  return `[[${refLabel(page.replace(/\|/g, " "), 120) || "page"}]]`;
 }
 
 /** A server event, labelled with its title — the chip jumps to the Events surface. */

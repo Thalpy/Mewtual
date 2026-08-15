@@ -9,6 +9,10 @@
     "checkJs": true,
     "isolatedModules": true,
     "moduleResolution": "bundler",
+    // Shipped modules import each other with explicit `.ts` specifiers so Node's test runner can
+    // load them directly (it does no extension resolution); Vite resolves them just the same.
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "strict": true,
     "skipLibCheck": true
   },

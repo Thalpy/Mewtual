@@ -76,6 +76,23 @@ test("a wiki page builds the [[Page]] form the wiki already uses", () => {
   const marker = wikiMarker("Onboarding Notes");
   const m = matched(WIKI_LINK_RE.exec(marker), marker);
   assert.equal(m[1], "Onboarding Notes");
+  assert.equal(m[2], undefined, "an unpiped marker must not capture a label");
+});
+
+test("the renderer's grammar splits a piped [[Page|label]] into page and label", () => {
+  const marker = `${wikiMarker("Onboarding Notes").slice(0, -2)}|start here]]`;
+  const m = matched(WIKI_LINK_RE.exec(marker), marker);
+  assert.equal(m[1], "Onboarding Notes");
+  assert.equal(m[2], "start here");
+});
+
+// `|` now separates the page from the label, so a page whose name contains one would build a marker
+// that links to the wrong page — the label sanitizer has to drop it like the brackets.
+test("a page name containing a pipe cannot build a mislinking marker", () => {
+  const marker = wikiMarker("Cats|Dogs");
+  const m = matched(WIKI_LINK_RE.exec(marker), marker);
+  assert.equal(m[1], "Cats Dogs");
+  assert.equal(m[2], undefined);
 });
 
 // --- hostile labels still produce a valid marker -----------------------------------------------

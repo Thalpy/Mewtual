@@ -3,11 +3,16 @@
 // Messages, statuses and wiki pages come from other (untrusted) group members, so rendering
 // is markdown via `marked` followed by a strict `DOMPurify` sanitize. Custom inline tokens
 // layer on top:
-//   - `[[Page]]`     → a wiki link the app navigates on click (resolved in 10d)
+//   - `[[Page]]` / `[[Page|label]]` → a wiki link the app navigates on click (resolved in 10d)
 //   - `:name:`       → a custom emoji (resolved to an image in 10f; shows `:name:` until then)
 //   - `![alt](cid:HEX)` → a fileshare embed (image/video/audio, resolved in 10c)
 //   - `[label](file:HEX)` / `[label](status:ID)` → an in-app reference the composer's "+" picker
 //     inserts: a fileshare file (opens its info pane) or one of this server's status posts.
+//
+// A wiki page can also be authored in MediaWiki wikitext instead of markdown (`format === "wiki"`).
+// That path swaps `marked` for `wikitext.ts`'s converter and keeps the identical sanitize step —
+// see `wikitext.ts`, which also owns the token grammar and the token renderers BOTH paths use, so
+// the two can't drift into two different surfaces for the sanitizer to police.
 //
 // SECURITY: the sanitizer does NOT allow <img>/<video>/<audio>/<script>/raw HTML. Custom
 // emoji and embeds render as inert <span> placeholders; the resolver (resolveMedia, wired in
@@ -17,14 +22,29 @@
 import { marked, type TokenizerAndRendererExtension } from "marked";
 import DOMPurify from "dompurify";
 
-function escAttr(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-function escText(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+import {
+  EMBED_RE,
+  EMOJI_RE,
+  MENTION_RE,
+  REF_LINK_RE,
+  WIKI_LINK_RE,
+  embedHtml,
+  emojiHtml,
+  escText,
+  mentionHtml,
+  refLinkHtml,
+  stripMagicWords,
+  wikiLinkHtml,
+  wikitextToHtml,
+} from "./wikitext.ts";
 
-// `[[Page Name]]` → a clickable wiki link (navigation handled by the app via data-wikilink).
+// The token grammar lives in `wikitext.ts` (both renderers need it) but is re-exported here: this
+// is the module `refs.ts`'s round-trip tests pin the composer's markers against.
+export { EMBED_RE, REF_LINK_RE, WIKI_LINK_RE };
+export { parseRedirect, tocDirective } from "./wikitext.ts";
+
+// `[[Page Name]]` / `[[Page Name|label]]` → a clickable wiki link (navigation handled by the app
+// via data-wikilink, which always carries the page name, never the label).
 const wikiLink: TokenizerAndRendererExtension = {
   name: "wikilink",
   level: "inline",
@@ -34,11 +54,13 @@ const wikiLink: TokenizerAndRendererExtension = {
   },
   tokenizer(src) {
     const m = WIKI_LINK_RE.exec(src);
-    if (m) return { type: "wikilink", raw: m[0], text: m[1].trim() };
-    return undefined;
+    if (!m) return undefined;
+    const page = m[1].trim();
+    if (!page) return undefined; // `[[ |label]]` has no target: leave it as literal text
+    return { type: "wikilink", raw: m[0], page, text: (m[2] ?? "").trim() || page };
   },
   renderer(token) {
-    return `<a class="wikilink" data-wikilink="${escAttr(token.text)}">${escText(token.text)}</a>`;
+    return wikiLinkHtml(token.page, token.text);
   },
 };
 
@@ -52,12 +74,12 @@ const emoji: TokenizerAndRendererExtension = {
     return i < 0 ? undefined : i;
   },
   tokenizer(src) {
-    const m = /^:([a-z0-9_+\-]{1,40}):/i.exec(src);
+    const m = EMOJI_RE.exec(src);
     if (m) return { type: "emoji", raw: m[0], text: m[1] };
     return undefined;
   },
   renderer(token) {
-    return `<span class="emoji" data-emoji="${escAttr(token.text)}">:${escText(token.text)}:</span>`;
+    return emojiHtml(token.text);
   },
 };
 
@@ -73,18 +95,18 @@ const mention: TokenizerAndRendererExtension = {
     return i < 0 ? undefined : i;
   },
   tokenizer(src) {
-    const m = /^@\[([^\]\n]{1,40})\]/.exec(src);
+    const m = MENTION_RE.exec(src);
     if (m) return { type: "mention", raw: m[0], text: m[1].trim() };
     return undefined;
   },
   renderer(token) {
-    const me = selfMentionName && token.text === selfMentionName ? " mention-me" : "";
-    return `<span class="mention${me}" data-mention="${escAttr(token.text)}">@${escText(token.text)}</span>`;
+    return mentionHtml(token.text, selfMentionName);
   },
 };
 
 // `||text||` → a spoiler: rendered blurred/blacked-out until clicked (the app toggles a `revealed`
 // class via the data-spoiler hook). The content is escaped plain text (no nested formatting).
+// Markdown-path only: in wikitext `||` is the table cell separator.
 const spoiler: TokenizerAndRendererExtension = {
   name: "spoiler",
   level: "inline",
@@ -104,9 +126,6 @@ const spoiler: TokenizerAndRendererExtension = {
 
 // `![alt](cid:HEX)` → a fileshare embed placeholder (resolved to media in 10c). Matched ahead
 // of marked's own image syntax; plain `![](http…)` falls through and is stripped by sanitize.
-/** The embed grammar. Exported so `refs.ts`'s builders can be pinned against it in tests. */
-export const EMBED_RE = /^!\[([^\]]*)\]\(cid:([0-9a-fA-F]{1,64})\)/;
-
 const embed: TokenizerAndRendererExtension = {
   name: "embed",
   level: "inline",
@@ -116,11 +135,11 @@ const embed: TokenizerAndRendererExtension = {
   },
   tokenizer(src) {
     const m = EMBED_RE.exec(src);
-    if (m) return { type: "embed", raw: m[0], alt: m[1], cid: m[2].toLowerCase() };
+    if (m) return { type: "embed", raw: m[0], alt: m[1], cid: m[2] };
     return undefined;
   },
   renderer(token) {
-    return `<span class="embed" data-embed-cid="${escAttr(token.cid)}" data-alt="${escAttr(token.alt)}"></span>`;
+    return embedHtml(token.alt, token.cid);
   },
 };
 
@@ -129,12 +148,6 @@ const embed: TokenizerAndRendererExtension = {
 // `<a href>` — the app resolves the target from the data- attribute instead, so a reference can
 // only ever address this group's own content. `![alt](cid:…)` is unaffected: the embed extension
 // starts at the `!` and consumes the whole thing, and `cid` isn't in this alternation anyway.
-/** The reference-chip grammar. Exported so `refs.ts`'s builders can be pinned against it in tests. */
-export const REF_LINK_RE = /^\[([^\]\n]{1,160})\]\((file|status|event):([0-9a-zA-Z_-]{1,64})\)/;
-
-/** The wiki-link grammar (`[[Page]]`), likewise exported for the round-trip tests. */
-export const WIKI_LINK_RE = /^\[\[([^\]\n]{1,120})\]\]/;
-
 const refLink: TokenizerAndRendererExtension = {
   name: "reflink",
   level: "inline",
@@ -148,11 +161,7 @@ const refLink: TokenizerAndRendererExtension = {
     return undefined;
   },
   renderer(token) {
-    const file = token.kind === "file";
-    const attr = file ? "data-file-cid" : token.kind === "status" ? "data-status-id" : "data-event-id";
-    const ref = file ? String(token.ref).toLowerCase() : String(token.ref);
-    const icon = file ? "📄" : token.kind === "status" ? "◈" : "⧗";
-    return `<a class="reflink ${escAttr(token.kind)}-ref" ${attr}="${escAttr(ref)}"><span class="reflink-ico" aria-hidden="true">${icon}</span>${escText(token.text)}</a>`;
+    return refLinkHtml(token.kind, token.ref, token.text);
   },
 };
 
@@ -164,11 +173,13 @@ function configure() {
 }
 
 // No media/script/raw-HTML tags: emoji + embeds are <span> placeholders the resolver fills.
+// h5/h6 stay out (the wikitext converter clamps deep headings to h4); <dl>/<dt>/<dd> and <caption>
+// are here for wikitext's definition lists and table captions — inert structure, no new capability.
 const SANITIZE = {
   ALLOWED_TAGS: [
     "a", "b", "strong", "i", "em", "u", "s", "del", "code", "pre", "span", "br", "p",
-    "ul", "ol", "li", "blockquote", "hr", "h1", "h2", "h3", "h4",
-    "table", "thead", "tbody", "tr", "th", "td",
+    "ul", "ol", "li", "dl", "dt", "dd", "blockquote", "hr", "h1", "h2", "h3", "h4",
+    "table", "caption", "thead", "tbody", "tr", "th", "td",
   ],
   ALLOWED_ATTR: [
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
@@ -187,9 +198,15 @@ export function renderMessage(text: string, me = ""): string {
   return DOMPurify.sanitize(marked.parseInline(text ?? "") as string, SANITIZE) as string;
 }
 
-/** Render a full wiki page: block markdown + the custom tokens, sanitized. */
-export function renderWiki(text: string): string {
+/**
+ * Render a full wiki page, sanitized. `format` is the page's stored authoring format: `"wiki"` for
+ * MediaWiki wikitext, anything else (including omitted) for the markdown default.
+ */
+export function renderWiki(text: string, format?: string): string {
   configure();
   selfMentionName = ""; // no "mention-me" self-highlight outside chat/status
-  return DOMPurify.sanitize(marked.parse(text ?? "") as string, SANITIZE) as string;
+  const src = text ?? "";
+  // __TOC__/__NOTOC__ are directives the page chrome reads (tocDirective), not content, in both.
+  const html = format === "wiki" ? wikitextToHtml(src) : (marked.parse(stripMagicWords(src)) as string);
+  return DOMPurify.sanitize(html, SANITIZE) as string;
 }

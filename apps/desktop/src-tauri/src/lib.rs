@@ -1784,6 +1784,58 @@ async fn save_wiki_page(
     Ok(())
 }
 
+/// The wiki's per-page render formats (name -> "md" | "wiki"). A page absent from the map has
+/// no declared format and renders as markdown.
+#[tauri::command]
+async fn get_wiki_meta(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.wiki_meta().await)
+}
+
+/// Set a wiki page's render format ("md" or "wiki").
+#[tauri::command]
+async fn set_wiki_format(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+    format: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.set_wiki_format(name, format).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Delete a wiki page (and its format metadata).
+#[tauri::command]
+async fn delete_wiki_page(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.delete_wiki_page(name).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Rename a wiki page, carrying its body and format.
+#[tauri::command]
+async fn rename_wiki_page(
+    state: State<'_, AppState>,
+    server: u64,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.rename_wiki_page(from, to).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
 /// Send a chat message to a channel (by id).
 #[tauri::command]
 async fn send_message(
@@ -2725,6 +2777,10 @@ pub fn run() {
             get_wiki_map,
             get_wiki_page,
             save_wiki_page,
+            get_wiki_meta,
+            set_wiki_format,
+            delete_wiki_page,
+            rename_wiki_page,
             get_roles,
             set_admin,
             remove_member,

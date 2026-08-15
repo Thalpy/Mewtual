@@ -273,6 +273,28 @@ pub enum AppCommand {
     },
     /// Create or update a wiki page.
     WriteWikiPage { name: String, body: String },
+    /// Query the wiki's per-page render formats (name -> "md" | "wiki"); absent = markdown.
+    WikiMeta {
+        reply: oneshot::Sender<HashMap<String, String>>,
+    },
+    /// Set a wiki page's render format ("md" or "wiki"); replies with a validation error.
+    SetWikiFormat {
+        name: String,
+        format: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a wiki page (and its format metadata); replies with an error if it is missing.
+    DeleteWikiPage {
+        name: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Rename a wiki page, carrying its body and format; replies with an error if `from` is
+    /// missing or `to` is taken.
+    RenameWikiPage {
+        from: String,
+        to: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Pull the wiki from `peer` (e.g. right after joining).
     CatchUpWiki { peer: PeerId },
     /// Query every member's role, keyed by fingerprint (owner/admin/member).
@@ -1340,6 +1362,82 @@ impl ServerActor {
             .await;
     }
 
+    /// Fetch the wiki's per-page render formats (name -> "md" | "wiki"); a page absent from the
+    /// map has no declared format and renders as markdown.
+    pub async fn wiki_meta(&self) -> HashMap<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiMeta { reply })
+            .await
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Set a wiki page's render format — "md" or "wiki" (a `WikiUpdated` event follows).
+    pub async fn set_wiki_format(
+        &self,
+        name: impl Into<String>,
+        format: impl Into<String>,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetWikiFormat {
+                name: name.into(),
+                format: format.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Delete a wiki page and its format metadata (a `WikiUpdated` event follows).
+    pub async fn delete_wiki_page(&self, name: impl Into<String>) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DeleteWikiPage {
+                name: name.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Rename a wiki page, carrying its body and format (a `WikiUpdated` event follows).
+    pub async fn rename_wiki_page(
+        &self,
+        from: impl Into<String>,
+        to: impl Into<String>,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RenameWikiPage {
+                from: from.into(),
+                to: to.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Pull the wiki from `peer`.
     pub async fn catch_up_wiki(&self, peer: PeerId) {
         let _ = self.cmd_tx.send(AppCommand::CatchUpWiki { peer }).await;
@@ -1429,7 +1527,7 @@ where
         if let Err(e) = server.open_wiki().await {
             tracing::warn!(error = %e, "open_wiki failed");
         }
-        let mut last_wiki = server.wiki_map();
+        let mut last_wiki = wiki_snapshot(&server);
         // …and subscribe the member-roles doc so admin grants propagate. The *owner* role is
         // not stored here — it is derived from the MLS designated committer (lowest leaf
         // index), so every member computes the owner identically with no roles op present.
@@ -1862,6 +1960,36 @@ where
                             let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
                     }
+                    Some(AppCommand::WikiMeta { reply }) => {
+                        let _ = reply.send(server.wiki_meta());
+                    }
+                    Some(AppCommand::SetWikiFormat { name, format, reply }) => {
+                        let res = server
+                            .set_wiki_page_format(&name, &format)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::DeleteWikiPage { name, reply }) => {
+                        let res = server.delete_wiki_page(&name).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::RenameWikiPage { from, to, reply }) => {
+                        let res = server
+                            .rename_wiki_page(&from, &to)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
                     Some(AppCommand::CatchUpWiki { peer }) => {
                         if let Err(e) = server.request_wiki_catchup(peer).await {
                             tracing::warn!(error = %e, "wiki catch-up failed");
@@ -2115,14 +2243,28 @@ where
     }
 }
 
-/// Whether the wiki changed since last seen (a page added or a body edited — a count
-/// alone misses edits, so this compares the full page map). Updates the record.
-fn wiki_changed<T, R>(server: &Server<T, R>, last: &mut HashMap<String, String>) -> bool
+/// What [`wiki_changed`] compares: the page map **and** the per-page format metadata. A format
+/// toggle leaves every body byte-identical, so the bodies alone would miss it.
+type WikiSnapshot = (HashMap<String, String>, HashMap<String, String>);
+
+/// The wiki's current bodies + formats.
+fn wiki_snapshot<T, R>(server: &Server<T, R>) -> WikiSnapshot
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    let now = server.wiki_map();
+    (server.wiki_map(), server.wiki_meta())
+}
+
+/// Whether the wiki changed since last seen (a page added/removed/renamed, a body edited or a
+/// format toggled — a count alone misses edits, so this compares the full snapshot). Updates
+/// the record.
+fn wiki_changed<T, R>(server: &Server<T, R>, last: &mut WikiSnapshot) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = wiki_snapshot(server);
     if now != *last {
         *last = now;
         true

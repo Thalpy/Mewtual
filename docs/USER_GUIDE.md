@@ -120,8 +120,8 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 
 ### Rich text, links & emoji (in chat, status, and the wiki)
 - **Markdown** works: `**bold**`, `*italic*`, `` `code` ``, lists, `> quotes`, links.
-- **`[[Page Name]]`** links to a wiki page (click to open; a **red** link means it doesn't
-  exist yet — click to create it).
+- **`[[Page Name]]`** links to a wiki page, and **`[[Page Name|shown text]]`** links it under
+  different text (click to open; a **red** link means it doesn't exist yet — click to create it).
 - **`:code:`** inserts a custom emoji (see Files → emoji below). The 😀 button in the
   composer opens a picker.
 
@@ -182,10 +182,15 @@ type a `code` and upload an image. Then anyone types `:code:` to use it.
 
 ## 7. Wiki & status
 
-- **Wiki** — collaborative Markdown pages. **Read/Edit** toggle per page; `[[links]]` between
-  pages; a **Linked from** (backlinks) list; drag images/video/audio into the editor to embed
-  them. The **?** button shows in-app formatting help. Same-page edits from two members merge
-  character-by-character.
+- **Wiki** — collaborative pages, each written in **Markdown or Wikitext** (a per-page
+  `md / wiki` switch in Edit mode, shared with every member — wikitext gives you
+  `== headings ==`, `'''bold'''`, `{| … |}` tables, MediaWiki-style). `[[links]]` between
+  pages (with `[[Page|display text]]` piping, in chat too); pages with **3+ headings get an
+  automatic Contents box** (`__TOC__` forces it, `__NOTOC__` hides it); hover a heading in
+  Read mode to **edit that section**; `#REDIRECT [[Target]]` pages forward readers; a **What
+  links here** list; **rename/delete** in the page header; an editor **toolbar + live
+  preview**; drag images/video/audio into the editor to embed them. The **?** button shows
+  in-app formatting help. Same-page edits from two members merge character-by-character.
 - **Status** — a per-server feed of short posts (announcements/activity). Supports the same
   rich text + media embeds.
 
