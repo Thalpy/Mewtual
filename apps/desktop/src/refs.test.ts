@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { refLabel, fileMarker, statusMarker, wikiMarker, insertInto } from "./refs.ts";
+import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs.ts";
 import { REF_LINK_RE, EMBED_RE, WIKI_LINK_RE } from "./render.ts";
 
 const CID = "deadbeef0123456789abcdef";
@@ -62,6 +62,14 @@ test("a status post builds a link carrying its id", () => {
   const m = matched(REF_LINK_RE.exec(marker), marker);
   assert.equal(m[2], "status");
   assert.equal(m[3], STATUS_ID);
+});
+
+test("an event builds a marker the renderer tokenizes as an event ref", () => {
+  const marker = eventMarker("board-game night [session 2]", STATUS_ID);
+  const m = matched(REF_LINK_RE.exec(marker), marker);
+  assert.equal(m[2], "event");
+  assert.equal(m[3], STATUS_ID);
+  assert.ok(!m[1].includes("["), "label must not contain marker-breaking brackets");
 });
 
 test("a wiki page builds the [[Page]] form the wiki already uses", () => {

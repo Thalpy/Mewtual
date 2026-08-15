@@ -4047,3 +4047,12 @@ button.you-panel:hover {
   background: color-mix(in oklab, var(--info) 16%, transparent);
   color: var(--info);
 }
+
+/* --- Event reference chips + jump flash --- */
+.reflink.event-ref {
+  color: var(--info);
+  border-color: color-mix(in oklab, var(--info) 40%, transparent);
+}
+.event-row.flash {
+  animation: flashPulse 1.5s ease-out;
+}

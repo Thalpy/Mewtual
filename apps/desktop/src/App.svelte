@@ -3,7 +3,7 @@
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onMount, tick } from "svelte";
   import { renderMessage, renderWiki } from "./render";
-  import { refLabel, fileMarker, statusMarker, wikiMarker, insertInto } from "./refs";
+  import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -2045,6 +2045,12 @@
       await openFileRef((fl.getAttribute("data-file-cid") ?? "").toLowerCase());
       return;
     }
+    const el2 = target?.closest("[data-event-id]") as HTMLElement | null;
+    if (el2) {
+      e.preventDefault();
+      openEventRef(el2.getAttribute("data-event-id") ?? "");
+      return;
+    }
     const sl = target?.closest("[data-status-id]") as HTMLElement | null;
     if (sl) {
       e.preventDefault();
@@ -2293,7 +2299,7 @@
   // open/copy a file or status reference chip.
   function handleRichContext(e: MouseEvent) {
     const el = (e.target as HTMLElement | null)?.closest(
-      "[data-wikilink],[data-emoji],[data-embed-cid],[data-file-cid],[data-status-id]",
+      "[data-wikilink],[data-emoji],[data-embed-cid],[data-file-cid],[data-status-id],[data-event-id]",
     ) as HTMLElement | null;
     if (!el) return;
     if (el.hasAttribute("data-file-cid")) {
@@ -2310,6 +2316,13 @@
       openMenu(e, [
         { label: "Open status", icon: "⊞", onSelect: () => openStatusRef(id) },
         { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
+      ]);
+    } else if (el.hasAttribute("data-event-id")) {
+      const id = el.getAttribute("data-event-id") ?? "";
+      const label = chipLabel(el) || "event";
+      openMenu(e, [
+        { label: "Open event", icon: "⧗", onSelect: () => openEventRef(id) },
+        { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](event:${id})`) },
       ]);
     } else if (el.hasAttribute("data-wikilink")) {
       const page = el.getAttribute("data-wikilink") ?? "";
@@ -2805,7 +2818,7 @@
   // Everything the group already holds is addressable from the composer: a fileshare file (inline
   // embed for media, a link chip otherwise), one of YOUR status posts, or a wiki page. Each inserts
   // a marker the shared renderer resolves — nothing here leaves the group or touches the network.
-  type InsertTab = "files" | "status" | "wiki";
+  type InsertTab = "files" | "status" | "wiki" | "events";
   let showInsert = $state(false);
   let insertTab = $state<InsertTab>("files");
   let insertQuery = $state("");
@@ -2833,8 +2846,20 @@
   let insertWikiPages = $derived(
     wikiPages.filter((p) => !insertQuery.trim() || p.toLowerCase().includes(insertQuery.trim().toLowerCase())).slice(0, 80),
   );
+  // Upcoming first (soonest at the top), then recent past — anything addressable.
+  let insertEvents = $derived.by(() => {
+    const q = insertQuery.trim().toLowerCase();
+    const hit = (e: UiEvent) => !q || e.title.toLowerCase().includes(q);
+    return [...upcomingEvents.filter(hit), ...pastEvents.filter(hit)].slice(0, 50);
+  });
   let insertCount = $derived(
-    insertTab === "files" ? insertFiles.length : insertTab === "status" ? insertStatuses.length : insertWikiPages.length,
+    insertTab === "files"
+      ? insertFiles.length
+      : insertTab === "status"
+        ? insertStatuses.length
+        : insertTab === "events"
+          ? insertEvents.length
+          : insertWikiPages.length,
   );
 
   async function toggleInsert() {
@@ -2855,7 +2880,7 @@
     // that can lag behind a busy server, so say so rather than showing a bare "nothing here".
     insertLoading = true;
     try {
-      await Promise.all(dmOnly ? [refreshFiles()] : [refreshFiles(), refreshStatuses(), refreshWiki()]);
+      await Promise.all(dmOnly ? [refreshFiles()] : [refreshFiles(), refreshStatuses(), refreshWiki(), refreshEvents()]);
     } finally {
       insertLoading = false;
     }
@@ -2891,6 +2916,19 @@
   function insertWikiRef(page: string) {
     insertAtCaret(wikiMarker(page));
     closeInsert();
+  }
+  function insertEventRef(e: UiEvent) {
+    insertAtCaret(eventMarker(e.title, e.id));
+    closeInsert();
+  }
+  // An event chip in a message: jump to the Events surface and briefly flash the event.
+  let flashEventId = $state("");
+  function openEventRef(id: string) {
+    switchView("events");
+    flashEventId = id;
+    setTimeout(() => {
+      if (flashEventId === id) flashEventId = "";
+    }, 1600);
   }
 
   // Follow a `[…](file:CID)` chip: the index may be stale (the file was added after this tab last
@@ -4811,6 +4849,7 @@
                   {#if !cur?.isDm}
                     <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Status</button>
                     <button type="button" role="tab" aria-selected={insertTab === "wiki"} class:active={insertTab === "wiki"} onclick={() => (insertTab = "wiki")}>Wiki</button>
+                    <button type="button" role="tab" aria-selected={insertTab === "events"} class:active={insertTab === "events"} onclick={() => (insertTab = "events")}>Events</button>
                   {/if}
                   <span class="ip-count">{insertCount}</span>
                   <button type="button" class="ghost small ip-close" title="Close (Esc)" onclick={closeInsert}>✕</button>
@@ -4819,7 +4858,7 @@
                   bind:this={insertInput}
                   class="ip-search"
                   bind:value={insertQuery}
-                  placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : "Find a wiki page…"}
+                  placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
                   onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeInsert(); composerEl?.focus(); } }}
                 />
                 <div class="ip-list">
@@ -4857,6 +4896,19 @@
                       </div>
                     {:else}
                       <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your posts match that." : "You haven't posted a status on this server yet."}</p>
+                    {/each}
+                  {:else if insertTab === "events"}
+                    {#each insertEvents as ev (ev.id)}
+                      <div class="ip-row">
+                        <button type="button" class="ip-item" title="Insert a link to this event" onclick={() => insertEventRef(ev)}>
+                          <span class="ip-ico">⧗</span>
+                          <span class="ip-name">{ev.title}</span>
+                          <span class="ip-meta">{fmtEventWhen(ev)}</span>
+                        </button>
+                        <span class="ip-mode">link</span>
+                      </div>
+                    {:else}
+                      <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "No events match that." : "No events on this server yet — add one on the ⧗ Events surface."}</p>
                     {/each}
                   {:else}
                     {#each insertWikiPages as p}
@@ -5169,7 +5221,7 @@
             <h3 class="ev-h"><span>Upcoming — {upcomingEvents.length}</span></h3>
             <ul class="event-list">
               {#each upcomingEvents as e (e.id)}
-                <li class="event-row">
+                <li class="event-row" class:flash={flashEventId === e.id}>
                   <div class="ev-when">{fmtEventWhen(e)}</div>
                   <div class="ev-main">
                     <div class="ev-title">{e.title}</div>

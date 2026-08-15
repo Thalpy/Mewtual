@@ -130,7 +130,7 @@ const embed: TokenizerAndRendererExtension = {
 // only ever address this group's own content. `![alt](cid:…)` is unaffected: the embed extension
 // starts at the `!` and consumes the whole thing, and `cid` isn't in this alternation anyway.
 /** The reference-chip grammar. Exported so `refs.ts`'s builders can be pinned against it in tests. */
-export const REF_LINK_RE = /^\[([^\]\n]{1,160})\]\((file|status):([0-9a-zA-Z_-]{1,64})\)/;
+export const REF_LINK_RE = /^\[([^\]\n]{1,160})\]\((file|status|event):([0-9a-zA-Z_-]{1,64})\)/;
 
 /** The wiki-link grammar (`[[Page]]`), likewise exported for the round-trip tests. */
 export const WIKI_LINK_RE = /^\[\[([^\]\n]{1,120})\]\]/;
@@ -149,9 +149,9 @@ const refLink: TokenizerAndRendererExtension = {
   },
   renderer(token) {
     const file = token.kind === "file";
-    const attr = file ? "data-file-cid" : "data-status-id";
+    const attr = file ? "data-file-cid" : token.kind === "status" ? "data-status-id" : "data-event-id";
     const ref = file ? String(token.ref).toLowerCase() : String(token.ref);
-    const icon = file ? "📄" : "◈";
+    const icon = file ? "📄" : token.kind === "status" ? "◈" : "⧗";
     return `<a class="reflink ${escAttr(token.kind)}-ref" ${attr}="${escAttr(ref)}"><span class="reflink-ico" aria-hidden="true">${icon}</span>${escText(token.text)}</a>`;
   },
 };
@@ -172,8 +172,8 @@ const SANITIZE = {
   ],
   ALLOWED_ATTR: [
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
-    "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "tabindex", "role",
-    "aria-hidden",
+    "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "data-event-id",
+    "tabindex", "role", "aria-hidden",
   ],
 };
 

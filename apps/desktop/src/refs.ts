@@ -40,6 +40,11 @@ export function wikiMarker(page: string): string {
   return `[[${refLabel(page, 120) || "page"}]]`;
 }
 
+/** A server event, labelled with its title — the chip jumps to the Events surface. */
+export function eventMarker(title: string, id: string): string {
+  return `[${refLabel(title, 60) || "event"}](event:${id})`;
+}
+
 /**
  * Splice `insert` into `draft` over the selection `[start, end)`, space-separated from the text on
  * either side so consecutive picks don't run together — but only where a space isn't already there,
