@@ -1,10 +1,10 @@
-# Multi-device identity — design
+# Multi-device identity — design (v2)
 
-Status: **draft for review.** One member ("user") on several devices, with per-device
-message attribution, an exportable user key with a device cap, and owner-visible device
-lists. This is a protocol-layer project on the scale of the 9-series persistence work:
-phased, each slice adversarially reviewable. **No code should land from this doc until it
-has been reviewed** — it touches admission, attribution, and revocation.
+Status: **reviewed direction, v2.** v1 (user-keypair + device cap) was reviewed by the
+project owner on 2026-08-15 and simplified: **one device per grant, single-use**, the
+**origin device is the identity root** (no separate user keypair), one **all-server grant
+bundle** per ceremony, and an explicit **grant-confirmation popup on the origin device**
+as the human gate. Phased; each slice adversarially reviewable before landing.
 
 ## Where we are (and the trap to avoid)
 
@@ -16,98 +16,95 @@ admits/removes *devices* (`contains_device`, `remove(&device_id)`). One member =
 **The trap:** "just export the device keypair and import it on the laptop." Two devices
 sharing one MLS leaf fork the ratchet — forward secrecy breaks, epochs desync, commits
 race — and the devices are cryptographically indistinguishable, so "sent from Phone" is
-impossible anyway. This path is explicitly rejected; the exporter below never exports a
-device key.
+impossible anyway. Rejected permanently; nothing below ever exports a device key.
 
-## Model: a user key certifies device keys (Signal/Matrix shape)
+## Model: the origin device certifies companion devices, one at a time
 
-- **Device key**: exactly today's per-device signature key; one MLS leaf per device;
-  every op/message stays device-signed (attribution comes free).
-- **User key**: a new Ed25519 keypair. Its only jobs: sign **device certificates** and a
-  small self-signed **user record**.
-- **Device certificate**: `sig_user(user_pk ‖ device_id ‖ device_name ‖ ordinal ‖ cap)` —
-  "device #2 of at most 3, named 'Phone', is me". `device_name` is bounded UTF-8 (≤ 24
-  bytes), shown beside messages and in rosters.
-- **User record**: `sig_user(user_pk ‖ rev ‖ cap ‖ revoked_device_ids[])` — a
-  monotonically-versioned statement of the device cap and revocation list.
+- **Device key**: exactly today's per-device signature key; one MLS leaf per device; every
+  op/message stays device-signed (attribution comes free).
+- **Identity root**: the member's **original device** (per server — see unlinkability).
+  There is no separate user keypair: a **device certificate** is
+  `sig_origin(origin_id ‖ new_device_id ‖ device_name ‖ issued_ts)`, minted by the origin
+  device during a grant ceremony, for exactly **one** new device.
+- **Identity for docs**: unchanged — profiles / roles / badges / message attribution stay
+  keyed by the **origin fingerprint**. A companion device's ops carry its own signature;
+  the client maps companion → origin via the certificate table and renders the origin's
+  name/style plus a mono device tag ("· phone") when a member has >1 device.
+  **Consequence: no doc re-keying phase exists at all** (v1's M3 is deleted).
+- **Chain depth is 1**: only the origin device may certify. A companion cannot mint
+  further devices. (Lost-origin recovery: see Revocation.)
 
-**Per-server user keys.** CatComs deliberately keeps identities unlinkable across servers
-(per-server profiles; DM identities unlinkable to server identities). A single global user
-key would become a cross-server correlator and break that. So user keys are **minted per
-server** (and per DM), and the export bundle carries the servers you choose to provision.
-Tradeoff: "one QR to move everything" becomes "one bundle with N entries" — acceptable;
-the UI hides the plurality.
+## The grant ceremony (one QR, all servers)
 
-## The flows
+1. **New device** generates its device key, then shows a short **pairing request**:
+   its public key + a random pairing nonce, as QR / copy-paste blob.
+2. **Origin device** ingests the request (scan / paste) and derives a **short
+   authentication string (SAS)** — e.g. 6 digits or 3 words — from
+   `KDF(new_device_pk ‖ pairing_nonce ‖ origin_id)`. Both devices display the SAS.
+3. **The grant popup (the human gate)** appears on the **origin** device:
+   *"Grant device access? New device `<petname>` — code `738 214` — does the new device
+   show the same code?"* plus **context, clearly labelled as context**: the transport
+   address the request arrived from ("192.168.1.22 — same network as you") and recency.
+   **The SAS match is the gate; the IP line is advisory only** — IPs are NAT-shared,
+   VPN-scrambled, and claimable, so they inform the human but never authenticate.
+   Decline ends the ceremony; the pairing nonce is single-use either way.
+4. On confirm, the origin mints one **grant bundle** covering **every server the origin
+   chooses** (default: all): per server, a device certificate + the same bootstrap
+   material a bound invite carries (rendezvous/relay hints). The bundle is
+   passphrase-wrapped (Argon2id) if it travels as a blob; over QR in one room it may ride
+   the pairing channel directly.
+5. **Admission, per server**: the new device presents its certificate through the
+   **owner-serialized add queue** ([`design-admin-invites.md`](design-admin-invites.md)) —
+   a `CTRL_DEVICE_ADD` whose validity condition is "certificate signed by an
+   already-admitted member's origin device, not revoked, issued_ts fresh" instead of an
+   invite-ledger entry. Single committer, no fork, offline-queued like admin invites.
 
-**Provisioning (the export the user asked for).** On device A: choose servers to bundle →
-choose the device cap N ("how many devices you plan to use", stored in the user record) →
-export a **provisioning bundle**: per server, the user private key + current user record.
-The bundle is passphrase-wrapped (Argon2id) — it IS the identity; treat like the vault.
-On device B: import bundle → B mints its own device key → self-issues a device
-certificate (signed by the user key it now holds) → for each server, runs the normal join
-flow **except** admission is satisfied by "device certified by an already-admitted user
-with spare cap" instead of an invite-ledger entry.
+Unlinkability across servers is preserved: each server's certificate is signed by *that
+server's* origin identity; the bundle containing them all exists only on the member's own
+two devices, never on the wire as one object.
 
-**Admission.** Reuses the owner-serialized add queue from
-[`design-admin-invites.md`](design-admin-invites.md): the new device broadcasts a signed
-`CTRL_DEVICE_ADD` (device cert + user record); the **owner alone** verifies
-(user admitted? cert valid? `ordinal ≤ cap`? device not in `revoked[]`? rev fresh?) and
-runs the MLS Add — single committer, no fork, offline-queued like admin invites. The
-owner's verdict is protocol-enforced the same way R1 remove-gating is.
+## Revocation, two verbs (unchanged from v1 in spirit)
 
-**Attribution.** Messages keep their device signature. The UI resolves
-`device → (user, device_name)` via the certificate table and renders the user's
-name/style + a small mono device tag ("· phone") when a user has >1 device. Badges,
-profiles, roles re-key from device-fp to **user id** (= fingerprint of `user_pk`).
-
-**Roster & owner visibility.** MLS members can already see every leaf (ratchet tree), so
-device *existence* is member-visible by construction; the UI groups leaves under their
-user with an expandable device list. The **owner** additionally sees per-device last-seen
-and the cap ("2 of 3 devices used") in the role manager.
-
-**Revocation, two distinct verbs.**
-- *User revokes own device* (lost phone): bump `rev`, add the device to `revoked[]`,
-  publish; owner (any admin?) enforces with an MLS Remove of that leaf. The revoked device
-  held the user key? No — devices hold only their device key; the user key lives where the
-  user keeps it (export bundle / originating device). A stolen *bundle* is full compromise:
-  document loudly, offer re-key-user later.
-- *Server kicks a user*: remove **all** the user's leaves + ledger-ban the user id (the
-  replay-proof machinery from [`design-grant-revocation.md`](design-grant-revocation.md)
-  extends from device ids to user ids).
-
-## Migration (existing members)
-
-On upgrade, each existing device locally mints a user key and self-certifies itself as
-device #1 (cap = 1 until the user exports with a higher cap). Docs keyed by device-fp are
-**dual-read**: a key that matches a known device maps to that device's user; new writes
-use user ids. Profiles/roles/badges (badges land device-keyed this week — the re-key is a
-mechanical map-key change, noted in its design). No flag day, no data loss.
+- **Member revokes own companion** (lost phone): the origin publishes a signed revocation
+  for that device id; the owner enforces an MLS Remove of that leaf. Companion devices
+  hold no grant authority, so a stolen companion can post until revoked but can never
+  mint siblings.
+- **Server kicks a member**: remove the origin's *and* all companions' leaves; ledger-ban
+  the origin id (the replay-proof machinery from
+  [`design-grant-revocation.md`](design-grant-revocation.md) applies to the origin id).
+- **Lost origin device**: companions keep working (their leaves and certs stand) but no
+  new devices can be added and revocations can't be signed — document this loudly in the
+  export UX. Escape hatch: server-side re-admission of the member under a fresh origin
+  (ownership-transfer machinery, already on the backlog) or per-server re-invite.
 
 ## Threat notes
 
-- **Provisioning bundle theft** = identity theft for the bundled servers. Passphrase-wrap
-  (Argon2id), display a one-time fingerprint check phrase on both devices, and encourage
-  deletion after import. Later: expiring bundles.
-- **Cap games**: the cap binds inside the signed user record; the owner enforces
-  `ordinal ≤ cap` at admission, so a compromised bundle can't silently farm 50 leaves
-  beyond the user's declared cap.
-- **Rev rollback**: user records are monotonic (`rev`); the owner rejects stale records —
-  same replay posture as grant revocation.
-- **Verification interplay**: the Verify dialog gains a per-device dimension — verifying a
-  *user* means verifying their user-key fingerprint; a new device under a verified user
-  shows "verified user · new device" (weaker claim, honest wording), never a silent ✓.
+- **Stolen grant bundle**: at most **one** device, only until the popup is declined —
+  and the popup + SAS ceremony happens *before* the bundle is minted, so a stolen bundle
+  alone (without a completed ceremony) admits nothing it wasn't minted for. Passphrase
+  wrapping covers the blob-in-transit case.
+- **SAS is the authenticator**; the popup's IP/recency line is context. Never compare
+  IPs as proof — say so in the UI copy.
+- **Ceremony replay**: pairing nonce is single-use; certificates carry `issued_ts` and
+  the owner rejects stale ones (same monotonic posture as grant revocation).
+- **Attribution**: companion ops are attributable to the exact device (own key) and to
+  the member (cert chain) — better forensics than v1's shared-user-key signing.
+- **R6 residual** (honest-client policy layer) applies to cert checks exactly as it does
+  to roles; the op log keeps everything attributable.
 
 ## Phases (each its own reviewed slice)
 
-- **M1** `catcoms-crypto`: user keys, device certs, user records (+ vectors).
-- **M2** admission: `CTRL_DEVICE_ADD` through the owner-serialized queue; cap/rev checks.
-- **M3** dual-read re-key of profiles / roles / badges to user ids.
-- **M4** UI: roster grouping + device tags on messages + owner device panel.
-- **M5** revocation verbs (device revoke; user kick extends the ban ledger).
-- **M6** export/import UX (passphrase-wrapped bundle, cap picker; QR/audio later — the
-  invite-UX work already wants those channels).
+- **M1** `catcoms-crypto`: device certificates, pairing request/nonce, SAS derivation
+  (+ golden vectors, single-use semantics tests). Pure primitives, no I/O.
+- **M2** pairing transport + the grant ceremony: request/confirm flow between the two
+  devices (reusing invite rendezvous machinery), the origin-side popup surface, bundle
+  mint (all-server), passphrase wrap.
+- **M3** admission: `CTRL_DEVICE_ADD` through the owner-serialized queue; cert/freshness/
+  revocation checks; companion → origin mapping table gossiped like other metadata.
+- **M4** UI: roster grouping (member row expands to devices), device tags on messages,
+  owner device panel, device-name management.
+- **M5** revocation verbs + lost-origin UX + export-time warnings.
+- **M6** QR/camera + audio channels for the pairing request (shared with the invite-UX
+  backlog; copy-paste blob ships first).
 
-Absorbs the existing "sticky/transferable ownership" backlog item naturally (ownership
-becomes a user-id property in M3). Until M1 lands, the cheap standalone win remains
-available: a device-name field shown on messages, one device per user as today.
+v1's M3 (doc re-keying) is deleted by design; badges/profiles/roles stay origin-keyed.
