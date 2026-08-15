@@ -94,15 +94,24 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   counter. **Esc** closes it.
 - **Filters** (the button in the search bar, or **Ctrl/Cmd+Shift+F** to open straight into it)
   narrow it further — they combine, and they work **with or without** any typed text:
-  - **From** a specific member · **After** / **Before** a date.
+  - **In**: this channel (the default), **all channels** in this server, or one you pick.
+  - **From** a member · **Mentions** a member — both are type-to-filter boxes: start typing a
+    name, pick with ↑ / ↓ + Enter or a click, empty the box to drop the filter.
+  - **When**: **After** / **Before** a date, with **Today** / **7d** / **30d** shortcuts.
   - **Has**: image · video · audio · file (a non-media attachment) · link.
   - **Is**: reply · has replies · pinned · edited · mentions me · from me.
   - **Reactions**: any · ones you reacted to · a specific emoji.
-- **Sort** the results **oldest / newest first**, by sender **name (A–Z)**, or by **most
-  reactions**; the result list under the filters lists each hit (sender, time, snippet) and
-  clicking one jumps to it. Stepping with ↑ / ↓ follows the same order.
-- Search covers the messages **loaded** for the open conversation — the backlog you've pulled,
-  not the whole of history that other members still hold.
+  - **Match**: **Aa** for case-sensitive, **Whole word** to stop `cat` matching `catalogue`.
+- **Sort** the results **oldest / newest first**, by sender **name (A–Z)**, by **most reactions**
+  or by **most replies**. The result list under the filters shows each hit (channel, sender,
+  time, snippet); clicking one jumps to it — **including into another channel**, which keeps
+  the search open so you can carry on stepping. ↑ / ↓ follow the same order.
+- Search covers the messages **loaded** for the conversations in scope — the backlog you've
+  pulled, not the whole of history that other members still hold. Channels other than the open
+  one are read once when you set the scope, so a message posted there mid-search shows up after
+  you reopen the search.
+- Mentions are matched on the **name in the marker**, so a member who has since renamed matches
+  under the name they were mentioned by.
 
 ### Channels
 - Every server starts with **#general**. Create/join a channel by typing its name into

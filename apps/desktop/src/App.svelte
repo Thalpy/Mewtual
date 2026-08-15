@@ -292,12 +292,20 @@
   // attachment kind, reactions, reply/pin/edit state — plus a sort order, so the same pass answers
   // "the clip Dana posted last week" as well as "where did we say quorum". Filters stand on their
   // own: with an empty query the filters alone select the matches.
-  type SearchSort = "oldest" | "newest" | "author" | "reactions";
+  type SearchSort = "oldest" | "newest" | "author" | "reactions" | "replies";
   type SearchFilters = ReturnType<typeof noFilters>;
+  // A hit is (channel, index in that channel's list, the message) — the index drives the in-pane
+  // highlight/scroll for the open channel, the id drives the jump when a hit lives elsewhere.
+  type SearchHit = { ch: string; idx: number; m: Msg };
   const SEARCH_RESULT_CAP = 50; // rows rendered in the results list (stepping still covers them all)
+  // Facets that select messages. `sort` and the two match modifiers are deliberately absent from
+  // the "n filters" count — they shape the query/order, they don't narrow on their own.
+  const NON_FACETS = ["sort", "caseSensitive", "wholeWord"];
   function noFilters() {
     return {
+      channel: "", // "" = the open channel · "*" = every channel here · else a channel id
       from: "", // author fingerprint ("" = anyone)
+      mentions: "", // a member the message @-mentions
       after: "", // yyyy-mm-dd (inclusive, local day)
       before: "", // yyyy-mm-dd (inclusive, local day)
       hasImage: false,
@@ -314,6 +322,8 @@
       reacted: false,
       reactedByMe: false,
       emoji: "", // a specific reaction emoji
+      caseSensitive: false,
+      wholeWord: false,
       sort: "oldest" as SearchSort,
     };
   }
@@ -350,99 +360,238 @@
     if (end) d.setHours(23, 59, 59, 999);
     return d.getTime();
   }
-  // How many facets are narrowing the result (sort order isn't one) — drives the "Filters (n)" badge.
+  // How many facets are narrowing the result — drives the "Filters (n)" badge and lets an
+  // empty query still search (filters alone are a valid search).
   let filterCount = $derived(
-    Object.entries(filters).filter(([k, v]) => k !== "sort" && v !== "" && v !== false).length
+    Object.entries(filters).filter(([k, v]) => !NON_FACETS.includes(k) && v !== "" && v !== false).length
   );
   function reactionCount(m: Msg): number {
     return m.reactions.reduce((n, r) => n + r.by.length, 0);
   }
+  // The text predicate, honouring the case/whole-word modifiers. Null when there's no query, so
+  // the caller can tell "match everything" from "match nothing".
+  function textMatcher(raw: string): ((t: string) => boolean) | null {
+    const q = raw.trim();
+    if (!q) return null;
+    if (!filters.wholeWord) {
+      if (filters.caseSensitive) return (t) => t.includes(q);
+      const lower = q.toLowerCase();
+      return (t) => t.toLowerCase().includes(lower);
+    }
+    // `\b` misbehaves when the query starts/ends with punctuation, so bound on non-word-or-edge.
+    const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?:^|\\W)${esc}(?:\\W|$)`, filters.caseSensitive ? "" : "i");
+    return (t) => re.test(t);
+  }
+
+  // ---- corpus: which channels the search covers -------------------------------------------
+  // The open channel always reads the live `messages`; any other in-scope channel is fetched once
+  // into `chanMsgs` (a snapshot, dropped when the search closes) so search can span the server.
+  let chanMsgs = $state<Record<string, Msg[]>>({});
+  let scopeLoading = $state(false);
+  let searchChannels = $derived.by(() => cur?.channels ?? []);
+  function channelName(id: string): string {
+    return searchChannels.find((c) => c.id === id)?.name ?? id;
+  }
+  async function loadScope() {
+    const id = activeServerId;
+    const s = cur;
+    if (id === null || !s) return;
+    const want = filters.channel === "*" ? s.channels.map((c) => c.id) : filters.channel ? [filters.channel] : [];
+    const need = want.filter((c) => c !== s.active && !chanMsgs[c]);
+    if (!need.length) return;
+    scopeLoading = true;
+    try {
+      const loaded = await Promise.all(
+        need.map((c) =>
+          invoke<Msg[]>("get_messages", { server: id, channel: c }).then((msgs) => [c, msgs] as const)
+        )
+      );
+      if (activeServerId !== id) return; // server switched mid-fetch — drop the stale snapshot
+      for (const [c, msgs] of loaded) chanMsgs[c] = msgs;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      scopeLoading = false;
+    }
+  }
+  let searchCorpus = $derived.by(() => {
+    const active = cur?.active ?? "";
+    const ids = filters.channel === "*" ? searchChannels.map((c) => c.id) : [filters.channel || active];
+    const out: SearchHit[] = [];
+    for (const ch of ids) {
+      const list = ch === active ? messages : chanMsgs[ch];
+      if (list) list.forEach((m, idx) => out.push({ ch, idx, m }));
+    }
+    return out;
+  });
+  // Reply counts over the corpus, not just the open channel, so "has replies" and the replies sort
+  // stay correct in a server-wide search.
+  let corpusReplies = $derived.by(() => {
+    const n = new Map<string, number>();
+    for (const h of searchCorpus) if (h.m.reply_to) n.set(h.m.reply_to, (n.get(h.m.reply_to) ?? 0) + 1);
+    return n;
+  });
+
   let searchMatches = $derived.by(() => {
-    const q = searchQuery.trim().toLowerCase();
-    if (!q && !filterCount) return [] as number[];
+    const match = textMatcher(searchQuery);
+    if (!match && !filterCount) return [] as SearchHit[];
     const after = dayBound(filters.after, false);
     const before = dayBound(filters.before, true);
+    const mentionMark = filters.mentions ? `@[${mentionName(nameOf(filters.mentions))}]` : "";
     const wantKind = filters.hasImage || filters.hasVideo || filters.hasAudio || filters.hasFile || filters.hasLink;
-    const out: number[] = [];
-    messages.forEach((m, i) => {
-      if (q && !m.text.toLowerCase().includes(q)) return;
-      if (filters.from && m.author !== filters.from) return;
-      if (filters.fromMe && m.author !== myFp) return;
-      if (after !== null && m.ts < after) return;
-      if (before !== null && m.ts > before) return;
-      if (filters.isReply && !m.reply_to) return;
-      if (filters.hasReplies && !(m.id && replyCounts.get(m.id))) return;
-      if (filters.isPinned && !m.pinned) return;
-      if (filters.isEdited && !m.edited) return;
-      if (filters.mentionsMe && !mentionsMe(m.text)) return;
-      if (filters.reacted && !m.reactions.length) return;
-      if (filters.reactedByMe && !m.reactions.some((r) => r.by.includes(myFp))) return;
-      if (filters.emoji && !m.reactions.some((r) => r.emoji === filters.emoji)) return;
+    const out: SearchHit[] = [];
+    for (const h of searchCorpus) {
+      const m = h.m;
+      if (match && !match(m.text)) continue;
+      if (filters.from && m.author !== filters.from) continue;
+      if (filters.fromMe && m.author !== myFp) continue;
+      if (mentionMark && !m.text.includes(mentionMark)) continue;
+      if (after !== null && m.ts < after) continue;
+      if (before !== null && m.ts > before) continue;
+      if (filters.isReply && !m.reply_to) continue;
+      if (filters.hasReplies && !(m.id && corpusReplies.get(m.id))) continue;
+      if (filters.isPinned && !m.pinned) continue;
+      if (filters.isEdited && !m.edited) continue;
+      if (filters.mentionsMe && !mentionsMe(m.text)) continue;
+      if (filters.reacted && !m.reactions.length) continue;
+      if (filters.reactedByMe && !m.reactions.some((r) => r.by.includes(myFp))) continue;
+      if (filters.emoji && !m.reactions.some((r) => r.emoji === filters.emoji)) continue;
       if (wantKind) {
         const k = msgKinds(m.text);
-        if (filters.hasImage && !k.image) return;
-        if (filters.hasVideo && !k.video) return;
-        if (filters.hasAudio && !k.audio) return;
-        if (filters.hasFile && !k.file) return;
-        if (filters.hasLink && !k.link) return;
+        if (filters.hasImage && !k.image) continue;
+        if (filters.hasVideo && !k.video) continue;
+        if (filters.hasAudio && !k.audio) continue;
+        if (filters.hasFile && !k.file) continue;
+        if (filters.hasLink && !k.link) continue;
       }
-      out.push(i);
-    });
+      out.push(h);
+    }
     return sortMatches(out);
   });
-  // `out` arrives chronological (message order), so "oldest" is a no-op and "newest" a reverse.
-  function sortMatches(idx: number[]): number[] {
-    if (filters.sort === "oldest") return idx;
-    if (filters.sort === "newest") return idx.slice().reverse();
-    return idx.slice().sort((a, b) => {
-      const x = messages[a];
-      const y = messages[b];
-      if (filters.sort === "author") {
-        const c = nameOf(x.author).localeCompare(nameOf(y.author), undefined, { sensitivity: "base" });
-        return c || x.ts - y.ts;
+  // Sorted by timestamp rather than corpus position: a multi-channel corpus is grouped by channel,
+  // so "oldest first" has to interleave the channels to mean anything.
+  function sortMatches(hits: SearchHit[]): SearchHit[] {
+    const s = filters.sort;
+    return hits.sort((a, b) => {
+      if (s === "newest") return b.m.ts - a.m.ts;
+      if (s === "author") {
+        const c = nameOf(a.m.author).localeCompare(nameOf(b.m.author), undefined, { sensitivity: "base" });
+        return c || a.m.ts - b.m.ts;
       }
-      return reactionCount(y) - reactionCount(x) || y.ts - x.ts;
+      if (s === "reactions") return reactionCount(b.m) - reactionCount(a.m) || b.m.ts - a.m.ts;
+      if (s === "replies") {
+        const ra = a.m.id ? (corpusReplies.get(a.m.id) ?? 0) : 0;
+        const rb = b.m.id ? (corpusReplies.get(b.m.id) ?? 0) : 0;
+        return rb - ra || b.m.ts - a.m.ts;
+      }
+      return a.m.ts - b.m.ts;
     });
   }
-  let searchMatchSet = $derived(new Set(searchMatches));
+  // In-pane highlighting only concerns the open channel; hits elsewhere are reached from the list.
+  let searchMatchSet = $derived(
+    new Set(searchMatches.filter((h) => h.ch === (cur?.active ?? "")).map((h) => h.idx))
+  );
   // The cursor is clamped rather than reset: a filter edit or an incoming message can shrink the
   // match list under it, and an out-of-range `searchPos` would otherwise blank the highlight.
   let searchPosClamped = $derived(searchMatches.length ? Math.min(searchPos, searchMatches.length - 1) : 0);
-  let searchCur = $derived(searchMatches.length ? searchMatches[searchPosClamped] : -1);
-  // Authors / reaction emoji actually present in the loaded messages — the filter pickers offer
-  // only what could match (lazily computed: nothing reads these while the panel is closed).
-  let searchAuthors = $derived.by(() => {
+  let searchCur = $derived<SearchHit | undefined>(searchMatches[searchPosClamped]);
+  // Everyone the pickers can offer: the roster (so you can filter on someone who hasn't spoken
+  // here) plus any author in the corpus (so a departed member is still selectable).
+  let searchPeople = $derived.by(() => {
     const seen = new Map<string, string>();
-    for (const m of messages) if (!seen.has(m.author)) seen.set(m.author, nameOf(m.author));
+    for (const r of roster) seen.set(r.fingerprint, nameOf(r.fingerprint));
+    for (const h of searchCorpus) if (!seen.has(h.m.author)) seen.set(h.m.author, nameOf(h.m.author));
     return [...seen]
       .map(([fp, name]) => ({ fp, name }))
       .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
   });
   let searchEmoji = $derived.by(() => {
     const seen = new Set<string>();
-    for (const m of messages) for (const r of m.reactions) seen.add(r.emoji);
+    for (const h of searchCorpus) for (const r of h.m.reactions) seen.add(r.emoji);
     return [...seen].sort();
   });
+
+  // ---- the member typeaheads (From · Mentions) ---------------------------------------------
+  type Picker = { q: string; open: boolean; idx: number };
+  let fromPick = $state<Picker>({ q: "", open: false, idx: 0 });
+  let mentionPick = $state<Picker>({ q: "", open: false, idx: 0 });
+  function pickerOptions(p: Picker) {
+    const q = p.q.trim().toLowerCase();
+    return (q ? searchPeople.filter((x) => x.name.toLowerCase().includes(q)) : searchPeople).slice(0, 8);
+  }
+  function choosePerson(p: Picker, o: { fp: string; name: string }, set: (fp: string) => void) {
+    set(o.fp);
+    p.q = o.name;
+    p.open = false;
+    refilter();
+  }
+  // Typing narrows the list; emptying the box drops the filter (so it behaves like a text field
+  // that happens to autocomplete, not a modal picker you have to explicitly reset).
+  function onPickerInput(p: Picker, v: string, current: string, set: (fp: string) => void) {
+    p.q = v;
+    p.open = true;
+    p.idx = 0;
+    if (!v.trim() && current) {
+      set("");
+      refilter();
+    }
+  }
+  function onPickerKey(e: KeyboardEvent, p: Picker, set: (fp: string) => void) {
+    const opts = pickerOptions(p);
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      p.open = true;
+      p.idx = Math.min(p.idx + 1, opts.length - 1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      p.idx = Math.max(p.idx - 1, 0);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (p.open && opts[p.idx]) choosePerson(p, opts[p.idx], set);
+    } else if (e.key === "Escape" && p.open) {
+      e.stopPropagation(); // close the list, not the whole search bar
+      p.open = false;
+    }
+  }
+
   function scrollToMatch(msgIdx: number) {
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
+  // Go to a hit, following it into another channel if that's where it lives. The channel we leave
+  // is snapshotted first so its hits don't blink out of the result list mid-switch.
+  async function goToHit(h: SearchHit, pos: number) {
+    searchPos = pos;
+    if (cur && h.ch !== cur.active) {
+      chanMsgs[cur.active] = messages;
+      await switchTo(h.ch, true);
+      if (h.m.id) jumpToMessageId(h.m.id);
+      else scrollToMatch(h.idx); // a legacy message has no id — its index still holds
+      return;
+    }
+    scrollToMatch(h.idx);
+  }
   function stepMatch(dir: number) {
     if (!searchMatches.length) return;
-    searchPos = (searchPosClamped + dir + searchMatches.length) % searchMatches.length;
-    scrollToMatch(searchMatches[searchPos]);
+    const pos = (searchPosClamped + dir + searchMatches.length) % searchMatches.length;
+    goToHit(searchMatches[pos], pos);
   }
   function onSearchInput(v: string) {
     searchQuery = v;
     refilter();
   }
   // Re-run from the top after any query/filter change (deriveds recompute on read, so the first
-  // match below is already the new one).
+  // match below is already the new one). Only scrolls — refining a query never yanks you into
+  // another channel; that's reserved for ↑/↓ and clicking a result.
   function refilter() {
     searchPos = 0;
-    if (searchMatches.length) scrollToMatch(searchMatches[0]);
+    const h = searchMatches[0];
+    if (h && h.ch === (cur?.active ?? "")) scrollToMatch(h.idx);
   }
   function clearFilters() {
     Object.assign(filters, noFilters());
+    fromPick.q = "";
+    mentionPick.q = "";
     searchPos = 0;
   }
   function openSearch(advanced = false) {
@@ -454,7 +603,19 @@
     showSearch = false;
     showSearchAdv = false;
     searchQuery = "";
+    chanMsgs = {};
     clearFilters();
+  }
+  // The date shortcuts: "today" and the last n days, in the local calendar.
+  function quickRange(days: number) {
+    const iso = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const now = new Date();
+    const from = new Date(now);
+    from.setDate(now.getDate() - days);
+    filters.after = iso(from);
+    filters.before = iso(now);
+    refilter();
   }
 
   // Quick switcher (Ctrl/Cmd+K): one palette over channels, server surfaces, servers and DMs.
@@ -1377,13 +1538,15 @@
     }
   }
 
-  function switchTo(id: string) {
+  // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
+  // channel) — everything else closes the search bar, as before.
+  async function switchTo(id: string, keepSearch = false) {
     if (!cur) return;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
     cur.unread = cur.unread.filter((c) => c !== id);
-    if (showSearch) closeSearch();
+    if (showSearch && !keepSearch) closeSearch();
     reactionPickerFor = "";
     replyingTo = "";
     mentionQuery = null;
@@ -1393,7 +1556,7 @@
       mentionChannels.delete(id); // reading the channel clears its mention badge
     }
     captureDivider(); // snapshot the read boundary before refresh advances the mark
-    refresh();
+    await refresh(); // awaited so a search jump can address the target channel's loaded messages
     refreshTopic();
   }
 
@@ -3388,6 +3551,50 @@
   </svg>
 {/snippet}
 
+<!-- A member typeahead for the advanced-search panel: type to narrow, ↑/↓/Enter or click to pick,
+     empty the box to drop the filter. `current` is the selected fingerprint, `set` writes it back. -->
+{#snippet personPicker(p: Picker, current: string, set: (fp: string) => void, placeholder: string)}
+  {@const opts = pickerOptions(p)}
+  <span class="sa-picker">
+    <input
+      class="sa-person"
+      class:on={!!current}
+      {placeholder}
+      value={p.q}
+      autocomplete="off"
+      spellcheck="false"
+      oninput={(e) => onPickerInput(p, e.currentTarget.value, current, set)}
+      onfocus={() => (p.open = true)}
+      onblur={() => (p.open = false)}
+      onkeydown={(e) => onPickerKey(e, p, set)}
+    />
+    {#if current}
+      <button
+        class="sa-person-clear"
+        type="button"
+        title="Clear"
+        aria-label="Clear"
+        onclick={() => { set(""); p.q = ""; refilter(); }}
+      >✕</button>
+    {/if}
+    {#if p.open && opts.length}
+      <ul class="sa-options" role="listbox">
+        {#each opts as o, i (o.fp)}
+          <li>
+            <button
+              type="button"
+              class="sa-option"
+              class:active={i === p.idx}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => choosePerson(p, o, set)}
+            >{o.name}</button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </span>
+{/snippet}
+
 <!-- One toggle in the advanced-search panel; `set` writes back into `filters`. -->
 {#snippet fchip(label: string, on: boolean, set: (v: boolean) => void, hint: string)}
   <button
@@ -3936,14 +4143,37 @@
             <div class="search-adv">
               <div class="sa-row">
                 <label class="sa-field">
-                  <span class="muted small">From</span>
-                  <select bind:value={filters.from} onchange={refilter}>
-                    <option value="">Anyone</option>
-                    {#each searchAuthors as a (a.fp)}
-                      <option value={a.fp}>{a.name}</option>
+                  <span class="muted small">In</span>
+                  <select bind:value={filters.channel} onchange={() => { loadScope(); refilter(); }}>
+                    <option value="">This channel</option>
+                    <option value="*">All channels ({searchChannels.length})</option>
+                    {#each searchChannels as c (c.id)}
+                      <option value={c.id}>#{c.name}</option>
                     {/each}
                   </select>
                 </label>
+                <div class="sa-field">
+                  <span class="muted small">From</span>
+                  {@render personPicker(fromPick, filters.from, (fp) => (filters.from = fp), "Anyone")}
+                </div>
+                <div class="sa-field">
+                  <span class="muted small">Mentions</span>
+                  {@render personPicker(mentionPick, filters.mentions, (fp) => (filters.mentions = fp), "Anyone")}
+                </div>
+                <label class="sa-field">
+                  <span class="muted small">Sort</span>
+                  <select bind:value={filters.sort} onchange={refilter}>
+                    <option value="oldest">Oldest first</option>
+                    <option value="newest">Newest first</option>
+                    <option value="author">Name (A–Z)</option>
+                    <option value="reactions">Most reactions</option>
+                    <option value="replies">Most replies</option>
+                  </select>
+                </label>
+                {#if scopeLoading}<span class="muted small">loading channels…</span>{/if}
+              </div>
+              <div class="sa-row">
+                <span class="muted small sa-label">When</span>
                 <label class="sa-field">
                   <span class="muted small">After</span>
                   <input type="date" bind:value={filters.after} onchange={refilter} />
@@ -3952,15 +4182,15 @@
                   <span class="muted small">Before</span>
                   <input type="date" bind:value={filters.before} onchange={refilter} />
                 </label>
-                <label class="sa-field">
-                  <span class="muted small">Sort</span>
-                  <select bind:value={filters.sort} onchange={refilter}>
-                    <option value="oldest">Oldest first</option>
-                    <option value="newest">Newest first</option>
-                    <option value="author">Name (A–Z)</option>
-                    <option value="reactions">Most reactions</option>
-                  </select>
-                </label>
+                <button class="ghost small" title="Today only" onclick={() => quickRange(0)}>Today</button>
+                <button class="ghost small" title="The last 7 days" onclick={() => quickRange(7)}>7d</button>
+                <button class="ghost small" title="The last 30 days" onclick={() => quickRange(30)}>30d</button>
+                <button
+                  class="ghost small"
+                  title="Clear the date range"
+                  disabled={!filters.after && !filters.before}
+                  onclick={() => { filters.after = ""; filters.before = ""; refilter(); }}
+                >Any time</button>
               </div>
               <div class="sa-row">
                 <span class="muted small sa-label">Has</span>
@@ -3989,22 +4219,24 @@
                     <option value={e}>{e}</option>
                   {/each}
                 </select>
-                <button class="ghost small sa-clear" disabled={!filterCount} onclick={clearFilters}>Clear filters</button>
+              </div>
+              <div class="sa-row">
+                <span class="muted small sa-label">Match</span>
+                {@render fchip("Aa", filters.caseSensitive, (v) => (filters.caseSensitive = v), "Case-sensitive text match")}
+                {@render fchip("Whole word", filters.wholeWord, (v) => (filters.wholeWord = v), "Match the query as a whole word, not as part of one")}
+                <button class="ghost small sa-clear" disabled={!filterCount} onclick={() => { clearFilters(); refilter(); }}>Clear filters</button>
               </div>
               {#if searchMatches.length}
                 <ul class="search-results">
-                  {#each searchMatches.slice(0, SEARCH_RESULT_CAP) as mi, ri (mi)}
-                    {@const m = messages[mi]}
+                  {#each searchMatches.slice(0, SEARCH_RESULT_CAP) as h, ri (h.ch + ":" + h.idx)}
                     <li>
-                      <button
-                        class="search-result"
-                        class:current={mi === searchCur}
-                        onclick={() => { searchPos = ri; scrollToMatch(mi); }}
-                      >
-                        <span class="sr-name">{nameOf(m.author)}</span>
-                        <span class="sr-ts muted small">{new Date(m.ts).toLocaleString()}</span>
-                        {#if reactionCount(m)}<span class="sr-rx muted small">♥ {reactionCount(m)}</span>{/if}
-                        <span class="sr-text">{msgSnippet(m.text, 90)}</span>
+                      <button class="search-result" class:current={h === searchCur} onclick={() => goToHit(h, ri)}>
+                        {#if filters.channel}<span class="sr-ch muted small">#{channelName(h.ch)}</span>{/if}
+                        <span class="sr-name">{nameOf(h.m.author)}</span>
+                        <span class="sr-ts muted small">{new Date(h.m.ts).toLocaleString()}</span>
+                        {#if reactionCount(h.m)}<span class="sr-rx muted small">♥ {reactionCount(h.m)}</span>{/if}
+                        {#if h.m.id && corpusReplies.get(h.m.id)}<span class="sr-rx muted small">💬 {corpusReplies.get(h.m.id)}</span>{/if}
+                        <span class="sr-text">{msgSnippet(h.m.text, 90)}</span>
                       </button>
                     </li>
                   {/each}
@@ -4013,7 +4245,9 @@
                   <p class="muted small sa-more">Showing the first {SEARCH_RESULT_CAP} of {searchMatches.length} — narrow the filters to see the rest.</p>
                 {/if}
               {:else if searchQuery.trim() || filterCount}
-                <p class="muted small sa-more">Nothing in this conversation matches.</p>
+                <p class="muted small sa-more">
+                  {scopeLoading ? "Loading the other channels…" : "Nothing in scope matches."}
+                </p>
               {/if}
             </div>
           {/if}
@@ -4040,7 +4274,7 @@
                 class:grouped
                 class:has-bubble={!!bubble}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
-                class:search-current={showSearch && searchCur === mi}
+                class:search-current={showSearch && searchCur?.ch === cur?.active && searchCur?.idx === mi}
                 class:flash={!!m.id && m.id === flashId}
                 style={bubble}
                 use:contextMenu={() => messageMenu(m)}
