@@ -622,6 +622,110 @@ fn read_livery(doc: &AutoCommit) -> Livery {
     }
 }
 
+// --- custom member badges ----------------------------------------------------
+//
+// One shared CRDT document per server (`DocType::Badges`, id `BADGES_DOC`): a map keyed by
+// member **device fingerprint** → `{ label, color }`, the small labelled tag an owner/admin
+// pins next to a member's name (e.g. `ARTIST` in teal). Written by owners/admins only —
+// honest-client gating at the same policy layer as the livery/roles/pins (the op log is
+// inner-signed, so authorship of a forged write is attributable either way).
+//
+// Like the livery, the values are stored **opaquely**: the backend bounds their sizes and
+// count and rejects labels reserved for the built-in roles; the *client* validates the colour
+// on read (and likewise ignores a reserved label, in case one predates this gate).
+
+/// The reserved document id for the per-server badge document.
+const BADGES_DOC: u128 = 0;
+/// Schema version written into every badge doc, so a later shape can be told apart.
+const BADGES_VERSION: i64 = 1;
+const B_V: &str = "v";
+/// The map of `fingerprint -> { label, color }` inside the badge document. Kept under its own
+/// key (rather than at the root, like the profile doc) so the schema version can live beside it
+/// without ever colliding with a fingerprint.
+const B_BADGES: &str = "badges";
+const B_LABEL: &str = "label";
+const B_COLOR: &str = "color";
+
+/// Maximum length of a badge label (a short word like `ARTIST`).
+pub const MAX_BADGE_LABEL_BYTES: usize = 24;
+/// Maximum length of a badge colour value (`#rrggbb` plus slack).
+pub const MAX_BADGE_COLOR_BYTES: usize = 16;
+/// Maximum length of the fingerprint a badge is keyed by (a hex device fingerprint).
+pub const MAX_BADGE_FINGERPRINT_BYTES: usize = 128;
+/// Maximum number of badge entries one server's document may carry — the whole map gossips
+/// with every change, so this bounds what members replicate.
+pub const MAX_BADGES: usize = 128;
+
+/// Labels reserved for the built-in roles: a custom badge may not impersonate one (compared
+/// case-insensitively, after trimming). The client applies the same rule on read.
+pub const RESERVED_BADGE_LABELS: [&str; 4] = ["owner", "admin", "mod", "moderator"];
+
+/// A member's custom badge — a short label plus a colour, both opaque to the backend.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberBadge {
+    /// The badge text (e.g. `ARTIST`); never empty in a stored entry (an empty label removes it).
+    pub label: String,
+    /// The badge colour (a CSS colour string, e.g. `#3fb8af`); empty = the client's default.
+    pub color: String,
+}
+
+/// Write (or, with an empty `label`, remove) one member's badge entry. Last-writer-wins per
+/// member, so two admins badging *different* members never conflict.
+fn write_member_badge(
+    doc: &mut AutoCommit,
+    fp: &str,
+    badge: &MemberBadge,
+) -> Result<(), AutomergeError> {
+    doc.put(ROOT, B_V, BADGES_VERSION)?;
+    let badges = match doc.get(ROOT, B_BADGES)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(ROOT, B_BADGES, ObjType::Map)?,
+    };
+    if badge.label.is_empty() {
+        doc.delete(&badges, fp)?;
+        return Ok(());
+    }
+    let entry = match doc.get(&badges, fp)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(&badges, fp, ObjType::Map)?,
+    };
+    doc.put(&entry, B_LABEL, badge.label.as_str())?;
+    doc.put(&entry, B_COLOR, badge.color.as_str())?;
+    Ok(())
+}
+
+/// Materialize the badge document into `fingerprint -> MemberBadge` (a missing/foreign-shaped
+/// entry is skipped, so a malformed doc degrades to "no badges" rather than junk labels).
+fn read_badges(doc: &AutoCommit) -> HashMap<String, MemberBadge> {
+    let mut out = HashMap::new();
+    if let Ok(Some((Value::Object(ObjType::Map), badges))) = doc.get(ROOT, B_BADGES) {
+        for fp in doc.keys(&badges) {
+            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&badges, &fp) {
+                let label = str_field(doc, &entry, B_LABEL);
+                if label.is_empty() {
+                    continue; // a cleared/empty entry is "no badge"
+                }
+                out.insert(
+                    fp,
+                    MemberBadge {
+                        label,
+                        color: str_field(doc, &entry, B_COLOR),
+                    },
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Whether `label` (trimmed, case-insensitive) is one of the role-reserved words.
+fn is_reserved_badge_label(label: &str) -> bool {
+    let label = label.trim();
+    RESERVED_BADGE_LABELS
+        .iter()
+        .any(|r| label.eq_ignore_ascii_case(r))
+}
+
 // --- fileshare: a per-server file index --------------------------------------
 //
 // One shared CRDT document per server (`DocType::FileIndex`, id `FILE_INDEX_DOC`): an
@@ -1930,6 +2034,97 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
+    // --- custom member badges ----------------------------------------------
+
+    /// Open (create/subscribe) the per-server **badge** document. Call once after
+    /// founding/joining.
+    pub async fn open_badges(&mut self) -> Result<(), AppError> {
+        self.sync.open_channel(DocType::Badges, BADGES_DOC).await?;
+        Ok(())
+    }
+
+    /// Assign a custom badge to the member with device fingerprint `fp`. **Owner or admin
+    /// only** — errors otherwise (honest-client gating, the same policy layer as the livery).
+    /// An empty `label` (or one that is only whitespace) **removes** that member's badge.
+    ///
+    /// The label/colour are opaque here and bounded only by size (the client validates the
+    /// colour on read), except that a label reserved for a built-in role is rejected — a
+    /// custom badge must never be able to read as `ADMIN`.
+    pub async fn set_member_badge(
+        &mut self,
+        fp: String,
+        label: String,
+        color: String,
+    ) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set a member badge".into(),
+            ));
+        }
+        if fp.len() > MAX_BADGE_FINGERPRINT_BYTES {
+            return Err(AppError::Invalid(format!(
+                "badge fingerprint too long: {} bytes (max {MAX_BADGE_FINGERPRINT_BYTES})",
+                fp.len()
+            )));
+        }
+        if label.len() > MAX_BADGE_LABEL_BYTES {
+            return Err(AppError::Invalid(format!(
+                "badge label too long: {} bytes (max {MAX_BADGE_LABEL_BYTES})",
+                label.len()
+            )));
+        }
+        if color.len() > MAX_BADGE_COLOR_BYTES {
+            return Err(AppError::Invalid(format!(
+                "badge color too long: {} bytes (max {MAX_BADGE_COLOR_BYTES})",
+                color.len()
+            )));
+        }
+        if is_reserved_badge_label(&label) {
+            return Err(AppError::Invalid(format!(
+                "badge label '{}' is reserved for roles",
+                label.trim()
+            )));
+        }
+        // Removal is never capped; only a *new* entry can push the document over the limit.
+        let label = if label.trim().is_empty() {
+            String::new()
+        } else {
+            label
+        };
+        if !label.is_empty() {
+            let current = self.badges();
+            if !current.contains_key(&fp) && current.len() >= MAX_BADGES {
+                return Err(AppError::Invalid(format!(
+                    "too many member badges: {} (max {MAX_BADGES})",
+                    current.len()
+                )));
+            }
+        }
+        let badge = MemberBadge { label, color };
+        self.sync
+            .post(DocType::Badges, BADGES_DOC, |d| {
+                write_member_badge(d, &fp, &badge)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Every assigned member badge, keyed by device fingerprint (empty if none were assigned).
+    pub fn badges(&self) -> HashMap<String, MemberBadge> {
+        self.sync
+            .doc(DocType::Badges, BADGES_DOC)
+            .map(|d| read_badges(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Catch up the badge document from `peer` (e.g. right after joining).
+    pub async fn request_badges_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Badges, BADGES_DOC)
+            .await?)
+    }
+
     // --- member roles / permissions (Phase 10h) ----------------------------
 
     /// Open (create/subscribe) the per-server member-roles document. Call once after
@@ -3215,6 +3410,97 @@ mod tests {
             Livery::default(),
             "no rejected write landed"
         );
+    }
+
+    #[tokio::test]
+    async fn a_member_badge_is_assigned_and_read_back() {
+        let mut alice = founder();
+        alice.open_badges().await.unwrap();
+        alice.open_roles().await.unwrap();
+        assert!(alice.badges().is_empty());
+
+        let fp = alice.my_fingerprint();
+        alice
+            .set_member_badge(fp.clone(), "ARTIST".into(), "#3fb8af".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            alice.badges().get(&fp),
+            Some(&MemberBadge {
+                label: "ARTIST".into(),
+                color: "#3fb8af".into(),
+            })
+        );
+
+        // Re-assigning replaces that member's badge (last-writer-wins per member).
+        alice
+            .set_member_badge(fp.clone(), "WRITER".into(), "#ffcc00".into())
+            .await
+            .unwrap();
+        let badges = alice.badges();
+        assert_eq!(badges.len(), 1);
+        assert_eq!(badges[&fp].label, "WRITER");
+        assert_eq!(badges[&fp].color, "#ffcc00");
+
+        // An empty label removes the entry entirely.
+        alice
+            .set_member_badge(fp.clone(), String::new(), String::new())
+            .await
+            .unwrap();
+        assert!(alice.badges().is_empty());
+
+        // Oversized values are rejected, like an over-long livery preset.
+        assert!(matches!(
+            alice
+                .set_member_badge(
+                    fp.clone(),
+                    "x".repeat(MAX_BADGE_LABEL_BYTES + 1),
+                    String::new()
+                )
+                .await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // Role words are reserved, however they are cased or padded — a custom badge must
+        // never be able to read as a built-in role.
+        for label in ["admin", " ADMIN ", "Owner", "mod", "Moderator"] {
+            assert!(
+                matches!(
+                    alice
+                        .set_member_badge(fp.clone(), label.into(), String::new())
+                        .await,
+                    Err(AppError::Invalid(_))
+                ),
+                "reserved label {label:?} must be rejected"
+            );
+        }
+        assert!(alice.badges().is_empty(), "no rejected write landed");
+
+        // The entry count is capped: filling the map is fine…
+        for i in 0..MAX_BADGES {
+            alice
+                .set_member_badge(format!("fp{i}"), "ARTIST".into(), "#3fb8af".into())
+                .await
+                .unwrap();
+        }
+        assert_eq!(alice.badges().len(), MAX_BADGES);
+        // …one more *member* is rejected…
+        assert!(matches!(
+            alice
+                .set_member_badge("overflow".into(), "ARTIST".into(), String::new())
+                .await,
+            Err(AppError::Invalid(_))
+        ));
+        // …while re-badging or clearing an existing member still works at the cap.
+        alice
+            .set_member_badge("fp0".into(), "WRITER".into(), String::new())
+            .await
+            .unwrap();
+        alice
+            .set_member_badge("fp0".into(), String::new(), String::new())
+            .await
+            .unwrap();
+        assert_eq!(alice.badges().len(), MAX_BADGES - 1);
     }
 
     #[tokio::test]

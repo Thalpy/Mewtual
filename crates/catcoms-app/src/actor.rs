@@ -21,8 +21,8 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, FileEntry, FilesView, InboxItem, Livery, MemberView, MessageStats,
-    Profile, Server,
+    ChatMessage, DeliveryState, FileEntry, FilesView, InboxItem, Livery, MemberBadge, MemberView,
+    MessageStats, Profile, Server,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -139,6 +139,19 @@ pub enum AppCommand {
     Livery { reply: oneshot::Sender<Livery> },
     /// Pull the livery document from `peer` (e.g. right after joining).
     CatchUpLivery { peer: PeerId },
+    /// Assign (or clear, with an empty label) a member's custom badge (owner/admin only).
+    SetMemberBadge {
+        fp: String,
+        label: String,
+        color: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query every assigned member badge, keyed by fingerprint.
+    Badges {
+        reply: oneshot::Sender<HashMap<String, MemberBadge>>,
+    },
+    /// Pull the badge document from `peer` (e.g. right after joining).
+    CatchUpBadges { peer: PeerId },
     /// Share a file under folder `path`; replies with its content-address hex, or an error.
     AddFile {
         name: String,
@@ -292,6 +305,8 @@ pub enum AppEvent {
     ProfilesUpdated,
     /// The server livery changed — the UI should re-fetch it (`livery`) and re-apply it.
     LiveryUpdated,
+    /// A custom member badge changed — the UI should re-fetch badges (`badges`).
+    BadgesUpdated,
     /// The shared file list changed — the UI should re-fetch it (`files`).
     FilesUpdated,
     /// The status feed changed — the UI should re-fetch it (`statuses`).
@@ -710,6 +725,50 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::CatchUpLivery { peer }).await;
     }
 
+    /// Assign (or clear, with an empty `label`) a member's custom badge (owner/admin only; a
+    /// `BadgesUpdated` event follows).
+    pub async fn set_member_badge(
+        &self,
+        fp: String,
+        label: String,
+        color: String,
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetMemberBadge {
+                fp,
+                label,
+                color,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch every assigned member badge, keyed by fingerprint.
+    pub async fn badges(&self) -> HashMap<String, MemberBadge> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Badges { reply })
+            .await
+            .is_err()
+        {
+            return HashMap::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the badge document from `peer`.
+    pub async fn catch_up_badges(&self, peer: PeerId) {
+        let _ = self.cmd_tx.send(AppCommand::CatchUpBadges { peer }).await;
+    }
+
     /// Share a file (bytes) under folder `path`; returns its content-address hex, or an error.
     pub async fn add_file(
         &self,
@@ -1115,6 +1174,11 @@ where
             tracing::warn!(error = %e, "open_livery failed");
         }
         let mut last_livery = server.livery();
+        // …and the badge doc, so an owner/admin's assigned badges reach this client.
+        if let Err(e) = server.open_badges().await {
+            tracing::warn!(error = %e, "open_badges failed");
+        }
+        let mut last_badges = server.badges();
         // Open the per-server file index too.
         if let Err(e) = server.open_files().await {
             tracing::warn!(error = %e, "open_files failed");
@@ -1312,6 +1376,27 @@ where
                         }
                         if livery_changed(&server, &mut last_livery) {
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::SetMemberBadge { fp, label, color, reply }) => {
+                        let res = server
+                            .set_member_badge(fp, label, color)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if badges_changed(&server, &mut last_badges) {
+                            let _ = event_tx.send(AppEvent::BadgesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::Badges { reply }) => {
+                        let _ = reply.send(server.badges());
+                    }
+                    Some(AppCommand::CatchUpBadges { peer }) => {
+                        if let Err(e) = server.request_badges_catchup(peer).await {
+                            tracing::warn!(error = %e, "badges catch-up failed");
+                        }
+                        if badges_changed(&server, &mut last_badges) {
+                            let _ = event_tx.send(AppEvent::BadgesUpdated).await;
                         }
                     }
                     Some(AppCommand::AddFile { name, mime, path, bytes, reply }) => {
@@ -1564,6 +1649,9 @@ where
                         if livery_changed(&server, &mut last_livery) {
                             let _ = event_tx.send(AppEvent::LiveryUpdated).await;
                         }
+                        if badges_changed(&server, &mut last_badges) {
+                            let _ = event_tx.send(AppEvent::BadgesUpdated).await;
+                        }
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
@@ -1728,6 +1816,22 @@ where
     R: CryptoRngCore,
 {
     let now = server.livery();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether any custom member badge changed since last seen (updating the record). The map is
+/// bounded (`MAX_BADGES` short entries), so comparing it per convergence is cheap.
+fn badges_changed<T, R>(server: &Server<T, R>, last: &mut HashMap<String, MemberBadge>) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.badges();
     if now != *last {
         *last = now;
         true

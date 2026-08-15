@@ -173,6 +173,16 @@ struct UiLivery {
     icon: String,
 }
 
+/// One member's custom badge as serialized to the frontend, keyed by fingerprint in
+/// `get_badges`. **Untrusted** like the livery: the backend bounds the sizes and rejects
+/// role-reserved labels, and the frontend validates the colour (and ignores a reserved label
+/// that predates that gate) on read.
+#[derive(Serialize, Clone)]
+struct UiBadge {
+    label: String,
+    color: String,
+}
+
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
 /// download it.
 #[derive(Serialize, Clone)]
@@ -308,6 +318,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::LiveryUpdated => {
                     let _ = app.emit("livery-changed", ServerEvt { server });
+                }
+                AppEvent::BadgesUpdated => {
+                    let _ = app.emit("badges-changed", ServerEvt { server });
                 }
                 AppEvent::FilesUpdated => {
                     let _ = app.emit("files-updated", ServerEvt { server });
@@ -919,6 +932,7 @@ async fn join_server(
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
     actor.catch_up_livery(inviter).await;
+    actor.catch_up_badges(inviter).await;
     actor.catch_up_files(inviter).await;
     actor.catch_up_status(inviter).await;
     actor.catch_up_wiki(inviter).await;
@@ -1195,6 +1209,46 @@ async fn get_livery(state: State<'_, AppState>, server: u64) -> Result<UiLivery,
         tokens: l.tokens,
         icon: l.icon,
     })
+}
+
+/// Assign a custom badge to a member (owner/admin only); re-seals the server. An empty `label`
+/// removes that member's badge. Sizes and the entry count are bounded by the backend, which also
+/// rejects labels reserved for the built-in roles (`owner`/`admin`/`mod`/`moderator`).
+#[tauri::command]
+async fn set_member_badge(
+    state: State<'_, AppState>,
+    server: u64,
+    fp: String,
+    label: String,
+    color: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.set_member_badge(fp, label, color).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Every assigned member badge, keyed by member fingerprint (empty if none).
+#[tauri::command]
+async fn get_badges(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<HashMap<String, UiBadge>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .badges()
+        .await
+        .into_iter()
+        .map(|(fp, b)| {
+            (
+                fp,
+                UiBadge {
+                    label: b.label,
+                    color: b.color,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Share a file (base64-encoded bytes); returns its content-address hex.
@@ -1958,6 +2012,8 @@ pub fn run() {
             set_livery,
             set_server_icon,
             get_livery,
+            set_member_badge,
+            get_badges,
             add_file,
             get_files,
             get_online_members,
