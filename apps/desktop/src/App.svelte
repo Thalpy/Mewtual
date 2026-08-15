@@ -667,6 +667,32 @@
   function showProfile(fp: string) {
     if (fp) profileCard = fp;
   }
+
+  // Out-of-band identity verification. The dialog shows both fingerprints for comparison
+  // over a trusted channel; "mark verified" is a LOCAL-ONLY note of your own judgement
+  // (stored on this device, never gossiped, no cryptographic weight). Per server.
+  let verifyFor = $state<string | null>(null);
+  let verifiedFps = $state<Set<string>>(new Set());
+  const verifiedKey = (id: number) => `catcoms.verified.${id}`;
+  function loadVerified(id: number) {
+    try {
+      verifiedFps = new Set(JSON.parse(localStorage.getItem(verifiedKey(id)) ?? "[]") as string[]);
+    } catch {
+      verifiedFps = new Set();
+    }
+  }
+  function setVerified(fp: string, v: boolean) {
+    if (activeServerId === null) return;
+    const next = new Set(verifiedFps);
+    if (v) next.add(fp);
+    else next.delete(fp);
+    verifiedFps = next;
+    try { localStorage.setItem(verifiedKey(activeServerId), JSON.stringify([...next])); } catch { /* best-effort */ }
+  }
+  // Fingerprint in 4-char groups for reading aloud ("A4F2 9C11 0B7D …").
+  function fmtFp(fp: string): string {
+    return (fp.match(/.{1,4}/g) ?? [fp]).join(" ");
+  }
   // Font/effect ids are opaque strings in the profile document (the backend stores them
   // verbatim), so a value from a peer on a newer build is tolerated: an unknown font falls
   // back to the system face, an unknown effect to a class with no rule (i.e. plain text).
@@ -1159,6 +1185,7 @@
     acceptCallsHere = loadAccept(id); // this server's call-notification preference
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
     loadLiveryOptOut(id); // whether the user opted out of this server's livery
+    loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
     await Promise.all([
@@ -1532,6 +1559,13 @@
       { divider: true },
       { label: "Copy fingerprint", icon: "#", onSelect: () => copyText(m.fingerprint) },
     ];
+    if (!m.you) {
+      items.push({
+        label: verifiedFps.has(m.fingerprint) ? "Verified — review…" : "Verify identity…",
+        icon: "✓",
+        onSelect: () => (verifyFor = m.fingerprint),
+      });
+    }
     // Add a friend in-band (only for an online member of a server — not in a DM, not yourself).
     if (!m.you && !cur?.isDm && isOnline) {
       items.push({ divider: true });
@@ -2878,6 +2912,7 @@
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (showQuickSwitch) closeQuickSwitch();
+        else if (verifyFor) verifyFor = null;
         else if (menu) menu = null;
         else if (reactionPickerFor) reactionPickerFor = "";
         else if (replyingTo) replyingTo = "";
@@ -2970,6 +3005,9 @@
       {@render avatarTag(m.fingerprint)}
       {@render nameTag(m.fingerprint)}
     </button>
+    {#if !m.you && verifiedFps.has(m.fingerprint)}
+      <span class="vf-check" title="You verified this member out of band">✓</span>
+    {/if}
     {#if roles[m.fingerprint] && roles[m.fingerprint] !== "member"}
       <span class="role-badge {roles[m.fingerprint]}" title={roles[m.fingerprint]}>{roleAbbr(roles[m.fingerprint])}</span>
     {/if}
@@ -4010,6 +4048,7 @@
                 <div class="pc-meta">
                   {#if roles[fp] && roles[fp] !== "member"}<span class="role-badge {roles[fp]}">{roles[fp]}</span>{/if}
                   {#if fp === myFp}<span class="you-badge">you</span>{/if}
+                  {#if fp !== myFp && verifiedFps.has(fp)}<span class="vf-check" title="You verified this member out of band">✓ verified</span>{/if}
                   <span class="muted small">{fp === myFp || onlineMembers.has(fp) ? "online" : "offline"}</span>
                 </div>
               </div>
@@ -4026,8 +4065,46 @@
                 {#if !cur?.isDm && onlineMembers.has(fp)}
                   <button onclick={() => { const t = fp; profileCard = null; startDmWithMember(t); }}>👋 Add friend</button>
                 {/if}
+                <button class="ghost" onclick={() => { const t = fp; profileCard = null; verifyFor = t; }}>✓ Verify identity</button>
                 <button class="ghost" onclick={() => copyText(fp)}>Copy fingerprint</button>
               {/if}
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if verifyFor}
+      {@const vfp = verifyFor}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) verifyFor = null; }}>
+        <div class="overlay-card verify-card">
+          <header class="overlay-head">
+            <h2>Verify {nameOf(vfp)}</h2>
+            <button class="ghost" onclick={() => (verifyFor = null)}>✕</button>
+          </header>
+          <div class="overlay-body">
+            <p class="muted small">
+              Compare these fingerprints over a channel you already trust — a voice call, video,
+              or in person. If both match, you're talking to the real device: no relay or network
+              position can forge a fingerprint. Marking someone verified is a note for yourself —
+              it's stored only on this device and never shared.
+            </p>
+            <div class="vf-block">
+              <span class="vf-label">their fingerprint — {nameOf(vfp)} reads this to you</span>
+              <code class="vf-fp">{fmtFp(vfp)}</code>
+            </div>
+            <div class="vf-block">
+              <span class="vf-label">your fingerprint — you read this to them</span>
+              <code class="vf-fp">{fmtFp(myFp)}</code>
+            </div>
+            <div class="pc-actions">
+              {#if verifiedFps.has(vfp)}
+                <button class="ghost" onclick={() => setVerified(vfp, false)}>Remove verified mark</button>
+              {:else}
+                <button onclick={() => { setVerified(vfp, true); verifyFor = null; }}>✓ They match — mark verified</button>
+              {/if}
+              <button class="ghost" onclick={() => copyText(`you: ${fmtFp(myFp)}\nthem (${nameOf(vfp)}): ${fmtFp(vfp)}`)}>Copy both</button>
             </div>
           </div>
         </div>

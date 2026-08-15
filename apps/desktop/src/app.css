@@ -3322,3 +3322,40 @@ button.you-panel:hover {
   object-fit: cover;
   display: block;
 }
+
+/* --- Verify dialog + local verified marks --- */
+.vf-check {
+  color: var(--ok);
+  font-size: 0.72rem;
+  flex: none;
+  cursor: default;
+}
+.vf-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0;
+}
+.vf-label {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+.vf-fp {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  padding: 10px 12px;
+  word-break: break-all;
+  user-select: all;
+}
+.verify-card .pc-actions {
+  margin-top: 12px;
+}
