@@ -1,4 +1,4 @@
-//! The **product model** — a UI-facing facade over the CatComs stack.
+//! The **product model**; a UI-facing facade over the Mewtual stack.
 //!
 //! Everything below `catcoms-sync` speaks in protocol terms (MLS groups, sealed ops,
 //! automerge docs, transport peers). A UI does not want any of that; it wants
@@ -7,7 +7,7 @@
 //! is built against, so the GUI never touches MLS or automerge directly.
 //!
 //! It owns the **canonical channel-message schema** (a channel document is a list of
-//! `{author, text}` maps) — previously poked inline in `catcomsctl`, now defined once
+//! `{author, text}` maps); previously poked inline in `catcomsctl`, now defined once
 //! here so the protocol and the UI agree on what a chat message is.
 //!
 //! Scope (slice 8a): a single [`Server`] (one [`ChannelSync`]), driven explicitly via
@@ -77,7 +77,7 @@ pub enum AppError {
     /// A product-layer validation error (e.g. an over-large avatar).
     #[error("{0}")]
     Invalid(String),
-    /// The join did not finalize before the wall-clock deadline — e.g. an Option-C admin invite
+    /// The join did not finalize before the wall-clock deadline; e.g. an Option-C admin invite
     /// whose owner never came online to serialize the Add. The user can retry.
     #[error("the join timed out before it finalized; try again")]
     JoinTimeout,
@@ -111,7 +111,7 @@ pub struct ChatMessage {
 /// One emoji reaction on a message: the emoji plus the fingerprints of the members who reacted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reaction {
-    /// The emoji (a short string — a unicode emoji, or `:name:` for a custom one).
+    /// The emoji (a short string; a unicode emoji, or `:name:` for a custom one).
     pub emoji: String,
     /// Fingerprints of the members who added this reaction (deduped; order not significant).
     pub by: Vec<String>,
@@ -178,7 +178,7 @@ pub struct InboxItem {
 }
 
 /// Deterministically derive a channel's document id from its **name**, so any two
-/// members who open the same channel name converge on the same channel — IRC-style name
+/// members who open the same channel name converge on the same channel; IRC-style name
 /// addressing, with no shared channel registry. Names are normalized (trimmed +
 /// lowercased), so "General" and " general " address the same channel. The id is scoped
 /// to the channel name only; the *group* scoping happens at the topic layer (the topic
@@ -193,7 +193,7 @@ pub fn channel_id(name: &str) -> u128 {
 }
 
 /// Wall-clock ceiling on a join handshake. Past this the joiner gives up (and the user can
-/// retry) — so an Option-C admin invite whose owner never comes online can't wedge it forever.
+/// retry); so an Option-C admin invite whose owner never comes online can't wedge it forever.
 const JOIN_TIMEOUT_SECS: u64 = 120;
 
 // --- the canonical channel-document schema ----------------------------------
@@ -210,7 +210,7 @@ const PINNED: &str = "pinned";
 const TOPIC: &str = "topic";
 
 /// Maximum length of a channel topic, in UTF-8 bytes. The topic lives in the channel
-/// document, so this bounds what every member replicates — the same reason the livery and
+/// document, so this bounds what every member replicates; the same reason the livery and
 /// avatar values are capped.
 pub const MAX_CHANNEL_TOPIC_BYTES: usize = 256;
 
@@ -263,12 +263,12 @@ pub fn read_messages(doc: &AutoCommit) -> Vec<ChatMessage> {
 }
 
 /// The separator between the emoji and the reactor fingerprint in a flat reaction key. ASCII Unit
-/// Separator (0x1F) — a control char that appears in neither emoji nor hex fingerprints.
+/// Separator (0x1F); a control char that appears in neither emoji nor hex fingerprints.
 const REACTION_SEP: char = '\u{1f}';
 
 /// Read a message map's reactions and group them by emoji. Reactions are stored as flat scalar keys
-/// *directly on the message map* — `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
-/// — alongside the regular field keys (`id`/`author`/…, none of which contain the separator, so they
+/// *directly on the message map*; `"<emoji>\x1f<fingerprint>" = true` (see `toggle_reaction_in_doc`)
+///; alongside the regular field keys (`id`/`author`/…, none of which contain the separator, so they
 /// are skipped here). A `BTreeMap` gives a stable emoji order (so the UI and the change-detector
 /// signature are deterministic). No reaction keys → no reactions.
 fn read_reactions(doc: &AutoCommit, msg: &ObjId) -> Vec<Reaction> {
@@ -290,8 +290,8 @@ fn read_reactions(doc: &AutoCommit, msg: &ObjId) -> Vec<Reaction> {
 
 /// Toggle `fp`'s reaction `emoji` on the message with `id`: adds it if absent, removes it if
 /// present. Each (emoji, reactor) pair is one flat scalar key `"<emoji>\x1f<fp>"` written *directly
-/// on the message map* — which always exists. So concurrent reactors write **distinct** keys that all
-/// survive a merge, and there is no sub-object that two reactors could create twice and lose one of —
+/// on the message map*; which always exists. So concurrent reactors write **distinct** keys that all
+/// survive a merge, and there is no sub-object that two reactors could create twice and lose one of;
 /// the convergence holds for every message, including ones authored by clients predating reactions.
 /// Returns whether the message was found. (`emoji` is validated by the caller; see `toggle_reaction`.)
 fn toggle_reaction_in_doc(
@@ -322,7 +322,7 @@ fn toggle_reaction_in_doc(
 }
 
 /// Pin or unpin the message with `id` by setting/removing a `pinned` flag **directly on its message
-/// map** (which always exists) — so concurrent pins of different messages never conflict and a
+/// map** (which always exists); so concurrent pins of different messages never conflict and a
 /// pin/unpin race on one message is a clean last-writer-wins. Returns whether the message was found.
 fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, AutomergeError> {
     let Some((Value::Object(ObjType::List), list)) = doc.get(ROOT, MESSAGES)? else {
@@ -345,14 +345,14 @@ fn set_pin_in_doc(doc: &mut AutoCommit, id: &str, pinned: bool) -> Result<bool, 
     Ok(false)
 }
 
-/// Read a channel document's topic (empty when it was never set — every channel written before
+/// Read a channel document's topic (empty when it was never set; every channel written before
 /// topics existed simply has no `topic` key, which reads as "no topic").
 fn read_topic(doc: &AutoCommit) -> String {
     str_field(doc, &ROOT, TOPIC)
 }
 
 /// Set a channel document's topic: one scalar key at the document ROOT (which always exists), so
-/// — like `pinned` on a message map — there is no container two members could concurrently create
+///; like `pinned` on a message map; there is no container two members could concurrently create
 /// and lose one of, and a concurrent set is a clean last-writer-wins.
 fn set_topic_in_doc(doc: &mut AutoCommit, topic: &str) -> Result<(), AutomergeError> {
     doc.put(ROOT, TOPIC, topic)
@@ -424,7 +424,7 @@ fn int_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> u64 {
 // keyed by member **device fingerprint** → `{ name, color, font, effect }`. Each member
 // writes only their *own* fingerprint's entry by convention (the op is inner-signed by
 // the author's device; enforcing "an op may only touch the author's own key" is a later
-// hardening — a malicious member overwriting another's profile is low-stakes and
+// hardening; a malicious member overwriting another's profile is low-stakes and
 // detectable, not a confidentiality/integrity break).
 
 /// The reserved document id for the per-server profile document.
@@ -443,7 +443,7 @@ const P_BUBBLE: &str = "bubble";
 /// JPEG produces.
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
 
-/// Max avatar blobs fetched per [`Server::fetch_missing_avatars`] pass — bounds how long
+/// Max avatar blobs fetched per [`Server::fetch_missing_avatars`] pass; bounds how long
 /// one pass (each fetch a blocking mesh round-trip) can stall the actor, so avatar churn by
 /// a malicious member cannot freeze peers' event loops.
 const MAX_AVATAR_FETCHES_PER_PASS: usize = 8;
@@ -483,7 +483,7 @@ struct ProfileRecord {
 }
 
 /// Write a member's own profile entry. The avatar is referenced by **content address**
-/// (`avatar_cid`), not stored inline — so the gossiped profile document stays tiny and the
+/// (`avatar_cid`), not stored inline; so the gossiped profile document stays tiny and the
 /// image is fetched on demand over the mesh.
 fn write_profile(
     doc: &mut AutoCommit,
@@ -542,7 +542,7 @@ fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
 //
 // One shared CRDT document per server (`DocType::Livery`, id `LIVERY_DOC`): the
 // owner/admin-published UI colour scheme every member's client applies while that server is
-// active (`docs/design-livery.md`). Written by owners/admins only — honest-client gating at
+// active (`docs/design-livery.md`). Written by owners/admins only; honest-client gating at
 // the same policy layer as roles/pins (the op log is inner-signed, so authorship of a
 // forged write is attributable either way).
 //
@@ -575,14 +575,14 @@ pub const MAX_LIVERY_TOKENS: usize = 16;
 pub const MAX_LIVERY_TOKEN_KEY_BYTES: usize = 32;
 /// Maximum length of a livery token value (`#rrggbb` plus slack).
 pub const MAX_LIVERY_TOKEN_VALUE_BYTES: usize = 16;
-/// Maximum **decoded** size of a server icon accepted by [`Server::set_server_icon`] — the
+/// Maximum **decoded** size of a server icon accepted by [`Server::set_server_icon`]; the
 /// same budget as a member avatar ([`MAX_AVATAR_BYTES`]), since the UI produces the same
 /// kind of small downscaled image. Unlike an avatar the icon rides *inline* (base64) in the
 /// livery document rather than by content address, so this cap also bounds what gossips.
 pub const MAX_SERVER_ICON_BYTES: usize = 64 * 1024;
 /// Maximum **decoded** size of a server cursor accepted by [`Server::set_server_cursor`]. A
 /// cursor image is at most 64×64 (a hotspot-bearing pointer, not artwork), so it gets a far
-/// tighter budget than the icon — and, like the icon, it rides *inline* (base64) in the livery
+/// tighter budget than the icon; and, like the icon, it rides *inline* (base64) in the livery
 /// document, so this also bounds what gossips.
 pub const MAX_SERVER_CURSOR_BYTES: usize = 16 * 1024;
 
@@ -597,12 +597,12 @@ pub struct Livery {
     /// Bounded colour-token overrides (token name -> colour); empty in v1 liveries.
     pub tokens: HashMap<String, String>,
     /// The shared server icon as base64 image bytes; empty = no icon. Set/cleared only by
-    /// [`Server::set_server_icon`] — [`Server::set_livery`] ignores this field and preserves
+    /// [`Server::set_server_icon`]; [`Server::set_livery`] ignores this field and preserves
     /// whatever is stored, so publishing colours never resends or drops the image.
     pub icon: String,
     /// The shared server cursor as base64 image bytes; empty = no cursor. Set/cleared only by
     /// [`Server::set_server_cursor`], exactly like the icon: [`Server::set_livery`] ignores
-    /// this field and preserves whatever is stored. The two images are independent — setting
+    /// this field and preserves whatever is stored. The two images are independent; setting
     /// one never disturbs the other.
     pub cursor: String,
 }
@@ -624,7 +624,7 @@ fn write_livery(doc: &mut AutoCommit, l: &Livery) -> Result<(), AutomergeError> 
     Ok(())
 }
 
-/// Write **only** the server icon (`""` clears it), leaving the colour fields untouched —
+/// Write **only** the server icon (`""` clears it), leaving the colour fields untouched;
 /// the image is a separate, much larger value with its own command, so the two never have
 /// to be republished together.
 fn write_server_icon(doc: &mut AutoCommit, icon: &str) -> Result<(), AutomergeError> {
@@ -634,7 +634,7 @@ fn write_server_icon(doc: &mut AutoCommit, icon: &str) -> Result<(), AutomergeEr
 }
 
 /// Write **only** the server cursor (`""` clears it), leaving the colour fields *and the icon*
-/// untouched — the mirror of [`write_server_icon`], so the two images have wholly independent
+/// untouched; the mirror of [`write_server_icon`], so the two images have wholly independent
 /// lifetimes and neither has to be republished with the other.
 fn write_server_cursor(doc: &mut AutoCommit, cursor: &str) -> Result<(), AutomergeError> {
     doc.put(ROOT, L_V, LIVERY_VERSION)?;
@@ -642,7 +642,7 @@ fn write_server_cursor(doc: &mut AutoCommit, cursor: &str) -> Result<(), Automer
     Ok(())
 }
 
-/// Materialize the livery document (a missing/foreign-shaped field reads as empty — so a
+/// Materialize the livery document (a missing/foreign-shaped field reads as empty; so a
 /// doc written before the icon/cursor keys existed reads back with neither).
 fn read_livery(doc: &AutoCommit) -> Livery {
     let mut tokens = HashMap::new();
@@ -665,7 +665,7 @@ fn read_livery(doc: &AutoCommit) -> Livery {
 //
 // One shared CRDT document per server (`DocType::Badges`, id `BADGES_DOC`): a map keyed by
 // member **device fingerprint** → `{ label, color }`, the small labelled tag an owner/admin
-// pins next to a member's name (e.g. `ARTIST` in teal). Written by owners/admins only —
+// pins next to a member's name (e.g. `ARTIST` in teal). Written by owners/admins only;
 // honest-client gating at the same policy layer as the livery/roles/pins (the op log is
 // inner-signed, so authorship of a forged write is attributable either way).
 //
@@ -691,7 +691,7 @@ pub const MAX_BADGE_LABEL_BYTES: usize = 24;
 pub const MAX_BADGE_COLOR_BYTES: usize = 16;
 /// Maximum length of the fingerprint a badge is keyed by (a hex device fingerprint).
 pub const MAX_BADGE_FINGERPRINT_BYTES: usize = 128;
-/// Maximum number of badge entries one server's document may carry — the whole map gossips
+/// Maximum number of badge entries one server's document may carry; the whole map gossips
 /// with every change, so this bounds what members replicate.
 pub const MAX_BADGES: usize = 128;
 
@@ -699,7 +699,7 @@ pub const MAX_BADGES: usize = 128;
 /// case-insensitively, after trimming). The client applies the same rule on read.
 pub const RESERVED_BADGE_LABELS: [&str; 4] = ["owner", "admin", "mod", "moderator"];
 
-/// A member's custom badge — a short label plus a colour, both opaque to the backend.
+/// A member's custom badge; a short label plus a colour, both opaque to the backend.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberBadge {
     /// The badge text (e.g. `ARTIST`); never empty in a stored entry (an empty label removes it).
@@ -773,14 +773,14 @@ fn is_reserved_badge_label(label: &str) -> bool {
 // profiles/roles/badges stay origin-keyed with no doc re-keying at all
 // (`docs/design-multi-device.md`).
 //
-// The **owner writes it, at admission time**. Admission is owner-serialized — only the designated
-// committer runs the MLS Add — so unlike every other shared document here there is exactly one
+// The **owner writes it, at admission time**. Admission is owner-serialized; only the designated
+// committer runs the MLS Add; so unlike every other shared document here there is exactly one
 // writer and no write race to reason about.
 //
 // Every entry is re-derived from its stored certificate on read: it survives only if the
 // certificate verifies under the origin it names, is bound to THIS group, and its subject, origin
 // and name match the key and the fields stored beside it. A modified client that writes a bogus
-// entry therefore changes nothing — forging one would take an origin's private key. That matters
+// entry therefore changes nothing; forging one would take an origin's private key. That matters
 // more here than for the livery or badges, because the owner's **depth-1 admission gate** reads
 // this map: without the re-derivation, a member could nominate someone as a "companion" and stop
 // them ever certifying a device of their own.
@@ -806,7 +806,7 @@ const D_OWNER_PK: &str = "opk";
 /// The **owner's** signature over the entry (see [`device_entry_payload`]). A valid device
 /// certificate only proves an origin *wanted* this device; the owner's signature proves the
 /// owner *admitted* it. Without this, any member could `post` a self-minted (genuinely signed)
-/// certificate naming an arbitrary subject straight into the doc — poisoning the depth-1 gate,
+/// certificate naming an arbitrary subject straight into the doc; poisoning the depth-1 gate,
 /// spoofing attribution, or marking the owner a companion. So the reader requires it, exactly as
 /// the member-roles roster requires the owner's signature (adversarial-review BLOCKING finding).
 const D_OWNER_SIG: &str = "osig";
@@ -830,7 +830,7 @@ fn device_entry_payload(group_id: &[u8], companion_fp: &str, cert_bytes: &[u8]) 
     p
 }
 
-/// Maximum number of companion devices one server's registry may carry — the whole map gossips
+/// Maximum number of companion devices one server's registry may carry; the whole map gossips
 /// with every change, so this bounds what members replicate. Generous next to [`MAX_BADGES`]:
 /// every member may have several devices.
 pub const MAX_DEVICES: usize = 256;
@@ -838,7 +838,7 @@ pub const MAX_DEVICES: usize = 256;
 /// One companion device as the product layer sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceEntry {
-    /// The **origin** device's fingerprint — the member identity this device's ops belong to, and
+    /// The **origin** device's fingerprint; the member identity this device's ops belong to, and
     /// the key its profile / roles / badges are stored under.
     pub origin: String,
     /// The human-set device name the origin certified (e.g. `phone`), rendered as the mono device
@@ -850,7 +850,7 @@ pub struct DeviceEntry {
 /// Record one admitted companion. Called by the **owner only**, from the admission drain.
 ///
 /// `owner_pk` is the owner's signing key and `owner_sig` its signature over
-/// [`device_entry_payload`] for this entry — the reader requires both, so an entry a non-owner
+/// [`device_entry_payload`] for this entry; the reader requires both, so an entry a non-owner
 /// forges into the doc (a genuinely-signed certificate for an arbitrary subject) is dropped.
 fn write_device_entry(
     doc: &mut AutoCommit,
@@ -879,7 +879,7 @@ fn write_device_entry(
 /// The set of companion devices a batch of revocations actually revokes: a revocation counts
 /// only when its origin matches the companion's **registered** origin (`companions`). This is the
 /// cross-check that stops member A from evicting member B's device by signing a revocation that
-/// names B's device id — A holds only its own origin key, and even a syntactically-valid
+/// names B's device id; A holds only its own origin key, and even a syntactically-valid
 /// revocation for someone else's device is ignored. (M5; pulled out so it is unit-testable
 /// without any wire/tick machinery.)
 fn honored_revocations(
@@ -893,7 +893,7 @@ fn honored_revocations(
         .collect()
 }
 
-/// Record one device revocation (M5). Written by the revoked device's **origin** — the
+/// Record one device revocation (M5). Written by the revoked device's **origin**; the
 /// revocation is self-authenticating (origin-signed), and the reader only honours one whose origin
 /// matches the companion's registered origin, so no owner counter-signature is needed here.
 fn write_revocation_entry(
@@ -925,7 +925,7 @@ fn write_revocation_entry(
 /// proves that some origin device *wanted* this companion; it does not prove the group *admitted*
 /// it, and its subject can be any device id. So every entry must additionally carry the current
 /// owner's signature over [`device_entry_payload`] (`owner_id` is the group's designated
-/// committer), and an entry missing or failing that check is dropped — closing the forged-entry
+/// committer), and an entry missing or failing that check is dropped; closing the forged-entry
 /// attack. Certificate re-verification stays as defence in depth.
 fn read_device_certs(
     doc: &AutoCommit,
@@ -1008,32 +1008,32 @@ fn read_device_revocations(doc: &AutoCommit) -> Vec<DeviceRevocation> {
 // append-only list of file entries `{ name, size, mime, cid, author }`. The bytes live in
 // the blob store and are fetched on demand over the mesh (8l); only the small metadata
 // gossips in the (encrypted) index. NOTE: blobs are stored plaintext at rest and served
-// members-only — per-file encryption-at-rest (`catcoms-storage::seal_file`) is a hardening
+// members-only; per-file encryption-at-rest (`catcoms-storage::seal_file`) is a hardening
 // follow-up; the index metadata is already confidential (it is an encrypted CRDT doc).
 
 /// The reserved document id for the per-server file index.
 const FILE_INDEX_DOC: u128 = 0;
 /// The reserved document id for the per-server status feed (`DocType::Status`).
 const STATUS_DOC: u128 = 0;
-/// The reserved document id for the per-server wiki (`DocType::Wiki`) — one doc that is a
+/// The reserved document id for the per-server wiki (`DocType::Wiki`); one doc that is a
 /// map of page name → page body.
 const WIKI_DOC: u128 = 0;
 
 /// The reserved root key holding the wiki's **per-page metadata** map (`page name -> format`).
 ///
 /// NUL-prefixed on purpose: a NUL is untypeable as a page name, so it can never collide with a
-/// real page, and — because it holds an automerge **`Map`**, not a `Text` — [`read_wiki_map`]
+/// real page, and; because it holds an automerge **`Map`**, not a `Text`; [`read_wiki_map`]
 /// (which only materializes `Text` values) is blind to it. That is the backward-compatibility
 /// mechanism: an older peer that has never heard of formats merges this key through the CRDT
 /// without ever showing it as a page.
 const WIKI_META_KEY: &str = "\u{0}meta";
 
-/// Maximum length of a wiki page name, in characters — the cap the frontend's `[[link]]` grammar
+/// Maximum length of a wiki page name, in characters; the cap the frontend's `[[link]]` grammar
 /// enforces, mirrored here so an over-long name can never be *written* either.
 pub const MAX_WIKI_NAME_CHARS: usize = 120;
 
 /// The render formats a page may declare. A page **absent** from the metadata map has no
-/// declared format and renders as markdown — the default is "missing", never a written value,
+/// declared format and renders as markdown; the default is "missing", never a written value,
 /// so a doc written before formats existed reads correctly.
 const WIKI_FORMATS: [&str; 2] = ["md", "wiki"];
 
@@ -1052,7 +1052,7 @@ fn write_wiki_page(doc: &mut AutoCommit, name: &str, body: &str) -> Result<(), A
 
 /// Materialize the wiki document into a `page name -> body` map (each body a `Text` object).
 ///
-/// Reserved (NUL-prefixed) root keys are skipped explicitly — defence in depth beside the
+/// Reserved (NUL-prefixed) root keys are skipped explicitly; defence in depth beside the
 /// `Text`-only type filter, so a reserved key can never surface as a page even if a future
 /// schema stores something text-shaped under one.
 fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
@@ -1071,7 +1071,7 @@ fn read_wiki_map(doc: &AutoCommit) -> HashMap<String, String> {
 }
 
 /// Trim and validate a wiki page name: non-empty, not reserved (no leading NUL), and within
-/// [`MAX_WIKI_NAME_CHARS`] — the same cap the frontend's `[[link]]` grammar enforces, so a name
+/// [`MAX_WIKI_NAME_CHARS`]; the same cap the frontend's `[[link]]` grammar enforces, so a name
 /// that can be written is always a name that can be linked.
 fn valid_wiki_name(name: &str) -> Result<String, AppError> {
     let name = name.trim();
@@ -1089,13 +1089,13 @@ fn valid_wiki_name(name: &str) -> Result<String, AppError> {
     Ok(name.to_string())
 }
 
-/// Every metadata map currently living at the reserved key, in automerge's conflict order —
+/// Every metadata map currently living at the reserved key, in automerge's conflict order;
 /// the **last** is the winner `doc.get` would return.
 ///
 /// There is normally exactly one. But the map is created lazily by whoever first sets a format,
 /// so two members who do that concurrently each `put_object` a *fresh* `Map` at the same root
 /// key; on merge automerge keeps both objects and picks one winner. Reads therefore union all
-/// of them (winner last, so it takes precedence) and deletes hit all of them — otherwise a
+/// of them (winner last, so it takes precedence) and deletes hit all of them; otherwise a
 /// format set on the losing side would silently vanish, or a deleted page's entry resurface.
 fn wiki_meta_objs(doc: &AutoCommit) -> Vec<ObjId> {
     doc.get_all(ROOT, WIKI_META_KEY)
@@ -1105,7 +1105,7 @@ fn wiki_meta_objs(doc: &AutoCommit) -> Vec<ObjId> {
         .collect()
 }
 
-/// Get (or create) the wiki's metadata map — the conflict winner if several exist.
+/// Get (or create) the wiki's metadata map; the conflict winner if several exist.
 fn wiki_meta_obj(doc: &mut AutoCommit) -> Result<ObjId, AutomergeError> {
     match doc.get(ROOT, WIKI_META_KEY)? {
         Some((Value::Object(ObjType::Map), id)) => Ok(id),
@@ -1114,7 +1114,7 @@ fn wiki_meta_obj(doc: &mut AutoCommit) -> Result<ObjId, AutomergeError> {
 }
 
 /// Record a page's render `format` (`"md"` or `"wiki"`). A plain last-writer-wins scalar put:
-/// a format is a toggle, so a concurrent flip resolving to one of the two values is correct —
+/// a format is a toggle, so a concurrent flip resolving to one of the two values is correct;
 /// unlike the body, which merges character-by-character.
 fn set_wiki_format(doc: &mut AutoCommit, name: &str, format: &str) -> Result<(), AutomergeError> {
     let meta = wiki_meta_obj(doc)?;
@@ -1137,7 +1137,7 @@ fn read_wiki_meta(doc: &AutoCommit) -> HashMap<String, String> {
     out
 }
 
-/// Delete a wiki page — its body and its metadata entry.
+/// Delete a wiki page; its body and its metadata entry.
 fn delete_wiki_page_op(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeError> {
     doc.delete(ROOT, name)?;
     for meta in wiki_meta_objs(doc) {
@@ -1173,14 +1173,14 @@ fn rename_wiki_page_op(doc: &mut AutoCommit, from: &str, to: &str) -> Result<(),
 // One shared CRDT document per server (`DocType::Calendar`, id `CALENDAR_DOC`): a versioned map
 // (like the livery/badge docs) of **event id → `{ title, body, start, end, author, created }`**.
 // Each event lives under its own random id key, so two members creating events concurrently
-// write *distinct* keys that both survive a merge — there is no container two writers could
+// write *distinct* keys that both survive a merge; there is no container two writers could
 // create twice and lose one of.
 //
 // **Any member may create an event**: an event is server *content*, like a channel, a status post
-// or a channel topic — not presentation like the livery — so this is deliberately not owner/admin
+// or a channel topic; not presentation like the livery; so this is deliberately not owner/admin
 // gated. Deletion is the author's, or an owner/admin's (moderation), exactly like a chat message;
 // the gate is honest-client-enforced (the op log is inner-signed, so authorship of a forged write
-// is attributable either way — the documented R6 residual).
+// is attributable either way; the documented R6 residual).
 
 /// The reserved document id for the per-server calendar document.
 const CALENDAR_DOC: u128 = 0;
@@ -1198,7 +1198,7 @@ const C_AUTHOR: &str = "author";
 const C_CREATED: &str = "created";
 
 /// Maximum length of a server-event title, in UTF-8 bytes. Events live in a document every
-/// member replicates, so — like the channel topic and the livery values — they are size-bounded.
+/// member replicates, so; like the channel topic and the livery values; they are size-bounded.
 pub const MAX_EVENT_TITLE_BYTES: usize = 120;
 /// Maximum length of a server-event body (its longer description), in UTF-8 bytes.
 pub const MAX_EVENT_BODY_BYTES: usize = 1024;
@@ -1208,7 +1208,7 @@ pub const MAX_EVENT_BODY_BYTES: usize = 1024;
 /// render time exactly like a message author.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerEvent {
-    /// A stable per-event id (random hex), minted like a message id — so a delete addresses
+    /// A stable per-event id (random hex), minted like a message id; so a delete addresses
     /// exactly one event under concurrent merges.
     pub id: String,
     /// The event title (never empty in a stored entry).
@@ -1288,28 +1288,28 @@ fn read_events(doc: &AutoCommit) -> Vec<ServerEvent> {
 
 // --- member roles (Phase 10h + item 3) -------------------------------------
 //
-// The **owner** is the MLS designated committer (the founder — cryptographically anchored, not
+// The **owner** is the MLS designated committer (the founder; cryptographically anchored, not
 // stored); everyone else is a plain member or an **admin**.
 //
-// ENFORCEMENT (item 3 — replay-proof revocation; see `docs/design-grant-revocation.md`):
+// ENFORCEMENT (item 3; replay-proof revocation; see `docs/design-grant-revocation.md`):
 //
-// * **Owner** is the MLS designated committer (lowest leaf index) — only that device can act
+// * **Owner** is the MLS designated committer (lowest leaf index); only that device can act
 //   as committer, so the owner is cryptographically anchored, not a stored/forgeable field.
 //   It is NOT sticky: it follows the lowest *live* leaf, so if the founder ever leaves the
 //   group, ownership (and admin-granting power) passes to the next-lowest member. (Founder
 //   removal is not wired into the desktop app yet, so this is latent.) A new owner starts with
-//   an empty roster (prior grants lapse until re-granted) — no stale-grant inheritance.
+//   an empty roster (prior grants lapse until re-granted); no stale-grant inheritance.
 //
 // * **Admin** authority is the **owner's local authoritative roster** (`ChannelSync::admin_roster`,
 //   persisted in the snapshot). Because only the owner runs admission (Option C), the gate
-//   (`inviter_is_authorized`) reads that local set, which a malicious member cannot write — so a
+//   (`inviter_is_authorized`) reads that local set, which a malicious member cannot write; so a
 //   demoted admin re-adding/replaying its old grant into the shared CRDT can no longer
 //   re-authorize itself (closes the old revocation-by-deletion residual). The owner publishes a
 //   single owner-signed `roster` value into `DocType::MemberRoles` for **display only**; readers
 //   verify the owner's signature, so a tampered copy is at worst cosmetic (never an admission).
 //
 // Residual: a tampered/stale published roster can transiently mislead *other members'* role
-// badges (cosmetic, R4-class). The guarantee rests on single-committer admission — do NOT enable
+// badges (cosmetic, R4-class). The guarantee rests on single-committer admission; do NOT enable
 // `max_committer_rank ≥ 1` (a second committer would re-introduce the replay surface).
 
 // `ROLES_DOC`, `roster_payload`, `encode_roster`, `read_published_roster`, and `fingerprint` live
@@ -1320,7 +1320,7 @@ fn read_events(doc: &AutoCommit) -> Vec<ServerEvent> {
 pub enum Role {
     /// The server owner (the MLS designated committer / founder).
     Owner,
-    /// An admin (granted by the owner) — may mint invites.
+    /// An admin (granted by the owner); may mint invites.
     Admin,
     /// A regular member.
     Member,
@@ -1357,7 +1357,7 @@ const F_REF: &str = "ref";
 // written by such a peer simply decodes as "not recorded".
 const F_EXPIRES: &str = "exp";
 
-/// How long a shared file stays in **circulation** — the default lifetime stamped on every new
+/// How long a shared file stays in **circulation**; the default lifetime stamped on every new
 /// listing by [`Server::add_file`].
 ///
 /// One month, matching `catcoms_storage::ONE_MONTH_MS` (the retention engine's global default);
@@ -1374,15 +1374,15 @@ pub const FILE_EXPIRY_DEFAULT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// deadlines.
 ///
 /// **NOTHING ENFORCES THIS YET.** As of this change the deadline is *recorded and displayed*
-/// metadata only — no eviction, no drop-from-circulation, no GC consults it. `catcoms-storage`'s
+/// metadata only; no eviction, no drop-from-circulation, no GC consults it. `catcoms-storage`'s
 /// [`RetentionIndex`](catcoms_storage::RetentionIndex) is a complete 3-scope expiry + GC engine,
 /// but it is **not wired into this layer at all**: the shared-file index records expiry, the blob
 /// store evicts nothing, and an "expired" file keeps circulating exactly as before. The point of
-/// stamping it now is that the eventual enforcement pass has honest inputs — including
+/// stamping it now is that the eventual enforcement pass has honest inputs; including
 /// [`Server::wiki_pinned_cids`], which it MUST consult (wiki-embedded files never decay).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileExpiry {
-    /// No deadline was ever recorded — a listing written before this field existed, or by a peer
+    /// No deadline was ever recorded; a listing written before this field existed, or by a peer
     /// that predates it. Distinct from [`FileExpiry::Never`]: we do not know what was intended,
     /// so the UI says "not recorded (older share)" rather than promising anything.
     Unrecorded,
@@ -1394,7 +1394,7 @@ pub enum FileExpiry {
 
 impl FileExpiry {
     /// The deadline in ms epoch, if one is recorded. Both [`FileExpiry::Unrecorded`] and
-    /// [`FileExpiry::Never`] answer `None` — use the variant itself to tell them apart.
+    /// [`FileExpiry::Never`] answer `None`; use the variant itself to tell them apart.
     pub fn deadline_ms(self) -> Option<u64> {
         match self {
             FileExpiry::At(ms) => Some(ms),
@@ -1417,7 +1417,7 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 const CHUNK_BYTES: usize = 8 * 1024 * 1024;
 
 /// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
-/// bytes) — the file's stable identity / download+embed handle (a chunked file has no single
+/// bytes); the file's stable identity / download+embed handle (a chunked file has no single
 /// ciphertext blob); `author` is the uploader's device fingerprint. The file's bytes are
 /// end-to-end encrypted under the group file-wrap key (Phase 9h), chunk by chunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1428,7 +1428,7 @@ pub struct FileEntry {
     pub size: u64,
     /// MIME type (best-effort; may be empty).
     pub mime: String,
-    /// Content address of the **ciphertext** blob (raw 32 bytes) — the download handle.
+    /// Content address of the **ciphertext** blob (raw 32 bytes); the download handle.
     pub cid: Vec<u8>,
     /// The uploader's device fingerprint.
     pub author: String,
@@ -1438,7 +1438,7 @@ pub struct FileEntry {
     /// The encoded [`FileRef`] (wrapped per-file key + addresses) needed to decrypt. Carried
     /// in the encrypted index; not forwarded to the UI.
     pub file_ref: Vec<u8>,
-    /// When THIS listing drops out of circulation — see [`FileExpiry`] for the three states and
+    /// When THIS listing drops out of circulation; see [`FileExpiry`] for the three states and
     /// for the blunt truth that nothing enforces it yet.
     pub expires: FileExpiry,
 }
@@ -1459,7 +1459,7 @@ pub struct FileListing {
 
 /// The shared file list with per-file local-availability counts, plus whether **any** catch-up
 /// peer is currently reachable to fetch missing chunks from. `has_peers` is a cheap in-memory
-/// signal — it does NOT prove a given file is held by any peer, only that a fetch could be tried.
+/// signal; it does NOT prove a given file is held by any peer, only that a fetch could be tried.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesView {
     /// The listed files with availability counts.
@@ -1502,7 +1502,7 @@ fn write_file_entry(
     Ok(())
 }
 
-/// Write a listing's circulation expiry. [`FileExpiry::Unrecorded`] leaves the key **absent** —
+/// Write a listing's circulation expiry. [`FileExpiry::Unrecorded`] leaves the key **absent**;
 /// that is exactly what a legacy entry looks like, so it is the one state we never fabricate on
 /// an entry that already has a deadline (`set_file_expiry` can only ask for the other two).
 fn put_expiry(
@@ -1521,7 +1521,7 @@ fn put_expiry(
 }
 
 /// Read a listing's circulation expiry. Absent (or any unexpected scalar type) decodes as
-/// [`FileExpiry::Unrecorded`], so a legacy entry — and any entry a future peer writes oddly —
+/// [`FileExpiry::Unrecorded`], so a legacy entry; and any entry a future peer writes oddly;
 /// round-trips without claiming a deadline it never had.
 fn expiry_field(doc: &AutoCommit, obj: &ObjId) -> FileExpiry {
     match doc.get(obj, F_EXPIRES) {
@@ -1567,7 +1567,7 @@ fn read_file_entries(doc: &AutoCommit) -> Vec<FileEntry> {
 /// restricted to folder `folder` when given. With `folder = None` *every* entry for that content
 /// goes: the index is an append-only list, so a concurrent double-add can leave more than one
 /// entry for the same content, and unlisting must remove them all. With `folder = Some(..)` only
-/// that folder's listing goes — content dedup makes several listings of one file deliberate
+/// that folder's listing goes; content dedup makes several listings of one file deliberate
 /// (`add_file` re-lists shared content instead of re-storing it), so unlisting one of them must
 /// leave the others alone. Iterating top-down keeps the indices we have yet to visit stable as
 /// we delete. The content-addressed blobs are left in place; this only unlists.
@@ -1598,7 +1598,7 @@ fn delete_file_entry(
 /// Set the circulation expiry on every index entry matching `cid` **in folder `folder`** (a
 /// concurrent double-add can leave more than one listing for the same content in one folder, and
 /// they are the same listing as far as the user is concerned). Other folders' listings of the
-/// same content keep their own deadlines — expiry is per listing, like unlisting.
+/// same content keep their own deadlines; expiry is per listing, like unlisting.
 fn set_file_entry_expiry(
     doc: &mut AutoCommit,
     cid: &[u8],
@@ -1625,7 +1625,7 @@ fn set_file_entry_expiry(
 }
 
 /// The two marker grammars the composer emits for a shared file (desktop `refs.ts::fileMarker`):
-/// `![alt](cid:HEX)` — an inline embed — and `[label](file:HEX)` — a reference chip. Both name a
+/// `![alt](cid:HEX)`; an inline embed; and `[label](file:HEX)`; a reference chip. Both name a
 /// file by its whole-file plaintext content address, so both count as *using* the file.
 const FILE_MARKER_PREFIXES: [&str; 2] = ["](cid:", "](file:"];
 
@@ -1633,7 +1633,7 @@ const FILE_MARKER_PREFIXES: [&str; 2] = ["](cid:", "](file:"];
 ///
 /// Deliberately a scanner and not a parser: it reads any `](cid:HEX)` / `](file:HEX)` occurrence
 /// in the raw body, which is what the renderer would turn into an embed/chip. Erring toward
-/// *over*-detection is the safe direction here — a false positive pins a file (it keeps
+/// *over*-detection is the safe direction here; a false positive pins a file (it keeps
 /// circulating) rather than dropping one that is still on a page.
 fn scan_file_markers(text: &str, out: &mut HashSet<String>) {
     for prefix in FILE_MARKER_PREFIXES {
@@ -1654,12 +1654,12 @@ fn scan_file_markers(text: &str, out: &mut HashSet<String>) {
     }
 }
 
-/// Where a shared file is referenced across this server's documents — the "Used in" answer, and
+/// Where a shared file is referenced across this server's documents; the "Used in" answer, and
 /// the input to the never-decay rule for wiki-embedded files.
 ///
 /// Usage is **content-addressed**: it is keyed by the file's whole-file plaintext cid, so every
 /// listing of the same bytes (content dedup lists one file under several names/folders) shares
-/// one usage answer. That is the honest semantic — a wiki page embeds *content*, not a listing.
+/// one usage answer. That is the honest semantic; a wiki page embeds *content*, not a listing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileUsage {
     /// Names of the live wiki pages whose body references this file, sorted. Non-empty ⇒ the
@@ -1703,13 +1703,13 @@ pub struct Server<T: MeshTransport, R: CryptoRngCore> {
     /// Per channel, the automerge change that authored each of this device's most recent
     /// messages: `(message id, change hash)`, oldest first, capped at
     /// [`MAX_TRACKED_OWN_MESSAGES`]. This is the only thing that ties a UI-visible message id to
-    /// the delivery evidence in the document, and it is **not persisted** — after a restart the
+    /// the delivery evidence in the document, and it is **not persisted**; after a restart the
     /// mapping is gone, so older messages report no delivery state at all rather than a wrong
     /// one. Only own messages are tracked; a peer's delivery is not ours to display.
     own_message_changes: HashMap<u128, VecDeque<(String, ChangeHash)>>,
     /// A cheap (crypto-free) content signature of the `Devices` document at the last reconcile.
     /// Re-validating that registry costs one signature check per entry, so it is rebuilt only
-    /// when the document actually changed — not on every tick. `None` = never reconciled.
+    /// when the document actually changed; not on every tick. `None` = never reconciled.
     devices_sig: Option<u64>,
 }
 
@@ -1724,10 +1724,10 @@ pub struct DeliveryState {
     /// The message id, as it appears in [`ChatMessage::id`].
     pub id: String,
     /// How many **other** members have proved they hold this message. Evidence-based and
-    /// one-sided: it only ever rises, and `0` means "no proof yet", *not* "not delivered" — so
+    /// one-sided: it only ever rises, and `0` means "no proof yet", *not* "not delivered"; so
     /// a renderer must show nothing rather than a failure for `0`.
     pub delivered: usize,
-    /// How many members are reachable right now — the same count that drives the presence
+    /// How many members are reachable right now; the same count that drives the presence
     /// indicators ([`Server::online_members`]). Independent of `delivered`, which can exceed it
     /// (a member that received the message and has since gone offline still holds it).
     pub reachable: usize,
@@ -1797,8 +1797,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Join a server as a **companion device**, presenting a [`PerServerGrant`] from a grant
     /// bundle instead of an invite (multi-device M3).
     ///
-    /// This rides the invite join's shape exactly — the caller has already connected to `contact`
-    /// using the grant's `bootstrap` / `rendezvous` (which are the invite's own reach fields) —
+    /// This rides the invite join's shape exactly; the caller has already connected to `contact`
+    /// using the grant's `bootstrap` / `rendezvous` (which are the invite's own reach fields);
     /// with two substitutions:
     ///
     /// - the **ledger check becomes certificate verification** on the admitting owner, and
@@ -1871,7 +1871,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         })
     }
 
-    /// This server's MLS group id (stable across restarts) — keys its on-disk blob directory.
+    /// This server's MLS group id (stable across restarts); keys its on-disk blob directory.
     pub fn group_id(&self) -> Vec<u8> {
         self.sync.group_id()
     }
@@ -1903,7 +1903,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Send a chat message that replies to `reply_to` (the parent message's id; empty for a plain
-    /// message). The pointer is advisory display metadata — it doesn't affect ordering or delivery.
+    /// message). The pointer is advisory display metadata; it doesn't affect ordering or delivery.
     pub async fn send_reply(
         &mut self,
         channel: u128,
@@ -1933,7 +1933,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Edit the text of one of **your own** messages (by id) in a channel. Honest-client gating:
     /// refused if the message isn't authored by this device (a modified client could bypass it, as
-    /// with all CRDT content — see THREAT-MODEL.md). A no-op edit (same text) is dropped, so the
+    /// with all CRDT content; see THREAT-MODEL.md). A no-op edit (same text) is dropped, so the
     /// `post` always carries a real change (automerge suppresses a same-value `put`).
     pub async fn edit_message(
         &mut self,
@@ -1952,7 +1952,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         };
         if current.text == new_text {
-            return Ok(()); // unchanged — don't post a redundant op
+            return Ok(()); // unchanged; don't post a redundant op
         }
         let edited = self.sync.now_ms();
         let id = id.to_string();
@@ -1965,9 +1965,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Delete a message (by id) from a channel: **your own**, or — if you are the owner/admin —
+    /// Delete a message (by id) from a channel: **your own**, or; if you are the owner/admin;
     /// anyone's (moderation). Honest-client gating (a modified client could post a raw delete op
-    /// for any message regardless — the documented R6 residual). Errors if the message is gone or
+    /// for any message regardless; the documented R6 residual). Errors if the message is gone or
     /// you may not delete it.
     pub async fn delete_message(&mut self, channel: u128, id: &str) -> Result<(), AppError> {
         let me = self.my_fingerprint();
@@ -2017,7 +2017,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Pin or unpin a message (by id) in a channel. **Owner/admin only** (honest-client gating, like
-    /// message deletion — the documented R6 residual). Errors if the message is gone, you may not
+    /// message deletion; the documented R6 residual). Errors if the message is gone, you may not
     /// pin, or the pin state is already as requested (no redundant op).
     pub async fn set_pin(&mut self, channel: u128, id: &str, pinned: bool) -> Result<(), AppError> {
         if !matches!(self.my_role(), Role::Owner | Role::Admin) {
@@ -2029,7 +2029,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             return Err(AppError::Invalid("no such message".into()));
         };
         if msg.pinned == pinned {
-            return Ok(()); // already in the requested state — don't post a redundant op
+            return Ok(()); // already in the requested state; don't post a redundant op
         }
         let id = id.to_string();
         self.sync
@@ -2040,10 +2040,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Set (or clear, with `""`) a channel's **topic** — the short description shown in its
+    /// Set (or clear, with `""`) a channel's **topic**; the short description shown in its
     /// header. **Any member may set it**: channels themselves are open to create (they are
     /// name-addressed, with no registry and no gate), and a topic is channel *content* like a
-    /// message, not presentation like the livery — so this is deliberately not owner/admin gated.
+    /// message, not presentation like the livery; so this is deliberately not owner/admin gated.
     /// The op is inner-signed by this device, so authorship is attributable exactly as for a
     /// message. Rejects a topic over [`MAX_CHANNEL_TOPIC_BYTES`] UTF-8 bytes; an unchanged topic
     /// is a no-op (no redundant op), like an unchanged pin.
@@ -2055,7 +2055,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             )));
         }
         if self.channel_topic(channel) == topic {
-            return Ok(()); // already the requested topic — don't post a redundant op
+            return Ok(()); // already the requested topic; don't post a redundant op
         }
         let topic = topic.to_string();
         self.sync
@@ -2091,7 +2091,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Set this member's own profile (writes the local fingerprint's entry). The avatar
     /// image (rejected if larger than [`MAX_AVATAR_BYTES`]) is stored in the blob store and
-    /// referenced by content address — the gossiped document carries only the CID.
+    /// referenced by content address; the gossiped document carries only the CID.
     pub async fn set_profile(&mut self, profile: Profile) -> Result<(), AppError> {
         if profile.avatar.len() > MAX_AVATAR_BYTES {
             return Err(AppError::Invalid(format!(
@@ -2114,7 +2114,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// All known member profiles, keyed by device fingerprint. Each profile's avatar is
-    /// resolved from its content address against the **local** blob store — members whose
+    /// resolved from its content address against the **local** blob store; members whose
     /// avatar blob has not been fetched yet (see [`Server::fetch_missing_avatars`]) come
     /// back with an empty `avatar`.
     pub fn profiles(&self) -> HashMap<String, Profile> {
@@ -2148,7 +2148,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// Fetch any referenced avatar blobs we do not yet hold from the best known peer.
     /// Returns how many were newly fetched (so the caller can re-render). Call after the
     /// profile document changes (e.g. on join/convergence). Fetches at most
-    /// [`MAX_AVATAR_FETCHES_PER_PASS`] missing avatars per call — since each fetch is a
+    /// [`MAX_AVATAR_FETCHES_PER_PASS`] missing avatars per call; since each fetch is a
     /// blocking mesh round-trip, this bounds how long a single pass can stall the actor, so
     /// a member churning many distinct avatar CIDs cannot freeze peers' event loops (the
     /// remainder are picked up on subsequent ticks).
@@ -2202,7 +2202,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ///   already-stored chunk blobs. Nothing is sealed and no blob is written.
     ///
     /// The check is against this device's view of the index, so two devices adding the same
-    /// bytes concurrently can still produce two entries — the same pre-existing situation
+    /// bytes concurrently can still produce two entries; the same pre-existing situation
     /// [`delete_file`](Self::delete_file) already handles by unlisting every entry for a cid.
     /// Reuse also means the listing inherits the *first* upload's declared mime, and that a
     /// dedup against content this device has never downloaded adds a listing whose chunks are
@@ -2211,7 +2211,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// **Circulation expiry**: every listing this creates is stamped
     /// `now + `[`FILE_EXPIRY_DEFAULT_MS`] (one month), adjustable afterwards per listing via
     /// [`set_file_expiry`](Self::set_file_expiry). Expiry is *per listing*, so a dedup re-list
-    /// gets its **own fresh** deadline rather than inheriting the twin's — re-sharing the same
+    /// gets its **own fresh** deadline rather than inheriting the twin's; re-sharing the same
     /// bytes under a new name is a new act of sharing. Nothing enforces the deadline yet; see
     /// [`FileExpiry`].
     pub async fn add_file(
@@ -2233,7 +2233,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         // Chunked transfer: split into CHUNK_BYTES pieces, seal each under the group file-wrap key
-        // (9h — a fresh per-chunk content key) and store the ciphertext blob, then describe the
+        // (9h; a fresh per-chunk content key) and store the ciphertext blob, then describe the
         // file by a manifest (the whole-file plaintext cid + the ordered chunk FileRefs). The
         // (encrypted) index carries the manifest; the blob fetch caps only per-chunk size. The
         // file's identity is its whole-file plaintext cid.
@@ -2253,7 +2253,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             if twins.iter().any(|e| e.name == name && e.path == folder) {
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
-            // Same content, new name/folder: list it again against the SAME sealed blobs — but
+            // Same content, new name/folder: list it again against the SAME sealed blobs; but
             // with its own fresh deadline, not the twin's.
             let ref_bytes = twin.file_ref.clone();
             self.sync
@@ -2309,7 +2309,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// As [`download_file`](Self::download_file), but reports per-chunk progress over `progress` as
-    /// `(chunks_done, chunks_total)` — `(0, total)` first so the UI shows 0% immediately, then
+    /// `(chunks_done, chunks_total)`; `(0, total)` first so the UI shows 0% immediately, then
     /// `(i+1, total)` after each chunk. The actor wires this to a `DownloadProgress` event so a
     /// large multi-chunk download shows a progress bar.
     pub async fn download_file_with_progress(
@@ -2379,7 +2379,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 ))
             } else {
                 AppError::Invalid(format!(
-                    "file not available yet — no connected peer has chunk {idx}"
+                    "file not available yet; no connected peer has chunk {idx}"
                 ))
             });
         };
@@ -2434,7 +2434,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.fetch_and_open_chunk(&chunk_ref, idx).await
     }
 
-    /// Whether this device already holds **all** of the file's chunk blobs locally — i.e. it can
+    /// Whether this device already holds **all** of the file's chunk blobs locally; i.e. it can
     /// be opened/previewed without a network fetch. (A listed file whose chunks aren't all held
     /// yet is still downloadable from peers that have them.)
     pub fn file_available(&self, cid: &Cid) -> bool {
@@ -2467,7 +2467,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// The shared file list with per-file local-availability counts and a cheap "any peer
-    /// reachable" flag, for the file browser's availability indicator. Zero network cost — purely
+    /// reachable" flag, for the file browser's availability indicator. Zero network cost; purely
     /// local blob-store + in-memory peer-set checks. See [`FilesView`].
     pub fn files_view(&self) -> FilesView {
         let files = self
@@ -2488,7 +2488,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
     }
 
-    /// Whether ≥1 transport peer is connected **right now** — a cheap, accurate proxy for "a
+    /// Whether ≥1 transport peer is connected **right now**; a cheap, accurate proxy for "a
     /// missing chunk could be fetched". Maintained on connect/disconnect (does NOT go stale like the
     /// catch-up source lists), though it does not prove any peer holds a particular file. Zero
     /// network cost (an in-memory peer-set check).
@@ -2497,13 +2497,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// The fingerprints of current members reachable right now (a live connection), for the
-    /// roster's presence indicators. Best-effort + authenticated — see
+    /// roster's presence indicators. Best-effort + authenticated; see
     /// [`ChannelSync::connected_member_fingerprints`].
     pub fn online_members(&self) -> Vec<String> {
         self.sync.connected_member_fingerprints()
     }
 
-    /// Milliseconds since the Unix epoch on this server's injected clock — the same seam message
+    /// Milliseconds since the Unix epoch on this server's injected clock; the same seam message
     /// timestamps use, so throttles stay deterministic under a test clock.
     pub fn now_ms(&self) -> u64 {
         self.sync.now_ms()
@@ -2511,7 +2511,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Delivery state for this device's recent messages in `channel`, oldest first
     /// (`docs/design-delivery-states.md`, D2). Empty for a channel this session has not sent to
-    /// — including every channel right after a restart, since the `message id → change` mapping
+    ///; including every channel right after a restart, since the `message id → change` mapping
     /// is deliberately not persisted.
     ///
     /// Read-only over state that already exists: `delivered` comes from the document's own causal
@@ -2538,7 +2538,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Pending incoming DM (friend) requests, each as `(sender fingerprint, sender display name,
-    /// opaque DM-group invite bytes)` — the name resolved against this group's profiles so the
+    /// opaque DM-group invite bytes)`; the name resolved against this group's profiles so the
     /// recipient sees who it's from regardless of which server is active.
     pub fn dm_requests(&self) -> Vec<(String, String, Vec<u8>)> {
         let profiles = self.profiles();
@@ -2592,10 +2592,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(self.sync.media_key(call_id)?)
     }
 
-    /// Remove a file from the shared index — **every** listing of that content — and
+    /// Remove a file from the shared index; **every** listing of that content; and
     /// **garbage-collect its now-orphaned chunk blobs** from local storage. **Owner or admin
-    /// only** — errors otherwise. The GC is **dedup-safe**: a chunk still referenced by another
-    /// listed file (chunks are content-addressed, so two files can share one — and content dedup
+    /// only**; errors otherwise. The GC is **dedup-safe**: a chunk still referenced by another
+    /// listed file (chunks are content-addressed, so two files can share one; and content dedup
     /// in [`add_file`](Self::add_file) makes several listings share *all* of them) is kept; only
     /// chunks no remaining manifest references are deleted (they're re-fetchable from any peer
     /// that still holds them). Like invites and member removal, the role gate is
@@ -2664,14 +2664,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Adjust ONE listing's circulation expiry: `Some(ms)` sets an absolute ms-epoch deadline,
     /// `None` means **keep forever**. Addressed by content address + folder, exactly like
-    /// [`delete_file_at`](Self::delete_file_at), because expiry is per listing — the same bytes
+    /// [`delete_file_at`](Self::delete_file_at), because expiry is per listing; the same bytes
     /// listed under two folders carry two independent deadlines.
     ///
     /// **Gate (honest-client, like the other R6 role gates):** the listing's **uploader**, the
     /// **owner**, or an **admin**. A member adjusting someone else's share is refused locally;
     /// the protocol residual is identical to invites and member removal.
     ///
-    /// Setting a deadline does **not** cause anything to happen at that instant — see
+    /// Setting a deadline does **not** cause anything to happen at that instant; see
     /// [`FileExpiry`]: this records metadata for a retention pass that does not exist yet, and a
     /// deadline on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids)
     /// in any case.
@@ -2714,8 +2714,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// either marker grammar (`![alt](cid:HEX)` embeds and `[label](file:HEX)` chips).
     ///
     /// **The never-decay set.** Product rule: a file embedded in a wiki page must never drop out
-    /// of circulation. Any future retention/GC pass — in this crate or in
-    /// `catcoms-storage` — **MUST** consult this set and treat a member of it as un-expirable,
+    /// of circulation. Any future retention/GC pass; in this crate or in
+    /// `catcoms-storage`; **MUST** consult this set and treat a member of it as un-expirable,
     /// whatever [`FileEntry::expires`] says.
     ///
     /// It is **derived, never stored**: the answer is recomputed from the wiki document every
@@ -2734,7 +2734,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// status posts and chat messages do. Both marker grammars count.
     ///
     /// Scans the wiki map, the status document, and **every channel document open on this
-    /// device** in-process (the same mechanic as [`inbox`](Self::inbox)) — so the chat count is
+    /// device** in-process (the same mechanic as [`inbox`](Self::inbox)); so the chat count is
     /// necessarily scoped to the channels this device has open and synced, not to some global
     /// truth no peer can see. Keyed by content address; see [`FileUsage`].
     pub fn file_usage(&self, cid: &Cid) -> FileUsage {
@@ -2778,7 +2778,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
-    /// Open (create/subscribe) the per-server **status feed** — a server-wide stream of
+    /// Open (create/subscribe) the per-server **status feed**; a server-wide stream of
     /// short posts (announcements/activity), reusing the canonical message schema on its
     /// own document. Call once after founding/joining.
     pub async fn open_status(&mut self) -> Result<(), AppError> {
@@ -2815,7 +2815,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .await?)
     }
 
-    /// Open (create/subscribe) the per-server **calendar** — the shared document holding the
+    /// Open (create/subscribe) the per-server **calendar**; the shared document holding the
     /// server's scheduled events. Call once after founding/joining.
     pub async fn open_calendar(&mut self) -> Result<(), AppError> {
         self.sync
@@ -2825,7 +2825,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Create a server event (authored by this device's fingerprint, clock-stamped); replies with
-    /// its fresh id. **Any member may** — an event is server *content*, like a channel, a status
+    /// its fresh id. **Any member may**; an event is server *content*, like a channel, a status
     /// post or a channel topic, so this is deliberately not owner/admin gated. The op is
     /// inner-signed by this device, so authorship is attributable exactly as for a message.
     ///
@@ -2875,9 +2875,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(id)
     }
 
-    /// Delete a server event (by id): **your own**, or — if you are the owner/admin — anyone's
+    /// Delete a server event (by id): **your own**, or; if you are the owner/admin; anyone's
     /// (moderation), exactly like [`Server::delete_message`]. Honest-client gating (a modified
-    /// client could post a raw delete op regardless — the documented R6 residual). Errors if the
+    /// client could post a raw delete op regardless; the documented R6 residual). Errors if the
     /// event is gone or you may not delete it.
     pub async fn delete_event(&mut self, id: &str) -> Result<(), AppError> {
         let me = self.my_fingerprint();
@@ -2961,7 +2961,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Set a wiki page's render format — `"md"` or `"wiki"`; any other value is refused.
+    /// Set a wiki page's render format; `"md"` or `"wiki"`; any other value is refused.
     ///
     /// The format lives in a reserved NUL-prefixed root key holding a `Map`, which older peers'
     /// readers skip, so declaring a format never disturbs a peer that predates the feature.
@@ -3041,7 +3041,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Publish the server livery. **Owner or admin only** — errors otherwise (honest-client
+    /// Publish the server livery. **Owner or admin only**; errors otherwise (honest-client
     /// gating, the same policy layer as roles/pins). An all-empty [`Livery`] removes it.
     /// Values are opaque here and bounded only by size (the client validates them on read);
     /// an over-long field or too many tokens is rejected, like an over-large avatar.
@@ -3104,7 +3104,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Set (or clear, with `""`) the shared **server icon** — base64 image bytes stored in
+    /// Set (or clear, with `""`) the shared **server icon**; base64 image bytes stored in
     /// the livery document. **Owner or admin only**, exactly like [`Server::set_livery`],
     /// which leaves this value alone. Rejects malformed base64 and anything over
     /// [`MAX_SERVER_ICON_BYTES`] decoded bytes, the same way an over-large avatar is rejected.
@@ -3131,7 +3131,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Set (or clear, with `""`) the shared **server cursor** — base64 image bytes stored in
+    /// Set (or clear, with `""`) the shared **server cursor**; base64 image bytes stored in
     /// the livery document, the exact mirror of [`Server::set_server_icon`]. **Owner or admin
     /// only**, and likewise left alone by [`Server::set_livery`] and by an icon write. Rejects
     /// malformed base64 and anything over [`MAX_SERVER_CURSOR_BYTES`] decoded bytes.
@@ -3186,11 +3186,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Assign a custom badge to the member with device fingerprint `fp`. **Owner or admin
-    /// only** — errors otherwise (honest-client gating, the same policy layer as the livery).
+    /// only**; errors otherwise (honest-client gating, the same policy layer as the livery).
     /// An empty `label` (or one that is only whitespace) **removes** that member's badge.
     ///
     /// The label/colour are opaque here and bounded only by size (the client validates the
-    /// colour on read), except that a label reserved for a built-in role is rejected — a
+    /// colour on read), except that a label reserved for a built-in role is rejected; a
     /// custom badge must never be able to read as `ADMIN`.
     pub async fn set_member_badge(
         &mut self,
@@ -3280,7 +3280,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Every admitted companion device, keyed by its own fingerprint. Empty until some member
     /// pairs a second device. Only entries whose stored certificate genuinely verifies for this
-    /// group are returned — see the module notes on the `Devices` document.
+    /// group are returned; see the module notes on the `Devices` document.
     pub fn devices(&self) -> HashMap<String, DeviceEntry> {
         self.device_certs()
             .into_iter()
@@ -3299,7 +3299,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// The **member identity** an author fingerprint belongs to: the certifying origin's
     /// fingerprint if `fp` is a companion device, otherwise `fp` itself.
     ///
-    /// This is the whole point of the registry — profiles, roles and badges stay keyed by the
+    /// This is the whole point of the registry; profiles, roles and badges stay keyed by the
     /// origin, so a companion's message renders under the member's name (M4 adds the device tag
     /// beside it) with no document re-keying anywhere.
     pub fn origin_of(&self, fp: &str) -> String {
@@ -3322,7 +3322,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     ///
     /// Read by the grant ceremony: a companion device has no roster before it is admitted, so the
     /// origin captures this key from its *live* group and puts it in the grant, and the companion
-    /// pins it to authenticate the owner's Welcome — the role `InviteToken::inviter_public_key`
+    /// pins it to authenticate the owner's Welcome; the role `InviteToken::inviter_public_key`
     /// plays for an invited joiner. `None` only for a group with no members (impossible in
     /// practice) or a non-Ed25519 roster key.
     pub fn owner_public_key(&self) -> Option<[u8; 32]> {
@@ -3375,7 +3375,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// re-validated companion → origin map and revocation set down to the sync layer, where the
     /// owner's depth-1 admission gate reads them.
     ///
-    /// Runs on every tick for every member. The **write** half only ever fires on the owner —
+    /// Runs on every tick for every member. The **write** half only ever fires on the owner;
     /// admission is owner-serialized, so nobody else has an admitted certificate to publish, and
     /// the document has exactly one writer. The **read** half is what keeps a joiner's
     /// attribution map current after a catch-up.
@@ -3414,7 +3414,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let sig = self.devices_signature();
         if self.devices_sig == Some(sig) {
-            return; // unchanged — skip the per-entry signature checks
+            return; // unchanged; skip the per-entry signature checks
         }
         self.devices_sig = Some(sig);
         let group_id = self.sync.group_id();
@@ -3428,7 +3428,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         .map(|c| (c.new_device_id, c.origin_id))
                         .collect();
                 // A revocation counts only if its origin matches the companion's REGISTERED origin
-                // (see `honored_revocations`) — so member A cannot evict member B's device.
+                // (see `honored_revocations`); so member A cannot evict member B's device.
                 let revoked = honored_revocations(&companions, &read_device_revocations(doc));
                 (companions, revoked)
             }
@@ -3455,7 +3455,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Revoke one of **your own** companion devices (M5: the "lost phone" verb). Signs an
     /// origin-signed [`DeviceRevocation`] and publishes it; the owner enforces the MLS Remove when
-    /// it next reconciles. Only the device's *origin* can call this — the revocation is signed with
+    /// it next reconciles. Only the device's *origin* can call this; the revocation is signed with
     /// this device's key, and the owner only honours a revocation whose origin matches the
     /// companion's registered origin. (An owner kicking someone else's member/devices uses
     /// [`Server::remove_member`], which removes leaves directly by owner authority.)
@@ -3469,7 +3469,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "only the device's own origin can revoke it".into(),
             ));
         }
-        // Resolve the companion fingerprint to its full device id (unambiguously — the registry is
+        // Resolve the companion fingerprint to its full device id (unambiguously; the registry is
         // keyed by the full-fingerprint we compare against).
         let revoked_id = self
             .members()
@@ -3535,7 +3535,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// The set of admin fingerprints, **filtered to current members** so a departed member does
     /// not resolve to a live admin. The **owner** displays its LOCAL authoritative roster (item 3
-    /// — the same source the admission gate uses, so a tampered/replayed CRDT copy can't mislead
+    ///; the same source the admission gate uses, so a tampered/replayed CRDT copy can't mislead
     /// the owner's own UI); other members read the owner-signed published copy.
     fn admin_set(&self) -> std::collections::HashSet<String> {
         let Some(owner_id) = self.sync.designated_committer_id() else {
@@ -3596,7 +3596,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .collect()
     }
 
-    /// Grant or revoke admin for a member fingerprint. **Owner only** — errors otherwise. Updates
+    /// Grant or revoke admin for a member fingerprint. **Owner only**; errors otherwise. Updates
     /// the owner's LOCAL authoritative roster (the admission source of truth, item 3) and publishes
     /// a fresh owner-signed copy into the roles doc for display; a demoted admin re-publishing its
     /// old roster into the CRDT cannot re-authorize itself because the gate reads the local set.
@@ -3655,8 +3655,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .unwrap_or_default()
     }
 
-    /// Lightweight activity stats over a channel's messages — total count, first/last wall-clock
-    /// timestamp, and the number of distinct days a message was sent — for the friends-list
+    /// Lightweight activity stats over a channel's messages; total count, first/last wall-clock
+    /// timestamp, and the number of distinct days a message was sent; for the friends-list
     /// sortings (activity / reconnect / recency) WITHOUT shipping message text to the UI.
     pub fn message_stats(&self, channel: u128) -> MessageStats {
         let msgs = self.messages(channel);
@@ -3679,8 +3679,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
     }
 
-    /// Scan every open channel for messages addressed to me — either an `@[my name]` mention (the
-    /// UI's mention marker) or a reply to one of my own messages — newest first, capped at `limit`.
+    /// Scan every open channel for messages addressed to me; either an `@[my name]` mention (the
+    /// UI's mention marker) or a reply to one of my own messages; newest first, capped at `limit`.
     /// Author names are resolved here because they are per-server. Excludes my own messages.
     pub fn inbox(&self, limit: usize) -> Vec<InboxItem> {
         let me = self.my_fingerprint();
@@ -3691,7 +3691,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .collect();
         // Build the mention marker from the SAME normalization the composer applies when it inserts
         // `@[Name]` (desktop `mentionName`), so a name with brackets/newlines/extra spaces or over
-        // the length cap is detected here exactly as it was written — not silently missed.
+        // the length cap is detected here exactly as it was written; not silently missed.
         let my_name = normalize_mention_name(&names.get(&me).cloned().unwrap_or_default());
         let marker = (!my_name.is_empty()).then(|| format!("@[{my_name}]"));
 
@@ -3767,7 +3767,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous)?)
     }
 
-    /// The roster — device ids of all current members.
+    /// The roster; device ids of all current members.
     pub fn members(&self) -> Vec<DeviceId> {
         self.sync.member_ids()
     }
@@ -3850,7 +3850,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.ingest_discovered(d).await;
     }
 
-    /// Advisory eclipse check — `true` if the node may be isolated (verify a member out of band).
+    /// Advisory eclipse check; `true` if the node may be isolated (verify a member out of band).
     /// Never gates anything; the actor surfaces a changed verdict to the UI.
     pub fn observe_eclipse(&mut self) -> bool {
         self.sync.observe_eclipse()
@@ -3870,7 +3870,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Catch a channel up from the **best known peer** (a proven member, else any known
-    /// peer) — no need to name a peer. Lets either side pull the backlog of a channel the
+    /// peer); no need to name a peer. Lets either side pull the backlog of a channel the
     /// other created. Returns `Ok(0)` if there is no peer to ask yet.
     pub async fn request_channel_catchup_any(&mut self, channel: u128) -> Result<usize, AppError> {
         Ok(self
@@ -3921,12 +3921,12 @@ mod tests {
     //
     // The founder is the owner *and* the origin here (a two-member group), which is the shape
     // the design's happy path allows: the member pairing a second device is the same member that
-    // serializes admissions. The certificate path is identical for any other member — only the
+    // serializes admissions. The certificate path is identical for any other member; only the
     // relay hop differs, and that is the already-reviewed admin-invite machinery.
 
     /// Time the M3 tests start at, well past any freshness horizon so `abs_diff` is meaningful.
     const T0: u64 = 1_700_000_000_000;
-    /// `MAX_DEVICE_CERT_AGE_MS` in `catcoms-sync` — the window a certificate may be admitted in.
+    /// `MAX_DEVICE_CERT_AGE_MS` in `catcoms-sync`; the window a certificate may be admitted in.
     const CERT_AGE: u64 = 3_600_000;
 
     /// A founder over `hub` whose clock the test controls.
@@ -3946,7 +3946,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The grant a member's origin device mints for one companion — exactly the object
+    /// The grant a member's origin device mints for one companion; exactly the object
     /// `pairing_mint` assembles per server, with a certificate this server actually signed.
     fn grant_from(
         server: &Server<MemNetwork, ChaCha20Rng>,
@@ -3986,7 +3986,7 @@ mod tests {
     ///
     /// The owner is ticked in a `select!` loop rather than `join!`ed, because a rejection the
     /// *presenting* device makes locally (a certificate that does not verify, or is not for this
-    /// device) never reaches the wire — so there would be no event for the owner's tick to
+    /// device) never reaches the wire; so there would be no event for the owner's tick to
     /// consume and a `join!` would simply hang.
     async fn present(
         hub: &std::sync::Arc<Hub>,
@@ -4044,7 +4044,7 @@ mod tests {
         .await
         .expect("the origin's certificate admits the companion");
 
-        // The companion is a real member with its own leaf — not a second holder of one key.
+        // The companion is a real member with its own leaf; not a second holder of one key.
         assert_eq!(phone.member_count(), 2);
         assert_eq!(alice.member_count(), 2);
         assert!(alice.members().contains(&phone_id));
@@ -4116,13 +4116,13 @@ mod tests {
 
     // NOTE: a full owner-enforces-removal round-trip over the single-node facade was flaky in the
     // harness (the `sync_once`/self-delivered-commit choreography, not the feature). The M5 logic
-    // is covered without it: `honored_revocations` (the origin cross-check — the security core) is
+    // is covered without it: `honored_revocations` (the origin cross-check; the security core) is
     // unit-tested above deterministically; the write/read of a revocation shares the owner-signed
     // `Devices`-doc path exercised by `a_forged_devices_document_entry_is_ignored`; and the MLS
     // Remove the owner performs is `ChannelSync::request_remove`, covered by the removal tests in
     // `catcoms-sync`. `drain_outbox` is fire-and-forget, so the enforcement call never blocks.
     #[tokio::test]
-    #[ignore = "harness choreography flake; see the note above — the M5 logic is covered elsewhere"]
+    #[ignore = "harness choreography flake; see the note above; the M5 logic is covered elsewhere"]
     async fn an_origin_revokes_its_own_companion_and_the_owner_removes_the_leaf() {
         // M5: the "lost phone" verb. The origin signs a revocation; the owner enforces the MLS
         // Remove. Here alice is both owner and origin (the common single-member case).
@@ -4152,7 +4152,7 @@ mod tests {
         assert_eq!(alice.member_count(), 2);
         assert_eq!(alice.devices().len(), 1);
 
-        // Revoke it. Only the origin may — a stranger fingerprint or a non-origin caller is refused.
+        // Revoke it. Only the origin may; a stranger fingerprint or a non-origin caller is refused.
         assert!(
             alice.revoke_device("deadbeef").await.is_err(),
             "no such device"
@@ -4163,7 +4163,7 @@ mod tests {
             .expect("the origin revokes its own device");
 
         // The owner enforces the removal on its next reconcile ticks. (Re-admission is separately
-        // blocked by the spent-certificate ledger — see `one_certificate_admits_one_device_once` —
+        // blocked by the spent-certificate ledger; see `one_certificate_admits_one_device_once`;
         // and the revoked set, without needing a fragile second wire round-trip here.)
         for _ in 0..4 {
             alice.sync_once().await.unwrap();
@@ -4235,7 +4235,7 @@ mod tests {
         assert_ne!(server_a.group_id(), server_b.group_id());
 
         let (secrets, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(9)).unwrap();
-        // A *valid* grant — for server A — presented to server B.
+        // A *valid* grant; for server A; presented to server B.
         let for_a = grant_from(&server_a, secrets.device_id(), "phone");
         let smuggled = PerServerGrant {
             group_id: server_b.group_id(),
@@ -4260,7 +4260,7 @@ mod tests {
     #[tokio::test]
     async fn a_certificate_from_a_non_member_origin_is_refused() {
         // The forgery a new device could always attempt: mint its own "origin" keypair and sign
-        // itself a certificate. Nothing stops it *signing* one — it is inert because the signer
+        // itself a certificate. Nothing stops it *signing* one; it is inert because the signer
         // is not on the roster.
         let hub = Hub::new();
         let clock = ManualClock::new(T0);
@@ -4355,7 +4355,7 @@ mod tests {
     #[tokio::test]
     async fn one_certificate_admits_one_device_once() {
         // Replay: a device removed from the group re-presents the certificate it was admitted
-        // with. The bind nonce is consumed in the (persisted) invite ledger, so it is inert —
+        // with. The bind nonce is consumed in the (persisted) invite ledger, so it is inert;
         // "already a member" is not the only thing standing in the way.
         let hub = Hub::new();
         let clock = ManualClock::new(T0);
@@ -4427,7 +4427,7 @@ mod tests {
             .devices()
             .contains_key(&fingerprint(&secrets.device_id())));
 
-        // The companion is a full member, so it *can* sign a certificate — its own key is on the
+        // The companion is a full member, so it *can* sign a certificate; its own key is on the
         // roster. The gate is that the owner knows it is a companion, not an origin.
         let (tablet, _) = begin_pairing(&mut ChaCha20Rng::seed_from_u64(11)).unwrap();
         let sub_grant = PerServerGrant {
@@ -4455,7 +4455,7 @@ mod tests {
     async fn a_tampered_certificate_is_refused() {
         // Every field is inside the signature, so any edit invalidates it. Both ends apply the
         // same predicate (`DeviceCertificate::verify`), so an honest client refuses to present a
-        // tampered certificate at all — and a modified one gets nowhere either.
+        // tampered certificate at all; and a modified one gets nowhere either.
         let hub = Hub::new();
         let clock = ManualClock::new(T0);
         let alice_peer = PeerId::from_u64(1);
@@ -4505,7 +4505,7 @@ mod tests {
         let grant = grant_from(&alice, mine.device_id(), "phone");
 
         // The nearest thing to a redirect an honest client can even attempt: another device
-        // presenting this grant. Refused before a byte leaves — the certificate names one key.
+        // presenting this grant. Refused before a byte leaves; the certificate names one key.
         assert!(present(
             &hub,
             2,
@@ -4552,7 +4552,7 @@ mod tests {
     #[test]
     fn a_forged_devices_document_entry_is_ignored() {
         // The registry is a CRDT any member can write into. An entry is trusted only if the
-        // CURRENT OWNER signed it — a device certificate alone proves an origin *wanted* a device,
+        // CURRENT OWNER signed it; a device certificate alone proves an origin *wanted* a device,
         // never that the group *admitted* it, and its subject can be any device id.
         let owner = catcoms_crypto::DeviceKeypair::generate(&mut ChaCha20Rng::seed_from_u64(9));
         let owner_id = owner.device_id();
@@ -4577,8 +4577,8 @@ mod tests {
         assert!(read_device_certs(&doc, &gid, &other_owner.device_id()).is_empty());
 
         // THE FORGERY (BLOCKING 1): a member writes its own genuinely-signed certificate directly,
-        // with NO owner signature. Alice certifies the victim's own origin id as a "companion" —
-        // a real signature by a real member — and posts it. It must NOT read, or it would poison
+        // with NO owner signature. Alice certifies the victim's own origin id as a "companion";
+        // a real signature by a real member; and posts it. It must NOT read, or it would poison
         // the depth-1 gate and spoof the victim's attribution.
         let forged =
             DeviceCertificate::issue(&alice, victim.device_id(), &gid, "phone", T0).unwrap();
@@ -4589,7 +4589,7 @@ mod tests {
             "an entry the owner never signed must be ignored"
         );
 
-        // An entry signed by a member pretending to be the owner (their own key) is rejected —
+        // An entry signed by a member pretending to be the owner (their own key) is rejected;
         // the signing key must content-address the owner id.
         let mut impostor = AutoCommit::new();
         owner_sign_entry(&mut impostor, &real, &gid, &alice);
@@ -4679,7 +4679,7 @@ mod tests {
         let over = "t".repeat(MAX_CHANNEL_TOPIC_BYTES + 1);
         assert!(alice.set_channel_topic(GENERAL, &over).await.is_err());
         assert_eq!(alice.channel_topic(GENERAL), at_cap, "unchanged");
-        // The cap counts UTF-8 *bytes*, not chars — a multi-byte topic over budget is refused too.
+        // The cap counts UTF-8 *bytes*, not chars; a multi-byte topic over budget is refused too.
         let multibyte = "é".repeat(MAX_CHANNEL_TOPIC_BYTES / 2 + 1); // 2 bytes each
         assert!(alice.set_channel_topic(GENERAL, &multibyte).await.is_err());
     }
@@ -4739,7 +4739,7 @@ mod tests {
             .any(|m| m.author == "beefbeef"));
 
         // An owner may delete it even though it isn't theirs (moderation); editing it is still
-        // refused (moderation is delete-only — no impersonation).
+        // refused (moderation is delete-only; no impersonation).
         assert!(alice.edit_message(GENERAL, "mid-01", "x").await.is_err());
         alice.delete_message(GENERAL, "mid-01").await.unwrap();
         assert!(!alice.messages(GENERAL).iter().any(|m| m.id == "mid-01"));
@@ -4777,7 +4777,7 @@ mod tests {
         let me = alice.my_fingerprint();
         assert!(alice.messages(GENERAL)[0].reactions.is_empty());
 
-        // Add 👍 — one reaction, by me.
+        // Add 👍; one reaction, by me.
         alice.toggle_reaction(GENERAL, &id, "👍").await.unwrap();
         let r = alice.messages(GENERAL)[0].reactions.clone();
         assert_eq!(r.len(), 1);
@@ -4830,7 +4830,7 @@ mod tests {
         let rb = read_messages(&b)[0].reactions.clone();
         assert_eq!(ra, rb, "the two replicas converge to identical reactions");
 
-        // 👍 kept BOTH reactors — the concurrent same-emoji adds did not clobber each other.
+        // 👍 kept BOTH reactors; the concurrent same-emoji adds did not clobber each other.
         let thumbs = ra.iter().find(|r| r.emoji == "👍").expect("👍 present");
         let mut by = thumbs.by.clone();
         by.sort();
@@ -5034,7 +5034,7 @@ mod tests {
         )
         .unwrap();
 
-        // The channel history, topic, display name and roster all survived — read offline.
+        // The channel history, topic, display name and roster all survived; read offline.
         let msgs = restored.messages(GENERAL);
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].text, "persist me");
@@ -5061,7 +5061,7 @@ mod tests {
         let me = alice.my_fingerprint();
         let snap = alice.snapshot().unwrap();
 
-        // Restore onto a fresh transport — note the founding display name "alice" is NOT the saved
+        // Restore onto a fresh transport; note the founding display name "alice" is NOT the saved
         // profile name, so a naive re-seed would clobber "Renamed Alice".
         let hub = Hub::new();
         let restored = Server::restore(
@@ -5144,7 +5144,7 @@ mod tests {
         assert_eq!(bob.channel_topic(GENERAL), "the main room");
 
         // Delivery state (D2). Bob demonstrably has "welcome!" now, but nothing Alice holds
-        // proves it yet — so her snapshot still reports no delivery, which the UI must render as
+        // proves it yet; so her snapshot still reports no delivery, which the UI must render as
         // "unknown" rather than as a failure.
         let snapshot = alice.delivery_snapshot(GENERAL);
         assert_eq!(snapshot.len(), 1, "only own messages are tracked");
@@ -5155,7 +5155,7 @@ mod tests {
             "Bob has sent nothing, so he has nothing to report"
         );
 
-        // …and *any* member may set it — Bob is not the owner and is not refused.
+        // …and *any* member may set it; Bob is not the owner and is not refused.
         assert_ne!(bob.my_role(), Role::Owner);
         bob.set_channel_topic(GENERAL, "bob was here")
             .await
@@ -5168,13 +5168,13 @@ mod tests {
         assert_eq!(alice.channel_topic(GENERAL), "bob was here");
         let snapshot = alice.delivery_snapshot(GENERAL);
         assert_eq!(snapshot[0].delivered, 1, "Bob provably holds the message");
-        // `reachable` is the presence count, tracked independently — the in-memory hub models no
+        // `reachable` is the presence count, tracked independently; the in-memory hub models no
         // connect/disconnect, so it stays 0 here even though delivery is proven. The two are not
         // a fraction: a member can hold a message and be offline.
         assert_eq!(snapshot[0].reachable, alice.online_members().len());
 
         // The calendar is its own document (`DocType::Calendar`), caught up exactly like the
-        // channel — so an event Alice created reaches the joiner.
+        // channel; so an event Alice created reaches the joiner.
         alice.open_calendar().await.unwrap();
         alice
             .create_event("Launch party", "bring cake", 9_000, 0)
@@ -5191,7 +5191,7 @@ mod tests {
         assert_eq!(events[0].author, alice.my_fingerprint());
 
         // Any member may create an event, but deletion is the author's or a moderator's: Bob is
-        // neither the owner nor an admin, so Alice's event is not his to remove — his own is.
+        // neither the owner nor an admin, so Alice's event is not his to remove; his own is.
         assert_ne!(bob.my_role(), Role::Owner);
         assert!(
             bob.delete_event(&events[0].id).await.is_err(),
@@ -5206,7 +5206,7 @@ mod tests {
     #[tokio::test]
     async fn members_derive_the_same_e2e_media_key() {
         // The crux of E2E voice: every member derives the SAME call media key locally from the MLS
-        // group secret — it never travels on the wire — and distinct calls get distinct keys.
+        // group secret; it never travels on the wire; and distinct calls get distinct keys.
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
         let mut alice = Server::found(
@@ -5312,7 +5312,7 @@ mod tests {
                 .await
                 .unwrap();
             snap = alice.snapshot().unwrap();
-        } // store + alice dropped — simulate the app closing
+        } // store + alice dropped; simulate the app closing
 
         // Re-open the vault (re-derive keys) and restore the server, as a restart does.
         let mut rng2 = ChaCha20Rng::seed_from_u64(8);
@@ -5378,7 +5378,7 @@ mod tests {
             Err(AppError::Invalid(_))
         ));
 
-        // The owner removes Bob — the MLS commit drops him from the roster.
+        // The owner removes Bob; the MLS commit drops him from the roster.
         alice.remove_member(&bob_fp).await.unwrap();
         assert_eq!(alice.member_count(), 1, "owner removed Bob");
     }
@@ -5419,14 +5419,14 @@ mod tests {
             .unwrap();
         assert_eq!(alice.files().len(), 1);
 
-        // A plain member cannot delete a file — the role gate rejects before anything else.
+        // A plain member cannot delete a file; the role gate rejects before anything else.
         assert!(matches!(
             bob.delete_file(&cid).await,
             Err(AppError::Invalid(_))
         ));
         assert_eq!(alice.files().len(), 1, "the file is still listed");
 
-        // The owner deletes it — the listing is removed.
+        // The owner deletes it; the listing is removed.
         alice.delete_file(&cid).await.unwrap();
         assert!(alice.files().is_empty(), "owner deleted the file");
 
@@ -5641,7 +5641,7 @@ mod tests {
             Err(AppError::Invalid(_))
         ));
 
-        // Role words are reserved, however they are cased or padded — a custom badge must
+        // Role words are reserved, however they are cased or padded; a custom badge must
         // never be able to read as a built-in role.
         for label in ["admin", " ADMIN ", "Owner", "mod", "Moderator"] {
             assert!(
@@ -5742,7 +5742,7 @@ mod tests {
                 .map(String::as_str)
                 == Some("owner")
         );
-        // The owner may write a grant, but a grant for a non-member never resolves to admin —
+        // The owner may write a grant, but a grant for a non-member never resolves to admin;
         // admin_set is filtered to current members, so a stale/bogus fp can't become admin.
         alice.set_admin("deadbeef", true).await.unwrap();
         assert_eq!(alice.role_of("deadbeef"), Role::Member);
@@ -5938,7 +5938,7 @@ mod tests {
         alice.open_wiki().await.unwrap();
         alice.write_wiki_page("Home", "hello").await.unwrap();
 
-        // Default: no metadata entry at all — the frontend reads "missing" as markdown, so a
+        // Default: no metadata entry at all; the frontend reads "missing" as markdown, so a
         // doc written before formats existed keeps rendering the same way.
         assert!(alice.wiki_meta().is_empty());
 
@@ -5965,7 +5965,7 @@ mod tests {
             );
         }
 
-        // The reserved metadata key is invisible to every page reader — it holds a Map, not a
+        // The reserved metadata key is invisible to every page reader; it holds a Map, not a
         // Text, and is NUL-prefixed besides.
         assert_eq!(alice.wiki_pages(), vec!["Home".to_string()]);
         assert_eq!(alice.wiki_map().len(), 1);
@@ -5992,7 +5992,7 @@ mod tests {
                 Err(AppError::Invalid(_))
             ));
         }
-        // Exactly at the cap is fine — the bound is inclusive, like the frontend's grammar.
+        // Exactly at the cap is fine; the bound is inclusive, like the frontend's grammar.
         let at_cap = "y".repeat(MAX_WIKI_NAME_CHARS);
         alice.write_wiki_page(&at_cap, "ok").await.unwrap();
         assert_eq!(alice.read_wiki_page(&at_cap), "ok");
@@ -6011,7 +6011,7 @@ mod tests {
         assert_eq!(alice.wiki_pages(), vec!["Rules".to_string()]);
         assert!(
             !alice.wiki_meta().contains_key("Home"),
-            "the metadata entry goes with the page — a recreated page starts at the default"
+            "the metadata entry goes with the page; a recreated page starts at the default"
         );
 
         // Deleting a page that is not there is an error, not a silent no-op.
@@ -6312,7 +6312,7 @@ mod tests {
     #[tokio::test]
     async fn the_same_bytes_in_a_second_folder_are_relisted_not_restored() {
         // The same image attached to a second wiki page: a new listing, but it points at the
-        // already-sealed blobs — no re-seal (which, being randomized, would store a second,
+        // already-sealed blobs; no re-seal (which, being randomized, would store a second,
         // byte-different copy of the same content).
         let mut alice = founder();
         alice.open_files().await.unwrap();
@@ -6514,7 +6514,7 @@ mod tests {
     #[tokio::test]
     async fn a_legacy_file_entry_without_an_expiry_decodes_as_not_recorded() {
         // A listing written before the field existed: same doc shape, no `exp` key. It must
-        // decode + round-trip intact, and read back as "not recorded" — NOT as keep-forever,
+        // decode + round-trip intact, and read back as "not recorded"; NOT as keep-forever,
         // which is a promise nobody made.
         let clock = ManualClock::new(T0);
         let mut alice = founder_with_clock(&clock);
@@ -6595,7 +6595,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Bob really can see the listing — so the refusal below is the ROLE gate, not "no such
+        // Bob really can see the listing; so the refusal below is the ROLE gate, not "no such
         // file" standing in for it.
         bob.open_files().await.unwrap();
         let _ = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
@@ -6638,7 +6638,7 @@ mod tests {
     #[tokio::test]
     async fn expiry_is_per_listing_and_a_dedup_relisting_gets_a_fresh_one() {
         // Content dedup lists the same bytes twice against one set of sealed blobs. Each listing
-        // is its own act of sharing, so each carries its own deadline — the second must be
+        // is its own act of sharing, so each carries its own deadline; the second must be
         // stamped at the time IT was shared, not inherited from the twin.
         let clock = ManualClock::new(T0);
         let mut alice = founder_with_clock(&clock);

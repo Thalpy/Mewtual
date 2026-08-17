@@ -1,14 +1,14 @@
 //! Storage & retention (Phase 5).
 //!
-//! - [`cid`] — content addresses ([`Cid`] = `BLAKE3(bytes)`), computed over the
+//! - [`cid`]; content addresses ([`Cid`] = `BLAKE3(bytes)`), computed over the
 //!   **ciphertext** that actually travels and is stored, so a blob verifies
 //!   end-to-end without being decrypted.
-//! - [`blob`] — a [`BlobStore`] trait with integrity-checked in-memory and
+//! - [`blob`]; a [`BlobStore`] trait with integrity-checked in-memory and
 //!   filesystem backends.
-//! - [`filecrypto`] — per-file content keys with a **per-file wrap nonce** (the
+//! - [`filecrypto`]; per-file content keys with a **per-file wrap nonce** (the
 //!   review fix against nonce reuse), and a [`FileRef`] carrying the addresses and
 //!   the wrapped content key.
-//! - [`retention`] — the adjustable expiry model (global → server → file,
+//! - [`retention`]; the adjustable expiry model (global → server → file,
 //!   most-specific wins), and a GC engine with **decorrelated eviction** (per-file
 //!   jitter so the whole group doesn't drop a blob at once) and a **holder probe**
 //!   (never evict the last copy). Eviction drops the bytes but keeps the metadata,

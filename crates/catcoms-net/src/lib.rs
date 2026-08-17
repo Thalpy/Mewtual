@@ -2,8 +2,8 @@
 //!
 //! [`MeshService`] realizes the Phase-0 [`catcoms_rt::MeshTransport`] seam over
 //! **real libp2p** (Noise + yamux, gossipsub for topic fan-out, request/response
-//! for addressed exchanges). The whole stack above — encrypted CRDT replication,
-//! blob fetch — can therefore run unchanged over either the in-memory test
+//! for addressed exchanges). The whole stack above; encrypted CRDT replication,
+//! blob fetch; can therefore run unchanged over either the in-memory test
 //! transport or this libp2p mesh.
 //!
 //! A background actor task owns the libp2p `Swarm`; the handle talks to it over
@@ -18,7 +18,7 @@
 //! via [`MeshService::next_direct_upgrade`]. A rendezvous **client** is wired too:
 //! [`MeshService::rendezvous_register`]/[`MeshService::rendezvous_discover`] register
 //! under and discover blinded namespaces; discovered records are *surfaced*
-//! ([`MeshService::next_discovered`]) but **never auto-dialed** — a higher layer
+//! ([`MeshService::next_discovered`]) but **never auto-dialed**; a higher layer
 //! decides whether to dial (where eclipse-resistance lives).
 //!
 //! Still to come in later mesh sub-blocks: the member-verifiable discovery tag +
@@ -78,13 +78,13 @@ pub enum NetError {
     Rendezvous(String),
 }
 
-/// A peer record surfaced by a rendezvous **discovery** — the (signed) peer id and
+/// A peer record surfaced by a rendezvous **discovery**; the (signed) peer id and
 /// the addresses it advertised, under a blinded namespace. The transport only
 /// *surfaces* these; it never auto-dials them (a higher layer decides whether and
 /// when to dial, which is where eclipse-resistance lives).
 #[derive(Debug, Clone)]
 pub struct Discovered {
-    /// The discovered peer (the signer of the record — authenticity is verified by
+    /// The discovered peer (the signer of the record; authenticity is verified by
     /// libp2p when decoding the signed peer record).
     pub peer: libp2p::PeerId,
     /// The addresses the peer advertised.
@@ -209,7 +209,7 @@ pub struct MeshBehaviour {
     /// and discover other members, without hard-coded bootstrap addresses.
     pub rendezvous_client: rendezvous::client::Behaviour,
     /// UPnP/NAT-PMP: best-effort ask the home router to open a port, so this node becomes directly
-    /// reachable (the discovered public address is advertised + folded into a fresh invite) — no
+    /// reachable (the discovered public address is advertised + folded into a fresh invite); no
     /// relay needed when the router cooperates.
     pub upnp: libp2p::upnp::tokio::Behaviour,
     /// Connection caps so a discovery/registration flood cannot exhaust us.
@@ -373,13 +373,13 @@ fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour {
 }
 
 /// Run a relay-server swarm's event loop: forward circuit traffic indefinitely.
-/// (Relays only ever route Noise + MLS ciphertext — zero-knowledge.)
+/// (Relays only ever route Noise + MLS ciphertext; zero-knowledge.)
 ///
 /// Each bound listen address is registered as an **external address** so granted
 /// reservations carry a usable relayed address (otherwise a client's circuit
 /// listener closes with `NoAddressesInReservation`). A production relay on a
 /// public IP behind 0.0.0.0 should additionally have its real public address added
-/// — pass it via [`run_relay_with_external`].
+///; pass it via [`run_relay_with_external`].
 pub async fn run_relay(swarm: Swarm<RelayBehaviour>) {
     run_relay_with_external(swarm, Vec::new()).await
 }
@@ -409,7 +409,7 @@ pub async fn run_relay_with_external(mut swarm: Swarm<RelayBehaviour>, external:
 
 /// A rendezvous **server**'s behaviours: members register their (signed) peer
 /// records under a blinded namespace and discover each other, without the server
-/// learning group identity or content. Zero-knowledge like the relay — it only sees
+/// learning group identity or content. Zero-knowledge like the relay; it only sees
 /// opaque namespace strings and signed peer records (member addresses + a TTL).
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
@@ -500,7 +500,7 @@ pub fn build_memory_rendezvous_swarm() -> Swarm<RendezvousBehaviour> {
 
 /// Run a rendezvous-server swarm's event loop indefinitely: register members and
 /// answer discovery under blinded namespaces. The server never learns group identity
-/// or content — only opaque namespace strings and signed peer records.
+/// or content; only opaque namespace strings and signed peer records.
 pub async fn run_rendezvous(mut swarm: Swarm<RendezvousBehaviour>) {
     loop {
         match swarm.select_next_some().await {
@@ -524,7 +524,7 @@ fn to_peer(p: &libp2p::PeerId) -> PeerId {
     PeerId::new(*blake3::hash(&p.to_bytes()).as_bytes())
 }
 
-/// The Phase-0 [`PeerId`] for a libp2p peer (a BLAKE3 of its bytes) — how every
+/// The Phase-0 [`PeerId`] for a libp2p peer (a BLAKE3 of its bytes); how every
 /// layer above the transport addresses it.
 pub fn phase0_peer_id(p: &libp2p::PeerId) -> PeerId {
     to_peer(p)
@@ -560,10 +560,10 @@ pub struct RendezvousTarget {
 }
 
 /// Validate an invite's `rendezvous` addresses (6e-3d-9): each must parse as a
-/// multiaddr, be **direct** (never a `/p2p-circuit` — a circuit rendezvous would route
+/// multiaddr, be **direct** (never a `/p2p-circuit`; a circuit rendezvous would route
 /// discovery through a relay), and carry a `/p2p/<id>`; and the peer ids must be
 /// **distinct**. The distinct-PeerId check catches accidental-duplicate misconfig
-/// **only** — it is *not* anti-collusion, so two secretly-cooperating rendezvous still
+/// **only**; it is *not* anti-collusion, so two secretly-cooperating rendezvous still
 /// count as ≤ 1 trust root in the eclipse layer regardless. Returns the parsed targets
 /// (in order) on success, so the caller can register/discover/dial against them.
 pub fn validate_rendezvous_addrs(addrs: &[String]) -> Result<Vec<RendezvousTarget>, NetError> {
@@ -626,7 +626,7 @@ enum Command {
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
     Dial(Multiaddr),
-    /// Advertise `addr` as an external (reachable) address — for a node with a
+    /// Advertise `addr` as an external (reachable) address; for a node with a
     /// directly-reachable address (a public IP, or a memory listener in tests) that
     /// does not need a relay circuit to be registerable at a rendezvous. Flushes any
     /// deferred registrations.
@@ -725,7 +725,7 @@ impl Actor {
                     .publish(to_ident(&topic), data.to_vec())
                     .is_err()
                 {
-                    // No subscribers known yet — retry when one appears.
+                    // No subscribers known yet; retry when one appears.
                     tracing::trace!(bytes = len, "publish queued (no subscribers yet)");
                     self.pending_publish.push((topic, data));
                 } else {
@@ -939,17 +939,17 @@ impl Actor {
             // DCUtR hole-punch result. On success the relayed link has been upgraded
             // to a direct connection (a fresh `ConnectionEstablished` to the same
             // peer); surface it for diagnostics. On failure the connection stays
-            // relayed — still fully functional, just routed through the relay.
+            // relayed; still fully functional, just routed through the relay.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Dcutr(dcutr::Event {
                 remote_peer_id,
                 result,
             })) => match result {
                 Ok(conn) => {
-                    tracing::info!(peer = %remote_peer_id, ?conn, "DCUtR hole-punch succeeded — connection upgraded to direct");
+                    tracing::info!(peer = %remote_peer_id, ?conn, "DCUtR hole-punch succeeded; connection upgraded to direct");
                     let _ = self.upgrade_tx.try_send(to_peer(&remote_peer_id));
                 }
                 Err(e) => {
-                    tracing::debug!(peer = %remote_peer_id, error = %e, "DCUtR hole-punch failed — staying relayed");
+                    tracing::debug!(peer = %remote_peer_id, error = %e, "DCUtR hole-punch failed; staying relayed");
                 }
             },
             // identify drives DCUtR's external-address candidates (and a relay learns
@@ -963,10 +963,10 @@ impl Actor {
             }
             // UPnP/NAT-PMP: the router mapped our port and told us our public address. Promote it
             // to an external address (so identify/rendezvous advertise it) and surface it so a
-            // fresh invite can carry a directly-dialable bootstrap — direct connect, no relay.
+            // fresh invite can carry a directly-dialable bootstrap; direct connect, no relay.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
                 libp2p::upnp::Event::NewExternalAddr(addr) => {
-                    tracing::info!(%addr, "UPnP mapped a public address — node is directly reachable");
+                    tracing::info!(%addr, "UPnP mapped a public address; node is directly reachable");
                     self.swarm.add_external_address(addr.clone());
                     self.flush_pending_registers();
                     let _ = self.upnp_tx.try_send(Some(addr));
@@ -976,11 +976,11 @@ impl Actor {
                     self.swarm.remove_external_address(&addr);
                 }
                 libp2p::upnp::Event::GatewayNotFound => {
-                    tracing::info!("no UPnP gateway found — direct reachability needs a port-forward or a relay");
+                    tracing::info!("no UPnP gateway found; direct reachability needs a port-forward or a relay");
                     let _ = self.upnp_tx.try_send(None);
                 }
                 libp2p::upnp::Event::NonRoutableGateway => {
-                    tracing::info!("UPnP gateway is not internet-routable (likely CGNAT/double-NAT) — a relay is required");
+                    tracing::info!("UPnP gateway is not internet-routable (likely CGNAT/double-NAT); a relay is required");
                     let _ = self.upnp_tx.try_send(None);
                 }
             },
@@ -989,7 +989,7 @@ impl Actor {
             SwarmEvent::Behaviour(MeshBehaviourEvent::RendezvousClient(e)) => match e {
                 rendezvous::client::Event::Discovered { registrations, .. } => {
                     // Cap records ingested per Discover response so a hostile rendezvous
-                    // cannot flood the (unbounded, never-dropping) discovered queue — it
+                    // cannot flood the (unbounded, never-dropping) discovered queue; it
                     // sits upstream of the DiscoveryPolicy's dial budget, so that budget
                     // alone does not bound it. The dropped tail is logged.
                     let total = registrations.len();
@@ -1116,13 +1116,13 @@ impl MeshService {
     /// (e.g. invite minting) can fold it into a directly-dialable bootstrap so a peer can connect
     /// with no relay. UPnP is best-effort: this resolves to `None` both when there is no usable
     /// gateway (signalled promptly, so the caller doesn't wait out a full timeout) and once the
-    /// actor stops — either way the caller simply proceeds without a UPnP bootstrap.
+    /// actor stops; either way the caller simply proceeds without a UPnP bootstrap.
     pub async fn next_external_addr(&self) -> Option<Multiaddr> {
         self.upnp_rx.lock().await.recv().await.flatten()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct
-    /// one** (NAT hole-punch success). Diagnostics/observability only — the upgrade
+    /// one** (NAT hole-punch success). Diagnostics/observability only; the upgrade
     /// is transparent to the layers above (the peer stays the same `PeerId`, traffic
     /// just moves off the relay). Returns `None` once the actor stops.
     pub async fn next_direct_upgrade(&self) -> Option<PeerId> {
@@ -1130,7 +1130,7 @@ impl MeshService {
     }
 
     /// Register our (signed) peer record under `namespace` at the rendezvous node
-    /// `rz_node` — we must already be connected to it (e.g. dialed via its multiaddr).
+    /// `rz_node`; we must already be connected to it (e.g. dialed via its multiaddr).
     /// The registration is **deferred** internally until we have an external address
     /// to advertise (a direct listen address or a relay-circuit reservation); the
     /// granted TTL surfaces via [`MeshService::next_registered`].
@@ -1149,7 +1149,7 @@ impl MeshService {
 
     /// Discover peers under `namespace` from the rendezvous node `rz_node`. Discovered
     /// records surface via [`MeshService::next_discovered`] and are **never
-    /// auto-dialed** — a higher layer decides whether/when to dial (eclipse-resistance).
+    /// auto-dialed**; a higher layer decides whether/when to dial (eclipse-resistance).
     pub async fn rendezvous_discover(
         &self,
         namespace: &str,
@@ -1163,7 +1163,7 @@ impl MeshService {
             .map_err(|_| NetError::Rendezvous("transport closed".into()))
     }
 
-    /// Await the next rendezvous-discovered peer record. Surfaced only — the transport
+    /// Await the next rendezvous-discovered peer record. Surfaced only; the transport
     /// never auto-dials it. Returns `None` once the actor stops.
     pub async fn next_discovered(&self) -> Option<Discovered> {
         self.discovered_rx.lock().await.recv().await
@@ -1246,7 +1246,7 @@ impl MeshService {
 
     /// A cheap, clonable [`MeshHandle`] to this node's command channel, for driving rendezvous
     /// register/dial **after** the `MeshService` has been moved elsewhere (e.g. into a server
-    /// actor) — the desktop bridge keeps one to register a fresh invite's namespace post-spawn.
+    /// actor); the desktop bridge keeps one to register a fresh invite's namespace post-spawn.
     pub fn handle(&self) -> MeshHandle {
         MeshHandle {
             local: self.local,
@@ -1364,7 +1364,7 @@ impl MeshTransport for MeshService {
         self.event_rx.lock().await.recv().await
     }
 
-    // Rendezvous discovery — delegate to the inherent methods, mapping rt-native opaque bytes/
+    // Rendezvous discovery; delegate to the inherent methods, mapping rt-native opaque bytes/
     // strings to libp2p types. (`MeshService::method(self, ..)` is the explicit inherent call.)
     async fn rendezvous_register(
         &self,

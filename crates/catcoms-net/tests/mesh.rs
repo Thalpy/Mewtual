@@ -191,7 +191,7 @@ async fn client_reserves_a_circuit_slot_on_a_relay() {
 /// 6e-3c: **DCUtR hole-punch.** A joiner reaches a server *through a relay*, then
 /// DCUtR upgrades that relayed link to a **direct** connection. Real NAT can't be
 /// exercised in-process, so this uses TCP loopback (all three nodes are directly
-/// dialable) and asserts the *upgrade event path* fires — the same mechanism that,
+/// dialable) and asserts the *upgrade event path* fires; the same mechanism that,
 /// behind real NATs, moves traffic off the relay once the hole is punched. Mirrors
 /// `libp2p-dcutr`'s own `connect` test, but driven through `MeshService` and the
 /// `next_direct_upgrade()` surface. Loopback hole-punching works because `identify`

@@ -155,7 +155,7 @@ pub enum TransportEvent {
 /// A peer surfaced by rendezvous discovery (rt-native, libp2p-free). `peer` is the discovered
 /// node's opaque transport-id bytes (the same encoding passed back to `dial`/used as a dedup key);
 /// `addresses` are its advertised dialable addresses; `namespace` is the rendezvous namespace it
-/// was found under. Surfaced only — the discovery/dial policy above the transport decides what to
+/// was found under. Surfaced only; the discovery/dial policy above the transport decides what to
 /// dial (the transport never auto-dials a discovered record).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredPeer {
@@ -203,7 +203,7 @@ pub trait MeshTransport: Send + Sync {
     // the rendezvous node's opaque transport-id bytes; `namespace` is a (member-only-derived)
     // rendezvous namespace; addresses are dialable address strings. The defaults make a transport
     // without rendezvous support inert: the control verbs succeed as no-ops and `next_discovered`
-    // never resolves (so a `select!` arm awaiting it simply never fires — returning `None` would
+    // never resolves (so a `select!` arm awaiting it simply never fires; returning `None` would
     // busy-loop the caller's loop).
 
     /// Register our advertised external addresses under `namespace` at rendezvous `rz_node`.

@@ -1,12 +1,12 @@
 // The acoustic pairing channel (multi-device M6): a small 16-FSK modem for carrying a
-// pairing blob between two devices in the same room as sound — the audio counterpart of
+// pairing blob between two devices in the same room as sound; the audio counterpart of
 // showing a QR. Pure DSP over Float32Array in/out, so the codec is unit-testable in Node
 // with no WebAudio; the thin mic/speaker glue lives in the component that uses it.
 //
 // Design: 16 tones (one per nibble) between F0 and F0 + 15·STEP, SYMBOL_MS per symbol,
 // framed as [preamble × PREAMBLE_REPS] [len: 2 bytes] [payload] [crc16: 2 bytes], every
 // byte high-nibble-first. Decoding scans for the preamble by Goertzel energy, then reads
-// symbol windows at the discovered offset. CRC16-CCITT rejects anything mangled — the
+// symbol windows at the discovered offset. CRC16-CCITT rejects anything mangled; the
 // decoder returns null rather than a wrong payload, matching the "degrade to nothing,
 // never to garbage" posture used everywhere else.
 //
@@ -16,7 +16,7 @@
 
 /** Lowest tone, Hz. Chosen above typical HVAC rumble and below laptop-speaker rolloff. */
 export const F0 = 1_600;
-/** Tone spacing, Hz. With 45 ms symbols the Goertzel bins are ~22 Hz wide — 150 Hz
+/** Tone spacing, Hz. With 45 ms symbols the Goertzel bins are ~22 Hz wide; 150 Hz
  * spacing keeps neighbours well separated even with cheap-speaker harmonics. */
 export const STEP = 150;
 /** Symbol duration in milliseconds. */
@@ -30,7 +30,7 @@ export const MAX_AUDIO_PAYLOAD = 256;
 
 const NIBBLE_FREQS: number[] = Array.from({ length: 16 }, (_, i) => F0 + i * STEP);
 
-/** CRC16-CCITT (0x1021, init 0xFFFF) — tiny, and plenty for a 256-byte frame. */
+/** CRC16-CCITT (0x1021, init 0xFFFF); tiny, and plenty for a 256-byte frame. */
 export function crc16(bytes: Uint8Array): number {
   let crc = 0xffff;
   for (const b of bytes) {

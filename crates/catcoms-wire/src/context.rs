@@ -20,7 +20,7 @@ pub const METADATA_EXPORTER_LABEL: &str = "catcoms metadata v1";
 pub const MEDIA_EXPORTER_LABEL: &str = "catcoms media v1";
 
 /// Logical document types within a server. Encoded as a fixed-width `u16` tag so
-/// the derivation context is injective. Values are stable across versions — only
+/// the derivation context is injective. Values are stable across versions; only
 /// ever append new ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
@@ -40,19 +40,19 @@ pub enum DocType {
     /// The file index (fileshare browser metadata).
     FileIndex = 7,
     /// Network-routing identifiers (blinded gossipsub topics + rendezvous
-    /// namespaces). Has no content document of its own — it only ever feeds the
+    /// namespaces). Has no content document of its own; it only ever feeds the
     /// **metadata** exporter label to derive the per-removal routing secret
     /// (`ns_secret_L`). Kept a distinct `DocType` so that derivation is
     /// domain-separated from every content document by the injective context.
     Routing = 8,
-    /// Per-member profiles (display name, color, font, text effect) — a single
+    /// Per-member profiles (display name, color, font, text effect); a single
     /// shared CRDT document per server keyed by member device fingerprint.
     Profile = 9,
-    /// The server **livery** — an owner/admin-published UI colour scheme (preset id,
+    /// The server **livery**; an owner/admin-published UI colour scheme (preset id,
     /// accent, bounded colour-token overrides) that members' clients apply while that
     /// server is active. A single shared CRDT document per server.
     Livery = 10,
-    /// Custom member **badges** — an owner/admin-assigned small labelled, coloured tag shown
+    /// Custom member **badges**; an owner/admin-assigned small labelled, coloured tag shown
     /// next to a member's name (e.g. `ARTIST`). A single shared CRDT document per server,
     /// keyed by member device fingerprint.
     Badges = 11,
@@ -103,7 +103,7 @@ pub fn context_bytes(doc_type_tag: u16, doc_id: u128) -> [u8; 18] {
 /// The canonical MLS-exporter **context** for a document's key derivation.
 ///
 /// Because the encoding is fixed-width, two distinct `(doc_type, doc_id)` pairs
-/// can never produce the same context bytes — which is exactly what makes
+/// can never produce the same context bytes; which is exactly what makes
 /// per-channel key separation sound.
 pub fn exporter_context(doc_type: DocType, doc_id: u128) -> [u8; 18] {
     context_bytes(doc_type.tag(), doc_id)
@@ -125,27 +125,27 @@ mod tests {
             exporter_context(DocType::FileIndex, 0),
             [0x00, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
-        // Routing (tag 8), id = 0 — the network-routing derivation context.
+        // Routing (tag 8), id = 0; the network-routing derivation context.
         assert_eq!(
             exporter_context(DocType::Routing, 0),
             [0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
-        // Profile (tag 9), id = 0 — the per-member profile document.
+        // Profile (tag 9), id = 0; the per-member profile document.
         assert_eq!(
             exporter_context(DocType::Profile, 0),
             [0x00, 0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
-        // Livery (tag 10), id = 0 — the server livery document.
+        // Livery (tag 10), id = 0; the server livery document.
         assert_eq!(
             exporter_context(DocType::Livery, 0),
             [0x00, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
-        // Badges (tag 11), id = 0 — the custom member-badge document.
+        // Badges (tag 11), id = 0; the custom member-badge document.
         assert_eq!(
             exporter_context(DocType::Badges, 0),
             [0x00, 0x0b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
-        // Devices (tag 12), id = 0 — the companion-device registry.
+        // Devices (tag 12), id = 0; the companion-device registry.
         assert_eq!(
             exporter_context(DocType::Devices, 0),
             [0x00, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]

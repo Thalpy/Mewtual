@@ -4,14 +4,14 @@
 //!
 //! This is the **v2** multi-device model of `docs/design-multi-device.md`: a
 //! member's *original device* is the identity root. There is no separate account
-//! key — a device certificate is
+//! key; a device certificate is
 //! `sig_origin(origin_id ‖ origin_pk ‖ new_device_id ‖ device_name ‖ issued_ts)`,
 //! minted by the origin device during a grant ceremony for exactly one companion.
 //! **Chain depth is 1**: only the origin may certify, so a companion certificate
-//! can never itself authorize a further device — nothing in this module lets a
+//! can never itself authorize a further device; nothing in this module lets a
 //! certificate name a signer other than the origin.
 //!
-//! (The superseded v1 model — a separate account key rooting a multi-hop chain —
+//! (The superseded v1 model; a separate account key rooting a multi-hop chain;
 //! was deleted with its module; every domain here is `/v2`, so no statement from
 //! that era could verify against this one even if one were replayed from a
 //! backup.)
@@ -19,7 +19,7 @@
 //! ## The ceremony, and what lives here
 //!
 //! 1. The **new device** generates its device key and emits a [`PairingRequest`]
-//!    — its public key plus a fresh 32-byte nonce. The request is deliberately
+//!   ; its public key plus a fresh 32-byte nonce. The request is deliberately
 //!    *unsigned*: the SAS, compared by a human, is the authenticator.
 //! 2. **Both devices** compute [`sas`] over exactly the same three inputs
 //!    (`new_device_pk`, `pairing_nonce`, `origin_id`) and display the same six
@@ -36,8 +36,8 @@
 //! operation is deterministically testable.
 //!
 //! **Single use is enforced above this crate.** A [`PairingRequest`]'s nonce is
-//! consumed by *ceremony state* — accepted or declined, it must never be usable
-//! twice — and that state lives in the pairing transport (M2), exactly as
+//! consumed by *ceremony state*; accepted or declined, it must never be usable
+//! twice; and that state lives in the pairing transport (M2), exactly as
 //! `InviteLedger` (not the token type) enforces single use for invites.
 //! Certificates, revocations and handoffs here are **immutable value types**: they
 //! carry no consumption bit, and freshness (`issued_ts_ms`), not-revoked and
@@ -117,7 +117,7 @@ pub fn validate_device_name(name: &str) -> Result<(), PairingError> {
 ///
 /// `(x * m) >> 64` is exactly the fixed-point scaling of `x / 2^64` into
 /// `[0, m)`: bucket sizes differ by at most one draw in `2^64 / m ≈ 1.8e13`, a
-/// relative bias below `2^-43` — some eight orders of magnitude beneath the
+/// relative bias below `2^-43`; some eight orders of magnitude beneath the
 /// `10^-6` an attacker gets by simply guessing the code. Unlike `x % m` this
 /// consumes the *high* bits and needs no rejection loop, so the derivation is
 /// branch-free and constant-work.
@@ -130,8 +130,8 @@ fn wide_reduce(x: u64) -> u32 {
 /// Returns a value in `0..`[`SAS_MODULUS`]; render it zero-padded, e.g.
 /// `format!("{:06}", code)` → `"073821"`, conventionally grouped `073 821`.
 ///
-/// **Both devices compute this from the same three inputs** — the new device's
-/// public key, the pairing nonce it generated, and the *origin* device's id —
+/// **Both devices compute this from the same three inputs**; the new device's
+/// public key, the pairing nonce it generated, and the *origin* device's id;
 /// and a human compares the results. The origin id is included so a request
 /// captured from one pairing can never be replayed to produce a matching code
 /// against a different origin device. The derivation is a domain-separated
@@ -160,7 +160,7 @@ pub fn sas(new_device_pk: &[u8; 32], pairing_nonce: &[u8; 32], origin_id: &Devic
 /// What a new device emits to start a grant ceremony: its public key and a fresh
 /// single-use nonce, shown as a QR / copy-paste blob.
 ///
-/// Unsigned by design — see the module docs. The nonce's single-use property is
+/// Unsigned by design; see the module docs. The nonce's single-use property is
 /// enforced by the ceremony state above this crate, not by this value type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingRequest {
@@ -189,7 +189,7 @@ impl PairingRequest {
     }
 
     /// The SAS a human compares, as computed against `origin_id`. Convenience
-    /// wrapper over [`sas`] — both devices call one or the other and must agree.
+    /// wrapper over [`sas`]; both devices call one or the other and must agree.
     pub fn sas(&self, origin_id: &DeviceId) -> u32 {
         sas(&self.new_device_pk, &self.pairing_nonce, origin_id)
     }
@@ -231,7 +231,7 @@ impl PairingRequest {
 /// Carries `origin_public_key` deliberately: [`DeviceId`] is a content address
 /// of the key, so a verifier who holds only the id cannot check a signature.
 /// Embedding the key lets any verifier both (a) check the signature and
-/// (b) re-derive the id and confirm it matches — the same self-authenticating
+/// (b) re-derive the id and confirm it matches; the same self-authenticating
 /// shape as `InviteToken::verify_self` in `catcoms-mls`, which exists so a
 /// joiner with no roster can still authenticate an invite. The key is inside the
 /// signed payload, so it cannot be swapped for another.
@@ -245,7 +245,7 @@ pub struct DeviceCertificate {
     /// The certified companion device's id.
     pub new_device_id: DeviceId,
     /// The MLS group id this certificate admits into, `1..=`[`MAX_CERT_GROUP_ID_BYTES`]
-    /// bytes, **bound into the signature** — so a certificate minted for one server can
+    /// bytes, **bound into the signature**; so a certificate minted for one server can
     /// never be replayed to admit the same device somewhere else, even if a member ever
     /// reuses an origin key across groups. (Adversarial-review finding on the M2 slice;
     /// mirrors `InviteToken`, which signs its `group_id` for the same reason.)
@@ -353,11 +353,11 @@ impl DeviceCertificate {
     /// `expected_origin`.
     ///
     /// Checks, all of which must hold:
-    /// 1. the embedded `origin_id` is exactly `expected_origin` — so a valid
+    /// 1. the embedded `origin_id` is exactly `expected_origin`; so a valid
     ///    certificate from another member can never be re-presented here;
     /// 2. `origin_public_key` content-addresses `origin_id`;
     /// 3. the signature verifies (strictly) under that key over the canonical
-    ///    payload — which covers every field, so any tamper invalidates it;
+    ///    payload; which covers every field, so any tamper invalidates it;
     /// 4. the name and group id are within bounds and the subject is not the origin
     ///    itself.
     ///
@@ -406,7 +406,7 @@ impl DeviceCertificate {
     }
 
     /// Parse a certificate produced by [`DeviceCertificate::encode`]. Structural
-    /// only — call [`DeviceCertificate::verify`] before trusting it.
+    /// only; call [`DeviceCertificate::verify`] before trusting it.
     pub fn decode(bytes: &[u8]) -> Result<Self, PairingError> {
         let mut d = Decoder::new(bytes);
         let domain = d.get_str().map_err(|_| PairingError::Malformed)?;
@@ -444,7 +444,7 @@ impl DeviceCertificate {
 /// Only the origin can sign one: companions hold no grant authority, so a stolen
 /// companion can neither mint siblings nor revoke them.
 ///
-/// Unlike a certificate, a revocation *may* name the origin itself — "burn this
+/// Unlike a certificate, a revocation *may* name the origin itself; "burn this
 /// identity" is a meaningful statement, whereas self-certification is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceRevocation {
@@ -543,7 +543,7 @@ impl DeviceRevocation {
     }
 
     /// Parse a revocation produced by [`DeviceRevocation::encode`]. Structural
-    /// only — call [`DeviceRevocation::verify`] before trusting it.
+    /// only; call [`DeviceRevocation::verify`] before trusting it.
     pub fn decode(bytes: &[u8]) -> Result<Self, PairingError> {
         let mut d = Decoder::new(bytes);
         let domain = d.get_str().map_err(|_| PairingError::Malformed)?;
@@ -571,8 +571,8 @@ impl DeviceRevocation {
 ///
 /// The master is *transferable, not distributable*
 /// (`docs/design-multi-device.md`): the member may **move** the right to mint
-/// [`DeviceCertificate`]s and [`DeviceRevocation`]s to an accepted device — the
-/// safe form of "elected master" — but nothing here hands out a second copy of it.
+/// [`DeviceCertificate`]s and [`DeviceRevocation`]s to an accepted device; the
+/// safe form of "elected master"; but nothing here hands out a second copy of it.
 /// Companion **self-election is rejected by construction**: only the current
 /// master's key produces a handoff that verifies, so surviving devices cannot
 /// crown one of their own without it.
@@ -582,7 +582,7 @@ impl DeviceRevocation {
 ///
 /// # `master_seq` is a fence this module does not enforce
 ///
-/// `master_seq` exists so a *consumer* can reject a stale handoff — a replayed
+/// `master_seq` exists so a *consumer* can reject a stale handoff; a replayed
 /// older statement that would hand the master back to a device the member has
 /// since retired. **Enforcing that is the admitting layer's job (M3/M5)**: it must
 /// remember the highest `master_seq` it has accepted for this identity and reject
@@ -682,12 +682,12 @@ impl MasterHandoff {
     }
 
     /// Whether this handoff is a well-formed statement genuinely signed by
-    /// `expected_origin` — the master the verifier currently believes in.
+    /// `expected_origin`; the master the verifier currently believes in.
     ///
     /// Same checks as [`DeviceCertificate::verify`]: the embedded `origin_id` is
     /// exactly `expected_origin`, the key content-addresses it, the signature
     /// verifies strictly over every field, and the successor is not the master
-    /// itself. **`master_seq` monotonicity is not checked here** — see the type
+    /// itself. **`master_seq` monotonicity is not checked here**; see the type
     /// docs.
     pub fn verify(&self, expected_origin: &DeviceId) -> bool {
         if self.origin_id != *expected_origin {
@@ -724,7 +724,7 @@ impl MasterHandoff {
         e.finish()
     }
 
-    /// Parse a handoff produced by [`MasterHandoff::encode`]. Structural only —
+    /// Parse a handoff produced by [`MasterHandoff::encode`]. Structural only;
     /// call [`MasterHandoff::verify`] before trusting it.
     pub fn decode(bytes: &[u8]) -> Result<Self, PairingError> {
         let mut d = Decoder::new(bytes);
@@ -770,7 +770,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
-    /// The group id every certificate test binds — group-scoping is part of the
+    /// The group id every certificate test binds; group-scoping is part of the
     /// signed payload (adversarial-review finding on the M2 slice).
     const TG: &[u8] = b"test-group-id";
 
@@ -1263,7 +1263,7 @@ mod tests {
         assert!(!t.verify(&impostor.device_id()));
 
         // A handoff genuinely signed by someone else is not accepted for `master`
-        // — this is what blocks a companion from crowning itself.
+        //; this is what blocks a companion from crowning itself.
         let other = MasterHandoff::issue(&impostor, successor.device_id(), 4, 99).unwrap();
         assert!(other.verify(&impostor.device_id()));
         assert!(!other.verify(&expected));
@@ -1295,7 +1295,7 @@ mod tests {
     fn master_handoff_does_not_enforce_monotonic_seq() {
         // Documented contract: this module verifies authenticity only. A *stale*
         // handoff (a lower `master_seq` presented after a higher one) is perfectly
-        // well-signed and verifies here — rejecting it is the admitting layer's
+        // well-signed and verifies here; rejecting it is the admitting layer's
         // job (M3/M5), which must track the highest seq it has accepted.
         let (master, successor) = origin_and_new(23);
         let retired = DeviceKeypair::generate(&mut rng(2300));

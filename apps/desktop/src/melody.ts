@@ -2,11 +2,11 @@
 //
 // Two jobs, both pure (no Svelte, no DOM, no audio), so `melody.test.ts` can pin them:
 //
-//   1. ENCODING — turning what was played into the deterministic string that feeds the vault KDF.
+//   1. ENCODING; turning what was played into the deterministic string that feeds the vault KDF.
 //      This is security-relevant: the same tune must always produce byte-identical output, and
 //      incidental things (which finger landed first, how the notes were spelled) must never
 //      change it. `encodeMelody` is the only function here the crypto path depends on.
-//   2. ENGRAVING — laying that same sequence out on a grand staff. Cosmetic, but it's what makes
+//   2. ENGRAVING; laying that same sequence out on a grand staff. Cosmetic, but it's what makes
 //      an absolute-pitch lock learnable: you can see C6 is not C4.
 //
 // The two must not drift: the score you read has to be the secret you're sealing, so both are
@@ -16,7 +16,7 @@
 export type MelodyEvent = {
   /** Ascending, de-duplicated MIDI note numbers. A single note is just a one-element chord. */
   notes: number[];
-  /** Index into `DUR_MAX_MS` / `DUR_NAMES` — 0 = eighth … 3 = whole. */
+  /** Index into `DUR_MAX_MS` / `DUR_NAMES`; 0 = eighth … 3 = whole. */
   dur: number;
 };
 
@@ -28,7 +28,7 @@ export const noteName = (n: number): string => `${NOTE_NAMES[n % 12]}${Math.floo
 /**
  * Duration classes, deliberately coarse. A human can reproduce "short / normal / long / very
  * long"; nobody can reproduce a twelve-way rhythmic grid, and an unreproducible lock is a
- * destroyed vault — there is no recovery path. Four classes buys entropy that can still be
+ * destroyed vault; there is no recovery path. Four classes buys entropy that can still be
  * played back a month later.
  */
 export const DUR_MAX_MS = [170, 380, 750, Infinity];
@@ -40,7 +40,7 @@ export const durClass = (ms: number): number => DUR_MAX_MS.findIndex((m) => ms <
  * the duration is omitted entirely rather than defaulted, so "rhythm off" and "played all
  * quarters" stay distinguishable secrets.
  *
- * Callers must hand in ascending, de-duplicated notes (see `normalizeEvent`) — fingering order
+ * Callers must hand in ascending, de-duplicated notes (see `normalizeEvent`); fingering order
  * must not be able to fork the secret.
  */
 export const encodeEvent = (e: MelodyEvent, rhythm: boolean): string =>
@@ -55,7 +55,7 @@ export const normalizeEvent = (notes: number[], dur: number): MelodyEvent => ({
 /**
  * The full scheme-prefixed secret, or "" for an empty sequence (which must never unlock).
  *
- * v3 records what a score records — chords and note values. v1 (pitch-class-folded) and v2 (bare
+ * v3 records what a score records; chords and note values. v1 (pitch-class-folded) and v2 (bare
  * absolute notes) are retired: a vault sealed under either must be re-entered under a scheme this
  * build can still produce. The scheme prefix is what keeps a secret entered on the sigil lock
  * and one played on the melody lock from ever colliding into one vault key.
@@ -64,7 +64,7 @@ export const encodeMelody = (seq: MelodyEvent[], rhythm: boolean): string =>
   seq.length ? `melody:v3:${seq.map((e) => encodeEvent(e, rhythm)).join("-")}` : "";
 
 /**
- * Entropy estimate for the strength meter — deliberately pessimistic, because this number talks
+ * Entropy estimate for the strength meter; deliberately pessimistic, because this number talks
  * someone out of a four-note tune. log2(24) for an event's first note (a ~two-octave working
  * range), only +2 bits per extra chord tone (people play triads, not random note sets), and +1.5
  * bits for a duration class (four classes, but held notes skew hard to the middle two).
@@ -116,7 +116,7 @@ export function chordName(notes: number[]): string {
 //
 // Every staff line then lands on an EVEN step and one step is half a line-space, which is what
 // makes the whole layout fall out of a single linear map. Treble lines are steps 30–38 (E4…F5),
-// bass 18–26 (G2…A3), and middle C (28) lands exactly between them — a real grand staff, with
+// bass 18–26 (G2…A3), and middle C (28) lands exactly between them; a real grand staff, with
 // its one shared ledger line, for free.
 
 const PC_STEP = [0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6];
@@ -130,12 +130,12 @@ export const BASS_LINES = [18, 20, 22, 24, 26];
 
 /** F5 (the treble top line) at y=20, four px per diatonic step, y growing downward. */
 export const yOf = (s: number): number => 20 + (38 - s) * 4;
-export const STAFF_TOP = yOf(38); // 20  — treble top line
-export const STAFF_BOT = yOf(18); // 100 — bass bottom line
+export const STAFF_TOP = yOf(38); // 20 ; treble top line
+export const STAFF_BOT = yOf(18); // 100; bass bottom line
 
 export const HEAD_RX = 5.2;
 export const HEAD_RY = 3.9;
-const SHEET_X0 = 48; // first note x — leaves the clef gutter clear
+const SHEET_X0 = 48; // first note x; leaves the clef gutter clear
 const SHEET_PAD = 26; // gap between the last note and the closing barline
 const DX_MIN = 22; // below this, note heads start colliding
 const DX_MAX = 76; // above this, a three-note tune reads as three lost dots
@@ -174,7 +174,7 @@ export type Sheet = { w: number; minY: number; h: number; labelY: number; events
  * The viewBox grows vertically to whatever the tune actually reaches (a C1 or a C8 is many
  * ledger lines away) instead of reserving the full MIDI range as empty space.
  *
- * With rhythm off every event engraves as a quarter — the score then shows exactly what the
+ * With rhythm off every event engraves as a quarter; the score then shows exactly what the
  * secret contains, which is pitches only.
  */
 export function buildSheet(seq: MelodyEvent[], rhythm: boolean, availW = 560): Sheet {
@@ -198,7 +198,7 @@ export function buildSheet(seq: MelodyEvent[], rhythm: boolean, availW = 560): S
     const seen = new Set<number>();
     let prevStep = -99;
     let prevOff = false;
-    // Notes a second apart can't share a column — the upper one shifts across the stem. Two in a
+    // Notes a second apart can't share a column; the upper one shifts across the stem. Two in a
     // row (a cluster) must not both shift, hence `prevOff`.
     for (const n of [...ev.notes].sort((a, b) => a - b)) {
       const s = staffStep(n);

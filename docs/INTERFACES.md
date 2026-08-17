@@ -1,4 +1,4 @@
-# CatComs — Interfaces & Hooks Schema
+# Mewtual; Interfaces & Hooks Schema
 
 A reference for the **seams** (dependency-injection hooks) and the key public APIs.
 Signatures are abbreviated; see the source for exact generics/lifetimes. This is the
@@ -11,7 +11,7 @@ contract a new contributor (or agent) builds against.
 Everything above these is generic over them, so the whole stack runs unchanged over
 test impls (in-memory, deterministic) or production impls (OS / libp2p).
 
-### `Clock` — injected time  *(catcoms-rt)*
+### `Clock`; injected time  *(catcoms-rt)*
 ```rust
 pub trait Clock: Send + Sync + Debug { fn now_ms(&self) -> u64; }
 pub struct SystemClock;                         // the ONLY OS-clock reader
@@ -19,16 +19,16 @@ pub struct ManualClock;  fn new(start_ms) -> Self;  advance_ms(delta)->u64;  set
 ```
 Rule: no other code reads the OS clock. Pass `&dyn Clock` / `Box<dyn Clock + Send>`.
 
-### RNG — injected randomness  *(catcoms-rt)*
+### RNG; injected randomness  *(catcoms-rt)*
 ```rust
 pub use rand_core::{CryptoRng, CryptoRngCore, RngCore};
 pub struct OsCryptoRng;   // the ONLY OS-RNG source; impl CryptoRngCore
 ```
 Rule: take `&mut impl CryptoRngCore` (or generic `R: CryptoRngCore`). `Box<dyn
 CryptoRngCore>` does **not** satisfy the bound (CryptoRng isn't forwarded through
-`&mut dyn`) — be generic over the concrete RNG instead (see `ChannelSync<T, R>`).
+`&mut dyn`); be generic over the concrete RNG instead (see `ChannelSync<T, R>`).
 
-### `MeshTransport` — pub/sub + request/response  *(catcoms-rt)*
+### `MeshTransport`; pub/sub + request/response  *(catcoms-rt)*
 ```rust
 pub trait MeshTransport: Send + Sync {
     fn local_peer(&self) -> PeerId;
@@ -61,13 +61,13 @@ Implementations:
   - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
     `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
-    **never auto-dialed** — a higher layer (`catcoms-discovery`) decides whether to dial;
+    **never auto-dialed**; a higher layer (`catcoms-discovery`) decides whether to dial;
     the surfaced-record queue is per-Discover-response capped. `add_external_address(addr)`
     lets a directly-reachable node register without a relay. `dial(addr)` dials at runtime.
     Free fn `validate_rendezvous_addrs(&[String]) -> Vec<RendezvousTarget>` (reject
     `/p2p-circuit`, require exactly one `/p2p/`, distinct PeerIds).
 
-### `SecureKeyStore` — at-rest DEK protection, tiered  *(catcoms-crypto)*
+### `SecureKeyStore`; at-rest DEK protection, tiered  *(catcoms-crypto)*
 ```rust
 pub trait SecureKeyStore: Debug {
     fn tier(&self) -> KeyTier;
@@ -79,15 +79,15 @@ pub fn requires_passphrase_confirmation(prev: KeyTier, cur: KeyTier) -> bool;  /
 pub struct PassphraseKeyStore; fn derive(passphrase, salt) -> Result<Self>;     // Argon2id
 pub struct InMemoryKeyStore;   fn generate(rng) -> Self;
 ```
-(OS-native impls — Secret Service / DPAPI / Android Keystore — are platform-phase work.)
+(OS-native impls; Secret Service / DPAPI / Android Keystore; are platform-phase work.)
 
-### `HolderOracle` — fresh replica count  *(catcoms-storage)*
+### `HolderOracle`; fresh replica count  *(catcoms-storage)*
 ```rust
 pub trait HolderOracle { fn reachable_holder_count(&self, cid: &Cid) -> usize; }
 ```
 Injected into GC so it never evicts the last copy. (Network-backed impl is later.)
 
-### `BlobStore` — content-addressed bytes  *(catcoms-storage)*
+### `BlobStore`; content-addressed bytes  *(catcoms-storage)*
 ```rust
 pub trait BlobStore {
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;       // cid = Cid::of(bytes)
@@ -115,7 +115,7 @@ pub fn verify(&VerifyingKey, msg, &[u8;64]) -> bool;                 // strict
 pub fn verify_with_public_bytes(pubkey: &[u8], msg, &[u8;64]) -> bool;
 
 // Multi-device pairing (design-multi-device.md v2: origin device is the identity root,
-// chain depth 1, no account key — the v1 account-rooted chain module was deleted; all
+// chain depth 1, no account key; the v1 account-rooted chain module was deleted; all
 // domains here are /v2 so no v1 statement can cross-verify).
 pub const MAX_DEVICE_NAME_BYTES; pub const MAX_CERT_GROUP_ID_BYTES; pub const SAS_DIGITS/SAS_MODULUS;
 pub fn validate_device_name(&str) -> Result<(), PairingError>;   // bounds + control/bidi/zero-width rejects
@@ -246,7 +246,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
 
 // 6e-3d-9 free fn: the pre-join rendezvous namespace, derivable from the invite ALONE
-// (BLAKE3-keyed off derive_key(invite_nonce), bound to group + rz_peer) — so a joiner
+// (BLAKE3-keyed off derive_key(invite_nonce), bound to group + rz_peer); so a joiner
 // discovers the inviter with no group secret and no hard-coded address.
 pub fn join_namespace(group_id:&[u8], invite_nonce:&[u8;16], rz_peer:&[u8]) -> String;
 // A member's self-signed, dialable peer record (PEX entry / discovery candidate).
@@ -281,7 +281,7 @@ vs `member_peers` (promoted via a verifying *signed* catch-up; preferred) · `ca
 
 ---
 
-## 6b. Discovery & eclipse-resistance  *(catcoms-discovery — pure, no I/O, no ambient time/RNG)*
+## 6b. Discovery & eclipse-resistance  *(catcoms-discovery; pure, no I/O, no ambient time/RNG)*
 
 ```rust
 // The ONLY thing that decides what to dial; the net Actor never auto-dials. Ranks
@@ -295,7 +295,7 @@ pub struct Candidate { peer:PeerKey, addresses:Vec<String>, source:Source, seq:u
 pub struct PlannedDial { peer:PeerKey, addresses:Vec<String> }
 pub struct PolicyConfig { dial_budget, window_ms, jitter_ms, roster_headroom, min_dial_slots, max_addresses, max_tracked_peers }
 
-// Advisory eclipse warning — NEVER gates messaging or a Remove (it has no gate path).
+// Advisory eclipse warning; NEVER gates messaging or a Remove (it has no gate path).
 pub struct EclipseDetector;  new(EclipseConfig);  level()->EclipseLevel;  observe(EclipseObservation, &dyn Clock)->EclipseLevel;
 pub enum EclipseLevel { Ok, Caution }
 pub struct EclipseObservation { roster_size /*R*/, reachable_devices /*D, incl self*/, trust_roots /*S*/ : usize }
@@ -325,13 +325,13 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   Ciphertext = XChaCha20-Poly1305 of the encoded `SignedOp` under `channel_secret(doc,epoch)`.
 - **`CommitRecord`** (control payload): `bytes group_id ‖ u64 commit_epoch ‖ bytes committer_device(32) ‖ bytes mls_commit ‖ bytes base_auth(32) ‖ bytes committer_sig(64)`.
 - **Request/response** (`ProtocolId("/catcoms/rr/1")`): first payload byte = **kind**:
-  - `0` KIND_CATCHUP — **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle.
-  - `1` KIND_JOIN — body `bytes invite.encode() ‖ bytes key_package`; response =
+  - `0` KIND_CATCHUP; **authed** body wrapping `u16 doc_type ‖ u128 doc_id`; response = op bundle.
+  - `1` KIND_JOIN; body `bytes invite.encode() ‖ bytes key_package`; response =
     `[JOIN_READY] ‖ bytes welcome ‖ bytes signature(64) ‖ bytes sealed_routing` (the admitter signs
     `join_transcript = "catcoms/join-resp/v1" ‖ group_id ‖ nonce ‖ welcome ‖ sealed_routing`). Not member-authed.
-  - `2` KIND_COMMIT_CATCHUP — **authed** body wrapping `u64 from_epoch`; response is **responder-signed**:
+  - `2` KIND_COMMIT_CATCHUP; **authed** body wrapping `u64 from_epoch`; response is **responder-signed**:
     `bytes responder_pubkey ‖ bytes sig(64) ‖ bytes bundle`, sig over `"catcoms/catchup-resp/v1" ‖ group_id ‖ requester_pubkey ‖ u64 req_ts ‖ nonce(16) ‖ u64 req_epoch ‖ bundle`.
-  - `4` KIND_PEX (6e-3d-7) — **authed** body (empty); response responder-signed like commit catch-up but under
+  - `4` KIND_PEX (6e-3d-7); **authed** body (empty); response responder-signed like commit catch-up but under
     `"catcoms/pex-resp/v1"`; bundle = `u32 count(≤64) ‖ len-prefixed PeerDescriptor`s, each self-signed under `"catcoms/peer-record/v1"`.
   - **Authed body** (members-only gate): `bytes inner ‖ bytes requester_pubkey ‖ u64 timestamp_ms ‖ bytes nonce(16) ‖ u64 req_epoch ‖ bytes signature(64)`,
     signature over `"catcoms/catchup-auth/v1" ‖ group_id ‖ u16 kind ‖ inner ‖ requester_pubkey ‖ timestamp_ms ‖ nonce ‖ req_epoch`.
@@ -344,4 +344,4 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
 ## 8. `DocType` tags (stable; only append)
 `Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8`.
 Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
-doc — it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.
+doc; it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.

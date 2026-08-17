@@ -1,10 +1,10 @@
 /* ============================================================
-   TOKEN LAYER — the entire theme is this block. Presets, the
+   TOKEN LAYER; the entire theme is this block. Presets, the
    accent override, and density only ever change these values;
    component rules below never hardcode a colour.
    ============================================================ */
 :root {
-  /* grounds — purple-shifted slate ("Nightshade", the default preset) */
+  /* grounds; purple-shifted slate ("Nightshade", the default preset) */
   --bg-0: #131218;        /* app floor: rail, code blocks         */
   --panel: #1a1922;       /* panels: sidebar, cards, overlays     */
   --bg-elev: #232130;     /* elevated: inputs, hover, chips       */
@@ -17,13 +17,13 @@
   --muted: #8f8ba3;
   --faint: #5c5870;
 
-  /* identity accent — user-swappable, carries no semantic meaning */
+  /* identity accent; user-swappable, carries no semantic meaning */
   --accent: #977df2;
   --accent-hi: #ab95f5;                                   /* hover     */
   --accent-dim: color-mix(in oklab, var(--accent) 16%, var(--panel)); /* tint bg */
   --on-accent: #131218;   /* text on a solid accent background    */
 
-  /* semantic — constant across presets; these colours have jobs */
+  /* semantic; constant across presets; these colours have jobs */
   --ok: #5ec96e;          /* presence · connected · encrypted     */
   --ok-dim: color-mix(in oklab, var(--ok) 14%, var(--panel));
   --ok-brd: color-mix(in oklab, var(--ok) 40%, var(--panel));
@@ -194,7 +194,7 @@ main {
   overflow-y: auto;
 }
 
-/* Mono micro-label — the "operator terminal" register lives in these. */
+/* Mono micro-label; the "operator terminal" register lives in these. */
 .sidebar h3,
 .roster h3,
 .set-section h3,
@@ -265,7 +265,7 @@ main {
   padding: 0.4rem 0.5rem;
 }
 
-/* Pane header bar — the "#channel · N member(s)" line and its inline actions. */
+/* Pane header bar; the "#channel · N member(s)" line and its inline actions. */
 .channel > h2 {
   display: flex;
   align-items: center;
@@ -387,7 +387,7 @@ select:focus {
   margin: 0;
 }
 
-/* Flat message log — full-width rows, no bubbles. Density tokens set the rhythm. */
+/* Flat message log; full-width rows, no bubbles. Density tokens set the rhythm. */
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -587,7 +587,7 @@ select:focus {
 
 /* Static two-stop gradient derived from the member's own colour: the style attribute sets
    `color`, so `currentcolor` is that colour. Unlike .fx-rainbow this must NOT set
-   `color: transparent` — that would collapse currentcolor and kill the gradient; only the
+   `color: transparent`; that would collapse currentcolor and kill the gradient; only the
    text *fill* is cleared so the clipped background shows through. */
 .fx-gradient {
   background-image: linear-gradient(90deg, currentcolor, color-mix(in oklab, currentcolor 45%, var(--accent)));
@@ -1093,7 +1093,7 @@ button.attach {
 }
 
 /* The attach/emoji controls inherit the solid-button text colour (--on-accent, near-black)
-   from the global button rule — repin them to chrome colours so the icons are visible. */
+   from the global button rule; repin them to chrome colours so the icons are visible. */
 .attach,
 button.attach {
   color: var(--muted);
@@ -1452,7 +1452,7 @@ button.emoji-pick:hover {
   margin-left: auto;
 }
 
-/* Solid-accent call-to-action (File info, Feedback) — restates the default
+/* Solid-accent call-to-action (File info, Feedback); restates the default
    button look so an ancestor rule can't quietly demote it. */
 button.primary {
   background: var(--accent);
@@ -1792,7 +1792,7 @@ button.primary:hover:not(:disabled) {
   border-radius: 999px;
 }
 
-/* File availability indicator — the colour signals whether a file is held locally, partial,
+/* File availability indicator; the colour signals whether a file is held locally, partial,
    fetchable from peers, or unreachable. A leading dot + matching status text in the meta line. */
 .file-avail {
   flex-shrink: 0;
@@ -1822,7 +1822,7 @@ button.primary:hover:not(:disabled) {
   color: var(--accent);
 }
 
-/* Roster presence dot — green when the member is reachable right now, dim when not. */
+/* Roster presence dot; green when the member is reachable right now, dim when not. */
 .presence {
   flex-shrink: 0;
   font-size: 0.55rem;
@@ -2037,7 +2037,7 @@ button.primary:hover:not(:disabled) {
   font-size: 0.78rem;
   padding: 2px 5px;
 }
-/* Every preset is a dark theme — tell the native date picker so its glyph isn't dark-on-dark. */
+/* Every preset is a dark theme; tell the native date picker so its glyph isn't dark-on-dark. */
 .search-adv input[type="date"] {
   color-scheme: dark;
 }
@@ -2109,7 +2109,7 @@ button.primary:hover:not(:disabled) {
 .search-adv .sa-more {
   margin: 2px 0 0;
 }
-/* A facet toggle — same silhouette as .chip, but interactive and accent-lit when on. */
+/* A facet toggle; same silhouette as .chip, but interactive and accent-lit when on. */
 .fchip {
   font-family: var(--mono);
   font-size: 0.62rem;
@@ -2607,7 +2607,7 @@ button.primary:hover:not(:disabled) {
   display: flex;
 }
 
-/* The first row has no message above it to overlap — pull the toolbar inside
+/* The first row has no message above it to overlap; pull the toolbar inside
    the row so the list edge doesn't clip it. */
 .messages li:first-child .msg-actions {
   top: 2px;
@@ -2856,7 +2856,7 @@ button.primary:hover:not(:disabled) {
 
 /* Voice call: the header button, the floating call bar, and the incoming-call prompt. */
 /* `button.ghost` (0,1,1) out-specifies a bare `.call-start` (0,1,0), so the green never
-   reached the label — pin it on the element form so currentColor tints the handset icon. */
+   reached the label; pin it on the element form so currentColor tints the handset icon. */
 .call-start,
 button.call-start {
   color: var(--ok);
@@ -2963,7 +2963,7 @@ button.call-start {
   gap: 2px;
 }
 
-/* --- UI overhaul: global status bar (self-connectivity — node, peers, session) --- */
+/* --- UI overhaul: global status bar (self-connectivity; node, peers, session) --- */
 .statusbar {
   display: flex;
   align-items: center;
@@ -3138,7 +3138,7 @@ button.call-start {
 /* No grayscale() filter on chrome controls any more: they draw inline line-icons that
    already follow currentColor, so desaturating only flattened their hover/active tints. */
 
-/* "Join/create #channel" is an action, not a channel row — dashed, quiet, mono hint. */
+/* "Join/create #channel" is an action, not a channel row; dashed, quiet, mono hint. */
 .join-channel input {
   background: transparent;
   border: 1px dashed var(--border);
@@ -3225,13 +3225,13 @@ button.call-start {
   font-size: 0.62rem;
   flex: none;
 }
-/* Page names can be long — one row each, clipped like a channel row. */
+/* Page names can be long; one row each, clipped like a channel row. */
 .wiki-pages button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* "+ new page" / "+ new folder" are actions, not rows — same quiet dashed field as join-channel. */
+/* "+ new page" / "+ new folder" are actions, not rows; same quiet dashed field as join-channel. */
 .new-page input,
 .new-folder input {
   width: 100%;
@@ -3477,7 +3477,7 @@ button.you-panel:hover {
   height: 1em;
   vertical-align: -0.15em;
 }
-/* Bare chrome-icon buttons (search, server settings) — match the glyph they replaced. */
+/* Bare chrome-icon buttons (search, server settings); match the glyph they replaced. */
 .icon-btn .ico {
   width: 1.05em;
   height: 1.05em;
@@ -3789,7 +3789,7 @@ button.you-panel:hover {
 /* --- Delivery ticks in the timestamp gutter (own messages; evidence-based) --- */
 :root {
   /* info-blue: full-roster delivery + informational accents. Constant across presets,
-     like --ok/--warn/--danger — a semantic job, not an identity colour. */
+     like --ok/--warn/--danger; a semantic job, not an identity colour. */
   --info: #6ca0d8;
 }
 .messages li > .t {
@@ -3889,7 +3889,7 @@ button.you-panel:hover {
   padding: 2px;
 }
 
-/* Authored background patterns (livery "pattern" catalog — values are ids, never CSS). */
+/* Authored background patterns (livery "pattern" catalog; values are ids, never CSS). */
 :root[data-livery-pattern="grid"] .channel {
   background-image:
     repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 24px),
@@ -4088,7 +4088,7 @@ button.you-panel:hover {
   border-radius: 999px;
   padding: 0 6px;
 }
-/* Sigil lock: one SVG is both the input surface and the assembled artefact — lattice, drawn
+/* Sigil lock: one SVG is both the input surface and the assembled artefact; lattice, drawn
    path, emoji points and ring inscription compose in place. (The spell lock's grid styles
    died with the spell lock.) */
 .sigil-wrap {
@@ -4131,7 +4131,7 @@ button.you-panel:hover {
 }
 .sigil-path.live { opacity: 0.6; stroke-dasharray: 5 4; }
 .sigil-arrow { fill: var(--accent); }
-/* Node colour marks: hue is never the only signal — each variant is also a distinct SHAPE
+/* Node colour marks: hue is never the only signal; each variant is also a distinct SHAPE
    (filled dot / hollow ring / diamond), so the 4-way distinction survives colour-blindness.
    Hues reuse the theme's own distinct trio; the marks are decorative categories here, not
    the semantic jobs those tokens carry elsewhere. */
@@ -4169,7 +4169,7 @@ button.you-panel:hover {
   color: var(--accent); /* the particle loop reads its tint from here via getComputedStyle */
 }
 /* The cat summon: ≤900ms, runs CONCURRENTLY with the unlock KDF (never gates it), and the
-   failure path removes the element mid-flight — an aborted summon simply vanishes. */
+   failure path removes the element mid-flight; an aborted summon simply vanishes. */
 .sigil-summon {
   position: absolute;
   inset: 0;
@@ -4334,7 +4334,7 @@ button.you-panel:hover {
 }
 .rhythm-toggle.on { color: var(--accent); border-color: color-mix(in oklab, var(--accent) 45%, transparent); }
 
-/* Melody lock: the sequence is engraved on a grand staff rather than listed as note names —
+/* Melody lock: the sequence is engraved on a grand staff rather than listed as note names;
    pitch, register, chords and note values are all one glance. Scrolls when the tune is long. */
 .sheet-wrap {
   overflow-x: auto;
@@ -4465,7 +4465,7 @@ button.you-panel:hover {
 .pair-results li.err { color: var(--danger); }
 
 /* ============================================================
-   Wiki overhaul — per-page md/wikitext, auto-contents, page tools.
+   Wiki overhaul; per-page md/wikitext, auto-contents, page tools.
    The article view borrows Wikipedia's bones (title rule, contents
    box, section rules, "what links here") in the operator-terminal
    register: mono micro-labels, token colours, tight radii.
@@ -4552,7 +4552,7 @@ button.you-panel:hover {
   flex: 1;
 }
 
-/* The md/wiki format switch — a segmented pair; the page's format is a shared property. */
+/* The md/wiki format switch; a segmented pair; the page's format is a shared property. */
 .wiki-fmt-toggle {
   display: flex;
 }

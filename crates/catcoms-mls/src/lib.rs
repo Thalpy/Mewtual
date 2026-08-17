@@ -1,4 +1,4 @@
-//! MLS group core for CatComs (Phase 2): **one MLS group == one server/connection**.
+//! MLS group core for Mewtual (Phase 2): **one MLS group == one server/connection**.
 //!
 //! Built on openmls (RFC 9420). A [`device::MlsDevice`] is one device's leaf
 //! identity (its MLS signature key, whose public bytes content-address its

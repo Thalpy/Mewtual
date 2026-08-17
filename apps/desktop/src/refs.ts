@@ -1,7 +1,7 @@
 // Reference markers for the composer's "+" insert picker.
 //
-// The picker turns a piece of this server's own content — a fileshare file, one of your status
-// posts, a wiki page — into the marker text that goes in the message. `render.ts` tokenizes those
+// The picker turns a piece of this server's own content; a fileshare file, one of your status
+// posts, a wiki page; into the marker text that goes in the message. `render.ts` tokenizes those
 // markers back into chips/embeds, so the two files agree on exactly one thing: the marker grammar.
 // `refs.test.ts` pins that agreement by checking every builder here against the renderer's own
 // regexes, which is the seam that silently breaks when either side is edited.
@@ -36,7 +36,7 @@ export function statusMarker(text: string, id: string): string {
 }
 
 /**
- * A wiki page — the long-standing `[[Page]]` form the wiki already uses everywhere. `|` is dropped
+ * A wiki page; the long-standing `[[Page]]` form the wiki already uses everywhere. `|` is dropped
  * as well as the bracket characters: it now separates `[[Page|label]]`, so a page name containing
  * one would otherwise build a marker that links somewhere else entirely.
  */
@@ -44,14 +44,14 @@ export function wikiMarker(page: string): string {
   return `[[${refLabel(page.replace(/\|/g, " "), 120) || "page"}]]`;
 }
 
-/** A server event, labelled with its title — the chip jumps to the Events surface. */
+/** A server event, labelled with its title; the chip jumps to the Events surface. */
 export function eventMarker(title: string, id: string): string {
   return `[${refLabel(title, 60) || "event"}](event:${id})`;
 }
 
 /**
  * Splice `insert` into `draft` over the selection `[start, end)`, space-separated from the text on
- * either side so consecutive picks don't run together — but only where a space isn't already there,
+ * either side so consecutive picks don't run together; but only where a space isn't already there,
  * otherwise inserting mid-message leaves a double space. Returns the new draft and where the caret
  * should land (just after the insertion).
  */

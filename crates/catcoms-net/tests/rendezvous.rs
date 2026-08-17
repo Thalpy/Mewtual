@@ -62,7 +62,7 @@ async fn rendezvous_server_grants_a_registration() {
     server.listen_on(server_addr.clone()).unwrap();
     let server_task = tokio::spawn(run_rendezvous(server));
 
-    // A client given an external address (so `register` is permitted — registrations
+    // A client given an external address (so `register` is permitted; registrations
     // advertise the registrant's reachable address) dials the server and registers.
     let mut client = build_rendezvous_client();
     client.add_external_address("/memory/991100".parse().unwrap());
@@ -116,7 +116,7 @@ async fn wait_connected(mesh: &MeshService, targets: &[catcoms_rt::PeerId]) {
 }
 
 /// 6e-3d-4: a `MeshService` node reserves a relay circuit (its external address),
-/// registers that record at a rendezvous, and a second node discovers it — surfaced,
+/// registers that record at a rendezvous, and a second node discovers it; surfaced,
 /// never auto-dialed. Relay + rendezvous + two mesh nodes over the memory transport.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_registers_via_a_circuit_and_another_discovers_it() {
@@ -186,7 +186,7 @@ async fn a_node_registers_via_a_circuit_and_another_discovers_it() {
     assert_eq!(discovered.namespace, namespace);
 
     // No auto-dial: discovering A must NOT make B connect to A (a higher layer decides
-    // whether/when to dial — that is where eclipse-resistance lives).
+    // whether/when to dial; that is where eclipse-resistance lives).
     let dialed = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let Some(TransportEvent::PeerConnected(p)) = b.next_event().await {

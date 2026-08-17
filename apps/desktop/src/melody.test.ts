@@ -1,11 +1,11 @@
 // Unit tests for the melody unlock lock's theory + engraving.
 //
-// Run with `npm test` (Node's built-in runner + type stripping — no extra dependencies).
+// Run with `npm test` (Node's built-in runner + type stripping; no extra dependencies).
 //
 // Two things are worth pinning here, and they are not equally serious:
 //
 //   ENCODING is security-critical. `encodeMelody` feeds the vault KDF directly, so a change to
-//   its output silently locks every existing melody vault out — there is no recovery path. The
+//   its output silently locks every existing melody vault out; there is no recovery path. The
 //   tests below pin the exact bytes for known sequences, pin that incidental things (finger
 //   order, a doubled note) cannot fork the secret, and pin that the schemes which CAN collide
 //   (rhythm on vs off, one octave vs another) actually stay distinct.
@@ -55,7 +55,7 @@ test("encodeMelody pins the exact v3 wire format", () => {
   assert.equal(encodeMelody([ev([60, 64, 67], 2)], true), "melody:v3:60+64+67.2");
 });
 
-test("an empty sequence encodes to \"\" — it must never be able to unlock", () => {
+test("an empty sequence encodes to \"\"; it must never be able to unlock", () => {
   assert.equal(encodeMelody([], true), "");
   assert.equal(encodeMelody([], false), "");
 });
@@ -68,7 +68,7 @@ test("finger order and doubled notes cannot fork the secret", () => {
   assert.equal(b, c);
 });
 
-test("octave is part of the secret — C4 is not C5", () => {
+test("octave is part of the secret; C4 is not C5", () => {
   assert.notEqual(encodeMelody([ev([60])], true), encodeMelody([ev([72])], true));
 });
 
@@ -127,7 +127,7 @@ test("chordName handles voicings spread over octaves", () => {
   assert.equal(chordName([48, 64, 67, 72]), "C"); // root doubled two octaves down
 });
 
-test("chordName degrades gracefully — a single note is unlabelled, a cluster still names", () => {
+test("chordName degrades gracefully; a single note is unlabelled, a cluster still names", () => {
   assert.equal(chordName([60]), "");
   assert.equal(chordName([]), "");
   assert.equal(chordName([60, 67]), "C 5"); // power chord reads as an interval
@@ -137,7 +137,7 @@ test("chordName degrades gracefully — a single note is unlabelled, a cluster s
 
 // --- Staff geometry -----------------------------------------------------------------------------
 
-test("staffStep is diatonic — a sharp shares its natural's line", () => {
+test("staffStep is diatonic; a sharp shares its natural's line", () => {
   assert.equal(staffStep(60), staffStep(61)); // C4 and C#4
   assert.equal(staffStep(60), 28); // middle C
   assert.equal(staffStep(62) - staffStep(60), 1); // C4 → D4 is one step
@@ -153,7 +153,7 @@ test("staff lines are evenly spaced and middle C falls exactly between the stave
   assert.deepEqual(gaps, [8, 8, 8, 8]);
   const e4 = yOf(30); // treble bottom line
   const a3 = yOf(26); // bass top line
-  assert.equal(yOf(28), (e4 + a3) / 2); // C4 is midway — a genuine grand staff
+  assert.equal(yOf(28), (e4 + a3) / 2); // C4 is midway; a genuine grand staff
   assert.equal(yOf(38), STAFF_TOP);
   assert.equal(yOf(18), STAFF_BOT);
 });
@@ -164,7 +164,7 @@ test("ledger lines appear only where a note actually leaves the staff", () => {
   assert.deepEqual(ledgersFor(39), []); // the space just above the treble staff
   assert.deepEqual(ledgersFor(27), []); // B3, the space just above the bass staff
   assert.deepEqual(ledgersFor(29), []); // D4, the space just below the treble staff
-  assert.deepEqual(ledgersFor(28), [28]); // middle C — the one line in the gap
+  assert.deepEqual(ledgersFor(28), [28]); // middle C; the one line in the gap
   assert.deepEqual(ledgersFor(40), [40]); // A5
   assert.deepEqual(ledgersFor(44), [40, 42, 44]); // stacked upward
   assert.deepEqual(ledgersFor(14), [16, 14]); // and downward
@@ -182,7 +182,7 @@ test("note values engrave correctly: filled/hollow, stems, flags", () => {
   assert.ok(!whole.filled && !whole.flag && whole.stem === null); // a whole note has no stem
 });
 
-test("with rhythm off every event engraves as a quarter — the score shows what's sealed", () => {
+test("with rhythm off every event engraves as a quarter; the score shows what's sealed", () => {
   for (const e of buildSheet([ev([60], 0), ev([60], 3)], false).events) {
     assert.ok(e.filled && !e.flag && e.stem);
   }

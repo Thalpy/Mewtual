@@ -63,7 +63,7 @@ proptest! {
     }
 
     /// The derivation context is a deterministic, injective function of
-    /// (doc_type_tag, doc_id) — the property channel-key separation depends on.
+    /// (doc_type_tag, doc_id); the property channel-key separation depends on.
     #[test]
     fn context_is_injective(t1 in any::<u16>(), id1 in any::<u128>(), t2 in any::<u16>(), id2 in any::<u128>()) {
         let c1 = context_bytes(t1, id1);

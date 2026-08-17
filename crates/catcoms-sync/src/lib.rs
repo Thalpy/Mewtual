@@ -1,7 +1,7 @@
 //! Channel synchronization: replicate encrypted CRDT documents over a mesh.
 //!
 //! [`ChannelSync`] bridges the Phase-4 replication engine ([`EncryptedDoc`]) and
-//! the Phase-0 transport seam ([`MeshTransport`]) — so it runs identically over
+//! the Phase-0 transport seam ([`MeshTransport`]); so it runs identically over
 //! the in-memory test transport and the libp2p mesh. It:
 //!
 //! - subscribes each open document to a **blinded topic** derived from the group
@@ -70,13 +70,13 @@ const KIND_JOIN: u8 = 1;
 /// Request kind: membership commit catch-up (missed-commit recovery, 6d-1b).
 const KIND_COMMIT_CATCHUP: u8 = 2;
 /// Request kind: committer→joiner Welcome delivery once a *staged* admission
-/// resolves — the provisional-Welcome push for the two-phase join (6d-2a).
+/// resolves; the provisional-Welcome push for the two-phase join (6d-2a).
 const KIND_WELCOME: u8 = 3;
-/// Request kind: member **peer exchange** (PEX, 6e-3d-7) — a member asks another
+/// Request kind: member **peer exchange** (PEX, 6e-3d-7); a member asks another
 /// member for the signed peer records it knows, so members supply each other with
 /// dialable peers without any rendezvous (defeats single-rendezvous omission).
 const KIND_PEX: u8 = 4;
-/// Request kind: **blob fetch** by content address (8l) — a member asks another member
+/// Request kind: **blob fetch** by content address (8l); a member asks another member
 /// for a content-addressed blob (avatars, files), so large/shared binaries move off the
 /// gossiped documents onto on-demand mesh fetch. Members-only and signed, like catch-up.
 const KIND_BLOB_FETCH: u8 = 5;
@@ -98,9 +98,9 @@ const MAX_PENDING_DM_INVITES: usize = 64;
 /// A real-time call signalling message (WebRTC SDP offer/answer + ICE candidates), pushed
 /// member-to-member like a DM invite. The payload is **opaque** to the core (the UI JSON-encodes
 /// `{callId, type, data}`); the core only proves "a current member sent you this" + relays it. Unlike
-/// DM invites these are NOT deduped — every ICE candidate must arrive — so the queue is plain FIFO.
+/// DM invites these are NOT deduped; every ICE candidate must arrive; so the queue is plain FIFO.
 const KIND_CALL_SIGNAL: u8 = 8;
-/// Request kind: a **companion device's admission request** (multi-device M3) — the pre-admission
+/// Request kind: a **companion device's admission request** (multi-device M3); the pre-admission
 /// analogue of `KIND_JOIN`. The new device presents an origin-signed [`DeviceCertificate`] plus a
 /// cert-bound KeyPackage to whichever member the grant's bootstrap/rendezvous reached. If that
 /// member is the designated committer it admits synchronously (`JOIN_READY`); otherwise it relays
@@ -120,15 +120,15 @@ const MAX_PENDING_CALL_SIGNALS: usize = 256;
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
 const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
-/// Per-requesting-**member** blob-serve budget over a fixed window — the anti-amplification rate
+/// Per-requesting-**member** blob-serve budget over a fixed window; the anti-amplification rate
 /// limit (a 32-byte CID can elicit up to `MAX_BLOB_RESPONSE` + a signature). A **bytes** budget
 /// (not a per-blob interval) so a single legitimate download can pull many chunks back-to-back
-/// from one holder — required for chunked large-file transfer, where a throttled-to-empty serve
+/// from one holder; required for chunked large-file transfer, where a throttled-to-empty serve
 /// would be misread as "not held" and break the fetch. Bounds a flooder to `BLOB_BUDGET_BYTES`
-/// per window per requester per holder (≈96 MiB/s — comparable to the old worst case of one
+/// per window per requester per holder (≈96 MiB/s; comparable to the old worst case of one
 /// 16 MiB blob / 200 ms ≈ 80 MiB/s). Only a HIT (a served blob) is charged; misses are free.
 /// This is a FIXED window (not sliding / token-bucket), so a requester can draw a full budget at
-/// the tail of one window and another at the head of the next — a transient ≤2× burst across a
+/// the tail of one window and another at the head of the next; a transient ≤2× burst across a
 /// boundary. That doesn't change the asymptotic bound and the absolute burst is modest.
 const BLOB_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
 const BLOB_BUDGET_WINDOW_MS: u64 = 1_000;
@@ -140,7 +140,7 @@ const MAX_DIALED_PEERS: usize = 4096;
 /// Cap on dialable addresses carried per peer record.
 const MAX_PEX_ADDRESSES: usize = 8;
 /// Minimum interval (ms, on the injected clock) between PEX responses served to the
-/// same requesting **member** — a rate limit so PEX cannot be used to amplify traffic.
+/// same requesting **member**; a rate limit so PEX cannot be used to amplify traffic.
 const MIN_PEX_INTERVAL_MS: u64 = 1_000;
 /// Cap on a single dialable address string in a peer record. Any real multiaddr is
 /// far shorter; rejecting longer ones bounds the bytes a record can carry.
@@ -148,7 +148,7 @@ const MAX_PEX_ADDR_LEN: usize = 256;
 /// Tight ceiling on a PEX **response** accepted from a serving member. A response is
 /// at most `MAX_PEX_ENTRIES` records, each bounded by `MAX_PEX_ADDRESSES` ×
 /// `MAX_PEX_ADDR_LEN`; 512 KiB is generous headroom. Far smaller than the 16 MiB
-/// catch-up ceiling — a member cannot make us decode/verify an arbitrarily large
+/// catch-up ceiling; a member cannot make us decode/verify an arbitrarily large
 /// bundle (the receive-side bound matching the serve-side `take(MAX_PEX_ENTRIES)`).
 const MAX_PEX_RESPONSE: usize = 512 * 1024;
 /// Join-response status byte: the admission was staged and is awaiting the
@@ -156,16 +156,16 @@ const MAX_PEX_RESPONSE: usize = 512 * 1024;
 const JOIN_PENDING: u8 = 0;
 /// Join-response status byte: the Welcome (and signature) follow inline.
 const JOIN_READY: u8 = 1;
-/// Defensive cap on the number of routing secrets a join transfer may carry — the
+/// Defensive cap on the number of routing secrets a join transfer may carry; the
 /// store only ever holds the current label plus two grandfathered ones.
 const MAX_ROUTING_SECRETS: usize = 8;
 /// Control requests (join/catch-up) are small; reject anything larger up front.
 const MAX_CONTROL_REQUEST: usize = 64 * 1024;
 /// Ceiling on a catch-up **response** accepted from a (untrusted) serving peer,
-/// before it is decoded — a serving peer is no more trusted than a requester, so
+/// before it is decoded; a serving peer is no more trusted than a requester, so
 /// the response is bounded just like the request. A full document history can be
 /// large; 16 MiB is a generous v1 ceiling (resumable chunked anti-entropy for
-/// larger-than-this histories is deferred — see ARCHITECTURE §2.8).
+/// larger-than-this histories is deferred; see ARCHITECTURE §2.8).
 const MAX_CATCHUP_RESPONSE: usize = 16 * 1024 * 1024;
 /// Defensive cap on the element count claimed by a bundle header, so a malformed
 /// length prefix cannot drive a long allocation loop even within the size cap.
@@ -189,13 +189,13 @@ const JOIN_RESP_DOMAIN: &str = "catcoms/join-resp/v1";
 /// to the requester's key + the request timestamp so it cannot be replayed.
 const CATCHUP_RESP_DOMAIN: &str = "catcoms/catchup-resp/v1";
 /// Domain separator for a **responder's** signature over a PEX response bundle
-/// (6e-3d-7) — same shape as the commit-catch-up response binding, distinct domain.
+/// (6e-3d-7); same shape as the commit-catch-up response binding, distinct domain.
 const PEX_RESP_DOMAIN: &str = "catcoms/pex-resp/v1";
 /// Domain separator for a peer's **self-signature** over its own peer record (a
 /// member binds its dialable addresses + seq to its device key), so a PEX responder
-/// can only relay records peers signed themselves — it cannot forge a peer's address.
+/// can only relay records peers signed themselves; it cannot forge a peer's address.
 const PEER_RECORD_DOMAIN: &str = "catcoms/peer-record/v1";
-/// Domain separator for a **responder's** signature over a blob-fetch response (8l) —
+/// Domain separator for a **responder's** signature over a blob-fetch response (8l);
 /// same binding shape as the catch-up/PEX responses, distinct domain.
 const BLOB_FETCH_RESP_DOMAIN: &str = "catcoms/blob-fetch-resp/v1";
 
@@ -212,7 +212,7 @@ pub struct SyncConfig {
     pub max_commit_log: usize,
     /// Cap on out-of-order commits buffered awaiting their predecessors.
     pub max_pending_commits: usize,
-    /// Largest forward epoch gap we will buffer/chase — a DoS bound against a
+    /// Largest forward epoch gap we will buffer/chase; a DoS bound against a
     /// peer flooding far-future (forged) commit records.
     pub max_commit_gap: u64,
     /// Cap on recently-seen peers retained as catch-up sources.
@@ -226,7 +226,7 @@ pub struct SyncConfig {
     /// ≥1 enables concurrent committers and the staged fork-resolution path).
     pub max_committer_rank: u32,
     /// How long (ms, on the injected clock) a node collects competing same-epoch
-    /// commits before adopting the lowest-`commit_id` winner — the fork-resolution
+    /// commits before adopting the lowest-`commit_id` winner; the fork-resolution
     /// contest window. Only used when `max_committer_rank >= 1`.
     pub stage_decision_window_ms: u64,
 }
@@ -251,7 +251,7 @@ impl Default for SyncConfig {
 /// same-base candidate commits during a bounded window, then adopts the lowest
 /// `commit_id`. Built only when `max_committer_rank >= 1`.
 /// Context for an admission we staged: how to finalize (or reject) the join once
-/// the fork-resolution contest resolves. The Welcome is **provisional** — it is
+/// the fork-resolution contest resolves. The Welcome is **provisional**; it is
 /// delivered to the joiner only if our staged Add becomes the canonical winner.
 #[derive(Debug)]
 struct StagedJoin {
@@ -261,7 +261,7 @@ struct StagedJoin {
     nonce: [u8; 16],
     /// The openmls Welcome for the joiner. The inviter signature over the join
     /// transcript is (re)computed at resolution time, where the routing transfer it
-    /// must bind has been sealed (post-merge epoch) — not here at stage time.
+    /// must bind has been sealed (post-merge epoch); not here at stage time.
     welcome: Vec<u8>,
 }
 
@@ -273,7 +273,7 @@ struct MyStaged {
     /// Present if the staged commit is an admission (then resolution pushes the
     /// Welcome on a win or a rejection on a loss).
     join: Option<StagedJoin>,
-    /// Whether our staged commit removes a member — so a win rotates the routing
+    /// Whether our staged commit removes a member; so a win rotates the routing
     /// secret (`ns_secret_L`) just like the inbound apply path does.
     removed: bool,
 }
@@ -288,14 +288,14 @@ struct PendingResolve {
     best: CommitRecord,
     /// When the window closes (on the injected clock).
     deadline_ms: u64,
-    /// Our own staged commit if we are a participant — so on resolution we know
+    /// Our own staged commit if we are a participant; so on resolution we know
     /// whether we won (merge our pending commit) or lost (abort it and apply the
     /// winner). `None` for a pure applier.
     mine: Option<MyStaged>,
 }
 
 /// A snapshot of a [`ChannelSync`]'s internal counters and gauges. Returned by
-/// [`ChannelSync::stats`] for diagnostics — useful to assert recovery behaviour
+/// [`ChannelSync::stats`] for diagnostics; useful to assert recovery behaviour
 /// in tests and to surface "why didn't this converge?" detail when debugging a
 /// live node without parsing the trace log.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -337,7 +337,7 @@ pub struct SyncStats {
     /// Gauge: untrusted catch-up **candidate** peers currently known.
     pub known_peers: usize,
     /// Gauge: **proven member** catch-up sources currently known (promoted via a
-    /// verified signed catch-up — the trusted pool).
+    /// verified signed catch-up; the trusted pool).
     pub member_peers: usize,
 }
 
@@ -400,7 +400,7 @@ fn catchup_auth_transcript(
 /// PEX), binding it to a `domain`, the group, the requester's key, the request
 /// timestamp, the request's **nonce** and **epoch** (so a captured response cannot be
 /// replayed against a *different* request, even one issued in the same millisecond),
-/// and the bundle bytes — so the requester can verify the bundle was served by a
+/// and the bundle bytes; so the requester can verify the bundle was served by a
 /// member for *this exact* request.
 fn signed_resp_transcript(
     domain: &str,
@@ -464,7 +464,7 @@ fn pex_resp_transcript(
 
 /// The responder transcript for a blob-fetch response (8l). Same binding shape as the
 /// catch-up/PEX responses (binds the blob to the requester's key + request), distinct
-/// domain — so a response cannot be lifted into another protocol or replayed.
+/// domain; so a response cannot be lifted into another protocol or replayed.
 fn blob_fetch_resp_transcript(
     group_id: &[u8],
     requester_pubkey: &[u8],
@@ -720,7 +720,7 @@ impl std::fmt::Debug for RoutingState {
 /// transfer key from the just-joined group (the joiner is now at the seal epoch),
 /// unseal, and decode.
 ///
-/// An **absent** transfer (empty — now only an inviter-side seal/key-derivation **error**,
+/// An **absent** transfer (empty; now only an inviter-side seal/key-derivation **error**,
 /// since post-9h a normal transfer always carries the file-wrap key + L=0 routing secret)
 /// yields an empty state, so the joiner keeps its local `L = 0` and **no** file key (it then
 /// cannot share/open group files until it rejoins). A **present but unopenable** transfer is a
@@ -774,7 +774,7 @@ fn remove_req_transcript(
 
 /// Encode a signed remove request body: `target ‖ requester_pubkey ‖ ts ‖ sig`. Only the
 /// committer ever *receives* a remove request now (removal is owner-only), so nothing in the
-/// library encodes one — this is retained for the forged-request rejection test.
+/// library encodes one; this is retained for the forged-request rejection test.
 #[cfg(test)]
 fn encode_remove_request(
     target: &[u8; 32],
@@ -916,9 +916,9 @@ fn decode_admit_result(bytes: &[u8]) -> Result<AdmitResult, SyncError> {
 
 /// The 16-byte **bind nonce** a certificate admits under.
 ///
-/// A device admission has no invite nonce, but every place the invite path uses one — the
+/// A device admission has no invite nonce, but every place the invite path uses one; the
 /// joiner's leaf credential ([`MlsDevice::key_package_for_invite`]), the single-use ledger, and
-/// the admit-result cache key — needs a value of that shape. Deriving it from the certificate's
+/// the admit-result cache key; needs a value of that shape. Deriving it from the certificate's
 /// canonical bytes gives all three at once: both sides compute it independently (no extra wire
 /// field to tamper with), it is unique per certificate (so one certificate admits one device
 /// once), and a KeyPackage minted against certificate A can never be relayed into an admission
@@ -951,7 +951,7 @@ fn device_add_transcript(
     e.finish()
 }
 
-/// The transcript the **owner** signs to authenticate a companion's Welcome — the device
+/// The transcript the **owner** signs to authenticate a companion's Welcome; the device
 /// analogue of [`join_transcript`], with the certificate hash standing in for the invite nonce
 /// (the invite-specific binding a device admission has no equivalent of).
 fn device_join_transcript(
@@ -976,7 +976,7 @@ fn cert_hash(cert: &DeviceCertificate) -> [u8; 32] {
 }
 
 /// Encode a signed device-add request body: `certificate ‖ key_package ‖ requester_pubkey ‖ ts ‖
-/// sig` — the same field order as [`encode_add_request`], with the certificate standing in for
+/// sig`; the same field order as [`encode_add_request`], with the certificate standing in for
 /// the invite. `requester_pubkey` is redundant (it content-addresses `cert.new_device_id` and is
 /// the KeyPackage's leaf key) and is cross-checked against both, which lets the owner reject a
 /// mismatched request before paying for KeyPackage validation.
@@ -1084,14 +1084,14 @@ pub enum SyncError {
 /// A member's **self-signed, dialable peer record**, exchanged via PEX (6e-3d-7). The
 /// member binds its transport `peer_id` and dialable `addresses` (plus a monotonic
 /// `seq` for freshness) to its **device key**, so a PEX responder can only relay
-/// records peers signed themselves — it cannot forge a peer's address — and a
+/// records peers signed themselves; it cannot forge a peer's address; and a
 /// recipient can confirm the record describes a current group member (the signer's
 /// device id is in the roster) before treating it as a dial candidate.
 ///
 /// NOTE for the discovery bridge (6e-3d-9): `seq` is a per-**device** counter, and the
 /// authenticated identity is `device_pubkey`. When turning records into
 /// `catcoms-discovery` `Candidate`s, key the candidate (and its anti-replay seq) on the
-/// **device id**, not the self-asserted `peer_id` — two records could claim the same
+/// **device id**, not the self-asserted `peer_id`; two records could claim the same
 /// `peer_id`, so keying on `peer_id` would let one member pin another's freshness.
 /// `peer_id`/`addresses` are the dial target only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1130,7 +1130,7 @@ fn peer_record_signing_payload(
 
 impl PeerDescriptor {
     /// Verify the record's self-signature: the embedded device key signed its
-    /// `(peer_id, addresses, seq)`. (Membership — that the signer is in the roster —
+    /// `(peer_id, addresses, seq)`. (Membership; that the signer is in the roster;
     /// is checked separately by the ingesting node.)
     pub fn verify_self(&self) -> bool {
         let payload = peer_record_signing_payload(
@@ -1256,7 +1256,7 @@ fn decode_pex_bundle(bytes: &[u8]) -> Result<Vec<PeerDescriptor>, SyncError> {
 /// The blinded gossip topic for a document at routing label `slot`, **keyed** under
 /// that label's routing secret (`ns_secret_slot`): `BLAKE3_keyed(ns_secret_slot,
 /// "…/topic/v2" ‖ group_id ‖ slot ‖ type ‖ id)`. Keyed (not just group-id-hashed,
-/// v1) so a non-member holding an invite — which carries `group_id` in the clear —
+/// v1) so a non-member holding an invite; which carries `group_id` in the clear;
 /// cannot compute it; binding `slot` rotates it on every member removal (§2.5).
 fn channel_topic(
     ns_secret: &[u8; 32],
@@ -1305,10 +1305,10 @@ const RZ_TAG_DOMAIN: &str = "catcoms/rz-tag/v1";
 /// routing label `slot`, *before* spending a dial on it. It binds the registrant's
 /// libp2p `peer_id` and its signed record `seq` so:
 ///
-/// - a **non-member** (no `ns_secret_L`) cannot forge one — a leaked/guessed-namespace
+/// - a **non-member** (no `ns_secret_L`) cannot forge one; a leaked/guessed-namespace
 ///   Sybil flood is one rejected hash, **no dial**;
 /// - a **colluding rendezvous** cannot graft a real member's tag onto an injected
-///   Sybil record — the Sybil's `peer_id` differs, so the bound tag will not verify; and
+///   Sybil record; the Sybil's `peer_id` differs, so the bound tag will not verify; and
 /// - a **removed** member's `L-1` tag is rejected by a discoverer who has applied the
 ///   removal (it derives the tag under the new `ns_secret_L`).
 ///
@@ -1353,13 +1353,13 @@ const JOIN_NS_DOMAIN: &str = "catcoms/join-rz/v1";
 
 /// The **pre-join** rendezvous namespace a joiner can compute from the invite alone
 /// (6e-3d-9), so it can discover the inviter at a rendezvous **without a hard-coded
-/// server address** — before it holds any group exporter secret. Keyed off the invite
+/// server address**; before it holds any group exporter secret. Keyed off the invite
 /// nonce (stretched to 32 bytes), bound to the group and the specific rendezvous node:
 ///
 /// `join_ns = "catcoms1-" ‖ hex(BLAKE3_keyed(derive_key(nonce),
 ///   "…/join-rz/v1" ‖ group_id ‖ rz_peer)[..20])`.
 ///
-/// Its secrecy is bounded by the invite's — an invite-holder can compute it, which is
+/// Its secrecy is bounded by the invite's; an invite-holder can compute it, which is
 /// acceptable for a single-use bootstrap rendezvous point. The inviter registers under
 /// it pre-join; once joined, the member switches to the secret, rotation-aware
 /// [`ChannelSync::rendezvous_namespaces`]. Both sides derive the identical string.
@@ -1385,12 +1385,12 @@ const CTRL_REMOVE_REQUEST: u8 = 1;
 /// designated committer admit a joiner via an invite (admin invites, Option C). Only the
 /// committer (owner) acts on it, so admins never produce a commit → no fork. The owner returns
 /// the Welcome to the requesting admin, who re-signs the join transcript and pushes it to the
-/// joiner (so the joiner's verification is unchanged — see docs/design-admin-invites.md).
+/// joiner (so the joiner's verification is unchanged; see docs/design-admin-invites.md).
 #[allow(dead_code)] // wired into serve_join/on_control in the next slice
 const CTRL_ADD_REQUEST: u8 = 2;
 /// Control-topic tag: a member relaying a **companion device's** admission request to the
-/// designated committer (multi-device M3). Same single-serializer shape as `CTRL_ADD_REQUEST` —
-/// only the owner runs the MLS Add, so no fork — but the validity condition is a certificate
+/// designated committer (multi-device M3). Same single-serializer shape as `CTRL_ADD_REQUEST`;
+/// only the owner runs the MLS Add, so no fork; but the validity condition is a certificate
 /// signed by an admitted member's *origin* device rather than an invite-ledger entry.
 const CTRL_DEVICE_ADD: u8 = 3;
 
@@ -1402,7 +1402,7 @@ const REMOVE_REQ_DOMAIN: &str = "catcoms/remove-req/v1";
 const ADD_REQ_DOMAIN: &str = "catcoms/add-req/v1";
 /// Domain separator for a **companion device's** signed admission request (M3).
 const DEVICE_ADD_DOMAIN: &str = "catcoms/device-add/v1";
-/// Domain separator for deriving a certificate's admission **bind nonce** — the 16-byte value
+/// Domain separator for deriving a certificate's admission **bind nonce**; the 16-byte value
 /// that plays the invite nonce's role for a device admission (leaf-credential binding, single
 /// use in the invite ledger, and the admit-result key).
 const DEVICE_BIND_DOMAIN: &str = "catcoms/device-add-bind/v1";
@@ -1411,7 +1411,7 @@ const DEVICE_JOIN_RESP_DOMAIN: &str = "catcoms/device-join-resp/v1";
 /// How stale a [`DeviceCertificate`]'s `issued_ts_ms` may be at admission.
 ///
 /// Certificates deliberately carry no expiry (`docs/design-multi-device.md` v2.2), so the
-/// admitting owner enforces freshness. `MAX_REQUEST_AGE_MS` (60 s) is the wrong window here —
+/// admitting owner enforces freshness. `MAX_REQUEST_AGE_MS` (60 s) is the wrong window here;
 /// it bounds a *live signed request*, whereas a certificate is minted, sealed into a bundle,
 /// hand-carried to the other device, unsealed under a typed passphrase and only then presented.
 /// One hour matches the expiry the product already puts on a minted invite (the desktop bridge
@@ -1419,29 +1419,29 @@ const DEVICE_JOIN_RESP_DOMAIN: &str = "catcoms/device-join-resp/v1";
 /// shape. The *request* wrapping the certificate is still held to `MAX_REQUEST_AGE_MS`.
 const MAX_DEVICE_CERT_AGE_MS: u64 = 3_600_000;
 /// Clock-skew allowance on a certificate / request timestamp. Freshness is checked
-/// *asymmetrically* — a stamp far in the past is stale, but one only slightly in the future is a
+/// *asymmetrically*; a stamp far in the past is stale, but one only slightly in the future is a
 /// clock difference, not an attack. (Using `abs_diff` symmetrically would let a future-dated
-/// certificate enjoy a doubled effective window — an adversarial-review finding.)
+/// certificate enjoy a doubled effective window; an adversarial-review finding.)
 const DEVICE_CERT_SKEW_MS: u64 = 120_000;
 /// The most companion devices any single origin (member) may have admitted at once. One origin
 /// driving unbounded certificates means unbounded owner-executed MLS Adds, and the ceremony's
-/// human gate lives on the origin device itself — so the owner caps it. "One device per grant" is
+/// human gate lives on the origin device itself; so the owner caps it. "One device per grant" is
 /// the design's intent; this is the enforcement (adversarial-review BLOCKING finding). Generous.
 const MAX_DEVICES_PER_ORIGIN: usize = 8;
 /// DoS bound: the owner queues at most this many pending Add-requests (drop-oldest, deduped on
 /// invite nonce) so a flood can't force unbounded MLS Adds or memory.
 const MAX_ADD_REQUESTS: usize = 64;
 /// How often an admin re-broadcasts a pending Add-request until the owner delivers the result
-/// (driven off run_once events — notably the owner's reconnect — so an offline owner is caught
+/// (driven off run_once events; notably the owner's reconnect; so an offline owner is caught
 /// up when it returns).
 const ADD_REQ_RETRY_MS: u64 = 2_000;
 /// Admin-side cap on how long a single Add-request is driven (re-broadcast), regardless of the
-/// invite's own (possibly far-future) expiry — bounds the `outgoing_add_requests` lifetime.
+/// invite's own (possibly far-future) expiry; bounds the `outgoing_add_requests` lifetime.
 const MAX_ADD_REQUEST_LIFETIME_MS: u64 = 3_600_000;
 
 /// A membership commit fanned out on the control topic so existing members apply
 /// it and advance to the same epoch. `commit_epoch` is the epoch the commit was
-/// built at (it advances the group to `commit_epoch + 1`) — the linearization key
+/// built at (it advances the group to `commit_epoch + 1`); the linearization key
 /// for ordered replay during recovery.
 ///
 /// `base_authenticator` is the committer's epoch-state fingerprint *before* the
@@ -1450,7 +1450,7 @@ const MAX_ADD_REQUEST_LIFETIME_MS: u64 = 3_600_000;
 /// different one means the branches diverged earlier. `committer_sig` is the
 /// committer's MLS-leaf signature over the authorization transcript, so a recipient
 /// can confirm an *authorized* member produced it (openmls still independently
-/// authenticates the inner commit — this is authorization, not state auth).
+/// authenticates the inner commit; this is authorization, not state auth).
 #[derive(Debug, Clone)]
 struct CommitRecord {
     group_id: Vec<u8>,
@@ -1687,20 +1687,20 @@ struct OutgoingAdd {
     expires_at_ms: u64,
 }
 
-/// (invite_encoded, kp_bytes, invite_nonce, group_id) — one Add-request to re-broadcast.
+/// (invite_encoded, kp_bytes, invite_nonce, group_id); one Add-request to re-broadcast.
 type Rebroadcast = (Vec<u8>, Vec<u8>, [u8; 16], Vec<u8>);
 
 /// Owner-side (multi-device M3): a verified companion admission awaiting the next admit drain.
 struct PendingDeviceAdd {
     certificate: DeviceCertificate,
     kp_bytes: Vec<u8>,
-    /// The member that relayed the request — where the finalized result is pushed back.
+    /// The member that relayed the request; where the finalized result is pushed back.
     relay: PeerId,
 }
 
 /// Relay-side (multi-device M3): a companion admission this node is driving to completion. The
 /// verbatim signed request is re-broadcast (the owner may be offline), and the resulting Welcome
-/// is forwarded — unchanged, owner signature intact — to the waiting device.
+/// is forwarded; unchanged, owner signature intact; to the waiting device.
 struct OutgoingDeviceAdd {
     body: Vec<u8>,
     /// The certificate hash the owner's signature will be bound to (so this node can sanity-check
@@ -1723,7 +1723,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// commits). Recomputed whenever the routing label changes.
     control_topic: Topic,
     /// All control topics this node currently accepts inbound (the current label
-    /// plus grandfathered ones) — used to tell a control message from a doc op on
+    /// plus grandfathered ones); used to tell a control message from a doc op on
     /// the gossip path. A subset of `routing_subs`.
     control_topics: HashSet<Topic>,
     /// Every routing-derived topic (control + per-doc, across the grandfather
@@ -1749,12 +1749,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// sealed under a just-superseded epoch still opens. Bounded and zeroized on
     /// eviction. Keyed by `(doc_type, doc_id, epoch)`.
     past_keys: BTreeMap<(DocType, u128, u64), Zeroizing<[u8; 32]>>,
-    /// Member-**removal** counter `L` — the routing label. Advanced (only) when a
+    /// Member-**removal** counter `L`; the routing label. Advanced (only) when a
     /// commit removes a member; unchanged by Adds/Updates/application posts. The
     /// blinded gossip topics and rendezvous namespaces derive from the routing
     /// secret snapshotted at the current `L`, so they rotate **only on removal**
     /// (ARCHITECTURE §2.5). NOTE: a member joining after removals must receive the
-    /// label and the snapshots via the join/catch-up transfer (6e-3d-9) — a fresh
+    /// label and the snapshots via the join/catch-up transfer (6e-3d-9); a fresh
     /// node locally initialises `L = 0`, which is only correct for the founder until
     /// that transfer lands.
     routing_label: u64,
@@ -1765,21 +1765,21 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// is captured at the post-removal epoch (a removed member can never export it).
     routing_secrets: BTreeMap<u64, Zeroizing<[u8; 32]>>,
     /// The group's **stable** file-wrap key (Phase 9h): minted random at founding, transferred
-    /// to each joiner alongside the routing state, and never rotated — so a late joiner can
+    /// to each joiner alongside the routing state, and never rotated; so a late joiner can
     /// open *all* files (a per-epoch key would lock it out of files sealed under past epochs,
     /// the same problem the routing transfer solves). Files seal a fresh per-file content key
     /// wrapped under this. Zeroized; persisted in the snapshot. All-zero until set.
     file_wrap_key: Zeroizing<[u8; 32]>,
-    /// Recently-seen peers (from gossip/requests/connections) — UNTRUSTED catch-up
+    /// Recently-seen peers (from gossip/requests/connections); UNTRUSTED catch-up
     /// **candidates**: a Noise handshake is not group membership, so these may be
     /// Sybils. Tried only as a fallback, and a junk/unsigned reply is rejected.
     known_peers: VecDeque<PeerId>,
-    /// Peers that served a **signed** commit catch-up verifying against the roster —
+    /// Peers that served a **signed** commit catch-up verifying against the roster;
     /// proven current members (6e-3d-5). Preferred as catch-up sources, so a flood of
     /// un-handshaked candidates cannot crowd out a known-good source (the Sybil-C1
     /// fix). Bounded by `max_known_peers`.
     member_peers: VecDeque<PeerId>,
-    /// The set of transport peers with a **live connection right now** — maintained on both
+    /// The set of transport peers with a **live connection right now**; maintained on both
     /// `PeerConnected` (insert) and `PeerDisconnected` (remove), unlike `known_peers`/`member_peers`
     /// which only grow. The accurate liveness signal for presence + the file-availability hint.
     /// Transient (connections re-establish on reload).
@@ -1795,7 +1795,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
     /// staged admission resolves: `(joiner, payload)` drained in `run_once`.
     welcome_outbox: Vec<(PeerId, Vec<u8>)>,
-    /// Admin invites (Option C) — owner-side: accepted Add-requests awaiting admission (bounded
+    /// Admin invites (Option C); owner-side: accepted Add-requests awaiting admission (bounded
     /// `MAX_ADD_REQUESTS`, deduped on invite nonce).
     add_request_queue: VecDeque<PendingAdd>,
     /// Owner-side: finalized admit results by invite nonce, to re-deliver on a retransmit.
@@ -1804,7 +1804,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     admit_result_outbox: Vec<(PeerId, Vec<u8>)>,
     /// Admin-side: Add-requests this node is driving to completion, keyed by invite nonce.
     outgoing_add_requests: HashMap<[u8; 16], OutgoingAdd>,
-    /// Multi-device M3 — owner-side: accepted companion admissions awaiting the MLS Add
+    /// Multi-device M3; owner-side: accepted companion admissions awaiting the MLS Add
     /// (bounded `MAX_ADD_REQUESTS`, deduped on the certificate bind nonce).
     device_add_queue: VecDeque<PendingDeviceAdd>,
     /// Owner-side: finalized companion admit results by bind nonce, to re-deliver on a
@@ -1820,11 +1820,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Two sources, unioned: the shared `Devices` document (pushed down by the product layer via
     /// [`ChannelSync::set_device_registry`], which owns that document's schema) and every
     /// admission this node performed itself. The self-recorded half closes the window between
-    /// admitting a companion and the document write landing — without it, a device certified by
+    /// admitting a companion and the document write landing; without it, a device certified by
     /// a *just-admitted* companion could slip past the depth-1 check.
     companion_devices: HashMap<DeviceId, DeviceId>,
     /// Devices revoked by their origin (multi-device M5), pushed down with the companion map.
-    /// Empty today — the revocation *verb* is M5; the admission-side check is here already so
+    /// Empty today; the revocation *verb* is M5; the admission-side check is here already so
     /// that a revoked device can never be re-admitted once the verb lands.
     revoked_devices: HashSet<DeviceId>,
     /// Companion certificates this node admitted and has not yet handed to the product layer,
@@ -1843,7 +1843,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// of each rendezvous this member registers/discovers at to re-find the group after a restart.
     /// Empty for a server not using rendezvous.
     rendezvous_nodes: Vec<(String, Vec<u8>)>,
-    /// The eclipse-resistant dial policy (one long-lived per group; transient — rebuilt on restore)
+    /// The eclipse-resistant dial policy (one long-lived per group; transient; rebuilt on restore)
     /// that ranks discovered candidates into a bounded dial plan. The transport NEVER auto-dials.
     discovery: DiscoveryPolicy,
     /// Discovered peers already dialed this session (dedup, keyed on the opaque peer bytes), so
@@ -1851,7 +1851,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     dialed_peers: HashSet<Vec<u8>>,
     /// Advisory-only isolation detector (never gates anything): hysteretic over R (roster) / D
     /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
-    /// "verify out-of-band" hint. Transient — rebuilt on restore.
+    /// "verify out-of-band" hint. Transient; rebuilt on restore.
     eclipse: EclipseDetector,
     /// Incoming DM (friend) requests received over this group via `KIND_DM_INVITE`: `(sender
     /// fingerprint, opaque DM-group invite bytes)`, deduped on the sender. Surfaced to the recipient
@@ -1873,7 +1873,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Per-requesting-**device** blob-serve budget accounting `(window_start_ms, bytes_in_window)`
     /// for the bytes-budget rate limit (same keying + bounding as `pex_served_at`).
     blob_budget: HashMap<DeviceId, (u64, u64)>,
-    /// Content-addressed blob store for binaries fetched/served over the mesh (8l) —
+    /// Content-addressed blob store for binaries fetched/served over the mesh (8l);
     /// avatars and, later, fileshare. An in-memory store by default; a persistent store
     /// can be injected later. Boxed (not a generic param) so it does not ripple through
     /// `Server<T, R>` and the actor.
@@ -1962,12 +1962,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// (Phase 9e): the MLS state ([`snapshot_server`]), every [`EncryptedDoc`], the routing
     /// label + secrets, the invite ledger, the retained commit log, and the known peer
     /// records. The transient state (transport, topics, subscription flags, caches,
-    /// rate-limit maps, blob store) is rebuilt on [`ChannelSync::restore`]. **Secret** — it
+    /// rate-limit maps, blob store) is rebuilt on [`ChannelSync::restore`]. **Secret**; it
     /// holds the signer private key, group secrets, routing secrets and plaintext document
     /// content; the registry seals it under the vault key before it touches disk (9f).
     pub fn snapshot(&mut self) -> Result<Zeroizing<Vec<u8>>, SyncError> {
         let mls = snapshot_server(&self.device, &self.group)?;
-        // `routing` carries the live routing secrets in the clear — zeroize the intermediate
+        // `routing` carries the live routing secrets in the clear; zeroize the intermediate
         // (the returned blob is already `Zeroizing`).
         let routing = {
             let secrets: Vec<(u64, [u8; 32])> = self
@@ -2019,7 +2019,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Reconstruct a synchronizer from a [`ChannelSync::snapshot`] blob plus a **fresh**
-    /// transport/rng/clock (connections do not persist — the caller re-dials, Phase 9g). The
+    /// transport/rng/clock (connections do not persist; the caller re-dials, Phase 9g). The
     /// MLS device + group, documents, routing state, ledger, commit log and peer records are
     /// restored; the node then subscribes + resyncs at runtime exactly like a fresh one.
     pub fn restore(
@@ -2067,7 +2067,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             for _ in 0..count {
                 set.insert(d.get_str().map_err(|_| bad())?.to_string());
             }
-            // Post-join discovery rendezvous config — also a graceful tail (absent in a snapshot
+            // Post-join discovery rendezvous config; also a graceful tail (absent in a snapshot
             // written before this feature). `get_*` is bounded by the remaining input, so push
             // (no pre-alloc) can't over-run; the snapshot is sealed, so the count isn't adversarial.
             let mut nodes = Vec::new();
@@ -2119,16 +2119,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.device.device_id()
     }
 
-    /// The designated committer's device id (the server owner — the MLS-anchored ownership
+    /// The designated committer's device id (the server owner; the MLS-anchored ownership
     /// the product layer uses, Phase 10h), if the group has one.
     pub fn designated_committer_id(&self) -> Option<DeviceId> {
         self.group.designated_committer()
     }
 
-    /// Whether `device_id` is currently authorized to invite/admit — the **owner** (designated
+    /// Whether `device_id` is currently authorized to invite/admit; the **owner** (designated
     /// committer) unconditionally, or a current admin. On the **owner** (the only node that runs
     /// admission in Option C) this reads the owner's **local authoritative roster**, which a
-    /// malicious member cannot write — so a demoted admin replaying/deleting its grant in the
+    /// malicious member cannot write; so a demoted admin replaying/deleting its grant in the
     /// shared CRDT cannot re-authorize itself (THREAT-MODEL item 3). On a non-owner node it is a
     /// display fallback only (never the admission path), reading the owner-signed published roster.
     /// Returns `false` for a non-admin / non-member.
@@ -2141,14 +2141,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let fp = roles::fingerprint(device_id);
         if self.is_designated_committer() {
-            // We are the owner — the only node that runs admission (Option C). Consult our LOCAL
+            // We are the owner; the only node that runs admission (Option C). Consult our LOCAL
             // authoritative roster: replay/deletion/forgery against the shared CRDT cannot touch
             // it, so a demoted admin cannot re-authorize itself (THREAT-MODEL item 3).
             return self.admin_roster.contains(&fp);
         }
         // Non-owner: this never gates admission (only the owner commits, against its local
         // roster). It IS consulted for the relay self-gate via `published_roster_omits`, which
-        // treats an unreadable roster as "unknown" so a junk overwrite cannot deny relays — so a
+        // treats an unreadable roster as "unknown" so a junk overwrite cannot deny relays; so a
         // tampered published roster is at worst a per-reader display glitch, never a liveness or
         // admission effect. Trust a cleanly-read owner-signed roster.
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
@@ -2158,7 +2158,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Whether the **published** roster reads successfully AND positively omits `device` — the
+    /// Whether the **published** roster reads successfully AND positively omits `device`; the
     /// only case in which a non-owner should self-gate a relay. Returns `false` when the roster is
     /// present-and-includes-us OR is unreadable/absent (the "unknown" case: relay and let the owner
     /// decide, so a junk-overwritten roster scalar cannot disable every admin's relay). Never
@@ -2179,7 +2179,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// The owner's local authoritative admin set (fingerprints). Owner-only meaningful — empty on
+    /// The owner's local authoritative admin set (fingerprints). Owner-only meaningful; empty on
     /// non-owner nodes. The product layer uses this for the owner's own role display so it always
     /// matches the admission gate (other members read the published copy).
     pub fn admin_roster(&self) -> HashSet<String> {
@@ -2236,13 +2236,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.device.public_key_bytes()
     }
 
-    /// This server's MLS group id (stable across restarts) — used to key the on-disk blob
+    /// This server's MLS group id (stable across restarts); used to key the on-disk blob
     /// store directory, so a reloaded server finds its sealed blobs.
     pub fn group_id(&self) -> Vec<u8> {
         self.group.group_id()
     }
 
-    /// Replace the blob store (default in-memory) — e.g. with a persistent, sealing on-disk
+    /// Replace the blob store (default in-memory); e.g. with a persistent, sealing on-disk
     /// store (Phase 9h). Inject this right after construction, before any blob is added.
     pub fn set_blob_store(&mut self, blobs: Box<dyn BlobStore + Send>) {
         self.blobs = blobs;
@@ -2290,7 +2290,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         routing: RoutingState,
     ) -> Self {
         let mut this = Self::new(transport, group, device, rng, clock);
-        // A joiner has NO group file-wrap key of its own — only the founder mints one. Zero
+        // A joiner has NO group file-wrap key of its own; only the founder mints one. Zero
         // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
         // false (and `add_file` refuses), rather than a wrong random key that would silently
         // seal files no other member could open. A successful transfer installs the real key.
@@ -2379,7 +2379,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Apply a local edit to a document and broadcast the resulting sealed op. Returns the
-    /// **automerge change hash** of the edit — the handle [`ChannelSync::peers_with_change`]
+    /// **automerge change hash** of the edit; the handle [`ChannelSync::peers_with_change`]
     /// takes to report who has since proved they hold it. Callers that don't track delivery
     /// simply drop it.
     pub async fn post<F>(
@@ -2415,7 +2415,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// pending recovery work. Returns `false` when the transport has closed.
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
-        // (caught up by the owner on its reconnect), then flush the Welcome a result produced —
+        // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
         // the admin relays it to the joiner here (in single-committer mode the contest path that
         // normally drains the Welcome outbox never runs).
         self.drive_outgoing_add_requests();
@@ -2424,7 +2424,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Flush any queued membership-commit broadcasts + Add-request retransmits.
         self.drain_outbox().await;
         self.drain_welcome_outbox().await;
-        // Owner: push finalized admit results to admins here too — a tick that admitted may be
+        // Owner: push finalized admit results to admins here too; a tick that admitted may be
         // cancelled (in a select!-driven loop) after publishing the commit but before sending the
         // result, so draining at the top each tick makes delivery robust.
         self.drain_admit_result_outbox().await;
@@ -2433,7 +2433,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // label's topics and drop the ones that aged out of the grandfather window.
         self.resync_if_needed().await;
         // Resolve a fork-resolution contest whose window has closed FIRST (local
-        // work) — ahead of recovery, so a tick spent on catch-up can never stretch
+        // work); ahead of recovery, so a tick spent on catch-up can never stretch
         // the contest window (I4), then deliver any provisional Welcome it produced.
         if self.resolve_pending_if_expired() {
             self.drain_welcome_outbox().await;
@@ -2441,7 +2441,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         // Perform recovery work queued by the previous event (commit/doc catch-up).
         // A tick that spent its turn fetching catch-up yields here instead of
-        // blocking on a fresh event — the recovery *was* this tick's work.
+        // blocking on a fresh event; the recovery *was* this tick's work.
         if self.drain_catchup_queue().await {
             return Ok(true);
         }
@@ -2454,7 +2454,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 if self.control_topics.contains(&topic) {
                     self.on_control(from, &data);
                     // The designated committer may have queued a commit in response to a remove
-                    // request, or an admin Add-request (Option C) — admit it + fan out the commit
+                    // request, or an admin Add-request (Option C); admit it + fan out the commit
                     // here; the result push to the admin happens at the top of the next tick
                     // (robust against this tick being cancelled mid-flight).
                     self.drain_add_request_queue();
@@ -2494,7 +2494,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Some(TransportEvent::PeerDisconnected(peer)) => {
                 // Drop it from the live-connection set so presence + the availability hint reflect
-                // the loss. (Catch-up source lists are left as-is — they age out / re-prove; only
+                // the loss. (Catch-up source lists are left as-is; they age out / re-prove; only
                 // liveness needs the precise removal.)
                 self.connected_peers.remove(&peer);
                 Ok(true)
@@ -2550,7 +2550,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // No usable catch-up source known yet; keep the task for a later
                 // tick (a new peer may appear). If every known peer is currently
                 // marked failed, that means we have tried them all without filling
-                // the gap — stop chasing until a fresh peer is seen.
+                // the gap; stop chasing until a fresh peer is seen.
                 if self.known_peers.is_empty() {
                     self.catchup_queue.push(task);
                 }
@@ -2598,7 +2598,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Pick a catch-up source: a **proven member** (verified via a signed catch-up)
-    /// first, falling back to an untrusted candidate to bootstrap — so a flood of
+    /// first, falling back to an untrusted candidate to bootstrap; so a flood of
     /// un-handshaked candidates cannot crowd out a known-good source. Skips peers that
     /// just failed to fill a gap.
     fn pick_catchup_peer(&self) -> Option<PeerId> {
@@ -2629,7 +2629,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Remove `peer` from the trusted member pool — e.g. its response showed it is no
+    /// Remove `peer` from the trusted member pool; e.g. its response showed it is no
     /// longer in the roster (a removed member), so it must stop being preferred as a
     /// catch-up source.
     fn demote_member_peer(&mut self, peer: PeerId) {
@@ -2712,7 +2712,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Verify an inbound authenticated catch-up request and return its inner body
     /// iff the requester proved current group membership with a fresh signature.
     /// Counts a rejection in [`SyncStats`]. `kind` is the matched request kind.
-    /// Returns `(inner body, requester pubkey, [`RequestAuth`])` on success — the
+    /// Returns `(inner body, requester pubkey, [`RequestAuth`])` on success; the
     /// pubkey + auth metadata let a serving handler bind its signed reply to this
     /// exact request (the nonce + epoch close the same-millisecond replay window).
     fn authenticate_request(
@@ -2798,8 +2798,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     //
     // The gossip topics and rendezvous namespaces derive from the routing secret
     // snapshotted at the current removal-count `L`. They therefore rotate ONLY on
-    // member removal (ARCHITECTURE §2.5), not on every commit — even though the
-    // underlying MLS exporter secret changes each epoch — because we read the
+    // member removal (ARCHITECTURE §2.5), not on every commit; even though the
+    // underlying MLS exporter secret changes each epoch; because we read the
     // *snapshot* at `L`, not the live current secret.
 
     /// Snapshot the current-epoch routing secret into slot `routing_label`,
@@ -2862,7 +2862,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Every routing-derived topic this node should be subscribed to: the control
     /// topics (if control was subscribed) and each open doc's topics, across the
-    /// grandfather window — so a member up to two removals behind is still heard.
+    /// grandfather window; so a member up to two removals behind is still heard.
     fn desired_routing_topics(&self) -> HashSet<Topic> {
         let mut set = HashSet::new();
         for slot in self.window_labels() {
@@ -2899,7 +2899,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// that has fallen behind no longer receives the live topic and would have no
     /// reactive recovery trigger; commit catch-up is point-to-point, so it recovers
     /// us regardless of how far behind we are (bounded by a serving peer's commit-log
-    /// window). The committer is the serializer and never lags — and probing from it
+    /// window). The committer is the serializer and never lags; and probing from it
     /// would stall its serve loop on a mid-join peer. Triggered on `PeerConnected`
     /// (the realistic recovery moment: startup / reconnect to a live peer); a
     /// continuously-connected node that silently falls behind is the documented
@@ -2911,7 +2911,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Whether this node is the group's single designated committer (lowest leaf
-    /// index) — the serializer that produces every commit and so never lags. Also the
+    /// index); the serializer that produces every commit and so never lags. Also the
     /// product layer's server "owner" anchor (Phase 10h).
     pub fn is_designated_committer(&self) -> bool {
         matches!(
@@ -2937,8 +2937,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Advance the routing label and snapshot the post-removal-epoch secret.
-    /// Invoked once per applied commit that removed a member — on the local
-    /// committer path and on every member's inbound apply path — so all members
+    /// Invoked once per applied commit that removed a member; on the local
+    /// committer path and on every member's inbound apply path; so all members
     /// converge on the same `L` and the same `ns_secret_L`.
     fn rotate_routing_secret(&mut self) {
         self.routing_label += 1;
@@ -3027,7 +3027,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// [`ingest_discovered`](Self::ingest_discovered). A no-op without rendezvous configured.
     pub async fn drive_discovery(&mut self) {
         for (addr, rz_node) in self.rendezvous_nodes.clone() {
-            // Ensure we're connected to the rendezvous (idempotent if already connected) — so a
+            // Ensure we're connected to the rendezvous (idempotent if already connected); so a
             // reloaded member re-establishes the link without the bridge re-dialing it.
             let _ = self.transport.dial_addr(&addr).await;
             for ns in self.rendezvous_namespaces(&rz_node) {
@@ -3038,17 +3038,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Await the next rendezvous-discovered peer (delegates to the transport; inert without
-    /// rendezvous — the default never resolves). `&mut self` (not `&self`) so the actor's task
+    /// rendezvous; the default never resolves). `&mut self` (not `&self`) so the actor's task
     /// future stays `Send` without requiring `ChannelSync: Sync`.
     pub async fn next_discovered(&mut self) -> Option<DiscoveredPeer> {
         self.transport.next_discovered().await
     }
 
-    /// Rank a discovered peer through the [`DiscoveryPolicy`] (which alone decides dials — the
+    /// Rank a discovered peer through the [`DiscoveryPolicy`] (which alone decides dials; the
     /// transport never auto-dials) and dial the chosen addresses if not already dialed. The
     /// namespace must be one of ours (member-only); membership is re-proven post-dial by the
     /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false` (the pre-dial membership
-    /// tag isn't surfaced by the transport yet — a documented hardening follow-up).
+    /// tag isn't surfaced by the transport yet; a documented hardening follow-up).
     pub async fn ingest_discovered(&mut self, d: DiscoveredPeer) {
         if self.dialed_peers.contains(&d.peer) {
             return;
@@ -3071,7 +3071,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             addresses: d.addresses,
             source: Source::Rendezvous(rz_root),
             // The record's own signed seq gives the policy real anti-replay freshness; tag_verified
-            // stays false (the pre-dial membership tag isn't carried by the transport yet — a
+            // stays false (the pre-dial membership tag isn't carried by the transport yet; a
             // documented follow-up; the member-only namespace + MLS/PEX are the gates meanwhile).
             seq: d.seq,
             tag_verified: false,
@@ -3089,14 +3089,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Advisory eclipse check (NEVER gates anything): feed the hysteretic detector the roster size
     /// (R), the reachable member peers + self (D), and the distinct rendezvous trust roots (S), and
-    /// return whether it currently counsels CAUTION — "you may be isolated; verify a member out of
+    /// return whether it currently counsels CAUTION; "you may be isolated; verify a member out of
     /// band". Small groups (≤ the roster floor) never trip it.
     pub fn observe_eclipse(&mut self) -> bool {
         let obs = EclipseObservation {
             roster_size: self.member_count(),
             // Reachable devices = currently-connected members (+ self), from the LIVE connection set
             // (`connected_member_fingerprints`) rather than the monotonic `member_peers` catch-up
-            // list, which never shrank on disconnect and so over-counted reachability — making the
+            // list, which never shrank on disconnect and so over-counted reachability; making the
             // detector under-warn after a node actually lost its peers.
             reachable_devices: self.connected_member_fingerprints().len() + 1,
             trust_roots: self.rendezvous_nodes.len(),
@@ -3212,7 +3212,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.peer_records.values().cloned().collect()
     }
 
-    /// Whether ≥1 transport peer is connected right now — the accurate liveness signal (maintained
+    /// Whether ≥1 transport peer is connected right now; the accurate liveness signal (maintained
     /// on both connect and disconnect, unlike the catch-up source lists). Backs the file-browser
     /// "can a fetch be tried" availability hint.
     pub fn has_connected_peer(&self) -> bool {
@@ -3220,13 +3220,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// The fingerprints of current members reachable **right now** (a live connection), sorted +
-    /// deduped — for the roster's online indicators. Each member is matched by **its own** signed
+    /// deduped; for the roster's online indicators. Each member is matched by **its own** signed
     /// record: iterate `peer_records` by device and surface a member iff the `peer_id` it signed
     /// into its own `PeerDescriptor` is in the live set AND it is still a roster member. Driving the
     /// match by the keyed device (rather than searching records by `peer_id`) means a member's
-    /// record can only ever vouch for *that* member — a malicious record claiming another member's
+    /// record can only ever vouch for *that* member; a malicious record claiming another member's
     /// `peer_id` can mislabel only its own dot, never another's. A member we hold no record for yet
-    /// (no PEX) just won't show until we learn it — a safe under-count, never a false positive.
+    /// (no PEX) just won't show until we learn it; a safe under-count, never a false positive.
     pub fn connected_member_fingerprints(&self) -> Vec<String> {
         let mut fps = BTreeSet::new();
         for (device, desc) in &self.peer_records {
@@ -3240,19 +3240,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// The current members that **provably hold** `change` in `(doc_type, doc_id)`, as sorted
-    /// fingerprints — the delivery-state query (`docs/design-delivery-states.md`, D1).
+    /// fingerprints; the delivery-state query (`docs/design-delivery-states.md`, D1).
     ///
     /// The design's primary route (read each peer's confirmed heads out of an automerge
     /// `sync::State`) does not exist here and its documented fallback ("outgoing sync reports
-    /// nothing pending toward them") does not either: CatComs does not run automerge's sync
+    /// nothing pending toward them") does not either: Mewtual does not run automerge's sync
     /// protocol. Ops are sealed, signed and **broadcast** on a blinded gossip topic
     /// ([`ChannelSync::post`]), and a lagging member pulls the whole signed-op log over
-    /// request/response — so there is no per-peer, per-doc sync session to interrogate, and
+    /// request/response; so there is no per-peer, per-doc sync session to interrogate, and
     /// publishing tells us nothing about who received anything.
     ///
     /// What the document itself proves is used instead: a member counts when it authored a
     /// change that causally descends from `change` (see [`EncryptedDoc::holders_of`]). That is
-    /// the design's own predicate — "the peer's heads causally include the op" — backed by the
+    /// the design's own predicate; "the peer's heads causally include the op"; backed by the
     /// peer's *signature* rather than by its self-report, so it is if anything harder to lie
     /// with. It is one-sided: a member that received `change` and has not written since is
     /// indistinguishable from one that never got it, so **absence means "unknown", not "not
@@ -3272,7 +3272,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .unwrap_or_default()
     }
 
-    /// [`ChannelSync::peers_with_change`] for many changes at once — one pass over the document's
+    /// [`ChannelSync::peers_with_change`] for many changes at once; one pass over the document's
     /// change graph for the whole batch, which is what makes a per-tick delivery snapshot cheap.
     /// Returns one entry per element of `changes`.
     pub fn peers_with_changes(
@@ -3406,14 +3406,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Drain (return + clear) the buffered inbound call signals — the actor calls this each loop and
+    /// Drain (return + clear) the buffered inbound call signals; the actor calls this each loop and
     /// emits a `CallSignal` event per item.
     pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
         std::mem::take(&mut self.pending_call_signals)
     }
 
     /// Derive this call's 32-byte E2E media base key from the group's current-epoch MLS exporter, plus
-    /// the epoch (so all members on the same epoch agree). The key is never sent on the wire — each
+    /// the epoch (so all members on the same epoch agree). The key is never sent on the wire; each
     /// member derives it locally.
     pub fn media_key(&self, call_id: u128) -> Result<([u8; 32], u64), SyncError> {
         let key = self.group.media_secret(&self.device, call_id)?;
@@ -3424,7 +3424,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// its signer must be a current group member. Returns `true` only when it adds a
     /// *newly-known* member (a refresh of an existing device, a stale-`seq` record, an
     /// invalid signature, or a non-member returns `false`). Used by PEX ingestion and
-    /// by the net layer to feed discovered records — a record never bypasses these two
+    /// by the net layer to feed discovered records; a record never bypasses these two
     /// checks, so a PEX responder cannot fabricate a peer's address or inject a Sybil.
     pub fn ingest_peer_record(&mut self, desc: PeerDescriptor) -> bool {
         if desc.seq == u64::MAX
@@ -3585,7 +3585,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Seal this member's routing state (`L` + the retained `ns_secret_L` history)
     /// for a peer joining at the **current** epoch, under the shared routing-transfer
-    /// key both will derive. Returned empty (no transfer) if the key or seal fails —
+    /// key both will derive. Returned empty (no transfer) if the key or seal fails;
     /// the joiner then keeps its local `L = 0` (correct only for the founder).
     /// Call at the post-merge epoch the joiner's Welcome lands them on.
     fn seal_routing_state(&mut self) -> Vec<u8> {
@@ -3619,7 +3619,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `L = 0`), so this joiner derives the same topics and namespaces as the group.
     /// A no-op for an empty transfer (keeps the local baseline).
     fn adopt_routing_state(&mut self, routing: RoutingState) {
-        // Adopt the transferred file-wrap key first (Phase 9h) — independent of the routing
+        // Adopt the transferred file-wrap key first (Phase 9h); independent of the routing
         // secrets, so the joiner shares the group's file key even at the L=0 baseline.
         if let Some(k) = routing.file_wrap_key {
             self.file_wrap_key = Zeroizing::new(k);
@@ -3658,7 +3658,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `max_committer_rank` above the designated committer. openmls still
     /// independently authenticates the inner commit at `process_incoming`; this gate
     /// authorizes *who* may advance the epoch (and, for 6d-2, lets the fork-winner
-    /// — who is not necessarily the *lowest*-index committer — be accepted).
+    ///; who is not necessarily the *lowest*-index committer; be accepted).
     fn authorize_committer(&self, record: &CommitRecord) -> bool {
         let committer = DeviceId::from_bytes(record.committer_device);
         // 1. The committer must be a current member; look up its raw leaf key.
@@ -3867,13 +3867,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             },
         };
         // Deliver the provisional-Welcome outcome to any joiner we admitted: the
-        // signed Welcome on a winning merge, an empty (rejection) push otherwise —
+        // signed Welcome on a winning merge, an empty (rejection) push otherwise;
         // so a losing committer never strands the joiner on a dead commit.
         if let Some(join) = p.mine.and_then(|m| m.join) {
             let payload = if we_won && advanced {
                 let _ = self.ledger.consume(join.nonce);
                 // We just merged the staged Add, so we are at the exact epoch the
-                // joiner's Welcome lands them on — seal the routing state and sign
+                // joiner's Welcome lands them on; seal the routing state and sign
                 // the transcript binding it (the joiner verifies both together).
                 let sealed_routing = self.seal_routing_state();
                 let transcript = join_transcript(
@@ -3908,7 +3908,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.record_commit(p.best);
             self.drain_pending_commits();
         } else {
-            // I2: a storage/merge failure must not wedge the node — heal via the
+            // I2: a storage/merge failure must not wedge the node; heal via the
             // existing commit-catch-up recovery path on the next tick.
             tracing::warn!("fork resolution did not advance the epoch; scheduling recovery");
             let here = self.group.epoch();
@@ -4002,7 +4002,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         // If a buffered commit advanced us past a fork contest we were holding, that
-        // contest is now stale — drop it (and roll back our own staged commit) so we
+        // contest is now stale; drop it (and roll back our own staged commit) so we
         // never resolve or extend it against a superseded epoch (I3).
         self.discard_stale_contest();
     }
@@ -4030,7 +4030,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         );
     }
 
-    /// Request that the group's **designated committer** remove `target` — the
+    /// Request that the group's **designated committer** remove `target`; the
     /// single-serializer model (6d-2b): any member can ask, but only the one
     /// committer executes, so no concurrent commits (and no fork) ever arise. The
     /// signed request is broadcast on the control topic; the committer validates and
@@ -4039,7 +4039,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// removal is performed directly.
     pub async fn request_remove(&mut self, target: &DeviceId) -> Result<(), SyncError> {
         // Removal is owner-only (THREAT-MODEL R1): only the designated committer (the server
-        // owner) may remove, and it does so directly. A non-owner caller is unauthorized — we
+        // owner) may remove, and it does so directly. A non-owner caller is unauthorized; we
         // return an error rather than broadcasting a request the committer would only reject.
         if !self.group.is_designated_committer(&self.device) {
             return Err(SyncError::Unauthorized);
@@ -4063,7 +4063,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         // Removal is **owner-only**, enforced here at the protocol layer (THREAT-MODEL R1).
         // The owner is the designated committer and removes *directly* (see `request_remove`),
-        // so it never sends a remove request to itself — any inbound request is therefore from
+        // so it never sends a remove request to itself; any inbound request is therefore from
         // a non-owner and is rejected. The signature check below still matters: it prevents a
         // modified client from forging a request that merely *claims* the owner's key, since
         // only the owner's private key can produce a valid signature over the transcript.
@@ -4109,8 +4109,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         self.evict_past_keys();
-        // Publish the removal commit on the PRE-rotation control topic — where the
-        // members being removed-from are still subscribed — *then* rotate the label
+        // Publish the removal commit on the PRE-rotation control topic; where the
+        // members being removed-from are still subscribed; *then* rotate the label
         // (the removed member cannot export the post-removal routing secret).
         let publish_topic = self.control_topic.clone();
         self.rotate_routing_secret();
@@ -4144,12 +4144,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 return;
             }
             Some((&CTRL_ADD_REQUEST, rest)) => {
-                // `from` is the requesting admin's peer — where the owner returns the result.
+                // `from` is the requesting admin's peer; where the owner returns the result.
                 self.on_add_request(from, rest);
                 return;
             }
             Some((&CTRL_DEVICE_ADD, rest)) => {
-                // `from` is the relaying member's peer — where the owner returns the result.
+                // `from` is the relaying member's peer; where the owner returns the result.
                 self.on_device_add_request(from, rest);
                 return;
             }
@@ -4173,7 +4173,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Ordering::Equal => {
                 if self.config.max_committer_rank == 0 {
                     // Single-committer fast path: no concurrent committers exist, so
-                    // no fork is possible — apply immediately (6d-1 behavior).
+                    // no fork is possible; apply immediately (6d-1 behavior).
                     if self.apply_commit_in_order(&record) {
                         self.drain_pending_commits();
                     }
@@ -4227,10 +4227,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(applied)
     }
 
-    /// Catch a document up from the **best known peer** — a proven member first, falling
+    /// Catch a document up from the **best known peer**; a proven member first, falling
     /// back to any known peer (see [`Self::pick_catchup_peer`]). Returns `Ok(0)` if there
     /// is no peer to ask yet. Unlike [`Self::request_catchup`] (which targets a specific
-    /// peer, e.g. the inviter), this works for any member with a populated peer pool — so
+    /// peer, e.g. the inviter), this works for any member with a populated peer pool; so
     /// either side can pull the backlog of a channel the other created.
     pub async fn request_catchup_best(
         &mut self,
@@ -4258,7 +4258,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs.has(cid)
     }
 
-    /// Every content address held in the local blob store — the store's whole inventory, for
+    /// Every content address held in the local blob store; the store's whole inventory, for
     /// storage accounting (e.g. checking that a dedup'd re-share wrote nothing new).
     pub fn blob_cids(&self) -> Vec<Cid> {
         self.blobs.cids()
@@ -4274,7 +4274,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Fetch a blob by content address from `peer`, verify it, and store it. Returns
     /// `(available, provider)`: `available` is whether the blob is now held (already-held or
     /// freshly fetched); `provider` is the **signed responder's device id** when the bytes were
-    /// fetched fresh from the network (authenticated — it signed the request-bound response),
+    /// fetched fresh from the network (authenticated; it signed the request-bound response),
     /// else `None`. The response is members-only and signed; the served bytes are re-hashed
     /// against the requested address before storing, so a member cannot substitute different
     /// bytes under it.
@@ -4350,8 +4350,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Like [`Self::request_blob_best`], but returns the **provider's fingerprint** — the signed
-    /// responder that served the bytes — when the blob was fetched fresh from a member, for the
+    /// Like [`Self::request_blob_best`], but returns the **provider's fingerprint**; the signed
+    /// responder that served the bytes; when the blob was fetched fresh from a member, for the
     /// UI's per-transfer "downloading from …" display. `None` if the blob was already held
     /// locally or no peer had it. Authenticated: the responder signed the request-bound response.
     pub async fn request_blob_best_provider(
@@ -4405,11 +4405,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             );
             return Err(SyncError::Malformed);
         }
-        // The response must be signed by a current member, bound to THIS request — so
+        // The response must be signed by a current member, bound to THIS request; so
         // an un-handshaked peer cannot feed us a trusted bundle or be promoted as a
         // catch-up source (6e-3d-5, the Sybil-C1 fix). Anti-replay binds the response
         // to the request timestamp **and** a per-request nonce + the requester epoch
-        // (6e-3d-6, below), closing the same-millisecond `ts`-collision window — so a
+        // (6e-3d-6, below), closing the same-millisecond `ts`-collision window; so a
         // captured member response cannot be replayed against a different request. An
         // invalid response fills no gap, so the drain marks it failed.
         let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(&resp)?;
@@ -4488,7 +4488,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.docs.get(&(doc_type, doc_id))
     }
 
-    /// The ids of every open chat-channel document (excludes profile/roles/status/etc.) — lets the
+    /// The ids of every open chat-channel document (excludes profile/roles/status/etc.); lets the
     /// product layer scan across channels (e.g. to build the mention/reply inbox).
     pub fn channel_ids(&self) -> Vec<u128> {
         self.docs
@@ -4509,7 +4509,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.clock.now_ms()
     }
 
-    /// A fresh random 128-bit id, hex-encoded — for stable per-message identity (addressing
+    /// A fresh random 128-bit id, hex-encoded; for stable per-message identity (addressing
     /// edits/deletes under concurrent CRDT merges). Uses the injected RNG (no ambient randomness).
     pub fn random_id(&mut self) -> String {
         let mut b = [0u8; 16];
@@ -4517,9 +4517,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
 
-    /// Borrow the underlying transport, so the **discovery/dial layer** — which lives
+    /// Borrow the underlying transport, so the **discovery/dial layer**; which lives
     /// *above* `ChannelSync` (the net Actor never auto-dials; the dial decision and
-    /// eclipse-resistance are a layer up) — can drive rendezvous register/discover and
+    /// eclipse-resistance are a layer up); can drive rendezvous register/discover and
     /// dial discovered peers. `ChannelSync` itself never dials.
     pub fn transport(&self) -> &T {
         &self.transport
@@ -4535,7 +4535,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.group.member_count()
     }
 
-    /// The current roster — the device ids of all members (for the UI/product layer).
+    /// The current roster; the device ids of all members (for the UI/product layer).
     pub fn member_ids(&self) -> Vec<DeviceId> {
         self.group.member_device_ids()
     }
@@ -4674,7 +4674,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     fn charge_blob_budget(&mut self, device: DeviceId, now: u64, bytes: u64) -> bool {
         let entry = self.blob_budget.entry(device).or_insert((now, 0));
         if now.saturating_sub(entry.0) >= BLOB_BUDGET_WINDOW_MS {
-            *entry = (now, 0); // the window elapsed — start a fresh one
+            *entry = (now, 0); // the window elapsed; start a fresh one
         }
         if entry.1.saturating_add(bytes) > BLOB_BUDGET_BYTES {
             return false; // would exceed the window budget
@@ -4697,7 +4697,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         true
     }
 
-    /// Serve a content-addressed blob — only to a proven current member, rate-limited per
+    /// Serve a content-addressed blob; only to a proven current member, rate-limited per
     /// requester (blob is the strongest amplifier), signing the response bound to the
     /// requester's request. An empty response means not held (or rate-limited).
     fn serve_blob_fetch(&mut self, data: &[u8]) -> Option<Vec<u8>> {
@@ -4736,7 +4736,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ))
     }
 
-    /// Serve a document's history — but only to a requester that proved current
+    /// Serve a document's history; but only to a requester that proved current
     /// group membership (the bundle, though sealed, still carries member-only
     /// framing/metadata, so it is members-only).
     fn serve_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
@@ -4767,7 +4767,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Serve missed membership commits at or after `from_epoch` from the retained
-    /// commit log, in epoch order — only to a proven current member (the records'
+    /// commit log, in epoch order; only to a proven current member (the records'
     /// framing reveals group id + member device ids, so this is members-only).
     fn serve_commit_catchup(&mut self, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, req_pubkey, req_auth) = self.authenticate_request(KIND_COMMIT_CATCHUP, data)?;
@@ -4854,14 +4854,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             _ => return None,
         };
 
-        // A non-committer (an Admin, in the single-committer model) cannot run the Add itself —
+        // A non-committer (an Admin, in the single-committer model) cannot run the Add itself;
         // that would be a second committer (a fork). Instead it asks the owner to admit
         // (Option C): broadcast a signed Add-request, drive it to completion, and tell the joiner
         // to wait for the pushed Welcome.
         //
         // We DO self-gate first, as a liveness courtesy, not as the security gate: the inviter
         // named in this invite is *this device* (checked above), and if our own best view says
-        // we are not owner/admin, the owner is certain to refuse the relayed request — parking
+        // we are not owner/admin, the owner is certain to refuse the relayed request; parking
         // the joiner on a Welcome push that never comes. Rejecting here is synchronous and
         // retryable (a freshly-promoted admin whose published roster hasn't synced yet just
         // retries once it has). The OWNER still re-checks authoritatively against its local
@@ -4870,7 +4870,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Self-gate as a liveness courtesy (a non-admin relaying its own invite would strand
             // the joiner on a Welcome the owner will never send). It must be reject-ONLY on a
             // *positively-read* roster that omits us: an unreadable or absent published roster
-            // means "unknown", not "unauthorized" — otherwise any member could overwrite the
+            // means "unknown", not "unauthorized"; otherwise any member could overwrite the
             // published-roster scalar with junk and disable every admin's relay server-wide. When
             // unknown we relay and let the owner's authoritative check decide (adversarial-review
             // finding). This never admits anyone; only the owner commits.
@@ -5015,7 +5015,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Admin side: re-broadcast any pending Add-request whose retry interval elapsed (and drop
-    /// expired ones). Driven off `run_once` events — notably the owner's reconnect — so an
+    /// expired ones). Driven off `run_once` events; notably the owner's reconnect; so an
     /// offline owner is caught up when it returns.
     fn drive_outgoing_add_requests(&mut self) {
         let now = self.clock.now_ms();
@@ -5154,7 +5154,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         });
     }
 
-    /// Owner side: admit each queued Add-request — run the MLS Add, cache the result, and push it
+    /// Owner side: admit each queued Add-request; run the MLS Add, cache the result, and push it
     /// back to the requesting admin (who re-signs + relays the Welcome to the joiner).
     fn drain_add_request_queue(&mut self) {
         let queued = std::mem::take(&mut self.add_request_queue);
@@ -5187,8 +5187,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Admin side: the owner delivered a finalized admission. Verify the owner's signature, then
-    /// re-sign the join transcript with our own (the inviter's) key — so the joiner's
-    /// verification against `invite.inviter_public_key` is unchanged — and push the Welcome to the
+    /// re-sign the join transcript with our own (the inviter's) key; so the joiner's
+    /// verification against `invite.inviter_public_key` is unchanged; and push the Welcome to the
     /// waiting joiner.
     fn on_admit_result(&mut self, data: &[u8]) {
         let Ok((nonce, welcome, sealed_routing, owner_sig)) = decode_admit_result(data) else {
@@ -5242,7 +5242,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// the moment they happen, and the depth-1 gate must not forget one because the document write
     /// has not converged yet. Forging an entry needs a genuine origin signature over a
     /// group-bound certificate (the reader validates that before calling), so a merge cannot be
-    /// poisoned by a malicious writer. The revocation set is replaced wholesale — it is only ever
+    /// poisoned by a malicious writer. The revocation set is replaced wholesale; it is only ever
     /// read to *refuse*, so a stale copy fails closed.
     /// Replace (not merge) the validated registry: the product layer re-derives the whole
     /// companion → origin map from the owner-signed `Devices` doc each time it changes, so this is
@@ -5273,14 +5273,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         std::mem::take(&mut self.admitted_devices)
     }
 
-    /// The raw Ed25519 signature public key of a current member, by device id — a roster lookup
+    /// The raw Ed25519 signature public key of a current member, by device id; a roster lookup
     /// (a [`DeviceId`] is a one-way hash of the key). The grant ceremony reads the **owner's**
     /// key through this, so a companion can pin it before it is admitted.
     pub fn member_public_key(&self, device: &DeviceId) -> Option<Vec<u8>> {
         self.group.member_signature_key(device)
     }
 
-    /// Serve a companion device's admission request (`KIND_DEVICE_ADD`) — the certificate-bound
+    /// Serve a companion device's admission request (`KIND_DEVICE_ADD`); the certificate-bound
     /// analogue of [`ChannelSync::serve_join`]. If this node is the designated committer it runs
     /// the whole admission synchronously and answers with the signed Welcome; otherwise it relays
     /// the (self-authenticating) request to the owner on the control topic and answers
@@ -5293,7 +5293,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return None;
         }
         if !self.group.is_designated_committer(&self.device) {
-            // We are not the serializer. Authenticate the request BEFORE relaying it — a relay
+            // We are not the serializer. Authenticate the request BEFORE relaying it; a relay
             // must not launder an unauthenticated stranger's bytes onto the members-only control
             // topic. Liveness-only (the owner re-checks in full); the ledger/KeyPackage half is
             // skipped because only the owner holds the ledger and pays for the Add.
@@ -5308,7 +5308,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Some(vec![JOIN_PENDING]);
         }
         // Authenticate before touching the cache, so a public certificate alone (which anyone in
-        // the group holds — it is published in the Devices doc) cannot pull a cached Welcome as a
+        // the group holds; it is published in the Devices doc) cannot pull a cached Welcome as a
         // free amplification / admission-confirmation oracle. Only the device that holds the key
         // can produce the transcript signature `precheck` requires.
         if let Err(why) = self.precheck_device_add(&cert, &kp_bytes, &pubkey, ts, &sig) {
@@ -5319,7 +5319,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let bind = device_bind_nonce(&cert);
         // A device that missed our response and retried gets the cached result, not a re-admit
         // (its certificate's ledger entry is already consumed, so the full check below would
-        // reject it — the cache is how an authenticated retry still completes).
+        // reject it; the cache is how an authenticated retry still completes).
         if let Some(cached) = self.device_admit_results.get(&bind) {
             return Some(encode_welcome_push(
                 &cached.welcome,
@@ -5352,18 +5352,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ts: u64,
         sig: &[u8; 64],
     ) -> Result<(), &'static str> {
-        // The cheap, no-ledger-no-KeyPackage-parse half — authenticity, membership, depth-1, the
+        // The cheap, no-ledger-no-KeyPackage-parse half; authenticity, membership, depth-1, the
         // per-origin cap, freshness, requester identity, and the device's own signature.
         self.precheck_device_add(cert, kp_bytes, pubkey, ts, sig)?;
 
         // 7. Single use, persisted: the certificate's bind nonce rides the invite ledger, so one
-        //    certificate admits one device once — across restarts, and across relays.
+        //    certificate admits one device once; across restarts, and across relays.
         let bind = device_bind_nonce(cert);
         if self.ledger.is_consumed(&bind) || self.ledger.is_revoked(&bind) {
             return Err("that certificate has already been used");
         }
         // 9. The expensive part: the KeyPackage parses, its leaf key is the request key, and its
-        //    credential binds it to (this group, THIS certificate) — so a relay cannot swap a
+        //    credential binds it to (this group, THIS certificate); so a relay cannot swap a
         //    KeyPackage minted against a different certificate into this admission.
         let Ok(key_package) = self.device.parse_key_package(kp_bytes) else {
             return Err("malformed key package");
@@ -5383,7 +5383,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// The cheap half of [`ChannelSync::check_device_add`]: everything that does **not** touch the
     /// single-use ledger or parse the KeyPackage. It fully authenticates the request as coming
-    /// from a real member's real origin device for a real subject device — which is exactly what a
+    /// from a real member's real origin device for a real subject device; which is exactly what a
     /// non-committer needs before **relaying** it onto the members-only control topic (a relay must
     /// not launder an unauthenticated stranger's bytes), and what `serve_device_add` needs before
     /// consulting its admit-result cache (else the cache is a free oracle for anyone holding a
@@ -5412,13 +5412,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.group.contains_device(&cert.origin_id) {
             return Err("certifying origin is not a member of this group");
         }
-        // 4. …and it is that member's ORIGIN device, not one of its companions — chain depth
+        // 4. …and it is that member's ORIGIN device, not one of its companions; chain depth
         //    stays 1, so a stolen companion is never an identity factory. Until the registry has
         //    entries every admitted member *is* an origin, which is exactly this predicate.
         if self.companion_devices.contains_key(&cert.origin_id) {
             return Err("a companion device may not certify another device");
         }
-        // 4b. Per-origin device cap — bound how many devices one member can drive the owner to Add.
+        // 4b. Per-origin device cap; bound how many devices one member can drive the owner to Add.
         if self
             .companion_devices
             .values()
@@ -5438,9 +5438,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err("certificate names a revoked device");
         }
         // 6. Freshness, ASYMMETRIC: a stamp far in the past is stale; one slightly in the future is
-        //    clock skew, not a doubled window. See MAX_DEVICE_CERT_AGE_MS — a certificate is a
+        //    clock skew, not a doubled window. See MAX_DEVICE_CERT_AGE_MS; a certificate is a
         //    hand-carried capability, so it gets the invite-style window, not the 60 s live one.
-        //    The request `ts` shares it (a relaying member cannot re-sign it — only the device can).
+        //    The request `ts` shares it (a relaying member cannot re-sign it; only the device can).
         let now = self.clock.now_ms();
         if now.saturating_sub(cert.issued_ts_ms) > MAX_DEVICE_CERT_AGE_MS
             || cert.issued_ts_ms > now.saturating_add(DEVICE_CERT_SKEW_MS)
@@ -5491,7 +5491,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let outcome = self.group.add_member(&self.device, key_package).ok()?;
         self.evict_past_keys();
         // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can
-        // only fail on a re-entrant path — treat it as already-burned rather than unwinding a
+        // only fail on a re-entrant path; treat it as already-burned rather than unwinding a
         // commit that has landed.
         let _ = self.ledger.consume(bind);
         let record =
@@ -5500,7 +5500,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let mut framed = vec![CTRL_COMMIT];
         framed.extend_from_slice(&record.encode());
         self.outbox.push((self.control_topic.clone(), framed));
-        // Record the companion → origin edge NOW — before the fallible signing below — so the
+        // Record the companion → origin edge NOW; before the fallible signing below; so the
         // invariant "the leaf is in the group ⇒ it is recorded as a companion" cannot be broken by
         // a mid-admission failure (which would leave a permanent depth-1 hole). The depth-1 gate
         // must know about the edge before the `Devices` write converges anyway, and the product
@@ -5551,7 +5551,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Relay side: broadcast a companion's admission request to the owner and remember it, so we
-    /// re-broadcast until the owner (which may be offline) returns the result — then forward the
+    /// re-broadcast until the owner (which may be offline) returns the result; then forward the
     /// Welcome to the waiting device.
     fn request_device_add(
         &mut self,
@@ -5577,7 +5577,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         // Clamp the retry lifetime to the certificate's own remaining freshness: once the owner
         // would reject the certificate as too old, there is no point re-broadcasting it (an
-        // adversarial-review finding — a flat hour let one request fan out for the full window
+        // adversarial-review finding; a flat hour let one request fan out for the full window
         // regardless of how stale its certificate already was).
         let cert_deadline = cert
             .issued_ts_ms
@@ -5599,7 +5599,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Relay side: re-broadcast any pending companion request whose retry interval elapsed (and
-    /// drop expired ones). The request is re-sent **verbatim** — it is self-authenticating
+    /// drop expired ones). The request is re-sent **verbatim**; it is self-authenticating
     /// (origin-signed certificate + device-signed request), so this node adds no authority to it.
     fn drive_outgoing_device_adds(&mut self) {
         let now = self.clock.now_ms();
@@ -5623,9 +5623,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     /// Owner side: a member relayed a companion's admission request. Re-check everything against
     /// the live group + device registry, then queue the admission (or re-deliver a cached result).
-    /// Only the owner acts, so no second committer — and therefore no fork — can arise.
+    /// Only the owner acts, so no second committer; and therefore no fork; can arise.
     // `from` is the relaying member's peer (the gossipsub publisher, authenticated because the
-    // mesh is configured `MessageAuthenticity::Signed` — see `on_add_request`'s note), used only
+    // mesh is configured `MessageAuthenticity::Signed`; see `on_add_request`'s note), used only
     // to route the result back. The request itself carries all of its own authority.
     fn on_device_add_request(&mut self, from: PeerId, data: &[u8]) {
         if !self.group.is_designated_committer(&self.device) {
@@ -5677,7 +5677,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         });
     }
 
-    /// Owner side: admit each queued companion — run the MLS Add, cache the result, and push it
+    /// Owner side: admit each queued companion; run the MLS Add, cache the result, and push it
     /// back to the member that relayed the request.
     fn drain_device_add_queue(&mut self) {
         let queued = std::mem::take(&mut self.device_add_queue);
@@ -5772,7 +5772,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
 /// Join a server from a pasted [`InviteToken`]: authenticate the invite, mint a
 /// bound KeyPackage, send it to `inviter` over the transport, and join from the
-/// returned Welcome — but only after verifying the Welcome was **signed by the
+/// returned Welcome; but only after verifying the Welcome was **signed by the
 /// inviter** named in the invite and that the joined group's id matches. This
 /// defeats a malicious inviter/relay trying to divert the joiner into a group it
 /// controls (the joiner's KeyPackage alone is not a secret). The caller must
@@ -5811,7 +5811,7 @@ pub async fn request_join<T: MeshTransport>(
         Some((&JOIN_PENDING, _)) => {
             tracing::debug!("admission staged; awaiting the Welcome push");
             // The wall-clock bound on this wait lives at the call site (catcoms-app, which owns
-            // the tokio runtime) so this crate stays runtime-agnostic — see the `request_join`
+            // the tokio runtime) so this crate stays runtime-agnostic; see the `request_join`
             // timeout wrapper there, so a never-finalizing owner can't wedge the joiner.
             await_welcome_push(transport, device, invite).await
         }
@@ -5859,7 +5859,7 @@ fn finish_join(
 /// bound to `(group, certificate)`, send it to whichever member the grant's bootstrap reached,
 /// and finish from the returned (or pushed) Welcome. `owner_public_key` is the designated
 /// committer's signature key, captured by the origin from its live roster at mint time and
-/// carried in the grant — it is the key this device pins to authenticate the Welcome, exactly as
+/// carried in the grant; it is the key this device pins to authenticate the Welcome, exactly as
 /// an invited joiner pins `InviteToken::inviter_public_key`.
 ///
 /// The caller must already be transport-connected to `contact`.
@@ -5883,7 +5883,7 @@ pub async fn request_device_join<T: MeshTransport>(
     }
 
     // The credential binds the leaf to (this group, THIS certificate), so the KeyPackage cannot
-    // be replayed into another group or against another certificate — the invite nonce's job,
+    // be replayed into another group or against another certificate; the invite nonce's job,
     // done by a value both ends derive from the certificate itself.
     let bind = device_bind_nonce(certificate);
     let key_package = device.key_package_for_invite(&certificate.group_id, bind)?;
@@ -5933,7 +5933,7 @@ pub async fn request_device_join<T: MeshTransport>(
     }
 }
 
-/// Verify a companion's Welcome and join from it — [`finish_join`] with the certificate's
+/// Verify a companion's Welcome and join from it; [`finish_join`] with the certificate's
 /// bindings in place of the invite's.
 ///
 /// Three independent things must hold, and each defeats a distinct attacker:
@@ -5943,7 +5943,7 @@ pub async fn request_device_join<T: MeshTransport>(
 ///    the invite path gets from the inviter signature: a relay cannot mint its own group and pass
 ///    it off as this one, because it cannot produce that signature.
 /// 2. **It was built for *this* device.** `ServerGroup::join` can only open a Welcome whose group
-///    secrets were HPKE-sealed to the init key of the KeyPackage this device published — a key
+///    secrets were HPKE-sealed to the init key of the KeyPackage this device published; a key
 ///    that exists solely in this device's provider. So a Welcome minted for device X is inert on
 ///    device Y even if an attacker delivers it there; the device keypair *is* the binding.
 /// 3. **It is the group the certificate names.** `group_id` is inside the origin's signature, and
@@ -5981,7 +5981,7 @@ fn finish_device_join(
 }
 
 /// Await the owner's Welcome push for a relayed companion admission (`KIND_WELCOME`), the device
-/// analogue of [`await_welcome_push`] — unbounded for the same reason; the app layer's
+/// analogue of [`await_welcome_push`]; unbounded for the same reason; the app layer's
 /// `Server::join_with_grant` applies the join timeout.
 async fn await_device_welcome<T: MeshTransport>(
     transport: &T,
@@ -6023,7 +6023,7 @@ async fn await_device_welcome<T: MeshTransport>(
 /// rejected; the caller retries), otherwise it carries the signed Welcome.
 ///
 /// Unbounded: this crate is runtime-agnostic and holds no timer. A refused relayed
-/// admission produces no push at all, so **callers must bound the whole join** — the app
+/// admission produces no push at all, so **callers must bound the whole join**; the app
 /// layer wraps `request_join` in its runtime's timeout (`Server::join`'s
 /// `JOIN_TIMEOUT_SECS`); anything calling this API directly must do the same.
 async fn await_welcome_push<T: MeshTransport>(
@@ -6192,7 +6192,7 @@ mod tests {
     }
 
     /// A genuine membership commit applied on the inbound path is accepted; a copy
-    /// with a tampered committer (or signature) is rejected — committer
+    /// with a tampered committer (or signature) is rejected; committer
     /// authorization is verified by signature on apply, not only at admission.
     #[tokio::test]
     async fn control_commit_with_a_forged_committer_label_is_rejected() {
@@ -6259,7 +6259,7 @@ mod tests {
         assert_eq!(bsy.epoch(), 2, "genuine commit applies");
     }
 
-    /// A single-member sync node (no peers) — enough to exercise the buffering
+    /// A single-member sync node (no peers); enough to exercise the buffering
     /// bounds, which are pure local logic.
     fn solo_node() -> ChannelSync<MemNetwork, ChaCha20Rng> {
         let alice = MlsDevice::generate().unwrap();
@@ -6322,7 +6322,7 @@ mod tests {
     #[test]
     fn peer_addresses_are_extractable_from_a_snapshot_for_redial() {
         // 9g: a reloading node pulls its last-known peer multiaddrs out of the snapshot to
-        // dial them at transport construction — without a full restore.
+        // dial them at transport construction; without a full restore.
         let mut node = solo_node();
         node.peer_records.insert(
             DeviceId::from_bytes([5u8; 32]),
@@ -6427,7 +6427,7 @@ mod tests {
 
     #[test]
     fn a_commit_catchup_response_verifies_only_from_a_current_member_bound_to_the_request() {
-        // 6e-3d-5: the Sybil-C1 gate — a served catch-up bundle is trusted only if a
+        // 6e-3d-5: the Sybil-C1 gate; a served catch-up bundle is trusted only if a
         // current member signed it for THIS request.
         let alice = MlsDevice::generate().unwrap();
         let group = ServerGroup::create(&alice).unwrap();
@@ -6452,7 +6452,7 @@ mod tests {
         ));
 
         // Rejected: Mallory's signature is cryptographically valid, but she is NOT in
-        // the roster — the membership check (contains_device) drops it.
+        // the roster; the membership check (contains_device) drops it.
         let mallory_sig = mallory.sign(&transcript).unwrap();
         assert!(verify_with_public_bytes(
             &mallory.public_key_bytes(),
@@ -6492,8 +6492,8 @@ mod tests {
             &alice_sig
         ));
 
-        // Rejected: a DIFFERENT nonce (same ts) — the 6e-3d-6 anti-replay bind that
-        // closes the same-millisecond `ts`-collision window — also breaks the binding.
+        // Rejected: a DIFFERENT nonce (same ts); the 6e-3d-6 anti-replay bind that
+        // closes the same-millisecond `ts`-collision window; also breaks the binding.
         let other_nonce = catchup_resp_transcript(
             &gid,
             &requester_pubkey,
@@ -6615,7 +6615,7 @@ mod tests {
         assert!(!node.verify_membership_tag(rz, "catcoms1-0000000000", peer, seq, &tag));
 
         // A DIFFERENT group (different ns_secret) cannot verify this tag, even handed
-        // the namespace string — it derives a different namespace, so it doesn't even
+        // the namespace string; it derives a different namespace, so it doesn't even
         // recognise this one (fails closed), and could never recompute the tag.
         let other = solo_node();
         assert!(!other.verify_membership_tag(rz, &namespace, peer, seq, &tag));
@@ -6632,7 +6632,7 @@ mod tests {
         // rz_peer and peer_id are the only two adjacent variable-length fields, so they
         // are the boundary a colluding rendezvous would target. (rz_peer="AB",
         // peer_id="CD") and (rz_peer="A", peer_id="BCD") share an identical raw
-        // concatenation but are distinct fields — length-prefixing keeps the tags
+        // concatenation but are distinct fields; length-prefixing keeps the tags
         // distinct (a raw-concat hash would collide them).
         let a = routing_membership_tag(&secret, gid, b"AB", 0, b"CD", 7);
         let b = routing_membership_tag(&secret, gid, b"A", 0, b"BCD", 7);
@@ -6755,7 +6755,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_committer_does_not_relay_an_unauthenticated_device_add() {
         // Adversarial-review BLOCKING: `serve_device_add`'s relay branch must authenticate a
-        // request before republishing it onto the members-only control topic — otherwise any peer
+        // request before republishing it onto the members-only control topic; otherwise any peer
         // that knows the group id (it is in every invite) could launder arbitrary bytes through an
         // honest member and amplify them. A certificate for the right group but signed by a
         // NON-MEMBER origin must be dropped without a relay.
@@ -6771,7 +6771,7 @@ mod tests {
         let target = MlsDevice::generate().unwrap();
         let cert =
             DeviceCertificate::issue(&stranger, target.device_id(), &group_id, "x", 1_000).unwrap();
-        // The device-add body: a decodable certificate, plus placeholder kp/pubkey/signature — the
+        // The device-add body: a decodable certificate, plus placeholder kp/pubkey/signature; the
         // non-member check fires before any of those are examined.
         let target_pk = target.public_key_bytes();
         let body = encode_device_add(&cert.encode(), b"kp", &target_pk, 1_000, &[0u8; 64]);
@@ -6794,7 +6794,7 @@ mod tests {
         let (_hub, mut members, ids) = build_members(3).await;
         let target = ids[2];
 
-        // Forge a valid request *from the non-owner* (members[1]) — correct signature, fresh ts.
+        // Forge a valid request *from the non-owner* (members[1]); correct signature, fresh ts.
         let (pubkey, ts, signature) = {
             let bob = &members[1];
             let pubkey = bob.device.public_key_bytes();
@@ -6868,7 +6868,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_replayed_old_roster_does_not_re_authorize_a_demoted_admin() {
-        // THREAT-MODEL item 3 — the core property. A demoted admin is still a member and can
+        // THREAT-MODEL item 3; the core property. A demoted admin is still a member and can
         // re-publish its (still validly owner-signed) OLD roster into the shared CRDT. The
         // owner's admission gate reads its LOCAL authoritative roster, so the replay cannot
         // re-authorize the demoted admin, and a CTRL_ADD_REQUEST from it is rejected.
@@ -6888,7 +6888,7 @@ mod tests {
 
         // Mallory replays the gen-1 roster value back into the CRDT (the owner's doc here, to
         // simulate it having propagated). It still verifies (owner-signed), so read_published
-        // would show her — but the gate ignores the CRDT.
+        // would show her; but the gate ignores the CRDT.
         {
             use automerge::{transaction::Transactable, ScalarValue, ROOT};
             let value = stale_roster.clone();
@@ -6899,8 +6899,8 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // The published copy now (wrongly) names Mallory — proving the replay "succeeds" at the
-        // CRDT layer — yet the owner's gate still rejects her.
+        // The published copy now (wrongly) names Mallory; proving the replay "succeeds" at the
+        // CRDT layer; yet the owner's gate still rejects her.
         let published = members[0]
             .doc(DocType::MemberRoles, ROLES_DOC)
             .and_then(|d| read_published_roster(d.doc(), &members[0].group_id(), &ids[0]))
@@ -7049,7 +7049,7 @@ mod tests {
     async fn an_admin_relays_the_owner_admit_result_so_the_joiner_accepts() {
         // The full Option-C chain at the method level: admin requests → owner admits → admin
         // relays the Welcome, re-signed with ITS key, so the joiner's existing finish_join
-        // verification (against the invite's inviter key) accepts it — the Welcome-auth chain
+        // verification (against the invite's inviter key) accepts it; the Welcome-auth chain
         // (Option B), validated without the multi-party network dance.
         let (_hub, mut members, ids) = build_members(2).await;
         let admin_id = ids[1];
@@ -7085,7 +7085,7 @@ mod tests {
         );
 
         // The relayed Welcome carries the ADMIN's signature, so the joiner's finish_join (which
-        // verifies against invite.inviter_public_key == the admin's key) accepts it — the
+        // verifies against invite.inviter_public_key == the admin's key) accepts it; the
         // no-substitution property of Option B.
         let payload = &members[1].welcome_outbox[0].1; // [JOIN_READY] ‖ encode_join_resp(...)
         let (welcome, sig, sealed_routing) = decode_join_resp(&payload[1..]).unwrap();
@@ -7104,7 +7104,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_admin_add_request_is_rejected_by_the_owner() {
         // A plain member (no admin grant) requests an admission; the owner's on_add_request must
-        // reject it at the role re-check — no commit, no admission.
+        // reject it at the role re-check; no commit, no admission.
         let (_hub, mut members, _ids) = build_members(3).await; // owner + two plain members
         let plain = &members[1];
         // Forge a well-formed, correctly-signed Add-request from the plain member.
@@ -7271,7 +7271,7 @@ mod tests {
 
         // A malicious member (Bob) re-publishes a fresher record forging Carol's transport id.
         // Because presence is matched per-device (each record vouches only for its own device key),
-        // this can at most mislabel Bob's OWN dot — it must never hide or steal Carol's presence.
+        // this can at most mislabel Bob's OWN dot; it must never hide or steal Carol's presence.
         let forged_payload = peer_record_signing_payload(
             &bob.device.public_key_bytes(),
             carol_peer.as_bytes(),
@@ -7353,7 +7353,7 @@ mod tests {
     #[tokio::test]
     async fn pex_round_trip_learns_a_third_member_through_a_second() {
         // M1 (Alice, founder) asks M2 (Carol, last joiner with the full roster) for
-        // its peer records, and learns M3 (Bob) — members supply each other with peers.
+        // its peer records, and learns M3 (Bob); members supply each other with peers.
         let (_hub, members, ids) = build_members(3).await;
         let mut it = members.into_iter();
         let mut alice = it.next().unwrap();
@@ -7380,7 +7380,7 @@ mod tests {
             "Alice learned M3 (Bob) via PEX through M2 (Carol)"
         );
         assert!(alice.peer_record(&carol_id).is_some());
-        // Discovery candidates only — no catch-up-source promotion.
+        // Discovery candidates only; no catch-up-source promotion.
         assert_eq!(alice.stats().member_peers, 0);
     }
 
@@ -7431,7 +7431,7 @@ mod tests {
     #[tokio::test]
     async fn rapid_blob_fetches_serve_under_the_byte_budget() {
         // The bytes-budget (not a per-blob interval) lets a requester pull many small blobs
-        // back-to-back within the same window — the enabler for chunked multi-blob fetch. (The old
+        // back-to-back within the same window; the enabler for chunked multi-blob fetch. (The old
         // per-blob 200ms throttle would have empty-replied the second, breaking chunked transfer.)
         let (_hub, members, _ids) = build_members(2).await;
         let mut it = members.into_iter();

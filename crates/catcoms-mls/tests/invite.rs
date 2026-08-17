@@ -1,5 +1,5 @@
 //! Single-use, device-bound invite tests: the happy path plus the adversarial
-//! cases the design review flagged — single use, cross-group replay, expiry,
+//! cases the design review flagged; single use, cross-group replay, expiry,
 //! revocation, forged signatures, and non-member inviters.
 
 use catcoms_mls::{InviteError, InviteLedger, InviteToken, MlsDevice, MlsError, ServerGroup};
@@ -151,7 +151,7 @@ fn invite_from_a_non_member_is_rejected() {
 
     // A token naming a non-member as the inviter. The membership check fires
     // before signature verification, so the (here irrelevant) signature is never
-    // reached — a stranger simply cannot invite, however they sign.
+    // reached; a stranger simply cannot invite, however they sign.
     let token = InviteToken {
         group_id: group.group_id(),
         inviter_device_id: stranger.device_id(),
@@ -214,7 +214,7 @@ fn token_with_rendezvous_roundtrips_and_binds_the_set() {
     let mut tampered = token.clone();
     tampered.rendezvous[0] = "/dns/evil.example/tcp/5000/p2p/evilid".into();
     assert!(!tampered.verify_self());
-    // Stripping an entry likewise breaks it — a relay cannot remove a rendezvous.
+    // Stripping an entry likewise breaks it; a relay cannot remove a rendezvous.
     let mut stripped = token.clone();
     stripped.rendezvous.pop();
     assert!(!stripped.verify_self());

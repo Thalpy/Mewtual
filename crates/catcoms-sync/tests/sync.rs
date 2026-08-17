@@ -214,7 +214,7 @@ async fn delivery_evidence_names_the_peer_that_built_on_a_change() {
         .peers_with_change(DocType::Channel, CHANNEL, change)
         .is_empty());
 
-    // Bob ingests the op, then authors his own — which necessarily descends from Alice's.
+    // Bob ingests the op, then authors his own; which necessarily descends from Alice's.
     assert!(bsy.run_once().await.unwrap());
     assert_eq!(
         bsy.peers_with_change(DocType::Channel, CHANNEL, change),
@@ -340,7 +340,7 @@ async fn joining_via_a_non_inviter_node_is_rejected() {
         Box::new(ManualClock::new(1_000)),
     );
 
-    // Bob tries to redeem Alice's invite by talking to Carol's node — rejected.
+    // Bob tries to redeem Alice's invite by talking to Carol's node; rejected.
     let bob = MlsDevice::generate().unwrap();
     let bob_net = hub.join(PeerId::from_u64(3));
     let (joined, _) = tokio::join!(
@@ -435,7 +435,7 @@ async fn multi_member_join_propagates_to_existing_members() {
     assert_eq!(asy.epoch(), 2);
     assert_eq!(csy.epoch(), 2);
 
-    // Bob — who admitted no one — receives the broadcast commit and advances.
+    // Bob; who admitted no one; receives the broadcast commit and advances.
     assert!(bsy.run_once().await.unwrap());
     assert_eq!(bsy.epoch(), 2, "Bob must learn of Carol's join");
 
@@ -467,7 +467,7 @@ async fn a_non_committer_cannot_admit() {
         Box::new(ManualClock::new(1_000)),
     );
 
-    // Bob joins (member, leaf 1 — NOT the designated committer).
+    // Bob joins (member, leaf 1; NOT the designated committer).
     let bob = MlsDevice::generate().unwrap();
     let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
     let bob_peer = PeerId::from_u64(2);
@@ -479,12 +479,12 @@ async fn a_non_committer_cannot_admit() {
     let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
 
     // Bob (a plain member) invites Carol and tries to admit her. Bob is not the committer, and
-    // there is no published admin roster here — so Bob cannot *predict* the owner's decision and
+    // there is no published admin roster here; so Bob cannot *predict* the owner's decision and
     // relays the request (rather than self-gating; treating an unreadable roster as "unknown, not
     // unauthorized" is what stops a junk roster-overwrite from disabling every admin's relay).
     // The owner is not driven in this test, so the Welcome never comes: the join must NOT succeed,
-    // and Carol must never be admitted. (In production a caller-side timeout — `Server::join`'s
-    // `JOIN_TIMEOUT_SECS` — turns the un-pushed Welcome into a clean error; the sync crate itself
+    // and Carol must never be admitted. (In production a caller-side timeout; `Server::join`'s
+    // `JOIN_TIMEOUT_SECS`; turns the un-pushed Welcome into a clean error; the sync crate itself
     // holds no timer, so the test bounds the wait.)
     let invite_c = bsy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
     let carol = MlsDevice::generate().unwrap();
@@ -502,7 +502,7 @@ async fn a_non_committer_cannot_admit() {
     })
     .await;
     // Either the relayed request is refused outright, or it hangs waiting for a Welcome that never
-    // comes (the timeout) — never a successful join.
+    // comes (the timeout); never a successful join.
     assert!(
         matches!(joined, Err(_) | Ok(Err(_))),
         "a non-committer's relayed admission must not succeed"
@@ -514,7 +514,7 @@ async fn a_non_committer_cannot_admit() {
 }
 
 /// 6d-1b: an op sealed under the epoch just before a membership change still
-/// decrypts after the holder advances, via the bounded past-epoch key window —
+/// decrypts after the holder advances, via the bounded past-epoch key window;
 /// instead of being silently dropped as `EpochUnavailable`.
 #[tokio::test]
 async fn op_sealed_before_an_epoch_advance_still_opens() {
@@ -569,7 +569,7 @@ async fn op_sealed_before_an_epoch_advance_still_opens() {
     .await
     .unwrap();
 
-    // Alice ingests the epoch-1 op while at epoch 2 — recovered via the retained
+    // Alice ingests the epoch-1 op while at epoch 2; recovered via the retained
     // past-epoch key rather than dropped.
     assert!(asy.run_once().await.unwrap());
     assert_eq!(get_str(&asy, "late").as_deref(), Some("from epoch 1"));
@@ -577,7 +577,7 @@ async fn op_sealed_before_an_epoch_advance_still_opens() {
 }
 
 /// 6d-1b: when the past-epoch key window has evicted the needed epoch, an op
-/// sealed under it is not silently lost — it is counted dropped and a document
+/// sealed under it is not silently lost; it is counted dropped and a document
 /// catch-up is queued to reconcile it.
 #[tokio::test]
 async fn op_past_the_key_window_falls_back_to_doc_catchup() {
@@ -778,7 +778,7 @@ async fn out_of_order_commit_auto_recovers_through_run_once() {
     );
     let mut bsy = joined_sync(bob_net, bob_joined, bob, rng(2), ManualClock::new(1_000));
 
-    // Carol joins (1->2) while Bob is still off the control topic — he misses it.
+    // Carol joins (1->2) while Bob is still off the control topic; he misses it.
     let carol = MlsDevice::generate().unwrap();
     let invite_c = asy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
     let carol_net = hub.join(PeerId::from_u64(3));
@@ -809,7 +809,7 @@ async fn out_of_order_commit_auto_recovers_through_run_once() {
     assert_eq!(bsy.stats().commits_buffered, 1);
 
     // Tick 2: Bob's queued catch-up fires; Alice serves the ordered bundle and Bob
-    // replays epoch 1 then epoch 2, converging — all driven by run_once.
+    // replays epoch 1 then epoch 2, converging; all driven by run_once.
     let (_, _) = tokio::join!(bsy.run_once(), asy.run_once());
     assert_eq!(bsy.epoch(), 3, "Bob auto-recovered to the current epoch");
     assert_eq!(bsy.stats().commit_catchups_requested, 1);
@@ -873,7 +873,7 @@ async fn concurrent_removes_resolve_to_a_single_winner() {
     asy.set_config(cfg);
     bsy.set_config(cfg);
 
-    // Alice (leaf 0) and Bob (leaf 1) BOTH remove Carol at epoch 2 — a same-base
+    // Alice (leaf 0) and Bob (leaf 1) BOTH remove Carol at epoch 2; a same-base
     // fork. Each stages and broadcasts its competing commit.
     asy.remove(&carol.device_id()).await.unwrap();
     bsy.remove(&carol.device_id()).await.unwrap();
@@ -909,7 +909,7 @@ async fn concurrent_removes_resolve_to_a_single_winner() {
 }
 
 /// 6d-2a: with concurrent committers enabled but no actual contention, a staged
-/// remove still resolves correctly after the window — the committer merges its own
+/// remove still resolves correctly after the window; the committer merges its own
 /// commit and an applier adopts it. (Single-candidate contest = the common case.)
 #[tokio::test]
 async fn uncontested_staged_remove_merges_after_the_window() {
@@ -976,7 +976,7 @@ async fn uncontested_staged_remove_merges_after_the_window() {
 }
 
 /// 6d-2a: a member that did NOT commit anything (a pure applier) still resolves a
-/// fork it observes to the same winner as the committers — convergence holds for
+/// fork it observes to the same winner as the committers; convergence holds for
 /// the whole roster, not just the participants.
 #[tokio::test]
 async fn a_non_committing_member_converges_on_the_fork_winner() {
@@ -1058,7 +1058,7 @@ async fn three_way_fork_collapses_to_one_winner() {
 }
 
 /// 6d-2a: after a fork resolves, the group is fully functional and its epoch state
-/// is byte-identical across winner and loser — proven by exchanging an
+/// is byte-identical across winner and loser; proven by exchanging an
 /// end-to-end-encrypted channel message that converges (it only decrypts if both
 /// derived the same epoch/channel key).
 #[tokio::test]
@@ -1104,7 +1104,7 @@ async fn group_is_functional_after_a_fork() {
 }
 
 /// 6d-2a: with concurrent committers enabled, an admission is **staged** (not
-/// merged synchronously) and the joiner is admitted via the two-phase flow — a
+/// merged synchronously) and the joiner is admitted via the two-phase flow; a
 /// `JOIN_PENDING` ack, then a pushed Welcome once the staged commit wins and
 /// merges. The joiner ends up a real member.
 #[tokio::test]
@@ -1141,7 +1141,7 @@ async fn staged_join_admits_via_the_welcome_push() {
 
 /// Removal is **owner-only**, enforced at the protocol layer (THREAT-MODEL R1): the designated
 /// committer (the owner) removes directly, and a non-owner's `request_remove` is rejected
-/// outright — a modified member cannot get anyone removed.
+/// outright; a modified member cannot get anyone removed.
 #[tokio::test]
 async fn removal_is_owner_only_and_a_non_owner_request_is_rejected() {
     catcoms_log::init_test();
@@ -1152,7 +1152,7 @@ async fn removal_is_owner_only_and_a_non_owner_request_is_rejected() {
     let carol = ids[2];
     assert_eq!(s[0].epoch(), 2);
 
-    // A non-owner cannot remove — the request is rejected and nothing is broadcast.
+    // A non-owner cannot remove; the request is rejected and nothing is broadcast.
     assert!(matches!(
         s[1].request_remove(&carol).await,
         Err(SyncError::Unauthorized)
@@ -1203,7 +1203,7 @@ async fn catch_up_transfers_history_over_request_response() {
 // the join transfer (6e-3d-9), so they assert the *current* namespace converges
 // among members who share a removal, not the grandfathered baseline.
 
-/// Two stand-in rendezvous peer ids — the namespace is bound per-rendezvous.
+/// Two stand-in rendezvous peer ids; the namespace is bound per-rendezvous.
 const RZ: &[u8] = b"catcoms-rendezvous-node-one-0001";
 const RZ2: &[u8] = b"catcoms-rendezvous-node-two-0002";
 
@@ -1233,7 +1233,7 @@ async fn routing_namespace_rotates_only_on_member_removal() {
     );
 
     // Remove Carol: Alice (owner) removes directly + fans out the commit; Bob applies. This
-    // exercises both rotation paths — the local committer (commit_remove_now) and the inbound
+    // exercises both rotation paths; the local committer (commit_remove_now) and the inbound
     // apply (note_commit_applied via process_incoming).
     s[0].request_remove(&ids[2]).await.unwrap();
     assert!(s[1].run_once().await.unwrap()); // Bob applies the broadcast commit
@@ -1251,7 +1251,7 @@ async fn routing_namespace_rotates_only_on_member_removal() {
     assert_eq!(a.len(), 2, "current + one grandfathered namespace at L=1");
 
     // Carol, removed, never advanced her label and cannot compute the post-removal
-    // namespace — her advertised set excludes it.
+    // namespace; her advertised set excludes it.
     assert_eq!(s[2].routing_label(), 0);
     assert!(
         !s[2].rendezvous_namespaces(RZ).contains(&a[0]),
@@ -1314,7 +1314,7 @@ async fn distinct_groups_derive_distinct_namespaces() {
 // A joiner captures a different L=0 baseline than the founder (the routing secret
 // is epoch-specific), so without the transfer it would derive a different
 // namespace. `build_members` builds joiners via `new_joined`, which adopts the
-// routing state sealed into the join response — so they converge.
+// routing state sealed into the join response; so they converge.
 
 #[tokio::test]
 async fn a_joiner_adopts_the_routing_state_and_converges_on_the_namespace() {

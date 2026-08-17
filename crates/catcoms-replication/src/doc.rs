@@ -1,4 +1,4 @@
-//! [`EncryptedDoc`] — one encrypted, replicated CRDT document.
+//! [`EncryptedDoc`]; one encrypted, replicated CRDT document.
 //!
 //! A document (a channel, wiki page, status feed, calendar) is an automerge
 //! document plus an append-only log of the [`SignedOp`]s that built it. Local
@@ -21,7 +21,7 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use crate::op::{SealedOp, SignedOp};
 use crate::ReplError;
 
-/// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about — each
+/// Cap on how many changes one [`EncryptedDoc::holders_of`] query may ask about; each
 /// target takes one bit of the propagation mask the single DAG pass carries.
 pub const MAX_DELIVERY_TARGETS: usize = 64;
 
@@ -36,7 +36,7 @@ pub struct EncryptedDoc {
     /// query ([`EncryptedDoc::holders_of`]). Attribution comes from the **signed** op envelope,
     /// not the change's automerge actor id, so a member cannot forge a change that looks like
     /// another member's. Built lazily and incrementally from `log` (see `index_authors`), so a
-    /// caller that never asks about delivery pays nothing. Derived state — never persisted.
+    /// caller that never asks about delivery pays nothing. Derived state; never persisted.
     change_authors: HashMap<ChangeHash, DeviceId>,
     /// How many entries of `log` are already reflected in `change_authors`.
     authors_indexed: usize,
@@ -80,13 +80,13 @@ impl EncryptedDoc {
     }
 
     /// Which devices **provably hold** each of `targets` (automerge change hashes), from the
-    /// document alone — the read-only half of the delivery-state query.
+    /// document alone; the read-only half of the delivery-state query.
     ///
     /// A device `D` counts for target `C` when `D` authored some change whose causal history
     /// contains `C`: `D` could not have built on `C` without holding it, and the change carrying
     /// that proof is signed by `D`. This is the same predicate the design's `their_heads` route
     /// describes ("the peer's confirmed heads causally include the op"), evaluated against
-    /// evidence already in the doc rather than against a sync session — CatComs replicates by
+    /// evidence already in the doc rather than against a sync session; Mewtual replicates by
     /// broadcasting sealed ops, so no per-peer automerge sync state exists to read.
     ///
     /// The result is *sound but incomplete*: a device that received `C` and has not written since
@@ -106,7 +106,7 @@ impl EncryptedDoc {
         }
         // One pass over the change DAG. `get_changes_meta(&[])` yields every change in the order
         // it entered the graph, and automerge only admits a change once all its dependencies are
-        // present — so dependencies are always visited before dependents and `carried` is complete
+        // present; so dependencies are always visited before dependents and `carried` is complete
         // by the time it is read. If that ever stopped holding, a dep would simply be missing from
         // the map and the mask would lose a bit: an under-count (silence), never a false claim.
         let mut carried: HashMap<ChangeHash, u64> = HashMap::new();
@@ -161,7 +161,7 @@ impl EncryptedDoc {
     /// Serialize this document for persistence (Phase 9d): the materialized automerge state
     /// plus the signed-op log (the log carries the per-op signatures the automerge state
     /// does not, so a restored member can still serve catch-up). The `applied` dedup set is
-    /// rebuilt from the log on restore. **Secret** — holds plaintext document content; the
+    /// rebuilt from the log on restore. **Secret**; holds plaintext document content; the
     /// persistence layer seals it under `db_key` before it touches disk.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, ReplError> {
         let doc_bytes = self.doc.save();
@@ -222,7 +222,7 @@ impl EncryptedDoc {
             .map(|(op, _)| op)
     }
 
-    /// [`EncryptedDoc::edit`], also returning the **automerge change hash** the edit produced —
+    /// [`EncryptedDoc::edit`], also returning the **automerge change hash** the edit produced;
     /// the stable, content-addressed handle a caller needs to later ask [`EncryptedDoc::holders_of`]
     /// who has received this particular edit.
     pub fn edit_tracked<F>(
@@ -276,7 +276,7 @@ impl EncryptedDoc {
     ///
     /// Confidentiality and authenticity are unchanged: a wrong key fails the AEAD
     /// open, and the op's inner author signature is still verified before it is
-    /// applied — so this cannot be used to inject forged history. The caller pairs
+    /// applied; so this cannot be used to inject forged history. The caller pairs
     /// `key` with an epoch and passes that as `expected_epoch`; this asserts the op
     /// was actually sealed under it (defense in depth against a future refactor
     /// that mis-pairs key and epoch). Returns `true` if newly applied, `false` if

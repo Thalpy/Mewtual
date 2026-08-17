@@ -2,14 +2,14 @@
 //!
 //! Expiry is resolved most-specific-first (per-file → per-server → global, default
 //! one month). "Expired" means the cached bytes are dropped and the blob leaves
-//! the auto-share set — but its index entry is kept, so it stays re-fetchable by
+//! the auto-share set; but its index entry is kept, so it stays re-fetchable by
 //! CID. Two review fixes are built in:
 //!
-//! - **Decorrelated eviction** — each blob gets random jitter added to its
+//! - **Decorrelated eviction**; each blob gets random jitter added to its
 //!   deadline, so a group sharing one default expiry does not all drop a blob in
 //!   the same wall-clock window (which would make the "always re-fetchable while
 //!   any member holds it" promise false).
-//! - **Holder probe** — GC will not evict the *last* copy: it evicts only when a
+//! - **Holder probe**; GC will not evict the *last* copy: it evicts only when a
 //!   fresh probe confirms at least `min_holders` other reachable peers hold the
 //!   blob. Otherwise it keeps it. A blob with no bytes locally and no known holder
 //!   surfaces as [`BlobState::MissingNoHolder`], never a silent gap.
@@ -41,9 +41,9 @@ pub enum Expiry {
 /// What kind of blob this is, for retention purposes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlobKind {
-    /// Inline media (images/audio) kept locally for embedding — never age-evicted.
+    /// Inline media (images/audio) kept locally for embedding; never age-evicted.
     InlineMedia,
-    /// A general file — age-evictable once past its expiry.
+    /// A general file; age-evictable once past its expiry.
     File,
 }
 
@@ -129,9 +129,9 @@ pub trait HolderOracle {
 pub enum BlobState {
     /// Bytes are present locally.
     Available,
-    /// Bytes evicted locally, but at least one peer holds them — re-fetchable.
+    /// Bytes evicted locally, but at least one peer holds them; re-fetchable.
     EvictedRefetchable,
-    /// Bytes evicted locally and no known holder remains — a typed, visible gap.
+    /// Bytes evicted locally and no known holder remains; a typed, visible gap.
     MissingNoHolder,
     /// Not tracked by the index.
     Unknown,

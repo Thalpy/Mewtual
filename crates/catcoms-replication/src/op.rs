@@ -5,7 +5,7 @@
 //! op is signed by its author's device key over `(doc, author_pubkey, delta)`,
 //! independently of how it is sealed. So when a catch-up peer decrypts history
 //! and re-seals it under the current epoch, the original authorship still
-//! verifies — a malicious re-sealer cannot forge or attribute ops it did not
+//! verifies; a malicious re-sealer cannot forge or attribute ops it did not
 //! author. The author's public key is carried in the op (and must content-address
 //! its `author_device`), so authorship is verifiable without consulting a roster.
 
@@ -78,7 +78,7 @@ impl SignedOp {
     }
 
     /// Canonical plaintext encoding (also the bytes that get sealed). The
-    /// `author_device` is omitted — it is recomputed from `author_pubkey`.
+    /// `author_device` is omitted; it is recomputed from `author_pubkey`.
     pub fn encode(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.put_u16(self.doc_type.tag());

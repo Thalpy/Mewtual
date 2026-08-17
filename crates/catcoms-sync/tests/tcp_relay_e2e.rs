@@ -1,7 +1,7 @@
-//! Phase 7 — full-stack join **through a relay over real TCP sockets** (NAT traversal).
+//! Phase 7; full-stack join **through a relay over real TCP sockets** (NAT traversal).
 //! The server is reachable *only* via a zero-knowledge circuit relay (it never binds a
 //! directly-dialable address); the joiner dials the server's relayed circuit address,
-//! and the MLS join + encrypted catch-up run over the relayed connection — over genuine
+//! and the MLS join + encrypted catch-up run over the relayed connection; over genuine
 //! OS sockets, not the libp2p memory transport. Together with `tcp_e2e` (direct) and
 //! `tcp_rendezvous_e2e` (discovered), this proves all three networking paths over real
 //! sockets.

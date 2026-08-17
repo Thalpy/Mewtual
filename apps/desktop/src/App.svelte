@@ -419,7 +419,7 @@
   let unlockMethod = $state<UnlockMethod>("pass");
   // Sigil lock, one screen, freely re-editable in any order: a path drawn over a fixed
   // 19-node magic circle, per-node colour MARKS (optional), a focus-emoji SET, and a masked
-  // magic word — folded into one "sigil:v1:…" secret. This REPLACES the spell lock
+  // magic word; folded into one "sigil:v1:…" secret. This REPLACES the spell lock
   // ("spell:v1:", glyphs by catalog index), which is RETIRED exactly as melody v1/v2 were: a
   // vault sealed under spell:v1 must be re-entered under a scheme this build can still
   // produce. Encoding, lattice geometry, the entropy model, the tap-vs-drag classifier and
@@ -433,7 +433,7 @@
   // Opt-in ring reveal. The word is the ONE factor a shoulder-surfer can't capture (the path,
   // marks and emoji are drawn in the open), so by default the ring shows a CONSTANT-count
   // rune band derived from (session seed, word): it reshuffles as you type but leaks nothing
-  // — not even the length (a per-character or tiled inscription would).
+  //; not even the length (a per-character or tiled inscription would).
   let sigilShowWord = $state(false);
   let sigilSeed = $state(1);
   let sigilSecret = $derived(encodeSigil(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
@@ -455,7 +455,7 @@
   }
   function sigilCommitStroke() {
     // A stroke needs a segment to mean anything: a single latched node is not a path (it is a
-    // colour tap — see sigilPointerUp), so it can never silently fork the path field.
+    // colour tap; see sigilPointerUp), so it can never silently fork the path field.
     if (sigilDrawing.length >= 2) sigilStrokes = [...sigilStrokes, sigilDrawing];
     sigilDrawing = [];
   }
@@ -466,7 +466,7 @@
     if (sigilDrawing.length && !sigilTracing) sigilCommitStroke(); // seal a pending keyboard stroke first
     const p = sigilXY(e);
     const hit = p ? hitNode(p.x, p.y) : -1;
-    if (hit < 0 || !p) return; // presses begin ON a node — dead space is not a start point
+    if (hit < 0 || !p) return; // presses begin ON a node; dead space is not a start point
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     sigilTracing = true;
     sigilDownPt = p;
@@ -495,7 +495,7 @@
   }
   // Keyboard path: every node is focusable; Enter/Space adds it to the working stroke (the
   // explicit "end stroke" button plays the role the pointer-lift plays for a drag) and C
-  // cycles the node's colour mark — the keyboard twin of the tap.
+  // cycles the node's colour mark; the keyboard twin of the tap.
   function sigilNodeKey(e: KeyboardEvent, i: number) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
@@ -510,7 +510,7 @@
     else sigilStrokes = sigilStrokes.slice(0, -1);
   }
   function toggleSigilEmoji(em: string) {
-    // Click to select, click again to deselect. The array keeps UI order; the ENCODER sorts —
+    // Click to select, click again to deselect. The array keeps UI order; the ENCODER sorts;
     // so deselect/reselect churn can never change the secret.
     if (sigilEmojis.includes(em)) sigilEmojis = sigilEmojis.filter((x) => x !== em);
     else if (sigilEmojis.length < MAX_SIGIL_EMOJI) sigilEmojis = [...sigilEmojis, em];
@@ -4779,7 +4779,7 @@
   async function copyFeedback() {
     const report = [
       `Type: ${feedbackKind === "bug" ? "Bug report" : "Feature request"}`,
-      `App: CatComs (desktop)`,
+      `App: Mewtual (desktop)`,
       `Environment: ${navigator.userAgent}`,
       ``,
       feedbackText.trim(),
@@ -5551,7 +5551,7 @@
   {/if}
   {#if locked}
     <div class="start">
-      <h1>CatComs</h1>
+      <h1>Mewtual</h1>
       <p class="muted">
         Unlock your servers: with a passphrase, a sigil, or a tune. All three seal the
         same vault; pick the one you'll actually remember.
@@ -5606,13 +5606,13 @@
             <circle class="sigil-ring" cx={SIGIL_C} cy={SIGIL_C} r={R_OUTER} />
             <!-- Ring inscription. An EMPTY word shows nothing; from the FIRST character the
                  ring is a CONSTANT-count rune band derived from (session seed, word),
-                 stretched around the full circumference — the SAME count for 1 character or
+                 stretched around the full circumference; the SAME count for 1 character or
                  30. Do NOT "fix" this into a length-proportional ring: per-character runes
                  leak the word's length and a repeated sequence leaks it via its period. The
                  empty/non-empty step leaks exactly one bit, which the disabled Unlock button
                  already gives away (an empty word can't form a valid secret). It reshuffles
-                 as you type — the keyed tspans remount only where a rune actually changed,
-                 which is the "being inscribed" flicker — but recovers to nothing without the
+                 as you type; the keyed tspans remount only where a rune actually changed,
+                 which is the "being inscribed" flicker; but recovers to nothing without the
                  session seed (reveal toggle aside). -->
             {#if sigilWordLen}
               <text class="sigil-ring-text">
@@ -5686,7 +5686,7 @@
           {/if}
         </div>
         <details class="sigil-emoji-pick">
-          <summary>{sigilEmojis.length ? `focus emoji: ${sigilEmojis.join(" ")}` : "choose focus emoji"} <span class="muted">({sigilEmojis.length}/{MAX_SIGIL_EMOJI} — click again to remove)</span></summary>
+          <summary>{sigilEmojis.length ? `focus emoji: ${sigilEmojis.join(" ")}` : "choose focus emoji"} <span class="muted">({sigilEmojis.length}/{MAX_SIGIL_EMOJI}; click again to remove)</span></summary>
           <div class="sigil-emoji-grid">
             {#each EMOJI_SETS as set (set.label)}
               {#each set.list as em (em)}
@@ -5844,7 +5844,7 @@
     </div>
   {:else if servers.length === 0 || showAdd}
     <div class="start">
-      <h1>CatComs</h1>
+      <h1>Mewtual</h1>
       {#if showAdd && servers.length}
         <button class="ghost" onclick={() => (showAdd = false)}>← back</button>
       {/if}
@@ -7924,11 +7924,11 @@
             <label class="fb-label" for="fb-text">
               {feedbackKind === "bug"
                 ? "What went wrong? Steps to reproduce, and what you expected to happen."
-                : "What would you like CatComs to do?"}
+                : "What would you like Mewtual to do?"}
             </label>
             <textarea id="fb-text" class="fb-text" bind:value={feedbackText} rows="7" placeholder="Describe it here…"></textarea>
             <p class="muted small">
-              CatComs is peer-to-peer with no servers, so feedback can't be sent automatically. Copy the report and
+              Mewtual is peer-to-peer with no servers, so feedback can't be sent automatically. Copy the report and
               share it with the maintainer (your issue tracker, email, or chat). Your environment is included to help debugging.
             </p>
             <div class="file-info-actions">

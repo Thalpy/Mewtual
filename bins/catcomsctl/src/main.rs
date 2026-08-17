@@ -1,10 +1,10 @@
-//! `catcomsctl` — a dev CLI that drives the CatComs stack end to end.
+//! `catcomsctl`; a dev CLI that drives the Mewtual stack end to end.
 //!
 //! The `demo` command runs the whole pipeline in one process: Alice founds a
 //! server, mints a single-use invite, Bob redeems it and joins the MLS group,
 //! both open a channel over the (in-memory) mesh transport, exchange end-to-end
-//! encrypted chat messages, and converge. It composes every layer — identity,
-//! MLS groups, invites, encrypted CRDT replication, and channel sync — and is
+//! encrypted chat messages, and converge. It composes every layer; identity,
+//! MLS groups, invites, encrypted CRDT replication, and channel sync; and is
 //! fully scriptable for testing. `--debug` additionally writes a verbose
 //! `debug_log_<timestamp>.txt`.
 
@@ -37,7 +37,7 @@ const GENERAL: u128 = 1;
 #[derive(Parser)]
 #[command(
     name = "catcomsctl",
-    about = "Drive the CatComs stack from the command line"
+    about = "Drive the Mewtual stack from the command line"
 )]
 struct Cli {
     /// Write a verbose debug log to <log-dir>/debug_log_<timestamp>.txt.
@@ -89,8 +89,8 @@ enum Command {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 4000)]
         port: u16,
-        /// Persist the relay identity to this file (created if absent), so the peer id — and
-        /// therefore every invite that embeds the relay's multiaddr — survives restarts.
+        /// Persist the relay identity to this file (created if absent), so the peer id; and
+        /// therefore every invite that embeds the relay's multiaddr; survives restarts.
         #[arg(long)]
         identity: Option<PathBuf>,
     },
@@ -167,7 +167,7 @@ async fn run_relay_node(port: u16, identity: Option<PathBuf>) -> Result<(), Box<
     swarm
         .listen_on(listen)
         .map_err(|e| format!("relay listen failed: {e}"))?;
-    println!("== CatComs relay ==");
+    println!("== Mewtual relay ==");
     println!("[relay] running on tcp/{port} (peer {relay_id})");
     println!("[relay] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{relay_id}");
     println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
@@ -186,7 +186,7 @@ async fn run_rendezvous_node(port: u16, identity: Option<PathBuf>) -> Result<(),
     swarm
         .listen_on(listen)
         .map_err(|e| format!("rendezvous listen failed: {e}"))?;
-    println!("== CatComs rendezvous ==");
+    println!("== Mewtual rendezvous ==");
     println!("[rendezvous] running on tcp/{port} (peer {rz_id})");
     println!("[rendezvous] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{rz_id}");
     println!("[rendezvous] members register/discover under blinded namespaces; Ctrl-C to stop");
@@ -269,7 +269,7 @@ async fn run_serve(
         append_message(
             d,
             "server",
-            "Welcome! You joined a CatComs server over libp2p.",
+            "Welcome! You joined a Mewtual server over libp2p.",
         )
     })
     .await?;
@@ -321,13 +321,13 @@ async fn run_serve(
         );
     }
 
-    println!("== CatComs server ==");
+    println!("== Mewtual server ==");
     println!("[serve] listening on tcp/{port} (peer {libp2p_id})");
     for b in &bootstrap {
         println!("[serve] bootstrap: {b}");
     }
     println!("[serve] invite written to {}", invite_file.display());
-    println!("[serve] serving — run `catcomsctl join` elsewhere; Ctrl-C to stop\n");
+    println!("[serve] serving; run `catcomsctl join` elsewhere; Ctrl-C to stop\n");
 
     // Serve indefinitely: admit joiners, answer catch-up, apply membership commits.
     while sync.run_once().await? {}
@@ -340,14 +340,14 @@ async fn run_serve(
 async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
     let blob = tokio::fs::read_to_string(&invite_file).await?;
     let invite = InviteToken::decode(&hex::decode(blob.trim())?)?;
-    // Authenticate the pasted token LOCALLY before acting on any of its fields — dialing
+    // Authenticate the pasted token LOCALLY before acting on any of its fields; dialing
     // its (attacker-nameable) rendezvous addresses or deriving join_ns from its group_id
     // and nonce. request_join re-verifies the Welcome too, but failing fast here keeps a
     // forged token from spending dial budget or leaking join interest to a rendezvous.
     if !invite.verify_self() {
         return Err("invite failed self-verification (forged or corrupt token)".into());
     }
-    println!("== CatComs join ==");
+    println!("== Mewtual join ==");
     if !invite.rendezvous.is_empty() {
         return run_join_via_rendezvous(invite).await;
     }
@@ -358,7 +358,7 @@ async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
         .ok_or("invite carries neither a rendezvous nor a bootstrap address")?;
     let addr: Multiaddr = boot.parse()?;
     // The server's peer id is the LAST /p2p/ component (past the relay, for a
-    // circuit address), so we wait for the SERVER specifically — not the relay we
+    // circuit address), so we wait for the SERVER specifically; not the relay we
     // hop through to reach it.
     let server_lp =
         catcoms_net::target_peer_in_multiaddr(&addr).ok_or("bootstrap address has no peer id")?;
@@ -371,7 +371,7 @@ async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
 
 /// Discover the inviter at a rendezvous under the invite's pre-join `join_ns`, let the
 /// `DiscoveryPolicy` decide what to dial (the net Actor never auto-dials), dial it, and
-/// join — with no hard-coded server address.
+/// join; with no hard-coded server address.
 async fn run_join_via_rendezvous(invite: InviteToken) -> Result<(), Box<dyn Error>> {
     let targets = validate_rendezvous_addrs(&invite.rendezvous)?;
     let rz = targets
@@ -546,7 +546,7 @@ fn field(doc: &AutoCommit, obj: &automerge::ObjId, key: &str) -> String {
 }
 
 async fn run_demo(stats: bool) -> Result<(), Box<dyn Error>> {
-    println!("== CatComs end-to-end demo ==\n");
+    println!("== Mewtual end-to-end demo ==\n");
     let now = SystemClock.now_ms();
 
     // 1. Alice founds a server.
@@ -642,10 +642,10 @@ async fn run_demo(stats: bool) -> Result<(), Box<dyn Error>> {
 /// inspected from the command line. Alice founds a server and admits Bob, Carol
 /// and Dave. Bob is offline for the control topic when Carol joins, so he *misses*
 /// that membership commit; when he later sees Dave's (future) commit he detects
-/// the gap, fetches the missing commits in order, and converges — without an
+/// the gap, fetches the missing commits in order, and converges; without an
 /// explicit catch-up call.
 async fn run_recover(stats: bool) -> Result<(), Box<dyn Error>> {
-    println!("== CatComs membership-recovery demo (6d-1b) ==\n");
+    println!("== Mewtual membership-recovery demo (6d-1b) ==\n");
     let hub = Hub::new();
     let alice_peer = PeerId::from_u64(1);
 

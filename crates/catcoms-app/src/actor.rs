@@ -1,13 +1,13 @@
 //! The async **event-stream actor** around a [`Server`] (slice 8b-1).
 //!
-//! A GUI can't poll `sync_once` by hand — it needs a live thing it sends *commands* to
+//! A GUI can't poll `sync_once` by hand; it needs a live thing it sends *commands* to
 //! and gets *events* from. [`spawn`] moves a `Server` into a background task that owns
 //! it, drives the network, and translates between a command channel and an event
 //! channel. The Tauri command bridge (8b-2) is a thin shell over this; tests drive it
 //! directly over the in-memory transport.
 //!
 //! The task `select!`s between the command channel and `Server::sync_once`. When a
-//! command arrives mid-`sync_once`, the in-flight `sync_once` is cancelled — safe at its
+//! command arrives mid-`sync_once`, the in-flight `sync_once` is cancelled; safe at its
 //! only real suspension point (`next_event`, which leaves the event queued); a cancel
 //! during the brief pre-event recovery work may at worst drop an in-flight catch-up,
 //! which the recovery machinery re-detects on the next inbound event (self-healing).
@@ -30,7 +30,7 @@ use crate::{
 const DISCOVERY_DRAIN_MS: u64 = 500;
 /// Minimum gap between delivery snapshots for one channel (ms, on the injected clock). Delivery
 /// evidence is derived by walking the channel document's change graph, so it is recomputed on a
-/// timer rather than on every inbound op — and the event only fires when the result actually
+/// timer rather than on every inbound op; and the event only fires when the result actually
 /// changed.
 const DELIVERY_THROTTLE_MS: u64 = 1_000;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
@@ -243,7 +243,7 @@ pub enum AppCommand {
         cid: Vec<u8>,
         reply: oneshot::Sender<FileUsage>,
     },
-    /// The wiki-pinned content addresses (lowercase hex) — files that must never decay.
+    /// The wiki-pinned content addresses (lowercase hex); files that must never decay.
     WikiPinnedCids { reply: oneshot::Sender<Vec<String>> },
     /// Pull the file index from `peer` (e.g. right after joining).
     CatchUpFiles { peer: PeerId },
@@ -354,7 +354,7 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
     /// This member's origin identity on this server: its device id plus the group id.
-    /// Read-only — the grant ceremony (multi-device M2) needs both to anchor the SAS
+    /// Read-only; the grant ceremony (multi-device M2) needs both to anchor the SAS
     /// and to tell the new device which group a grant is for.
     OriginIdentity {
         reply: oneshot::Sender<(DeviceId, Vec<u8>)>,
@@ -387,35 +387,35 @@ pub enum AppCommand {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    /// A channel's message list changed — the UI should re-fetch it (`messages`). Using
+    /// A channel's message list changed; the UI should re-fetch it (`messages`). Using
     /// a re-fetch signal (rather than diffed deltas) keeps ordering robust under CRDT
     /// merges of concurrent messages.
     ChannelUpdated { channel: u128 },
     /// The roster size changed (a member joined or was removed).
     MembersChanged { count: usize },
-    /// A member profile changed — the UI should re-fetch profiles (`profiles`).
+    /// A member profile changed; the UI should re-fetch profiles (`profiles`).
     ProfilesUpdated,
-    /// The server livery changed — the UI should re-fetch it (`livery`) and re-apply it.
+    /// The server livery changed; the UI should re-fetch it (`livery`) and re-apply it.
     LiveryUpdated,
-    /// A custom member badge changed — the UI should re-fetch badges (`badges`).
+    /// A custom member badge changed; the UI should re-fetch badges (`badges`).
     BadgesUpdated,
-    /// The companion-device registry changed — the UI should re-fetch it (`devices`) and
+    /// The companion-device registry changed; the UI should re-fetch it (`devices`) and
     /// re-resolve message attribution (multi-device M3/M4).
     DevicesUpdated,
-    /// The shared file list changed — the UI should re-fetch it (`files`).
+    /// The shared file list changed; the UI should re-fetch it (`files`).
     FilesUpdated,
-    /// The status feed changed — the UI should re-fetch it (`statuses`).
+    /// The status feed changed; the UI should re-fetch it (`statuses`).
     StatusUpdated,
-    /// The server events (calendar) changed — the UI should re-fetch them (`events`).
+    /// The server events (calendar) changed; the UI should re-fetch them (`events`).
     EventsUpdated,
-    /// The wiki changed — the UI should re-fetch pages / the open page.
+    /// The wiki changed; the UI should re-fetch pages / the open page.
     WikiUpdated,
-    /// Member roles changed — the UI should re-fetch roles.
+    /// Member roles changed; the UI should re-fetch roles.
     RolesUpdated,
     /// The advisory eclipse verdict changed: `true` = the node may be isolated (verify a member
     /// out of band). Surfaced as a UI hint; never gates anything.
     EclipseChanged { caution: bool },
-    /// The set of members reachable right now (a live connection) changed — `online` is their
+    /// The set of members reachable right now (a live connection) changed; `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
     /// Delivery state changed for this device's recent messages in `channel` (oldest first).
@@ -425,7 +425,7 @@ pub enum AppEvent {
         channel: u128,
         states: Vec<DeliveryState>,
     },
-    /// The set of pending incoming DM (friend) requests changed — the UI should re-fetch them.
+    /// The set of pending incoming DM (friend) requests changed; the UI should re-fetch them.
     DmRequestsChanged,
     /// An inbound call-signalling message arrived: `(sender fingerprint, opaque payload)`. One event
     /// per signal; the UI decodes the payload (`{callId, type, data}`) and drives WebRTC.
@@ -564,7 +564,7 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Set (or clear, with `""`) a channel's topic. Any member may — see
+    /// Set (or clear, with `""`) a channel's topic. Any member may; see
     /// [`Server::set_channel_topic`]. A `ChannelUpdated` event follows if it changed.
     pub async fn set_channel_topic(&self, channel: u128, topic: String) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
@@ -753,7 +753,7 @@ impl ServerActor {
     }
 
     /// Sign a device certificate for a companion device with this server's origin key
-    /// (multi-device M2). The key never leaves the actor — only the certificate does.
+    /// (multi-device M2). The key never leaves the actor; only the certificate does.
     pub async fn sign_device_cert(
         &self,
         new_device_id: DeviceId,
@@ -842,7 +842,7 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Set (or clear, with `""`) the shared server icon — base64 image bytes (owner/admin
+    /// Set (or clear, with `""`) the shared server icon; base64 image bytes (owner/admin
     /// only; a `LiveryUpdated` event follows). Publishing colours never disturbs it.
     pub async fn set_server_icon(&self, icon: String) -> Result<(), String> {
         let (reply, rx) = oneshot::channel();
@@ -857,7 +857,7 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
-    /// Set (or clear, with `""`) the shared server cursor — base64 image bytes (owner/admin
+    /// Set (or clear, with `""`) the shared server cursor; base64 image bytes (owner/admin
     /// only; a `LiveryUpdated` event follows). Publishing colours, or the icon, never
     /// disturbs it.
     pub async fn set_server_cursor(&self, cursor: String) -> Result<(), String> {
@@ -1444,7 +1444,7 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
-    /// Set a wiki page's render format — "md" or "wiki" (a `WikiUpdated` event follows).
+    /// Set a wiki page's render format; "md" or "wiki" (a `WikiUpdated` event follows).
     pub async fn set_wiki_format(
         &self,
         name: impl Into<String>,
@@ -1515,7 +1515,7 @@ impl ServerActor {
         let _ = self.cmd_tx.send(AppCommand::Shutdown).await;
     }
 
-    /// Drive one steady-state rendezvous-discovery pass. Fire-and-forget — the bridge calls this on
+    /// Drive one steady-state rendezvous-discovery pass. Fire-and-forget; the bridge calls this on
     /// a timer. Returns `Err` once the actor has stopped (so the bridge's timer task can exit).
     pub async fn drive_discovery(&self) -> Result<(), ()> {
         self.cmd_tx
@@ -1544,7 +1544,7 @@ where
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
         // customize color/font/effect later via SetProfile). Seed ONLY when this device has no
-        // profile entry yet (first founding/join) — otherwise a reload would overwrite the
+        // profile entry yet (first founding/join); otherwise a reload would overwrite the
         // customized name/color/font the user saved with the founding display name + defaults.
         if let Err(e) = server.open_profiles().await {
             tracing::warn!(error = %e, "open_profiles failed");
@@ -1596,7 +1596,7 @@ where
         }
         let mut last_wiki = wiki_snapshot(&server);
         // …and subscribe the member-roles doc so admin grants propagate. The *owner* role is
-        // not stored here — it is derived from the MLS designated committer (lowest leaf
+        // not stored here; it is derived from the MLS designated committer (lowest leaf
         // index), so every member computes the owner identically with no roles op present.
         if let Err(e) = server.open_roles().await {
             tracing::warn!(error = %e, "open_roles failed");
@@ -1605,7 +1605,7 @@ where
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
         let mut last_dm_requests = server.dm_requests();
-        // Per channel: when delivery state was last recomputed, and what it was — the throttle
+        // Per channel: when delivery state was last recomputed, and what it was; the throttle
         // plus the change detector for `DeliveryChanged`.
         let mut delivery: HashMap<u128, (u64, Vec<DeliveryState>)> = HashMap::new();
         loop {
@@ -1617,7 +1617,7 @@ where
                             tracing::warn!(error = %e, channel, "open_channel failed");
                         }
                         // Seed (and start tracking) the channel's current content signature WITHOUT
-                        // emitting — the UI fetches messages on open (switchTo → refresh); only a
+                        // emitting; the UI fetches messages on open (switchTo → refresh); only a
                         // later add/edit/delete should fire ChannelUpdated. (A non-empty channel's
                         // signature is non-zero, so the old `or_insert(0)` would have spuriously
                         // signalled "changed" on open under the content-hash detector.)
@@ -1888,7 +1888,7 @@ where
                             .and_then(|arr| server.file_download_plan(&Cid::from_bytes(arr)));
                         let _ = reply.send(plan);
                     }
-                    // Fetch ONE chunk, then return to the select! loop — so a large download no
+                    // Fetch ONE chunk, then return to the select! loop; so a large download no
                     // longer pins the actor: other commands + sync_once interleave between chunks
                     // (the bridge orchestrates the per-chunk loop + reassembly + progress).
                     Some(AppCommand::FetchFileChunk { cid, idx, reply }) => {
@@ -1931,7 +1931,7 @@ where
                         };
                         let ok = res.is_ok();
                         let _ = reply.send(res);
-                        // The listing count is unchanged, so `files_changed` can't see this —
+                        // The listing count is unchanged, so `files_changed` can't see this;
                         // announce it directly so every surface repaints the new expiry.
                         if ok {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
@@ -2226,7 +2226,7 @@ where
                                     .await;
                             }
                         }
-                        // A DM (friend) request may have arrived over this group — surface a change.
+                        // A DM (friend) request may have arrived over this group; surface a change.
                         if dm_requests_changed(&server, &mut last_dm_requests) {
                             let _ = event_tx.send(AppEvent::DmRequestsChanged).await;
                         }
@@ -2251,7 +2251,7 @@ where
 
 /// Whether a channel's rendered content (its messages or its topic) changed since last seen
 /// (updating the record).
-/// Synchronous — the `&Server` borrow ends before the caller awaits the event send, so
+/// Synchronous; the `&Server` borrow ends before the caller awaits the event send, so
 /// the actor future stays `Send` (a `&Server` held across an await would require
 /// `Server: Sync`, which it is not).
 fn channel_changed<T, R>(
@@ -2264,7 +2264,7 @@ where
     R: CryptoRngCore,
 {
     use std::hash::{Hash, Hasher};
-    // A content signature (not just the count) so an EDIT — which doesn't change the count — is
+    // A content signature (not just the count) so an EDIT; which doesn't change the count; is
     // detected too, both locally and when a peer's edit arrives. `DefaultHasher::new()` has a fixed
     // seed, so the same content hashes the same across ticks. Cheap over a channel's message list.
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -2322,7 +2322,7 @@ where
 }
 
 /// Whether the server events changed since last seen (updating the record). A count alone would
-/// miss a concurrent create+delete converging in one tick, so this compares the full list — which
+/// miss a concurrent create+delete converging in one tick, so this compares the full list; which
 /// `Server::events` already returns in a deterministic order, and whose entries are size-bounded
 /// (`MAX_EVENT_TITLE_BYTES` / `MAX_EVENT_BODY_BYTES`).
 fn events_changed<T, R>(server: &Server<T, R>, last: &mut Vec<ServerEvent>) -> bool
@@ -2353,7 +2353,7 @@ where
 }
 
 /// Whether the wiki changed since last seen (a page added/removed/renamed, a body edited or a
-/// format toggled — a count alone misses edits, so this compares the full snapshot). Updates
+/// format toggled; a count alone misses edits, so this compares the full snapshot). Updates
 /// the record.
 fn wiki_changed<T, R>(server: &Server<T, R>, last: &mut WikiSnapshot) -> bool
 where
@@ -2472,7 +2472,7 @@ where
 }
 
 /// Emit `ProfilesUpdated` if the profile set changed, then fetch any avatar blobs not yet
-/// held from a peer and emit again if that resolved new avatars — so a member's picture
+/// held from a peer and emit again if that resolved new avatars; so a member's picture
 /// renders shortly after their profile arrives (avatars travel by content address, not
 /// inline). Synchronous fetch (blocks the actor briefly per missing avatar); fine for the
 /// small downscaled avatars, a concurrent fetch is a later refinement.
@@ -2487,7 +2487,7 @@ async fn sync_profiles<T, R>(
     if profiles_changed(server, last_profiles) {
         let _ = event_tx.send(AppEvent::ProfilesUpdated).await;
     }
-    // Always attempt to resolve missing avatars — the peer holding one is often only known
+    // Always attempt to resolve missing avatars; the peer holding one is often only known
     // (via gossip's remember_peer) *after* the profile already arrived by catch-up, so a
     // change-gated fetch would never retry. Held avatars short-circuit on `has_blob`; only
     // genuinely-missing ones hit the network. (Caching unavailable CIDs to avoid re-asking
@@ -2592,7 +2592,7 @@ mod tests {
         let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
         let (alice, _alice_events, alice_handle) = spawn(alice_srv);
 
-        // Bob joins — Alice's actor serves the join via its own sync loop.
+        // Bob joins; Alice's actor serves the join via its own sync loop.
         let bob_srv = Server::join(
             hub.join(PeerId::from_u64(2)),
             MlsDevice::generate().unwrap(),
@@ -2744,7 +2744,7 @@ mod tests {
         .await
         .expect("bob has his own message");
 
-        // Alice opens the same channel and pulls the backlog with no named peer — the
+        // Alice opens the same channel and pulls the backlog with no named peer; the
         // founder catching up a joiner-created channel (the symmetric case 8i could not do).
         alice.open_channel(SECRET).await;
         alice.catch_up_any(SECRET).await;
@@ -2797,7 +2797,7 @@ mod tests {
 
         // Alice sets an avatar: its bytes go to the blob store, only the CID into her
         // profile. Bob converges her profile, then his actor fetches the avatar blob over
-        // the mesh — proving an image travels by content address, not inline in gossip.
+        // the mesh; proving an image travels by content address, not inline in gossip.
         let avatar = vec![0xABu8; 1234];
         alice
             .set_profile(Profile {
@@ -2862,10 +2862,10 @@ mod tests {
             .await
             .unwrap();
 
-        // Bob pulls the file index from Alice (request/response — what the real app does on
+        // Bob pulls the file index from Alice (request/response; what the real app does on
         // join) until the shared file appears. The loop retries the catch-up every ~50ms
         // and drains bob_events when present (so a full event channel can't stall his
-        // actor) — fully deterministic, no reliance on gossip timing or peer discovery.
+        // actor); fully deterministic, no reliance on gossip timing or peer discovery.
         // (Fetching the blob bytes over the mesh is covered deterministically by
         //  catcoms-sync::tests::a_blob_is_fetched_from_a_member_over_the_mesh.)
         let file = timeout(Duration::from_secs(60), async {

@@ -60,7 +60,7 @@ impl MlsDevice {
     }
 
     /// Reconstruct a device from a `provider` whose storage has been **restored** from a
-    /// snapshot (Phase 9c) — the signature keypair + key/group state already live in that
+    /// snapshot (Phase 9c); the signature keypair + key/group state already live in that
     /// storage. The signer is read back from storage; the credential + device id re-derive
     /// from its public key. See [`crate::persist`].
     pub(crate) fn restore(
@@ -94,7 +94,7 @@ impl MlsDevice {
     /// A second handle on the **same device identity**, backed by its own fresh provider.
     ///
     /// One `MlsDevice` owns exactly one openmls provider, and one provider backs exactly one
-    /// group — so a device that belongs to several servers needs one `MlsDevice` per server.
+    /// group; so a device that belongs to several servers needs one `MlsDevice` per server.
     /// For a *founder/joiner* those are deliberately unrelated identities (per-server
     /// unlinkability, see `docs/design-multi-device.md`), which is why nothing else in the
     /// codebase duplicates a device. A **companion** admitted by a grant bundle is the one
@@ -140,7 +140,7 @@ impl MlsDevice {
     }
 
     /// Build a KeyPackage whose leaf credential is bound to a specific
-    /// `(group_id, invite_nonce)` — so this KeyPackage can only be admitted into
+    /// `(group_id, invite_nonce)`; so this KeyPackage can only be admitted into
     /// that group via that invite, and cannot be replayed elsewhere.
     pub fn key_package_for_invite(
         &self,

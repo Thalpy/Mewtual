@@ -1,0 +1,55 @@
+| Phase | Block | State |
+|------:|-------|-------|
+| 0 | Workspace, `Clock`/`Transport` seams, canonical wire format, CI | done |
+| 1 | Device identity + unified key hierarchy | done |
+| 2 | MLS group core (local) | done |
+| 3 | Single-use device-bound invites | done |
+| 4 | CRDT replication (inner-signed ops, snapshot catch-up) | done |
+| 5 | Storage & retention | done |
+| 6a | Mesh transport: libp2p `MeshService` over the seam (gossipsub + req/resp) | done |
+| 6b | Channel sync over the mesh (live gossip + catch-up); + diagnostics (tracing) | done |
+| 6c | Network join handshake (inviter-authenticated, single-use over the wire) | done |
+| 6d-1a | Membership commit propagation (single designated committer) — multi-member join converges | done |
+| 6d-1b | Missed-commit recovery (commit catch-up + ordered replay, peer discovery) + past-epoch key window | done |
+| 6d-2 | Fork resolution + single-serializer membership (convergence-safe; concurrent-committer path fenced off until I1) | done |
+| 6e-1/2 | Full stack over real libp2p; multi-process `serve`/`join` over TCP | done |
+| 6e-3a/b/c | Circuit relay v2 (reserve + dial-through) + DCUtR hole-punch (NAT traversal) | done |
+| 6e-3d-1/2 | Per-removal routing secret + member-only rotating gossip topics + join-time transfer (closes the pre-existing topic-disclosure bug) | done |
+| 6e-3d-3/4 | Zero-knowledge rendezvous server + client (register/discover, no auto-dial) | done |
+| 6e-3d-5 | Signed catch-up responses + two-pool peer model (catch-up source trust) | done |
+| 6e-3d-6 | `catcoms-discovery` `DiscoveryPolicy` (ranked, bounded dial plan) + catch-up nonce/epoch anti-replay + pre-dial membership tag | done |
+| 6e-3d-7 | Member PEX (`KIND_PEX`): members supply each other dialable signed peer records (members-only, responder-signed, capped/rate-limited) | done |
+| 6e-3d-8 | Advisory eclipse detector (D/R/S, hysteresis, never gates) + cross-session address cache (tamper-detected on load) | done |
+| 6e-3d-9 | Invite rewiring (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join `join_ns` + `serve --rendezvous`/`join` discover→dial→join (no hard-coded address) | done |
+| 7a | **Direct** full-stack join over **real TCP sockets** (MLS join + channel converge over OS sockets) | done |
+| 7b | Consolidated **security suite** (threat-model map + cross-layer adversarial scenarios) | done |
+| 7c | **Rendezvous-discovered** join over real TCP (no hard-coded server address) | done |
+| 7d | **Relayed** full-stack join over real TCP (NAT traversal; server reachable only via a relay) | done |
+| 7e | **DCUtR-upgraded** full-stack path over real TCP (relayed join hole-punches to a direct link) | done |
+| 8a | `catcoms-app` **product model** (UI-facing `Server` facade + canonical message schema) | done |
+| 8b-1 | async **event-stream actor** (commands in / events out) | done |
+| 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`): found → #general → send/read | done |
+| 8c | **invite + join in the UI** — two app instances talk over real TCP (found → copy invite → paste/join) | done |
+| 8d | **multi-channel** — IRC-style name-addressed channels + channel-list sidebar | done |
+| 8e | **member roster + chat polish** — live Members panel + own-message bubbles | done |
+| 8f | **member profiles (backend)** — shared `DocType::Profile` doc (name/color/font/effect), messages authored by device fingerprint | done |
+| 8g | **profile editor + rich rendering** — customize name/color/font/animated effect; roster + messages resolve fingerprint → profile | done |
+| 8h | **member avatars** — small inline display pictures (canvas-downscaled, capped); circular avatars in roster + messages, initials fallback | done |
+| 8i | **per-channel history catch-up** — a joiner catches up the backlog of any channel it opens (not just #general) from the peer it joined through | done |
+| 8j | **symmetric (any-peer) catch-up** — either side pulls the backlog of a channel the other created (best known peer) | done |
+| 8k | **chat UX polish** — message timestamps (clock-stamped) + auto-scroll to newest | done |
+| 8l | **content-addressed blob fetch over the mesh** — `KIND_BLOB_FETCH` (members-only, signed, capped, rate-limited); the foundation for large avatars + fileshare | done |
+| 8m | **avatars over the blob layer** — profile carries the avatar's CID, not inline bytes; fetched on demand over the mesh | done |
+| 8n | **fileshare browser** — per-server file index + upload/list/download (bytes via the blob mesh); Files panel in the UI | done |
+| 8o | **cross-network founding/joining** — bind all interfaces + advertise a reachable address (LAN/public IP); joining dials all bootstrap addresses | done |
+| 8p | **multi-server** — a Discord-style server rail; be in several servers at once (each its own group/channels/roster/profiles/files) | done |
+| 8q | **relay-circuit founding** — reserve a circuit on a relay node so NAT'd peers connect with no port-forward (zero-config NAT traversal) | done |
+| 8r/8s | **security-review hardening** — adversarial review of 8m–8q (no blocking findings); bounded avatar fetching + size-bounded blob store; [User Guide](docs/USER_GUIDE.md) | done |
+| 8t | **status feed** — a per-server post stream (announcements/activity) + Status panel in the UI | done |
+| 8u/8v | **wiki** — per-server collaborative pages (name→body map doc) + Chat/Wiki view toggle (page list + editor); page bodies are automerge `Text`, so concurrent edits merge **char-by-char** (8v) | done |
+| 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
+| 10 | **desktop UI / product overhaul** — **10a–10h done**: tabbed nav + Settings overlay; a sanitized markdown renderer (`marked`+DOMPurify) with `[[wiki links]]`, `:emoji:`, and `![cid embeds]`; fileshare **folders** + drag-drop **media embeds** in chat/status (built in code from CID-verified blobs); a **wiki** overhaul (markdown, links, backlinks, media, in-app help); **custom emoji**; **notification sounds**; and **owner/admin roles** + a server-settings role manager. 10c & 10h adversarially reviewed; roles enforcement is documented as policy-layer (cryptographic hardening is a named follow-up) | done |
+| 8… | rendezvous discovery in the UI · chunked large-file transfer · last-copy-safe blob retention | planned |
+| 8 | Product model + Tauri desktop UI | planned |
+| 9 | Android | planned |
+| 10 | Hardening + calendar | planned |

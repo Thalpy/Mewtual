@@ -1,4 +1,4 @@
-// Phase 10b — the shared rich-text renderer.
+// Phase 10b; the shared rich-text renderer.
 //
 // Messages, statuses and wiki pages come from other (untrusted) group members, so rendering
 // is markdown via `marked` followed by a strict `DOMPurify` sanitize. Custom inline tokens
@@ -10,14 +10,14 @@
 //     inserts: a fileshare file (opens its info pane) or one of this server's status posts.
 //
 // A wiki page can also be authored in MediaWiki wikitext instead of markdown (`format === "wiki"`).
-// That path swaps `marked` for `wikitext.ts`'s converter and keeps the identical sanitize step —
+// That path swaps `marked` for `wikitext.ts`'s converter and keeps the identical sanitize step;
 // see `wikitext.ts`, which also owns the token grammar and the token renderers BOTH paths use, so
 // the two can't drift into two different surfaces for the sanitizer to police.
 //
 // SECURITY: the sanitizer does NOT allow <img>/<video>/<audio>/<script>/raw HTML. Custom
 // emoji and embeds render as inert <span> placeholders; the resolver (resolveMedia, wired in
 // 10c/10f) replaces those placeholders with media elements it builds in code from the group's
-// own content-addressed blobs — so untrusted text can never inject a live tag or remote URL.
+// own content-addressed blobs; so untrusted text can never inject a live tag or remote URL.
 
 import { marked, type TokenizerAndRendererExtension } from "marked";
 import DOMPurify from "dompurify";
@@ -145,7 +145,7 @@ const embed: TokenizerAndRendererExtension = {
 
 // `[label](file:HEX)` / `[label](status:ID)` → an in-app reference chip (inserted by the composer's
 // "+" picker). Matched ahead of marked's own link syntax so these app-only schemes never reach an
-// `<a href>` — the app resolves the target from the data- attribute instead, so a reference can
+// `<a href>`; the app resolves the target from the data- attribute instead, so a reference can
 // only ever address this group's own content. `![alt](cid:…)` is unaffected: the embed extension
 // starts at the `!` and consumes the whole thing, and `cid` isn't in this alternation anyway.
 const refLink: TokenizerAndRendererExtension = {
@@ -174,7 +174,7 @@ function configure() {
 
 // No media/script/raw-HTML tags: emoji + embeds are <span> placeholders the resolver fills.
 // h5/h6 stay out (the wikitext converter clamps deep headings to h4); <dl>/<dt>/<dd> and <caption>
-// are here for wikitext's definition lists and table captions — inert structure, no new capability.
+// are here for wikitext's definition lists and table captions; inert structure, no new capability.
 const SANITIZE = {
   ALLOWED_TAGS: [
     "a", "b", "strong", "i", "em", "u", "s", "del", "code", "pre", "span", "br", "p",

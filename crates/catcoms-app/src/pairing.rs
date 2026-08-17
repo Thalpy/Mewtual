@@ -1,10 +1,10 @@
 //! The **grant ceremony** (multi-device M2): pairing request in, grant bundle out.
 //!
-//! `docs/design-multi-device.md` v2. Identity is still the device — one MLS leaf per
-//! device — and a companion is admitted because the member's **origin** device signed
+//! `docs/design-multi-device.md` v2. Identity is still the device; one MLS leaf per
+//! device; and a companion is admitted because the member's **origin** device signed
 //! a [`DeviceCertificate`] for it. This module is the offline-first, paste-carried
 //! half of that ceremony: pure functions and small value types the bridge calls. There
-//! is **no transport here** — no rendezvous session, no live request. Both legs travel
+//! is **no transport here**; no rendezvous session, no live request. Both legs travel
 //! as blobs the human moves between their own two devices, exactly like an invite.
 //! Network re-enters at M3 (admission).
 //!
@@ -22,12 +22,12 @@
 //! [`sas`] binds three inputs: the new device's public key, its pairing nonce, and an
 //! **origin device id**. A member has one origin identity *per server* (that is what
 //! keeps servers from linking them), so a ceremony must pick one of them to anchor the
-//! code — the **ceremony origin**. The caller chooses it (the bridge picks the
+//! code; the **ceremony origin**. The caller chooses it (the bridge picks the
 //! lowest-numbered server, deterministically), it is written into the bundle, and
 //! [`open_grant_bundle`] recomputes the same code on the new device. So the human sees
 //! the code on the origin at the popup and on the new device when the bundle opens,
 //! with no extra value to type across. A man-in-the-middle who substituted the request's
-//! key or nonce changes one of the two codes — and, for the key, also produces
+//! key or nonce changes one of the two codes; and, for the key, also produces
 //! certificates this device rejects outright.
 //!
 //! ## What sealing is for
@@ -43,7 +43,7 @@
 //! ## Single use
 //!
 //! `catcoms-crypto` leaves single use to "ceremony state above this crate". That state
-//! is [`PairingLedger`], which [`mint_grant_bundle`] spends before it signs anything —
+//! is [`PairingLedger`], which [`mint_grant_bundle`] spends before it signs anything;
 //! so one pairing request mints at most one bundle, mirroring how `InviteLedger` (not
 //! `InviteToken`) enforces single use for invites. It is in-memory today, like the
 //! invite ledger was before it was persisted.
@@ -69,7 +69,7 @@ pub const GRANT_BLOB_PREFIX: &str = "catcoms-device-grant:v1:";
 /// Domain label opening the (sealed) grant-bundle body, so a body sealed for some
 /// other purpose can never be read back as one of these.
 ///
-/// Bumped `v1` → `v2` in M3 (hard cutover, pre-release — the same treatment `InviteToken` got at
+/// Bumped `v1` → `v2` in M3 (hard cutover, pre-release; the same treatment `InviteToken` got at
 /// 6e-3d-9) when each grant gained `owner_public_key`: the body shape changed, so a v1 bundle
 /// must never half-decode as a v2 one. A stale bundle now unseals and then fails as malformed;
 /// the member simply re-runs the ceremony.
@@ -78,7 +78,7 @@ const GRANT_BODY_DOMAIN: &str = "catcoms/device-grant-bundle/v2";
 const GRANT_BODY_KEY_LABEL: &str = "catcoms/device-grant-body/v1";
 /// Sealed-frame version byte, mirroring the vault file's leading version.
 const GRANT_BUNDLE_VERSION: u8 = 1;
-/// Argon2id salt length — the vault's (`catcoms-storage::vault::SALT_LEN`).
+/// Argon2id salt length; the vault's (`catcoms-storage::vault::SALT_LEN`).
 const GRANT_SALT_LEN: usize = 16;
 
 /// Defensive cap on servers in one bundle (a member with more than this many servers
@@ -102,7 +102,7 @@ fn invalid(msg: impl Into<String>) -> AppError {
 /// What the **new** device keeps between step 1 and step 4: the device identity it
 /// just generated, plus the pairing request it published.
 ///
-/// The keypair never leaves this struct and is never exported — the whole point of
+/// The keypair never leaves this struct and is never exported; the whole point of
 /// the v2 model is that no device key is ever copied. M3 takes the [`MlsDevice`] out
 /// of here to actually join each granted server as its own MLS leaf.
 #[derive(Debug)]
@@ -143,7 +143,7 @@ impl PairingSecrets {
 /// request. Returns the secrets to hold until the bundle arrives, and the blob to
 /// paste (or, at M6, render as a QR).
 ///
-/// The request is deliberately unsigned — the SAS a human compares is the
+/// The request is deliberately unsigned; the SAS a human compares is the
 /// authenticator, not a signature no one could yet check.
 pub fn begin_pairing(rng: &mut impl CryptoRngCore) -> Result<(PairingSecrets, String), AppError> {
     let device = MlsDevice::generate()?;
@@ -176,7 +176,7 @@ pub struct PairingRequestView {
     pub request: PairingRequest,
     /// The id the new device will carry once admitted.
     pub new_device_id: DeviceId,
-    /// The six-digit code to compare, in `0..1_000_000` — render zero-padded.
+    /// The six-digit code to compare, in `0..1_000_000`; render zero-padded.
     pub sas: u32,
 }
 
@@ -195,7 +195,7 @@ pub fn decode_pairing_blob(blob: &str) -> Result<PairingRequest, AppError> {
 /// Step 2, on the origin device: read a pasted pairing request and derive the code
 /// the human compares against the new device's screen.
 ///
-/// `ceremony_origin_id` anchors the SAS — see the module docs. Nothing is minted
+/// `ceremony_origin_id` anchors the SAS; see the module docs. Nothing is minted
 /// here and nothing is consumed: the popup may be opened, closed and reopened. The
 /// request's nonce is spent only when the human confirms, in [`mint_grant_bundle`].
 pub fn read_pairing_blob(
@@ -253,7 +253,7 @@ impl PairingLedger {
     }
 
     /// Serialize the spent set for persistence, exactly as `InviteLedger::snapshot` does for
-    /// invites — single use has to survive a restart, or a re-pasted request would mint a second
+    /// invites; single use has to survive a restart, or a re-pasted request would mint a second
     /// bundle. The bridge seals this under the vault
     /// ([`crate::store::ServerStore::save_pairing_ledger`]).
     pub fn snapshot(&self) -> Vec<u8> {
@@ -292,8 +292,8 @@ impl PairingLedger {
 /// certificate signed by **that server's** origin identity.
 ///
 /// The reach fields are exactly the ones an [`InviteToken`](catcoms_mls::InviteToken)
-/// carries and `join_server` consumes — a bootstrap seed vector and a rendezvous
-/// vector of opaque multiaddr strings — because a companion needs precisely what a
+/// carries and `join_server` consumes; a bootstrap seed vector and a rendezvous
+/// vector of opaque multiaddr strings; because a companion needs precisely what a
 /// joiner needs to find the group before it is admitted. Nothing new is invented
 /// here; the caller passes through what it already holds for that server.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,7 +301,7 @@ pub struct PerServerGrant {
     /// The MLS group id this grant is for (stable across restarts; also what keys
     /// the pre-join rendezvous namespace).
     pub group_id: Vec<u8>,
-    /// The server's **local** display label on the origin device — a convenience so
+    /// The server's **local** display label on the origin device; a convenience so
     /// the new device's rail is not a list of hex, never anything the group agreed.
     pub server_name: String,
     /// Bootstrap seed multiaddrs, as `InviteToken::bootstrap`.
@@ -315,7 +315,7 @@ pub struct PerServerGrant {
     /// from its live roster at mint time.
     ///
     /// M3 needs this and an invite does not, for a structural reason: only the owner ever runs an
-    /// MLS Add, so the owner is the only device that can sign the Welcome — and the new device has
+    /// MLS Add, so the owner is the only device that can sign the Welcome; and the new device has
     /// no roster to look that key up in before it is admitted. An invited joiner pins
     /// `InviteToken::inviter_public_key` for exactly the same purpose (defeating a relay that
     /// substitutes a group it controls); this is that pin, carried by the one object the member
@@ -334,7 +334,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// caller gets a finished certificate, never a key. Verified before it is
     /// returned, so a mismatched id/key can never leave this function.
     ///
-    /// Chain depth is 1 by design — only an *origin* may certify. That is enforced
+    /// Chain depth is 1 by design; only an *origin* may certify. That is enforced
     /// at admission (M3 rejects a certificate whose signer is not an admitted
     /// member's origin device); once the companion → origin table exists, this call
     /// should refuse locally on a companion too.
@@ -388,8 +388,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 ///
 /// This is the point of no return, so it is the point that spends the nonce: the
 /// ledger is burned **before** anything is written, and a re-paste of the same
-/// request fails. Every certificate is re-checked here — signed, self-consistent,
-/// for *this* request's device, and under the name the human approved — so a bug or
+/// request fails. Every certificate is re-checked here; signed, self-consistent,
+/// for *this* request's device, and under the name the human approved; so a bug or
 /// a rogue actor upstream cannot slip a certificate for another device into a bundle
 /// the member is about to trust.
 ///
@@ -649,7 +649,7 @@ fn get_addrs(d: &mut Decoder<'_>) -> Result<Vec<String>, AppError> {
 /// Passphrase-wrap `body` exactly as the on-disk vault wraps its root key:
 /// Argon2id over (passphrase, fresh salt) ⇒ a wrap key that seals a fresh one-shot
 /// [`Dek`]; an HKDF subkey of that DEK seals the body. Same primitives, same
-/// parameters — [`PassphraseKeyStore::derive`] is the only Argon2id call in the
+/// parameters; [`PassphraseKeyStore::derive`] is the only Argon2id call in the
 /// codebase and this reuses it verbatim.
 fn seal_bundle(
     passphrase: &[u8],
@@ -676,7 +676,7 @@ fn seal_bundle(
 }
 
 /// Inverse of [`seal_bundle`]. A wrong passphrase and a tampered blob are the same
-/// failure — authenticated decryption — never a silently wrong plaintext.
+/// failure; authenticated decryption; never a silently wrong plaintext.
 fn unseal_bundle(passphrase: &[u8], blob: &str) -> Result<Vec<u8>, AppError> {
     let hexed = blob
         .trim()

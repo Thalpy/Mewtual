@@ -3,7 +3,7 @@
 //! A returning node faces a **first-contact eclipse**: before it has reached any
 //! member it has no peers, so a hostile rendezvous can feed it only Sybils. The cure
 //! is to remember, across restarts, the **proven members** it reached last session and
-//! offer them as dial candidates immediately — past any hostile rendezvous.
+//! offer them as dial candidates immediately; past any hostile rendezvous.
 //!
 //! This is the in-memory cache with the right semantics + a serialization seam; the
 //! persistent SQLCipher backing is platform/storage-phase work (like the rest of the
@@ -12,12 +12,12 @@
 //! a row undetected). Properties:
 //!
 //! - **Proven members only.** The caller inserts a peer only after verifying its
-//!   signed record belongs to a current roster member — the cache stores opaque
+//!   signed record belongs to a current roster member; the cache stores opaque
 //!   `record` bytes and re-offers them, but a hit **counts toward a trust root only
 //!   after a fresh live re-proof** (the eclipse detector's `S`), never on the cache's
 //!   say-so. (A colluding host that forged a row would fail that live re-proof.)
 //! - **Freshness off the registrant's own signed seq**, never a server-asserted TTL.
-//! - **RNG-jittered eviction** when over capacity — decorrelated, so an attacker
+//! - **RNG-jittered eviction** when over capacity; decorrelated, so an attacker
 //!   cannot steer which honest entry is dropped.
 //! - **Tamper-detected on load.** A flipped byte fails the keyed tag → the whole load
 //!   is refused rather than trusting a doctored row.
@@ -41,7 +41,7 @@ const MAX_DECODE_ADDRESSES: usize = 32;
 /// Why a cache load failed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CacheError {
-    /// The keyed integrity tag did not verify — the bytes were tampered with.
+    /// The keyed integrity tag did not verify; the bytes were tampered with.
     #[error("address cache integrity tag mismatch (tampered)")]
     Tampered,
     /// The serialized bytes were malformed.
@@ -54,7 +54,7 @@ pub enum CacheError {
 /// live before the peer is ever trusted again).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CachedPeer {
-    /// The cache key — the member's **device id** (not its self-asserted transport
+    /// The cache key; the member's **device id** (not its self-asserted transport
     /// peer id; see the 6e-3d-7 `PeerDescriptor` note).
     pub peer: PeerKey,
     /// Dialable multiaddr strings.
@@ -111,7 +111,7 @@ impl AddressCache {
     }
 
     /// Every cached peer (the discovery layer offers these as `Source::Cache`
-    /// candidates — counted toward a trust root only after a live re-proof).
+    /// candidates; counted toward a trust root only after a live re-proof).
     pub fn candidates(&self) -> Vec<CachedPeer> {
         self.entries.values().cloned().collect()
     }
@@ -163,7 +163,7 @@ impl AddressCache {
     }
 
     /// Load a cache serialized by [`AddressCache::to_bytes`], verifying the keyed
-    /// integrity tag first — a tampered body is rejected wholesale, not partially
+    /// integrity tag first; a tampered body is rejected wholesale, not partially
     /// trusted. `config` bounds the loaded set.
     pub fn from_bytes(
         bytes: &[u8],
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn a_cached_member_survives_a_serialize_load_round_trip() {
         // Session 1 caches a proven member; session 2 loads it and can offer it as a
-        // candidate immediately — reaching it past a hostile rendezvous.
+        // candidate immediately; reaching it past a hostile rendezvous.
         let key = [42u8; 32];
         let mut c1 = AddressCache::new(CacheConfig::default());
         c1.insert(cached(7, 1), &mut rng());

@@ -579,26 +579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "catcoms-desktop"
-version = "0.0.0"
-dependencies = [
- "base64 0.22.1",
- "catcoms-app",
- "catcoms-discovery",
- "catcoms-mls",
- "catcoms-net",
- "catcoms-rt",
- "catcoms-sync",
- "hex",
- "libp2p",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
 name = "catcoms-discovery"
 version = "0.0.0"
 dependencies = [
@@ -3699,6 +3679,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mewtual-desktop"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "catcoms-app",
+ "catcoms-discovery",
+ "catcoms-mls",
+ "catcoms-net",
+ "catcoms-rt",
+ "catcoms-sync",
+ "hex",
+ "libp2p",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
 ]
 
 [[package]]

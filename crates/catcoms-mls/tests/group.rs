@@ -127,8 +127,8 @@ fn application_message_roundtrips_between_members() {
 #[test]
 fn staged_add_can_be_aborted_with_keys_intact() {
     // The fork-loser primitive: stage an Add, then abort it. The group must be
-    // exactly as before — same epoch, same membership, same channel key, still
-    // usable — so a committer that loses a fork loses nothing.
+    // exactly as before; same epoch, same membership, same channel key, still
+    // usable; so a committer that loses a fork loses nothing.
     let alice = MlsDevice::generate().unwrap();
     let mut alice_group = ServerGroup::create(&alice).unwrap();
     let key_before = alice_group
@@ -170,7 +170,7 @@ fn staged_add_can_be_aborted_with_keys_intact() {
 #[test]
 fn staged_then_merged_add_matches_direct_add() {
     // Stage→merge advances the epoch and adds the member, and the joiner can join
-    // from the staged Welcome — identical outcome to the atomic add_member path.
+    // from the staged Welcome; identical outcome to the atomic add_member path.
     let alice = MlsDevice::generate().unwrap();
     let mut alice_group = ServerGroup::create(&alice).unwrap();
     let bob = MlsDevice::generate().unwrap();

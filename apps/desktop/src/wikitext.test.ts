@@ -1,13 +1,13 @@
 // Unit tests for the MediaWiki-subset wikitext converter.
 //
-// Run with `npm test` (Node's built-in runner + type stripping — no extra dependencies).
+// Run with `npm test` (Node's built-in runner + type stripping; no extra dependencies).
 //
 // Two things are worth pinning here. The first is the SYNTAX: wikitext is a format members type by
 // hand, so every construct the editor's help panel advertises needs a test that says what it turns
 // into. The second, and the reason this file byte-compares rather than pattern-matches, is the
 // SANITIZER CONTRACT: `render.ts` hands this converter's output to DOMPurify with a fixed allow-list
 // and then the app resolves `data-` attributes into media. Emitting a tag outside that list, or an
-// attribute value that wasn't escaped, is the failure that turns member-authored text into markup —
+// attribute value that wasn't escaped, is the failure that turns member-authored text into markup;
 // so the placeholder shapes are compared exactly, and the escaping cases are compared exactly.
 
 import { test } from "node:test";
@@ -268,7 +268,7 @@ test("http is accepted too", () => {
   assert.equal(wikitextToHtml("[http://x.test a]"), '<p><a href="http://x.test">a</a></p>');
 });
 
-test("a javascript: URL never reaches an href — it renders as text", () => {
+test("a javascript: URL never reaches an href; it renders as text", () => {
   const html = wikitextToHtml("[javascript:alert(1) click]");
   assert.equal(html, "<p>[javascript:alert(1) click]</p>");
   assert.ok(!html.includes("href"));

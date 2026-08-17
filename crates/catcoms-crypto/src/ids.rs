@@ -36,7 +36,7 @@ impl DeviceId {
         Self::from_public_key_bytes(vk.as_bytes())
     }
 
-    /// Derive the id directly from raw Ed25519 public-key bytes — e.g. when the
+    /// Derive the id directly from raw Ed25519 public-key bytes; e.g. when the
     /// key comes from another library (openmls hands the MLS leaf signature key
     /// back as bytes). Same scheme as [`DeviceId::from_verifying_key`].
     pub fn from_public_key_bytes(public_key: &[u8]) -> Self {

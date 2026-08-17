@@ -1,11 +1,11 @@
 // Unit tests for the sigil unlock lock's encoding + lattice geometry.
 //
-// Run with `npm test` (Node's built-in runner + type stripping — no extra dependencies).
+// Run with `npm test` (Node's built-in runner + type stripping; no extra dependencies).
 //
 // As with melody.test.ts, the two halves are not equally serious:
 //
 //   ENCODING is security-critical. `encodeSigil` feeds the vault KDF directly, so a change to
-//   its output silently locks every existing sigil vault out — there is no recovery path. The
+//   its output silently locks every existing sigil vault out; there is no recovery path. The
 //   tests pin the exact bytes for known inputs, pin that incidental representation differences
 //   (emoji variation selectors, skin tones, NFC forms, the ORDER emoji were toggled in) cannot
 //   fork the secret, and pin that things which MUST be distinct secrets (direction, stroke
@@ -14,7 +14,7 @@
 //   GEOMETRY is cosmetic in pixels but the node INDICES are the wire format, so the lattice
 //   shape, the hit-test hysteresis (disjoint catch discs) and the tap-vs-drag classifier get
 //   pinned too: if a refactor moved a node or grew the catch radius past half the minimum
-//   spacing, an old sigil could re-trace to different indices — the same disaster as changing
+//   spacing, an old sigil could re-trace to different indices; the same disaster as changing
 //   the encoding.
 
 import { test } from "node:test";
@@ -51,7 +51,7 @@ test("encodeSigil pins the exact v1 wire format", () => {
   );
 });
 
-test("empty input in any REQUIRED factor encodes to \"\" — it must never be able to unlock", () => {
+test("empty input in any REQUIRED factor encodes to \"\"; it must never be able to unlock", () => {
   assert.equal(encodeSigil([], Z, ["🐱"], "word"), ""); // no sigil at all
   assert.equal(encodeSigil([[4]], Z, ["🐱"], "word"), ""); // a stray tap is not a sigil
   assert.equal(encodeSigil([[0, 1]], Z, [], "word"), ""); // no emoji
@@ -60,7 +60,7 @@ test("empty input in any REQUIRED factor encodes to \"\" — it must never be ab
   assert.equal(encodeSigil([[0, 1]], Z, ["🐱"], "   "), ""); // whitespace is not a word
 });
 
-test("colours are NOT required — the all-default colouring is a valid secret, encoded literally", () => {
+test("colours are NOT required; the all-default colouring is a valid secret, encoded literally", () => {
   const s = encodeSigil([[0, 1]], Z, ["🐱"], "w");
   assert.ok(s.includes(`:${Z19}:`)); // present as its all-zeros string, never omitted
   assert.ok(s.length > 0);
@@ -83,17 +83,17 @@ test("VS16 and skin-tone modifiers are stripped; the three thumbs-up forms are O
   );
   assert.equal(forms[0], forms[1]);
   assert.equal(forms[1], forms[2]);
-  assert.equal(encodeEmoji("\u{2764}\u{FE0F}"), "2764"); // ❤️ — the VS16 goes, the heart stays
+  assert.equal(encodeEmoji("\u{2764}\u{FE0F}"), "2764"); // ❤️; the VS16 goes, the heart stays
 });
 
-test("ZWJ is structural and is kept — a black cat is not a cat plus a square", () => {
+test("ZWJ is structural and is kept; a black cat is not a cat plus a square", () => {
   assert.equal(encodeEmoji("\u{1F408}\u{200D}\u{2B1B}"), "1f408-200d-2b1b"); // 🐈‍⬛
   assert.notEqual(encodeEmoji("\u{1F408}\u{200D}\u{2B1B}"), encodeEmoji("\u{1F408}"));
 });
 
 test("the emoji set is canonical: pick order cannot fork the secret", () => {
   // Toggle interaction reorders the selection array freely (deselect + reselect moves an emoji
-  // to the end), so insertion order MUST be invisible — same lesson normalizeEvent teaches
+  // to the end), so insertion order MUST be invisible; same lesson normalizeEvent teaches
   // about fingering order on the melody lock.
   assert.equal(encodeEmojiSet(["🔥", "🐱"]), "1f431+1f525"); // sorted by encoded string…
   assert.equal(encodeEmojiSet(["🐱", "🔥"]), "1f431+1f525"); // …whatever order they were picked
@@ -122,7 +122,7 @@ test("a magic word containing the field separator cannot collide two secrets", (
   const s = encodeSigil([[0, 1]], Z, ["🐱"], "a:b:c");
   assert.equal(s, `sigil:v1:0-1:${Z19}:1f431:5:a:b:c`);
   // The length prefix makes the parse unambiguous: strip the scheme, read path, colours and
-  // emoji (whose alphabets exclude ":"), then take exactly <len> code units — the recovered
+  // emoji (whose alphabets exclude ":"), then take exactly <len> code units; the recovered
   // word is intact.
   const rest = s.slice("sigil:v1:".length);
   const [path, colors, emoji, len] = rest.split(":", 4);
@@ -146,13 +146,13 @@ test("the word is NFC-normalized and trimmed, and case is preserved", () => {
   assert.notEqual(encodeSigil([[0, 1]], Z, ["🐱"], "Word"), encodeSigil([[0, 1]], Z, ["🐱"], "word"));
 });
 
-test("direction is significant — A→B is not B→A", () => {
+test("direction is significant; A→B is not B→A", () => {
   assert.equal(encodeSigilPath([[0, 1]]), "0-1");
   assert.equal(encodeSigilPath([[1, 0]]), "1-0");
   assert.notEqual(encodeSigil([[0, 1]], Z, ["🐱"], "w"), encodeSigil([[1, 0]], Z, ["🐱"], "w"));
 });
 
-test("stroke boundaries are significant — one stroke is not two strokes over the same nodes", () => {
+test("stroke boundaries are significant; one stroke is not two strokes over the same nodes", () => {
   assert.equal(encodeSigilPath([[0, 1, 2]]), "0-1-2");
   assert.equal(encodeSigilPath([[0, 1], [1, 2]]), "0-1_1-2");
   assert.notEqual(
@@ -187,7 +187,7 @@ test("encodeColors is always exactly 19 digits, whatever shape the input is", ()
   assert.equal(encodeColors(Array(30).fill(2)).length, 19); // over-length input truncates
 });
 
-test("encodeColors clamps defensively — the UI only produces 0–3, but garbage still encodes deterministically", () => {
+test("encodeColors clamps defensively; the UI only produces 0–3, but garbage still encodes deterministically", () => {
   assert.equal(encodeColors([4])[0], "0"); // wraps mod 4
   assert.equal(encodeColors([-1])[0], "3");
   assert.equal(encodeColors([2.9])[0], "2"); // truncates, never emits fractions
@@ -196,7 +196,7 @@ test("encodeColors clamps defensively — the UI only produces 0–3, but garbag
 test("a node mark changes the secret; marking is independent of the path", () => {
   const plain = encodeSigil([[0, 1]], Z, ["🐱"], "w");
   const marked = [...Z];
-  marked[14] = 3; // a node the path never visits — still a legal, meaningful mark
+  marked[14] = 3; // a node the path never visits; still a legal, meaningful mark
   assert.notEqual(plain, encodeSigil([[0, 1]], marked, ["🐱"], "w"));
 });
 
@@ -217,7 +217,7 @@ test("classifyGesture: a second node makes a path, however short the travel", ()
   assert.equal(classifyGesture([0, 7, 0], 120), "path");
 });
 
-test("classifyGesture: one node within the slop is a colour tap — boundary inclusive", () => {
+test("classifyGesture: one node within the slop is a colour tap; boundary inclusive", () => {
   assert.equal(classifyGesture([5], 0), "colour");
   assert.equal(classifyGesture([5], TAP_SLOP), "colour");
 });
@@ -236,7 +236,7 @@ test("TAP_SLOP stays small enough that a tap can never span toward another node"
 test("the lattice is 1 + 6 + 12 nodes with frozen index assignment", () => {
   assert.equal(LATTICE.length, 19);
   assert.deepEqual(LATTICE.map((n) => n.ring), [0, ...Array(6).fill(1), ...Array(12).fill(2)]);
-  // Index 0 dead centre; 1 and 7 straight up from it — pinned so a refactor can't renumber.
+  // Index 0 dead centre; 1 and 7 straight up from it; pinned so a refactor can't renumber.
   assert.equal(LATTICE[0].x, SIGIL_C);
   assert.equal(LATTICE[0].y, SIGIL_C);
   assert.ok(Math.abs(LATTICE[1].x - SIGIL_C) < 1e-9 && Math.abs(LATTICE[1].y - (SIGIL_C - R_INNER)) < 1e-9);
@@ -249,7 +249,7 @@ test("every ring node sits exactly on its ring radius", () => {
   for (let i = 7; i <= 18; i++) assert.ok(Math.abs(dist(LATTICE[i], c) - R_OUTER) < 1e-9);
 });
 
-test("catch discs are disjoint and smaller than the node art — the hysteresis invariants", () => {
+test("catch discs are disjoint and smaller than the node art; the hysteresis invariants", () => {
   let min = Infinity;
   for (let i = 0; i < LATTICE.length; i++) {
     for (let j = i + 1; j < LATTICE.length; j++) min = Math.min(min, dist(LATTICE[i], LATTICE[j]));
@@ -325,7 +325,7 @@ test("the colour term counts only marked nodes and caps hard", () => {
 test("empty word ⇒ no runes; every length ≥ 1 ⇒ the SAME constant count", () => {
   // A per-character inscription leaks length outright; a REPEATED sequence leaks it via its
   // period. Constant count is the only shape with nothing to measure. The empty case hides
-  // the ring entirely — that reveals only empty-vs-non-empty, a single bit the disabled
+  // the ring entirely; that reveals only empty-vs-non-empty, a single bit the disabled
   // Unlock button already gives away (an empty word can't form a valid secret at all).
   assert.deepEqual(ringGlyphs("", 7), []);
   assert.deepEqual(ringGlyphs("   ", 7), []); // whitespace normalizes to empty, same as the encoder
@@ -340,7 +340,7 @@ test("ringGlyphs is deterministic per (word, seed) and drawn from the rune set",
   for (const g of a) assert.ok(RING_RUNES.includes(g));
 });
 
-test("typing visibly changes the inscription — the feedback channel survives", () => {
+test("typing visibly changes the inscription; the feedback channel survives", () => {
   assert.notDeepEqual(ringGlyphs("a", 7), ringGlyphs("ab", 7));
   assert.notDeepEqual(ringGlyphs("a", 7), ringGlyphs("b", 7));
 });

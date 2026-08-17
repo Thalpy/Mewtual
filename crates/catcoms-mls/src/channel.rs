@@ -1,6 +1,6 @@
 //! Per-document key derivation from the group's epoch exporter secret.
 //!
-//! Channels, the wiki, status feed and calendar are not separate MLS groups —
+//! Channels, the wiki, status feed and calendar are not separate MLS groups;
 //! each derives its own key from the group exporter secret plus a canonical,
 //! **injective** `(doc_type, doc_id)` context (see `catcoms-wire`). Because the
 //! context encoding is collision-free, distinct documents get independent keys
@@ -39,7 +39,7 @@ impl ServerGroup {
             .map_err(|_| MlsError::Internal("unexpected exported secret length"))
     }
 
-    /// Derive the 32-byte **media** secret for a call at the current epoch — the base key for E2E
+    /// Derive the 32-byte **media** secret for a call at the current epoch; the base key for E2E
     /// real-time media (voice/video frames). All members derive it identically from the group
     /// exporter; distinct `call_id`s yield independent keys. Domain-separated from content + metadata
     /// keys by [`MEDIA_EXPORTER_LABEL`]. The key is never sent on the wire.
@@ -71,7 +71,7 @@ impl ServerGroup {
             .map_err(|_| MlsError::Internal("unexpected exported secret length"))
     }
 
-    /// Derive the 32-byte **routing** secret for the current epoch — the single
+    /// Derive the 32-byte **routing** secret for the current epoch; the single
     /// secret from which the per-removal routing label (`ns_secret_L`: blinded
     /// gossipsub topics + rendezvous namespaces) is keyed. This is just the
     /// metadata secret under the dedicated [`DocType::Routing`] context, so it is
@@ -84,7 +84,7 @@ impl ServerGroup {
         self.metadata_secret(device, DocType::Routing, 0)
     }
 
-    /// Derive the 32-byte **routing-transfer wrap key** for the current epoch — the
+    /// Derive the 32-byte **routing-transfer wrap key** for the current epoch; the
     /// symmetric key under which a member seals the routing state (`L` + the
     /// `ns_secret_L` history) for a peer joining at this same epoch. Both the
     /// admitting member (after merging the Add) and the joiner (after processing the

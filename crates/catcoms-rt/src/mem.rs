@@ -3,7 +3,7 @@
 //! A [`Hub`] is a shared broker: every node [`Hub::join`]s it to get a
 //! [`MemNetwork`] handle. Gossip is delivered to every *other* subscriber of a
 //! topic; requests are routed to the target's inbox carrying a oneshot reply
-//! channel. No sockets, no real time — N nodes run inside one test.
+//! channel. No sockets, no real time; N nodes run inside one test.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -243,7 +243,7 @@ mod tests {
         a.publish(topic, bytes("nope")).await.unwrap();
 
         // b has no subscription, so a request to a dead peer is the only thing
-        // that resolves — confirming no gossip was queued for b.
+        // that resolves; confirming no gossip was queued for b.
         let err = b
             .request(PeerId::from_u64(404), ProtocolId("x"), bytes("q"))
             .await

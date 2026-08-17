@@ -3,7 +3,7 @@
 
 use openmls::prelude::*;
 
-/// The single pinned ciphersuite for all CatComs groups
+/// The single pinned ciphersuite for all Mewtual groups
 /// (`0x0003`: X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519).
 pub const CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;

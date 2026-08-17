@@ -1,4 +1,4 @@
-// Unit tests for the acoustic pairing codec — pure DSP, so the whole modem round-trips
+// Unit tests for the acoustic pairing codec; pure DSP, so the whole modem round-trips
 // in Node with no audio hardware. Run with `npm test`.
 
 import { test } from "node:test";
@@ -9,7 +9,7 @@ import { crc16, decodeAudio, encodeAudio, MAX_AUDIO_PAYLOAD } from "./audiocode.
 const SR = 48_000;
 
 function bytes(n: number, seed = 7): Uint8Array {
-  // Deterministic pseudo-random payload (xorshift) — no Math.random in tests.
+  // Deterministic pseudo-random payload (xorshift); no Math.random in tests.
   const out = new Uint8Array(n);
   let x = seed >>> 0 || 1;
   for (let i = 0; i < n; i++) {

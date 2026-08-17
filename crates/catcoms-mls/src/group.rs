@@ -49,7 +49,7 @@ pub enum Incoming {
     /// A decrypted application-message payload.
     Application(Vec<u8>),
     /// A commit was processed and merged (group state advanced). `removed` is true
-    /// iff the commit contained at least one Remove proposal — the signal the
+    /// iff the commit contained at least one Remove proposal; the signal the
     /// routing layer uses to rotate the per-removal metadata secret (`ns_secret_L`)
     /// identically on every member, not just the local committer.
     CommitApplied {
@@ -130,7 +130,7 @@ impl ServerGroup {
         })
     }
 
-    /// The device id of the **designated committer** — the member with the lowest
+    /// The device id of the **designated committer**; the member with the lowest
     /// leaf index (the only roster value every member derives identically from the
     /// ratchet tree). In the single-committer model this member is the only one
     /// permitted to produce commits, which prevents concurrent commits from
@@ -171,7 +171,7 @@ impl ServerGroup {
             .map(|m| m.signature_key)
     }
 
-    /// A 32-byte fingerprint of this group's current epoch state — `BLAKE3` of the
+    /// A 32-byte fingerprint of this group's current epoch state; `BLAKE3` of the
     /// MLS `epoch_authenticator` (a members-only value every member derives
     /// identically). Two records built against the same fingerprint are a genuine
     /// same-base fork (resolvable by tie-break); different fingerprints at the same
@@ -208,7 +208,7 @@ impl ServerGroup {
     ///
     /// The set is signed **verbatim**, so the caller should validate it first with
     /// `catcoms_net::validate_rendezvous_addrs` (reject `/p2p-circuit`, require a
-    /// `/p2p/` id, distinct PeerIds) — that lives in `catcoms-net` where multiaddrs
+    /// `/p2p/` id, distinct PeerIds); that lives in `catcoms-net` where multiaddrs
     /// parse, and an invalid set minted here would otherwise fail only at the joiner.
     pub fn mint_invite_with_rendezvous(
         &self,
@@ -285,7 +285,7 @@ impl ServerGroup {
     }
 
     /// Validate that `key_package` is admissible under `token` **without** adding it
-    /// or consuming the invite — the binding checks `add_member_via_invite` runs
+    /// or consuming the invite; the binding checks `add_member_via_invite` runs
     /// before the Add, factored out so a *staged* (fork-resolvable) admission can
     /// validate up front and consume the invite only once its commit merges.
     /// Invite freshness (the ledger) is checked separately by the caller.
@@ -316,14 +316,14 @@ impl ServerGroup {
     }
 
     /// Validate that `key_package` is admissible as `expected_device`'s leaf, bound to
-    /// `(this group, bind_nonce)` — the **certificate-bound** analogue of
+    /// `(this group, bind_nonce)`; the **certificate-bound** analogue of
     /// [`ServerGroup::validate_invite_binding`], for the multi-device companion admission
     /// (`docs/design-multi-device.md` M3), which carries a device certificate instead of an
     /// invite token.
     ///
     /// `bind_nonce` is derived deterministically from the certificate by the admitting layer,
     /// so a KeyPackage minted against one certificate can never be relayed into an admission
-    /// for another — the same non-replayability the invite nonce gives the invite path, and
+    /// for another; the same non-replayability the invite nonce gives the invite path, and
     /// the same leaf-credential shape every member re-checks in
     /// [`ServerGroup::process_incoming`].
     pub fn validate_device_binding(
@@ -467,7 +467,7 @@ impl ServerGroup {
             ProcessedMessageContent::StagedCommitMessage(staged) => {
                 // Defense in depth: every member independently validates that any
                 // Add in this commit carries a credential bound to THIS group and
-                // content-addressing its own leaf key — so a malicious committer
+                // content-addressing its own leaf key; so a malicious committer
                 // cannot inject an unbound or cross-group device. (Single-use nonce
                 // enforcement stays with the admitting committer's ledger; this is
                 // the binding check every applier can make without the invite token.)
@@ -483,7 +483,7 @@ impl ServerGroup {
                     }
                 }
                 // Inspect the staged commit for Remove proposals *before* the merge
-                // consumes it — every member uses this to rotate `ns_secret_L`.
+                // consumes it; every member uses this to rotate `ns_secret_L`.
                 let removed = staged.remove_proposals().next().is_some();
                 self.group
                     .merge_staged_commit(device.provider(), *staged)

@@ -8,7 +8,7 @@
 //! opaque without it.
 //!
 //! Threat model (see `docs/design-persistence.md`): this protects a **stolen disk / leaked
-//! backup**, not a live process — while running, the keys are unsealed in RAM.
+//! backup**, not a live process; while running, the keys are unsealed in RAM.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -71,7 +71,7 @@ impl ServerStore {
 
     /// Seal + atomically write the **pairing ledger** (which grant-ceremony nonces this device has
     /// already acted on). Single use has to survive a restart, or a re-pasted pairing request
-    /// would mint a second grant bundle — the same reason `InviteLedger` is persisted.
+    /// would mint a second grant bundle; the same reason `InviteLedger` is persisted.
     pub fn save_pairing_ledger(
         &self,
         snapshot: &[u8],
@@ -190,7 +190,7 @@ fn encode_registry(records: &[ServerRecord]) -> Vec<u8> {
         e.put_str(&r.invite).expect("invite fits");
     }
     // v2 trailing block: one `is_dm` flag per record, appended after the v1 records. A v1 registry
-    // has no trailing bytes, so a reader defaults every flag to false — existing servers survive.
+    // has no trailing bytes, so a reader defaults every flag to false; existing servers survive.
     // NOTE: this "is anything left?" trick is single-shot. A future v3 field must introduce an
     // explicit version byte (a v2 reader can't distinguish v2-only from v2+v3 by length alone).
     for r in records {

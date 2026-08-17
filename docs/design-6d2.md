@@ -1,4 +1,4 @@
-# CatComs 6d-2 — Design (concurrent-commit fork resolution + proposal/commit split)
+# Mewtual 6d-2; Design (concurrent-commit fork resolution + proposal/commit split)
 
 Output of a design + adversarial-review `Workflow` (3 capability investigations
 verified against the **openmls 0.8.1 source**, 3 independent designs, adversarial
@@ -37,8 +37,8 @@ CommitRecord { group_id, commit_epoch, committer_device, mls_commit,
                committer_sig: [u8;64] }        // leaf-key sig over the auth transcript
 ```
 
-- `commit_id = BLAKE3("catcoms/commit-id/v1" ‖ group_id ‖ commit_epoch ‖ base_authenticator ‖ committer_device ‖ mls_commit)` — derived, never stored; the tie-break key (lowest wins; content-addressed, no clock/order input).
-- `commit_auth_transcript = "catcoms/commit-auth/v1" ‖ group_id ‖ commit_epoch ‖ base_authenticator ‖ committer_device ‖ BLAKE3(mls_commit)`; signed by the committer's MLS leaf key. **openmls still independently authenticates the inner commit** via `process_incoming` — `committer_sig` is *authorization*, not state authentication.
+- `commit_id = BLAKE3("catcoms/commit-id/v1" ‖ group_id ‖ commit_epoch ‖ base_authenticator ‖ committer_device ‖ mls_commit)`; derived, never stored; the tie-break key (lowest wins; content-addressed, no clock/order input).
+- `commit_auth_transcript = "catcoms/commit-auth/v1" ‖ group_id ‖ commit_epoch ‖ base_authenticator ‖ committer_device ‖ BLAKE3(mls_commit)`; signed by the committer's MLS leaf key. **openmls still independently authenticates the inner commit** via `process_incoming`; `committer_sig` is *authorization*, not state authentication.
 
 `SyncConfig` adds: `max_committer_rank` (default 1), `stage_decision_window_ms`
 (250), `max_pending_proposals` (256), `max_revoked` (4096).
@@ -53,7 +53,7 @@ CommitRecord { group_id, commit_epoch, committer_device, mls_commit,
 | apply remote winner; inspect adds pre-merge | `process_message`→`StagedCommitMessage`; `StagedCommit::add_proposals().key_package()`; `merge_staged_commit` | ✅ |
 | fork-vs-lag base binding | `epoch_authenticator()` | ✅ |
 | author proposal (6d-2b) | `propose_add_member`/`propose_remove_member`; ingest via `process_message`→`store_pending_proposal` (two-step, NOT auto-queued) | ✅ |
-| **external-commit self-heal** | `export_group_info(crypto,signer,true)` *does* emit `external_pub` on demand (no `config.rs` change needed) | ⛔ **deferred to 6d-3** — `leftmost_free_index` reindexes leaves, destabilizing committer rank mid-recovery; only needed for the deep-partition case we instead refuse |
+| **external-commit self-heal** | `export_group_info(crypto,signer,true)` *does* emit `external_pub` on demand (no `config.rs` change needed) | ⛔ **deferred to 6d-3**; `leftmost_free_index` reindexes leaves, destabilizing committer rank mid-recovery; only needed for the deep-partition case we instead refuse |
 
 Proposals are committed **by value** (`CommitBuilder.add_proposals(owned)`), not
 by-ref (`commit_to_pending_proposals`), so a node that missed the proposal gossip
@@ -95,23 +95,23 @@ buffered (plain writes, no openmls call) and packed into the next epoch.
   gated by the consumed-set.
 - Double-claim handling: same-base fork → one winner (single consumption); sequential
   → second Add rejected at apply on every node (nonce already consumed); deep
-  partition → `ForkTooDeep` (detected, not remediated — honest residual).
+  partition → `ForkTooDeep` (detected, not remediated; honest residual).
 - Joiner nonce reuses `MembershipCredential{device_id, group_id, invite_nonce}`
   (already in the MLS leaf, MLS-authenticated); the 6d-2 addition is all-members
   apply-time re-validation.
 
 ## Staging (strict dependency order)
 
-- **6d-2a** — stage/merge/abort split + signed `CommitRecord` + `authorize_committer`
+- **6d-2a**; stage/merge/abort split + signed `CommitRecord` + `authorize_committer`
   gate + `commit_id`/`base_authenticator` tie-break + loser rollback/re-issue +
   provisional-Welcome + contest window. (Implemented in two commits: **(1) foundations**
-  — primitives + signed records + gate, single-committer synchronous join preserved;
-  **(2) fork resolution** — staging + tie-break + provisional Welcome.)
-- **6d-2b** — proposal/commit split (`ProposalRecord` on control topic, by-value
+ ; primitives + signed records + gate, single-committer synchronous join preserved;
+  **(2) fork resolution**; staging + tie-break + provisional Welcome.)
+- **6d-2b**; proposal/commit split (`ProposalRecord` on control topic, by-value
   packing, deterministic order); non-committers drive removes.
-- **6d-2c** — history-derived consumed-set + all-members apply-time binding +
+- **6d-2c**; history-derived consumed-set + all-members apply-time binding +
   replicated revoke.
-- **6d-2d** — joiner-nonce binding hardening + `ForkTooDeep` surfacing + PCS on remove.
+- **6d-2d**; joiner-nonce binding hardening + `ForkTooDeep` surfacing + PCS on remove.
 - **6d-3 (deferred):** external-commit self-heal, committer-decoupled Welcome, topic
   rotation on removal, deep-partition remediation (`fork_resolution::reboot`).
 
@@ -132,30 +132,30 @@ path is untouched), but **opt-in path `max_committer_rank>=1`: must-fix before
 relying on it.** The flag therefore stays **OFF by default** until the items below
 land. What was found and what was done:
 
-- **I1 — CRITICAL (open): the clock-window contest can converge two honest nodes to
+- **I1; CRITICAL (open): the clock-window contest can converge two honest nodes to
   different winners.** Each node times its contest window from its *own* clock when
   it sees its first candidate; a lower-`commit_id` candidate that arrives after a
   node already resolved is dropped (`Ordering::Less`). So under real async timing two
-  nodes can finalize different winners at the same epoch — permanent divergence, and
+  nodes can finalize different winners at the same epoch; permanent divergence, and
   MLS can't un-merge. **A wall-clock window is only a best-effort barrier; true
   convergence needs the single-serializer proposal/commit model (6d-2b)**, where the
   designated committer is the sole committer in steady state and forks only occur on
   committer *failover*. Until 6d-2b (and likely a published decision-record / barrier
   for the failover race), the flag must not be enabled in any real deployment. This
   is the gate on turning on concurrent committers.
-- **I2 — HIGH (fixed):** the loser abort/apply path swallowed errors and discarded
+- **I2; HIGH (fixed):** the loser abort/apply path swallowed errors and discarded
   the contest, wedging the node on a storage failure. Now logs the real error and, if
   resolution doesn't advance the epoch, enqueues commit-catch-up to self-heal.
-- **I3 — HIGH (fixed):** an epoch advance via `drain_pending_commits` (catch-up) left
+- **I3; HIGH (fixed):** an epoch advance via `drain_pending_commits` (catch-up) left
   a stale `PendingResolve`, silently overwriting our staged tracking. Added
   `discard_stale_contest` (aborts our staged commit + clears `pending`), called in
   `drain_pending_commits` and `contest_commit`.
-- **I4 — MEDIUM (fixed):** `run_once` returned after catch-up before checking the
+- **I4; MEDIUM (fixed):** `run_once` returned after catch-up before checking the
   contest window, stretching it. `resolve_pending_if_expired` now runs *before* the
   catch-up early-return.
-- **I6 — INFO (fixed):** `commit_id` ties now break on the full `mls_commit` bytes, so
+- **I6; INFO (fixed):** `commit_id` ties now break on the full `mls_commit` bytes, so
   even an (astronomically unlikely) BLAKE3 collision stays deterministic.
-- **I7 — doc (this section):** 6d-2a fork resolution covers **Removes and staged
+- **I7; doc (this section):** 6d-2a fork resolution covers **Removes and staged
   Adds** (the two-phase Welcome-push join is implemented); both are gated by
   `max_committer_rank>=1` and share the I1 limitation. Joins on the default config
   remain synchronous single-committer.
@@ -171,5 +171,5 @@ Deep-partition single-use double-claim is **detected, not remediated** (`ForkToo
 needs 6d-3 reboot). Committer-decoupled admission deferred (Welcome is inviter-signed).
 External-commit self-heal deferred (API present, but leaf reindex destabilizes ranking).
 Topic rotation on removal deferred. v2 is a hard wire cutover (pre-release; coordinated
-upgrade). The `is_operational` freeze is bounded (250ms) but real — a latency floor on
+upgrade). The `is_operational` freeze is bounded (250ms) but real; a latency floor on
 back-to-back membership changes.

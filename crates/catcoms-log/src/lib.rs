@@ -1,4 +1,4 @@
-//! Diagnostics setup for CatComs binaries and tests.
+//! Diagnostics setup for Mewtual binaries and tests.
 //!
 //! Library crates emit structured diagnostics with the `tracing` facade (no
 //! global state). A binary (the dev CLI, the Tauri app) or a test installs a

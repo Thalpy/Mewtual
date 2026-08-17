@@ -1,6 +1,6 @@
 //! 6e-3d-9 end-to-end (memory transport, real swarms): a joiner finds the inviter at a
-//! zero-knowledge **rendezvous** under the pre-join `join_ns` — derivable from the
-//! invite alone — then dials the discovered address **through the `DiscoveryPolicy`**
+//! zero-knowledge **rendezvous** under the pre-join `join_ns`; derivable from the
+//! invite alone; then dials the discovered address **through the `DiscoveryPolicy`**
 //! (the only thing that decides what to dial; the net Actor never auto-dials) and joins
 //! the MLS group, with **no hard-coded server address**. Then, now a member, it
 //! discovers the inviter again under the steady-state (secret) **member namespace**,
@@ -143,7 +143,7 @@ async fn joiner_discovers_inviter_via_join_ns_then_joins_with_no_hardcoded_addr(
         "the policy offers the discovered inviter to dial"
     );
 
-    // Dial the planned address — Bob never held a hard-coded server address.
+    // Dial the planned address; Bob never held a hard-coded server address.
     for addr in &plan[0].addresses {
         b_mesh.dial(addr.parse().unwrap()).await.unwrap();
     }

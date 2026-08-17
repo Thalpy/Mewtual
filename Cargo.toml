@@ -15,7 +15,7 @@ members = [
     "bins/catcomsctl",
 ]
 # cargo-fuzz crates carry their own (nightly) workspace; keep them out of the main build.
-# The desktop app (Tauri 2 + webview deps) is its own workspace — kept out of the core
+# The desktop app (Tauri 2 + webview deps) is its own workspace; kept out of the core
 # `cargo test --all` so the protocol crates stay lean and fast.
 exclude = [
     "crates/catcoms-wire/fuzz",

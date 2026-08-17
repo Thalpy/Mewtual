@@ -1,10 +1,10 @@
-//! Phase 7 — full-stack join over a relayed link that **DCUtR-upgrades to direct**.
+//! Phase 7; full-stack join over a relayed link that **DCUtR-upgrades to direct**.
 //! A joiner reaches a server *through a relay* (NAT traversal), runs the MLS join and
 //! catches up the channel over that relayed connection, and the link is then hole-punched
-//! to a **direct** connection via DCUtR — surfaced on the joiner via
+//! to a **direct** connection via DCUtR; surfaced on the joiner via
 //! `next_direct_upgrade()`. Real NAT can't be exercised in-process, so this uses TCP
 //! loopback (both nodes directly dialable; `identify` translates the relay-observed
-//! address into each node's real listen port) — the same mechanism that, behind real
+//! address into each node's real listen port); the same mechanism that, behind real
 //! NATs, moves traffic off the relay once the hole is punched. The transport-level
 //! upgrade is tested in `catcoms-net`; this drives it through a complete join.
 

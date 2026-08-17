@@ -1,4 +1,4 @@
-//! Canonical, injective, length-prefixed wire encoding for CatComs.
+//! Canonical, injective, length-prefixed wire encoding for Mewtual.
 //!
 //! Every integer is fixed-width big-endian and every variable-length field is
 //! length-prefixed. That makes the encoding *prefix-free*, and therefore

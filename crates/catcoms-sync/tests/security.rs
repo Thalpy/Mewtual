@@ -1,6 +1,6 @@
-//! Phase 7 — **consolidated security suite**.
+//! Phase 7; **consolidated security suite**.
 //!
-//! The CatComs security contract, in one auditable place. Most adversarial properties
+//! The Mewtual security contract, in one auditable place. Most adversarial properties
 //! are enforced (and unit-tested) inside the crate that owns them; this file (a) maps
 //! the threat model to where each property is proven, and (b) adds the **cross-cutting,
 //! end-to-end** adversarial scenarios that no single crate's unit tests cover.
@@ -19,7 +19,7 @@
 //! | **Pre-dial membership tag** (Sybil/colluding-rendezvous injection) | `sync::a_membership_tag_binds_the_secret_label_and_peer` |
 //! | **Member PEX is members-only + can't forge addresses** | `sync::pex_*` (ingest gate, non-member rejection, rate limit) |
 //! | **DiscoveryPolicy: junk-last, budgeted, no auto-dial** | `discovery::*`; `net::a_node_registers_via_a_circuit_and_another_discovers_it` (no auto-dial) |
-//! | **Eclipse detector is advisory — never gates** (H3 weaponization) | **`an_eclipse_caution_never_gates_a_removal` here** |
+//! | **Eclipse detector is advisory; never gates** (H3 weaponization) | **`an_eclipse_caution_never_gates_a_removal` here** |
 //! | **Address cache: tamper-detected on load** | `discovery::a_tampered_row_is_rejected_on_load` |
 //! | **Rendezvous addrs validated** (circuit / dup-PeerId misconfig) | `net::rendezvous_address_validation_rejects_circuits_and_duplicates` |
 //!
@@ -84,10 +84,10 @@ async fn build_members(n: u64) -> (Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
     (hub, members, ids)
 }
 
-/// **H3 — the eclipse detector can never be weaponized to block a legitimate removal.**
+/// **H3; the eclipse detector can never be weaponized to block a legitimate removal.**
 /// It is *advisory only*: it returns an `EclipseLevel` and nothing in the membership
 /// path consults it. So even while the detector is raising CAUTION (sustained isolation
-/// signs), the designated committer's removal still commits — an attacker who can drive
+/// signs), the designated committer's removal still commits; an attacker who can drive
 /// the detector's inputs gains no power to keep a member in the group.
 #[tokio::test]
 async fn an_eclipse_caution_never_gates_a_removal() {
@@ -123,11 +123,11 @@ async fn an_eclipse_caution_never_gates_a_removal() {
     assert!(!alice.contains_member(&carol_id), "Carol is gone");
 }
 
-/// **Routing-metadata forward secrecy — a removed member is excluded from the rotated
+/// **Routing-metadata forward secrecy; a removed member is excluded from the rotated
 /// rendezvous namespace.** On removal the routing label `L` advances and `ns_secret_L`
 /// is the *post-removal* epoch secret the removed member can never export. So the
 /// remaining members converge on the new namespace while the removed member is stuck on
-/// the old one — it cannot discover (or be discovered by) the group going forward.
+/// the old one; it cannot discover (or be discovered by) the group going forward.
 #[tokio::test]
 async fn a_removed_member_is_excluded_from_the_rotated_namespace() {
     // members[0]=Alice (founder/committer), [1]=Bob (joined 2nd), [2]=Carol (joined
@@ -146,7 +146,7 @@ async fn a_removed_member_is_excluded_from_the_rotated_namespace() {
     assert_eq!(members[0].routing_label(), 1, "removal rotated the founder");
 
     // Carol (current, still a member) receives the single removal commit on the control
-    // topic and rotates to the same label. (Exactly one event is queued —
+    // topic and rotates to the same label. (Exactly one event is queued;
     // `MemNetwork::next_event` blocks, so a second `run_once` here would deadlock.)
     members[2].run_once().await.unwrap();
     assert_eq!(

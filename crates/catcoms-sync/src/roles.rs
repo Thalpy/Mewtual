@@ -1,16 +1,16 @@
-//! Member-roles authority — the owner-signed admin roster published in the `MemberRoles` doc.
+//! Member-roles authority; the owner-signed admin roster published in the `MemberRoles` doc.
 //!
 //! This lives in the **sync** layer (not the app layer) on purpose. The membership-admission
 //! gate (`ChannelSync::inviter_is_authorized`) is the security-critical reader, and in the
 //! single-committer (Option C) model **only the owner runs admission**. So the authoritative
 //! admin set is kept as owner-**local** state (`ChannelSync::admin_roster`, persisted in the
-//! snapshot), which a malicious member cannot write — closing the demoted-admin grant-replay
+//! snapshot), which a malicious member cannot write; closing the demoted-admin grant-replay
 //! residual (THREAT-MODEL item 3): replay, deletion, or forgery against the shared CRDT cannot
 //! promote anyone, because the gate never reads the CRDT.
 //!
 //! What lives *here* is the **published copy** of that set: a single owner-signed `roster` value
 //! in the `MemberRoles` doc, so honest non-owner clients can show trustworthy role badges. It is
-//! **display / propagation only** — `read_published_roster` verifies the owner's signature so a
+//! **display / propagation only**; `read_published_roster` verifies the owner's signature so a
 //! tampering member's UI edits are rejected by every reader, but a stale-replay or deletion of
 //! the published copy is at worst cosmetic (it never gates admission). See
 //! `docs/design-grant-revocation.md`.
@@ -29,7 +29,7 @@ pub const ROLE_ROSTER_DOMAIN: &[u8] = b"catcoms/role-roster/v1";
 /// The single doc key under which the owner-signed roster is published.
 pub const ROSTER_KEY: &str = "roster";
 
-/// Short 4-byte hex fingerprint of a device id — the roster entry + the UI display id. Always 8
+/// Short 4-byte hex fingerprint of a device id; the roster entry + the UI display id. Always 8
 /// ASCII hex characters, which the roster wire format relies on (fixed-width entries).
 pub fn fingerprint(id: &DeviceId) -> String {
     id.as_bytes()[..4]
@@ -82,9 +82,9 @@ fn bytes_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> Vec<u8> {
 
 /// Materialize the admin fingerprints from the **published** roster in `doc`. Returns `Some(set)`
 /// iff the `roster` value parses, was signed by the **current owner's** key (the signing key's
-/// full device id must equal `owner_id` — comparing the 32-byte id, not the 4-byte display fp,
+/// full device id must equal `owner_id`; comparing the 32-byte id, not the 4-byte display fp,
 /// keeps a forged-roster attack at a full preimage), and the signature verifies; otherwise `None`
-/// (fail-closed). **Display only** — the admission gate uses the owner's local `admin_roster`, so
+/// (fail-closed). **Display only**; the admission gate uses the owner's local `admin_roster`, so
 /// a stale-replay or deletion of this published copy is cosmetic, never an admission bypass.
 pub fn read_published_roster(
     doc: &AutoCommit,
@@ -114,7 +114,7 @@ pub fn read_published_roster(
     if DeviceId::from_public_key_bytes(owner_pk) != *owner_id {
         return None;
     }
-    // Verify over the parsed (stored) order — a malicious reorder/dup changes the payload and
+    // Verify over the parsed (stored) order; a malicious reorder/dup changes the payload and
     // fails here, so the returned set always reflects exactly the owner-signed bytes.
     if !verify_with_public_bytes(owner_pk, &roster_payload(group_id, gen, &fps), &sig) {
         return None;

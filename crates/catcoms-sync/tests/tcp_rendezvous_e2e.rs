@@ -1,4 +1,4 @@
-//! Phase 7 — the full **discovery bootstrap over real TCP sockets**: a joiner finds the
+//! Phase 7; the full **discovery bootstrap over real TCP sockets**: a joiner finds the
 //! inviter at a zero-knowledge rendezvous under the pre-join `join_ns` and joins with
 //! **no hard-coded server address**, all over genuine OS sockets (not the libp2p memory
 //! transport that the 6e-3d-9 memory e2e uses). This is the 6e-3d-9 headline property

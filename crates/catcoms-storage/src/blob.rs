@@ -40,7 +40,7 @@ fn verify(cid: &Cid, bytes: Vec<u8>) -> Result<Vec<u8>, StorageError> {
 
 /// Default in-memory blob budget (128 MiB). Bounds how much fetched content (avatars,
 /// downloaded files) a node caches, so a member spamming large blobs cannot make peers grow
-/// without bound. This is a simple **size-bounded FIFO** interim — evicted blobs stay
+/// without bound. This is a simple **size-bounded FIFO** interim; evicted blobs stay
 /// re-fetchable by CID; the full holder-probe retention engine (never-evict-last-copy) is
 /// a follow-up.
 pub const DEFAULT_BLOB_BUDGET: usize = 128 * 1024 * 1024;
@@ -192,8 +192,8 @@ impl BlobStore for FsBlobStore {
 }
 
 /// A filesystem blob store that **seals each blob at rest** (Phase 9b). Externally it is a
-/// normal [`BlobStore`] keyed by the **plaintext** content address — so the mesh fetch (which
-/// addresses blobs by plaintext CID) is unchanged — but on disk every blob is XChaCha20-
+/// normal [`BlobStore`] keyed by the **plaintext** content address; so the mesh fetch (which
+/// addresses blobs by plaintext CID) is unchanged; but on disk every blob is XChaCha20-
 /// Poly1305-sealed under a key (the keystore's `blob_key`). A stolen disk yields only
 /// ciphertext; the sealing is at the disk boundary, not on the wire. The file is named by
 /// the plaintext CID; its contents are `nonce ‖ sealed-plaintext`. Both the AEAD tag and a
@@ -329,9 +329,9 @@ mod tests {
     fn memory_store_evicts_oldest_over_budget() {
         let mut store = MemoryBlobStore::with_budget(20);
         let a = store.put(b"aaaaaaaaaa").unwrap(); // 10 bytes
-        let b = store.put(b"bbbbbbbbbb").unwrap(); // 10 bytes — total 20, at budget
+        let b = store.put(b"bbbbbbbbbb").unwrap(); // 10 bytes; total 20, at budget
         assert!(store.has(&a) && store.has(&b));
-        let c = store.put(b"cccccccccc").unwrap(); // 10 bytes — over budget, evicts oldest (a)
+        let c = store.put(b"cccccccccc").unwrap(); // 10 bytes; over budget, evicts oldest (a)
         assert!(!store.has(&a), "the oldest blob is evicted past the budget");
         assert!(store.has(&b) && store.has(&c));
         // Re-putting an existing blob does not double-count toward the budget.
@@ -378,7 +378,7 @@ mod tests {
         let cid = store.put(&plaintext).unwrap();
         assert_eq!(cid, Cid::of(&plaintext), "addressed by the plaintext CID");
 
-        // On disk: sealed — the plaintext never appears.
+        // On disk: sealed; the plaintext never appears.
         let on_disk = std::fs::read(dir.path().join(cid.to_hex())).unwrap();
         assert!(
             !on_disk

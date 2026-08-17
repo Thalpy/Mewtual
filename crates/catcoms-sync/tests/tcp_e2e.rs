@@ -1,7 +1,7 @@
-//! Phase 7 — the full stack end-to-end over **real OS sockets** (TCP loopback), not the
+//! Phase 7; the full stack end-to-end over **real OS sockets** (TCP loopback), not the
 //! libp2p memory transport. A founder binds an ephemeral `127.0.0.1` port; a fresh
 //! device dials it over real TCP, runs the MLS join handshake, catches up the encrypted
-//! channel, and both converge — exercising every layer (identity, MLS, invites,
+//! channel, and both converge; exercising every layer (identity, MLS, invites,
 //! encrypted CRDT replication, channel sync) across a genuine socket. The `serve`/`join`
 //! CLI runs this same path across separate OS processes; this is the automated,
 //! in-CI single-process form over the same TCP transport.

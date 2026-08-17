@@ -60,7 +60,7 @@ impl fmt::Debug for DeviceKeypair {
     }
 }
 
-/// A human account's Ed25519 keypair — the trust root certifying their devices.
+/// A human account's Ed25519 keypair; the trust root certifying their devices.
 pub struct AccountKeypair {
     signing: SigningKey,
 }

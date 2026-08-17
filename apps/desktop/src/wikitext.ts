@@ -1,12 +1,12 @@
-// Phase 10g — the wikitext layer: a MediaWiki-subset converter plus the shared token grammar.
+// Phase 10g; the wikitext layer: a MediaWiki-subset converter plus the shared token grammar.
 //
 // This is the LOWER half of the rich-text renderer. `render.ts` (marked + DOMPurify) imports the
 // grammar regexes and the token renderers from here, so the markdown path and the wikitext path
-// emit byte-identical HTML for the app's own tokens — `[[Page|label]]`, `:emoji:`, `![alt](cid:…)`,
+// emit byte-identical HTML for the app's own tokens; `[[Page|label]]`, `:emoji:`, `![alt](cid:…)`,
 // `[label](file|status|event:ID)`, `@[Name]`. One definition is what stops the two paths drifting
 // into two subtly different surfaces for the sanitizer to police.
 //
-// Everything here is PURE — no DOM, no DOMPurify, no marked — so it unit-tests under plain Node.
+// Everything here is PURE; no DOM, no DOMPurify, no marked; so it unit-tests under plain Node.
 //
 // SECURITY: this is a converter, not a sanitizer. It emits an HTML *string* that `render.ts` always
 // passes through DOMPurify before it reaches the page. It nevertheless holds the same line itself:
@@ -31,22 +31,22 @@ export function escText(s: string): string {
 // `^`-anchored because marked's tokenizers are handed the remaining source; the wikitext scanner
 // below derives sticky copies (see `sticky`) so it can match at an offset without slicing.
 
-/** `![alt](cid:HEX)` — a fileshare embed. */
+/** `![alt](cid:HEX)`; a fileshare embed. */
 export const EMBED_RE = /^!\[([^\]]*)\]\(cid:([0-9a-fA-F]{1,64})\)/;
 
-/** `[label](file|status|event:ID)` — an in-app reference chip. */
+/** `[label](file|status|event:ID)`; an in-app reference chip. */
 export const REF_LINK_RE = /^\[([^\]\n]{1,160})\]\((file|status|event):([0-9a-zA-Z_-]{1,64})\)/;
 
 /**
- * `[[Page]]` / `[[Page|label]]` — a wiki link. The page never contains `|` so the split is
+ * `[[Page]]` / `[[Page|label]]`; a wiki link. The page never contains `|` so the split is
  * unambiguous; the label is optional and falls back to the page name.
  */
 export const WIKI_LINK_RE = /^\[\[([^\]|\n]{1,120})(?:\|([^\]\n]{1,120}))?\]\]/;
 
-/** `:name:` — a custom emoji. */
+/** `:name:`; a custom emoji. */
 export const EMOJI_RE = /^:([a-z0-9_+\-]{1,40}):/i;
 
-/** `@[Name]` — a member mention. */
+/** `@[Name]`; a member mention. */
 export const MENTION_RE = /^@\[([^\]\n]{1,40})\]/;
 
 // --- the shared token renderers -------------------------------------------------------------------
@@ -106,7 +106,7 @@ export function parseRedirect(text: string): string | null {
   return target || null;
 }
 
-/** `__NOTOC__` / `__TOC__` — whether the page forces or suppresses its contents box. NOTOC wins. */
+/** `__NOTOC__` / `__TOC__`; whether the page forces or suppresses its contents box. NOTOC wins. */
 export function tocDirective(text: string): "notoc" | "force" | null {
   const t = text ?? "";
   if (t.includes("__NOTOC__")) return "notoc";
@@ -146,7 +146,7 @@ function at(re: RegExp, src: string, i: number): RegExpExecArray | null {
 /**
  * Wikitext inline markup → HTML. Plain runs are buffered and escaped wholesale; every recognised
  * token is emitted through one of the shared renderers above. Anything unrecognised (`{{template}}`,
- * a stray bracket, raw HTML) stays literal escaped text — the converter has no passthrough.
+ * a stray bracket, raw HTML) stays literal escaped text; the converter has no passthrough.
  */
 export function inlineToHtml(src: string): string {
   let out = "";
@@ -265,7 +265,7 @@ const RE_PRE = /^ /;
 const RE_TABLE = /^[ \t]*\{\|/;
 
 /**
- * A leading `:` is MediaWiki indentation — except when it opens one of the app's own `:emoji:`
+ * A leading `:` is MediaWiki indentation; except when it opens one of the app's own `:emoji:`
  * tokens, which is far more likely at the start of a line here than a one-level indent is.
  */
 function isIndent(line: string): boolean {
@@ -386,7 +386,7 @@ function renderIndent(lines: string[]): string {
 
 /**
  * Drop a cell's attribute string (`| style="…" | content`). Only a prefix that looks like
- * attributes — has an `=`, no brackets — is dropped, so `| [[Page|label]]` keeps its whole content.
+ * attributes; has an `=`, no brackets; is dropped, so `| [[Page|label]]` keeps its whole content.
  */
 function cellBody(s: string): string {
   const p = s.indexOf("|");

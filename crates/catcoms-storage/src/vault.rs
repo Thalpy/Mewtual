@@ -5,7 +5,7 @@
 //! XChaCha20-Poly1305 under a key Argon2id-derived from the passphrase + a per-vault random
 //! salt (the salt is not secret; it lives in the file). The passphrase is never stored, so
 //! an attacker with the file still needs it to unseal the DEK. A wrong passphrase fails as
-//! an authenticated-decryption error ([`StorageError::Crypto`]) — never the wrong key.
+//! an authenticated-decryption error ([`StorageError::Crypto`]); never the wrong key.
 //!
 //! This is the keystore wiring; the higher layers seal blobs / docs / MLS state under the
 //! derived subkeys. The root DEK is currently passphrase-protected only; an OS-keychain
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(kh1.blob_key().unwrap(), kh2.blob_key().unwrap());
         assert_eq!(kh1.mls_seal_key().unwrap(), kh2.mls_seal_key().unwrap());
 
-        // A wrong passphrase fails (authenticated decryption) — not the wrong key — and
+        // A wrong passphrase fails (authenticated decryption); not the wrong key; and
         // leaves the vault intact.
         assert!(open_or_create_vault(dir.path(), b"guess", &mut rng).is_err());
         let kh3 = open_or_create_vault(dir.path(), b"correct horse battery", &mut rng).unwrap();

@@ -2,18 +2,18 @@
 //!
 //! An [`InviteToken`] is a pasteable capability signed by an inviting device. It
 //! carries the target `group_id`, a one-time `invite_nonce`, an expiry, and
-//! bootstrap hints — but **no group secrets**. Its security rests on three
+//! bootstrap hints; but **no group secrets**. Its security rests on three
 //! independent checks performed by [`crate::ServerGroup::add_member_via_invite`]
 //! (and re-checkable by every member):
 //!
-//! 1. **Inviter authenticity** — the token signature verifies under a *current
+//! 1. **Inviter authenticity**; the token signature verifies under a *current
 //!    group member's* key.
-//! 2. **Credential binding** — the joiner's KeyPackage carries a
+//! 2. **Credential binding**; the joiner's KeyPackage carries a
 //!    [`MembershipCredential`] bound to exactly `(group_id, invite_nonce)`. Since
 //!    the KeyPackage is self-signed by the joining device, a KeyPackage minted
-//!    for group X cannot be replayed into group Y — the binding travels *inside
+//!    for group X cannot be replayed into group Y; the binding travels *inside
 //!    MLS* in the leaf credential.
-//! 3. **Single use** — the [`InviteLedger`] records consumed/revoked nonces, so a
+//! 3. **Single use**; the [`InviteLedger`] records consumed/revoked nonces, so a
 //!    leaked or already-used invite is inert, and the token cannot be redeemed
 //!    twice.
 
@@ -126,8 +126,8 @@ pub struct InviteToken {
     pub group_id: Vec<u8>,
     /// The inviting device's content-addressed id.
     pub inviter_device_id: DeviceId,
-    /// The inviter's Ed25519 public key (raw bytes). Lets a *joiner* — who is not
-    /// yet a group member and so has no roster — authenticate the invite and the
+    /// The inviter's Ed25519 public key (raw bytes). Lets a *joiner*; who is not
+    /// yet a group member and so has no roster; authenticate the invite and the
     /// admitter's signed Welcome. Must content-address `inviter_device_id`.
     pub inviter_public_key: Vec<u8>,
     /// The one-time nonce identifying this invite.
@@ -139,7 +139,7 @@ pub struct InviteToken {
     /// `join_ns` instead, so a joiner needs no hard-coded server address.
     pub bootstrap: Vec<String>,
     /// Zero-knowledge **rendezvous** infra multiaddrs (≥2 recommended, distinct PeerIds,
-    /// direct — never `/p2p-circuit`). The joiner registers/discovers under the pre-join
+    /// direct; never `/p2p-circuit`). The joiner registers/discovers under the pre-join
     /// `join_ns` at these to find the inviter; each is credited as ≤1 eclipse trust root
     /// (the distinct-PeerId check is misconfig defence, not anti-collusion). Validation
     /// (reject circuit, distinct PeerIds) lives in `catcoms-net` where multiaddrs parse.
@@ -229,7 +229,7 @@ impl InviteToken {
     }
 
     /// Verify a signature made by the inviter (the embedded public key) over
-    /// `message` — e.g. the admitter's signature over a join-response transcript,
+    /// `message`; e.g. the admitter's signature over a join-response transcript,
     /// which authenticates that the Welcome really came from the inviter.
     pub fn verify_inviter_signature(&self, message: &[u8], signature: &[u8; 64]) -> bool {
         verify_with_public_bytes(&self.inviter_public_key, message, signature)
@@ -364,7 +364,7 @@ impl InviteLedger {
     }
 
     /// Serialize the ledger (consumed + revoked nonces) for persistence (Phase 9e). The
-    /// single-use guarantee must survive restart, so the inviter persists this — otherwise
+    /// single-use guarantee must survive restart, so the inviter persists this; otherwise
     /// a restart would forget which invites were spent and a single-use invite could be
     /// redeemed again.
     pub fn snapshot(&self) -> Vec<u8> {

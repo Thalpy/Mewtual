@@ -1,8 +1,8 @@
 //! One key hierarchy, sealing primitives, and a tiered secure key store.
 //!
 //! There is exactly **one** root data-encryption key (DEK). Everything else is an
-//! HKDF subkey of it — the SQLCipher DB key, the openmls value-sealing key, the
-//! blob-at-rest key — so a single rotation rekeys the whole device and there is
+//! HKDF subkey of it; the SQLCipher DB key, the openmls value-sealing key, the
+//! blob-at-rest key; so a single rotation rekeys the whole device and there is
 //! no second, divergent root of trust.
 //!
 //! The DEK itself is sealed at rest by a [`SecureKeyStore`], which reports a
@@ -10,7 +10,7 @@
 //! hardware-backed store; the portable fallback is [`PassphraseKeyStore`]
 //! (Argon2id). If the available tier ever *drops* below what protected the store
 //! before, [`requires_passphrase_confirmation`] signals that the user must
-//! confirm a passphrase before the store reopens — never a silent downgrade.
+//! confirm a passphrase before the store reopens; never a silent downgrade.
 
 use core::fmt;
 
@@ -52,7 +52,7 @@ pub enum KeyTier {
         /// Whether the hardware backing was cryptographically attested.
         attested: bool,
     },
-    /// OS software keystore (e.g. Secret Service, DPAPI) — same-user readable.
+    /// OS software keystore (e.g. Secret Service, DPAPI); same-user readable.
     OsSoftware,
     /// Passphrase-derived (Argon2id), no OS/hardware backing.
     Passphrase,

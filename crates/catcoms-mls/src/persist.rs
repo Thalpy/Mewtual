@@ -5,7 +5,7 @@
 //! the signer public key + the group id) into one blob, and [`restore_server`] populates a
 //! fresh provider's storage with it and reloads the device + group via `MlsGroup::load`.
 //!
-//! The snapshot blob is **secret** — it contains the signer private key and the MLS group
+//! The snapshot blob is **secret**; it contains the signer private key and the MLS group
 //! secrets. This module does the *serialization* only; the persistence layer **seals the
 //! blob under `mls_seal_key`** (the vault, Phase 9a/9b) before it ever touches disk, exactly
 //! as the [`crate::SealingBlobStore`]-style sealing-at-the-storage-boundary does for blobs.
@@ -20,13 +20,13 @@ use catcoms_wire::{Decoder, Encoder};
 
 use crate::{MlsDevice, MlsError, ServerGroup};
 
-/// Serialize a server's full MLS state — provider storage + signer public key + group id —
+/// Serialize a server's full MLS state; provider storage + signer public key + group id;
 /// into a single blob. **Secret**: it contains private keys, so seal it before persisting.
 pub fn snapshot_server(
     device: &MlsDevice,
     group: &ServerGroup,
 ) -> Result<Zeroizing<Vec<u8>>, MlsError> {
-    // openmls' built-in storage `serialize` is test-only, but `values` is public — so we
+    // openmls' built-in storage `serialize` is test-only, but `values` is public; so we
     // serialize the key/value map ourselves with the canonical wire codec.
     let storage = {
         let map = device
@@ -154,7 +154,7 @@ mod tests {
     fn snapshot_round_trips_a_pending_staged_commit() {
         // The whole approach rests on openmls persisting `group_state = PendingCommit` to
         // storage. Snapshot a group with a staged (un-merged) commit, restore it, and merge
-        // — locking in that the pending state survives a snapshot.
+        //; locking in that the pending state survives a snapshot.
         let alice = MlsDevice::generate().unwrap();
         let mut group = ServerGroup::create(&alice).unwrap();
         let bob = MlsDevice::generate().unwrap();

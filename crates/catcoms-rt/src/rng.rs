@@ -10,7 +10,7 @@
 
 pub use rand_core::{CryptoRng, CryptoRngCore, Error as RngError, RngCore};
 
-/// The operating-system CSPRNG — the single sanctioned source of OS randomness.
+/// The operating-system CSPRNG; the single sanctioned source of OS randomness.
 ///
 /// Pass `&mut OsCryptoRng` wherever a `CryptoRngCore` is required in production.
 #[derive(Debug, Default, Clone, Copy)]

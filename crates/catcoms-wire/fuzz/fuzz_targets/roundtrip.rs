@@ -1,5 +1,5 @@
 #![no_main]
-//! Decoding arbitrary, attacker-controlled bytes must never panic — it may only
+//! Decoding arbitrary, attacker-controlled bytes must never panic; it may only
 //! return a value or a `WireError`.
 
 use catcoms_wire::Decoder;

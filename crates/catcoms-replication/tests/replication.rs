@@ -158,7 +158,7 @@ fn tampered_op_is_rejected_by_the_inner_signature() {
     let mut bdoc = EncryptedDoc::new(DocType::Channel, CHANNEL, &bob.device_id());
     let mut r = rng(1);
 
-    // A malicious member holds the channel key, so they can seal anything — but
+    // A malicious member holds the channel key, so they can seal anything; but
     // they cannot produce a valid inner signature for content they tamper.
     let mut forged = SignedOp::sign(&alice, DocType::Channel, CHANNEL, vec![1, 2, 3, 4]).unwrap();
     forged.signature[0] ^= 0xFF;

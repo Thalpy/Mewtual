@@ -2,7 +2,7 @@
 //!
 //! Each file gets a fresh random content key; the ciphertext is what is stored
 //! and content-addressed. The content key is then **wrapped** under a channel
-//! wrap key with its own **per-file wrap nonce** — the review fix: because the
+//! wrap key with its own **per-file wrap nonce**; the review fix: because the
 //! wrap key is shared per channel-epoch, reusing a nonce across files would be a
 //! catastrophic AEAD misuse, so every file's wrap gets a unique random nonce.
 
@@ -159,18 +159,18 @@ impl FileRef {
 /// `0xF1` first byte unambiguously marks a manifest.
 const MANIFEST_TAG: u8 = 0xF1;
 
-/// Hard upper bound on the chunk count a manifest may declare — a parse guard against a hostile
+/// Hard upper bound on the chunk count a manifest may declare; a parse guard against a hostile
 /// count, well above the real maximum (the product caps files at 256 MiB / 8 MiB chunks = 32).
 const MAX_CHUNKS: u32 = 4096;
 
 /// A file described as an ordered list of independently-sealed **chunks** plus the whole-file
 /// identity, so a file larger than one blob-fetch response can be transferred chunk-by-chunk. The
 /// common small-file case is a 1-chunk manifest. Each chunk is a full [`FileRef`] (its own content
-/// key, wrapped under the channel file-wrap key) — reusing the reviewed `seal_file`/`open_file`
+/// key, wrapped under the channel file-wrap key); reusing the reviewed `seal_file`/`open_file`
 /// primitives per chunk, no new crypto. Stored inline in the channel CRDT like a single `FileRef`.
 #[derive(Clone, Debug)]
 pub struct FileManifest {
-    /// Address of the whole-file plaintext — the file's stable identity (UI/embeds use this).
+    /// Address of the whole-file plaintext; the file's stable identity (UI/embeds use this).
     pub plaintext_cid: Cid,
     /// Whole-file plaintext size in bytes.
     pub total_size: u64,

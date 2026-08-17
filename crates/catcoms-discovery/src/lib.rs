@@ -2,18 +2,18 @@
 //! candidates into a bounded, eclipse-resistant **dial plan**.
 //!
 //! This crate is the single place that decides *what to dial*. The libp2p Actor
-//! (catcoms-net) never auto-dials — it surfaces every signed peer record on a
+//! (catcoms-net) never auto-dials; it surfaces every signed peer record on a
 //! never-dropping queue, and a higher layer feeds those records (plus PEX entries
 //! and cross-session cache entries) here. The policy:
 //!
 //! - **unions** candidates for the same peer across sources, taking the freshest
 //!   record and merging addresses,
 //! - judges **freshness off the registrant's own signed sequence number** (never a
-//!   server-asserted TTL — a colluding rendezvous lies about TTL), dropping a record
+//!   server-asserted TTL; a colluding rendezvous lies about TTL), dropping a record
 //!   whose seq we have already bettered (stale / replayed),
 //! - **ranks** peers so a member-tag-verified peer leads, then multi-source
 //!   corroboration, then a prior proven contact from the cache, then raw single-
-//!   rendezvous candidates (the junk/flood) last — but *never drops* the junk, only
+//!   rendezvous candidates (the junk/flood) last; but *never drops* the junk, only
 //!   sinks it,
 //! - counts **≤ 1 trust root per rendezvous** (two colluding rendezvous cannot
 //!   manufacture independent corroboration) and **round-robin interleaves** equal-rank
@@ -24,12 +24,12 @@
 //! - meters dials against a **Clock-paced, RNG-jittered budget** shared across all
 //!   discovery sources, so junk costs at most `B` dials per window.
 //!
-//! It **ranks only — it never gates messaging** and never makes a network call. No
+//! It **ranks only; it never gates messaging** and never makes a network call. No
 //! ambient time/RNG: a `Clock` and an RNG are injected on every `plan` call, exactly
 //! like the rest of the stack, so the whole thing is deterministically testable.
 //!
 //! The round-robin guarantee is scoped to a **single** rendezvous. Distinct *colluding*
-//! rendezvous each earn one front-of-line slot among equal-rank peers — but a
+//! rendezvous each earn one front-of-line slot among equal-rank peers; but a
 //! verified/cache/PEX honest peer outranks all unverified rendezvous junk by score and
 //! still leads, so only an honest yet *unverified, uncorroborated, uncached* peer is
 //! pushed back, and that is the documented all-rendezvous-colluding residual (answered
@@ -46,11 +46,11 @@ mod eclipse;
 pub use cache::{AddressCache, CacheConfig, CacheError, CachedPeer};
 pub use eclipse::{EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservation};
 
-/// An opaque peer identifier — a libp2p `PeerId`'s bytes (or any stable id). Kept as
+/// An opaque peer identifier; a libp2p `PeerId`'s bytes (or any stable id). Kept as
 /// a `Vec<u8>` so this crate stays free of a libp2p dependency and fully pure.
 pub type PeerKey = Vec<u8>;
 
-/// Where a candidate came from — its **trust-root class**. Eclipse-resistance counts
+/// Where a candidate came from; its **trust-root class**. Eclipse-resistance counts
 /// *distinct* roots: every rendezvous is at most one root (so two colluding
 /// rendezvous cannot fake corroboration); each PEX-vouching member is one root; a
 /// cache entry is a prior proven contact (it becomes a counted root only via the live
@@ -66,7 +66,7 @@ pub enum Source {
 }
 
 /// One discovered candidate, before merging. The caller (which holds `ns_secret_L`)
-/// sets `tag_verified` by recomputing the member-only registration tag — an
+/// sets `tag_verified` by recomputing the member-only registration tag; an
 /// unverified candidate is never dropped here, only ranked last.
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -453,7 +453,7 @@ mod tests {
         let clock = ManualClock::new(0);
         let mut r = rng();
         let candidates = vec![
-            // peer 9: junk — single rendezvous, unverified.
+            // peer 9: junk; single rendezvous, unverified.
             cand(9, Source::Rendezvous(rdv(1)), 1, false),
             // peer 5: corroborated by two distinct rendezvous.
             cand(5, Source::Rendezvous(rdv(1)), 1, false),

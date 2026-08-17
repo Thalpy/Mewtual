@@ -1,4 +1,4 @@
-//! The Tauri command/event bridge — a thin shell over the `catcoms-app` event-stream
+//! The Tauri command/event bridge; a thin shell over the `catcoms-app` event-stream
 //! actors. The frontend `invoke`s these commands and `listen`s for the forwarded events;
 //! all the real work lives in the tested `catcoms-app` actor, which itself wraps the
 //! protocol stack. The GUI never touches MLS or automerge.
@@ -45,7 +45,7 @@ struct ServerEntry {
     bootstrap: Vec<String>,
     /// The rendezvous infra multiaddrs this server registered at (if any), so a fresh on-demand
     /// invite is also discovery-enabled. Empty when the server uses direct bootstrap only. Not
-    /// separately persisted — on reload it is recovered from the persisted invite's `rendezvous`.
+    /// separately persisted; on reload it is recovered from the persisted invite's `rendezvous`.
     rendezvous: Vec<String>,
     /// A clonable handle to this server's live transport, kept so the bridge can register a
     /// freshly-minted invite's namespace at the rendezvous *after* the `Server` was moved into its
@@ -64,7 +64,7 @@ struct AppState {
     store: Mutex<Option<ServerStore>>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
-    /// pasted back. One slot — starting a new ceremony abandons any previous one — and, like
+    /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
     /// `store`, it is process state only: the key is never written to disk here.
     pairing: Mutex<Option<PairingSecrets>>,
     /// The **origin device's** record of which pairing nonces it has already granted, so one
@@ -73,14 +73,14 @@ struct AppState {
     pairing_ledger: Mutex<PairingLedger>,
     /// The **origin device's** pending ceremony: exactly the request (and SAS anchor) the
     /// human saw at `pairing_read`. `pairing_mint` takes NO blob and mints only from here,
-    /// so what gets certified is provably what was approved — re-reading a caller-supplied
+    /// so what gets certified is provably what was approved; re-reading a caller-supplied
     /// blob at mint time was a TOCTOU (the popup could show one device while a swapped blob
     /// minted for another), and it left the backend with no notion of "confirmed" at all
     /// (adversarial-review finding). Cleared on mint success and on decline.
     pending_grant: Mutex<Option<PendingGrant>>,
     /// The **new device's** opened grants (multi-device M3), held between `pairing_open` and
     /// `pairing_join`. A grant is dropped once its server has actually been joined; a grant that
-    /// *failed* is kept so the user can retry — the expected failure is "the owner is offline",
+    /// *failed* is kept so the user can retry; the expected failure is "the owner is offline",
     /// which is exactly what the offline-queued admission is built to survive. Starting a fresh
     /// ceremony (`pairing_begin`) replaces the lot, and the ceremony secrets are dropped once the
     /// last grant has been redeemed.
@@ -219,8 +219,8 @@ struct UiBadge {
 
 /// One companion device as serialized to the frontend, keyed by its own fingerprint: which member
 /// (origin fingerprint) it belongs to, and the name the origin certified. `name` is safe to render
-/// as text — it is inside the certificate's signature and bounded/control-character-free by
-/// `validate_device_name` — but it is still a *member-chosen* string, so render it as a tag, never
+/// as text; it is inside the certificate's signature and bounded/control-character-free by
+/// `validate_device_name`; but it is still a *member-chosen* string, so render it as a tag, never
 /// as chrome.
 #[derive(Serialize, Clone)]
 struct UiDevice {
@@ -256,7 +256,7 @@ struct UiFile {
     /// Total chunks the file is split into.
     total: u32,
     /// When this listing drops out of circulation, ms epoch. `null` means either "keep forever"
-    /// or "never recorded" — `expires_known` tells those apart. Recorded metadata only: nothing
+    /// or "never recorded"; `expires_known` tells those apart. Recorded metadata only: nothing
     /// enforces it yet (see `catcoms_app::FileExpiry`).
     expires: Option<u64>,
     /// Whether an expiry was ever recorded for this listing. `false` = a legacy share from before
@@ -264,7 +264,7 @@ struct UiFile {
     expires_known: bool,
 }
 
-/// Where a file is referenced across the server — the Properties pane's "Used in" row.
+/// Where a file is referenced across the server; the Properties pane's "Used in" row.
 #[derive(Serialize, Clone)]
 struct UiFileUsage {
     /// Live wiki pages whose body embeds/references this file (sorted).
@@ -278,7 +278,7 @@ struct UiFileUsage {
     pinned: bool,
 }
 
-/// The shared file list plus whether any peer is currently reachable to fetch from — the payload
+/// The shared file list plus whether any peer is currently reachable to fetch from; the payload
 /// of `get_files`, so the UI can color each file by availability in one round-trip.
 #[derive(Serialize, Clone)]
 struct FilesPayload {
@@ -286,7 +286,7 @@ struct FilesPayload {
     has_peers: bool,
 }
 
-// Event payloads — every event is tagged with its server id.
+// Event payloads; every event is tagged with its server id.
 #[derive(Serialize, Clone)]
 struct ChannelEvt {
     server: u64,
@@ -380,7 +380,7 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
         while let Some(ev) = events.recv().await {
             match ev {
                 AppEvent::ChannelUpdated { channel } => {
-                    // Channel ids are u128 — send as a string (JS numbers lose precision).
+                    // Channel ids are u128; send as a string (JS numbers lose precision).
                     let _ = app.emit(
                         "channel-updated",
                         ChannelEvt {
@@ -466,7 +466,7 @@ fn tcp_port(addr: &Multiaddr) -> Option<u16> {
 }
 
 /// Build a dialable bootstrap multiaddr from a user-entered reachable address, so peers on
-/// a LAN or the internet can join. Accepts a bare IPv4 (`1.2.3.4` — uses the bound `port`),
+/// a LAN or the internet can join. Accepts a bare IPv4 (`1.2.3.4`; uses the bound `port`),
 /// `host:port` (e.g. a forwarded port), or a full multiaddr starting with `/` (e.g. a relay
 /// circuit address). Appends this node's `/p2p/<id>` if absent. (IPv4/multiaddr only; a
 /// hostname would need `/dns4/`.)
@@ -530,7 +530,7 @@ async fn register_server(
 }
 
 /// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
-/// store, a stopped actor, or an I/O error is logged, not fatal — the app keeps running).
+/// store, a stopped actor, or an I/O error is logged, not fatal; the app keeps running).
 async fn persist_server(state: &AppState, server: u64) {
     let actor = match actor_of(state, server).await {
         Ok(a) => a,
@@ -615,7 +615,7 @@ fn addr_is_loopback(addr: &Multiaddr) -> bool {
 }
 
 /// The reachable external addresses to advertise for rendezvous registration, from the bootstrap
-/// list. Loopback is advertised **only** when nothing else is reachable (same-machine testing) —
+/// list. Loopback is advertised **only** when nothing else is reachable (same-machine testing);
 /// otherwise it's dropped so we don't pollute a shared rendezvous namespace with a record a remote
 /// joiner can't reach (it would instead use the invite's real bootstrap addrs as a fallback).
 fn external_addrs(bootstrap: &[String]) -> Vec<Multiaddr> {
@@ -629,7 +629,7 @@ fn external_addrs(bootstrap: &[String]) -> Vec<Multiaddr> {
 }
 
 /// Register a `(group_id, nonce)` invite's pre-join namespace at the rendezvous `rz` via `handle`
-/// (fire-and-forget — the grant is internally deferred + flushed once an external address exists,
+/// (fire-and-forget; the grant is internally deferred + flushed once an external address exists,
 /// which the founder establishes when it first registers). So a joiner holding the invite can
 /// discover this server with no hard-coded address.
 async fn register_join_ns(
@@ -647,8 +647,8 @@ async fn register_join_ns(
 
 /// The discover-on-join path (no hard-coded inviter address): build a transport, dial the invite's
 /// rendezvous node(s), discover the inviter's records under the pre-join namespace, rank them
-/// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses — plus the
-/// invite's `bootstrap` addrs as direct fallbacks — and return the connected transport + the
+/// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses; plus the
+/// invite's `bootstrap` addrs as direct fallbacks; and return the connected transport + the
 /// inviter's peer id. Mirrors `tcp_rendezvous_e2e.rs`.
 async fn discover_and_connect(
     invite: &InviteToken,
@@ -658,8 +658,8 @@ async fn discover_and_connect(
         return Err("invite carries no rendezvous address".into());
     }
     let rz_addrs: Vec<Multiaddr> = targets.iter().map(|t| t.addr.clone()).collect();
-    // Bind a listen port so the joiner is itself dialable — post-join steady-state discovery has
-    // members register/discover + dial each other — then dial the rendezvous nodes.
+    // Bind a listen port so the joiner is itself dialable; post-join steady-state discovery has
+    // members register/discover + dial each other; then dial the rendezvous nodes.
     let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
         .parse()
         .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
@@ -722,7 +722,7 @@ async fn discover_and_connect(
         return Err("could not discover the server at the rendezvous".into());
     }
 
-    // The DiscoveryPolicy alone decides what to dial (eclipse-resistance — never auto-dial).
+    // The DiscoveryPolicy alone decides what to dial (eclipse-resistance; never auto-dial).
     let mut policy = DiscoveryPolicy::with_config(PolicyConfig::default());
     let mut rng = OsCryptoRng;
     let dialed = policy
@@ -762,10 +762,10 @@ async fn discover_and_connect(
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
 /// loopback), found the group, mint a single-use invite carrying the reachable address(es),
 /// spawn the actor, and register it. `advertise` is an optional user-supplied reachable
-/// address (LAN or public IP); `relay` is an optional relay-node multiaddr — when given, we
+/// address (LAN or public IP); `relay` is an optional relay-node multiaddr; when given, we
 /// reserve a circuit there and put the **relayed** address first in the invite, so a joiner
 /// reaches us through the relay with **no port-forward** (zero-config NAT traversal).
-/// `rendezvous` is an optional zero-knowledge rendezvous multiaddr — when given, we register at it
+/// `rendezvous` is an optional zero-knowledge rendezvous multiaddr; when given, we register at it
 /// so a joiner can discover us with **no hard-coded address at all** (just the pasted invite).
 #[tauri::command]
 async fn found_server(
@@ -806,7 +806,7 @@ async fn found_server(
 
     // No manual address and no relay? Best-effort UPnP: give the router a few seconds to open a
     // port and report our public address, then fold it into the invite as a directly-dialable
-    // bootstrap — a peer can connect with no relay, no port-forward (when the router cooperates).
+    // bootstrap; a peer can connect with no relay, no port-forward (when the router cooperates).
     if advertise.trim().is_empty() && relay.is_empty() {
         if let Ok(Some(ext)) = timeout(Duration::from_secs(4), mesh.next_external_addr()).await {
             bootstrap.push(format!("{ext}/p2p/{id}"));
@@ -848,7 +848,7 @@ async fn found_server(
     // Optional rendezvous: connect to it + advertise our reachable address(es) on the raw mesh
     // (so the deferred registration can flush), keeping a handle to register each invite's
     // namespace after the server is spawned. The founder is then discoverable with no hard-coded
-    // address — a joiner needs only the pasted invite.
+    // address; a joiner needs only the pasted invite.
     let rendezvous = rendezvous.trim().to_string();
     let (rz_target, rz_handle): (Option<RendezvousTarget>, Option<MeshHandle>) = if rendezvous
         .is_empty()
@@ -874,7 +874,7 @@ async fn found_server(
         .await
         .map_err(|_| "could not connect to the rendezvous".to_string())?;
         // Advertise our routable addresses so the deferred registration can flush. A relay
-        // *circuit* address is intentionally not advertised here — it auto-promotes to an external
+        // *circuit* address is intentionally not advertised here; it auto-promotes to an external
         // address on reservation (in the transport actor), so the rendezvous still learns it.
         for addr in external_addrs(&bootstrap) {
             mesh.add_external_address(addr)
@@ -1093,7 +1093,7 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
         .and_then(|e| e.invite.clone()))
 }
 
-/// Mint a **fresh** single-use invite on demand (owner/admin only — gated in `Server::mint_invite`),
+/// Mint a **fresh** single-use invite on demand (owner/admin only; gated in `Server::mint_invite`),
 /// carrying the live bootstrap address captured at found/reload. If the server registered at a
 /// rendezvous, the fresh invite is also discovery-enabled and its new (nonce-keyed) namespace is
 /// registered there via the stored transport handle, so the new joiner can discover us with no
@@ -1136,7 +1136,7 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
     Ok(invite_hex)
 }
 
-/// Rename a server — a **local** display label in this client's rail (server names are not
+/// Rename a server; a **local** display label in this client's rail (server names are not
 /// shared between members), persisted to the registry.
 #[tauri::command]
 async fn rename_server(state: State<'_, AppState>, server: u64, name: String) -> Result<(), String> {
@@ -1236,7 +1236,7 @@ async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiP
 
 /// Publish the server livery (owner/admin only); re-seals the server. An all-empty livery
 /// removes it. Sizes are bounded by the backend; the *values* are validated in the UI. The
-/// published **icon and cursor are preserved** — each has its own command (`set_server_icon` /
+/// published **icon and cursor are preserved**; each has its own command (`set_server_icon` /
 /// `set_server_cursor`), so changing colours never resends or clears either image.
 #[tauri::command]
 async fn set_livery(
@@ -1442,7 +1442,7 @@ async fn get_online_members(state: State<'_, AppState>, server: u64) -> Result<V
     Ok(actor.online_members().await)
 }
 
-/// Delivery state for this device's recent messages in a channel — the seed a UI paints on open,
+/// Delivery state for this device's recent messages in a channel; the seed a UI paints on open,
 /// before the throttled `delivery-changed` event next fires. Empty until this session sends a
 /// message (the message-id → change mapping is not persisted across a restart).
 #[tauri::command]
@@ -1468,7 +1468,7 @@ struct DmStat {
 
 /// Activity stats for every DM (count + timestamps over its #general conversation), so the UI can
 /// sort friends by activity / reconnect / recency. Clones the DM actors first (no lock held across
-/// the awaits), then queries each — bounded by the (small) number of DMs.
+/// the awaits), then queries each; bounded by the (small) number of DMs.
 #[tauri::command]
 async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
     let dms: Vec<(u64, ServerActor)> = {
@@ -1603,7 +1603,7 @@ async fn delete_file(state: State<'_, AppState>, server: u64, cid: String) -> Re
 /// listing. Uploader, owner or admin only (honest-client gate, like delete).
 ///
 /// This records metadata. It does **not** cause the file to be dropped, deleted or evicted at the
-/// deadline — no retention pass consumes it yet.
+/// deadline; no retention pass consumes it yet.
 #[tauri::command]
 async fn set_file_expiry(
     state: State<'_, AppState>,
@@ -1638,7 +1638,7 @@ async fn get_file_usage(
 }
 
 /// The content addresses (lowercase hex) embedded in a live wiki page: files that must never drop
-/// out of circulation. Derived from the wiki each call — dropping the embed un-pins the file.
+/// out of circulation. Derived from the wiki each call; dropping the embed un-pins the file.
 #[tauri::command]
 async fn get_wiki_pinned_cids(
     state: State<'_, AppState>,
@@ -1650,7 +1650,7 @@ async fn get_wiki_pinned_cids(
 
 /// Download a shared file by content-address hex; returns base64-encoded bytes. Fetches the file
 /// ONE chunk per actor command (emitting `download-progress` after each), so a large download no
-/// longer freezes the server actor — the actor returns to its loop between chunks and interleaves
+/// longer freezes the server actor; the actor returns to its loop between chunks and interleaves
 /// other commands + network sync. The whole reassembled file is verified against the requested
 /// content address (defends against a malicious manifest whose chunks individually verify).
 #[tauri::command]
@@ -1670,7 +1670,7 @@ async fn download_file(
         .file_download_plan(raw.clone())
         .await
         .ok_or_else(|| {
-            "this file can't be downloaded — it isn't listed, or its reference is invalid".to_string()
+            "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
         })?;
     let _ = app.emit(
         "download-progress",
@@ -1725,7 +1725,7 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
         .collect())
 }
 
-/// Create a server event; re-seals the server. **Any member may** — an event is server content,
+/// Create a server event; re-seals the server. **Any member may**; an event is server content,
 /// like a channel or a status post. Rejected with a message when the title is blank or over 120
 /// UTF-8 bytes, the body is over 1024, or the end time precedes the start (`endTs: 0` = no end).
 /// An `events-changed` event follows, so the UI re-reads the calendar.
@@ -1988,7 +1988,7 @@ async fn set_pin(
     Ok(())
 }
 
-/// Set (or clear, with `""`) a channel's topic — its short description. **Any member may**, like
+/// Set (or clear, with `""`) a channel's topic; its short description. **Any member may**, like
 /// creating the channel itself; rejected over 256 UTF-8 bytes. A `channel-updated` event for this
 /// channel follows, so the UI re-reads it exactly as it re-reads messages.
 #[tauri::command]
@@ -2067,7 +2067,7 @@ async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, Strin
     }
     out.sort_by(|a, b| b.ts.cmp(&a.ts));
     // Per-server cap (50) then a global cap (100), newest first. A single hyper-active server can
-    // thus have its older mentions truncated before the global merge — fine for an inbox view.
+    // thus have its older mentions truncated before the global merge; fine for an inbox view.
     out.truncate(100);
     Ok(out)
 }
@@ -2104,7 +2104,7 @@ async fn reload_one(
     let (mesh, libp2p_id) =
         MeshService::new_tcp(Some(listen), &redial).map_err(|e| e.to_string())?;
     // Capture the current loopback bootstrap. The OS-assigned port changes across reloads (the
-    // 9f caveat), so a freshly-minted invite must carry the *new* address — capture it here
+    // 9f caveat), so a freshly-minted invite must carry the *new* address; capture it here
     // rather than reuse the persisted (stale) one. Best-effort same-machine reach; re-advertising
     // a LAN/relay address on reload is a networking follow-up (tied to rendezvous).
     let bootstrap = match timeout(Duration::from_secs(10), mesh.next_listen_addr()).await {
@@ -2121,7 +2121,7 @@ async fn reload_one(
     }
 
     // If the persisted invite was discovery-enabled, re-connect to its rendezvous, re-advertise
-    // our (new-port) address, and re-register the invite's namespace there — so the founder is
+    // our (new-port) address, and re-register the invite's namespace there; so the founder is
     // discoverable again after restart, and fresh invites can register via the kept handle. The
     // rz addrs ride in the persisted invite (not separately persisted). Best-effort.
     let persisted_invite = (!record.invite.is_empty())
@@ -2179,7 +2179,7 @@ async fn reload_one(
     attach_blob_store(state, &mut server).await;
 
     // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
-    // (rendezvous infra was down at reload), drop it: it would not resolve — no registration, and
+    // (rendezvous infra was down at reload), drop it: it would not resolve; no registration, and
     // after a reload the only bootstrap is a stale new-port loopback. The rail then prompts a fresh
     // invite (which re-registers). A direct (non-rendezvous) invite is presented unchanged.
     let discovery_unregistered =
@@ -2231,7 +2231,7 @@ async fn unlock(
         ServerStore::open(&dir, passphrase.as_bytes(), &mut rng).map_err(|e| e.to_string())?;
 
     // If the vault is already unlocked (e.g. a dev HMR re-mounted the frontend while the Rust
-    // process kept running), don't reload from disk — that would spawn a duplicate actor +
+    // process kept running), don't reload from disk; that would spawn a duplicate actor +
     // transport per server. Return the servers already registered so the rail repopulates.
     if state.store.lock().await.is_some() {
         let servers = state.servers.lock().await;
@@ -2305,7 +2305,7 @@ async fn unlock(
 }
 
 // ---------------------------------------------------------------------------
-// Multi-device grant ceremony (M2) — four paste-carried steps, no new transport.
+// Multi-device grant ceremony (M2); four paste-carried steps, no new transport.
 // ---------------------------------------------------------------------------
 
 /// What `pairing_begin` hands the **new** device.
@@ -2313,7 +2313,7 @@ async fn unlock(
 struct PairingBegun {
     /// The blob to carry to the origin device (copy/paste; QR at M6).
     blob: String,
-    /// This device's id as full hex — its first 8 characters are the roster fingerprint.
+    /// This device's id as full hex; its first 8 characters are the roster fingerprint.
     device_id: String,
 }
 
@@ -2326,7 +2326,7 @@ struct PairingRead {
     /// (`023602` is a valid code and `23602` is a different one).
     sas: String,
     /// The scope the grant will cover if accepted: every unlocked server's local label
-    /// (the popup must show what is about to be granted — adversarial-review finding).
+    /// (the popup must show what is about to be granted; adversarial-review finding).
     servers: Vec<String>,
     /// How many of those are DMs (surfaced separately in the popup copy).
     dm_count: usize,
@@ -2345,7 +2345,7 @@ struct PairingGrantSummary {
     name: String,
     /// The MLS group id (hex).
     group_id: String,
-    /// The certifying origin's device id (hex) — different per server by design.
+    /// The certifying origin's device id (hex); different per server by design.
     origin: String,
     /// How many bootstrap / rendezvous hints came with it.
     bootstrap: usize,
@@ -2355,7 +2355,7 @@ struct PairingGrantSummary {
 /// What `pairing_open` shows on the new device: the code to compare, and what arrived.
 #[derive(Serialize, Clone)]
 struct PairingOpened {
-    /// The six-digit code — the human's last check. It must match the one the origin
+    /// The six-digit code; the human's last check. It must match the one the origin
     /// showed at its popup; if it does not, discard the grant.
     sas: String,
     /// The name the origin gave this device.
@@ -2375,8 +2375,8 @@ struct GrantSource {
 
 /// The origin identity anchoring this ceremony's SAS: the **lowest-numbered** server's.
 ///
-/// A member holds one origin identity *per server* — that is what stops servers from
-/// linking them — so a ceremony has to name one of them, and both ends must name the
+/// A member holds one origin identity *per server*; that is what stops servers from
+/// linking them; so a ceremony has to name one of them, and both ends must name the
 /// same one or the six digits will not match. Choosing it deterministically here means
 /// the popup and the new device's bundle-open agree with no extra value typed across
 /// (the choice is written into the bundle, and `open_grant_bundle` reads it back).
@@ -2411,9 +2411,9 @@ async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, Strin
 }
 
 /// Step 2, on the **origin** device: read a pasted request for the grant popup, and
-/// remember it as THE pending ceremony — `pairing_mint` acts on this stored view only,
+/// remember it as THE pending ceremony; `pairing_mint` acts on this stored view only,
 /// so the device the popup showed is the device that gets certified. Nothing is minted
-/// and the nonce is not consumed here — the popup may be reopened (re-reading replaces
+/// and the nonce is not consumed here; the popup may be reopened (re-reading replaces
 /// the pending view wholesale).
 #[tauri::command]
 async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<PairingRead, String> {
@@ -2442,7 +2442,7 @@ async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<Pairin
 }
 
 /// Decline the pending ceremony: burn its nonce (single-use **either way**, per the
-/// design — a declined request cannot be re-run by re-pasting the same blob) and clear
+/// design; a declined request cannot be re-run by re-pasting the same blob) and clear
 /// the pending view.
 #[tauri::command]
 async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
@@ -2472,8 +2472,8 @@ async fn persist_pairing_ledger(state: &AppState) {
 }
 
 /// Step 3, on the **origin** device, once the human has confirmed the popup: sign one
-/// certificate per unlocked server — each with *that server's* own origin key, inside
-/// its actor — and seal them all into one passphrase-wrapped bundle.
+/// certificate per unlocked server; each with *that server's* own origin key, inside
+/// its actor; and seal them all into one passphrase-wrapped bundle.
 ///
 /// Each server contributes what only its actor knows (group id + signature) and what
 /// only the bridge knows (the local label and the live bootstrap / rendezvous hints,
@@ -2486,13 +2486,13 @@ async fn pairing_mint(
     device_name: String,
     turn: Option<HashMap<String, String>>,
 ) -> Result<PairingBundle, String> {
-    // Mint ONLY from the pending view `pairing_read` stored — the popup's device is the
+    // Mint ONLY from the pending view `pairing_read` stored; the popup's device is the
     // certified device, closing the read→mint TOCTOU. The lock is held for the whole
     // mint so a concurrent re-read cannot swap the ceremony out from under the accept.
     let mut pending_guard = state.pending_grant.lock().await;
     let pending = pending_guard
         .as_ref()
-        .ok_or_else(|| "no pairing request has been read — paste one first".to_string())?;
+        .ok_or_else(|| "no pairing request has been read; paste one first".to_string())?;
     let ceremony = pending.origin;
     let view = &pending.view;
 
@@ -2502,7 +2502,7 @@ async fn pairing_mint(
     }
 
     // Snapshot what the registry knows about each server under the lock, then talk to
-    // each actor without holding it — the same shape as `get_inbox`. Sorted so the
+    // each actor without holding it; the same shape as `get_inbox`. Sorted so the
     // bundle's server order is stable.
     let mut servers: Vec<GrantSource> = {
         let guard = state.servers.lock().await;
@@ -2578,7 +2578,7 @@ async fn pairing_mint(
 /// for this ceremony. Returns the code for the human's final comparison plus a summary
 /// of what arrived.
 ///
-/// The opened [`PerServerGrant`]s are **held** alongside the ceremony secrets — `pairing_join`
+/// The opened [`PerServerGrant`]s are **held** alongside the ceremony secrets; `pairing_join`
 /// (step 5) redeems them. Opening again simply replaces them, so a re-paste is harmless.
 #[tauri::command]
 async fn pairing_open(
@@ -2618,19 +2618,19 @@ struct PairingJoinResult {
     name: String,
     /// Whether this device is now admitted to that server.
     ok: bool,
-    /// Why it is not, when `ok` is false. A failure is **retryable** — the grant is kept.
+    /// Why it is not, when `ok` is false. A failure is **retryable**; the grant is kept.
     error: Option<String>,
     /// The bridge server id, once joined (so the UI can select it).
     server: Option<u64>,
 }
 
-/// Step 5, on the **new** device: redeem the held grants — connect to each server the way an
+/// Step 5, on the **new** device: redeem the held grants; connect to each server the way an
 /// invite join does, present the origin-signed certificate through the owner-serialized add
 /// queue, and register every admitted server exactly like `join_server` does.
 ///
 /// `server_index` selects one grant (indexing the list `pairing_open` returned); omit it to run
 /// every remaining grant. Results come back per server, in that same order. A grant that failed
-/// stays held so the user can retry — the common failure is an owner that has not come online
+/// stays held so the user can retry; the common failure is an owner that has not come online
 /// yet, and the admission is offline-queued precisely for that. Once every grant has been
 /// redeemed the ceremony secrets are dropped.
 #[tauri::command]
@@ -2641,7 +2641,7 @@ async fn pairing_join(
 ) -> Result<Vec<PairingJoinResult>, String> {
     let grants = state.pairing_grants.lock().await.clone();
     if grants.is_empty() {
-        return Err("no grants to join — open a grant bundle first".to_string());
+        return Err("no grants to join; open a grant bundle first".to_string());
     }
     let targets: Vec<usize> = match server_index {
         Some(i) if i < grants.len() => vec![i],
@@ -2708,7 +2708,7 @@ async fn join_one_grant(
         secrets.device().duplicate().map_err(|e| e.to_string())?
     };
 
-    // Reach the server exactly as an invite join does — via the grant's bootstrap addresses,
+    // Reach the server exactly as an invite join does; via the grant's bootstrap addresses,
     // which are the invite's own field, passed through by the origin.
     //
     // Rendezvous discovery is NOT available here: the pre-join namespace is keyed by an *invite
@@ -2759,7 +2759,7 @@ async fn join_one_grant(
     .map_err(|e| e.to_string())?;
     attach_blob_store(state, &mut server).await;
     // Steady-state discovery: keep the grant's rendezvous nodes so this companion can re-find the
-    // group after a restart (post-join, group-keyed — unlike the pre-join namespace above, this
+    // group after a restart (post-join, group-keyed; unlike the pre-join namespace above, this
     // works from a grant). Mirrors `join_server`.
     let rz_config: Vec<(String, Vec<u8>)> = grant
         .rendezvous
@@ -2785,7 +2785,7 @@ async fn join_one_grant(
     actor.catch_up_wiki(contact).await;
     actor.catch_up_roles(contact).await;
     // A companion mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its
-    // own — the same registry shape a joiner gets. `is_dm` is not in the grant yet, so a DM pairs
+    // own; the same registry shape a joiner gets. `is_dm` is not in the grant yet, so a DM pairs
     // in as a server on the rail until M4 carries the flag.
     let server_id = register_server(
         app,
@@ -2878,7 +2878,7 @@ pub fn run() {
             pairing_join
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the CatComs desktop app");
+        .expect("error while running the Mewtual desktop app");
 }
 
 #[cfg(test)]

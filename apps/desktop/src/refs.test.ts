@@ -1,6 +1,6 @@
 // Unit tests for the composer "+" picker's reference markers.
 //
-// Run with `npm test` (Node's built-in runner + type stripping — no extra dependencies).
+// Run with `npm test` (Node's built-in runner + type stripping; no extra dependencies).
 //
 // The thing worth pinning is the SEAM: refs.ts writes a marker, render.ts tokenizes it back. Those
 // live in different files and are edited independently, so every builder here is checked against
@@ -87,7 +87,7 @@ test("the renderer's grammar splits a piped [[Page|label]] into page and label",
 });
 
 // `|` now separates the page from the label, so a page whose name contains one would build a marker
-// that links to the wrong page — the label sanitizer has to drop it like the brackets.
+// that links to the wrong page; the label sanitizer has to drop it like the brackets.
 test("a page name containing a pipe cannot build a mislinking marker", () => {
   const marker = wikiMarker("Cats|Dogs");
   const m = matched(WIKI_LINK_RE.exec(marker), marker);

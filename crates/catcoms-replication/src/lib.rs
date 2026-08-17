@@ -1,14 +1,14 @@
-//! Encrypted CRDT replication engine (Phase 4) — the data plane.
+//! Encrypted CRDT replication engine (Phase 4); the data plane.
 //!
 //! Every channel, wiki page, status feed and calendar is an [`doc::EncryptedDoc`]:
 //! an automerge document plus an append-only log of inner-signed operations. The
 //! design-review fixes that live here:
 //!
-//! - **Inner per-op signatures** ([`op::SignedOp`]) — authorship is verified
+//! - **Inner per-op signatures** ([`op::SignedOp`]); authorship is verified
 //!   independently of transport encryption, so re-sealed history cannot be forged.
-//! - **Snapshot/log catch-up re-sealed under the current epoch** — a latecomer
+//! - **Snapshot/log catch-up re-sealed under the current epoch**; a latecomer
 //!   converges without ever holding old epoch keys, preserving forward secrecy.
-//! - **Per-document keys from the MLS epoch exporter** — confidentiality and
+//! - **Per-document keys from the MLS epoch exporter**; confidentiality and
 //!   access control come from group membership; no separate ACL is trusted.
 //!
 //! Out-of-order delivery, de-duplication and concurrent merge are handled by
