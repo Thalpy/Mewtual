@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Mewtual logo</title>
+  <desc id="desc">A cute white cat with a pink heart lock inside a pastel blue and pink security shield.</desc>
+  <defs>
+    <linearGradient id="shield" x1="90" y1="62" x2="421" y2="447" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BAE6FD"/>
+      <stop offset="0.46" stop-color="#E9D5FF"/>
+      <stop offset="1" stop-color="#FBCFE8"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="107" y1="63" x2="406" y2="447" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7DD3FC"/>
+      <stop offset="0.5" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F9A8D4"/>
+    </linearGradient>
+    <linearGradient id="lock" x1="220" y1="300" x2="295" y2="378" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9A8D4"/>
+      <stop offset="1" stop-color="#F472B6"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#6D5A8B" flood-opacity="0.2"/>
+    </filter>
+  </defs>
+
+  <!-- A soft shield keeps the security silhouette without making the mark feel severe. -->
+  <path
+    d="M256 28 431 91v132c0 116-67 205-175 253C148 428 81 339 81 223V91Z"
+    fill="url(#shield)"
+    stroke="#FFFFFF"
+    stroke-width="12"
+    stroke-linejoin="round"
+    filter="url(#shadow)"
+  />
+  <path
+    d="M256 53 408 108v115c0 99-56 176-152 220-96-44-152-121-152-220V108Z"
+    fill="none"
+    stroke="url(#rim)"
+    stroke-width="8"
+    stroke-linejoin="round"
+  />
+
+  <!-- Kawaii cat: round cheeks, tiny muzzle, lashes, and plenty of blush. -->
+  <path
+    d="m148 218 9-88 71 49c9-2 18-3 28-3s19 1 28 3l71-49 9 88c17 22 26 48 26 77 0 75-60 134-134 134s-134-59-134-134c0-29 9-55 26-77Z"
+    fill="#FFFDFE"
+    stroke="#FFFFFF"
+    stroke-width="9"
+    stroke-linejoin="round"
+  />
+  <path d="m171 155 10 59 38-25Z" fill="#F9A8D4" opacity="0.72"/>
+  <path d="m341 155-10 59-38-25Z" fill="#7DD3FC" opacity="0.78"/>
+
+  <g fill="none" stroke="#66517A" stroke-width="9" stroke-linecap="round">
+    <path d="M175 268c15 14 35 14 50 0"/>
+    <path d="M287 268c15 14 35 14 50 0"/>
+  </g>
+  <g fill="none" stroke="#66517A" stroke-width="5" stroke-linecap="round">
+    <path d="m180 260-9-10M191 255l-4-13"/>
+    <path d="m332 260 9-10M321 255l4-13"/>
+  </g>
+  <ellipse cx="178" cy="304" rx="29" ry="14" fill="#FDA4AF" opacity="0.38"/>
+  <ellipse cx="334" cy="304" rx="29" ry="14" fill="#FDA4AF" opacity="0.38"/>
+
+  <!-- A heart-shaped lock doubles as the cat's nose and the security motif. -->
+  <path
+    d="M232 320v-13c0-18 10-31 24-31s24 13 24 31v13"
+    fill="none"
+    stroke="#8B5E83"
+    stroke-width="12"
+    stroke-linecap="round"
+  />
+  <path
+    d="M256 383c-8-8-39-32-39-55 0-15 11-26 26-26 7 0 11 3 13 8 2-5 6-8 13-8 15 0 26 11 26 26 0 23-31 47-39 55Z"
+    fill="url(#lock)"
+    stroke="#FFFFFF"
+    stroke-width="6"
+    stroke-linejoin="round"
+  />
+  <circle cx="256" cy="334" r="7" fill="#FFFFFF"/>
+  <path d="m252 339 8 0 4 15h-16Z" fill="#FFFFFF"/>
+
+  <!-- Whiskers become friendly little network links. -->
+  <g fill="none" stroke-linecap="round" stroke-width="6">
+    <path d="m191 324-63-15M190 343l-57 9" stroke="#7DD3FC"/>
+    <path d="m321 324 63-15M322 343l57 9" stroke="#F9A8D4"/>
+  </g>
+  <g fill="#FFFFFF">
+    <circle cx="128" cy="309" r="6"/>
+    <circle cx="133" cy="352" r="6"/>
+    <circle cx="384" cy="309" r="6"/>
+    <circle cx="379" cy="352" r="6"/>
+  </g>
+
+  <!-- Tiny bow and sparkles add an intentionally cute, femme finish. -->
+  <g transform="translate(326 190) rotate(18)">
+    <path d="M0 8C-18-8-34-3-31 13c3 15 17 17 32 5Z" fill="#F9A8D4" stroke="#FFFFFF" stroke-width="5"/>
+    <path d="M12 8c18-16 34-11 31 5-3 15-17 17-32 5Z" fill="#7DD3FC" stroke="#FFFFFF" stroke-width="5"/>
+    <circle cx="6" cy="14" r="11" fill="#E9D5FF" stroke="#FFFFFF" stroke-width="5"/>
+  </g>
+  <g fill="#FFFFFF">
+    <path d="m109 163 5 13 13 5-13 5-5 13-5-13-13-5 13-5Z"/>
+    <path d="m403 156 4 10 10 4-10 4-4 10-4-10-10-4 10-4Z"/>
+    <path d="m399 253 3 8 8 3-8 3-3 8-3-8-8-3 8-3Z"/>
+  </g>
+</svg>

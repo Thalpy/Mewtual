@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 12 476 476" role="img" aria-labelledby="title desc">
+  <title id="title">Mewtual logo</title>
+  <desc id="desc">A cute white cat inside a chat bubble and security shield, with a small pink heart lock badge.</desc>
+  <defs>
+    <linearGradient id="shield" x1="82" y1="50" x2="430" y2="466" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BDEBFF"/>
+      <stop offset="0.5" stop-color="#E9D5FF"/>
+      <stop offset="1" stop-color="#FFD0E2"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="99" y1="71" x2="415" y2="449" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5BCEFA"/>
+      <stop offset="0.5" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F5A9B8"/>
+    </linearGradient>
+    <linearGradient id="lock" x1="337" y1="329" x2="406" y2="404" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9A8D4"/>
+      <stop offset="1" stop-color="#F472B6"/>
+    </linearGradient>
+    <filter id="shadow" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#6D5A8B" flood-opacity="0.2"/>
+    </filter>
+    <filter id="bubbleShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#7C6B91" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+
+  <!-- Security: a soft shield in trans-femme pastel colours. -->
+  <path
+    d="M256 28 431 91v132c0 116-67 205-175 253C148 428 81 339 81 223V91Z"
+    fill="url(#shield)"
+    stroke="#FFFFFF"
+    stroke-width="12"
+    stroke-linejoin="round"
+    filter="url(#shadow)"
+  />
+  <path
+    d="M256 53 408 108v115c0 99-56 176-152 220-96-44-152-121-152-220V108Z"
+    fill="none"
+    stroke="url(#rim)"
+    stroke-width="8"
+    stroke-linejoin="round"
+  />
+
+  <!-- Communication: an unmistakable chat bubble, with room for the mascot. -->
+  <path
+    d="M151 128h210c34 0 59 27 59 61v124c0 34-25 61-59 61H226l-67 48 17-48h-25c-34 0-59-27-59-61V189c0-34 25-61 59-61Z"
+    fill="#232130e9"
+    stroke="#8B6A9E"
+    stroke-width="9"
+    stroke-linejoin="round"
+    filter="url(#bubbleShadow)"
+  />
+
+  <!-- The same sleepy kawaii kitty, now with her whole face clear. -->
+  <g transform="translate(64 32) scale(.75)">
+  <path
+    d="m155 235 8-78 66 46c9-2 18-3 27-3s18 1 27 3l66-46 8 78c15 19 23 43 23 69 0 66-55 117-124 117s-124-51-124-117c0-26 8-50 23-69Z"
+    fill="#FFFDFE"
+    stroke="#FFFFFF"
+    stroke-width="8"
+    stroke-linejoin="round"
+  />
+  <path d="m177 181 9 52 34-22Z" fill="#F5A9B8" opacity="0.82"/>
+  <path d="m335 181-9 52-34-22Z" fill="#5BCEFA" opacity="0.82"/>
+
+  <g fill="none" stroke="#66517A" stroke-width="9" stroke-linecap="round">
+    <path d="M178 280c14 13 33 13 47 0"/>
+    <path d="M287 280c14 13 33 13 47 0"/>
+  </g>
+  <g fill="none" stroke="#66517A" stroke-width="5" stroke-linecap="round">
+    <path d="m182 272-9-9M193 267l-4-12"/>
+    <path d="m330 272 9-9M319 267l4-12"/>
+  </g>
+  <ellipse cx="181" cy="316" rx="26" ry="12" fill="#F5A9B8" opacity="0.42"/>
+  <ellipse cx="331" cy="316" rx="26" ry="12" fill="#F5A9B8" opacity="0.42"/>
+
+  <path d="M247 308c5-5 13-5 18 0-2 8-7 12-9 12s-7-4-9-12Z" fill="#B784A7"/>
+  <g fill="none" stroke="#8B6A9E" stroke-width="5" stroke-linecap="round">
+    <path d="M256 320v5c0 8-8 12-15 12"/>
+    <path d="M256 325c0 8 8 12 15 12"/>
+  </g>
+
+  <!-- Whiskers echo little messages travelling out across the network. -->
+  <g fill="none" stroke-linecap="round" stroke-width="6">
+    <path d="m195 331-49-12M195 347l-45 8" stroke="#5BCEFA"/>
+    <path d="m317 331 49-12M317 347l45 8" stroke="#F5A9B8"/>
+  </g>
+  <g fill="#FFFFFF" stroke-width="3">
+    <circle cx="146" cy="319" r="5" stroke="#5BCEFA"/>
+    <circle cx="150" cy="355" r="5" stroke="#5BCEFA"/>
+    <circle cx="366" cy="319" r="5" stroke="#F5A9B8"/>
+    <circle cx="362" cy="355" r="5" stroke="#F5A9B8"/>
+  </g>
+  </g>
+
+  <!-- Encryption: the much-loved heart lock hangs from the bubble, clear of the face. -->
+  <g transform="translate(400 350) scale(.68) translate(-374 -371)">
+  <circle cx="374" cy="371" r="49" fill="#FFFFFF" stroke="#E9D5FF" stroke-width="7"/>
+  <path
+    d="M353 363v-12c0-16 9-28 21-28s21 12 21 28v12"
+    fill="none"
+    stroke="#8B5E83"
+    stroke-width="11"
+    stroke-linecap="round"
+  />
+  <path
+    d="M374 409c-7-7-34-28-34-48 0-13 10-23 23-23 6 0 9 3 11 7 2-4 5-7 11-7 13 0 23 10 23 23 0 20-27 41-34 48Z"
+    fill="url(#lock)"
+    stroke="#FFFFFF"
+    stroke-width="5"
+    stroke-linejoin="round"
+  />
+  <circle cx="374" cy="365" r="6" fill="#FFFFFF"/>
+  <path d="m371 370 6 0 4 13h-14Z" fill="#FFFFFF"/>
+  </g>
+
+  <!-- A tiny bow and sparkle keep the mascot playful without obscuring her expression. -->
+  <g transform="translate(323 215) rotate(16)">
+    <path d="M0 7c-16-14-29-9-27 5 3 13 15 15 28 5Z" fill="#F5A9B8" stroke="#FFFFFF" stroke-width="4"/>
+    <path d="M10 7c16-14 29-9 27 5-3 13-15 15-28 5Z" fill="#5BCEFA" stroke="#FFFFFF" stroke-width="4"/>
+    <circle cx="5" cy="12" r="9" fill="#E9D5FF" stroke="#FFFFFF" stroke-width="4"/>
+  </g>
+  <g fill="#FFFFFF">
+    <path d="m110 174 5 13 13 5-13 5-5 13-5-13-13-5 13-5Z"/>
+    <path d="m403 157 4 10 10 4-10 4-4 10-4-10-10-4 10-4Z"/>
+  </g>
+</svg>
