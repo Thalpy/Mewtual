@@ -12,6 +12,12 @@
     encodeMelody, melodyBits as bitsOf, chordName, PC_SHARP, TREBLE_LINES, BASS_LINES, yOf,
     STAFF_TOP, STAFF_BOT, HEAD_RX, HEAD_RY, buildSheet, scoreText,
   } from "./melody";
+  import {
+    SIGIL_VIEW, SIGIL_C, R_INNER, R_OUTER, R_TEXT, R_EMOJI, NODE_R, LATTICE, nodeLabel, hitNode,
+    appendHit, classifyGesture, encodeSigil, encodeSigilPath, segmentCount,
+    sigilBits as sigilBitsOf, normalizeWord, MAX_SIGIL_EMOJI, SIGIL_COLORS, COLOR_NAMES,
+    coloredCount, ringGlyphs, ringPoints, ringPathD,
+  } from "./sigil";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -24,7 +30,12 @@
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
   type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string };
-  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number };
+  // `expires`: ms-epoch deadline for this listing's CIRCULATION, or null. `expires_known` tells
+  // "explicitly kept forever" (known + null) from "recorded before expiry existed" (!known).
+  type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number; expires: number | null; expires_known: boolean };
+  // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
+  // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
+  type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; pinned: boolean };
   type Found = { server: number; channel: string; is_dm: boolean };
   type Reloaded = { server: number; name: string; invite: string; channel: string; is_dm: boolean };
 
@@ -404,14 +415,201 @@
   // that feeds the SAME vault KDF ("unlock" invoke): the vault crypto is untouched, and a
   // passphrase remains the recommended, highest-entropy option. The scheme prefix means the
   // same finger pattern on different games can never collide into the same secret.
-  type UnlockMethod = "pass" | "spell" | "melody";
+  type UnlockMethod = "pass" | "sigil" | "melody";
   let unlockMethod = $state<UnlockMethod>("pass");
-  // Spell lock: glyphs picked in order from a fixed catalog, encoded by INDEX (stable even
-  // if the glyph art changes): "spell:v1:3-17-9-…". ~4.6 bits per pick.
-  const SPELL_GLYPHS = ["🐱", "🌙", "⭐", "🔥", "❄️", "🍀", "🗝️", "🕯️", "💀", "🌿", "🍄", "⚡", "🌊", "🪶", "🔔", "🫧", "🦴", "🌸", "☄️", "🐟", "🧶", "🪙", "🎐", "🕸️"];
-  let spellSeq = $state<number[]>([]);
-  let spellSecret = $derived(spellSeq.length ? `spell:v1:${spellSeq.join("-")}` : "");
-  let spellBits = $derived(Math.round(spellSeq.length * Math.log2(SPELL_GLYPHS.length)));
+  // Sigil lock, one screen, freely re-editable in any order: a path drawn over a fixed
+  // 19-node magic circle, per-node colour MARKS (optional), a focus-emoji SET, and a masked
+  // magic word — folded into one "sigil:v1:…" secret. This REPLACES the spell lock
+  // ("spell:v1:", glyphs by catalog index), which is RETIRED exactly as melody v1/v2 were: a
+  // vault sealed under spell:v1 must be re-entered under a scheme this build can still
+  // produce. Encoding, lattice geometry, the entropy model, the tap-vs-drag classifier and
+  // the ring-inscription policy live in `sigil.ts` (pure + unit-tested); only
+  // pointer/keyboard input and the ceremony visuals (glow, particles, the cat) belong here.
+  let sigilStrokes = $state<number[][]>([]); // committed strokes of node indices: order AND direction significant
+  let sigilDrawing = $state<number[]>([]); // the stroke in progress (one pointer drag, or keyboard taps)
+  let sigilColors = $state<number[]>(Array(19).fill(0)); // per-node mark 0–3, independent of the path
+  let sigilEmojis = $state<string[]>([]); // selection order is UI-only: the encoder canonicalizes
+  let sigilWord = $state("");
+  // Opt-in ring reveal. The word is the ONE factor a shoulder-surfer can't capture (the path,
+  // marks and emoji are drawn in the open), so by default the ring shows a CONSTANT-count
+  // rune band derived from (session seed, word): it reshuffles as you type but leaks nothing
+  // — not even the length (a per-character or tiled inscription would).
+  let sigilShowWord = $state(false);
+  let sigilSeed = $state(1);
+  let sigilSecret = $derived(encodeSigil(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
+  let sigilBits = $derived(sigilBitsOf(sigilStrokes, sigilColors, sigilEmojis, sigilWord));
+  let sigilComplete = $derived(!!sigilSecret); // a boolean, so effects don't churn per keystroke
+  let sigilWordLen = $derived([...normalizeWord(sigilWord)].length);
+  let sigilMarked = $derived(coloredCount(sigilColors));
+  let sigilSvgEl = $state<SVGSVGElement | undefined>();
+  let sigilTracing = false; // a pointer press is live (as opposed to a keyboard-built stroke)
+  let sigilDownPt: { x: number; y: number } | null = null; // where the press began, viewBox units
+  let sigilTravel = 0; // max distance strayed from the down-point: feeds classifyGesture
+  // Pointer coordinates → viewBox coordinates. The SVG is square (aspect-ratio: 1), so one
+  // scale factor serves both axes.
+  function sigilXY(e: PointerEvent): { x: number; y: number } | null {
+    if (!sigilSvgEl) return null;
+    const r = sigilSvgEl.getBoundingClientRect();
+    if (!r.width) return null;
+    return { x: ((e.clientX - r.left) * SIGIL_VIEW) / r.width, y: ((e.clientY - r.top) * SIGIL_VIEW) / r.height };
+  }
+  function sigilCommitStroke() {
+    // A stroke needs a segment to mean anything: a single latched node is not a path (it is a
+    // colour tap — see sigilPointerUp), so it can never silently fork the path field.
+    if (sigilDrawing.length >= 2) sigilStrokes = [...sigilStrokes, sigilDrawing];
+    sigilDrawing = [];
+  }
+  function cycleSigilColor(i: number) {
+    sigilColors = sigilColors.map((c, j) => (j === i ? (c + 1) % SIGIL_COLORS : c));
+  }
+  function sigilPointerDown(e: PointerEvent) {
+    if (sigilDrawing.length && !sigilTracing) sigilCommitStroke(); // seal a pending keyboard stroke first
+    const p = sigilXY(e);
+    const hit = p ? hitNode(p.x, p.y) : -1;
+    if (hit < 0 || !p) return; // presses begin ON a node — dead space is not a start point
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    sigilTracing = true;
+    sigilDownPt = p;
+    sigilTravel = 0;
+    sigilDrawing = [hit];
+  }
+  function sigilPointerMove(e: PointerEvent) {
+    if (!sigilTracing) return;
+    const p = sigilXY(e);
+    if (!p) return;
+    if (sigilDownPt) sigilTravel = Math.max(sigilTravel, Math.hypot(p.x - sigilDownPt.x, p.y - sigilDownPt.y));
+    sigilDrawing = appendHit(sigilDrawing, hitNode(p.x, p.y)); // hard snap: appendHit ignores misses
+  }
+  function sigilPointerUp() {
+    if (!sigilTracing) return;
+    sigilTracing = false;
+    // One set of nodes, two verbs: classifyGesture (pure, unit-tested) splits them. A tap
+    // (one node, travel ≤ TAP_SLOP) cycles that node's mark; entering a second node makes the
+    // press a path stroke (lifting the pointer IS the stroke separator); a long wander that
+    // latched nothing new is dropped on the floor.
+    const g = classifyGesture(sigilDrawing, sigilTravel);
+    if (g === "colour") cycleSigilColor(sigilDrawing[0]);
+    else if (g === "path") sigilStrokes = [...sigilStrokes, sigilDrawing];
+    sigilDrawing = [];
+    sigilDownPt = null;
+  }
+  // Keyboard path: every node is focusable; Enter/Space adds it to the working stroke (the
+  // explicit "end stroke" button plays the role the pointer-lift plays for a drag) and C
+  // cycles the node's colour mark — the keyboard twin of the tap.
+  function sigilNodeKey(e: KeyboardEvent, i: number) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      sigilDrawing = appendHit(sigilDrawing, i);
+    } else if (e.key === "c" || e.key === "C") {
+      e.preventDefault();
+      cycleSigilColor(i);
+    }
+  }
+  function sigilUndo() {
+    if (sigilDrawing.length) sigilDrawing = [];
+    else sigilStrokes = sigilStrokes.slice(0, -1);
+  }
+  function toggleSigilEmoji(em: string) {
+    // Click to select, click again to deselect. The array keeps UI order; the ENCODER sorts —
+    // so deselect/reselect churn can never change the secret.
+    if (sigilEmojis.includes(em)) sigilEmojis = sigilEmojis.filter((x) => x !== em);
+    else if (sigilEmojis.length < MAX_SIGIL_EMOJI) sigilEmojis = [...sigilEmojis, em];
+  }
+  // Cat summoning: pure latency theatre. It starts WITH the invoke("unlock") call : the KDF
+  // costs real time regardless, so the animation fills a wait that exists anyway : never
+  // delays resolution, and a FAILED unlock aborts it: no cat for a wrong word.
+  let sigilSummon = $state(false);
+  let sigilSummonTimer: ReturnType<typeof setTimeout> | null = null;
+  const reducedMotion = () =>
+    typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  function startSummon() {
+    if (reducedMotion()) return;
+    sigilSummon = true;
+    if (sigilSummonTimer) clearTimeout(sigilSummonTimer);
+    sigilSummonTimer = setTimeout(() => (sigilSummon = false), 900);
+  }
+  function abortSummon() {
+    sigilSummon = false;
+    if (sigilSummonTimer) {
+      clearTimeout(sigilSummonTimer);
+      sigilSummonTimer = null;
+    }
+  }
+  // Reseed the ring runes every time the sigil lock comes up: a camera that filmed one session
+  // must not be able to line yesterday's inscription up against today's.
+  $effect(() => {
+    if (locked && unlockMethod === "sigil") {
+      sigilSeed = (typeof crypto !== "undefined" ? crypto.getRandomValues(new Uint32Array(1))[0] : Date.now()) || 1;
+    }
+  });
+  // Particles float up from the assembled circle. Loop discipline is the point: it runs ONLY
+  // while the completed circle is actually on screen and the tab is visible, and the effect
+  // teardown (unlock, method switch, component destroy) cancels it : a rAF loop left running
+  // on a lock screen burns battery forever. One canvas, not N animated DOM nodes.
+  let sigilFx = $state<HTMLCanvasElement | undefined>();
+  $effect(() => {
+    const canvas = sigilFx;
+    if (!locked || unlockMethod !== "sigil" || !sigilComplete || !canvas || reducedMotion()) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    type Mote = { x: number; y: number; vx: number; vy: number; r: number; life: number };
+    const motes: Mote[] = [];
+    let raf = 0;
+    let last = performance.now();
+    const tint = getComputedStyle(canvas).color; // .sigil-fx sets color: var(--accent)
+    const step = (now: number) => {
+      const dt = Math.min(50, now - last); // clamp so a background stall can't teleport motes
+      last = now;
+      if (motes.length < 40 && Math.random() < 0.3) {
+        const a = Math.random() * Math.PI * 2;
+        const rr = 60 + Math.random() * 160;
+        motes.push({
+          x: W / 2 + Math.cos(a) * rr,
+          y: H / 2 + (Math.abs(Math.sin(a)) * rr) / 2 + 30,
+          vx: (Math.random() - 0.5) * 14,
+          vy: -30 - Math.random() * 50,
+          r: 1.6 + Math.random() * 2.6,
+          life: 1,
+        });
+      }
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = tint;
+      for (let i = motes.length - 1; i >= 0; i--) {
+        const m = motes[i];
+        m.x += (m.vx * dt) / 1000;
+        m.y += (m.vy * dt) / 1000;
+        m.life -= dt / 2800;
+        if (m.life <= 0 || m.y < -6) {
+          motes.splice(i, 1);
+          continue;
+        }
+        ctx.globalAlpha = Math.min(0.7, m.life);
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      raf = requestAnimationFrame(step);
+    };
+    // Hidden tab ⇒ no frames. rAF is throttled when hidden anyway, but "throttled" is not
+    // "stopped", and a lock screen is exactly the surface that sits hidden for days.
+    const onVis = () => {
+      cancelAnimationFrame(raf);
+      if (!document.hidden) {
+        last = performance.now();
+        raf = requestAnimationFrame(step);
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    if (!document.hidden) raf = requestAnimationFrame(step);
+    return () => {
+      cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVis);
+      ctx.clearRect(0, 0, W, H);
+    };
+  });
   // Melody lock: ABSOLUTE MIDI notes: C6 is not C4; octaves carry meaning (and entropy).
   // The on-screen piano shows two octaves with a shift, so any register a MIDI controller
   // played is reachable on screen too. v3 records what a score records: notes that overlap
@@ -623,7 +821,7 @@
     }
   }
   function unlockSecret(): string {
-    return unlockMethod === "pass" ? passphrase : unlockMethod === "spell" ? spellSecret : melodySecret;
+    return unlockMethod === "pass" ? passphrase : unlockMethod === "sigil" ? sigilSecret : melodySecret;
   }
 
   // --- M6: alternate carry channels for pairing blobs (QR + sound) -----------------------
@@ -2175,10 +2373,17 @@
     if (!secret) return;
     unlocking = true;
     error = "";
+    // The summon starts alongside the KDF call and never gates it: the animation fills
+    // latency that exists anyway, and a failed unlock aborts it below.
+    if (unlockMethod === "sigil") startSummon();
     try {
       const reloaded = await invoke<Reloaded[]>("unlock", { passphrase: secret });
       passphrase = "";
-      spellSeq = [];
+      sigilStrokes = [];
+      sigilDrawing = [];
+      sigilColors = Array(19).fill(0);
+      sigilEmojis = [];
+      sigilWord = "";
       stopPlayback();
       melodySeq = [];
       for (const r of reloaded) {
@@ -2194,6 +2399,7 @@
       loadInbox(); // populate the inbox badge once the reloaded servers are live
       refreshAllServerIcons(); // rail icons come from each server's livery doc
     } catch (e) {
+      abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
       error = String(e);
     } finally {
       unlocking = false;
@@ -2626,10 +2832,19 @@
       });
       files = v.files;
       hasPeers = v.has_peers;
+      // Wiki-pinned content addresses, derived fresh from the wiki on the backend each call: a
+      // file embedded in a live page never drops out of circulation, whatever its expiry says.
+      // One extra round-trip per refresh, so the Files tab and Properties can say so instantly.
+      wikiPinned = new Set(
+        await invoke<string[]>("get_wiki_pinned_cids", { server: activeServerId })
+      );
     } catch (e) {
       error = String(e);
     }
   }
+  // Lowercase-hex cids embedded in a live wiki page (the never-decay set).
+  let wikiPinned = $state<Set<string>>(new Set());
+  const isPinned = (cid: string) => wikiPinned.has(cid.toLowerCase());
 
   // The availability of a file for the browser indicator: held locally / partially downloaded /
   // fetchable from peers / no peers online: or actively downloading. Reactive (reads files,
@@ -3000,7 +3215,7 @@
       const cid = (el.getAttribute("data-file-cid") ?? "").toLowerCase();
       const label = chipLabel(el) || "file";
       openMenu(e, [
-        { label: "Open file details", icon: "ⓘ", onSelect: () => openFileRef(cid) },
+        { label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) },
         { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](file:${cid})`) },
         { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) },
       ]);
@@ -3029,8 +3244,13 @@
       const code = (el.getAttribute("data-emoji") ?? "").replace(/:/g, "");
       openMenu(e, [{ label: `Copy :${code}:`, icon: "⧉", onSelect: () => copyText(`:${code}:`) }]);
     } else {
-      const cid = el.getAttribute("data-embed-cid") ?? "";
-      openMenu(e, [{ label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) }]);
+      // An inline embed (`![alt](cid:HEX)`) in chat, status or a wiki page : all three render
+      // through this one context-menu path, so Properties works on every surface.
+      const cid = (el.getAttribute("data-embed-cid") ?? "").toLowerCase();
+      openMenu(e, [
+        { label: "Properties", icon: "📄", onSelect: () => openFileRef(cid) },
+        { label: "Copy address (CID)", icon: "#", onSelect: () => copyText(cid) },
+      ]);
     }
   }
   async function refreshWiki() {
@@ -3574,6 +3794,74 @@
   let fileInfoPreviewError = $state(false); // the preview fetch failed (so "Loading…" doesn't hang)
   let fileInfoBusy = $state(false);
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
+  let fileInfoUsage = $state<UiFileUsage | null>(null); // null = still checking
+  let fileInfoExpiryBusy = $state(false);
+
+  // The default circulation lifetime, mirroring `catcoms_app::FILE_EXPIRY_DEFAULT_MS`. Used only
+  // to compute the deadline "Restore 30-day expiry" writes back; new shares are stamped by the
+  // backend off its injected clock.
+  const FILE_EXPIRY_DEFAULT_MS = 30 * 24 * 60 * 60 * 1000;
+  const RELATIVE_FMT = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  /** An absolute day in the viewer's locale, e.g. "Sep 14, 2026". */
+  function fmtDay(ms: number): string {
+    return new Date(ms).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+  /** A coarse signed distance from `now`, e.g. "in 30 days" / "3 days ago" / "tomorrow". */
+  function relDay(ms: number, now: number): string {
+    const delta = ms - now;
+    const abs = Math.abs(delta);
+    if (abs < 3_600_000) return RELATIVE_FMT.format(Math.round(delta / 60_000), "minute");
+    if (abs < 86_400_000) return RELATIVE_FMT.format(Math.round(delta / 3_600_000), "hour");
+    if (abs < 45 * 86_400_000) return RELATIVE_FMT.format(Math.round(delta / 86_400_000), "day");
+    return RELATIVE_FMT.format(Math.round(delta / (30 * 86_400_000)), "month");
+  }
+
+  // The "Circulates until" row. Precedence: a wiki embed pins the file regardless of any recorded
+  // deadline; then an explicit keep-forever; then a date; then a legacy listing that never
+  // recorded one. `kind` drives the styling, `text` is the row's wording.
+  type ExpiryView = { kind: "pinned" | "forever" | "date" | "unknown"; text: string };
+  let fileInfoExpiry = $derived.by((): ExpiryView => {
+    const f = fileInfo;
+    if (!f) return { kind: "unknown", text: "" };
+    if (isPinned(f.cid) || fileInfoUsage?.pinned)
+      return { kind: "pinned", text: "pinned: embedded in the wiki, never drops from sharing" };
+    if (!f.expires_known) return { kind: "unknown", text: "not recorded (older share)" };
+    if (f.expires === null) return { kind: "forever", text: "forever" };
+    return { kind: "date", text: `${fmtDay(f.expires)} · ${relDay(f.expires, nowTick)}` };
+  });
+  // Expiry is per listing and the gate is uploader / owner / admin, matching the backend.
+  let canSetExpiry = $derived(
+    !!fileInfo && (fileInfo.author === myFp || myRole === "owner" || myRole === "admin")
+  );
+  let keptForever = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
+
+  /** Toggle this listing between "keep forever" and a fresh 30-day circulation window. */
+  async function toggleKeepForever() {
+    if (activeServerId === null || !fileInfo) return;
+    const f = fileInfo;
+    const forever = !keptForever; // the state we're moving TO
+    const expires = forever ? null : Date.now() + FILE_EXPIRY_DEFAULT_MS;
+    fileInfoExpiryBusy = true;
+    const tid = toast(forever ? "Keeping forever…" : "Restoring 30-day expiry…", "info", 0);
+    try {
+      await invoke("set_file_expiry", { server: activeServerId, cid: f.cid, path: f.path, expires });
+      await refreshFiles();
+      // Re-point the open pane at the refreshed listing so the row repaints.
+      const fresh = files.find((x) => x.cid === f.cid && x.path === f.path);
+      if (fresh && fileInfo?.cid === f.cid) fileInfo = fresh;
+      updateToast(
+        tid,
+        forever
+          ? `${f.name} will be kept in circulation forever`
+          : `${f.name} circulates until ${fmtDay(expires as number)}`,
+        "ok"
+      );
+    } catch (e) {
+      updateToast(tid, `Couldn't change the expiry: ${e}`, "err", 9000);
+    } finally {
+      fileInfoExpiryBusy = false;
+    }
+  }
   // Tracked downloads keyed by file cid, for the Downloads tab + the file-info progress bar. Driven
   // by 'download-progress' events (per-chunk) from the actor. Only EXPLICIT downloads (the Download
   // button) are tracked here: background embed/preview fetches emit progress but create no entry.
@@ -3617,7 +3905,17 @@
     fileInfoPreview = "";
     fileInfoPreviewError = false;
     confirmDeleteCid = "";
+    fileInfoUsage = null;
     const id = activeServerId;
+    // Where the file is used (wiki pages + status/chat counts). Async like the availability row,
+    // and guarded against the pane being switched while the scan is in flight.
+    invoke<UiFileUsage>("get_file_usage", { server: id, cid: f.cid })
+      .then((u) => {
+        if (fileInfo?.cid === f.cid) fileInfoUsage = u;
+      })
+      .catch(() => {
+        if (fileInfo?.cid === f.cid) fileInfoUsage = { wiki_pages: [], status_count: 0, chat_count: 0, pinned: false };
+      });
     // Report whether the blob is held locally *before* a preview fetch would pull it. Guard the
     // assignment against a race where the user clicked another file while this was in flight.
     try {
@@ -3646,6 +3944,14 @@
     fileInfoPreviewError = false;
     fileInfoAvail = null;
     confirmDeleteCid = "";
+    fileInfoUsage = null;
+  }
+
+  /** From Properties → "Used in": close the pane and open the wiki page that embeds the file. */
+  async function openUsageWikiPage(name: string) {
+    closeFileInfo();
+    switchView("wiki");
+    await openWikiPage(name);
   }
 
   async function removeFile(f: UiFile) {
@@ -3876,7 +4182,7 @@
       f = files.find((x) => x.cid.toLowerCase() === cid);
     }
     if (f) openFileInfo(f);
-    else error = "That file is no longer in this server's file index.";
+    else toast("That file is no longer in this server's file index.", "err", 6000);
   }
   // Follow a `[…](status:ID)` chip: switch to the Status tab and flash the post.
   let flashStatusId = $state("");
@@ -5041,7 +5347,7 @@
   content column's surface strip. Shared by the server and DM sidebars: `dm` suppresses the blocks
   that only make sense on a server (channels, the status feed's blurb).
 -->
-<!-- The "+" insert panel: link/embed this server's own content. One snippet, two homes — the
+<!-- The "+" insert panel: link/embed this server's own content. One snippet, two homes : the
   chat composer (above it) and the wiki editor's toolbar (below it); insertTarget routes the
   insertion to the right caret. -->
 {#snippet insertPanel()}
@@ -5247,14 +5553,14 @@
     <div class="start">
       <h1>CatComs</h1>
       <p class="muted">
-        Unlock your servers: with a passphrase, a spell, or a tune. All three seal the
+        Unlock your servers: with a passphrase, a sigil, or a tune. All three seal the
         same vault; pick the one you'll actually remember.
       </p>
       <div class="ul-tabs" role="tablist">
         <button type="button" role="tab" class:active={unlockMethod === "pass"} aria-selected={unlockMethod === "pass"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "pass"; }}>
           Passphrase <span class="ul-rec">recommended</span>
         </button>
-        <button type="button" role="tab" class:active={unlockMethod === "spell"} aria-selected={unlockMethod === "spell"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "spell"; }}>Spell</button>
+        <button type="button" role="tab" class:active={unlockMethod === "sigil"} aria-selected={unlockMethod === "sigil"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "sigil"; }}>Sigil</button>
         <button type="button" role="tab" class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; initMidi(); }}>Melody</button>
       </div>
       {#if unlockMethod === "pass"}
@@ -5269,27 +5575,151 @@
             autofocus
           />
         </label>
-      {:else if unlockMethod === "spell"}
+      {:else if unlockMethod === "sigil"}
         <p class="muted small">
-          Cast your unlock spell: the same glyphs, in the same order, every time. Memorable,
-          but weaker than a good passphrase; longer spells are stronger.
+          Inscribe your sigil: drag node to node over the circle (order and direction count;
+          lift and press again for a second stroke), tap a node to cycle its mark, pick one or
+          more focus emoji, and whisper a magic word. Keyboard: Tab to a node, Enter adds it to
+          the stroke, <span class="fp">c</span> cycles its mark. Path, emoji and word together
+          are the secret (marks are optional), so a short sigil of 6–10 hops is plenty.
         </p>
-        <div class="spell-grid">
-          {#each SPELL_GLYPHS as g, i (i)}
-            <button type="button" class="spell-glyph" title={`glyph ${i + 1}`} onclick={() => (spellSeq = [...spellSeq, i])}>{g}</button>
-          {/each}
+        <div class="sigil-wrap" class:complete={sigilComplete}>
+          <svg
+            bind:this={sigilSvgEl}
+            class="sigil-svg"
+            viewBox={`0 0 ${SIGIL_VIEW} ${SIGIL_VIEW}`}
+            role="application"
+            aria-label="Sigil circle: 19 nodes. Tab between nodes; Enter adds the focused node to the current stroke; C cycles its colour mark."
+            onpointerdown={sigilPointerDown}
+            onpointermove={sigilPointerMove}
+            onpointerup={sigilPointerUp}
+            onpointercancel={sigilPointerUp}
+          >
+            <defs>
+              <marker id="sigil-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path class="sigil-arrow" d="M 0 0 L 8 4 L 0 8 z" />
+              </marker>
+              <path id="sigil-ringpath" d={ringPathD(R_TEXT)} />
+            </defs>
+            <!-- Decorative ring guides run through the node rings; nodes draw over them. -->
+            <circle class="sigil-ring" cx={SIGIL_C} cy={SIGIL_C} r={R_INNER} />
+            <circle class="sigil-ring" cx={SIGIL_C} cy={SIGIL_C} r={R_OUTER} />
+            <!-- Ring inscription. An EMPTY word shows nothing; from the FIRST character the
+                 ring is a CONSTANT-count rune band derived from (session seed, word),
+                 stretched around the full circumference — the SAME count for 1 character or
+                 30. Do NOT "fix" this into a length-proportional ring: per-character runes
+                 leak the word's length and a repeated sequence leaks it via its period. The
+                 empty/non-empty step leaks exactly one bit, which the disabled Unlock button
+                 already gives away (an empty word can't form a valid secret). It reshuffles
+                 as you type — the keyed tspans remount only where a rune actually changed,
+                 which is the "being inscribed" flicker — but recovers to nothing without the
+                 session seed (reveal toggle aside). -->
+            {#if sigilWordLen}
+              <text class="sigil-ring-text">
+                {#if sigilShowWord}
+                  <textPath href="#sigil-ringpath" startOffset="1%">{normalizeWord(sigilWord)}</textPath>
+                {:else}
+                  <textPath href="#sigil-ringpath" textLength={Math.round(2 * Math.PI * R_TEXT) - 8} lengthAdjust="spacing">
+                    {#each ringGlyphs(sigilWord, sigilSeed) as g, i (`${i}:${g}`)}<tspan class="sigil-glyph">{g}</tspan>{/each}
+                  </textPath>
+                {/if}
+              </text>
+            {/if}
+            <!-- The chosen emoji repeat as the points around the circle, alternating through
+                 the set (display order is the pick order; only the encoder sorts). -->
+            {#if sigilEmojis.length}
+              {#each ringPoints(12, R_EMOJI, 15) as p, i (i)}
+                <text class="sigil-ring-emoji" x={p.x} y={p.y}>{sigilEmojis[i % sigilEmojis.length]}</text>
+              {/each}
+            {/if}
+            {#each sigilStrokes as st, i (i)}
+              <polyline
+                class="sigil-path"
+                points={st.map((n) => `${LATTICE[n].x},${LATTICE[n].y}`).join(" ")}
+                marker-end="url(#sigil-arrow)"
+              />
+            {/each}
+            {#if sigilDrawing.length > 1}
+              <polyline class="sigil-path live" points={sigilDrawing.map((n) => `${LATTICE[n].x},${LATTICE[n].y}`).join(" ")} />
+            {/if}
+            {#each LATTICE as n, i (i)}
+              <circle
+                class="sigil-node"
+                class:lit={sigilDrawing.includes(i) || sigilStrokes.some((s) => s.includes(i))}
+                cx={n.x}
+                cy={n.y}
+                r={NODE_R}
+                role="button"
+                tabindex="0"
+                aria-label={`${nodeLabel(i)}, mark: ${COLOR_NAMES[sigilColors[i]]}. Enter adds to stroke, C cycles the mark.`}
+                onkeydown={(e) => sigilNodeKey(e, i)}
+              />
+              <!-- Colour marks: every variant is a different SHAPE as well as hue (dot / ring /
+                   diamond), so the 4-way signal survives colour-blindness and any palette. -->
+              {#if sigilColors[i] === 1}
+                <circle class="sigil-mark m1" cx={n.x} cy={n.y} r="3.4" />
+              {:else if sigilColors[i] === 2}
+                <circle class="sigil-mark m2" cx={n.x} cy={n.y} r="4.6" />
+              {:else if sigilColors[i] === 3}
+                <rect class="sigil-mark m3" x={n.x - 3.4} y={n.y - 3.4} width="6.8" height="6.8" transform={`rotate(45 ${n.x} ${n.y})`} />
+              {/if}
+            {/each}
+          </svg>
+          <canvas bind:this={sigilFx} class="sigil-fx" width="576" height="576" aria-hidden="true"></canvas>
+          {#if sigilSummon}<div class="sigil-summon" aria-hidden="true">🐈‍⬛</div>{/if}
         </div>
         <div class="ul-seq">
-          {#if spellSeq.length}
-            <span class="ul-seq-chips">{#each spellSeq as s, i (i)}<span>{SPELL_GLYPHS[s]}</span>{/each}</span>
-            <button type="button" class="ghost small" title="Remove the last glyph" onclick={() => (spellSeq = spellSeq.slice(0, -1))}>⌫</button>
-            <button type="button" class="ghost small" onclick={() => (spellSeq = [])}>Clear</button>
+          {#if sigilDrawing.length}
+            <span class="muted small mono">stroke: {sigilDrawing.join("-")}</span>
+            <button type="button" class="ghost small" title="Finish the current stroke (a drag finishes when you lift)" onclick={sigilCommitStroke} disabled={sigilDrawing.length < 2}>end stroke</button>
+            <button type="button" class="ghost small" onclick={() => (sigilDrawing = [])}>drop</button>
+          {:else if sigilStrokes.length || sigilMarked}
+            <span class="muted small mono">
+              {sigilStrokes.length ? `${encodeSigilPath(sigilStrokes)} · ${segmentCount(sigilStrokes)} hop${segmentCount(sigilStrokes) === 1 ? "" : "s"}` : "no path yet"}{sigilMarked ? ` · ${sigilMarked} marked` : ""}
+            </span>
+            {#if sigilStrokes.length}
+              <button type="button" class="ghost small" title="Remove the last stroke" onclick={sigilUndo}>⌫</button>
+            {/if}
+            <button type="button" class="ghost small" title="Clear the path and all marks" onclick={() => { sigilStrokes = []; sigilColors = Array(19).fill(0); }}>Clear</button>
           {:else}
-            <span class="muted small">Nothing cast yet.</span>
+            <span class="muted small">No sigil yet: drag from one node to another (tap to mark).</span>
           {/if}
         </div>
-        {#if spellSeq.length}
-          <div class="ul-meter {bitsTier(spellBits)}">≈ {spellBits} bits{spellBits < 28 ? ": too short, add more glyphs" : spellBits < 44 ? ": okay; longer is stronger" : ": strong"}</div>
+        <details class="sigil-emoji-pick">
+          <summary>{sigilEmojis.length ? `focus emoji: ${sigilEmojis.join(" ")}` : "choose focus emoji"} <span class="muted">({sigilEmojis.length}/{MAX_SIGIL_EMOJI} — click again to remove)</span></summary>
+          <div class="sigil-emoji-grid">
+            {#each EMOJI_SETS as set (set.label)}
+              {#each set.list as em (em)}
+                <button
+                  type="button"
+                  class="sigil-emoji"
+                  class:sel={sigilEmojis.includes(em)}
+                  title={set.label}
+                  disabled={!sigilEmojis.includes(em) && sigilEmojis.length >= MAX_SIGIL_EMOJI}
+                  onclick={() => toggleSigilEmoji(em)}
+                >{em}</button>
+              {/each}
+            {/each}
+          </div>
+        </details>
+        <label class="field">
+          <span class="muted">Magic word</span>
+          <input
+            type="password"
+            bind:value={sigilWord}
+            onkeydown={(e) => e.key === "Enter" && sigilSecret && unlock()}
+            placeholder="magic word"
+            autocomplete="off"
+          />
+        </label>
+        <label class="sigil-show muted small">
+          <input type="checkbox" bind:checked={sigilShowWord} />
+          inscribe my actual word in the ring (visible to anyone watching)
+        </label>
+        {#if sigilComplete}
+          <div class="ul-meter {bitsTier(sigilBits)}">≈ {sigilBits} bits{sigilBits < 28 ? ": add hops or a longer word" : sigilBits < 44 ? ": okay; a little more is stronger" : ": strong"}</div>
+        {:else}
+          <span class="muted small mono">sigil {sigilStrokes.length ? "✓" : "·"} · emoji {sigilEmojis.length ? "✓" : "·"} · word {sigilWordLen ? "✓" : "·"}</span>
         {/if}
       {:else}
         <p class="muted small">
@@ -6227,6 +6657,9 @@
                 <button class="file-name" title="View file details" onclick={() => openFileInfo(f)}>
                   {fileIcon(f.mime)} {f.name}
                 </button>
+                {#if isPinned(f.cid)}
+                  <span class="file-pin" title="Embedded in a wiki page: never drops out of circulation">📌</span>
+                {/if}
                 <span class="muted file-size">{fmtSize(f.size)} · {nameOf(f.author)} · <span class="avail-text {av.cls}">{av.label}</span></span>
               </li>
             {/each}
@@ -7054,7 +7487,7 @@
           <div class="overlay-body">
             <section class="set-section">
               <h3>Server</h3>
-              <p>{cur?.name ?? "—"} <span class="role-badge {myRole}">{myRole}</span></p>
+              <p>{cur?.name ?? ":"} <span class="role-badge {myRole}">{myRole}</span></p>
               <form class="rename-row" onsubmit={(e) => { e.preventDefault(); renameServer(); }}>
                 <input bind:value={serverNameDraft} placeholder="Server name" />
                 <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
@@ -7406,9 +7839,39 @@
               <dd>{fileInfo.mime || "unknown"}</dd>
               <dt>Folder</dt>
               <dd>{fileInfo.path === "" ? "(root)" : fileInfo.path}</dd>
+              <dt>Circulates until</dt>
+              <dd>
+                <span class="expiry {fileInfoExpiry.kind}">
+                  {#if fileInfoExpiry.kind === "pinned"}📌{/if}{fileInfoExpiry.text}
+                </span>
+              </dd>
+              <dt>Used in</dt>
+              <dd>
+                {#if fileInfoUsage === null}
+                  <span class="muted">checking…</span>
+                {:else if fileInfoUsage.wiki_pages.length === 0 && fileInfoUsage.status_count === 0 && fileInfoUsage.chat_count === 0}
+                  <span class="muted">nowhere yet</span>
+                {:else}
+                  <span class="usage-list">
+                    {#each fileInfoUsage.wiki_pages as page (page)}
+                      <button class="wikilink" onclick={() => openUsageWikiPage(page)}>{page}</button>
+                    {/each}
+                    {#if fileInfoUsage.chat_count > 0}
+                      <span class="usage-count">{fileInfoUsage.chat_count} chat message{fileInfoUsage.chat_count === 1 ? "" : "s"}</span>
+                    {/if}
+                    {#if fileInfoUsage.status_count > 0}
+                      <span class="usage-count">{fileInfoUsage.status_count} status post{fileInfoUsage.status_count === 1 ? "" : "s"}</span>
+                    {/if}
+                  </span>
+                {/if}
+              </dd>
               <dt>Address</dt>
               <dd class="cid" title={fileInfo.cid}>{fileInfo.cid.slice(0, 16)}…</dd>
             </dl>
+            <p class="muted small expiry-note">
+              Expiry only stops the file being <strong>auto-circulated</strong> to members. Nothing is deleted from
+              anyone's device, and the file stays fetchable by address for as long as any member still holds it.
+            </p>
 
             {#if activeServerId !== null && downloads[dlKey(activeServerId, fileInfo.cid)] && (downloads[dlKey(activeServerId, fileInfo.cid)].status === "downloading" || downloads[dlKey(activeServerId, fileInfo.cid)].status === "queued")}
               {@const di = downloads[dlKey(activeServerId, fileInfo.cid)]}
@@ -7421,6 +7884,11 @@
             {/if}
             <div class="file-info-actions">
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              {#if canSetExpiry}
+                <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
+                  {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}
+                </button>
+              {/if}
               {#if myRole === "owner" || myRole === "admin"}
                 {#if confirmDeleteCid === fileInfo.cid}
                   <button class="danger-btn" disabled={fileInfoBusy} onclick={() => fileInfo && removeFile(fileInfo)}>

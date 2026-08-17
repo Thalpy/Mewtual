@@ -4088,20 +4088,141 @@ button.you-panel:hover {
   border-radius: 999px;
   padding: 0 6px;
 }
-.spell-grid {
+/* Sigil lock: one SVG is both the input surface and the assembled artefact — lattice, drawn
+   path, emoji points and ring inscription compose in place. (The spell lock's grid styles
+   died with the spell lock.) */
+.sigil-wrap {
+  position: relative;
+  align-self: center;
+  width: min(320px, 100%);
+}
+.sigil-svg {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  touch-action: none; /* the drag IS the gesture: never hand it to the scroller */
+  user-select: none;
+}
+.sigil-ring {
+  fill: none;
+  stroke: var(--border-soft);
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+.sigil-node {
+  fill: var(--bg-elev);
+  stroke: var(--border);
+  stroke-width: 1.4;
+  cursor: pointer;
+  outline: none;
+}
+.sigil-node:hover { stroke: var(--accent); }
+.sigil-node:focus-visible { stroke: var(--accent); stroke-width: 2.6; }
+.sigil-node.lit {
+  fill: color-mix(in oklab, var(--accent) 30%, var(--bg-elev));
+  stroke: var(--accent);
+}
+.sigil-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.sigil-path.live { opacity: 0.6; stroke-dasharray: 5 4; }
+.sigil-arrow { fill: var(--accent); }
+/* Node colour marks: hue is never the only signal — each variant is also a distinct SHAPE
+   (filled dot / hollow ring / diamond), so the 4-way distinction survives colour-blindness.
+   Hues reuse the theme's own distinct trio; the marks are decorative categories here, not
+   the semantic jobs those tokens carry elsewhere. */
+.sigil-mark { pointer-events: none; }
+.sigil-mark.m1 { fill: var(--ok); }
+.sigil-mark.m2 { fill: none; stroke: var(--warn); stroke-width: 2; }
+.sigil-mark.m3 { fill: var(--info); }
+.sigil-ring-text {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 4px;
+  fill: var(--text-2);
+}
+.sigil-glyph { animation: sigil-glyph-in 0.4s ease-out both; }
+@keyframes sigil-glyph-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.sigil-ring-emoji {
+  font-size: 13px;
+  text-anchor: middle;
+  dominant-baseline: central;
+}
+/* All three factors present: the artefact goes live. Glow is one drop-shadow on one svg
+   (cheap); the particles are one canvas, not a swarm of animated DOM nodes. */
+.sigil-wrap.complete .sigil-svg {
+  filter: drop-shadow(0 0 12px color-mix(in oklab, var(--accent) 45%, transparent));
+}
+.sigil-fx {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  color: var(--accent); /* the particle loop reads its tint from here via getComputedStyle */
+}
+/* The cat summon: ≤900ms, runs CONCURRENTLY with the unlock KDF (never gates it), and the
+   failure path removes the element mid-flight — an aborted summon simply vanishes. */
+.sigil-summon {
+  position: absolute;
+  inset: 0;
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  place-items: center;
+  font-size: 3.4rem;
+  pointer-events: none;
+  animation: sigil-summon 0.9s ease-out both;
+}
+@keyframes sigil-summon {
+  0% { opacity: 0; transform: translateY(34px) scale(0.3); }
+  55% { opacity: 1; transform: translateY(-4px) scale(1.05); }
+  100% { opacity: 0; transform: translateY(-20px) scale(1.2); }
+}
+.sigil-emoji-pick summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+.sigil-emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(9, 1fr);
+  gap: 3px;
+  max-height: 150px;
+  overflow-y: auto;
+  margin-top: 6px;
+}
+.sigil-emoji {
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0.3rem 0;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+}
+.sigil-emoji:hover { border-color: var(--accent); }
+.sigil-emoji.sel {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 22%, var(--bg-elev));
+}
+.sigil-show {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
 }
-.spell-glyph {
-  font-size: 1.3rem;
-  padding: 0.45rem 0;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  line-height: 1;
+/* JS already skips particles + summon under reduced motion; this is the CSS backstop. */
+@media (prefers-reduced-motion: reduce) {
+  .sigil-glyph,
+  .sigil-summon {
+    animation: none;
+  }
+  .sigil-wrap.complete .sigil-svg { filter: none; }
 }
-.spell-glyph:hover { background: var(--bg-elev); border-color: var(--accent); }
 .piano {
   display: flex;
   gap: 3px;
@@ -4759,4 +4880,58 @@ button.you-panel:hover {
     opacity: 0;
     transform: translateY(4px);
   }
+}
+
+/* --- File circulation expiry + "Used in" (Properties pane) --- */
+
+/* The "Circulates until" value. Each state reads at a glance: a wiki pin and an explicit
+   keep-forever are both promises the file stays shared; a date is neutral; a legacy listing that
+   never recorded one is deliberately dim, because it promises nothing. */
+.expiry {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+.expiry.pinned { color: var(--ok); }
+.expiry.forever { color: var(--ok); }
+.expiry.date { color: var(--text); }
+.expiry.unknown { color: var(--muted); font-style: italic; }
+
+/* The clarification under the metadata list: expiry drops a file from circulation, it never
+   deletes anyone's copy. */
+.expiry-note {
+  margin: -8px 0 16px;
+}
+
+/* "Used in": wiki page links first, then plain reference counts. Wraps on a narrow pane. */
+.usage-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.6rem;
+}
+/* The page links are real buttons (they navigate), so strip the button chrome back to the
+   .wikilink look the rendered rich text uses. */
+.usage-list button.wikilink {
+  padding: 0;
+  border: none;
+  border-bottom: 1px dotted var(--accent);
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  font-weight: inherit;
+}
+.usage-list button.wikilink:hover {
+  background: none;
+  color: var(--accent-hi);
+}
+.usage-count {
+  color: var(--muted);
+}
+
+/* A wiki-pinned file in the browser: it can never drop out of circulation. */
+.file-pin {
+  flex: none;
+  font-size: 0.85em;
+  line-height: 1;
 }

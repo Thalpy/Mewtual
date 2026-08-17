@@ -57,8 +57,8 @@ export const normalizeEvent = (notes: number[], dur: number): MelodyEvent => ({
  *
  * v3 records what a score records — chords and note values. v1 (pitch-class-folded) and v2 (bare
  * absolute notes) are retired: a vault sealed under either must be re-entered under a scheme this
- * build can still produce. The scheme prefix is what keeps the same finger pattern on the spell
- * lock and the melody lock from colliding into one vault key.
+ * build can still produce. The scheme prefix is what keeps a secret entered on the sigil lock
+ * and one played on the melody lock from ever colliding into one vault key.
  */
 export const encodeMelody = (seq: MelodyEvent[], rhythm: boolean): string =>
   seq.length ? `melody:v3:${seq.map((e) => encodeEvent(e, rhythm)).join("-")}` : "";
