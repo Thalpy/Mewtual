@@ -1,85 +1,100 @@
-# CatComs
+<p align="center">
+  <img src="assets/mewtual-logo.svg" alt="Mewtual: a cat in a chat bubble with a heart lock inside a pastel security shield" width="180">
+</p>
 
-A peer-to-peer, serverless, end-to-end-encrypted, invite-only group communications
-system. Mental model: **Signal + federation**.
+<h1 align="center">Mewtual</h1>
 
-- **Encrypted groups** — each "server/connection" is its own MLS (RFC 9420) group with
-  an independent key schedule; per-device identity; forward secrecy + post-compromise
-  security.
-- **Serverless mesh** — nodes find and sync with each other over rust-libp2p with
-  zero-knowledge relay/rendezvous nodes for NAT traversal. Relays only ever route
-  Noise+MLS ciphertext.
-- **Eventually-consistent** — channels, the wiki, status posts and calendar events are
-  all encrypted append-only CRDT documents; offline members catch up on reconnect.
-- **Content-addressed files** — images/audio kept locally for inline embeds; large/old
-  files expire from cache (default 1 month, adjustable) but stay re-fetchable on demand
-  by content address.
-- **One codebase, three targets** — a shared Rust core packaged via Tauri 2 to Linux,
-  Windows and Android.
+<p align="center">
+  <strong>Private communities, owned by the people in them.</strong><br>
+  Peer-to-peer · end-to-end encrypted · invite-only · no accounts
+</p>
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design, the security
-corrections from the adversarial review, and the phased roadmap. **Using the desktop
-app?** Start with the [**User Guide**](docs/USER_GUIDE.md).
+<p align="center">
+  <a href="docs/USER_GUIDE.md">User guide</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/THREAT-MODEL.md">Threat model</a>
+</p>
 
-## Status
+> [!WARNING]
+> Mewtual is an experimental, early-stage project. The desktop app works, but it has not
+> received an independent security audit and should not yet be treated as production-ready.
 
-Early construction, built **block-by-block with tests gating each phase**.
+## What is Mewtual?
 
-| Phase | Block | State |
-|------:|-------|-------|
-| 0 | Workspace, `Clock`/`Transport` seams, canonical wire format, CI | done |
-| 1 | Device identity + unified key hierarchy | done |
-| 2 | MLS group core (local) | done |
-| 3 | Single-use device-bound invites | done |
-| 4 | CRDT replication (inner-signed ops, snapshot catch-up) | done |
-| 5 | Storage & retention | done |
-| 6a | Mesh transport: libp2p `MeshService` over the seam (gossipsub + req/resp) | done |
-| 6b | Channel sync over the mesh (live gossip + catch-up); + diagnostics (tracing) | done |
-| 6c | Network join handshake (inviter-authenticated, single-use over the wire) | done |
-| 6d-1a | Membership commit propagation (single designated committer) — multi-member join converges | done |
-| 6d-1b | Missed-commit recovery (commit catch-up + ordered replay, peer discovery) + past-epoch key window | done |
-| 6d-2 | Fork resolution + single-serializer membership (convergence-safe; concurrent-committer path fenced off until I1) | done |
-| 6e-1/2 | Full stack over real libp2p; multi-process `serve`/`join` over TCP | done |
-| 6e-3a/b/c | Circuit relay v2 (reserve + dial-through) + DCUtR hole-punch (NAT traversal) | done |
-| 6e-3d-1/2 | Per-removal routing secret + member-only rotating gossip topics + join-time transfer (closes the pre-existing topic-disclosure bug) | done |
-| 6e-3d-3/4 | Zero-knowledge rendezvous server + client (register/discover, no auto-dial) | done |
-| 6e-3d-5 | Signed catch-up responses + two-pool peer model (catch-up source trust) | done |
-| 6e-3d-6 | `catcoms-discovery` `DiscoveryPolicy` (ranked, bounded dial plan) + catch-up nonce/epoch anti-replay + pre-dial membership tag | done |
-| 6e-3d-7 | Member PEX (`KIND_PEX`): members supply each other dialable signed peer records (members-only, responder-signed, capped/rate-limited) | done |
-| 6e-3d-8 | Advisory eclipse detector (D/R/S, hysteresis, never gates) + cross-session address cache (tamper-detected on load) | done |
-| 6e-3d-9 | Invite rewiring (`rendezvous` vector, `INVITE_DOMAIN` v2) + pre-join `join_ns` + `serve --rendezvous`/`join` discover→dial→join (no hard-coded address) | done |
-| 7a | **Direct** full-stack join over **real TCP sockets** (MLS join + channel converge over OS sockets) | done |
-| 7b | Consolidated **security suite** (threat-model map + cross-layer adversarial scenarios) | done |
-| 7c | **Rendezvous-discovered** join over real TCP (no hard-coded server address) | done |
-| 7d | **Relayed** full-stack join over real TCP (NAT traversal; server reachable only via a relay) | done |
-| 7e | **DCUtR-upgraded** full-stack path over real TCP (relayed join hole-punches to a direct link) | done |
-| 8a | `catcoms-app` **product model** (UI-facing `Server` facade + canonical message schema) | done |
-| 8b-1 | async **event-stream actor** (commands in / events out) | done |
-| 8b-2 | **Tauri 2 + Svelte desktop app** (`apps/desktop`): found → #general → send/read | done |
-| 8c | **invite + join in the UI** — two app instances talk over real TCP (found → copy invite → paste/join) | done |
-| 8d | **multi-channel** — IRC-style name-addressed channels + channel-list sidebar | done |
-| 8e | **member roster + chat polish** — live Members panel + own-message bubbles | done |
-| 8f | **member profiles (backend)** — shared `DocType::Profile` doc (name/color/font/effect), messages authored by device fingerprint | done |
-| 8g | **profile editor + rich rendering** — customize name/color/font/animated effect; roster + messages resolve fingerprint → profile | done |
-| 8h | **member avatars** — small inline display pictures (canvas-downscaled, capped); circular avatars in roster + messages, initials fallback | done |
-| 8i | **per-channel history catch-up** — a joiner catches up the backlog of any channel it opens (not just #general) from the peer it joined through | done |
-| 8j | **symmetric (any-peer) catch-up** — either side pulls the backlog of a channel the other created (best known peer) | done |
-| 8k | **chat UX polish** — message timestamps (clock-stamped) + auto-scroll to newest | done |
-| 8l | **content-addressed blob fetch over the mesh** — `KIND_BLOB_FETCH` (members-only, signed, capped, rate-limited); the foundation for large avatars + fileshare | done |
-| 8m | **avatars over the blob layer** — profile carries the avatar's CID, not inline bytes; fetched on demand over the mesh | done |
-| 8n | **fileshare browser** — per-server file index + upload/list/download (bytes via the blob mesh); Files panel in the UI | done |
-| 8o | **cross-network founding/joining** — bind all interfaces + advertise a reachable address (LAN/public IP); joining dials all bootstrap addresses | done |
-| 8p | **multi-server** — a Discord-style server rail; be in several servers at once (each its own group/channels/roster/profiles/files) | done |
-| 8q | **relay-circuit founding** — reserve a circuit on a relay node so NAT'd peers connect with no port-forward (zero-config NAT traversal) | done |
-| 8r/8s | **security-review hardening** — adversarial review of 8m–8q (no blocking findings); bounded avatar fetching + size-bounded blob store; [User Guide](docs/USER_GUIDE.md) | done |
-| 8t | **status feed** — a per-server post stream (announcements/activity) + Status panel in the UI | done |
-| 8u/8v | **wiki** — per-server collaborative pages (name→body map doc) + Chat/Wiki view toggle (page list + editor); page bodies are automerge `Text`, so concurrent edits merge **char-by-char** (8v) | done |
-| 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
-| 10 | **desktop UI / product overhaul** — **10a–10h done**: tabbed nav + Settings overlay; a sanitized markdown renderer (`marked`+DOMPurify) with `[[wiki links]]`, `:emoji:`, and `![cid embeds]`; fileshare **folders** + drag-drop **media embeds** in chat/status (built in code from CID-verified blobs); a **wiki** overhaul (markdown, links, backlinks, media, in-app help); **custom emoji**; **notification sounds**; and **owner/admin roles** + a server-settings role manager. 10c & 10h adversarially reviewed; roles enforcement is documented as policy-layer (cryptographic hardening is a named follow-up) | done |
-| 8… | rendezvous discovery in the UI · chunked large-file transfer · last-copy-safe blob retention | planned |
-| 8 | Product model + Tauri desktop UI | planned |
-| 9 | Android | planned |
-| 10 | Hardening + calendar | planned |
+Mewtual is a desktop app for private group communication without a central service holding
+the community's messages, files, or membership database. Every Mewtual “server” is an
+independent encrypted group stored and replicated by its members' devices.
+
+The simplest mental model is **Signal-style group cryptography, a Discord-shaped community
+space, and peer-to-peer networking**. Members can chat, share files, write wiki pages, post
+updates, and move between several separate communities—all without creating an account.
+
+| A conventional hosted platform | Mewtual |
+|---|---|
+| Stores history on a provider's server | Replicates encrypted history between members |
+| Identifies you through an online account | Gives each device a cryptographic identity |
+| Lets anyone request or discover an account | Requires a single-use, device-bound invite |
+| Depends on the provider staying online | Connects peers directly or through a ciphertext-only relay |
+| Gives the operator access to platform metadata and policy controls | Leaves each community in its members' hands |
+
+## What can it do?
+
+- **Group chat:** multiple channels, replies, reactions, pins, mentions, unread markers,
+  message editing, rich search, Markdown, and custom emoji.
+- **Shared knowledge:** collaborative Markdown/Wikitext wiki pages with links, backlinks,
+  media embeds, redirects, and concurrent editing.
+- **Files and media:** encrypted file sharing, folders, inline image/audio/video embeds,
+  content-addressed fetching, and configurable circulation periods.
+- **Community spaces:** member profiles, avatars, status posts, events, owner/admin badges,
+  server themes, and multiple servers in one app.
+- **Private calls:** peer-to-peer call signalling and media without a central call service.
+- **Offline use:** read local history while disconnected and catch up with another member
+  when a peer becomes reachable again.
+
+## How it works
+
+1. A founder creates a server, which creates a new MLS encrypted group and device identity.
+2. The founder shares a single-use invite. The invite is bound to the joining device when it
+   is redeemed, so it cannot be reused as a permanent bearer credential.
+3. Members connect over `rust-libp2p`, either directly over TCP or through a relay when direct
+   connectivity is unavailable. Transport connections use Noise; application content remains
+   encrypted end to end.
+4. Chat, wiki, status, calendar, profile, and file-index data are replicated as encrypted CRDT
+   documents. Concurrent and offline changes converge when devices reconnect.
+5. Files use content addressing and encrypted peer-to-peer fetching. A device can discard an
+   old cached copy and fetch it again while another member still holds it.
+
+There is no always-on Mewtual application server. A community does still need at least one
+reachable member to join or synchronize, and internet users behind restrictive NAT may need a
+relay or port forwarding.
+
+## Security model
+
+Mewtual is designed so that infrastructure can move encrypted traffic without being trusted
+with its contents:
+
+- Every server is a separate **MLS group (RFC 9420)** with its own key schedule, forward
+  secrecy, and post-compromise security properties.
+- Messages and replicated operations are authenticated and encrypted before entering the
+  network. Files are encrypted under group-derived keys.
+- Relay and rendezvous nodes route or help locate peers but do not receive plaintext content.
+- Local group state, messages, files, and identity keys are sealed under the user's passphrase
+  using **Argon2id** and **XChaCha20-Poly1305**.
+- Membership is invite-only, and removal rotates the secrets used for group traffic and
+  discovery.
+
+Important boundaries remain:
+
+- Encryption at rest protects a copied disk, not a running device compromised by malware.
+- Peers and relays may observe metadata such as IP addresses, timing, and traffic volume.
+- A forgotten local passphrase cannot be recovered; Mewtual has no account or reset service.
+- Display names are not identities. The stable identity is the device fingerprint shown by
+  the app.
+- Owner and admin roles are authenticated labels, but they are not yet fine-grained content
+  access controls: members of a server can read that server's shared content.
+
+For the assumptions, attacker capabilities, mitigations, and remaining risks, read the
+[threat model](docs/THREAT-MODEL.md).
 
 ## Layout
 
@@ -120,59 +135,170 @@ Diagnostics use the `tracing` facade; binaries/tests install a subscriber via
 `catcoms_log::init()` / `init_test()`. Filter with e.g.
 `RUST_LOG=catcoms_net=debug,catcoms_sync=trace`.
 
-## Try it
+## Run the desktop app
 
-`catcomsctl demo` composes the whole stack in one process: Alice founds a server,
-mints a single-use invite, Bob redeems it and joins the MLS group, both open a
-channel over the mesh, and exchange end-to-end-encrypted chat that converges.
+The current user-facing target is the Tauri 2 desktop app. Development requires Rust 1.89,
+Node.js/npm, and the platform dependencies required by Tauri. Windows users also need the
+WebView2 runtime, which is included with Windows 11.
 
 ```sh
-cargo run -p catcomsctl -- demo                       # full end-to-end demo (in-process)
-cargo run -p catcomsctl -- recover --stats            # 6d-1b: miss a membership commit and self-heal
-cargo run -p catcomsctl -- --debug demo               # + writes logs/debug_log_<timestamp>.txt
-cargo run -p catcomsctl -- --stats demo               # print per-node SyncStats diagnostics
+cd apps/desktop
+npm install
+npm run tauri dev
 ```
 
-**Over real networking** (two OS processes, real libp2p TCP):
+On first launch, enter a passphrase. On a new profile, that passphrase becomes the key used to
+seal local data; on later launches, the same passphrase unlocks it.
+
+To start talking:
+
+1. Choose **Found a server** and give it a name.
+2. Open **Settings → Invite someone** and copy the generated invite.
+3. Have another Mewtual instance choose **Join**, paste the invite, and connect.
+4. Open `#general` and send a message.
+
+See the [user guide](docs/USER_GUIDE.md) for the complete UI walkthrough, networking setup,
+file sharing, wiki syntax, roles, and troubleshooting.
+
+### Test two instances on one computer
+
+`tauri dev` owns the Vite development port, so run the second instance from the already-built
+debug binary while the first terminal remains open:
 
 ```sh
-# Terminal 1 — found a server, write an invite, and serve:
+# Terminal 1
+cd apps/desktop
+npm run tauri dev
+
+# Terminal 2
+./apps/desktop/src-tauri/target/debug/mewtual-desktop
+```
+
+Use a blank reachable-address field when both instances are on the same machine.
+
+## Connecting other people
+
+The founder advertises one or more addresses in the invite:
+
+| Where the joining member is | Setup |
+|---|---|
+| Same computer | Leave the reachable address blank |
+| Same LAN/Wi-Fi | Enter the founder's LAN IP, such as `192.168.1.5` |
+| Across the internet | Enter a public address and forward the selected TCP port |
+| Behind NAT without port forwarding | Run a reachable relay and paste its multiaddress |
+
+Relays forward encrypted bytes; they do not join the MLS group or receive its keys. Automatic
+rendezvous discovery exists in the core/CLI but is not yet fully wired into the desktop flow.
+
+## Build a distributable app
+
+Do not share a debug executable: it expects a local Vite server. Build a self-contained release
+executable instead:
+
+```sh
+cd apps/desktop
+npm install
+npm run build
+npm run tauri build -- --no-bundle
+```
+
+The result is written to `apps/desktop/src-tauri/target/release/` (`.exe` on Windows). The
+current Tauri configuration produces the executable without an installer bundle or code
+signature.
+
+## Try the protocol from the CLI
+
+The developer CLI can exercise the stack without the desktop UI:
+
+```sh
+# Alice founds a group, Bob redeems an invite, and encrypted chat converges in one process
+cargo run -p catcomsctl -- demo
+
+# Add protocol diagnostics
+cargo run -p catcomsctl -- --debug --stats demo
+```
+
+For two real OS processes over TCP:
+
+```sh
+# Terminal 1: create a server and write its invite
 cargo run -p catcomsctl -- serve --port 9000 --invite-file invite.txt
-# Terminal 2 (or another machine, with --host <server-ip>) — join it:
+
+# Terminal 2: redeem the invite and join
 cargo run -p catcomsctl -- join --invite-file invite.txt
 ```
 
-The joiner dials the server over TCP, does the Noise + MLS join handshake, and
-catches up the encrypted channel — the whole stack between separate processes.
-
-**Through a relay** (NAT traversal — the joiner never connects to the server
-directly; a zero-knowledge relay forwards ciphertext between them):
+For a relayed connection:
 
 ```sh
-# Terminal 1 — a relay (prints its dialable /ip4/.../tcp/4000/p2p/<id>):
+# Reachable host: start a relay and copy the printed multiaddress
 cargo run -p catcomsctl -- relay --port 4000
-# Terminal 2 — serve, reserving a circuit slot on the relay:
+
+# Founder: reserve a circuit through that relay
 cargo run -p catcomsctl -- serve --relay /ip4/<relay-ip>/tcp/4000/p2p/<relay-id>
-# Terminal 3 — join (dials the relayed circuit address from the invite):
-cargo run -p catcomsctl -- join
 ```
 
-Diagnostics use the `tracing` facade. `--debug` writes a verbose
-`debug_log_<timestamp>.txt`; console verbosity is set with `RUST_LOG`
-(e.g. `RUST_LOG=catcoms_sync=trace cargo run -p catcomsctl -- demo`).
+Set `RUST_LOG` for detailed console traces, for example
+`RUST_LOG=catcoms_net=debug,catcoms_sync=trace`.
 
-## Build & test
+## Project layout
+
+```text
+apps/desktop             Tauri 2 + Svelte 5 desktop application
+bins/catcomsctl          Development CLI for demos, peers, relay, and rendezvous
+crates/catcoms-app       UI-facing product model and event-stream actor
+crates/catcoms-crypto    Device identity, key hierarchy, and encrypted key storage
+crates/catcoms-discovery Bounded peer discovery and eclipse-resistance policy
+crates/catcoms-mls       MLS group lifecycle, invites, membership, and persistence
+crates/catcoms-net       libp2p mesh, Noise transport, relay, and rendezvous
+crates/catcoms-replication Encrypted, authenticated CRDT documents
+crates/catcoms-rt        Runtime seams for clocks, randomness, storage, and transport
+crates/catcoms-storage   Encrypted content-addressed blobs and retention
+crates/catcoms-sync      Live replication, catch-up, peer exchange, and blob fetching
+crates/catcoms-wire      Canonical length-prefixed wire encoding
+docs/                    Architecture, threat model, user guide, and design notes
+```
+
+The desktop application has its own Cargo workspace so Tauri's platform dependencies stay out
+of the core protocol test cycle. The [architecture document](docs/ARCHITECTURE.md) explains the
+layer boundaries and the test-gated implementation roadmap.
+
+## Build and test
 
 ```sh
 cargo build
-cargo test --all
+cargo test --all --all-features
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-bash scripts/check-no-ambient.sh   # no ambient time/RNG outside the seam crate
+cargo clippy --all-targets --all-features -- -D warnings
+bash scripts/check-no-ambient.sh
 ```
 
-Fuzzing (nightly):
+Frontend checks run separately:
 
 ```sh
-cargo +nightly fuzz run roundtrip -p catcoms-wire-fuzz   # from crates/catcoms-wire/fuzz
+cd apps/desktop
+npm test
+npm run check
+npm run build
 ```
+
+The ambient-dependency gate keeps OS time and randomness behind the runtime seams, which makes
+protocol behaviour deterministic under test. Wire-format fuzzing is also available from
+`crates/catcoms-wire/fuzz` with nightly Rust.
+
+## Current status
+
+The encrypted group core, peer-to-peer transport, direct and relayed joining, replication,
+encrypted persistence, file transfer, and desktop product experience are implemented and
+covered by the repository's test suites. Work is still ongoing around easier automatic
+discovery in the desktop UI, chunked large-file transfer, retention hardening, packaging,
+mobile support, and broader security review.
+
+This repository deliberately documents unfinished security properties instead of presenting
+them as complete. Start with:
+
+- [User guide](docs/USER_GUIDE.md)—how to run and use the desktop app.
+- [Architecture](docs/ARCHITECTURE.md)—protocol layers, invariants, and roadmap.
+- [Threat model](docs/THREAT-MODEL.md)—assets, trust boundaries, attacks, and residual risk.
+- [Interfaces](docs/INTERFACES.md)—the main cross-crate contracts.
+- [Handover notes](docs/HANDOVER.md)—implementation state and engineering context.

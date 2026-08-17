@@ -1,7 +1,7 @@
-# CatComs desktop (Tauri 2 + Svelte 5)
+# Mewtual desktop (Tauri 2 + Svelte 5)
 
 A desktop client over the `catcoms-app` actor bridge. The GUI never touches MLS or
-automerge — it talks to the tested `catcoms-app` event-stream actor through a thin
+automerge; it talks to the tested `catcoms-app` event-stream actor through a thin
 `#[tauri::command]` bridge in `src-tauri/`.
 
 This is its **own Cargo workspace** (excluded from the repo root), so the heavy
@@ -24,11 +24,11 @@ the first the normal way, then launch the **prebuilt debug exe** for the second 
 — it reuses the first instance's dev server for its frontend but runs its own backend:
 
 ```sh
-# terminal 1 — keep this running (it serves the frontend for BOTH windows):
+# terminal 1; keep this running (it serves the frontend for BOTH windows):
 npm run tauri dev
 
-# terminal 2 — a second, independent instance:
-./src-tauri/target/debug/catcoms-desktop      # .exe on Windows
+# terminal 2; a second, independent instance:
+./src-tauri/target/debug/mewtual-desktop      # .exe on Windows
 ```
 
 Found in window 1, copy the invite, paste + **Join** in window 2; both see each
@@ -54,22 +54,22 @@ Windows 11; a free installer for older Windows).
 The app founds on all interfaces (`0.0.0.0`) and the founder can advertise a **reachable
 address** in the start screen's "Network" field:
 
-- **Same machine** — leave it blank (the invite carries a loopback address).
-- **Same LAN** — enter your LAN IP (e.g. `192.168.1.5`); the other machine pastes the
+- **Same machine**; leave it blank (the invite carries a loopback address).
+- **Same LAN**; enter your LAN IP (e.g. `192.168.1.5`); the other machine pastes the
   invite and connects.
-- **Over the internet** — enter a **port-forwarded public IP** (or `host:port` if the
+- **Over the internet**; enter a **port-forwarded public IP** (or `host:port` if the
   forwarded port differs from the bound one), and forward that TCP port on your router.
 
-- **Behind NAT, no port-forward** — paste a **relay node's** multiaddr into the "Relay
+- **Behind NAT, no port-forward**; paste a **relay node's** multiaddr into the "Relay
   address" field (run one with `catcomsctl relay --port 4000`, which prints its multiaddr,
   on any reachable host). The invite then carries the relayed address and your friend joins
   through the relay from anywhere.
 
 Joining dials **every** address in the invite, so the reachable one wins.
 
-You can also be in **several servers at once** — found/join adds a server to the left rail.
+You can also be in **several servers at once**; found/join adds a server to the left rail.
 
-**Deferred:** rendezvous auto-discovery (joining with *no* address in the invite — the CLI
+**Deferred:** rendezvous auto-discovery (joining with *no* address in the invite; the CLI
 already does this over real TCP; not yet wired into the desktop `found`/`join`).
 
 ## Layout
