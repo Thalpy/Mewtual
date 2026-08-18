@@ -19,7 +19,7 @@
 //! ## The ceremony, and what lives here
 //!
 //! 1. The **new device** generates its device key and emits a [`PairingRequest`]
-//!   ; its public key plus a fresh 32-byte nonce. The request is deliberately
+//!    its public key plus a fresh 32-byte nonce. The request is deliberately
 //!    *unsigned*: the SAS, compared by a human, is the authenticator.
 //! 2. **Both devices** compute [`sas`] over exactly the same three inputs
 //!    (`new_device_pk`, `pairing_nonce`, `origin_id`) and display the same six
