@@ -17,9 +17,8 @@ use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
 use catcoms_net::{
-    build_relay_swarm, build_relay_swarm_with_key, build_rendezvous_swarm,
-    build_rendezvous_swarm_with_key, phase0_peer_id, run_relay, run_rendezvous,
-    validate_rendezvous_addrs, MeshService,
+    phase0_peer_id, validate_rendezvous_addrs, MeshService, RelayLimits, RelayNode,
+    RendezvousLimits, RendezvousNode,
 };
 use catcoms_rt::{
     Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
@@ -85,25 +84,95 @@ enum Command {
     },
     /// Run a zero-knowledge circuit-relay-v2 server: forward Noise+MLS ciphertext
     /// between peers that cannot connect directly. Print its dialable address.
+    ///
+    /// Sizing flags are all optional; omitting one keeps the built-in default (see
+    /// `catcoms_net::RelayLimits`, whose doc comments state what each number costs in
+    /// bandwidth). A relay that binds a wildcard address must be told its real public
+    /// address with --external, or it refuses to start: reservations would otherwise
+    /// carry an address no client can dial.
     Relay {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 4000)]
         port: u16,
+        /// IP to bind. The default binds every interface, which then requires --external.
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
         /// Persist the relay identity to this file (created if absent), so the peer id; and
         /// therefore every invite that embeds the relay's multiaddr; survives restarts.
         #[arg(long)]
         identity: Option<PathBuf>,
+        /// A dialable public multiaddr to advertise in reservations. Repeatable. Required when
+        /// binding a wildcard address, e.g. /ip4/198.51.100.7/tcp/4000.
+        #[arg(long)]
+        external: Vec<String>,
+        #[command(flatten)]
+        ws: WsArgs,
+        /// Concurrent reservations (how many NAT'd nodes can be reachable at once).
+        #[arg(long)]
+        max_reservations: Option<usize>,
+        /// Concurrent forwarded circuits. The main driver of peak bandwidth.
+        #[arg(long)]
+        max_circuits: Option<usize>,
+        /// Bytes one circuit may move, both directions summed. 0 disables the per-circuit cap.
+        #[arg(long)]
+        max_circuit_bytes: Option<u64>,
+        /// Hard lifetime of a circuit, in seconds.
+        #[arg(long)]
+        max_circuit_duration_secs: Option<u64>,
+        /// Bytes one peer may move per budget window before it is disconnected and refused.
+        #[arg(long)]
+        peer_budget_bytes: Option<u64>,
+        /// Bytes the whole node may move per budget window before it sheds new connections.
+        #[arg(long)]
+        node_budget_bytes: Option<u64>,
+        /// The budget window, in seconds.
+        #[arg(long)]
+        budget_window_secs: Option<u64>,
+        /// Concurrent connections allowed from one source prefix (a /24 or a /64).
+        #[arg(long)]
+        max_conns_per_prefix: Option<usize>,
     },
     /// Run a zero-knowledge rendezvous server: members register their signed peer
     /// records under blinded namespaces and discover each other. Print its address.
+    ///
+    /// Sizing flags are optional; see `catcoms_net::RendezvousLimits` for what each costs.
     Rendezvous {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 5000)]
         port: u16,
+        /// IP to bind.
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
         /// Persist the rendezvous identity to this file (created if absent), for a stable peer id
         /// across restarts (so invites carrying the rendezvous address keep working).
         #[arg(long)]
         identity: Option<PathBuf>,
+        /// A dialable public multiaddr to advertise. Repeatable.
+        #[arg(long)]
+        external: Vec<String>,
+        #[command(flatten)]
+        ws: WsArgs,
+        /// Registrations the table may hold. Also the ceiling on a single census response.
+        #[arg(long)]
+        max_registrations: Option<usize>,
+        /// Registrations one peer id may hold.
+        #[arg(long)]
+        max_registrations_per_peer: Option<usize>,
+        /// Registrations attributable to one source prefix.
+        #[arg(long)]
+        max_registrations_per_prefix: Option<usize>,
+        /// Stored discovery cookies. Worst-case cookie memory is this times the table size.
+        #[arg(long)]
+        max_cookies: Option<usize>,
+        /// Longest TTL a client may request, in seconds. Bounds how long a squatter holds a slot.
+        #[arg(long)]
+        max_ttl_secs: Option<u64>,
+        /// Discovery requests one peer may make per window before it is cut off.
+        #[arg(long)]
+        max_discovers_per_window: Option<u32>,
+        /// Concurrent connections allowed from one source prefix (a /24 or a /64).
+        #[arg(long)]
+        max_conns_per_prefix: Option<usize>,
     },
     /// Join a server using an invite file written by `serve`, over real libp2p, then
     /// catch up the channel and print it.
@@ -114,6 +183,59 @@ enum Command {
     },
     /// Print the version.
     Version,
+}
+
+/// Rung 4 of the connectivity ladder: an opt-in TCP/443 WebSocket listener.
+///
+/// Corporate, university and guest networks filter outbound traffic to arbitrary high ports, and
+/// today every rung of the ladder fails identically there with the same unactionable timeout.
+/// This is opt-in because binding 443 needs privilege on Linux (`setcap
+/// cap_net_bind_service=+ep`, a systemd `AmbientCapabilities=`, or a redirect).
+///
+/// With a certificate the listener speaks `/tls/ws` and looks like ordinary HTTPS. Without one it
+/// speaks plain `/ws` on the chosen port, which still defeats a port-based filter but not a proxy
+/// that expects a TLS handshake. A `/tls/ws` certificate must be **CA-issued for a real DNS
+/// name**: a dialing libp2p client validates it against the public web PKI, so a self-signed
+/// certificate is refused and clients must dial `/dns4/<name>/tcp/443/tls/ws`.
+#[derive(clap::Args, Clone, Debug)]
+struct WsArgs {
+    /// Also listen for WebSocket connections on this TCP port (443 is the useful value).
+    #[arg(long)]
+    ws_port: Option<u16>,
+    /// PEM certificate chain for the WebSocket listener (leaf first). Requires --ws-key.
+    #[arg(long)]
+    ws_cert: Option<PathBuf>,
+    /// PEM private key matching --ws-cert.
+    #[arg(long)]
+    ws_key: Option<PathBuf>,
+}
+
+impl WsArgs {
+    /// Resolve the flags into a TLS config (if any), rejecting a half-supplied pair rather than
+    /// silently downgrading to plaintext WebSocket, which would be a security surprise.
+    fn tls(&self) -> Result<Option<catcoms_net::WsTlsConfig>, Box<dyn Error>> {
+        match (&self.ws_cert, &self.ws_key) {
+            (Some(cert), Some(key)) => Ok(Some(catcoms_net::load_ws_tls_pem(cert, key)?)),
+            (None, None) => Ok(None),
+            _ => Err("--ws-cert and --ws-key must be given together".into()),
+        }
+    }
+
+    /// The WebSocket listen address for `host`, if the listener was requested.
+    fn listen_addr(&self, host: &str) -> Result<Option<Multiaddr>, Box<dyn Error>> {
+        let Some(port) = self.ws_port else {
+            if self.ws_cert.is_some() {
+                return Err("--ws-cert was given without --ws-port; nothing would listen".into());
+            }
+            return Ok(None);
+        };
+        let suffix = if self.ws_cert.is_some() {
+            "tls/ws"
+        } else {
+            "ws"
+        };
+        Ok(Some(format!("/ip4/{host}/tcp/{port}/{suffix}").parse()?))
+    }
 }
 
 #[tokio::main]
@@ -133,10 +255,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             rendezvous,
         } => run_serve(port, invite_file, host, relay, rendezvous).await?,
         Command::Join { invite_file } => run_join(invite_file).await?,
-        Command::Relay { port, identity } => run_relay_node(port, identity).await?,
-        Command::Rendezvous { port, identity } => run_rendezvous_node(port, identity).await?,
+        cmd @ Command::Relay { .. } => run_relay_node(cmd).await?,
+        cmd @ Command::Rendezvous { .. } => run_rendezvous_node(cmd).await?,
     }
     Ok(())
+}
+
+/// Parse and validate the `--external` multiaddrs an infra node advertises.
+fn parse_external(external: &[String]) -> Result<Vec<Multiaddr>, Box<dyn Error>> {
+    external
+        .iter()
+        .map(|s| {
+            s.parse::<Multiaddr>()
+                .map_err(|e| format!("bad --external address {s:?}: {e}").into())
+        })
+        .collect()
 }
 
 /// Load a persisted libp2p identity from `path`, or generate one and write it there (protobuf
@@ -156,41 +289,174 @@ fn load_or_create_identity(
     }
 }
 
-/// Run a circuit-relay-v2 server node.
-async fn run_relay_node(port: u16, identity: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
-    let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    let mut swarm = match identity {
-        Some(path) => build_relay_swarm_with_key(load_or_create_identity(&path)?)?,
-        None => build_relay_swarm()?,
+/// Run a circuit-relay-v2 server node, sized by the CLI flags.
+///
+/// Every relay used to be built with `relay::Config::default()`: 128 KiB per circuit (both
+/// directions summed), 120 seconds, 16 circuits **for the whole node** and 128 reservations. That
+/// node could not carry an avatar, a file chunk or a voice call, and refused the 129th group ever
+/// to exist. The sizing now comes from `RelayLimits`, which also drives per-peer byte accounting
+/// and a load-shed path, because the new numbers are a real bandwidth commitment.
+async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
+    let Command::Relay {
+        port,
+        host,
+        identity,
+        external,
+        ws,
+        max_reservations,
+        max_circuits,
+        max_circuit_bytes,
+        max_circuit_duration_secs,
+        peer_budget_bytes,
+        node_budget_bytes,
+        budget_window_secs,
+        max_conns_per_prefix,
+    } = cmd
+    else {
+        unreachable!("dispatched only for Command::Relay")
     };
-    let relay_id = *swarm.local_peer_id();
-    swarm
-        .listen_on(listen)
-        .map_err(|e| format!("relay listen failed: {e}"))?;
+
+    let mut limits = RelayLimits::default();
+    if let Some(v) = max_reservations {
+        limits.max_reservations = v;
+        // The connection cap has to stay above the reservation cap, or reservations are refused
+        // by the wrong limit and the operator debugs the wrong number.
+        limits.max_established_incoming = limits
+            .max_established_incoming
+            .max(u32::try_from(v.saturating_mul(2)).unwrap_or(u32::MAX));
+    }
+    if let Some(v) = max_circuits {
+        limits.max_circuits = v;
+    }
+    if let Some(v) = max_circuit_bytes {
+        limits.max_circuit_bytes = v;
+    }
+    if let Some(v) = max_circuit_duration_secs {
+        limits.max_circuit_duration_secs = v;
+    }
+    if let Some(v) = peer_budget_bytes {
+        limits.peer_budget_bytes = v;
+    }
+    if let Some(v) = node_budget_bytes {
+        limits.node_budget_bytes = v;
+    }
+    if let Some(v) = budget_window_secs {
+        limits.budget_window_secs = v;
+    }
+    if let Some(v) = max_conns_per_prefix {
+        limits.admission.max_conns_per_prefix = v;
+    }
+
+    let key = match identity {
+        Some(path) => load_or_create_identity(&path)?,
+        None => libp2p::identity::Keypair::generate_ed25519(),
+    };
+    let mut node = RelayNode::build(key, limits.clone(), ws.tls()?)?;
+    let relay_id = node.local_peer_id();
+    node.listen_on(format!("/ip4/{host}/tcp/{port}").parse()?)?;
+    if let Some(ws_addr) = ws.listen_addr(&host)? {
+        node.listen_on(ws_addr.clone())?;
+        println!("[relay] websocket listener on {ws_addr}");
+    }
+    for addr in parse_external(&external)? {
+        node.add_external_address(addr)?;
+    }
+
+    // Pre-flight before the banner: a node that announces itself and then exits reads as a
+    // crash, when it is in fact an actionable configuration error (P12).
+    node.check_advertisable()?;
+
     println!("== Mewtual relay ==");
     println!("[relay] running on tcp/{port} (peer {relay_id})");
     println!("[relay] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{relay_id}");
+    println!(
+        "[relay] limits: {} reservations, {} circuits, {} bytes/circuit, {}s/circuit",
+        limits.max_reservations,
+        limits.max_circuits,
+        limits.max_circuit_bytes,
+        limits.max_circuit_duration_secs
+    );
+    println!(
+        "[relay] budget: {} bytes/peer and {} bytes/node per {}s window",
+        limits.peer_budget_bytes, limits.node_budget_bytes, limits.budget_window_secs
+    );
     println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
-    run_relay(swarm).await; // runs until the process is killed
+    node.run().await?; // runs until the process is killed
     Ok(())
 }
 
-/// Run a rendezvous server node.
-async fn run_rendezvous_node(port: u16, identity: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
-    let listen: Multiaddr = format!("/ip4/0.0.0.0/tcp/{port}").parse()?;
-    let mut swarm = match identity {
-        Some(path) => build_rendezvous_swarm_with_key(load_or_create_identity(&path)?)?,
-        None => build_rendezvous_swarm()?,
+/// Run a rendezvous server node, sized by the CLI flags.
+async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
+    let Command::Rendezvous {
+        port,
+        host,
+        identity,
+        external,
+        ws,
+        max_registrations,
+        max_registrations_per_peer,
+        max_registrations_per_prefix,
+        max_cookies,
+        max_ttl_secs,
+        max_discovers_per_window,
+        max_conns_per_prefix,
+    } = cmd
+    else {
+        unreachable!("dispatched only for Command::Rendezvous")
     };
-    let rz_id = *swarm.local_peer_id();
-    swarm
-        .listen_on(listen)
-        .map_err(|e| format!("rendezvous listen failed: {e}"))?;
+
+    let mut limits = RendezvousLimits::default();
+    if let Some(v) = max_registrations {
+        limits.max_registrations_total = v;
+    }
+    if let Some(v) = max_registrations_per_peer {
+        limits.max_registrations_per_peer = v;
+    }
+    if let Some(v) = max_registrations_per_prefix {
+        limits.max_registrations_per_prefix = v;
+    }
+    if let Some(v) = max_cookies {
+        limits.max_stored_cookies = v;
+    }
+    if let Some(v) = max_ttl_secs {
+        limits.max_ttl_secs = v;
+    }
+    if let Some(v) = max_discovers_per_window {
+        limits.max_discovers_per_window = v;
+    }
+    if let Some(v) = max_conns_per_prefix {
+        limits.admission.max_conns_per_prefix = v;
+    }
+
+    let key = match identity {
+        Some(path) => load_or_create_identity(&path)?,
+        None => libp2p::identity::Keypair::generate_ed25519(),
+    };
+    let mut node = RendezvousNode::build(key, limits.clone(), ws.tls()?)?;
+    let rz_id = node.local_peer_id();
+    node.listen_on(format!("/ip4/{host}/tcp/{port}").parse()?)?;
+    if let Some(ws_addr) = ws.listen_addr(&host)? {
+        node.listen_on(ws_addr.clone())?;
+        println!("[rendezvous] websocket listener on {ws_addr}");
+    }
+    for addr in parse_external(&external)? {
+        node.add_external_address(addr);
+    }
+
     println!("== Mewtual rendezvous ==");
     println!("[rendezvous] running on tcp/{port} (peer {rz_id})");
     println!("[rendezvous] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{rz_id}");
+    println!(
+        "[rendezvous] limits: {} registrations ({} per peer, {} per source prefix), {} cookies, \
+         max TTL {}s",
+        limits.max_registrations_total,
+        limits.max_registrations_per_peer,
+        limits.max_registrations_per_prefix,
+        limits.max_stored_cookies,
+        limits.max_ttl_secs
+    );
     println!("[rendezvous] members register/discover under blinded namespaces; Ctrl-C to stop");
-    run_rendezvous(swarm).await; // runs until the process is killed
+    node.run().await?; // runs until the process is killed
     Ok(())
 }
 

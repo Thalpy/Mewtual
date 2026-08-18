@@ -24,6 +24,29 @@
 //! Still to come in later mesh sub-blocks: the member-verifiable discovery tag +
 //! eclipse-resistant discovery policy, and the anti-entropy / proposal-commit
 //! protocols layered on top of this transport.
+//!
+//! The **infra** nodes (the zero-knowledge relay and rendezvous) live in their own modules;
+//! see [`relay_node`] and [`rendezvous_node`] for their sizing, byte accounting and
+//! load-shedding, [`admission`] for the source-prefix quotas both share, and
+//! [`infra_transport`] for the metered TCP and TCP/443 WebSocket transports.
+
+pub mod admission;
+pub mod infra_transport;
+pub mod metering;
+pub mod relay_node;
+pub mod rendezvous_node;
+
+pub use infra_transport::{is_websocket_addr, is_wildcard_addr, load_ws_tls_pem, WsTlsConfig};
+pub use metering::ByteMeters;
+pub use relay_node::{
+    build_memory_relay_swarm, build_relay_swarm, build_relay_swarm_with_key, run_relay,
+    run_relay_with_external, RelayBehaviour, RelayBehaviourEvent, RelayLimits, RelayNode,
+};
+pub use rendezvous_node::{
+    build_memory_rendezvous_swarm, build_rendezvous_swarm, build_rendezvous_swarm_with_key,
+    run_rendezvous, QueryVerdict, RendezvousBehaviour, RendezvousBehaviourEvent, RendezvousLimits,
+    RendezvousNode,
+};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -42,10 +65,11 @@ use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
+use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    connection_limits, dcutr, gossipsub, identify, noise, ping, relay, rendezvous,
-    request_response, tcp, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
+    connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous, request_response, tcp,
+    yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -208,7 +232,7 @@ const AGENT_VERSION: &str = "catcoms";
 /// **confirmed external** addresses flowing (see `Behaviour::all_addresses`: only the raw listen
 /// set is withheld), which is what relay reservations, rendezvous registration and DCUtR actually
 /// consume, so NAT traversal is unaffected.
-fn identify_config(key: &libp2p::identity::Keypair) -> identify::Config {
+pub(crate) fn identify_config(key: &libp2p::identity::Keypair) -> identify::Config {
     identify::Config::new(IDENTIFY_PROTO.to_string(), key.public())
         .with_agent_version(AGENT_VERSION.to_string())
         .with_hide_listen_addrs(true)
@@ -282,19 +306,6 @@ impl MeshBehaviour {
             connection_limits,
         })
     }
-}
-
-/// A relay **server**'s behaviours: forward circuit traffic between peers that
-/// cannot connect directly. Never sees plaintext (Noise + MLS ciphertext only).
-#[derive(NetworkBehaviour)]
-#[allow(missing_debug_implementations)]
-pub struct RelayBehaviour {
-    /// The circuit-relay-v2 server.
-    pub relay: relay::Behaviour,
-    /// Address discovery for clients reserving slots.
-    pub identify: identify::Behaviour,
-    /// Keep-alive.
-    pub ping: ping::Behaviour,
 }
 
 /// Build a swarm over the in-memory transport (deterministic local testing),
@@ -371,210 +382,6 @@ pub fn build_tcp_swarm_with_key(
         .map_err(|e| NetError::Build(e.to_string()))?
         .build();
     Ok(swarm)
-}
-
-/// Build a TCP **relay-server** swarm (forwards circuit traffic for clients behind
-/// NAT). Run it with [`run_relay`].
-pub fn build_relay_swarm() -> Result<Swarm<RelayBehaviour>, NetError> {
-    let swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(relay_behaviour)
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .build();
-    Ok(swarm)
-}
-
-/// Like [`build_relay_swarm`] but with a **caller-supplied identity**, so an operator can persist
-/// the relay's keypair and keep a **stable peer id across restarts**. Otherwise every restart
-/// generates a fresh id and silently invalidates every invite that embedded the relay's multiaddr.
-pub fn build_relay_swarm_with_key(
-    key: libp2p::identity::Keypair,
-) -> Result<Swarm<RelayBehaviour>, NetError> {
-    let swarm = SwarmBuilder::with_existing_identity(key)
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(relay_behaviour)
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .build();
-    Ok(swarm)
-}
-
-/// Build a relay-server swarm over the in-memory transport (deterministic tests).
-pub fn build_memory_relay_swarm() -> Swarm<RelayBehaviour> {
-    SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_other_transport(|key| {
-            MemoryTransport::default()
-                .upgrade(Version::V1)
-                .authenticate(noise::Config::new(key).expect("noise config"))
-                .multiplex(yamux::Config::default())
-        })
-        .expect("memory transport")
-        .with_behaviour(relay_behaviour)
-        .expect("relay behaviour")
-        .build()
-}
-
-fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour {
-    RelayBehaviour {
-        relay: relay::Behaviour::new(key.public().to_peer_id(), relay::Config::default()),
-        identify: identify::Behaviour::new(identify_config(key)),
-        ping: ping::Behaviour::default(),
-    }
-}
-
-/// Run a relay-server swarm's event loop: forward circuit traffic indefinitely.
-/// (Relays only ever route Noise + MLS ciphertext; zero-knowledge.)
-///
-/// Each bound listen address is registered as an **external address** so granted
-/// reservations carry a usable relayed address (otherwise a client's circuit
-/// listener closes with `NoAddressesInReservation`). A production relay on a
-/// public IP behind 0.0.0.0 should additionally have its real public address added
-///; pass it via [`run_relay_with_external`].
-pub async fn run_relay(swarm: Swarm<RelayBehaviour>) {
-    run_relay_with_external(swarm, Vec::new()).await
-}
-
-/// Like [`run_relay`] but also advertises each address in `external` (e.g. the
-/// relay's real public `/ip4/.../tcp/...` when listening on `0.0.0.0`).
-pub async fn run_relay_with_external(mut swarm: Swarm<RelayBehaviour>, external: Vec<Multiaddr>) {
-    for addr in external {
-        swarm.add_external_address(addr);
-    }
-    loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => {
-                // Advertise the bound address so reservations can hand it to clients.
-                swarm.add_external_address(address.clone());
-                tracing::info!(%address, "relay listening");
-            }
-            SwarmEvent::Behaviour(RelayBehaviourEvent::Relay(e)) => {
-                tracing::debug!(?e, "relay event");
-            }
-            _ => {}
-        }
-    }
-}
-
-// ----- rendezvous server -----------------------------------------------------
-
-/// A rendezvous **server**'s behaviours: members register their (signed) peer
-/// records under a blinded namespace and discover each other, without the server
-/// learning group identity or content. Zero-knowledge like the relay; it only sees
-/// opaque namespace strings and signed peer records (member addresses + a TTL).
-#[derive(NetworkBehaviour)]
-#[allow(missing_debug_implementations)]
-pub struct RendezvousBehaviour {
-    /// The rendezvous registration/discovery protocol.
-    pub rendezvous: rendezvous::server::Behaviour,
-    /// Address discovery (lets a registering client learn its observed address).
-    pub identify: identify::Behaviour,
-    /// Keep-alive.
-    pub ping: ping::Behaviour,
-    /// Connection caps so a registration/discovery flood cannot exhaust the server.
-    pub connection_limits: connection_limits::Behaviour,
-}
-
-fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour {
-    // Storage caps bound a registration flood; the spec-recommended TTL band (2h–72h)
-    // is the default. A per-PeerId request-rate token bucket is a hardening follow-up.
-    let config = rendezvous::server::Config::default()
-        .with_max_registration_per_peer(128)
-        .with_max_registration_total(16_384)
-        .with_max_stored_cookies(4_096);
-    RendezvousBehaviour {
-        rendezvous: rendezvous::server::Behaviour::new(config),
-        identify: identify::Behaviour::new(identify_config(key)),
-        ping: ping::Behaviour::default(),
-        connection_limits: connection_limits::Behaviour::new(
-            connection_limits::ConnectionLimits::default()
-                .with_max_pending_incoming(Some(64))
-                .with_max_established_incoming(Some(4_096))
-                .with_max_established_per_peer(Some(8)),
-        ),
-    }
-}
-
-/// Build a TCP rendezvous-server swarm. Run it with [`run_rendezvous`].
-pub fn build_rendezvous_swarm() -> Result<Swarm<RendezvousBehaviour>, NetError> {
-    let swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(rendezvous_behaviour)
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .build();
-    Ok(swarm)
-}
-
-/// Like [`build_rendezvous_swarm`] but with a **caller-supplied identity**, for a **stable peer id
-/// across restarts** (a restart otherwise invalidates every invite carrying the rendezvous addr).
-pub fn build_rendezvous_swarm_with_key(
-    key: libp2p::identity::Keypair,
-) -> Result<Swarm<RendezvousBehaviour>, NetError> {
-    let swarm = SwarmBuilder::with_existing_identity(key)
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(rendezvous_behaviour)
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .build();
-    Ok(swarm)
-}
-
-/// Build a rendezvous-server swarm over the in-memory transport (deterministic tests).
-pub fn build_memory_rendezvous_swarm() -> Swarm<RendezvousBehaviour> {
-    SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_other_transport(|key| {
-            MemoryTransport::default()
-                .upgrade(Version::V1)
-                .authenticate(noise::Config::new(key).expect("noise config"))
-                .multiplex(yamux::Config::default())
-        })
-        .expect("memory transport")
-        .with_behaviour(rendezvous_behaviour)
-        .expect("rendezvous behaviour")
-        .build()
-}
-
-/// Run a rendezvous-server swarm's event loop indefinitely: register members and
-/// answer discovery under blinded namespaces. The server never learns group identity
-/// or content; only opaque namespace strings and signed peer records.
-pub async fn run_rendezvous(mut swarm: Swarm<RendezvousBehaviour>) {
-    loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => {
-                tracing::info!(%address, "rendezvous listening");
-            }
-            SwarmEvent::Behaviour(RendezvousBehaviourEvent::Rendezvous(e)) => match &e {
-                rendezvous::server::Event::PeerRegistered { peer, .. } => {
-                    tracing::info!(%peer, "rendezvous: peer registered");
-                }
-                _ => tracing::debug!(?e, "rendezvous event"),
-            },
-            _ => {}
-        }
-    }
 }
 
 // ----- mapping helpers -------------------------------------------------------
@@ -811,11 +618,7 @@ impl Actor {
                     tracing::warn!(%addr, error = %e, "listen failed");
                 }
             }
-            Command::Dial(addr) => {
-                if let Err(e) = self.swarm.dial(addr.clone()) {
-                    tracing::warn!(%addr, error = %e, "dial failed");
-                }
-            }
+            Command::Dial(addr) => self.dial_gated(addr),
             Command::AddExternalAddress(addr) => {
                 tracing::debug!(%addr, "add external address");
                 self.swarm.add_external_address(addr);
@@ -837,6 +640,45 @@ impl Actor {
                     rz_node,
                 );
             }
+        }
+    }
+
+    /// Dial `addr`, but **not** if we already have (or are already opening) a connection to the
+    /// peer it names. Second half of P11.
+    ///
+    /// `Swarm::dial(Multiaddr)` builds `DialOpts` with `peer_id: None` and
+    /// `PeerCondition::Always`, so an existing connection never suppresses a new dial. Combined
+    /// with an unjittered per-server discovery timer that dials plus registers plus discovers for
+    /// every namespace in the grandfather window, every member of every group reconverges on the
+    /// same infra node inside one timer period after an outage: a thundering herd aimed at
+    /// precisely the node that just came back. Naming the target peer and asking for
+    /// `DisconnectedAndNotDialing` collapses that to one dial per peer.
+    ///
+    /// An address with no `/p2p/<id>` names no peer, so it cannot be gated; it is dialed as
+    /// before. (The jitter half of P11 lives in the caller that drives the timer.)
+    fn dial_gated(&mut self, addr: Multiaddr) {
+        let Some(target) = target_peer_in_multiaddr(&addr) else {
+            if let Err(e) = self.swarm.dial(addr.clone()) {
+                tracing::warn!(%addr, error = %e, "dial failed");
+            }
+            return;
+        };
+        if self.swarm.is_connected(&target) {
+            tracing::trace!(%addr, peer = %target, "dial suppressed: already connected");
+            return;
+        }
+        let opts = DialOpts::peer_id(target)
+            .addresses(vec![addr.clone()])
+            .condition(PeerCondition::DisconnectedAndNotDialing)
+            .build();
+        match self.swarm.dial(opts) {
+            Ok(()) => tracing::debug!(%addr, peer = %target, "dialing"),
+            // `DialError::DialPeerConditionFalse` is the condition doing its job (a dial to this
+            // peer is already in flight), not a failure worth warning about.
+            Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
+                tracing::trace!(%addr, peer = %target, ?cond, "dial suppressed: already dialing");
+            }
+            Err(e) => tracing::warn!(%addr, error = %e, "dial failed"),
         }
     }
 

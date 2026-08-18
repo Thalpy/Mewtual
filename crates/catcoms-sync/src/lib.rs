@@ -33,8 +33,8 @@ use catcoms_crypto::{
     seal, unseal, verify_with_public_bytes, DeviceCertificate, DeviceId, SealedBlob,
 };
 use catcoms_discovery::{
-    Candidate, DiscoveryPolicy, EclipseConfig, EclipseDetector, EclipseLevel, EclipseObservation,
-    PolicyConfig, Source,
+    AddressCache, CacheConfig, CacheError, CachedPeer, Candidate, DiscoveryPolicy, EclipseConfig,
+    EclipseDetector, EclipseLevel, EclipseObservation, PolicyConfig, Source,
 };
 use catcoms_mls::{
     restore_server, serialize_key_package, snapshot_server, Incoming, InviteLedger, InviteToken,
@@ -113,9 +113,20 @@ const KIND_DEVICE_ADD: u8 = 9;
 /// **forwards** the owner's signature rather than re-signing (the companion holds the owner's key
 /// from its grant, not the relay's).
 const KIND_DEVICE_ADMIT_RESULT: u8 = 10;
-/// Bound on buffered inbound call signals before the actor drains them (FIFO-evicted if exceeded), so
-/// a member can't flood the queue.
+/// Bound on buffered inbound call signals before the actor drains them, so a member can't flood
+/// the queue. The queue stays a global FIFO (drain order is arrival order), but the *eviction*
+/// rule is per-sender fair: see [`ChannelSync::bound_call_signals`].
 const MAX_PENDING_CALL_SIGNALS: usize = 256;
+/// Burst a single member may push into the call-signal queue before the token bucket bites.
+/// An ICE gathering round is genuinely bursty (one SDP blob then every host/srflx/relay
+/// candidate as it is discovered), and `docs/design-voice.md` deliberately does not dedupe,
+/// so the burst allowance has to cover a whole realistic round or a legitimate call loses
+/// candidates. Two rounds' worth.
+const CALL_SIGNAL_BURST: u32 = 64;
+/// Sustained call signals per second a member is refilled at, once its burst is spent. A call
+/// setup is a burst followed by near-silence (renegotiation, an occasional late candidate), so
+/// this only needs to cover the steady state; it is the ceiling a flooder is squeezed down to.
+const CALL_SIGNAL_REFILL_PER_SEC: u64 = 8;
 /// Ceiling on a blob **response** accepted from a serving peer before storing. The blob's
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
@@ -141,7 +152,23 @@ const MAX_DIALED_PEERS: usize = 4096;
 const MAX_PEX_ADDRESSES: usize = 8;
 /// Minimum interval (ms, on the injected clock) between PEX responses served to the
 /// same requesting **member**; a rate limit so PEX cannot be used to amplify traffic.
+/// The *requesting* side reuses the same number (see [`ChannelSync::drive_pex`]), so a
+/// caller driving PEX from a fast loop cannot burn its own budget with a peer.
 const MIN_PEX_INTERVAL_MS: u64 = 1_000;
+/// How many peers one [`ChannelSync::drive_pex`] pass may ask. The discovery tick runs about
+/// once a minute, and a member that answers hands back up to `MAX_PEX_ENTRIES` records, so a
+/// handful of sources per pass converges the address book quickly while keeping the tick's
+/// work (and the traffic a single node generates) bounded and predictable.
+const MAX_PEX_REQUESTS_PER_TICK: usize = 4;
+/// How long a discovery root keeps counting toward the eclipse detector's corroboration signal
+/// after it was last heard from (ms, on the injected clock).
+///
+/// The count has to be able to fall, or the "corroboration collapsed to a single root" alarm can
+/// never fire: a session-cumulative set only ever grows. It must not fall *easily* either, or a
+/// rendezvous restarting, or two discovery ticks that happened to find nothing, would read as an
+/// eclipse. Ten minutes is roughly ten discovery periods: several consecutive misses are absorbed,
+/// while a root that has genuinely dropped out of the picture stops counting within minutes.
+const ROOT_FRESHNESS_MS: u64 = 600_000;
 /// Cap on a single dialable address string in a peer record. Any real multiaddr is
 /// far shorter; rejecting longer ones bounds the bytes a record can carry.
 const MAX_PEX_ADDR_LEN: usize = 256;
@@ -1224,6 +1251,86 @@ pub fn peer_addrs_from_snapshot(snapshot: &[u8]) -> Result<Vec<String>, SyncErro
     Ok(addrs)
 }
 
+/// Whether an IPv4 literal is worth dialing *and* safe to have been pointed at by someone else.
+/// Everything a peer record has no business naming: this machine, this LAN, the carrier's NAT
+/// pool, the link-local and multicast spaces, and the two reserved blocks.
+fn ipv4_is_routable(ip: &std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        // RFC 6598 100.64.0.0/10, the carrier-grade-NAT block (`Ipv4Addr::is_shared` is
+        // still unstable), and the two reserved blocks 0.0.0.0/8 and 240.0.0.0/4
+        // (`is_reserved` likewise).
+        || (o[0] == 100 && (64..128).contains(&o[1]))
+        || o[0] == 0
+        || o[0] >= 240)
+}
+
+/// The IPv6 counterpart of [`ipv4_is_routable`]. `is_unique_local` / `is_unicast_link_local`
+/// are still unstable, so those two are bit tests.
+fn ipv6_is_routable(ip: &std::net::Ipv6Addr) -> bool {
+    let s = ip.segments();
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        // fc00::/7 unique-local and fe80::/10 link-local.
+        || (s[0] & 0xfe00) == 0xfc00
+        || (s[0] & 0xffc0) == 0xfe80
+        // An IPv4 address smuggled through v6 (`::ffff:a.b.c.d`, or the deprecated
+        // `::a.b.c.d`) is judged by the v4 rules, or every one of them could be dodged
+        // by writing the same private address in the other family.
+        || ip.to_ipv4().is_some_and(|v4| !ipv4_is_routable(&v4)))
+}
+
+/// Whether a dialable address string carried in a [`PeerDescriptor`] may be kept.
+///
+/// Peer records carry free-form multiaddr strings, signed by the member that published them,
+/// and until this landed nothing ever looked inside one. That let any member aim every other
+/// member's dialer at a host of its choosing: an internal-network scan (`/ip4/192.168.1.1/…`)
+/// run from inside each victim's own LAN, a liveness/port oracle against a third party, or a
+/// connect flood sourced from clean residential addresses with nothing tying it back to the
+/// member that aimed it. PEX is members-only, but "a member" is a low bar for anyone holding
+/// one invite.
+///
+/// The rule is the one the desktop bridge already applies to what this node *advertises*
+/// (`external_addrs`), applied now to what it *accepts*: every IP component in the address
+/// must be globally routable. Components with no IP at all (a `/dns4/` name, the `/p2p-circuit`
+/// suffix of a relayed address) are left alone; they are resolved by the transport, and a
+/// relayed address is judged on the relay's own IP, which is right there in the same string.
+///
+/// Documentation prefixes (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24, 2001:db8::/32) are
+/// deliberately **not** rejected. Nothing routes to them, so they are neither a scan target
+/// nor a flood vector: the whole cost of accepting one is a single dial that fails. They are
+/// also this repo's established stand-in for a public address in tests, and rejecting them
+/// would buy nothing but a worse test vocabulary.
+///
+/// Pure: string plus `std::net` parsing, no DNS, no I/O, no ambient anything.
+fn peer_addr_is_routable(addr: &str) -> bool {
+    let mut parts = addr.split('/');
+    while let Some(proto) = parts.next() {
+        // Each IP component is `ip4`/`ip6` followed by its literal, so taking the next
+        // element here consumes exactly that literal and leaves the walk aligned.
+        match proto {
+            "ip4" => match parts.next().map(str::parse::<std::net::Ipv4Addr>) {
+                Some(Ok(ip)) if ipv4_is_routable(&ip) => {}
+                // A missing or unparseable literal is malformed; fail closed rather than
+                // hand an address we could not read to the dialer.
+                _ => return false,
+            },
+            "ip6" => match parts.next().map(str::parse::<std::net::Ipv6Addr>) {
+                Some(Ok(ip)) if ipv6_is_routable(&ip) => {}
+                _ => return false,
+            },
+            _ => {}
+        }
+    }
+    true
+}
+
 /// Frame a PEX bundle: `u32 count ‖ len-prefixed PeerDescriptors`.
 fn encode_pex_bundle(records: &[PeerDescriptor]) -> Vec<u8> {
     let mut e = Encoder::new();
@@ -1870,6 +1977,46 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// transport connection, so multiple connections cannot multiply the rate).
     /// Bounded by `max_known_peers`.
     pex_served_at: HashMap<DeviceId, u64>,
+    /// The mirror of `pex_served_at` on the **asking** side: when this node last asked each
+    /// peer for records, so [`ChannelSync::drive_pex`] respects `MIN_PEX_INTERVAL_MS` and a
+    /// caller driving the tick faster than intended cannot burn its budget with one peer (it
+    /// would be answered with an empty bundle anyway). Keyed on the transport peer, because
+    /// that is all we know before the response identifies its signer. Transient; bounded by
+    /// `max_known_peers`.
+    pex_requested_at: HashMap<PeerId, u64>,
+    /// Per-sending-**device** token bucket for `KIND_CALL_SIGNAL`: `(last_refill_ms, tokens)`.
+    /// Voice signalling was the one authenticated member-to-member push with no rate limit at
+    /// all, so one member could evict every other member's SDP and ICE before the actor drained
+    /// the queue. Same keying and bounding as `pex_served_at`. Transient.
+    call_signal_budget: HashMap<DeviceId, (u64, u32)>,
+    /// Which discovery roots actually **returned a distinct peer** this session: rendezvous node
+    /// id (or PEX voucher device id, encoded the same way) → the set of peers it surfaced.
+    ///
+    /// This is the eclipse detector's `S`, and it exists because the old input was
+    /// `rendezvous_nodes.len()`: a count of *configured strings*, which arrive from the
+    /// inviter-chosen `rendezvous` vector in the invite. A hostile inviter naming two nodes it
+    /// controls satisfied `min_sources` and the suspect predicate could then never fire. A root
+    /// that never answers now counts for nothing, which is what "corroboration" has to mean.
+    /// Each root keeps the time it was last heard from, because a count that only ever grew
+    /// could never *drop*, and the source-collapse alarm is defined on a drop; a root that has
+    /// gone quiet for `ROOT_FRESHNESS_MS` stops counting. Transient (a fresh session re-earns
+    /// its roots), bounded by `max_known_peers`.
+    discovery_roots: BTreeMap<Vec<u8>, (u64, BTreeSet<Vec<u8>>)>,
+    /// The cross-session address cache: the **proven members** this node reached in earlier
+    /// sessions, offered as `Source::Cache` dial candidates the moment the app opens.
+    ///
+    /// This is the cure for the first-contact eclipse. A returning node has no peers, so a
+    /// hostile rendezvous is free to answer with nothing but Sybils; a cached, previously-proven
+    /// member is a route past it that the rendezvous never got to choose. Entries are candidates
+    /// **only**: they are dialed through the same [`DiscoveryPolicy`] as anything else, and
+    /// membership is re-proven live afterwards (roster check + self-signature on the record, and
+    /// a signed catch-up before the peer ever becomes a catch-up source). Nothing here promotes
+    /// anyone into `member_peers`.
+    ///
+    /// Persisted separately from the snapshot, sealed beside it by `catcoms-app`'s `ServerStore`;
+    /// the keyed integrity tag in [`AddressCache::to_bytes`] means a doctored row is refused on
+    /// load rather than half-trusted.
+    address_cache: AddressCache,
     /// Per-requesting-**device** blob-serve budget accounting `(window_start_ms, bytes_in_window)`
     /// for the bytes-budget rate limit (same keying + bounding as `pex_served_at`).
     blob_budget: HashMap<DeviceId, (u64, u64)>,
@@ -1946,6 +2093,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             pending_call_signals: Vec::new(),
             peer_records: HashMap::new(),
             pex_served_at: HashMap::new(),
+            pex_requested_at: HashMap::new(),
+            call_signal_budget: HashMap::new(),
+            discovery_roots: BTreeMap::new(),
+            address_cache: AddressCache::new(CacheConfig::default()),
             blob_budget: HashMap::new(),
             blobs: Box::new(MemoryBlobStore::new()),
             stats: SyncStats::default(),
@@ -2580,6 +2731,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         attempted
     }
 
+    /// Seed the **untrusted candidate** pool with a peer this node already reached outside the
+    /// event loop; specifically the inviter a joiner just completed its handshake with.
+    ///
+    /// The joiner's `ChannelSync` is built *after* `request_join`, which runs directly on the
+    /// transport, so the peer it just spoke to was nowhere in its pools: a fresh member started
+    /// life knowing nobody, and had to wait for the inviter to send it something before it could
+    /// ask anyone anything (PEX included). Seeding it here is a pool-one entry only: the peer is
+    /// a catch-up *candidate* and a PEX target, and it still has to serve a roster-verified
+    /// signed catch-up before [`promote_member_peer`](Self::promote_member_peer) makes it a
+    /// trusted source. The two pools stay separate.
+    pub fn note_candidate_peer(&mut self, peer: PeerId) {
+        self.remember_peer(peer);
+    }
+
     /// Remember `peer` as a catch-up source (most-recently-seen at the back),
     /// bounded by `max_known_peers`. A freshly-seen peer is also un-marked as
     /// failed, so it becomes eligible again.
@@ -3050,9 +3215,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false` (the pre-dial membership
     /// tag isn't surfaced by the transport yet; a documented hardening follow-up).
     pub async fn ingest_discovered(&mut self, d: DiscoveredPeer) {
-        if self.dialed_peers.contains(&d.peer) {
-            return;
-        }
         // Only act on a record from a namespace we actually register/discover under.
         let Some(rz_root) = self
             .rendezvous_nodes
@@ -3062,6 +3224,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         else {
             return;
         };
+        // This rendezvous just named a peer, so it is an **effective** discovery root, and one
+        // root no matter how many records it returns (two colluding rendezvous cannot manufacture
+        // independent corroboration). Recorded before the already-dialed dedup below:
+        // corroboration is about a root independently surfacing a peer, and a root that keeps
+        // naming a peer we happen to have dialed already is still corroborating.
+        //
+        // RESIDUAL: the `MeshTransport` seam does not surface this node's own libp2p peer id
+        // (`local_peer` is the hashed 32-byte form, `d.peer` the raw libp2p bytes), so a
+        // rendezvous echoing our *own* registration back counts as one effective root. That is
+        // weaker than corroboration but strictly stronger than the count it replaces, which was
+        // the number of configured strings; closing it means self-filtering discovery in
+        // `catcoms-net`.
+        self.note_discovery_root(rz_root.clone(), d.peer.clone());
+        if self.dialed_peers.contains(&d.peer) {
+            return;
+        }
         if self.dialed_peers.len() >= MAX_DIALED_PEERS {
             self.dialed_peers.clear(); // bound memory; re-dials are still policy-budget-gated
         }
@@ -3099,7 +3277,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // list, which never shrank on disconnect and so over-counted reachability; making the
             // detector under-warn after a node actually lost its peers.
             reachable_devices: self.connected_member_fingerprints().len() + 1,
-            trust_roots: self.rendezvous_nodes.len(),
+            // Roots that actually **returned a peer** this session, not the number of configured
+            // rendezvous strings. Those strings come from the inviter-chosen `rendezvous` vector
+            // in the invite, so the old count was attacker-supplied: a hostile inviter naming two
+            // nodes it controls met `min_sources` and the suspect predicate could never fire, and
+            // a configured-but-dead rendezvous counted as corroboration it had never provided.
+            trust_roots: self.effective_discovery_roots(),
         };
         matches!(
             self.eclipse.observe(obs, &*self.clock),
@@ -3171,6 +3354,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// addresses are dropped and the list is truncated to `MAX_PEX_ADDRESSES`; `seq`
     /// must be below `u64::MAX` (the top value is reserved so a node can always
     /// publish a fresher record later).
+    ///
+    /// Non-routable addresses (loopback, this LAN, CGNAT, link-local, multicast, reserved;
+    /// see [`peer_addr_is_routable`]) are dropped **before signing**, for two reasons. They
+    /// publish this machine's internal topology to every member and buy nothing, since no
+    /// remote peer can route to them; and filtering here is what lets the receive side reject
+    /// such an address outright without ever tripping over an honest node, because a signature
+    /// covers the address list and a receiver cannot strip an entry without invalidating the
+    /// record it must be able to relay onward.
+    ///
+    /// A LAN-only group therefore publishes a record with **no** addresses. That is deliberate
+    /// and matches what this node already advertises to a rendezvous: the record still carries
+    /// the peer id and its signature, so presence and the delivery-state reach count keep
+    /// working; only the cross-session dial hint is absent, which is mDNS's job (rung 0a of
+    /// `docs/design-zeroconf-reachability.md`), not PEX's.
     pub fn publish_self_record(
         &mut self,
         mut addresses: Vec<String>,
@@ -3179,7 +3376,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if seq == u64::MAX {
             return Err(SyncError::Malformed);
         }
-        addresses.retain(|a| a.len() <= MAX_PEX_ADDR_LEN);
+        addresses.retain(|a| a.len() <= MAX_PEX_ADDR_LEN && peer_addr_is_routable(a));
         addresses.truncate(MAX_PEX_ADDRESSES);
         let device_pubkey = self.device.public_key_bytes();
         let peer_id = *self.transport.local_peer().as_bytes();
@@ -3399,10 +3596,105 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if payload.is_empty() {
             return;
         }
-        let from = roles::fingerprint(&DeviceId::from_public_key_bytes(&req_pubkey));
+        let device = DeviceId::from_public_key_bytes(&req_pubkey);
+        // Rate limit before anything is queued (the PEX / blob-budget idiom: charge the
+        // authenticated *device*, not the transport connection, so opening more connections
+        // multiplies nothing).
+        if !self.charge_call_signal_budget(device, self.clock.now_ms()) {
+            tracing::trace!("call signal rate-limited; dropped");
+            return;
+        }
+        let from = roles::fingerprint(&device);
         self.pending_call_signals.push((from, payload));
+        self.bound_call_signals();
+    }
+
+    /// Spend one call-signal token for `device`, refilling the bucket first. `false` means the
+    /// sender is over budget and the signal is dropped.
+    ///
+    /// A token bucket rather than the fixed `MIN_PEX_INTERVAL_MS`-style interval PEX uses,
+    /// because the traffic shape is different: PEX is one request answered with a whole bundle,
+    /// while call setup is a burst of individually meaningful messages (`docs/design-voice.md`
+    /// deliberately does not dedupe, so every ICE candidate must land). A minimum interval would
+    /// throttle a legitimate call to a trickle; a bucket lets the burst through and squeezes only
+    /// a sender that keeps going.
+    ///
+    /// Bounded by `max_known_peers` on the stalest-entry rule the other budgets use.
+    fn charge_call_signal_budget(&mut self, device: DeviceId, now: u64) -> bool {
+        let (last, tokens) = self
+            .call_signal_budget
+            .get(&device)
+            .copied()
+            .unwrap_or((now, CALL_SIGNAL_BURST));
+        // Saturating throughout: a backward clock step refills nothing rather than underflowing,
+        // which is the fail-safe direction for a limiter (it only ever delays a sender).
+        let elapsed = now.saturating_sub(last);
+        let refill = elapsed.saturating_mul(CALL_SIGNAL_REFILL_PER_SEC) / 1_000;
+        // Advance the refill clock only by the time actually converted into whole tokens, and
+        // carry the remainder. Snapping it to `now` instead would throw that remainder away on
+        // every charge, so a sender arriving faster than one token per refill period (an ICE
+        // candidate every 200 ms, say) would see `refill` truncate to zero forever and be
+        // starved permanently after its opening burst: the limiter would break exactly the
+        // legitimate long call it exists to protect.
+        let last = last.saturating_add(refill.saturating_mul(1_000) / CALL_SIGNAL_REFILL_PER_SEC);
+        let tokens = u64::from(tokens)
+            .saturating_add(refill)
+            .min(u64::from(CALL_SIGNAL_BURST)) as u32;
+        if tokens == 0 {
+            self.call_signal_budget.insert(device, (last, 0));
+            return false;
+        }
+        self.call_signal_budget.insert(device, (last, tokens - 1));
+        while self.call_signal_budget.len() > self.config.max_known_peers {
+            let victim = self
+                .call_signal_budget
+                .iter()
+                .min_by_key(|(_, &(t, _))| t)
+                .map(|(d, _)| *d);
+            match victim {
+                Some(v) => {
+                    self.call_signal_budget.remove(&v);
+                }
+                None => break,
+            }
+        }
+        true
+    }
+
+    /// Hold the call-signal queue at `MAX_PENDING_CALL_SIGNALS` with **per-sender fairness**.
+    ///
+    /// The queue stays a single global FIFO, because drain order must be arrival order (an
+    /// answer has to reach the UI after the offer it answers). What changed is *who* pays when
+    /// it is full: the old rule evicted the head, so one member sending 257 signals flushed
+    /// every other member's SDP offers and ICE candidates before the actor could drain them and
+    /// killed voice group-wide. Now the sender holding the **most** queued entries loses its
+    /// oldest one, so a flooder can only starve itself: with `k` senders active nobody is ever
+    /// squeezed below `MAX_PENDING_CALL_SIGNALS / k` slots.
+    ///
+    /// Ties go to the lowest fingerprint, so the behaviour is deterministic and testable.
+    fn bound_call_signals(&mut self) {
         while self.pending_call_signals.len() > MAX_PENDING_CALL_SIGNALS {
-            self.pending_call_signals.remove(0);
+            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            for (from, _) in &self.pending_call_signals {
+                *counts.entry(from.as_str()).or_default() += 1;
+            }
+            let Some(worst) = counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
+                .map(|(fp, _)| fp.to_string())
+            else {
+                break;
+            };
+            match self
+                .pending_call_signals
+                .iter()
+                .position(|(f, _)| *f == worst)
+            {
+                Some(idx) => {
+                    self.pending_call_signals.remove(idx);
+                }
+                None => break,
+            }
         }
     }
 
@@ -3431,6 +3723,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             || desc.addresses.len() > MAX_PEX_ADDRESSES
             || desc.addresses.iter().any(|a| a.len() > MAX_PEX_ADDR_LEN)
         {
+            return false;
+        }
+        // Address validation (see `peer_addr_is_routable`). The whole record goes, rather than
+        // the offending address: the record is stored to be **relayed on** to other members
+        // under its author's own signature, and a record with an edited address list no longer
+        // verifies. `publish_self_record` strips these before signing, so an honest member's
+        // record never reaches this branch.
+        if desc.addresses.iter().any(|a| !peer_addr_is_routable(a)) {
+            tracing::trace!("dropping peer record naming a non-routable address");
             return false;
         }
         // Cheap roster check BEFORE the Ed25519 self-signature verify, so a record
@@ -3528,15 +3829,267 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!(?peer, "PEX response signature invalid; rejected");
             return Ok(0);
         }
+        // A signed, request-bound answer came back from a proven current member, so this peer is
+        // reachable *right now*. That is the same fact `PeerConnected` carries (request/response
+        // rides an established connection), learned on a path the in-memory transport also
+        // exercises; `PeerDisconnected` still removes it, so the set cannot drift stale.
+        self.connected_peers.insert(peer);
         let records = decode_pex_bundle(&bundle)?;
         let mut learned = 0;
+        // The responder is one **effective** discovery root (a member that actually vouched for
+        // peers), keyed on its device id so two connections from one member cannot inflate the
+        // corroboration count. Only records that survive the roster + signature checks count.
+        let root = responder.as_bytes().to_vec();
         for r in records {
+            let vouched = DeviceId::from_public_key_bytes(&r.device_pubkey);
             if self.ingest_peer_record(r) {
                 learned += 1;
+            }
+            // Note the vouch whether or not the record was *new*: corroboration is about the
+            // root having independently named a peer, not about us having learned something.
+            if vouched != self.device.device_id() && self.group.contains_device(&vouched) {
+                self.note_discovery_root(root.clone(), vouched.as_bytes().to_vec());
             }
         }
         tracing::debug!(learned, "applied PEX response");
         Ok(learned)
+    }
+
+    /// One steady-state peer-exchange pass: ask a bounded handful of the peers we know for
+    /// their signed member records, so the address book (and with it presence, the
+    /// cross-session re-dial, and the eclipse detector's reach term) actually fills.
+    ///
+    /// Source order is the **two-pool** order the catch-up path already uses: proven members
+    /// (they served a signed catch-up that verified against the roster) first, then untrusted
+    /// candidates, so a flood of un-handshaked peers cannot crowd out a known-good source. Both
+    /// pools are safe to ask: a PEX response is only applied if a current member signed it and
+    /// bound it to this request, and each record inside is independently roster-checked and
+    /// signature-verified. Nothing here promotes anyone: a peer learned from PEX is a **dial
+    /// candidate**, never a catch-up source.
+    ///
+    /// Returns the number of newly-known members learned across the pass.
+    pub async fn drive_pex(&mut self) -> usize {
+        let now = self.clock.now_ms();
+        let mut targets: Vec<PeerId> = Vec::new();
+        let push = |peer: PeerId, targets: &mut Vec<PeerId>| {
+            if !targets.contains(&peer) {
+                targets.push(peer);
+            }
+        };
+        for p in self.member_peers.iter().rev() {
+            push(*p, &mut targets);
+        }
+        for p in self.known_peers.iter().rev() {
+            push(*p, &mut targets);
+        }
+        // A live connection we have not otherwise catalogued is still worth asking (it is how a
+        // freshly-dialed, policy-approved peer first gets spoken to).
+        let mut live: Vec<PeerId> = self.connected_peers.iter().copied().collect();
+        live.sort_unstable();
+        for p in live {
+            push(p, &mut targets);
+        }
+        let me = self.transport.local_peer();
+        let chosen: Vec<PeerId> = targets
+            .into_iter()
+            .filter(|p| *p != me)
+            .filter(|p| match self.pex_requested_at.get(p) {
+                Some(&last) => now.saturating_sub(last) >= MIN_PEX_INTERVAL_MS,
+                None => true,
+            })
+            .take(MAX_PEX_REQUESTS_PER_TICK)
+            .collect();
+        let mut learned = 0;
+        for peer in chosen {
+            self.note_pex_requested(peer, now);
+            match self.request_pex(peer).await {
+                Ok(n) => learned += n,
+                // An unreachable or rude peer is normal; the next pass tries a different one.
+                Err(e) => tracing::trace!(?peer, error = %e, "PEX request failed"),
+            }
+        }
+        learned
+    }
+
+    /// Record that we asked `peer` for records at `now` (the requester-side rate limit),
+    /// bounding the map by evicting the stalest entry. Mirrors [`Self::note_pex_served`].
+    fn note_pex_requested(&mut self, peer: PeerId, now: u64) {
+        self.pex_requested_at.insert(peer, now);
+        while self.pex_requested_at.len() > self.config.max_known_peers {
+            let victim = self
+                .pex_requested_at
+                .iter()
+                .min_by_key(|(_, &t)| t)
+                .map(|(p, _)| *p);
+            match victim {
+                Some(v) => {
+                    self.pex_requested_at.remove(&v);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Note that discovery root `root` surfaced peer `peer`, for the eclipse detector's
+    /// corroboration count (`S`). Bounded on both axes so a chatty root cannot grow memory.
+    fn note_discovery_root(&mut self, root: Vec<u8>, peer: Vec<u8>) {
+        let now = self.clock.now_ms();
+        let cap = self.config.max_known_peers;
+        let entry = self
+            .discovery_roots
+            .entry(root)
+            .or_insert((now, BTreeSet::new()));
+        entry.0 = now;
+        if entry.1.len() < cap {
+            entry.1.insert(peer);
+        }
+        // Drop roots that have gone quiet before falling back to the size cap, so ageing out
+        // (which is the meaningful rule) always wins over eviction (which is only about memory).
+        self.discovery_roots
+            .retain(|_, (seen, _)| now.saturating_sub(*seen) <= ROOT_FRESHNESS_MS);
+        while self.discovery_roots.len() > cap {
+            // Deterministic eviction of the stalest root; ties broken by key order.
+            let victim = self
+                .discovery_roots
+                .iter()
+                .min_by_key(|(k, (seen, _))| (*seen, (*k).clone()))
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(v) => {
+                    self.discovery_roots.remove(&v);
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// The number of **effective** discovery roots: roots that returned at least one distinct
+    /// peer and have been heard from within `ROOT_FRESHNESS_MS`. The eclipse detector's `S`.
+    /// See [`Self::discovery_roots`].
+    pub fn effective_discovery_roots(&self) -> usize {
+        let now = self.clock.now_ms();
+        self.discovery_roots
+            .values()
+            .filter(|(seen, peers)| {
+                !peers.is_empty() && now.saturating_sub(*seen) <= ROOT_FRESHNESS_MS
+            })
+            .count()
+    }
+
+    // --- cross-session address cache -----------------------------------------
+
+    /// Fold every currently-known member record into the cross-session
+    /// [`address_cache`](Self::address_cache), so the next session can dial these members
+    /// straight away. Only records that passed [`Self::ingest_peer_record`] are in the map, so
+    /// every entry cached here is roster-checked and self-signature-verified; our own record is
+    /// skipped (dialing ourselves is not a route past anything). Returns the cache size.
+    pub fn cache_known_records(&mut self) -> usize {
+        let own = self.device.device_id();
+        let entries: Vec<CachedPeer> = self
+            .peer_records
+            .iter()
+            .filter(|(device, _)| **device != own && self.group.contains_device(device))
+            // A record with no dialable address is worth keeping for presence but is not a dial
+            // candidate, which is the only thing the cache is for.
+            .filter(|(_, desc)| !desc.addresses.is_empty())
+            .map(|(device, desc)| CachedPeer {
+                // Keyed on the **device id**, never the self-asserted transport peer id: two
+                // records could claim one peer id, and keying on that would let one member pin
+                // another's freshness (the 6e-3d-7 `PeerDescriptor` note).
+                peer: device.as_bytes().to_vec(),
+                addresses: desc.addresses.clone(),
+                seq: desc.seq,
+                record: desc.encode(),
+            })
+            .collect();
+        for e in entries {
+            self.address_cache.insert(e, &mut self.rng);
+        }
+        self.address_cache.len()
+    }
+
+    /// Serialize the address cache for at-rest storage, with the keyed integrity tag.
+    /// `integrity_key` is supplied by the storage layer (an HKDF subkey of the vault key).
+    pub fn address_cache_bytes(&self, integrity_key: &[u8; 32]) -> Vec<u8> {
+        self.address_cache.to_bytes(integrity_key)
+    }
+
+    /// Load a previously serialized address cache, verifying its integrity tag. A tampered or
+    /// malformed blob is refused wholesale (the node simply starts with no cached candidates)
+    /// rather than partially trusted.
+    pub fn load_address_cache(&mut self, bytes: &[u8], integrity_key: &[u8; 32]) -> bool {
+        match AddressCache::from_bytes(bytes, integrity_key, CacheConfig::default()) {
+            Ok(cache) => {
+                self.address_cache = cache;
+                true
+            }
+            Err(CacheError::Tampered) => {
+                tracing::warn!("address cache failed its integrity tag; discarded");
+                false
+            }
+            Err(CacheError::Malformed) => {
+                tracing::warn!("address cache was malformed; discarded");
+                false
+            }
+        }
+    }
+
+    /// How many previously-proven members the cache is holding.
+    pub fn cached_peer_count(&self) -> usize {
+        self.address_cache.len()
+    }
+
+    /// Offer every cached peer to the [`DiscoveryPolicy`] as a `Source::Cache` candidate and
+    /// dial whatever it approves. Returns the number of peers dialed.
+    ///
+    /// This is the **first-contact** path: it runs before any rendezvous has answered, which is
+    /// exactly the window a hostile rendezvous owns. The two-pool separation is preserved end to
+    /// end: a cached peer is a dial target and nothing more, it never enters `member_peers`, and
+    /// its record still has to survive `ingest_peer_record` (roster + signature) before it is
+    /// believed. Addresses are re-validated on the way out, because the cache is at-rest state a
+    /// colluding host could have edited; the integrity tag should have caught that, but a dial
+    /// target is cheap to re-check and this is the last gate before a socket.
+    pub async fn dial_cached_peers(&mut self) -> usize {
+        let candidates: Vec<Candidate> = self
+            .address_cache
+            .candidates()
+            .into_iter()
+            .filter(|c| !self.dialed_peers.contains(&c.peer))
+            .map(|c| Candidate {
+                peer: c.peer,
+                addresses: c
+                    .addresses
+                    .into_iter()
+                    .filter(|a| peer_addr_is_routable(a))
+                    .collect(),
+                source: Source::Cache,
+                seq: c.seq,
+                // The pre-dial membership tag is a rendezvous-registration primitive; a cache
+                // entry carries no tag, so it ranks on being a prior proven contact.
+                tag_verified: false,
+            })
+            .filter(|c| !c.addresses.is_empty())
+            .collect();
+        if candidates.is_empty() {
+            return 0;
+        }
+        if self.dialed_peers.len() >= MAX_DIALED_PEERS {
+            self.dialed_peers.clear(); // bound memory; re-dials stay policy-budget-gated
+        }
+        for c in &candidates {
+            self.dialed_peers.insert(c.peer.clone());
+        }
+        let roster = self.member_count();
+        let plan = self
+            .discovery
+            .plan(candidates, roster, &*self.clock, &mut self.rng);
+        let dialed = plan.len();
+        for pd in plan {
+            for addr in &pd.addresses {
+                let _ = self.transport.dial_addr(addr).await;
+            }
+        }
+        dialed
     }
 
     /// Serve a PEX request: only to a proven current member (the membership-authed
@@ -7206,7 +7759,7 @@ mod tests {
         let mut bob = it.next().unwrap();
         drop(it);
 
-        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
             .unwrap();
         // Bob is a member of Alice's roster and his record self-verifies → accepted.
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
@@ -7254,10 +7807,10 @@ mod tests {
         assert!(alice.connected_member_fingerprints().is_empty());
 
         // Alice learns Bob's + Carol's signed records (PEX).
-        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
             .unwrap();
         carol
-            .publish_self_record(vec!["/ip4/10.0.0.3/tcp/1".into()], 1)
+            .publish_self_record(vec!["/ip4/203.0.113.3/tcp/1".into()], 1)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         assert!(alice.ingest_peer_record(carol.self_record().unwrap().clone()));
@@ -7316,7 +7869,7 @@ mod tests {
         let bob_fp = roles::fingerprint(&ids[1]);
 
         // Alice must hold Bob's signed peer record to address him (the UI gates this on Bob online).
-        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         assert!(bob.pending_dm_invites().is_empty());
@@ -7362,10 +7915,10 @@ mod tests {
         let bob_id = ids[1];
         let carol_id = ids[2];
 
-        bob.publish_self_record(vec!["/ip4/10.0.0.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
             .unwrap();
         carol
-            .publish_self_record(vec!["/ip4/10.0.0.3/tcp/1".into()], 1)
+            .publish_self_record(vec!["/ip4/203.0.113.3/tcp/1".into()], 1)
             .unwrap();
         // Carol already knows Bob's record (she joined after him, so Bob is in her
         // roster); seed it so she can relay it.
@@ -7382,6 +7935,310 @@ mod tests {
         assert!(alice.peer_record(&carol_id).is_some());
         // Discovery candidates only; no catch-up-source promotion.
         assert_eq!(alice.stats().member_peers, 0);
+        // Carol answered with records for members other than us, so she is one *effective*
+        // discovery root (this is the eclipse detector's S, and it now measures something).
+        assert_eq!(alice.effective_discovery_roots(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_discovery_root_that_goes_quiet_stops_corroborating() {
+        // The eclipse detector's S has to be able to FALL, or "corroboration collapsed to a single
+        // root" is an alarm that can never fire: a session-cumulative count only ever grows.
+        let hub = Hub::new();
+        let founder = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&founder).unwrap();
+        let clock = ManualClock::new(1_000);
+        let mut node = ChannelSync::new(
+            hub.join(PeerId::from_u64(1)),
+            group,
+            founder,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+        );
+
+        node.note_discovery_root(b"rendezvous-a".to_vec(), b"peer-1".to_vec());
+        node.note_discovery_root(b"rendezvous-b".to_vec(), b"peer-2".to_vec());
+        assert_eq!(node.effective_discovery_roots(), 2);
+
+        // Root A keeps answering; root B goes quiet. Several missed ticks are absorbed...
+        clock.advance_ms(ROOT_FRESHNESS_MS / 2);
+        node.note_discovery_root(b"rendezvous-a".to_vec(), b"peer-1".to_vec());
+        assert_eq!(node.effective_discovery_roots(), 2, "not twitchy");
+
+        // ...but a root that has genuinely dropped out stops counting, and corroboration falls to
+        // the single surviving root, which is exactly the signal the detector alarms on.
+        clock.advance_ms(ROOT_FRESHNESS_MS);
+        node.note_discovery_root(b"rendezvous-a".to_vec(), b"peer-1".to_vec());
+        assert_eq!(node.effective_discovery_roots(), 1);
+    }
+
+    #[test]
+    fn peer_record_addresses_are_validated_against_the_routable_ranges() {
+        // What a member may point every other member's dialer at. The private/loopback/CGNAT
+        // rejects are the ones that matter: they turn PEX into an internal-network scanner run
+        // from inside each victim's own LAN.
+        for good in [
+            "/ip4/203.0.113.4/tcp/9",
+            "/ip4/8.8.8.8/udp/443/quic-v1",
+            "/ip6/2001:db8::1/tcp/9",
+            "/ip4/198.51.100.1/tcp/4000/p2p/RELAY/p2p-circuit/p2p/SELF",
+            // No IP component at all: not this defect's shape, left to the transport.
+            "/dns4/example.invalid/tcp/443",
+        ] {
+            assert!(peer_addr_is_routable(good), "{good} should be accepted");
+        }
+        for bad in [
+            "/ip4/127.0.0.1/tcp/9",          // loopback
+            "/ip4/192.168.1.1/tcp/9",        // RFC1918
+            "/ip4/10.0.0.5/tcp/9",           // RFC1918
+            "/ip4/172.20.0.5/tcp/9",         // RFC1918 (the easy one to get wrong)
+            "/ip4/100.64.0.1/tcp/9",         // RFC6598 CGNAT
+            "/ip4/169.254.1.1/tcp/9",        // link-local
+            "/ip4/0.0.0.0/tcp/9",            // unspecified / "this network"
+            "/ip4/224.0.0.1/tcp/9",          // multicast
+            "/ip4/240.0.0.1/tcp/9",          // reserved
+            "/ip6/::1/tcp/9",                // loopback
+            "/ip6/fd00::1/tcp/9",            // unique-local
+            "/ip6/fe80::1/tcp/9",            // link-local
+            "/ip6/ff02::1/tcp/9",            // multicast
+            "/ip6/::ffff:192.168.1.1/tcp/9", // a private v4 smuggled through v6
+            "/ip4/not-an-address/tcp/9",     // malformed: fail closed
+            "/ip4",                          // truncated: fail closed
+            // A relayed address whose *relay* is on the LAN is still a LAN dial.
+            "/ip4/192.168.1.9/tcp/4000/p2p/RELAY/p2p-circuit/p2p/SELF",
+        ] {
+            assert!(!peer_addr_is_routable(bad), "{bad} should be rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_record_naming_a_non_routable_address_is_refused_and_never_published() {
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+
+        // Publishing strips the addresses that must not leave the box, before signing.
+        bob.publish_self_record(
+            vec![
+                "/ip4/192.168.1.50/tcp/9".into(),
+                "/ip4/203.0.113.9/tcp/9".into(),
+                "/ip4/127.0.0.1/tcp/9".into(),
+            ],
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            bob.self_record().unwrap().addresses,
+            vec!["/ip4/203.0.113.9/tcp/9".to_string()],
+            "only the routable address survives, so the signature covers a clean list"
+        );
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+
+        // A hand-rolled record (a modified client) naming a LAN host is refused outright, even
+        // though its self-signature is perfectly valid and its signer is a real member.
+        let payload = peer_record_signing_payload(
+            &bob.device.public_key_bytes(),
+            bob.local_peer().as_bytes(),
+            &["/ip4/192.168.1.1/tcp/80".to_string()],
+            9,
+        );
+        let hostile = PeerDescriptor {
+            device_pubkey: bob.device.public_key_bytes(),
+            peer_id: *bob.local_peer().as_bytes(),
+            addresses: vec!["/ip4/192.168.1.1/tcp/80".into()],
+            seq: 9,
+            signature: bob.device.sign(&payload).unwrap(),
+        };
+        assert!(hostile.verify_self(), "the record is internally valid…");
+        assert!(!alice.ingest_peer_record(hostile), "…and still refused");
+        assert_eq!(
+            alice.peer_record(&ids[1]).unwrap().addresses,
+            vec!["/ip4/203.0.113.9/tcp/9".to_string()],
+            "the refused record did not overwrite the good one despite its higher seq"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_pex_fills_the_address_book_and_is_rate_limited_per_peer() {
+        // The product path: nobody names a peer, the tick simply asks whoever it knows.
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let bob_peer = bob.local_peer();
+
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+            .unwrap();
+        // Alice knows of Bob only as a transport peer (as she would after serving his join).
+        alice.remember_peer(bob_peer);
+        assert!(alice.peer_record(&ids[1]).is_none());
+
+        let (learned, _) = tokio::join!(alice.drive_pex(), bob.run_once());
+        assert_eq!(
+            learned, 1,
+            "the tick learned Bob with no peer named by hand"
+        );
+        assert!(alice.peer_record(&ids[1]).is_some());
+        // Still a candidate, never a catch-up source: the two pools stay separate.
+        assert_eq!(alice.stats().member_peers, 0);
+
+        // A second pass inside MIN_PEX_INTERVAL_MS does not ask again (the clock has not moved),
+        // so a caller driving the tick in a tight loop cannot amplify traffic.
+        assert_eq!(alice.drive_pex().await, 0);
+        assert!(
+            alice.pex_requested_at.contains_key(&bob_peer),
+            "the ask was recorded for the requester-side rate limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_address_cache_round_trips_proven_members_across_a_session() {
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 3)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        // Our own record is not a route past anything, so it is not cached.
+        alice
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .unwrap();
+        assert_eq!(alice.cache_known_records(), 1);
+        assert_eq!(alice.cached_peer_count(), 1);
+
+        let key = [42u8; 32];
+        let bytes = alice.address_cache_bytes(&key);
+
+        // Next session: a fresh node loads the cache and can offer Bob immediately, before any
+        // rendezvous has had the chance to answer with Sybils.
+        let (_hub2, members2, _) = build_members(1).await;
+        let mut next = members2.into_iter().next().unwrap();
+        assert!(next.load_address_cache(&bytes, &key));
+        assert_eq!(next.cached_peer_count(), 1);
+        assert!(next
+            .address_cache
+            .get(&ids[1].as_bytes().to_vec())
+            .is_some());
+
+        // A doctored row is refused wholesale rather than half-trusted.
+        let mut tampered = bytes.clone();
+        tampered[12] ^= 0x01;
+        assert!(!next.load_address_cache(&tampered, &key));
+        assert_eq!(next.cached_peer_count(), 1, "the good cache is kept");
+        // …as is a cache sealed for another device.
+        assert!(!next.load_address_cache(&bytes, &[7u8; 32]));
+    }
+
+    #[tokio::test]
+    async fn one_member_flooding_call_signals_starves_only_itself() {
+        // P4: the whole point. Bob floods; Carol's single SDP offer must still be there when
+        // the actor drains, and the flood must be rate-limited on top.
+        let (_hub, members, ids) = build_members(3).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+        let bob_fp = roles::fingerprint(&ids[1]);
+        let carol_fp = roles::fingerprint(&ids[2]);
+
+        // Everyone can address Alice.
+        alice
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .unwrap();
+        for n in [&mut bob, &mut carol] {
+            assert!(n.ingest_peer_record(alice.self_record().unwrap().clone()));
+        }
+        let alice_fp = roles::fingerprint(&ids[0]);
+
+        // Carol's offer lands first, then Bob floods far past the queue bound.
+        let (sent, _) = tokio::join!(
+            carol.send_call_signal(&alice_fp, b"carol-sdp-offer"),
+            alice.run_once()
+        );
+        assert!(sent.unwrap());
+        for i in 0..(MAX_PENDING_CALL_SIGNALS + 64) {
+            let payload = format!("bob-flood-{i}");
+            let (_, _) = tokio::join!(
+                bob.send_call_signal(&alice_fp, payload.as_bytes()),
+                alice.run_once()
+            );
+        }
+
+        let queued = alice.take_call_signals();
+        assert!(
+            queued.len() <= MAX_PENDING_CALL_SIGNALS,
+            "the queue stayed bounded"
+        );
+        assert!(
+            queued
+                .iter()
+                .any(|(from, p)| *from == carol_fp && p == b"carol-sdp-offer"),
+            "the quiet member's offer survived a flood that used to evict it"
+        );
+        // The flooder is squeezed by its own token bucket: it cannot have banked more than one
+        // burst plus whatever the (unmoving) test clock refilled, which is nothing.
+        let from_bob = queued.iter().filter(|(from, _)| *from == bob_fp).count();
+        assert!(
+            from_bob <= CALL_SIGNAL_BURST as usize,
+            "the flooder was capped at its burst, got {from_bob}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_call_signal_bucket_refills_over_time() {
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let bob_device = DeviceId::from_public_key_bytes(&[3u8; 32]);
+        let _ = ids;
+
+        // Spend the whole burst at t=0.
+        for _ in 0..CALL_SIGNAL_BURST {
+            assert!(alice.charge_call_signal_budget(bob_device, 0));
+        }
+        assert!(
+            !alice.charge_call_signal_budget(bob_device, 0),
+            "the burst is spent"
+        );
+        // A refused signal must not reset the refill clock, or the bucket never recovers: keep
+        // hammering inside the first sub-token window and the refill still measures from t=0.
+        for t in [10, 50, 100] {
+            assert!(!alice.charge_call_signal_budget(bob_device, t));
+        }
+        // One second after the burst was spent, exactly the sustained rate has refilled.
+        for _ in 0..CALL_SIGNAL_REFILL_PER_SEC {
+            assert!(alice.charge_call_signal_budget(bob_device, 1_000));
+        }
+        assert!(!alice.charge_call_signal_budget(bob_device, 1_000));
+
+        // The sustained rate must actually be sustainable. A caller arriving faster than one
+        // token per refill period used to throw its remainder away on every charge and starve
+        // permanently; over ten seconds it must get the ten seconds' worth it is owed.
+        let mut carol = ChannelSync::new(
+            Hub::new().join(PeerId::from_u64(9)),
+            ServerGroup::create(&MlsDevice::generate().unwrap()).unwrap(),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(9),
+            Box::new(ManualClock::new(0)),
+        );
+        for _ in 0..CALL_SIGNAL_BURST {
+            assert!(carol.charge_call_signal_budget(bob_device, 0));
+        }
+        let mut granted = 0;
+        for step in 1..=100u64 {
+            // One attempt every 100 ms for 10 s: well under a whole token per attempt.
+            if carol.charge_call_signal_budget(bob_device, step * 100) {
+                granted += 1;
+            }
+        }
+        assert_eq!(
+            granted,
+            (10 * CALL_SIGNAL_REFILL_PER_SEC) as usize,
+            "ten seconds of refill must actually arrive"
+        );
     }
 
     #[tokio::test]
@@ -7518,7 +8375,7 @@ mod tests {
     async fn pex_to_a_non_member_is_rejected() {
         let mut alice = solo_node();
         alice
-            .publish_self_record(vec!["/ip4/10.0.0.1/tcp/1".into()], 1)
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
             .unwrap();
         let gid = alice.group.group_id();
         // A non-member crafts a syntactically-valid authed PEX request; Alice's
@@ -7550,7 +8407,7 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         alice
-            .publish_self_record(vec!["/ip4/10.0.0.1/tcp/1".into()], 1)
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
             .unwrap();
         let bob_peer = bob.local_peer();
         // Bob (a member) signs a PEX request; strip the leading kind byte for serve_pex.

@@ -2264,8 +2264,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         )
         .await
         .map_err(|_| AppError::JoinTimeout)??;
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        // Seed the inviter as an untrusted **candidate** peer. `request_join` ran straight on the
+        // transport, before this `ChannelSync` existed, so without this a brand-new member starts
+        // life knowing nobody at all and cannot ask anyone for anything (PEX included) until the
+        // inviter happens to send it something first. Candidate pool only; the inviter still has
+        // to serve a roster-verified signed catch-up to become a trusted source.
+        sync.note_candidate_peer(inviter);
         Ok(Self {
-            sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
+            sync,
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
@@ -2313,8 +2320,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         )
         .await
         .map_err(|_| AppError::JoinTimeout)??;
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        // Same reasoning as the invite join: the contact that relayed this admission is the one
+        // peer a fresh companion device has, so seed it as a candidate.
+        sync.note_candidate_peer(contact);
         Ok(Self {
-            sync: ChannelSync::new_joined(transport, group, device, rng, clock, routing),
+            sync,
             display_name: display_name.into(),
             device_id,
             own_message_changes: HashMap::new(),
@@ -4755,6 +4766,63 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.observe_eclipse()
     }
 
+    // --- member peer exchange (PEX) + the cross-session address cache -------------------------
+
+    /// Publish this device's own signed peer record, so other members can learn where to dial it.
+    ///
+    /// This is the **root of the whole steady-state discovery path** and until now nothing in the
+    /// product called it, which left `peer_records` permanently empty and took presence, the
+    /// cross-session re-dial and the eclipse detector's reach term down with it. Call it at
+    /// found, join and reload with the addresses this node is actually reachable on.
+    ///
+    /// `seq` must come from the per-launch block reserved by
+    /// [`ServerNet::reserve_record_seq_block`](crate::store::ServerNet::reserve_record_seq_block),
+    /// never from a counter that restarts at 1: a peer keeps an incoming record only when its
+    /// `seq` beats the one it already holds, so a restart that reuses low numbers is ignored
+    /// forever by everyone holding the old record.
+    pub fn publish_self_record(
+        &mut self,
+        addresses: Vec<String>,
+        seq: u64,
+    ) -> Result<(), AppError> {
+        Ok(self.sync.publish_self_record(addresses, seq)?)
+    }
+
+    /// Ask a bounded handful of known peers for their member records (one PEX pass). Returns the
+    /// number of newly-known members. Driven from the actor's discovery tick.
+    pub async fn drive_pex(&mut self) -> usize {
+        self.sync.drive_pex().await
+    }
+
+    /// Fold the currently-known member records into the cross-session address cache. Returns the
+    /// cache size.
+    pub fn cache_known_records(&mut self) -> usize {
+        self.sync.cache_known_records()
+    }
+
+    /// Dial the cached previously-proven members (policy-gated; candidates only, never promoted
+    /// into the trusted catch-up pool). Returns the number of peers dialed.
+    pub async fn dial_cached_peers(&mut self) -> usize {
+        self.sync.dial_cached_peers().await
+    }
+
+    /// Serialize the address cache for sealing beside this server's snapshot.
+    /// `integrity_key` comes from [`ServerStore::address_cache_key`](crate::store::ServerStore::address_cache_key).
+    pub fn address_cache_bytes(&self, integrity_key: &[u8; 32]) -> Vec<u8> {
+        self.sync.address_cache_bytes(integrity_key)
+    }
+
+    /// Load a previously sealed address cache. `false` if it failed its integrity tag or was
+    /// malformed, in which case the node simply starts with no cached candidates.
+    pub fn load_address_cache(&mut self, bytes: &[u8], integrity_key: &[u8; 32]) -> bool {
+        self.sync.load_address_cache(bytes, integrity_key)
+    }
+
+    /// How many previously-proven members the cross-session cache is holding.
+    pub fn cached_peer_count(&self) -> usize {
+        self.sync.cached_peer_count()
+    }
+
     /// Fetch a channel's history from `peer` (request/response catch-up), e.g. right
     /// after joining. Returns the number of newly-applied messages.
     pub async fn request_channel_catchup(
@@ -5660,6 +5728,172 @@ mod tests {
             .await
             .is_err());
         assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+    }
+
+    // ---------- steady-state peer exchange, at the product layer (defect P1) ----------
+    //
+    // The PEX machinery below has had passing unit tests in `catcoms-sync` since 6e-3d-7 while
+    // being completely unwired in the product: nothing outside those tests ever called
+    // `publish_self_record`, `request_pex` or `known_peer_records`. `peer_records` was therefore
+    // permanently empty in the shipping app, which silently took three shipped features with it:
+    // the roster's online dots always read zero, the Phase 9g cross-session re-dial had nothing
+    // to re-dial, and the eclipse detector computed `reachable = 1` and raised CAUTION
+    // unconditionally for every group of four or more.
+    //
+    // These tests live HERE, at the `catcoms-app` layer, precisely because the sync-layer tests
+    // cannot catch that class of bug: they call the primitives directly, so they pass whether or
+    // not anything above them does. This drives the same entry points the actor's discovery tick
+    // drives, and asserts on the product-facing answer (`online_members`).
+
+    #[tokio::test]
+    async fn two_members_exchange_records_and_report_each_other_online() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let bob_peer = PeerId::from_u64(2);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(bob_peer),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(1_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        assert_eq!(bob.member_count(), 2);
+
+        // Before anything publishes, this is exactly the shipping app's state: a two-member group
+        // that has been talking, and a roster with every dot dark.
+        assert!(
+            alice.online_members().is_empty() && bob.online_members().is_empty(),
+            "the bug being regressed: records are empty, so nobody is ever online"
+        );
+
+        // What found/join/reload now do: publish a signed record on this launch's reserved
+        // sequence block. (Addresses are the reachable ones; loopback and LAN entries are
+        // stripped at publish, so a stand-in public address is what a real node would carry.)
+        alice
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/9000".into()], 65_536)
+            .unwrap();
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/9000".into()], 65_536)
+            .unwrap();
+
+        // What the actor's discovery tick now does: one PEX pass each, nobody naming a peer.
+        let (_, _) = tokio::join!(bob.drive_pex(), alice.sync_once());
+        let (_, _) = tokio::join!(alice.drive_pex(), bob.sync_once());
+
+        assert_eq!(
+            alice.online_members(),
+            vec![bob.my_fingerprint()],
+            "Alice sees Bob online"
+        );
+        assert_eq!(
+            bob.online_members(),
+            vec![alice.my_fingerprint()],
+            "…and Bob sees Alice"
+        );
+
+        // The delivery-state "reachable" count reads off the same signal, so it moves too.
+        assert_eq!(alice.online_members().len(), 1);
+
+        // Phase 9g: the records land in the snapshot, so a reloading node has somewhere to dial.
+        // This returned an empty list for the entire life of the feature.
+        let snap = alice.snapshot().unwrap();
+        let addrs = peer_addrs_from_snapshot(&snap).unwrap();
+        assert!(
+            addrs.contains(&"/ip4/203.0.113.2/tcp/9000".to_string()),
+            "the cross-session re-dial has Bob's address to dial, got {addrs:?}"
+        );
+
+        // And the cross-session cache picks up the proven member for the next launch.
+        assert_eq!(alice.cache_known_records(), 1);
+        let key = [9u8; 32];
+        let bytes = alice.address_cache_bytes(&key);
+        assert!(bob.load_address_cache(&bytes, &key));
+        assert_eq!(bob.cached_peer_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
+        // The third consequence of P1: with `reachable_devices` stuck at 1, the suspect predicate
+        // was unconditionally true for any roster above the floor, so CAUTION fired about 30s
+        // after startup, forever, in every real group. Four members, all reachable, must be quiet.
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let clock = ManualClock::new(1_000);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        alice
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/9000".into()], 65_536)
+            .unwrap();
+
+        let mut members = Vec::new();
+        for (n, nonce) in [(2u64, 11u8), (3, 12), (4, 13)] {
+            let invite = alice.mint_invite([nonce; 16], u64::MAX, vec![]).unwrap();
+            let (joined, _) = tokio::join!(
+                Server::join(
+                    hub.join(PeerId::from_u64(n)),
+                    MlsDevice::generate().unwrap(),
+                    ChaCha20Rng::seed_from_u64(n),
+                    Box::new(clock.clone()),
+                    "member",
+                    alice_peer,
+                    &invite,
+                ),
+                alice.sync_once(),
+            );
+            let mut m = joined.unwrap();
+            m.publish_self_record(vec![format!("/ip4/203.0.113.{n}/tcp/9000")], 65_536)
+                .unwrap();
+            members.push(m);
+        }
+        assert_eq!(alice.member_count(), 4);
+        let mut it = members.into_iter();
+        let mut m2 = it.next().unwrap();
+        let mut m3 = it.next().unwrap();
+        let mut m4 = it.next().unwrap();
+
+        // One PEX pass: Alice asks each of them in turn (that is what the tick does; it names no
+        // peer), and all three serve concurrently, as three separate processes would.
+        let (_, _, _, _) = tokio::join!(
+            alice.drive_pex(),
+            m2.sync_once(),
+            m3.sync_once(),
+            m4.sync_once(),
+        );
+        assert_eq!(
+            alice.online_members().len(),
+            3,
+            "every other member is reachable"
+        );
+
+        // Well past the detector's 30s grace window, and still quiet.
+        for _ in 0..5 {
+            assert!(!alice.observe_eclipse(), "a healthy group must not warn");
+            clock.advance_ms(60_000);
+        }
+        assert!(!alice.observe_eclipse());
     }
 
     #[tokio::test]

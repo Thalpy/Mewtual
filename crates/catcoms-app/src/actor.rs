@@ -36,6 +36,11 @@ const DISCOVERY_DRAIN_MS: u64 = 500;
 const DELIVERY_THROTTLE_MS: u64 = 1_000;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
 const MAX_DISCOVERED_PER_TICK: usize = 16;
+/// Ceiling on one member-PEX pass (ms). `drive_pex` asks up to a handful of peers in turn, so an
+/// unbounded pass is only as fast as the slowest of them; a peer that accepts the request and
+/// then goes quiet must not hold the actor (and every queued UI command behind it) for longer
+/// than this. Whatever did not answer in the window is simply retried on the next tick.
+const PEX_DRIVE_MS: u64 = 5_000;
 
 /// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
 /// error string). One chunk per command keeps the actor responsive during a large download.
@@ -434,9 +439,21 @@ pub enum AppCommand {
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
     /// Drive one steady-state rendezvous-discovery pass (re-register + re-discover + dial newly
-    /// found members). Fire-and-forget; sent periodically by the bridge's per-server timer (the
-    /// real-time interval lives there, off the deterministic-time seam). No-op without rendezvous.
+    /// found members), then one member-PEX pass and a refresh of the cross-session address cache.
+    /// Fire-and-forget; sent periodically by the bridge's per-server timer (the real-time interval
+    /// lives there, off the deterministic-time seam). The rendezvous half is a no-op without
+    /// rendezvous configured; the PEX half always runs, because members exchange records over
+    /// whatever connections they have with no infrastructure involved.
     DriveDiscovery,
+    /// (Re)publish this device's own signed peer record with `addresses` at `seq`. Sent by the
+    /// bridge when this node's reachability changes (a UPnP mapping arriving, say), so members
+    /// learn the new address instead of holding a dead one.
+    PublishSelfRecord { addresses: Vec<String>, seq: u64 },
+    /// Serialize the cross-session address cache for sealing beside the snapshot (Phase 9f).
+    AddressCacheBytes {
+        integrity_key: [u8; 32],
+        reply: oneshot::Sender<Vec<u8>>,
+    },
     /// Stop the actor.
     Shutdown,
 }
@@ -1769,6 +1786,28 @@ impl ServerActor {
             .await
             .map_err(|_| ())
     }
+
+    /// (Re)publish this device's signed peer record. `seq` must come from this launch's reserved
+    /// peer-record sequence block (see `ServerNet::reserve_record_seq_block`).
+    pub async fn publish_self_record(&self, addresses: Vec<String>, seq: u64) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::PublishSelfRecord { addresses, seq })
+            .await;
+    }
+
+    /// Serialize the cross-session address cache so the bridge can seal it beside the snapshot.
+    pub async fn address_cache_bytes(&self, integrity_key: [u8; 32]) -> Result<Vec<u8>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AddressCacheBytes {
+                integrity_key,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| "server actor stopped".to_string())?;
+        rx.await.map_err(|_| "server actor stopped".to_string())
+    }
 }
 
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
@@ -2455,6 +2494,35 @@ where
                             )
                             .await;
                         }
+                        // Member peer exchange, every pass and independent of rendezvous: this is
+                        // how `peer_records` fills, and with it presence, the cross-session
+                        // re-dial and the eclipse detector's reach term. Then offer the
+                        // cross-session cache's previously-proven members to the dial policy
+                        // (candidates only; the first-contact route past a hostile rendezvous),
+                        // and fold whatever we now know back into the cache for next launch.
+                        //
+                        // Bounded like the discovery drain above, and for the same reason: PEX
+                        // asks several peers in turn, and a peer that accepts the request and
+                        // then never answers must cost this tick a bounded wait rather than
+                        // wedging the actor (and with it every UI command) behind it.
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(PEX_DRIVE_MS),
+                            server.drive_pex(),
+                        )
+                        .await;
+                        server.dial_cached_peers().await;
+                        server.cache_known_records();
+                    }
+                    Some(AppCommand::PublishSelfRecord { addresses, seq }) => {
+                        if let Err(e) = server.publish_self_record(addresses, seq) {
+                            tracing::warn!(error = %e, "publishing the peer record failed");
+                        }
+                    }
+                    Some(AppCommand::AddressCacheBytes { integrity_key, reply }) => {
+                        // Refresh before serializing, so what is sealed reflects the members this
+                        // session actually proved rather than the set the last tick happened to see.
+                        server.cache_known_records();
+                        let _ = reply.send(server.address_cache_bytes(&integrity_key));
                     }
                     Some(AppCommand::MintInvite { nonce, expires_at_ms, bootstrap, reply }) => {
                         let res = server

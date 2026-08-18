@@ -78,6 +78,9 @@ pub struct ServerNet {
 /// Domain separator for the derived listen port, so the port derivation can never collide with
 /// any other use of the seed.
 const PORT_DOMAIN: &[u8] = b"catcoms/server-port/v1";
+/// Domain separator for the address cache's keyed integrity tag, derived off the vault's
+/// `db_key` (see [`ServerStore::address_cache_key`]).
+const ADDRESS_CACHE_TAG_DOMAIN: &[u8] = b"catcoms/addr-cache-tag/v1";
 /// The band [`ServerNet::derived_port`] draws from: above the well-known/registered clutter and
 /// below the ephemeral ranges the OS hands out on its own (Linux from 32768, Windows from 49152),
 /// so the number is unlikely to already be lent to something else.
@@ -239,6 +242,49 @@ impl ServerStore {
         decode_server_net(&plain).map(Some)
     }
 
+    fn address_cache_path(&self, id: u64) -> PathBuf {
+        self.dir.join("servers").join(format!("{id}.cache"))
+    }
+
+    /// The keyed-integrity key for a server's cross-session address cache
+    /// (`catcoms_discovery::AddressCache::to_bytes`).
+    ///
+    /// Domain-separated off the vault's `db_key` rather than reusing it: the cache file is
+    /// already sealed under `db_key` by [`Self::save_address_cache`], and giving the tag its own
+    /// key keeps the AEAD key and the MAC key distinct even though one derives from the other.
+    /// `KeyHierarchy` exposes a fixed set of subkeys and this is not one of them, so the
+    /// derivation is a keyed BLAKE3 here, in the layer that owns the file.
+    pub fn address_cache_key(&self) -> Result<[u8; 32], AppError> {
+        let db = Zeroizing::new(self.keys.db_key()?);
+        Ok(*blake3::keyed_hash(&db, ADDRESS_CACHE_TAG_DOMAIN).as_bytes())
+    }
+
+    /// Seal + atomically write a server's cross-session address cache (the previously-proven
+    /// members it can dial straight away next launch). Best-effort state: a missing or unreadable
+    /// file simply means "no cached candidates", never a failure to open the server.
+    pub fn save_address_cache(
+        &self,
+        id: u64,
+        bytes: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let sealed = seal(&self.keys.db_key()?, bytes, rng)?;
+        atomic_write(&self.address_cache_path(id), &frame(&sealed))
+    }
+
+    /// Read + unseal a server's address cache (empty if none yet). The caller still verifies the
+    /// cache's own integrity tag on decode, so a host that could edit the sealed file is caught
+    /// twice over.
+    pub fn load_address_cache(&self, id: u64) -> Result<Vec<u8>, AppError> {
+        let path = self.address_cache_path(id);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(path).map_err(|e| AppError::Io(e.to_string()))?;
+        let sealed = unframe(&bytes)?;
+        Ok(unseal(&self.keys.db_key()?, &sealed)?)
+    }
+
     fn pairing_ledger_path(&self) -> PathBuf {
         self.dir.join("pairing.bin")
     }
@@ -284,10 +330,15 @@ impl ServerStore {
         Ok(Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?))
     }
 
-    /// Delete a server's on-disk snapshot **and** its network record (e.g. on leave): leaving a
-    /// stale identity seed behind would hand a re-founded server the old server's peer id.
+    /// Delete a server's on-disk snapshot, its network record **and** its address cache (e.g. on
+    /// leave): leaving a stale identity seed behind would hand a re-founded server the old
+    /// server's peer id, and leaving the cache behind would have it dialling a group it left.
     pub fn remove_server(&self, id: u64) -> Result<(), AppError> {
-        for p in [self.server_path(id), self.server_net_path(id)] {
+        for p in [
+            self.server_path(id),
+            self.server_net_path(id),
+            self.address_cache_path(id),
+        ] {
             if p.exists() {
                 fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;
             }
@@ -656,6 +707,39 @@ mod tests {
             "derived ports should be well spread, got {} distinct of 64",
             ports.len()
         );
+    }
+
+    #[test]
+    fn the_address_cache_is_sealed_beside_the_snapshot_and_dies_with_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(4);
+        let store = ServerStore::open(dir.path(), b"correct horse", &mut rng).unwrap();
+
+        // Nothing written yet reads back as "no cached candidates", never as an error: a missing
+        // cache must not stop a server opening.
+        assert!(store.load_address_cache(3).unwrap().is_empty());
+
+        let cache = b"serialized-address-cache-with-its-own-tag";
+        store.save_address_cache(3, cache, &mut rng).unwrap();
+        assert_eq!(store.load_address_cache(3).unwrap(), cache);
+
+        // Sealed at rest like everything else here: the addresses of the members this device has
+        // met are exactly the social graph the vault exists to protect.
+        let raw = std::fs::read(dir.path().join("servers").join("3.cache")).unwrap();
+        assert!(
+            raw.windows(cache.len()).all(|w| w != cache),
+            "the cache must not be readable from the sealed file"
+        );
+
+        // The tag key is domain-separated off the vault, stable, and not the sealing key itself.
+        let k1 = store.address_cache_key().unwrap();
+        assert_eq!(k1, store.address_cache_key().unwrap());
+        assert_ne!(k1, store.keys.db_key().unwrap());
+
+        // Leaving the server takes the cache with it; a re-founded server must not inherit a
+        // list of peers from a group this device is no longer in.
+        store.remove_server(3).unwrap();
+        assert!(store.load_address_cache(3).unwrap().is_empty());
     }
 
     #[test]

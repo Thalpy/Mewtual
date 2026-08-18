@@ -66,6 +66,34 @@ least three block any public deployment.
   survive removal indefinitely.
 - **P7. Invite `bootstrap` addresses get no validation** (unlike `rendezvous`, which is
   carefully validated), up to 64 of them, all dialled.
+- **P8. The eclipse detector's source count is attacker-supplied.** `observe_eclipse` sets
+  `trust_roots = rendezvous_nodes.len()`, i.e. the number of *configured rendezvous strings*,
+  which come from the inviter-chosen `rendezvous` vector in the invite. It is not a
+  corroboration measurement. A hostile inviter naming two nodes it controls satisfies
+  `min_sources` and the suspect predicate can never fire. The predicate also requires **both**
+  low reach and low sources, so an attacker who relays honestly keeps reach high and stays
+  silent regardless. Fix: count roots that actually returned a distinct, tag-verified peer, and
+  make a drop to a single discovery root its own alarm independent of reach.
+- **P9. The pre-dial membership tag is never carried on the wire.** `Candidate.tag_verified`
+  is hard-coded `false` for every rendezvous-discovered candidate, so `SCORE_TAG_VERIFIED`
+  never fires in production and all discovered candidates score flat. The primitive itself
+  (`membership_tag` / `verify_membership_tag`) is correct and constant-time; it is simply not
+  plumbed through `Discovered`. Currently defensible because the policy only ranks and never
+  drops, but it means the design's "member-tag-verified" ranking tier does not exist.
+- **P10. No padding or size quantization.** Listed in `ARCHITECTURE.md` as a locked
+  adversarial-review fix and never implemented. A forwarder sees exact per-message ciphertext
+  lengths with publisher attribution, and blob fetches reveal exact file sizes, enough to
+  fingerprint a shared file against a known corpus without breaking any encryption. Pull
+  forward, because rung 2 deliberately puts a member on the path.
+- **P11. Discovery is unjittered and dials unconditionally.** The per-server discovery timer is
+  a bare 60s interval with no jitter, and each tick issues a dial plus a register and a discover
+  for every namespace in the grandfather window. `Swarm::dial` is reached with
+  `PeerCondition::Always`, so **an existing connection never suppresses a dial**. After an infra
+  outage every member converges in one 60s window. Fix before a shared node is deployed: jitter
+  the interval and gate the dial on connection state.
+- **P12. `run_relay` advertises `0.0.0.0`** as an external address when no external address was
+  supplied, so reservations carry an undialable address and fail silently. Make the
+  misconfiguration an error rather than a doc comment.
 
 ## 2. The constraint, stated plainly
 
@@ -465,19 +493,19 @@ Each needs a line in [`THREAT-MODEL.md`](THREAT-MODEL.md):
 | Step | Work | Blocking? | Review |
 |---:|---|---|---|
 | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
-| 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive | prerequisite for rungs 2, 4, 5 | light |
+| 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Includes P8 (real corroboration count) and P9 (carry the membership tag) | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
 | 2 | AutoNAT into `MeshBehaviour`; mDNS; pairwise reachability in the model | prerequisite for rungs 1, 2 | light |
 | 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
 | 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
 | 5 | Two-way invite code: MAC binding, 60s life, address validation, async join via the existing offline queue | needs 0-2 | yes |
-| 6 | Node capacity fixes (P2, P3), TCP/443 listener, jittered discovery | **blocks any public deployment** | yes |
+| 6 | Node capacity fixes (P2, P3), TCP/443 listener, jittered discovery (P11), relay external-address misconfig (P12), bootstrap address validation (P7) | **blocks any public deployment** | yes |
 | 7 | Switchboards: rendezvous-registered capability, relay-only never admit, aggregate egress budget, `Disconnect` plus deny list (P6), consent flow | needs 1, 2, 6 | **mandatory** |
 | 8 | Bootstrap node deployed, default on, live hysteretic expiry | needs 6, 7 | yes |
 | 9 | Port-forwarding wizard | needs 0 | none |
 | 10 | Hosted mode | **blocked on O1 and O4** | **mandatory** |
 | 11 | Public DHT | last, if ever | yes |
 
-Independent of the ladder, worth fixing on their own: P4 (voice DoS), P5, P7.
+Independent of the ladder, worth fixing on their own: P4 (voice DoS), P5, P10 (padding).
 
 ## 10. Open questions
 

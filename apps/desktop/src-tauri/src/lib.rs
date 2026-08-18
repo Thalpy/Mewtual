@@ -54,6 +54,14 @@ struct ServerEntry {
     mesh: Option<MeshHandle>,
     /// Whether this group is a 1:1 DM (shown behind the DMs circle) rather than a server.
     is_dm: bool,
+    /// The next PEX peer-record sequence number this launch may publish, taken from the block
+    /// `ServerNet::reserve_record_seq_block` reserved on disk before the transport came up.
+    ///
+    /// It is a per-launch **block**, not a per-launch increment, precisely so a session that
+    /// republishes (a UPnP mapping arriving, a relay circuit reserved late) can keep climbing
+    /// without ever reaching the number the next launch will start from. A record is only kept
+    /// by a peer when its `seq` beats the one already held, so reuse is permanent invisibility.
+    record_seq: u64,
 }
 
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
@@ -376,22 +384,57 @@ fn delivery_payload(states: Vec<catcoms_app::DeliveryState>) -> Vec<DeliveryStat
 }
 
 /// Forward one server actor's event stream to the frontend, tagging each with `server`.
-/// How often the bridge nudges a server's actor to drive steady-state rendezvous discovery. The
-/// real-time interval lives HERE (in the bridge / `apps`, off the deterministic-time seam the
-/// `crates` ambient gate enforces); the actor's pass is a no-op for a server without rendezvous.
+/// How often, on average, the bridge nudges a server's actor to drive steady-state discovery
+/// (rendezvous re-register/re-discover, member PEX, address-cache refresh). The real-time
+/// interval lives HERE (in the bridge / `apps`, off the deterministic-time seam the `crates`
+/// ambient gate enforces; `scripts/check-no-ambient.sh` searches `crates` and `bins` only).
 const DISCOVERY_INTERVAL_SECS: u64 = 60;
+/// Half-width of the random jitter applied to every discovery period, so the actual cadence is
+/// uniform over `[60s - 15s, 60s + 15s)`.
+///
+/// A bare `interval` gave every member of every group the same period *and* the same phase, so
+/// after an infrastructure outage the entire network reconverged inside one 60-second window and
+/// hit the rendezvous as a thundering herd (defect P11). Randomising each period, rather than
+/// only the start, means phases keep diverging instead of drifting back into lockstep.
+const DISCOVERY_JITTER_MS: u64 = 15_000;
+/// Spread of the *first* tick. Kept short deliberately: the first pass is what lights the roster's
+/// online dots and takes the first eclipse observation, so a full-period start offset would leave
+/// a freshly-founded server looking dead for up to a minute. A few seconds is enough to stop the
+/// servers in one process from ticking in unison.
+const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
 
-/// Spawn a per-server timer that periodically drives steady-state rendezvous discovery, so the
-/// group re-finds itself after a restart. Exits once the actor stops (`drive_discovery` errors).
-fn spawn_discovery_timer(actor: ServerActor) {
+/// A uniformly random delay in `[base_ms, base_ms + spread_ms)`, drawn from the injected OS RNG
+/// seam (`catcoms_rt::OsCryptoRng`) rather than an ambient `rand::random`, so this file keeps to
+/// the same discipline the `crates` gate enforces even though it is not itself gated.
+fn jittered_delay(base_ms: u64, spread_ms: u64) -> Duration {
+    let mut rng = OsCryptoRng;
+    let offset = if spread_ms == 0 {
+        0
+    } else {
+        rng.next_u64() % spread_ms
+    };
+    Duration::from_millis(base_ms.saturating_add(offset))
+}
+
+/// Spawn a per-server timer that periodically drives steady-state discovery, so the group
+/// re-finds itself after a restart and members keep exchanging peer records. Exits once the actor
+/// stops (`drive_discovery` errors).
+fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(DISCOVERY_INTERVAL_SECS));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // A short randomised start offset, then an independently randomised period each round.
+        let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
-            tick.tick().await;
+            tokio::time::sleep(delay).await;
             if actor.drive_discovery().await.is_err() {
                 break; // the actor stopped
             }
+            // The pass just refreshed the member records; seal the cache on the same cadence, so
+            // the next launch starts from the members this one actually proved.
+            persist_address_cache(&app, server).await;
+            delay = jittered_delay(
+                DISCOVERY_INTERVAL_SECS * 1_000 - DISCOVERY_JITTER_MS,
+                DISCOVERY_JITTER_MS * 2,
+            );
         }
     });
 }
@@ -684,6 +727,7 @@ async fn register_server(
     rendezvous: Vec<String>,
     mesh: Option<MeshHandle>,
     is_dm: bool,
+    record_seq: u64,
 ) -> u64 {
     let id = {
         let mut n = state.next_id.lock().await;
@@ -691,7 +735,7 @@ async fn register_server(
         *n
     };
     forward_events(app.clone(), id, events);
-    spawn_discovery_timer(actor.clone());
+    spawn_discovery_timer(app.clone(), id, actor.clone());
     state.servers.lock().await.insert(
         id,
         ServerEntry {
@@ -702,9 +746,20 @@ async fn register_server(
             rendezvous,
             mesh,
             is_dm,
+            record_seq,
         },
     );
     id
+}
+
+/// Draw the next peer-record sequence number for `server` from this launch's reserved block, or
+/// `None` if the server is gone. Monotonic within the launch; every number it can return is below
+/// anything the next launch's block starts at.
+async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
+    let mut servers = state.servers.lock().await;
+    let e = servers.get_mut(&server)?;
+    e.record_seq = e.record_seq.saturating_add(1);
+    Some(e.record_seq)
 }
 
 /// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
@@ -726,6 +781,47 @@ async fn persist_server(state: &AppState, server: u64) {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_server(server, &bytes, &mut rng) {
             eprintln!("persist: sealing server {server} failed: {e}");
+        }
+    }
+}
+
+/// Seal this server's cross-session address cache (the previously-proven members it can dial
+/// straight away next launch) beside its snapshot.
+///
+/// Deliberately **not** folded into [`persist_server`], which runs after every single message: the
+/// cache only changes when the set of known member records changes, which happens on the discovery
+/// tick and essentially nowhere else, so it is written on that cadence instead of on the chat hot
+/// path. Best-effort throughout, exactly like the snapshot: a locked vault or an I/O error costs
+/// a faster reconnect next launch and nothing else.
+async fn persist_address_cache(app: &AppHandle, server: u64) {
+    let state = app.state::<AppState>();
+    let state = state.inner();
+    let Ok(actor) = actor_of(state, server).await else {
+        return;
+    };
+    // Fetch the key, then the bytes, before taking the store lock, so the actor round-trip never
+    // happens while holding it.
+    let key = {
+        let guard = state.store.lock().await;
+        match guard.as_ref() {
+            Some(store) => match store.address_cache_key() {
+                Ok(k) => k,
+                Err(e) => {
+                    eprintln!("persist: no address-cache key for server {server}: {e}");
+                    return;
+                }
+            },
+            None => return, // vault locked; in-memory only
+        }
+    };
+    let Ok(bytes) = actor.address_cache_bytes(key).await else {
+        return; // the actor stopped
+    };
+    let guard = state.store.lock().await;
+    if let Some(store) = guard.as_ref() {
+        let mut rng = OsCryptoRng;
+        if let Err(e) = store.save_address_cache(server, &bytes, &mut rng) {
+            eprintln!("persist: sealing the address cache of server {server} failed: {e}");
         }
     }
 }
@@ -814,6 +910,94 @@ fn addr_is_private(addr: &Multiaddr) -> bool {
         }
         _ => false,
     })
+}
+
+/// Whether a multiaddr names something that cannot be a peer at all: a multicast group, an
+/// IPv4/IPv6 link-local address, the unspecified addresses, the IPv4 broadcast address, or the
+/// reserved 0.0.0.0/8 and 240.0.0.0/4 blocks.
+///
+/// Distinct from [`addr_is_private`], which asks a different question ("may we *advertise* this?")
+/// and deliberately includes LAN addresses. A LAN address is a perfectly good thing to *dial*
+/// (the most common first invite is someone in the same house); a multicast group is not an
+/// endpoint, and a link-local address means a different machine on every network the invite is
+/// opened on, which is what turns an invite into a scanner aimed at the reader's own segment.
+fn addr_is_undialable(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| match p {
+        Protocol::Ip4(ip) => {
+            let o = ip.octets();
+            ip.is_multicast()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || o[0] == 0
+                || o[0] >= 240
+        }
+        Protocol::Ip6(ip) => {
+            ip.is_multicast()
+                || ip.is_unspecified()
+                // fe80::/10 link-local (`is_unicast_link_local` is still unstable).
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        _ => false,
+    })
+}
+
+/// Whether a multiaddr points at this machine.
+fn addr_is_loopback(addr: &Multiaddr) -> bool {
+    addr.iter().any(|p| match p {
+        Protocol::Ip4(ip) => ip.is_loopback(),
+        Protocol::Ip6(ip) => ip.is_loopback(),
+        _ => false,
+    })
+}
+
+/// The most bootstrap addresses this client will actually dial out of one invite.
+///
+/// `InviteToken` permits 64. A genuine invite needs a fraction of that: the relayed address, the
+/// user's advertised address, the UPnP-discovered public one, the auto-detected LAN IPv4 and
+/// routable IPv6 over both TCP and QUIC, and loopback. Twelve covers every real shape with room
+/// to spare, and turns "one pasted string, 64 outbound connections to hosts of the author's
+/// choosing" into something with a much smaller blast radius.
+const MAX_BOOTSTRAP_DIALS: usize = 12;
+
+/// Validate and rank an invite's `bootstrap` list into the addresses this client will dial.
+///
+/// The invite's `rendezvous` vector is carefully validated (`validate_rendezvous_addrs`: no
+/// circuit addresses, exactly one `/p2p/` stanza, distinct peer ids) and `bootstrap` was not
+/// validated at all, despite being the list that is dialled *unconditionally and in bulk*
+/// (defect P7). `decode_and_verify_invite` proves the addresses have not been edited since
+/// signing; it says nothing at all about whether the signer chose sensible ones, and the signer
+/// is exactly the party we are guarding against here.
+///
+/// Rules:
+/// * anything unparseable, or naming something that cannot be a peer ([`addr_is_undialable`]),
+///   is dropped;
+/// * loopback is kept only when **nothing else survived**. A loopback entry is by construction
+///   the same-machine case (two instances on one dev box, the DM/self-pairing flows), and that
+///   case is real and must keep working. But when the invite also carries routable addresses,
+///   a loopback entry is not a fallback for anything: it can only ever probe ports on the
+///   reader's own machine, so it is dropped rather than dialled;
+/// * the survivors are capped at [`MAX_BOOTSTRAP_DIALS`], routable first.
+///
+/// Private (LAN) addresses are deliberately **kept**: a group on one home network is the single
+/// most common first invite, and dropping them would break it. The exposure is bounded by the
+/// cap and by the fact that a LAN address the author chose can only aim at the reader's own
+/// segment, which the reader can already scan.
+fn dialable_bootstrap(bootstrap: &[String]) -> Vec<Multiaddr> {
+    let parsed: Vec<Multiaddr> = bootstrap
+        .iter()
+        .filter_map(|s| s.parse::<Multiaddr>().ok())
+        .filter(|a| !addr_is_undialable(a))
+        .collect();
+    let (loopback, routable): (Vec<Multiaddr>, Vec<Multiaddr>) =
+        parsed.into_iter().partition(addr_is_loopback);
+    let mut out = if routable.is_empty() {
+        loopback
+    } else {
+        routable
+    };
+    out.truncate(MAX_BOOTSTRAP_DIALS);
+    out
 }
 
 /// The external addresses to advertise (rendezvous registration, identify) from the bootstrap
@@ -1041,6 +1225,17 @@ fn build_transport(
     Ok((mesh, libp2p_id, port))
 }
 
+/// This server's libp2p peer id, derived from its persisted identity seed. Lets a caller that
+/// never held the `MeshService` (the joiner's rendezvous branch hands the transport straight
+/// through) still build its own dialable addresses.
+fn peer_id_of(net: &ServerNet) -> Result<String, String> {
+    Ok(keypair_from_seed(net.key_seed)
+        .map_err(|e| e.to_string())?
+        .public()
+        .to_peer_id()
+        .to_string())
+}
+
 /// Mint a fresh per-server network identity: 32 random bytes for the libp2p keypair (drawn from
 /// the injected OS RNG, exactly like an invite nonce), plus the reachability inputs the user gave.
 /// The listen port falls out of the seed ([`ServerNet::derived_port`]). Persisted once, then
@@ -1134,12 +1329,23 @@ fn spawn_upnp_fold(
         let Ok(Some(Some(addr))) = found else { return };
         let entry = format!("{addr}/p2p/{peer_id}");
         let state = app.state::<AppState>();
-        let mut servers = state.inner().servers.lock().await;
-        if let Some(e) = servers.get_mut(&server) {
+        let (actor, bootstrap) = {
+            let mut servers = state.inner().servers.lock().await;
+            let Some(e) = servers.get_mut(&server) else {
+                return;
+            };
             if !e.bootstrap.contains(&entry) {
                 // Front of the list: a public address beats the LAN and loopback entries beside it.
                 e.bootstrap.insert(0, entry);
             }
+            (e.actor.clone(), e.bootstrap.clone())
+        };
+        // The whole point of the mapping is that members can now reach us directly, and they only
+        // learn that from a *fresher* peer record. Republishing on the next number in this
+        // launch's block is what turns the UPnP result into something other members can act on;
+        // without it the router opened a port nobody was ever told about.
+        if let Some(seq) = next_record_seq(state.inner(), server).await {
+            actor.publish_self_record(bootstrap, seq).await;
         }
     });
 }
@@ -1250,8 +1456,15 @@ async fn discover_and_connect(
         .map_err(|_| "discovered peer id was malformed".to_string())?;
     let inviter = phase0_peer_id(&inviter_lp);
 
-    // Dial the policy-chosen addresses plus the invite's bootstrap addrs (direct fallbacks).
-    for a in dialed.addresses.iter().chain(invite.bootstrap.iter()) {
+    // Dial the policy-chosen addresses plus the invite's bootstrap addrs (direct fallbacks). The
+    // bootstrap half goes through `dialable_bootstrap` first: the discovered addresses were
+    // ranked by the DiscoveryPolicy, but the invite's own list is whatever the token's author
+    // wrote down, and it is dialled in bulk (defect P7).
+    let fallbacks: Vec<String> = dialable_bootstrap(&invite.bootstrap)
+        .iter()
+        .map(|m| m.to_string())
+        .collect();
+    for a in dialed.addresses.iter().chain(fallbacks.iter()) {
         if let Ok(m) = a.parse::<Multiaddr>() {
             let _ = mesh.dial(m).await;
         }
@@ -1347,6 +1560,16 @@ async fn found_server(
         server.set_rendezvous_nodes(vec![(rz.addr.to_string(), rz.peer.to_bytes())]);
     }
 
+    // Publish this device's own signed peer record (defect P1). Nothing in the product used to
+    // do this, so `peer_records` stayed empty for the life of every server and took the roster's
+    // online dots, the cross-session re-dial and the eclipse detector's reach term with it. The
+    // sequence number is the base of this launch's reserved block; non-routable entries in
+    // `bootstrap` (loopback, the LAN address) are stripped inside `publish_self_record`, so what
+    // members learn is only what they could actually dial.
+    if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
+        eprintln!("found: publishing the peer record failed: {e}");
+    }
+
     // Mint a single-use invite (1h) carrying the bootstrap address (+ rendezvous addr if set, so
     // the joiner can discover us), then register the invite's namespace at the rendezvous.
     let mut nonce = [0u8; 16];
@@ -1383,6 +1606,7 @@ async fn found_server(
         rz_vec,
         rz_handle,
         is_dm,
+        net.record_seq,
     )
     .await;
     // Seal the new server, its network identity and the registry to disk (if the store is
@@ -1424,11 +1648,9 @@ async fn join_server(
         net.port = port;
         (mesh, inviter, rz_config)
     } else {
-        let addrs: Vec<Multiaddr> = invite
-            .bootstrap
-            .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        // Validated + capped before a single socket is opened (defect P7): an unvalidated list of
+        // up to 64 author-chosen addresses is a connect flood with a paste for a trigger.
+        let addrs = dialable_bootstrap(&invite.bootstrap);
         if addrs.is_empty() {
             return Err("invite carries no usable bootstrap address".to_string());
         }
@@ -1473,6 +1695,20 @@ async fn join_server(
     if !rz_config.is_empty() {
         server.set_rendezvous_nodes(rz_config);
     }
+    // A joiner is a full member the moment the Welcome lands, so it publishes its own signed peer
+    // record exactly like the founder does (defect P1). It mints no invites and therefore keeps no
+    // `bootstrap` list, so the addresses are the auto-detected ones; the non-routable entries are
+    // stripped inside `publish_self_record`.
+    let joiner_addrs = match peer_id_of(&net) {
+        Ok(id) => auto_bootstrap(net.port, &id),
+        Err(e) => {
+            eprintln!("join: could not derive the local peer id: {e}");
+            Vec::new()
+        }
+    };
+    if let Err(e) = server.publish_self_record(joiner_addrs, net.record_seq) {
+        eprintln!("join: publishing the peer record failed: {e}");
+    }
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
@@ -1498,6 +1734,7 @@ async fn join_server(
         Vec::new(),
         None,
         is_dm,
+        net.record_seq,
     )
     .await;
     // Seal the joined server, its network identity and the registry to disk (if unlocked).
@@ -2865,6 +3102,41 @@ async fn reload_one(
         .await
         .map_err(|e| e.to_string())?;
     attach_blob_store(state, &mut server).await;
+    // Republish this device's peer record on THIS launch's reserved sequence block (defect P1 and
+    // the 1a-7 seq bug together). The identity and port are the same as last launch, but the
+    // reachable address may not be (a new relay circuit, a different UPnP mapping), and a record
+    // published from a number the peers have already seen is discarded by every one of them.
+    if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
+        eprintln!("reload: publishing the peer record failed: {e}");
+    }
+    // Restore the cross-session address cache: the previously-proven members this node can offer
+    // the dial policy immediately, before any rendezvous has had a chance to answer with Sybils.
+    // Best-effort; a missing, unreadable or tamper-detected cache just means no cached candidates.
+    {
+        let guard = state.store.lock().await;
+        if let Some(store) = guard.as_ref() {
+            match (
+                store.address_cache_key(),
+                store.load_address_cache(record.id),
+            ) {
+                (Ok(key), Ok(bytes)) if !bytes.is_empty() => {
+                    if !server.load_address_cache(&bytes, &key) {
+                        eprintln!(
+                            "reload: the address cache of server {} was rejected",
+                            record.id
+                        );
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!(
+                        "reload: the address cache of server {} did not load: {e}",
+                        record.id
+                    )
+                }
+                _ => {}
+            }
+        }
+    }
 
     // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
     // (rendezvous infra was down at reload), drop it: it would not resolve. The rail then prompts a
@@ -2885,7 +3157,7 @@ async fn reload_one(
     actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
     forward_events(app.clone(), record.id, events);
-    spawn_discovery_timer(actor.clone());
+    spawn_discovery_timer(app.clone(), record.id, actor.clone());
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {
@@ -2896,6 +3168,7 @@ async fn reload_one(
             rendezvous: rz_vec,
             mesh: rz_handle,
             is_dm: record.is_dm,
+            record_seq: net.record_seq,
         },
     );
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
@@ -3544,6 +3817,14 @@ async fn join_one_grant(
     // A companion mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its
     // own; the same registry shape a joiner gets. `is_dm` is not in the grant yet, so a DM pairs
     // in as a server on the rail until M4 carries the flag.
+    //
+    // `record_seq` is 0 and no peer record is published here, deliberately. Unlike found/join,
+    // this path builds its transport with `MeshService::new_tcp(None, ..)`: a throwaway identity
+    // on an OS-assigned port, so it has no stable address worth telling other members about, and
+    // publishing one would hand them a peer id and port that die with the process. The companion
+    // becomes visible on its first reload, which goes through `reload_one` on a persisted
+    // identity and a reserved sequence block like every other server. (Giving this path a
+    // persisted identity is multi-device work, not discovery work.)
     let server_id = register_server(
         app,
         state,
@@ -3555,6 +3836,7 @@ async fn join_one_grant(
         Vec::new(),
         None,
         false,
+        0,
     )
     .await;
     persist_server(state, server_id).await;
@@ -3708,6 +3990,76 @@ mod tests {
                 format!("/ip6/2001:db8::5/udp/443/quic-v1/p2p/{id}"),
             ]
         );
+    }
+
+    #[test]
+    fn invite_bootstrap_addresses_are_validated_capped_and_ranked() {
+        const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let a = |h: &str| format!("{h}/tcp/9/p2p/{ID}");
+
+        // Things that cannot be a peer are dropped outright: an invite naming a multicast group
+        // or a link-local address is aiming the reader at their own segment, not at a server.
+        let hostile = vec![
+            a("/ip4/224.0.0.1"),
+            a("/ip4/239.255.255.250"), // SSDP; every UPnP router on the LAN answers this
+            a("/ip4/169.254.1.1"),
+            a("/ip4/0.0.0.0"),
+            a("/ip4/255.255.255.255"),
+            a("/ip4/240.0.0.1"),
+            a("/ip6/ff02::1"),
+            a("/ip6/fe80::1"),
+            a("/ip6/::"),
+            "not a multiaddr at all".to_string(),
+        ];
+        assert!(
+            dialable_bootstrap(&hostile).is_empty(),
+            "none of these are dialable"
+        );
+
+        // A LAN address IS kept: the most common first invite is someone in the same house.
+        let lan = vec![a("/ip4/192.168.1.5")];
+        assert_eq!(dialable_bootstrap(&lan).len(), 1);
+
+        // Loopback is kept only when nothing else survived (the genuine same-machine case)...
+        let same_machine = vec![a("/ip4/127.0.0.1"), a("/ip6/::1")];
+        assert_eq!(dialable_bootstrap(&same_machine).len(), 2);
+        // ...and dropped when the invite also carries something routable, where it could only
+        // ever probe ports on the reader's own machine.
+        let mixed = vec![a("/ip4/127.0.0.1"), a("/ip4/203.0.113.7")];
+        let out = dialable_bootstrap(&mixed);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].to_string(), a("/ip4/203.0.113.7"));
+
+        // And the number actually dialled is capped well below the token's 64.
+        let flood: Vec<String> = (1..=60)
+            .map(|n| a(&format!("/ip4/203.0.113.{n}")))
+            .collect();
+        assert_eq!(dialable_bootstrap(&flood).len(), MAX_BOOTSTRAP_DIALS);
+    }
+
+    #[test]
+    fn the_discovery_cadence_is_jittered_around_its_base() {
+        // P11: a bare interval gives every member of every group the same period and phase, so
+        // one infrastructure outage reconverges the whole network inside a single window.
+        let base = DISCOVERY_INTERVAL_SECS * 1_000 - DISCOVERY_JITTER_MS;
+        let spread = DISCOVERY_JITTER_MS * 2;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..64 {
+            let d = jittered_delay(base, spread).as_millis() as u64;
+            assert!(
+                (base..base + spread).contains(&d),
+                "{d}ms is outside [{base}, {})",
+                base + spread
+            );
+            seen.insert(d);
+        }
+        assert!(
+            seen.len() > 32,
+            "the period must actually vary, got {} distinct of 64",
+            seen.len()
+        );
+        // A zero spread is the degenerate case and must not panic on the modulo.
+        assert_eq!(jittered_delay(1_000, 0), Duration::from_millis(1_000));
     }
 
     #[test]

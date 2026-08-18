@@ -14,7 +14,10 @@ bytes.workspace = true
 tracing.workspace = true
 blake3 = "1"
 hex = "0.4"
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
+# PEM decoding for the operator-supplied TCP/443 TLS certificate. Already in the tree via
+# rustls (QUIC + libp2p-tls), so this adds no new crate, only a direct edge to it.
+rustls-pki-types = { version = "1.14", features = ["std"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 libp2p = { version = "0.56", features = [
     "tokio",
     "gossipsub",
@@ -33,6 +36,13 @@ libp2p = { version = "0.56", features = [
     "ping",
     "rendezvous",
     "upnp",
+    # Rung 4 of the connectivity ladder: a TLS/WebSocket listener on TCP/443. Corporate,
+    # university and guest networks routinely filter outbound traffic to arbitrary high
+    # ports, and today every rung fails identically there. `dns` is not optional here:
+    # the builder's websocket phase resolves through `libp2p_dns` unconditionally.
+    "websocket",
+    "tls",
+    "dns",
 ] }
 
 [dev-dependencies]
