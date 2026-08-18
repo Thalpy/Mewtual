@@ -50,7 +50,7 @@
   const QUICK_EMOJI = ["👍", "❤️", "😂", "🎉", "😮", "😢", "🔥", "👀"];
   type Channel = { id: string; name: string };
   type Member = { fingerprint: string; you: boolean };
-  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string };
+  type Prof = { fingerprint: string; name: string; color: string; font: string; effect: string; description: string; bubble: string; avatar: string; banner: string };
   // `expires`: ms-epoch deadline for this listing's CIRCULATION, or null. `expires_known` tells
   // "explicitly kept forever" (known + null) from "recorded before expiry existed" (!known).
   type UiFile = { name: string; size: number; mime: string; cid: string; author: string; path: string; held: number; total: number; expires: number | null; expires_known: boolean };
@@ -116,16 +116,60 @@
   type DmRequest = { server: number; from_fp: string; from_name: string; invite: string };
   let dmRequests = $state<DmRequest[]>([]);
   let notice = $state(""); // a transient confirmation (e.g. "Friend request sent")
-  let showSettings = $state(false); // the personal/app Settings overlay
-  let showServerSettings = $state(false); // the per-server (admin) Settings overlay
+  let showSettings = $state(false); // the personal/app Settings takeover
+  let showServerSettings = $state(false); // the per-server Settings takeover
   let serverNameDraft = $state("");
+  // The settings takeovers are Discord-shaped: a sidebar of pages, one page shown at a
+  // time. Page ids are stable route names; the catalogs below are the sidebars' contents.
+  // `setSearch` filters BOTH sidebars by label (cleared on open, "/" focuses it).
+  let settingsPage = $state("appearance");
+  let serverSettingsPage = $state("overview");
+  let setSearch = $state("");
+  type SetPage = { id: string; label: string; cat: string; danger?: boolean };
+  const USER_SET_PAGES: SetPage[] = [
+    { id: "profile", label: "My Profile", cat: "Account" },
+    { id: "devices", label: "Devices", cat: "Account" },
+    { id: "vault", label: "Vault & Lock", cat: "Account" },
+    { id: "verify", label: "Verification", cat: "Account" },
+    { id: "appearance", label: "Appearance", cat: "App" },
+    { id: "space", label: "Server Space", cat: "App" },
+    { id: "notifications", label: "Notifications", cat: "App" },
+    { id: "voice", label: "Voice & Calls", cat: "App" },
+    { id: "chatmedia", label: "Chat & Media", cat: "App" },
+    { id: "keybinds", label: "Keybinds", cat: "App" },
+    { id: "network", label: "Network", cat: "Connection" },
+    { id: "updates", label: "Updates", cat: "Connection" },
+  ];
+  const SRV_SET_PAGES: SetPage[] = [
+    { id: "overview", label: "Overview", cat: "Overview" },
+    { id: "livery", label: "Livery", cat: "Overview" },
+    { id: "members", label: "Members", cat: "People" },
+    { id: "badges", label: "Badges", cat: "People" },
+    { id: "sdevices", label: "Devices", cat: "People" },
+    { id: "invites", label: "Invites", cat: "People" },
+    { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
+    { id: "calls", label: "Calls & Relay", cat: "Voice" },
+    { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
+  ];
+  // One filter for both sidebars: category headers only survive while a page of theirs does.
+  function filterPages(pages: SetPage[], q: string): SetPage[] {
+    const n = q.trim().toLowerCase();
+    return n ? pages.filter((p) => p.label.toLowerCase().includes(n)) : pages;
+  }
+  function openSettings(page: string = settingsPage) {
+    settingsPage = page;
+    setSearch = "";
+    showSettings = true;
+  }
 
-  function openServerSettings(id: number | null = null) {
+  function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
     if (id !== null && id !== activeServerId) switchServer(id);
     serverNameDraft = cur?.name ?? "";
     // The draft never carries the images: set_livery ignores them (set_server_icon /
     // set_server_cursor own those fields).
     liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
+    serverSettingsPage = page;
+    setSearch = "";
     showServerSettings = true;
   }
   async function renameServer() {
@@ -154,9 +198,11 @@
   // Appearance: the whole theme is a token map in app.css; these choices only flip
   // data-attributes / one CSS variable on <html>, so they can never fork the layout.
   // Semantic colours (green=presence, gold=mentions, red=danger) are constant in every preset.
-  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string };
+  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string; clock: string; scale: number };
   const APPEARANCE_KEY = "catcoms.appearance";
-  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true, icons: "", motion: "" };
+  // clock: "" = the locale's habit, "12"/"24" force a convention. scale: chat text size in
+  // percent (100 = the density's own base size); clamped where applied, not where stored.
+  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true, icons: "", motion: "", clock: "", scale: 100 };
   function loadAppearance(): Appearance {
     try {
       return { ...APPEARANCE_DEFAULT, ...JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") };
@@ -430,6 +476,14 @@
     if (accent) {
       el.style.setProperty("--accent", accent);
       el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
+    }
+    // Chat text size: a personal multiplier on the density's own base. Never livery-controllable,
+    // and cleared first so returning the slider to 100% restores the token untouched.
+    el.style.removeProperty("--fs-msg");
+    const scale = Math.min(140, Math.max(70, appearance.scale || 100));
+    if (scale !== 100) {
+      const base = appearance.density === "compact" ? 0.78 : 0.84;
+      el.style.setProperty("--fs-msg", `${((base * scale) / 100).toFixed(3)}rem`);
     }
     try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); } catch { /* best-effort */ }
   });
@@ -1873,6 +1927,7 @@
   let pDescription = $state("");
   let pBubble = $state("");
   let pAvatar = $state("");
+  let pBanner = $state("");
   // The name-style picker's choices (font face / text effect / colour). Ids are the opaque
   // strings stored in the profile; the tiles preview each one live.
   const NAME_FONTS: { id: string; label: string }[] = [
@@ -1881,6 +1936,8 @@
     { id: "mono", label: "Mono" },
     { id: "script", label: "Script" },
     { id: "caps", label: "Small caps" },
+    { id: "rounded", label: "Rounded" },
+    { id: "gothic", label: "Gothic" },
   ];
   const NAME_EFFECTS: { id: string; label: string }[] = [
     { id: "none", label: "Solid" },
@@ -1889,6 +1946,9 @@
     { id: "rainbow", label: "Rainbow" },
     { id: "wave", label: "Wave" },
     { id: "pulse", label: "Pulse" },
+    { id: "outline", label: "Outline" },
+    { id: "retro", label: "Retro" },
+    { id: "glitch", label: "Glitch" },
   ];
   // Curated name colours that stay legible on the dark grounds (content, not theme).
   const NAME_COLORS = ["#977df2", "#6ca0d8", "#57c77a", "#d8a657", "#e0574b", "#e879c0", "#6ee7d8", "#c6c2d6"];
@@ -2271,7 +2331,11 @@
           ? "font-script"
           : font === "caps"
             ? "font-caps"
-            : "";
+            : font === "rounded"
+              ? "font-rounded"
+              : font === "gothic"
+                ? "font-gothic"
+                : "";
   }
   // A file-type glyph from the MIME prefix (a small QoL cue in the file browser).
   function fileIcon(mime: string): string {
@@ -2294,7 +2358,12 @@
     return color ? `color:${color}` : "";
   }
   function fmtTime(ts: number): string {
-    return ts ? new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+    if (!ts) return "";
+    // Settings can force a clock convention; "" keeps the locale's own habit.
+    const opts: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit" };
+    if (appearance.clock === "12") opts.hour12 = true;
+    else if (appearance.clock === "24") opts.hourCycle = "h23";
+    return new Date(ts).toLocaleTimeString([], opts);
   }
   // Coarse relative duration for presence ("45s", "5m", "3h", "2d").
   function relTime(ms: number): string {
@@ -2950,6 +3019,7 @@
       pDescription = me.description ?? "";
       pBubble = me.bubble ?? "";
       pAvatar = me.avatar || "";
+      pBanner = me.banner || "";
     }
   }
 
@@ -4086,11 +4156,73 @@
     }
   }
 
+  // Sniff a stored image's format from its base64 prefix (the first magic bytes survive
+  // base64 alignment). Profiles store opaque bytes, so an animated GIF or WebP a member
+  // uploaded plays back as itself instead of being branded a JPEG.
+  function imgSrc(b64: string): string {
+    const mime = b64.startsWith("R0lGOD")
+      ? "image/gif"
+      : b64.startsWith("iVBOR")
+        ? "image/png"
+        : b64.startsWith("UklGR")
+          ? "image/webp"
+          : "image/jpeg";
+    return `data:${mime};base64,${b64}`;
+  }
+  // A file's raw bytes as base64, no re-encode: keeps animation and alpha.
+  async function fileToRawB64(file: File): Promise<string> {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let s = "";
+    const CHUNK = 0x8000; // String.fromCharCode argument limit
+    for (let i = 0; i < buf.length; i += CHUNK) s += String.fromCharCode(...buf.subarray(i, i + CHUNK));
+    return btoa(s);
+  }
+
   async function loadAvatar(fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file) return;
     try {
-      pAvatar = await fileToSquareJpegB64(file, 128);
+      // Animated formats are kept byte-for-byte when they fit the backend's 64KiB cap:
+      // the canvas path would freeze them to one JPEG frame. Everything else gets the
+      // usual 128px-square normalization.
+      if ((file.type === "image/gif" || file.type === "image/webp") && file.size <= 64 * 1024) {
+        pAvatar = await fileToRawB64(file);
+      } else {
+        pAvatar = await fileToSquareJpegB64(file, 128);
+      }
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  // Downscale an image file to a wide banner JPEG (max 640px wide, aspect kept), raw base64.
+  // Animated GIF/WebP under the backend's 256KiB banner cap ride byte-for-byte instead.
+  async function loadBanner(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      if ((file.type === "image/gif" || file.type === "image/webp") && file.size <= 256 * 1024) {
+        pBanner = await fileToRawB64(file);
+        return;
+      }
+      const url = URL.createObjectURL(file);
+      try {
+        const img = new Image();
+        await new Promise((resolve, reject) => {
+          img.onload = () => resolve(null);
+          img.onerror = () => reject(new Error("could not load image"));
+          img.src = url;
+        });
+        const w = Math.min(640, img.width);
+        const h = Math.max(1, Math.round((img.height / img.width) * w));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d")?.drawImage(img, 0, 0, w, h);
+        pBanner = canvas.toDataURL("image/jpeg", 0.8).split(",")[1] ?? "";
+      } finally {
+        URL.revokeObjectURL(url);
+      }
     } catch (err) {
       error = String(err);
     }
@@ -4110,6 +4242,7 @@
         description: pDescription.trim(),
         bubble: pBubble,
         avatar: pAvatar,
+        banner: pBanner,
       });
       // Keep the server's rail label in sync ONLY when it was still tracking my name (i.e. never
       // deliberately renamed in Server settings), so the name I set shows everywhere without
@@ -7552,12 +7685,129 @@
 {#snippet avatarTag(fp: string)}
   {@const p = profiles[fp]}
   {#if p?.avatar}
-    <img class="avatar" src={"data:image/jpeg;base64," + p.avatar} alt="" />
+    <img class="avatar" src={imgSrc(p.avatar)} alt="" />
   {:else}
     <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
       {nameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
+{/snippet}
+
+<!-- The profile editor, rendered by BOTH the profile surface (Ctrl+5) and Settings → My
+     Profile: one form, two doors, so the two can never drift apart. -->
+{#snippet profileEditor()}
+  <div class="profile-tab tab-pane">
+    <div class="field">
+      <span class="muted">Banner</span>
+      {#if pBanner}
+        <img class="banner-preview" src={imgSrc(pBanner)} alt="" />
+      {/if}
+      <div class="avatar-row">
+        <label class="upload-btn">
+          {pBanner ? "Replace banner" : "Upload banner"}
+          <input type="file" accept="image/*" onchange={(e) => { const t = e.currentTarget; void loadBanner(t.files).then(() => (t.value = "")); }} />
+        </label>
+        {#if pBanner}
+          <button type="button" class="ghost" onclick={() => (pBanner = "")}>Remove</button>
+        {/if}
+      </div>
+      <span class="muted small">Tops your profile card. A small animated GIF or WebP stays animated.</span>
+    </div>
+    <label class="field">
+      <span class="muted">Name</span>
+      <input bind:value={pName} placeholder="display name" />
+    </label>
+    <div class="field">
+      <span class="muted">Font</span>
+      <div class="ns-tiles">
+        {#each NAME_FONTS as f}
+          <button
+            type="button"
+            class="ns-tile"
+            class:active={pFont === f.id}
+            title={f.label}
+            aria-label={f.label}
+            aria-pressed={pFont === f.id}
+            onclick={() => (pFont = f.id)}
+          ><span class="name {fontClass(f.id)}">Gg</span></button>
+        {/each}
+      </div>
+    </div>
+    <div class="field">
+      <span class="muted">Effect</span>
+      <div class="ns-tiles">
+        {#each NAME_EFFECTS as fx}
+          <button
+            type="button"
+            class="ns-tile"
+            class:active={pEffect === fx.id}
+            title={fx.label}
+            aria-label={fx.label}
+            aria-pressed={pEffect === fx.id}
+            onclick={() => (pEffect = fx.id)}
+          ><span class="name {fxClass(fx.id)}" style={colorStyle(pColor)}>{fx.label}</span></button>
+        {/each}
+      </div>
+    </div>
+    <div class="field">
+      <span class="muted">Colour</span>
+      <div class="ns-swatches">
+        <input type="color" bind:value={pColor} aria-label="Custom name colour" />
+        {#each NAME_COLORS as c}
+          <button
+            type="button"
+            class="ns-swatch"
+            class:active={pColor === c}
+            title={c}
+            aria-label={`Name colour ${c}`}
+            aria-pressed={pColor === c}
+            style={`background:${c}`}
+            onclick={() => (pColor = c)}
+          ></button>
+        {/each}
+      </div>
+    </div>
+    <label class="field">
+      <span class="muted">About you</span>
+      <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
+    </label>
+    <div class="field">
+      <span class="muted">Message bubble</span>
+      <div class="bubble-presets">
+        {#each BUBBLE_PRESETS as b}
+          <button
+            type="button"
+            class="bubble-swatch"
+            class:active={pBubble === b.value}
+            title={b.label}
+            style={b.value ? `background:${b.value}` : ""}
+            onclick={() => (pBubble = b.value)}
+          >{#if !b.value}Aa{/if}</button>
+        {/each}
+      </div>
+    </div>
+    <div class="field">
+      <span class="muted">Avatar</span>
+      <div class="avatar-row">
+        {#if pAvatar}
+          <img class="avatar lg" src={imgSrc(pAvatar)} alt="" />
+        {:else}
+          <span class="avatar lg fallback" style={`background:${pColor}`}>
+            {(pName || displayName).slice(0, 1).toUpperCase()}
+          </span>
+        {/if}
+        <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
+        {#if pAvatar}
+          <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
+        {/if}
+      </div>
+      <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
+    </div>
+    <p class="preview">
+      Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
+    </p>
+    <button onclick={saveProfile}>Save profile</button>
+  </div>
 {/snippet}
 
 <!-- One roster row in the member column (rendered under the online / offline group heads). -->
@@ -9118,7 +9368,7 @@
               use:contextMenu={() => serverMenu(s)}
             >
               {#if serverIcons[s.id] && appearance.icons !== "flat"}
-                <img class="rail-img" src={"data:image/jpeg;base64," + serverIcons[s.id]} alt="" />
+                <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" />
               {:else}
                 {monogram(s.name)}
               {/if}
@@ -10111,101 +10361,7 @@
           </div>
         {:else if view === "profile"}
           <h2>Your profile</h2>
-          <div class="profile-tab tab-pane">
-            <label class="field">
-              <span class="muted">Name</span>
-              <input bind:value={pName} placeholder="display name" />
-            </label>
-            <div class="field">
-              <span class="muted">Font</span>
-              <div class="ns-tiles">
-                {#each NAME_FONTS as f}
-                  <button
-                    type="button"
-                    class="ns-tile"
-                    class:active={pFont === f.id}
-                    title={f.label}
-                    aria-label={f.label}
-                    aria-pressed={pFont === f.id}
-                    onclick={() => (pFont = f.id)}
-                  ><span class="name {fontClass(f.id)}">Gg</span></button>
-                {/each}
-              </div>
-            </div>
-            <div class="field">
-              <span class="muted">Effect</span>
-              <div class="ns-tiles">
-                {#each NAME_EFFECTS as fx}
-                  <button
-                    type="button"
-                    class="ns-tile"
-                    class:active={pEffect === fx.id}
-                    title={fx.label}
-                    aria-label={fx.label}
-                    aria-pressed={pEffect === fx.id}
-                    onclick={() => (pEffect = fx.id)}
-                  ><span class="name {fxClass(fx.id)}" style={colorStyle(pColor)}>{fx.label}</span></button>
-                {/each}
-              </div>
-            </div>
-            <div class="field">
-              <span class="muted">Colour</span>
-              <div class="ns-swatches">
-                <input type="color" bind:value={pColor} aria-label="Custom name colour" />
-                {#each NAME_COLORS as c}
-                  <button
-                    type="button"
-                    class="ns-swatch"
-                    class:active={pColor === c}
-                    title={c}
-                    aria-label={`Name colour ${c}`}
-                    aria-pressed={pColor === c}
-                    style={`background:${c}`}
-                    onclick={() => (pColor = c)}
-                  ></button>
-                {/each}
-              </div>
-            </div>
-            <label class="field">
-              <span class="muted">About you</span>
-              <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
-            </label>
-            <div class="field">
-              <span class="muted">Message bubble</span>
-              <div class="bubble-presets">
-                {#each BUBBLE_PRESETS as b}
-                  <button
-                    type="button"
-                    class="bubble-swatch"
-                    class:active={pBubble === b.value}
-                    title={b.label}
-                    style={b.value ? `background:${b.value}` : ""}
-                    onclick={() => (pBubble = b.value)}
-                  >{#if !b.value}Aa{/if}</button>
-                {/each}
-              </div>
-            </div>
-            <div class="field">
-              <span class="muted">Avatar</span>
-              <div class="avatar-row">
-                {#if pAvatar}
-                  <img class="avatar lg" src={"data:image/jpeg;base64," + pAvatar} alt="" />
-                {:else}
-                  <span class="avatar lg fallback" style={`background:${pColor}`}>
-                    {(pName || displayName).slice(0, 1).toUpperCase()}
-                  </span>
-                {/if}
-                <input type="file" accept="image/*" onchange={(e) => loadAvatar(e.currentTarget.files)} />
-                {#if pAvatar}
-                  <button type="button" class="ghost" onclick={() => (pAvatar = "")}>Remove</button>
-                {/if}
-              </div>
-            </div>
-            <p class="preview">
-              Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
-            </p>
-            <button onclick={saveProfile}>Save profile</button>
-          </div>
+          {@render profileEditor()}
         {:else if view === "events"}
           <h2>Events</h2>
           <div class="events-tab tab-pane">
@@ -10702,9 +10858,12 @@
             <button class="ghost" onclick={() => (profileCard = null)}>✕</button>
           </header>
           <div class="overlay-body">
+            {#if p?.banner}
+              <img class="pc-banner" src={imgSrc(p.banner)} alt="" />
+            {/if}
             <div class="pc-top">
               {#if p?.avatar}
-                <img class="avatar lg" src={"data:image/jpeg;base64," + p.avatar} alt="" />
+                <img class="avatar lg" src={imgSrc(p.avatar)} alt="" />
               {:else}
                 <span class="avatar lg fallback" style={`background:${p?.color || "#4f8cff"}`}>{nameOf(fp).slice(0, 1).toUpperCase()}</span>
               {/if}
@@ -10930,7 +11089,7 @@
               use:contextMenu={() => spaceServerMenu(it.s)}
             >
               {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
-                <img class="rail-img" src={"data:image/jpeg;base64," + serverIcons[it.s.id]} alt="" />
+                <img class="rail-img" src={imgSrc(serverIcons[it.s.id])} alt="" />
               {:else}
                 {monogram(it.s.name)}
               {/if}
@@ -10973,7 +11132,7 @@
                   <button class="sp-tray-item" onclick={() => placeFromTray(s.id)}>
                     <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
                       {#if serverIcons[s.id] && appearance.icons !== "flat"}
-                        <img class="rail-img" src={"data:image/jpeg;base64," + serverIcons[s.id]} alt="" />
+                        <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" />
                       {:else}
                         {monogram(s.name)}
                       {/if}
@@ -10991,98 +11150,234 @@
     {/if}
 
     {#if showSettings}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showSettings = false; }}>
-        <div class="overlay-card">
-          <header class="overlay-head">
-            <h2>Settings</h2>
-            <button class="ghost" onclick={() => (showSettings = false)}>✕</button>
-          </header>
-          <div class="overlay-body">
-            <section class="set-section">
-              <h3>Appearance</h3>
-              <p class="muted small">
-                Presets restyle the whole app. Whatever you pick, colours keep their jobs:
-                green = presence, gold = mentions, red = danger.
-              </p>
-              <div class="preset-row">
-                {#each PRESETS as p (p.id)}
-                  <button
-                    type="button"
-                    class="preset-btn"
-                    class:active={appearance.preset === p.id}
-                    onclick={() => (appearance = { ...appearance, preset: p.id, accent: "" })}
-                  >
-                    <span class="preset-sw" style={`background:${p.sw}`}></span>{p.name}
-                  </button>
+      <div class="stx" role="dialog" aria-label="Settings">
+        <div class="stx-nav-zone">
+          <nav class="stx-nav">
+            <label class="stx-search">
+              <input bind:value={setSearch} placeholder="Search settings" />
+            </label>
+            {#each ["Account", "App", "Connection"] as cat (cat)}
+              {@const pages = filterPages(USER_SET_PAGES, setSearch).filter((p) => p.cat === cat)}
+              {#if pages.length}
+                <div class="stx-cat">{cat}</div>
+                {#each pages as p (p.id)}
+                  <button type="button" class="stx-item" class:active={settingsPage === p.id} onclick={() => (settingsPage = p.id)}>{p.label}</button>
                 {/each}
-              </div>
-              <div class="field" style="margin-top:8px">
-                <span class="muted small">Accent override: keep the preset's mood, swap the highlight colour</span>
-                <div class="accent-row">
-                  {#each ACCENT_CHOICES as a (a)}
+              {/if}
+            {/each}
+            <div class="stx-foot">
+              <span>MEWTUAL v{APP_VERSION}</span>
+              {#if myFp}<span>FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</span>{/if}
+              <span>[CTRL+L] LOCK SESSION</span>
+            </div>
+          </nav>
+        </div>
+        <div class="stx-content-zone">
+          <div class="stx-content">
+            {#if settingsPage === "profile"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // MY PROFILE</div>
+              <h1>My Profile</h1>
+              {#if cur && !cur.isDm}
+                <p class="muted small">Editing your identity on <strong>{cur.name}</strong>: profiles are per server, by design. Other servers never see this one.</p>
+              {:else}
+                <p class="muted small">Open a server to edit the profile you use there: profiles are per server, by design.</p>
+              {/if}
+              {@render profileEditor()}
+            {:else if settingsPage === "devices"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // DEVICES</div>
+              <h1>Devices</h1>
+              <section class="set-section">
+                <p class="muted small">
+                  Link another device to your identity. The new device gets its own key: nothing
+                  is copied: and nothing at all happens until you approve it here on this device.
+                </p>
+                <button class="ghost" onclick={() => (showLinkDevice = true)}>⛓ Link a new device…</button>
+              </section>
+              <section class="set-section">
+                <p class="muted small">Your linked devices are listed per server (each server sees its own identity): find them under a server's Settings → Devices.</p>
+              </section>
+            {:else if settingsPage === "vault"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
+              <h1>Vault &amp; Lock</h1>
+              <section class="set-section">
+                <p class="muted small">
+                  Everything you are lives in an encrypted vault on this machine, sealed by the
+                  secret you chose at setup (passphrase, spell, or melody). Locking clears the
+                  screen and asks for it again; the node stays online underneath.
+                </p>
+                <button class="ghost" onclick={lockScreen}>Lock now [Ctrl+L]</button>
+              </section>
+              <section class="set-section">
+                <p class="muted small">Changing the secret re-seals the vault, which is not wired up yet: it is on the list.</p>
+              </section>
+            {:else if settingsPage === "verify"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // VERIFICATION</div>
+              <h1>Verification</h1>
+              {#if myFp}
+                <section class="set-section">
+                  <h3>Your fingerprint on {cur?.name ?? "this server"}</h3>
+                  <p class="stx-fp-big">{fmtFp(myFp.toUpperCase())}</p>
+                  <div class="invite-actions">
+                    <button class="ghost small" onclick={() => navigator.clipboard?.writeText(myFp)}>Copy fingerprint</button>
+                  </div>
+                  <p class="muted small">Read it to someone over a call, or compare in person. If theirs matches what their profile claims, mark them verified from their context menu.</p>
+                </section>
+                <section class="set-section">
+                  <h3>People you have verified here</h3>
+                  {#if roster.some((m) => !m.you && verifiedFps.has(m.fingerprint))}
+                    <ul class="role-list">
+                      {#each roster.filter((m) => !m.you && verifiedFps.has(m.fingerprint)) as m (m.fingerprint)}
+                        <li>
+                          {@render avatarTag(m.fingerprint)}
+                          {@render nameTag(m.fingerprint)}
+                          <span class="vf-check">✓</span>
+                          <button class="ghost small" onclick={() => (verifyFor = m.fingerprint)}>Review…</button>
+                        </li>
+                      {/each}
+                    </ul>
+                  {:else}
+                    <p class="muted small">Nobody yet. Verified marks are local to you and this server: nobody is told.</p>
+                  {/if}
+                </section>
+              {:else}
+                <p class="muted small">Open a server first: fingerprints are per-server identities.</p>
+              {/if}
+            {:else if settingsPage === "appearance"}
+              <div class="stx-crumb">SETTINGS // APP // APPEARANCE</div>
+              <h1>Appearance</h1>
+              <section class="set-section">
+                <h3>Theme</h3>
+                <p class="muted small">
+                  Presets restyle the whole app. Whatever you pick, colours keep their jobs:
+                  green = presence, gold = mentions, red = danger.
+                </p>
+                <div class="preset-row">
+                  {#each PRESETS as p (p.id)}
                     <button
                       type="button"
-                      class="accent-sw"
-                      class:active={appearance.accent === a}
-                      style={`background:${a}`}
-                      aria-label={`Accent colour ${a}`}
-                      title={a}
-                      onclick={() => (appearance = { ...appearance, accent: appearance.accent === a ? "" : a })}
-                    ></button>
+                      class="preset-btn"
+                      class:active={appearance.preset === p.id}
+                      onclick={() => (appearance = { ...appearance, preset: p.id, accent: "" })}
+                    >
+                      <span class="preset-sw" style={`background:${p.sw}`}></span>{p.name}
+                    </button>
                   {/each}
-                  <input
-                    type="color"
-                    class="accent-custom"
-                    title="Custom accent colour"
-                    aria-label="Custom accent colour"
-                    value={appearance.accent || "#977df2"}
-                    oninput={(e) => (appearance = { ...appearance, accent: e.currentTarget.value })}
-                  />
                 </div>
-              </div>
-              <label class="toggle">
-                <input
-                  type="checkbox"
-                  checked={appearance.density === "compact"}
-                  onchange={() => (appearance = { ...appearance, density: appearance.density === "compact" ? "" : "compact" })}
-                />
-                <span>Compact density: tighter rows, smaller text, more on screen</span>
-              </label>
-              <label class="toggle">
-                <input
-                  type="checkbox"
-                  checked={appearance.chrome !== "clean"}
-                  onchange={() => (appearance = { ...appearance, chrome: appearance.chrome === "clean" ? "terminal" : "clean" })}
-                />
-                <span>Terminal chrome: scanlines &amp; glow on the frame</span>
-              </label>
-              <label class="toggle">
-                <input
-                  type="checkbox"
-                  checked={appearance.motion !== "off"}
-                  onchange={() => (appearance = { ...appearance, motion: appearance.motion === "off" ? "" : "off" })}
-                />
-                <span>Hover motion: icons lift and turn under the pointer</span>
-              </label>
-              <label class="toggle">
-                <input
-                  type="checkbox"
-                  checked={appearance.flat}
-                  onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
-                />
-                <span>Flatten messages: ignore other members' custom bubble backgrounds</span>
-              </label>
-              <label class="toggle">
-                <input
-                  type="checkbox"
-                  checked={appearance.icons === "flat"}
-                  onchange={() => (appearance = { ...appearance, icons: appearance.icons === "flat" ? "" : "flat" })}
-                />
-                <span>Flat server icons: monograms instead of uploaded images</span>
-              </label>
-              <div class="field" style="margin-top:8px">
-                <span class="muted small">Server space (Ctrl+O): the 360° room your servers hang in. Backdrop:</span>
+                <div class="field" style="margin-top:8px">
+                  <span class="muted small">Accent override: keep the preset's mood, swap the highlight colour</span>
+                  <div class="accent-row">
+                    {#each ACCENT_CHOICES as a (a)}
+                      <button
+                        type="button"
+                        class="accent-sw"
+                        class:active={appearance.accent === a}
+                        style={`background:${a}`}
+                        aria-label={`Accent colour ${a}`}
+                        title={a}
+                        onclick={() => (appearance = { ...appearance, accent: appearance.accent === a ? "" : a })}
+                      ></button>
+                    {/each}
+                    <input
+                      type="color"
+                      class="accent-custom"
+                      title="Custom accent colour"
+                      aria-label="Custom accent colour"
+                      value={appearance.accent || "#977df2"}
+                      oninput={(e) => (appearance = { ...appearance, accent: e.currentTarget.value })}
+                    />
+                  </div>
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Text</h3>
+                <div class="stx-duo">
+                  <label class="field">
+                    <span class="muted small">Chat text size: {appearance.scale || 100}%</span>
+                    <input
+                      type="range"
+                      min="70"
+                      max="140"
+                      step="2"
+                      value={appearance.scale || 100}
+                      oninput={(e) => (appearance = { ...appearance, scale: +e.currentTarget.value })}
+                    />
+                  </label>
+                  <div class="field">
+                    <span class="muted small">Timestamps</span>
+                    <div class="stx-seg">
+                      {#each [["", "AUTO"], ["12", "12H"], ["24", "24H"]] as [id, lbl] (id)}
+                        <button type="button" class:on={appearance.clock === id} onclick={() => (appearance = { ...appearance, clock: id })}>{lbl}</button>
+                      {/each}
+                    </div>
+                  </div>
+                </div>
+              </section>
+              {#if liveryActive && activeServerId !== null && !cur?.isDm}
+                <section class="set-section">
+                  <h3>Livery</h3>
+                  <label class="toggle">
+                    <input
+                      type="checkbox"
+                      checked={!liveryOptOut}
+                      onchange={() => setLiveryOptOut(!liveryOptOut)}
+                    />
+                    <span>
+                      Follow this server's livery{livery.preset
+                        ? ` (${PRESETS.find((p) => p.id === livery.preset)?.name ?? livery.preset})`
+                        : ""}
+                    </span>
+                  </label>
+                  <p class="muted small">Opting out is yours alone; nobody is told.</p>
+                </section>
+              {/if}
+              <section class="set-section">
+                <h3>Interface</h3>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={appearance.density === "compact"}
+                    onchange={() => (appearance = { ...appearance, density: appearance.density === "compact" ? "" : "compact" })}
+                  />
+                  <span>Compact density: tighter rows, smaller text, more on screen</span>
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={appearance.chrome !== "clean"}
+                    onchange={() => (appearance = { ...appearance, chrome: appearance.chrome === "clean" ? "terminal" : "clean" })}
+                  />
+                  <span>Terminal chrome: scanlines &amp; glow on the frame</span>
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={appearance.motion !== "off"}
+                    onchange={() => (appearance = { ...appearance, motion: appearance.motion === "off" ? "" : "off" })}
+                  />
+                  <span>Hover motion: icons lift and turn under the pointer</span>
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={appearance.flat}
+                    onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
+                  />
+                  <span>Flatten messages: ignore other members' custom bubble backgrounds</span>
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
+                    checked={appearance.icons === "flat"}
+                    onchange={() => (appearance = { ...appearance, icons: appearance.icons === "flat" ? "" : "flat" })}
+                  />
+                  <span>Flat server icons: monograms instead of uploaded images</span>
+                </label>
+              </section>
+            {:else if settingsPage === "space"}
+              <div class="stx-crumb">SETTINGS // APP // SERVER SPACE</div>
+              <h1>Server Space</h1>
+              <section class="set-section">
+                <p class="muted small">The 360° room your servers hang in (Ctrl+O). Backdrop:</p>
                 <div class="space-set-row">
                   {#each SPACE_BACKDROP_TILES as b (b.id)}
                     <button type="button" class="ghost small" class:active={spaceState.backdrop === b.id} onclick={() => setSpaceBackdrop(b.id)}>{b.name}</button>
@@ -11096,121 +11391,188 @@
                   </label>
                   <button type="button" class="ghost small" onclick={() => { spaceState.placements = {}; saveSpace(); }}>Forget placements</button>
                 </div>
-                <span class="muted small">A custom backdrop is one equirectangular (2:1) image. Backdrop and placements stay on this device, like desktop icon positions.</span>
-              </div>
-              {#if liveryActive && activeServerId !== null && !cur?.isDm}
-                <label class="toggle">
-                  <input
-                    type="checkbox"
-                    checked={!liveryOptOut}
-                    onchange={() => setLiveryOptOut(!liveryOptOut)}
-                  />
-                  <span>
-                    Follow this server's livery{livery.preset
-                      ? ` (${PRESETS.find((p) => p.id === livery.preset)?.name ?? livery.preset})`
-                      : ""}
-                  </span>
-                </label>
-              {/if}
-            </section>
-
-            <section class="set-section">
-              <h3>Devices</h3>
-              <p class="muted small">
-                Link another device to your identity. The new device gets its own key: nothing
-                is copied: and nothing at all happens until you approve it here on this device.
-              </p>
-              <button class="ghost" onclick={() => (showLinkDevice = true)}>⛓ Link a new device…</button>
-            </section>
-
-            <section class="set-section">
-              <h3>Notifications</h3>
-              <label class="toggle">
-                <input type="checkbox" checked={soundOn} onchange={toggleSound} />
-                <span>Play a sound for new messages</span>
-              </label>
-              <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
-            </section>
-
-            <section class="set-section">
-              <h3>Calls (voice)</h3>
-              <p class="muted small">
-                Voice is peer-to-peer + end-to-end encrypted. To connect across networks, peers use a
-                <strong>STUN</strong> server to find their public address; <strong>TURN</strong> relays the
-                (still encrypted) audio when a direct path can't be made. Blank STUN for LAN-only.
-              </p>
-              <label class="field">
-                <span class="muted small">STUN server(s): space/comma separated</span>
-                <input bind:value={callStun} placeholder="stun:stun.l.google.com:19302" />
-              </label>
-              <label class="field">
-                <span class="muted small">TURN server (optional, for strict NATs)</span>
-                <input bind:value={callTurn} placeholder="turn:your-host:3478" />
-              </label>
-              <div class="field row">
-                <label class="field" style="flex:1">
-                  <span class="muted small">TURN user</span>
-                  <input bind:value={callTurnUser} />
-                </label>
-                <label class="field" style="flex:1">
-                  <span class="muted small">TURN credential</span>
-                  <input type="password" bind:value={callTurnCred} />
-                </label>
-              </div>
-              <button class="ghost small" onclick={saveCallSettings}>Save call settings</button>
-            </section>
-
-            <section class="set-section">
-              <h3>Message formatting</h3>
-              <p class="muted small">Type these in any message. Bold/italic also have Ctrl+B / Ctrl+I.</p>
-              <ul class="format-help">
-                <li><code>**bold**</code> → <strong>bold</strong></li>
-                <li><code>*italic*</code> → <em>italic</em></li>
-                <li><code>~~strike~~</code> → <s>strike</s></li>
-                <li><code>`code`</code> → <code>code</code> (inline) · <code>```</code> for a block</li>
-                <li><code>||spoiler||</code> → a blacked-out spoiler you click to reveal</li>
-                <li><code>&gt; quote</code> → a block quote</li>
-                <li><code>@</code> then a name → mention a member (notifies them)</li>
-                <li><code>:name:</code> → a custom emoji (add them under Emoji below), or use the 😀 picker</li>
-                <li><code>[[Page]]</code> → link to a wiki page</li>
-                <li><code>- item</code> / <code>1. item</code> → bullet / numbered lists</li>
-              </ul>
-            </section>
-
-            <section class="set-section">
-              <h3>Network</h3>
-              <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
-              <label class="field">
-                <span class="muted small">
-                  Default rendezvous address: pre-filled when you found a server, so people can
-                  join with just the invite (no address needed). Pasting a joiner invite that names
-                  a rendezvous is discovered automatically.
-                </span>
-                <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-              </label>
-            </section>
-
-            <section class="set-section">
-              <h3>Updates</h3>
-              <p class="muted small">
-                Mewtual looks for a new release on launch and offers it once. It never installs
-                anything on its own, and a skipped version stays skipped: check here to get it back.
-                Only official builds are wired to the release feed: a copy you built yourself
-                updates the way you built it.
-              </p>
-              <div class="invite-actions">
-                <button class="ghost" disabled={updateBusy} onclick={() => checkForUpdate(true)}>Check for updates</button>
-                <span class="muted small">Current version: {APP_VERSION}</span>
-              </div>
-            </section>
-
-            {#if activeServerId !== null}
+                <p class="muted small">A custom backdrop is one equirectangular (2:1) image. Backdrop and placements stay on this device, like desktop icon positions.</p>
+              </section>
+            {:else if settingsPage === "notifications"}
+              <div class="stx-crumb">SETTINGS // APP // NOTIFICATIONS</div>
+              <h1>Notifications</h1>
               <section class="set-section">
-                <h3>This server</h3>
-                <button class="ghost" onclick={() => { showSettings = false; openServerSettings(); }}>Open server settings →</button>
+                <label class="toggle">
+                  <input type="checkbox" checked={soundOn} onchange={toggleSound} />
+                  <span>Play a sound for new messages</span>
+                </label>
+                <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
+              </section>
+              <section class="set-section">
+                <p class="muted small">Voice-call notifications are per server: each server's Settings → Overview has the toggle.</p>
+              </section>
+            {:else if settingsPage === "voice"}
+              <div class="stx-crumb">SETTINGS // APP // VOICE &amp; CALLS</div>
+              <h1>Voice &amp; Calls</h1>
+              <section class="set-section">
+                <h3>Devices</h3>
+                <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
+              </section>
+              <section class="set-section">
+                <h3>NAT traversal</h3>
+                <p class="muted small">
+                  Voice is peer-to-peer + end-to-end encrypted. To connect across networks, peers use a
+                  <strong>STUN</strong> server to find their public address; <strong>TURN</strong> relays the
+                  (still encrypted) audio when a direct path can't be made. Blank STUN for LAN-only.
+                </p>
+                <label class="field">
+                  <span class="muted small">STUN server(s): space/comma separated</span>
+                  <input bind:value={callStun} placeholder="stun:stun.l.google.com:19302" />
+                </label>
+                <label class="field">
+                  <span class="muted small">TURN server (optional, for strict NATs)</span>
+                  <input bind:value={callTurn} placeholder="turn:your-host:3478" />
+                </label>
+                <div class="field row">
+                  <label class="field" style="flex:1">
+                    <span class="muted small">TURN user</span>
+                    <input bind:value={callTurnUser} />
+                  </label>
+                  <label class="field" style="flex:1">
+                    <span class="muted small">TURN credential</span>
+                    <input type="password" bind:value={callTurnCred} />
+                  </label>
+                </div>
+                <button class="ghost small" onclick={saveCallSettings}>Save call settings</button>
+              </section>
+            {:else if settingsPage === "chatmedia"}
+              <div class="stx-crumb">SETTINGS // APP // CHAT &amp; MEDIA</div>
+              <h1>Chat &amp; Media</h1>
+              <section class="set-section">
+                <h3>Message formatting</h3>
+                <p class="muted small">Type these in any message. Bold/italic also have Ctrl+B / Ctrl+I.</p>
+                <ul class="format-help">
+                  <li><code>**bold**</code> → <strong>bold</strong></li>
+                  <li><code>*italic*</code> → <em>italic</em></li>
+                  <li><code>~~strike~~</code> → <s>strike</s></li>
+                  <li><code>`code`</code> → <code>code</code> (inline) · <code>```</code> for a block</li>
+                  <li><code>||spoiler||</code> → a blacked-out spoiler you click to reveal</li>
+                  <li><code>&gt; quote</code> → a block quote</li>
+                  <li><code>@</code> then a name → mention a member (notifies them)</li>
+                  <li><code>:name:</code> → a custom emoji (added in a server's Settings → Emoji), or use the 😀 picker</li>
+                  <li><code>[[Page]]</code> → link to a wiki page</li>
+                  <li><code>- item</code> / <code>1. item</code> → bullet / numbered lists</li>
+                </ul>
+              </section>
+            {:else if settingsPage === "keybinds"}
+              <div class="stx-crumb">SETTINGS // APP // KEYBINDS</div>
+              <h1>Keybinds</h1>
+              <section class="set-section">
+                <ul class="stx-keys">
+                  <li><kbd>Ctrl+K</kbd><span>Quick switcher: channels, surfaces, servers, DMs</span></li>
+                  <li><kbd>Ctrl+1…7</kbd><span>Surfaces: chat, files, status, wiki, profile, downloads, events</span></li>
+                  <li><kbd>Ctrl+B / Ctrl+I</kbd><span>Bold / italic in the composer</span></li>
+                  <li><kbd>Ctrl+Shift+F</kbd><span>Search with the filter panel open</span></li>
+                  <li><kbd>Ctrl+L</kbd><span>Lock the session</span></li>
+                  <li><kbd>Ctrl+O</kbd><span>The 360° server space</span></li>
+                  <li><kbd>Alt+← / →</kbd><span>Back / forward through where you have been</span></li>
+                  <li><kbd>T</kbd> <span>(held, in the space) the tray of unplaced servers</span></li>
+                  <li><kbd>Z / X</kbd><span>Piano octave down / up (lock screen and instrument drawer)</span></li>
+                  <li><kbd>Esc</kbd><span>Close the topmost thing, one layer at a time</span></li>
+                </ul>
+                <p class="muted small">Remapping is not wired up yet: it is on the list.</p>
+              </section>
+            {:else if settingsPage === "network"}
+              <div class="stx-crumb">SETTINGS // CONNECTION // NETWORK</div>
+              <h1>Network</h1>
+              <section class="set-section">
+                <p class="muted small">Reachability (LAN address / relay) is chosen when you found a server.</p>
+                <label class="field">
+                  <span class="muted small">
+                    Default rendezvous address: pre-filled when you found a server, so people can
+                    join with just the invite (no address needed). Pasting a joiner invite that names
+                    a rendezvous is discovered automatically.
+                  </span>
+                  <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
+                </label>
+              </section>
+            {:else if settingsPage === "updates"}
+              <div class="stx-crumb">SETTINGS // CONNECTION // UPDATES</div>
+              <h1>Updates</h1>
+              <section class="set-section">
+                <p class="muted small">
+                  Mewtual looks for a new release on launch and offers it once. It never installs
+                  anything on its own, and a skipped version stays skipped: check here to get it back.
+                  Only official builds are wired to the release feed: a copy you built yourself
+                  updates the way you built it.
+                </p>
+                <div class="invite-actions">
+                  <button class="ghost" disabled={updateBusy} onclick={() => checkForUpdate(true)}>Check for updates</button>
+                  <span class="muted small">Current version: {APP_VERSION}</span>
+                </div>
               </section>
             {/if}
           </div>
+          {#if settingsPage === "appearance"}
+            <aside class="stx-prev">
+              <div class="stx-ph"><i></i>LIVE PREVIEW</div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">CHROME</div>
+                <div class="stx-mini">
+                  <div class="stx-mini-rail"><i class="on"></i><i></i><i></i></div>
+                  <div class="stx-mini-side"><i class="on" style="width:90%"></i><i style="width:70%"></i><i style="width:80%"></i><i style="width:55%"></i></div>
+                  <div class="stx-mini-chat"><i class="nm"></i><i style="width:80%"></i><i style="width:60%"></i></div>
+                </div>
+              </div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">MESSAGE</div>
+                <div class="stx-pmsg">
+                  <div class="stx-pnew">NEW · 2 UNREAD</div>
+                  <span class="stx-pname">kes</span><span class="stx-ptime">{fmtTime(Date.now())}</span>
+                  <div class="stx-pbody"><span class="stx-pmention">@you</span> tea is ready when you are</div>
+                </div>
+              </div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">CONTROLS</div>
+                <div class="stx-pctl">
+                  <button class="primary small" type="button">Send</button>
+                  <button class="ghost small" type="button">Cancel</button>
+                  <span class="stx-pdot"></span>
+                </div>
+              </div>
+              <p class="muted small stx-pnote">Updates as you tweak: theme, accent, text size, clock.</p>
+            </aside>
+          {:else if settingsPage === "profile"}
+            <aside class="stx-prev">
+              <div class="stx-ph"><i></i>LIVE PREVIEW</div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">PROFILE CARD</div>
+                <div class="stx-prof">
+                  {#if pBanner}
+                    <img class="stx-pbanner" src={imgSrc(pBanner)} alt="" />
+                  {:else}
+                    <div class="stx-pbanner"></div>
+                  {/if}
+                  {#if pAvatar}
+                    <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
+                  {:else}
+                    <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+                  {/if}
+                  <div class="stx-prof-body">
+                    <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+                    {#if myFp}<div class="stx-pfp">FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</div>{/if}
+                  </div>
+                </div>
+              </div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">IN CHAT</div>
+                <div class="stx-pmsg">
+                  <span class="stx-pname">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span><span class="stx-ptime">{fmtTime(Date.now())}</span>
+                  <div class="stx-pbody">on my way with the tea</div>
+                </div>
+              </div>
+              <p class="muted small stx-pnote">Exactly what members of this server see, card and chat both.</p>
+            </aside>
+          {/if}
+          <button type="button" class="stx-esc" onclick={() => (showSettings = false)} title="Close (Esc)">
+            <span class="stx-esc-ring">✕</span>
+            <span>ESC</span>
+          </button>
         </div>
       </div>
     {/if}
@@ -11261,7 +11623,7 @@
                   <span class="muted small">Server icon: shown on everyone's rail (they can prefer monograms)</span>
                   <div class="avatar-row">
                     {#if livery.icon}
-                      <img class="avatar lg" src={"data:image/jpeg;base64," + livery.icon} alt="" />
+                      <img class="avatar lg" src={imgSrc(livery.icon)} alt="" />
                     {/if}
                     <label class="upload-btn">
                       {livery.icon ? "Replace icon" : "Upload icon"}

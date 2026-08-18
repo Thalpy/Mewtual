@@ -8204,3 +8204,543 @@ label.space-file input {
     animation: none;
   }
 }
+
+/* ============================================================
+   Settings takeover (Discord-shaped): a full-window surface
+   below the titlebar, sidebar of pages on the left (right-
+   aligned against the content seam), one page at a time on the
+   right, optional live-preview rail, ESC ring. Tokens only:
+   presets and liveries restyle it for free.
+   ============================================================ */
+.stx {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0 0;
+  z-index: 40; /* above the app, below the titlebar (1000) and toasts */
+  display: flex;
+  background: var(--panel);
+}
+
+.stx-nav-zone {
+  flex: 1 1 34%;
+  min-width: 0;
+  background: var(--bg-0);
+  display: flex;
+  justify-content: flex-end;
+  overflow-y: auto;
+}
+
+.stx-nav {
+  width: 256px;
+  padding: 34px 10px 14px 6px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.stx-search {
+  margin: 0 8px 8px;
+}
+
+.stx-search input {
+  width: 100%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 6px 9px;
+  font-size: 0.78rem;
+  color: var(--text);
+}
+
+.stx-cat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 13px 8px 4px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  text-transform: uppercase;
+}
+
+.stx-cat::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--border-soft);
+}
+
+button.stx-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  margin: 1px 2px;
+  border: none;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 0.84rem;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.stx-item:hover {
+  background: var(--bg-elev);
+}
+
+button.stx-item.active {
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--text);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+button.stx-item.danger {
+  color: var(--danger-hi);
+}
+
+.stx-foot {
+  margin: auto 8px 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--faint);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  letter-spacing: 0.06em;
+}
+
+/* The server-settings variant reuses the shell; only the sidebar head differs. */
+.stx-srv-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 8px 6px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.stx-srv-head .srv-meta {
+  min-width: 0;
+}
+
+.stx-srv-head .srv-meta b {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stx-content-zone {
+  flex: 2 1 66%;
+  min-width: 0;
+  background: var(--panel);
+  display: flex;
+}
+
+.stx-content {
+  flex: 1;
+  max-width: 660px;
+  padding: 34px 8px 40px 42px;
+  overflow-y: auto;
+}
+
+.stx-content h1 {
+  margin: 0 0 12px;
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.stx-crumb {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+  margin-bottom: 8px;
+}
+
+.stx-duo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.stx-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  width: fit-content;
+}
+
+.stx-seg button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 3px 11px;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.stx-seg button.on {
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.stx-keys {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stx-keys li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.8rem;
+  color: var(--text-2);
+}
+
+.stx-keys kbd {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.stx-fp-big {
+  font-family: var(--mono);
+  font-size: 0.92rem;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  word-break: break-all;
+  margin: 0 0 8px;
+}
+
+/* --- live preview rail --- */
+.stx-prev {
+  width: 252px;
+  flex: none;
+  padding: 34px 0 36px;
+  border-left: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+}
+
+.stx-ph {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.stx-ph i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok); /* --ok's job: live */
+}
+
+.stx-pcard {
+  margin: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-0);
+  overflow: hidden;
+  flex: none;
+}
+
+.stx-pcap {
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  letter-spacing: 0.12em;
+  color: var(--faint);
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.stx-mini {
+  display: flex;
+  height: 96px;
+}
+
+.stx-mini i {
+  display: block;
+}
+
+.stx-mini-rail {
+  width: 26px;
+  background: var(--bg-0);
+  border-right: 1px solid var(--border-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 6px;
+}
+
+.stx-mini-rail i {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  background: var(--bg-elev);
+}
+
+.stx-mini-rail i.on {
+  background: var(--accent);
+}
+
+.stx-mini-side {
+  width: 58px;
+  background: var(--panel);
+  border-right: 1px solid var(--border-soft);
+  padding: 6px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stx-mini-side i {
+  height: 5px;
+  border-radius: 2px;
+  background: var(--bg-elev);
+}
+
+.stx-mini-side i.on {
+  background: color-mix(in oklab, var(--accent) 30%, var(--bg-elev));
+}
+
+.stx-mini-chat {
+  flex: 1;
+  background: var(--panel);
+  padding: 6px 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stx-mini-chat i {
+  height: 5px;
+  border-radius: 2px;
+  background: var(--bg-elev);
+}
+
+.stx-mini-chat i.nm {
+  width: 34%;
+  background: var(--accent);
+}
+
+.stx-pmsg {
+  padding: 8px 10px;
+  font-size: var(--fs-msg); /* tracks the text-size slider live */
+}
+
+.stx-pname .name,
+.stx-pname {
+  font-weight: 600;
+  color: var(--accent-hi);
+}
+
+.stx-ptime {
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  color: var(--faint);
+  margin-left: 5px;
+}
+
+.stx-pbody {
+  color: var(--text);
+  line-height: 1.4;
+  margin-top: 2px;
+}
+
+.stx-pmention {
+  background: var(--warn-dim); /* --warn's job: mentions */
+  color: var(--warn);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.stx-pnew {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+
+.stx-pnew::before,
+.stx-pnew::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid color-mix(in oklab, var(--accent) 40%, transparent);
+}
+
+.stx-pctl {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+}
+
+.stx-pdot {
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok); /* --ok's job: presence */
+}
+
+.stx-pnote {
+  padding: 0 14px;
+}
+
+/* profile-card preview */
+.stx-prof {
+  position: relative;
+}
+
+.stx-pbanner {
+  display: block;
+  width: 100%;
+  height: 58px;
+  object-fit: cover;
+  background: linear-gradient(120deg, var(--bg-elev), color-mix(in oklab, var(--accent) 22%, var(--bg-0)));
+}
+
+.stx-pav {
+  position: absolute;
+  top: 34px;
+  left: 12px;
+  border: 3px solid var(--bg-0);
+  box-sizing: content-box;
+}
+
+.stx-prof-body {
+  padding: 26px 12px 10px;
+}
+
+.stx-prof-name .name {
+  font-size: 0.94rem;
+}
+
+.stx-pfp {
+  margin-top: 7px;
+  font-family: var(--mono);
+  font-size: 0.54rem;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+
+/* --- ESC ring --- */
+button.stx-esc {
+  width: 68px;
+  flex: none;
+  align-self: flex-start;
+  margin-top: 34px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.14em;
+  color: var(--faint);
+}
+
+.stx-esc-ring {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+button.stx-esc:hover .stx-esc-ring {
+  border-color: var(--muted);
+  color: var(--text);
+}
+
+/* --- profile banner (editor + card) --- */
+.banner-preview,
+.pc-banner {
+  display: block;
+  width: 100%;
+  max-height: 140px;
+  object-fit: cover;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+}
+
+.pc-banner {
+  margin-bottom: 10px;
+}
+
+/* Avatars can be non-square now (animated originals skip the square crop): cover, never
+   stretch. */
+.avatar,
+.rail-img {
+  object-fit: cover;
+}
+
+/* --- name styles: pass-2 fonts and effects (member content, like the originals) --- */
+.font-rounded {
+  font-family: "Comic Sans MS", "Segoe UI", system-ui, sans-serif;
+}
+
+.font-gothic {
+  font-family: "Old English Text MT", Georgia, serif;
+}
+
+/* Hollow letters: the fill clears, the stroke keeps currentcolor (same trick as
+   .fx-gradient: never touch the color property itself). */
+.fx-outline {
+  -webkit-text-stroke: 1px currentcolor;
+  -webkit-text-fill-color: transparent;
+}
+
+/* A hard offset shadow in a darkened cut of the member's own colour. */
+.fx-retro {
+  text-shadow: 2px 2px 0 color-mix(in oklab, currentcolor 35%, var(--bg-0));
+}
+
+/* Chromatic fringe: danger-red and info-blue ghosts either side. Static on purpose. */
+.fx-glitch {
+  text-shadow:
+    1px 0 0 color-mix(in oklab, var(--danger) 70%, transparent),
+    -1px 0 0 color-mix(in oklab, var(--info) 70%, transparent);
+}

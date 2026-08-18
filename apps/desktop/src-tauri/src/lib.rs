@@ -16,7 +16,7 @@ use base64::Engine;
 use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger,
     PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerRecord, ServerStore,
-    MAX_AVATAR_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -177,8 +177,8 @@ struct UiMember {
     you: bool,
 }
 
-/// A member profile as serialized to the frontend (keyed by fingerprint). `avatar` is
-/// base64-encoded JPEG bytes (empty = no avatar).
+/// A member profile as serialized to the frontend (keyed by fingerprint). `avatar` and
+/// `banner` are base64-encoded JPEG bytes (empty = unset).
 #[derive(Serialize, Clone)]
 struct UiProfile {
     fingerprint: String,
@@ -189,6 +189,8 @@ struct UiProfile {
     description: String,
     bubble: String,
     avatar: String,
+    /// The wide profile-card banner, base64-encoded like the avatar (empty = no banner).
+    banner: String,
 }
 
 /// The server's published livery as serialized to the frontend. Every value is **untrusted**
@@ -1185,9 +1187,10 @@ async fn get_members(state: State<'_, AppState>, server: u64) -> Result<Vec<UiMe
         .collect())
 }
 
-/// Set this member's own profile (name + styling + optional avatar). `avatar` is
-/// base64-encoded JPEG bytes (empty = no avatar).
+/// Set this member's own profile (name + styling + optional avatar and banner). `avatar` and
+/// `banner` are base64-encoded JPEG bytes (empty = unset).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn set_profile(
     state: State<'_, AppState>,
     server: u64,
@@ -1198,6 +1201,7 @@ async fn set_profile(
     description: String,
     bubble: String,
     avatar: String,
+    banner: String,
 ) -> Result<(), String> {
     let avatar = if avatar.is_empty() {
         Vec::new()
@@ -1211,6 +1215,18 @@ async fn set_profile(
             avatar.len()
         ));
     }
+    let banner = if banner.is_empty() {
+        Vec::new()
+    } else {
+        B64.decode(banner.as_bytes())
+            .map_err(|e| format!("bad banner: {e}"))?
+    };
+    if banner.len() > MAX_BANNER_BYTES {
+        return Err(format!(
+            "banner too large: {} bytes (max {MAX_BANNER_BYTES})",
+            banner.len()
+        ));
+    }
     let actor = actor_of(&state, server).await?;
     actor
         .set_profile(Profile {
@@ -1221,6 +1237,7 @@ async fn set_profile(
             description,
             bubble,
             avatar,
+            banner,
         })
         .await;
     persist_server(&state, server).await;
@@ -1247,6 +1264,11 @@ async fn get_profiles(state: State<'_, AppState>, server: u64) -> Result<Vec<UiP
                 String::new()
             } else {
                 B64.encode(&p.avatar)
+            },
+            banner: if p.banner.is_empty() {
+                String::new()
+            } else {
+                B64.encode(&p.banner)
             },
         })
         .collect())

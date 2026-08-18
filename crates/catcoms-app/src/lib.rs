@@ -547,6 +547,7 @@ const P_COLOR: &str = "color";
 const P_FONT: &str = "font";
 const P_EFFECT: &str = "effect";
 const P_AVATAR_CID: &str = "avatar_cid";
+const P_BANNER_CID: &str = "banner_cid";
 const P_DESCRIPTION: &str = "description";
 const P_BUBBLE: &str = "bubble";
 
@@ -555,6 +556,13 @@ const P_BUBBLE: &str = "bubble";
 /// and fetched on demand over the mesh; this caps the blob the UI's downscaled ~128px
 /// JPEG produces.
 pub const MAX_AVATAR_BYTES: usize = 64 * 1024;
+
+/// Maximum profile banner image size accepted by [`Server::set_profile`]. A banner rides by
+/// **content address** exactly like an avatar (only the CID gossips in the profile document,
+/// the bytes are fetched on demand), so this budget bounds a blob fetch rather than gossip.
+/// It is larger than [`MAX_AVATAR_BYTES`] because a banner is a wide profile-card image, not
+/// a 128px square, so the same visual quality needs more pixels.
+pub const MAX_BANNER_BYTES: usize = 256 * 1024;
 
 /// Max avatar blobs fetched per [`Server::fetch_missing_avatars`] pass; bounds how long
 /// one pass (each fetch a blocking mesh round-trip) can stall the actor, so avatar churn by
@@ -581,10 +589,14 @@ pub struct Profile {
     /// The avatar image bytes, resolved from its content address against the local blob
     /// store (empty if unset or not yet fetched). The UI produces a downscaled JPEG.
     pub avatar: Vec<u8>,
+    /// The profile banner image bytes, resolved from its content address the same way as
+    /// [`Profile::avatar`] (empty if unset or not yet fetched). A wide profile-card image.
+    pub banner: Vec<u8>,
 }
 
-/// An internal profile record straight from the document: the avatar is its **content
-/// address** (CID bytes), resolved to image bytes against the blob store by [`Server`].
+/// An internal profile record straight from the document: the avatar and banner are their
+/// **content addresses** (CID bytes), resolved to image bytes against the blob store by
+/// [`Server`].
 struct ProfileRecord {
     name: String,
     color: String,
@@ -593,16 +605,18 @@ struct ProfileRecord {
     description: String,
     bubble: String,
     avatar_cid: Vec<u8>,
+    banner_cid: Vec<u8>,
 }
 
-/// Write a member's own profile entry. The avatar is referenced by **content address**
-/// (`avatar_cid`), not stored inline; so the gossiped profile document stays tiny and the
-/// image is fetched on demand over the mesh.
+/// Write a member's own profile entry. The avatar and banner are referenced by **content
+/// address** (`avatar_cid` / `banner_cid`), not stored inline; so the gossiped profile
+/// document stays tiny and the images are fetched on demand over the mesh.
 fn write_profile(
     doc: &mut AutoCommit,
     fp: &str,
     p: &Profile,
     avatar_cid: &[u8],
+    banner_cid: &[u8],
 ) -> Result<(), AutomergeError> {
     let entry = match doc.get(ROOT, fp)? {
         Some((Value::Object(ObjType::Map), id)) => id,
@@ -619,11 +633,16 @@ fn write_profile(
         P_AVATAR_CID,
         ScalarValue::Bytes(avatar_cid.to_vec()),
     )?;
+    doc.put(
+        &entry,
+        P_BANNER_CID,
+        ScalarValue::Bytes(banner_cid.to_vec()),
+    )?;
     Ok(())
 }
 
-/// Materialize the profile document into `fingerprint -> ProfileRecord` (avatars still as
-/// content addresses; [`Server::profiles`] resolves them against the blob store).
+/// Materialize the profile document into `fingerprint -> ProfileRecord` (avatars and banners
+/// still as content addresses; [`Server::profiles`] resolves them against the blob store).
 fn read_profile_records(doc: &AutoCommit) -> HashMap<String, ProfileRecord> {
     let mut out = HashMap::new();
     for fp in doc.keys(ROOT) {
@@ -638,6 +657,7 @@ fn read_profile_records(doc: &AutoCommit) -> HashMap<String, ProfileRecord> {
                     description: str_field(doc, &entry, P_DESCRIPTION),
                     bubble: str_field(doc, &entry, P_BUBBLE),
                     avatar_cid: bytes_field(doc, &entry, P_AVATAR_CID),
+                    banner_cid: bytes_field(doc, &entry, P_BANNER_CID),
                 },
             );
         }
@@ -645,7 +665,8 @@ fn read_profile_records(doc: &AutoCommit) -> HashMap<String, ProfileRecord> {
     out
 }
 
-/// Parse a stored avatar content address (32 bytes) into a [`Cid`] (`None` if absent/bad).
+/// Parse a stored avatar/banner content address (32 bytes) into a [`Cid`] (`None` if
+/// absent/bad).
 fn parse_avatar_cid(bytes: &[u8]) -> Option<Cid> {
     let arr: [u8; 32] = bytes.try_into().ok()?;
     Some(Cid::from_bytes(arr))
@@ -2627,8 +2648,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Set this member's own profile (writes the local fingerprint's entry). The avatar
-    /// image (rejected if larger than [`MAX_AVATAR_BYTES`]) is stored in the blob store and
-    /// referenced by content address; the gossiped document carries only the CID.
+    /// image (rejected if larger than [`MAX_AVATAR_BYTES`]) and the banner image (rejected if
+    /// larger than [`MAX_BANNER_BYTES`]) are stored in the blob store and referenced by
+    /// content address; the gossiped document carries only the CIDs.
     pub async fn set_profile(&mut self, profile: Profile) -> Result<(), AppError> {
         if profile.avatar.len() > MAX_AVATAR_BYTES {
             return Err(AppError::Invalid(format!(
@@ -2636,24 +2658,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 profile.avatar.len()
             )));
         }
+        if profile.banner.len() > MAX_BANNER_BYTES {
+            return Err(AppError::Invalid(format!(
+                "banner too large: {} bytes (max {MAX_BANNER_BYTES})",
+                profile.banner.len()
+            )));
+        }
         let avatar_cid = if profile.avatar.is_empty() {
             Vec::new()
         } else {
             self.sync.put_blob(&profile.avatar)?.as_bytes().to_vec()
         };
+        let banner_cid = if profile.banner.is_empty() {
+            Vec::new()
+        } else {
+            self.sync.put_blob(&profile.banner)?.as_bytes().to_vec()
+        };
         let fp = self.my_fingerprint();
         self.sync
             .post(DocType::Profile, PROFILE_DOC, |d| {
-                write_profile(d, &fp, &profile, &avatar_cid)
+                write_profile(d, &fp, &profile, &avatar_cid, &banner_cid)
             })
             .await?;
         Ok(())
     }
 
-    /// All known member profiles, keyed by device fingerprint. Each profile's avatar is
-    /// resolved from its content address against the **local** blob store; members whose
-    /// avatar blob has not been fetched yet (see [`Server::fetch_missing_avatars`]) come
-    /// back with an empty `avatar`.
+    /// All known member profiles, keyed by device fingerprint. Each profile's avatar and
+    /// banner are resolved from their content addresses against the **local** blob store;
+    /// members whose image blob has not been fetched yet (see
+    /// [`Server::fetch_missing_avatars`]) come back with an empty `avatar` / `banner`.
     pub fn profiles(&self) -> HashMap<String, Profile> {
         let records = self
             .sync
@@ -2666,6 +2699,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 let avatar = parse_avatar_cid(&r.avatar_cid)
                     .and_then(|cid| self.sync.get_blob(&cid))
                     .unwrap_or_default();
+                let banner = parse_avatar_cid(&r.banner_cid)
+                    .and_then(|cid| self.sync.get_blob(&cid))
+                    .unwrap_or_default();
                 (
                     fp,
                     Profile {
@@ -2676,19 +2712,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         description: r.description,
                         bubble: r.bubble,
                         avatar,
+                        banner,
                     },
                 )
             })
             .collect()
     }
 
-    /// Fetch any referenced avatar blobs we do not yet hold from the best known peer.
-    /// Returns how many were newly fetched (so the caller can re-render). Call after the
-    /// profile document changes (e.g. on join/convergence). Fetches at most
-    /// [`MAX_AVATAR_FETCHES_PER_PASS`] missing avatars per call; since each fetch is a
-    /// blocking mesh round-trip, this bounds how long a single pass can stall the actor, so
-    /// a member churning many distinct avatar CIDs cannot freeze peers' event loops (the
-    /// remainder are picked up on subsequent ticks).
+    /// Fetch any referenced profile image blobs (avatars **and** banners) we do not yet hold
+    /// from the best known peer. Returns how many were newly fetched (so the caller can
+    /// re-render). Call after the profile document changes (e.g. on join/convergence).
+    /// Fetches at most [`MAX_AVATAR_FETCHES_PER_PASS`] missing blobs per call, counted across
+    /// both kinds; since each fetch is a blocking mesh round-trip, this bounds how long a
+    /// single pass can stall the actor, so a member churning many distinct CIDs cannot freeze
+    /// peers' event loops (the remainder are picked up on subsequent ticks).
     pub async fn fetch_missing_avatars(&mut self) -> Result<usize, AppError> {
         let cids: Vec<Cid> = self
             .sync
@@ -2696,7 +2733,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .map(|d| read_profile_records(d.doc()))
             .unwrap_or_default()
             .values()
-            .filter_map(|r| parse_avatar_cid(&r.avatar_cid))
+            .flat_map(|r| {
+                [
+                    parse_avatar_cid(&r.avatar_cid),
+                    parse_avatar_cid(&r.banner_cid),
+                ]
+            })
+            .flatten()
             .collect();
         let mut fetched = 0;
         let mut attempts = 0;
@@ -5902,6 +5945,7 @@ mod tests {
                 description: String::new(),
                 bubble: String::new(),
                 avatar: Vec::new(),
+                banner: Vec::new(),
             })
             .await
             .unwrap();
@@ -6454,12 +6498,46 @@ mod tests {
             description: "the founder".into(),
             bubble: "linear-gradient(90deg,#f06,#09f)".into(),
             avatar: vec![0xff, 0xd8, 0xff, 0x00, 1, 2, 3], // stand-in JPEG bytes
+            banner: Vec::new(),
         };
         alice.set_profile(p.clone()).await.unwrap();
 
         let profiles = alice.profiles();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles.get(&alice.my_fingerprint()), Some(&p));
+    }
+
+    #[tokio::test]
+    async fn a_profile_banner_round_trips_by_content_address() {
+        let mut alice = founder();
+        alice.open_profiles().await.unwrap();
+
+        // The banner rides by content address like the avatar: the doc carries only the CID,
+        // the bytes come back resolved against the local blob store.
+        let p = Profile {
+            name: "Alice".into(),
+            avatar: vec![0xff, 0xd8, 0xff, 0x00, 1, 2, 3], // stand-in JPEG bytes
+            banner: vec![0xABu8; 4096],                    // stand-in wide card image
+            ..Default::default()
+        };
+        alice.set_profile(p.clone()).await.unwrap();
+
+        let profiles = alice.profiles();
+        assert_eq!(profiles.len(), 1);
+        let got = profiles.get(&alice.my_fingerprint()).expect("own profile");
+        assert_eq!(got, &p);
+        assert_eq!(got.banner, p.banner, "the banner resolved back to bytes");
+
+        // Clearing the banner leaves the avatar alone.
+        let cleared = Profile {
+            banner: Vec::new(),
+            ..p.clone()
+        };
+        alice.set_profile(cleared.clone()).await.unwrap();
+        let after = alice.profiles();
+        let got = after.get(&alice.my_fingerprint()).expect("own profile");
+        assert!(got.banner.is_empty(), "the banner was cleared");
+        assert_eq!(got.avatar, p.avatar, "the avatar survived");
     }
 
     #[tokio::test]
@@ -6699,6 +6777,32 @@ mod tests {
             alice.set_profile(p).await,
             Err(AppError::Invalid(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn an_oversize_banner_is_rejected() {
+        let mut alice = founder();
+        alice.open_profiles().await.unwrap();
+        let p = Profile {
+            name: "Alice".into(),
+            banner: vec![0u8; MAX_BANNER_BYTES + 1],
+            ..Default::default()
+        };
+        assert!(matches!(
+            alice.set_profile(p).await,
+            Err(AppError::Invalid(_))
+        ));
+        // A banner at the cap is fine: it gets a bigger budget than an avatar.
+        let ok = Profile {
+            name: "Alice".into(),
+            banner: vec![0u8; MAX_BANNER_BYTES],
+            ..Default::default()
+        };
+        alice.set_profile(ok).await.unwrap();
+        assert_eq!(
+            alice.profiles()[&alice.my_fingerprint()].banner.len(),
+            MAX_BANNER_BYTES
+        );
     }
 
     #[tokio::test]
