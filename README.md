@@ -286,6 +286,18 @@ The ambient-dependency gate keeps OS time and randomness behind the runtime seam
 protocol behaviour deterministic under test. Wire-format fuzzing is also available from
 `crates/catcoms-wire/fuzz` with nightly Rust.
 
+## Licence
+
+Mewtual is **source-available**, not OSI-approved open source. Noncommercial use, modification,
+and redistribution are permitted only under the [Mewtual Combined Licence Terms](LICENSE),
+which incorporate the PolyForm Noncommercial License 1.0.0 and additional no-AI and
+source-disclosure conditions.
+
+In short: commercial use is prohibited; the code may not be used for AI training, AI tooling,
+or AI-based projects; and forks or network-deployed modifications must publish their complete
+buildable source under the same terms. Third-party dependencies remain under their respective
+licences. Read the licence document for the actual terms.
+
 ## Current status
 
 The encrypted group core, peer-to-peer transport, direct and relayed joining, replication,
