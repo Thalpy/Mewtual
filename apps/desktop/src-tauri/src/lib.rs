@@ -15,14 +15,15 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger,
-    PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerRecord, ServerStore,
-    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord,
+    ServerStore, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES,
+    MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
-    phase0_peer_id, target_peer_in_multiaddr, validate_rendezvous_addrs, MeshHandle, MeshService,
-    RendezvousTarget,
+    keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_rendezvous_addrs,
+    MeshHandle, MeshService, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
 use catcoms_sync::join_namespace;
@@ -477,19 +478,21 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
     });
 }
 
-/// Extract the TCP port from a multiaddr (the OS-assigned listen port).
-fn tcp_port(addr: &Multiaddr) -> Option<u16> {
+/// Extract the listen port from a multiaddr. Both `/tcp/<p>` and `/udp/<p>/quic-v1` carry it,
+/// and a node binds the same number on both, so either component answers the question; matching
+/// only `/tcp/` would silently drop every QUIC address the node now also listens on.
+fn listen_port(addr: &Multiaddr) -> Option<u16> {
     addr.iter().find_map(|p| match p {
-        Protocol::Tcp(port) => Some(port),
+        Protocol::Tcp(port) | Protocol::Udp(port) => Some(port),
         _ => None,
     })
 }
 
 /// Build a dialable bootstrap multiaddr from a user-entered reachable address, so peers on
 /// a LAN or the internet can join. Accepts a bare IPv4 (`1.2.3.4`; uses the bound `port`),
-/// `host:port` (e.g. a forwarded port), or a full multiaddr starting with `/` (e.g. a relay
-/// circuit address). Appends this node's `/p2p/<id>` if absent. (IPv4/multiaddr only; a
-/// hostname would need `/dns4/`.)
+/// `host:port` (e.g. a forwarded port), a bare or bracketed IPv6 (`2001:db8::1`, `[2001:db8::1]:443`),
+/// or a full multiaddr starting with `/` (e.g. a relay circuit address). Appends this node's
+/// `/p2p/<id>` if absent. (Literal IPs / multiaddrs only; a hostname would need `/dns4/`.)
 fn build_advertised(input: &str, port: u16, peer_id: &str) -> Result<String, String> {
     let input = input.trim();
     if input.is_empty() {
@@ -502,14 +505,169 @@ fn build_advertised(input: &str, port: u16, peer_id: &str) -> Result<String, Str
             format!("{input}/p2p/{peer_id}")
         });
     }
-    let (host, p) = match input.rsplit_once(':') {
-        Some((h, ps)) => (h, ps.parse().map_err(|_| format!("bad port in '{input}'"))?),
-        None => (input, port),
+    // `[addr]` / `[addr]:port` is the only unambiguous way to write an IPv6 host with a port,
+    // since a bare IPv6 literal is itself full of colons; check it before the host:port split.
+    let (host, p) = if let Some(rest) = input.strip_prefix('[') {
+        let (h, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("unclosed '[' in '{input}'"))?;
+        let p = match tail.strip_prefix(':') {
+            Some(ps) => ps.parse().map_err(|_| format!("bad port in '{input}'"))?,
+            None if tail.is_empty() => port,
+            None => return Err(format!("bad address '{input}'")),
+        };
+        (h, p)
+    } else if input.parse::<std::net::Ipv6Addr>().is_ok() {
+        (input, port)
+    } else {
+        match input.rsplit_once(':') {
+            Some((h, ps)) => (h, ps.parse().map_err(|_| format!("bad port in '{input}'"))?),
+            None => (input, port),
+        }
     };
     if host.is_empty() {
         return Err(format!("bad address '{input}'"));
     }
-    Ok(format!("/ip4/{host}/tcp/{p}/p2p/{peer_id}"))
+    let family = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        "ip6"
+    } else {
+        "ip4"
+    };
+    Ok(format!("/{family}/{host}/tcp/{p}/p2p/{peer_id}"))
+}
+
+/// The two dialable multiaddrs for one of this host's addresses: TCP and QUIC on the same port.
+/// Both go into the invite because the joiner dials every bootstrap address it is given, and UDP
+/// hole-punching succeeds through NATs that refuse the TCP one; an extra address never hurts.
+fn dialable_addrs(ip: std::net::IpAddr, port: u16, peer_id: &str) -> Vec<String> {
+    let family = if ip.is_ipv6() { "ip6" } else { "ip4" };
+    vec![
+        format!("/{family}/{ip}/tcp/{port}/p2p/{peer_id}"),
+        format!("/{family}/{ip}/udp/{port}/quic-v1/p2p/{peer_id}"),
+    ]
+}
+
+/// The IPv4 and IPv6 probe targets used to learn which of this host's own addresses the kernel
+/// would route from. Both are documentation prefixes (RFC 5737 / RFC 3849): nothing is ever sent,
+/// so they only need to resolve against the default route, and they must not name real infra.
+const V4_ROUTE_PROBE: &str = "192.0.2.1:9";
+const V6_ROUTE_PROBE: &str = "[2001:db8::1]:9";
+
+/// The source address this host would use to reach the wider internet in `target`'s family,
+/// learned by "connecting" an unbound UDP socket: no packet is sent, the kernel simply resolves
+/// the route and picks a source address. A dependency-free way to learn the LAN IPv4 (so a peer on
+/// the same network can dial us with nothing typed in) and the global IPv6 (which, having no NAT
+/// in front of it, is frequently the only thing that works for a CGNAT'd user). `None` when the
+/// family has no route at all, which is exactly the "this host has no IPv6" answer we want.
+fn local_source_ip(target: &str) -> Option<std::net::IpAddr> {
+    let target: std::net::SocketAddr = target.parse().ok()?;
+    let bind: std::net::SocketAddr = if target.is_ipv6() {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    };
+    let sock = std::net::UdpSocket::bind(bind).ok()?;
+    sock.connect(target).ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    // A link-local IPv6 is useless outside its own segment and would just be dialled and time out.
+    let link_local = match ip {
+        std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
+        std::net::IpAddr::V4(_) => false,
+    };
+    (!ip.is_unspecified() && !ip.is_loopback() && !link_local).then_some(ip)
+}
+
+/// The bootstrap addresses this node can offer with nothing configured: its LAN IPv4, its
+/// routable IPv6, and the same-machine loopback, each over TCP and QUIC. Routable first, loopback
+/// last, because that is the order a joiner should prefer.
+fn auto_bootstrap(port: u16, peer_id: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for probe in [V4_ROUTE_PROBE, V6_ROUTE_PROBE] {
+        if let Some(ip) = local_source_ip(probe) {
+            out.extend(dialable_addrs(ip, port, peer_id));
+        }
+    }
+    out.extend(dialable_addrs(
+        std::net::Ipv4Addr::LOCALHOST.into(),
+        port,
+        peer_id,
+    ));
+    out
+}
+
+/// The addresses a server binds: IPv4 **and** IPv6, TCP **and** QUIC, all on one port number.
+/// IPv6 has no NAT in front of it, so it silently rescues users their router would otherwise
+/// strand; QUIC's UDP hole-punching is materially more reliable than TCP's. Both listeners are
+/// best-effort: [`MeshService::new_tcp_with_key`] reports a refusal (no IPv6 stack, say) instead
+/// of failing the node.
+fn listen_addrs(port: u16) -> Vec<Multiaddr> {
+    if port == 0 {
+        // Degenerate fallback (no port could be reserved). Bind exactly one address, because an
+        // OS-assigned port would give each listener a *different* number and the one-port-per-
+        // server model, and with it any port-forward, would be meaningless.
+        return "/ip4/0.0.0.0/tcp/0".parse().into_iter().collect();
+    }
+    [
+        format!("/ip4/0.0.0.0/tcp/{port}"),
+        format!("/ip6/::/tcp/{port}"),
+        format!("/ip4/0.0.0.0/udp/{port}/quic-v1"),
+        format!("/ip6/::/udp/{port}/quic-v1"),
+    ]
+    .iter()
+    .filter_map(|s| s.parse().ok())
+    .collect()
+}
+
+/// Can `port` be bound right now, for both TCP and UDP, on every IPv4 interface? A server listens
+/// on both under one number (TCP plus QUIC), so a port is only usable when both are free. IPv6 is
+/// deliberately not probed: those listeners are best-effort and a host without an IPv6 stack must
+/// not be pushed off its stable port. This is inherently a race (the probe sockets are released
+/// before libp2p rebinds them), but the alternative is refusing to start at all.
+fn port_is_bindable(port: u16) -> bool {
+    if port == 0 {
+        return false;
+    }
+    let v4 = std::net::Ipv4Addr::UNSPECIFIED;
+    std::net::TcpListener::bind((v4, port)).is_ok() && std::net::UdpSocket::bind((v4, port)).is_ok()
+}
+
+/// Ask the OS for a port that is free for both TCP and UDP, so the TCP and QUIC listeners can
+/// share one number. The OS only hands out a free *TCP* port, so the UDP half is re-probed and the
+/// draw retried; a handful of attempts is plenty in practice.
+fn os_chosen_port() -> u16 {
+    for _ in 0..16 {
+        let Ok(probe) = std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
+            return 0;
+        };
+        let Ok(local) = probe.local_addr() else {
+            return 0;
+        };
+        let port = local.port();
+        drop(probe);
+        if port_is_bindable(port) {
+            return port;
+        }
+    }
+    0
+}
+
+/// This server's listen port, in order of preference.
+///
+/// First choice is the port derived from the server's own identity seed
+/// ([`ServerNet::derived_port`]): stable across restarts, which is what a router port-forward and
+/// a UPnP mapping need, yet a different number on every install, so one internet-wide sweep of a
+/// single well-known port cannot enumerate the network. Second is whatever the last launch
+/// actually used (a server that had to move once should stay put rather than flap). Last is a
+/// fresh OS-drawn port. The caller persists what comes back.
+fn choose_port(net: &ServerNet) -> u16 {
+    let home = net.derived_port();
+    if port_is_bindable(home) {
+        return home;
+    }
+    if port_is_bindable(net.port) {
+        return net.port;
+    }
+    os_chosen_port()
 }
 
 /// Insert a freshly-spawned server into the registry, forward its events, and return the
@@ -625,27 +783,54 @@ fn external_addr(s: &str) -> Option<Multiaddr> {
     Some(addr)
 }
 
-/// Whether a multiaddr is a loopback address (`127.0.0.0/8` or `::1`).
-fn addr_is_loopback(addr: &Multiaddr) -> bool {
+/// Whether a multiaddr names an address that means nothing outside this machine or this LAN:
+/// loopback, RFC1918 private space, the RFC6598 CGNAT block, IPv4 link-local, IPv6 unique-local
+/// (`fc00::/7`) or IPv6 link-local (`fe80::/10`), plus the unspecified addresses.
+///
+/// Such an address must never be **advertised**. Publishing it to a rendezvous or handing it to a
+/// remote peer over identify discloses this machine's internal topology to anyone who asks, and
+/// buys nothing: the recipient cannot route to it. (Loopback stays perfectly usable inside an
+/// invite's bootstrap list, which is the deliberately same-machine case; this predicate governs
+/// what leaves the box, not what an invite may carry.)
+fn addr_is_private(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
-        Protocol::Ip4(ip) => ip.is_loopback(),
-        Protocol::Ip6(ip) => ip.is_loopback(),
+        Protocol::Ip4(ip) => {
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                // RFC 6598 100.64.0.0/10, the carrier-grade-NAT block: routable in form, useless
+                // in practice, and `Ipv4Addr::is_shared` is still unstable.
+                || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
+        }
+        Protocol::Ip6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                // fc00::/7 unique-local and fe80::/10 link-local; both `is_unique_local` and
+                // `is_unicast_link_local` are still unstable.
+                || (ip.segments()[0] & 0xfe00) == 0xfc00
+                || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
         _ => false,
     })
 }
 
-/// The reachable external addresses to advertise for rendezvous registration, from the bootstrap
-/// list. Loopback is advertised **only** when nothing else is reachable (same-machine testing);
-/// otherwise it's dropped so we don't pollute a shared rendezvous namespace with a record a remote
-/// joiner can't reach (it would instead use the invite's real bootstrap addrs as a fallback).
+/// The external addresses to advertise (rendezvous registration, identify) from the bootstrap
+/// list: **globally routable ones only**.
+///
+/// This used to fall back to advertising loopback when nothing else was reachable, which put an
+/// address no remote peer can dial into a shared rendezvous namespace. With a stable port and a
+/// stable peer id the calculus is worse than merely useless: an advertised private address is a
+/// free map of the advertiser's internal network. An empty result simply means "we have nothing
+/// worth publishing yet"; the registration stays deferred until UPnP, a relay circuit or a real
+/// public address supplies one.
 fn external_addrs(bootstrap: &[String]) -> Vec<Multiaddr> {
-    let all: Vec<Multiaddr> = bootstrap.iter().filter_map(|s| external_addr(s)).collect();
-    let routable: Vec<Multiaddr> = all.iter().filter(|a| !addr_is_loopback(a)).cloned().collect();
-    if routable.is_empty() {
-        all
-    } else {
-        routable
-    }
+    bootstrap
+        .iter()
+        .filter_map(|s| external_addr(s))
+        .filter(|a| !addr_is_private(a))
+        .collect()
 }
 
 /// Register a `(group_id, nonce)` invite's pre-join namespace at the rendezvous `rz` via `handle`
@@ -665,6 +850,322 @@ async fn register_join_ns(
         .map_err(|e| e.to_string())
 }
 
+/// How long to let the router answer a UPnP/NAT-PMP mapping request, in the background. SSDP/IGD
+/// discovery on a consumer router routinely needs ten seconds or more, so the old four-second
+/// window (which additionally only ran when the user had supplied neither an advertise address nor
+/// a relay) lost that race far more often than it won it, and the one genuinely zero-config path
+/// to reachability was wasted. It now always runs, never blocks founding, and folds its answer
+/// into the stored bootstrap so every later invite carries it.
+const UPNP_WINDOW_SECS: u64 = 25;
+
+/// Everything that makes a node reachable from *outside* this machine, gathered in one place so
+/// founding and reloading do identical work.
+struct Reachability {
+    /// The dialable addresses a minted invite should carry (relayed first when there is a relay).
+    bootstrap: Vec<String>,
+    /// The validated rendezvous target this server registers at, if any.
+    rz_target: Option<RendezvousTarget>,
+    /// A handle for registering later invites' namespaces; kept only once the rendezvous connected.
+    rz_handle: Option<MeshHandle>,
+}
+
+/// Do the reachability work for a server: assemble the bootstrap list (auto-detected LAN IPv4,
+/// routable IPv6 and loopback, plus the user's advertised address), reserve a relay circuit, and
+/// connect + advertise at the rendezvous.
+///
+/// This runs identically at found time **and at every reload**. It used to live inline in
+/// `found_server` only, so after a restart a server rebuilt a loopback-only bootstrap and every
+/// invite minted from then on worked on that one machine; the remote joiner's "timed out
+/// connecting to the server" was the visible end of that.
+///
+/// Best-effort by construction: it returns whatever reachability it managed plus the list of
+/// things that went wrong, and lets the caller decide. Founding surfaces the problems to the user
+/// (they just typed those addresses); a reload logs them and carries on with what worked.
+async fn establish_reachability(
+    mesh: &MeshService,
+    peer_id: &str,
+    port: u16,
+    net: &ServerNet,
+) -> (Reachability, Vec<String>) {
+    let mut problems = Vec::new();
+    let mut bootstrap = auto_bootstrap(port, peer_id);
+
+    let advertise = net.advertise.trim();
+    if !advertise.is_empty() {
+        match build_advertised(advertise, port, peer_id) {
+            Ok(a) => bootstrap.insert(0, a), // the user's own address is the authoritative one
+            Err(e) => problems.push(e),
+        }
+    }
+
+    // Reserve a relay circuit and prefer the relayed address (NAT traversal, no port-forward).
+    let relay = net.relay.trim();
+    if !relay.is_empty() {
+        match reserve_relay_circuit(mesh, relay).await {
+            Ok(addr) => bootstrap.insert(0, addr),
+            Err(e) => problems.push(e),
+        }
+    }
+
+    // Optional rendezvous: connect to it and advertise our reachable address(es) on the raw mesh
+    // (so the deferred registration can flush), keeping a handle to register each invite's
+    // namespace after the server is spawned. The node is then discoverable with no hard-coded
+    // address; a joiner needs only the pasted invite.
+    let mut rz_target = None;
+    let mut rz_handle = None;
+    let rendezvous = net.rendezvous.trim();
+    if !rendezvous.is_empty() {
+        match connect_rendezvous(mesh, rendezvous, &bootstrap).await {
+            Ok(rz) => {
+                rz_target = Some(rz);
+                rz_handle = Some(mesh.handle());
+            }
+            Err(e) => problems.push(e),
+        }
+    }
+
+    (
+        Reachability {
+            bootstrap,
+            rz_target,
+            rz_handle,
+        },
+        problems,
+    )
+}
+
+/// Dial the relay, reserve a circuit slot on it, and return the granted circuit address. The
+/// relay-client transport needs a live connection before it can reserve, hence the wait.
+async fn reserve_relay_circuit(mesh: &MeshService, relay: &str) -> Result<String, String> {
+    let circuit: Multiaddr = format!("{relay}/p2p-circuit")
+        .parse()
+        .map_err(|e: libp2p::multiaddr::Error| format!("bad relay address: {e}"))?;
+    let relay_addr: Multiaddr = relay
+        .parse()
+        .map_err(|e: libp2p::multiaddr::Error| format!("bad relay address: {e}"))?;
+    // Wait for the relay *specifically*, not for any peer: a reload also dials the remembered
+    // members from the snapshot, so "something connected" would fire on the wrong peer and the
+    // reservation would be attempted before the relay-client had a connection to reserve over.
+    let relay_peer = target_peer_in_multiaddr(&relay_addr)
+        .map(|p| phase0_peer_id(&p))
+        .ok_or_else(|| "the relay address carries no peer id".to_string())?;
+    // Dialing again when the transport was already constructed dialing this relay is harmless
+    // (libp2p collapses it onto the existing connection) and is what makes a reload self-contained.
+    mesh.dial(relay_addr).await.map_err(|e| e.to_string())?;
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                if p == relay_peer {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "could not connect to the relay".to_string())?;
+    mesh.listen_on(circuit).await.map_err(|e| e.to_string())?;
+    let addr = timeout(Duration::from_secs(20), async {
+        loop {
+            match mesh.next_listen_addr().await {
+                Some(a) if a.to_string().contains("p2p-circuit") => return Some(a),
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    })
+    .await
+    .map_err(|_| "relay reservation timed out".to_string())?
+    .ok_or_else(|| "relay reservation failed".to_string())?;
+    Ok(addr.to_string())
+}
+
+/// Dial the rendezvous node, wait for the connection, and advertise our routable addresses so the
+/// deferred registration can flush. A relay *circuit* address is intentionally not advertised
+/// here; it auto-promotes to an external address on reservation (in the transport actor), so the
+/// rendezvous still learns it.
+async fn connect_rendezvous(
+    mesh: &MeshService,
+    rendezvous: &str,
+    bootstrap: &[String],
+) -> Result<RendezvousTarget, String> {
+    let rz = validate_rendezvous_addrs(std::slice::from_ref(&rendezvous.to_string()))
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "no rendezvous address".to_string())?;
+    mesh.dial(rz.addr.clone())
+        .await
+        .map_err(|e| e.to_string())?;
+    let rz_peer = phase0_peer_id(&rz.peer);
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
+                if p == rz_peer {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| "could not connect to the rendezvous".to_string())?;
+    for addr in external_addrs(bootstrap) {
+        mesh.add_external_address(addr)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(rz)
+}
+
+/// Build this server's transport on its **own** persisted libp2p identity and stable port.
+///
+/// The identity is per server, never per device: Mewtual deliberately gives each server a separate
+/// network identity so two servers cannot be correlated to the same person. Reusing it across
+/// launches is what keeps an already-issued invite (which embeds `/p2p/<id>`) redeemable.
+///
+/// Returns the transport, the peer id, and the port actually in use (which differs from
+/// `net.port` only when the saved port had to be abandoned; the caller persists it back).
+fn build_transport(
+    net: &ServerNet,
+    dial: &[Multiaddr],
+) -> Result<(MeshService, libp2p::PeerId, u16), String> {
+    let key = keypair_from_seed(net.key_seed).map_err(|e| e.to_string())?;
+    let port = choose_port(net);
+    let (mesh, libp2p_id, bound) =
+        MeshService::new_tcp_with_key(key, &listen_addrs(port), dial).map_err(|e| e.to_string())?;
+    // With `port == 0` the OS assigned the number; read it back off whatever bound.
+    let port = if port != 0 {
+        port
+    } else {
+        bound.iter().find_map(listen_port).unwrap_or(0)
+    };
+    Ok((mesh, libp2p_id, port))
+}
+
+/// Mint a fresh per-server network identity: 32 random bytes for the libp2p keypair (drawn from
+/// the injected OS RNG, exactly like an invite nonce), plus the reachability inputs the user gave.
+/// The listen port falls out of the seed ([`ServerNet::derived_port`]). Persisted once, then
+/// reused for the life of the server.
+fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
+    let mut key_seed = [0u8; 32];
+    let mut rng = OsCryptoRng;
+    rng.fill_bytes(&mut key_seed);
+    let mut net = ServerNet {
+        key_seed,
+        // 0 = "no port used yet"; `choose_port` starts from the seed-derived home port, and the
+        // number that actually bound is written back by the caller.
+        port: 0,
+        advertise: advertise.trim().to_string(),
+        relay: relay.trim().to_string(),
+        rendezvous: rendezvous.trim().to_string(),
+        // Reserved just below; this session gets the first block, the next launch the second.
+        record_seq: 0,
+    };
+    // Own a peer-record sequence block from the very first session, so the invariant "this launch
+    // can only publish numbers below anything the next launch can" holds from birth rather than
+    // starting on the first reload.
+    net.reserve_record_seq_block();
+    net
+}
+
+/// Seal a server's network record to disk (best-effort, like [`persist_server`]): a locked vault
+/// or an I/O error costs a stable identity on the *next* launch, which is worth a log line but not
+/// worth failing the operation the user actually asked for.
+async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) {
+    let guard = state.store.lock().await;
+    if let Some(store) = guard.as_ref() {
+        let mut rng = OsCryptoRng;
+        if let Err(e) = store.save_server_net(server, net, &mut rng) {
+            eprintln!("persist: sealing the network identity of server {server} failed: {e}");
+        }
+    }
+}
+
+/// Load a server's persisted network record, or mint one when the server predates it, and
+/// reserve this launch's block of PEX peer-record sequence numbers.
+///
+/// The reservation is sealed back to disk **before** the caller brings the transport up, so a
+/// crash can only skip sequence numbers, never reuse them. Reuse would be the fatal one: a peer
+/// keeps an incoming `PeerDescriptor` only when its `seq` beats the one it already holds, so a
+/// node that restarted and resumed counting from where it left off would have every record it
+/// publishes rejected forever, and its peers would keep dialling a dead address.
+///
+/// The migration case (`fallback_rendezvous` recovered from the persisted invite, which is where
+/// the rendezvous address used to be kept) rotates the peer id exactly once, on the first launch
+/// after this landed; from then on it is stable. There is nothing better available: the old
+/// identity was never written down.
+async fn load_or_init_server_net(
+    state: &AppState,
+    server: u64,
+    fallback_rendezvous: &str,
+) -> ServerNet {
+    let stored = {
+        let guard = state.store.lock().await;
+        match guard.as_ref() {
+            Some(store) => match store.load_server_net(server) {
+                Ok(net) => net,
+                Err(e) => {
+                    eprintln!("reload: the network identity of server {server} did not load: {e}");
+                    None
+                }
+            },
+            None => None,
+        }
+    };
+    let mut net = stored.unwrap_or_else(|| new_server_net("", "", fallback_rendezvous));
+    net.reserve_record_seq_block();
+    persist_server_net(state, server, &net).await;
+    net
+}
+
+/// Watch for the UPnP mapping this node asked its router for, in the background, and fold the
+/// public address it reports into the server's stored bootstrap list so every invite minted from
+/// then on carries a directly-dialable address: no relay, no port-forward. Founding must not wait
+/// on it (see [`UPNP_WINDOW_SECS`]), so the answer is collected out here instead.
+fn spawn_upnp_fold(
+    app: AppHandle,
+    server: u64,
+    mut rx: mpsc::Receiver<Option<Multiaddr>>,
+    peer_id: String,
+) {
+    tokio::spawn(async move {
+        let found = timeout(Duration::from_secs(UPNP_WINDOW_SECS), rx.recv()).await;
+        // Nested Options: the outer is the timeout, the middle the channel, the inner the actor's
+        // "no usable gateway" signal (sent promptly so we are not just waiting out the window).
+        let Ok(Some(Some(addr))) = found else { return };
+        let entry = format!("{addr}/p2p/{peer_id}");
+        let state = app.state::<AppState>();
+        let mut servers = state.inner().servers.lock().await;
+        if let Some(e) = servers.get_mut(&server) {
+            if !e.bootstrap.contains(&entry) {
+                // Front of the list: a public address beats the LAN and loopback entries beside it.
+                e.bootstrap.insert(0, entry);
+            }
+        }
+    });
+}
+
+/// Decode a pasted invite **and check its signature**, before anything touches the network.
+///
+/// `InviteToken::decode` is structural only. Acting on an unverified token means binding a
+/// listener and then dialling every address in its `rendezvous` and `bootstrap` vectors, which
+/// hands whoever wrote the token the user's IP and a free liveness/port-scan oracle against any
+/// host they care to name. The signature check exists at the sync layer (inside `request_join`),
+/// but that is several dials too late; a forged token has to die here, at the point of paste.
+///
+/// `verify_self` checks the token against the inviter public key the token itself carries, so it
+/// only proves internal consistency, not that the inviter is anybody in particular. That is the
+/// right amount for this gate: whether the inviter is a real member of the named group is decided
+/// later, on the wire, by `request_join`. What it does buy is that a token nobody signed, or one
+/// whose addresses were edited after signing, never causes a single packet.
+fn decode_and_verify_invite(invite_hex: &str) -> Result<InviteToken, String> {
+    let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
+    let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
+    if !invite.verify_self() {
+        return Err("this invite's signature is not valid; it may have been altered or forged, so nothing was contacted".into());
+    }
+    Ok(invite)
+}
+
 /// The discover-on-join path (no hard-coded inviter address): build a transport, dial the invite's
 /// rendezvous node(s), discover the inviter's records under the pre-join namespace, rank them
 /// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses; plus the
@@ -672,26 +1173,21 @@ async fn register_join_ns(
 /// inviter's peer id. Mirrors `tcp_rendezvous_e2e.rs`.
 async fn discover_and_connect(
     invite: &InviteToken,
-) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>), String> {
+    net: &ServerNet,
+) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
     let targets = validate_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
     if targets.is_empty() {
         return Err("invite carries no rendezvous address".into());
     }
     let rz_addrs: Vec<Multiaddr> = targets.iter().map(|t| t.addr.clone()).collect();
-    // Bind a listen port so the joiner is itself dialable; post-join steady-state discovery has
-    // members register/discover + dial each other; then dial the rendezvous nodes.
-    let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
-        .parse()
-        .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
-    let (mesh, _id) = MeshService::new_tcp(Some(listen), &rz_addrs).map_err(|e| e.to_string())?;
-    // Advertise our reachable (loopback) address so our steady-state rendezvous registration
-    // carries a dialable record (same-machine; a LAN/relay advertise for joiners is a follow-up).
-    if let Ok(Some(bound)) = timeout(Duration::from_secs(10), mesh.next_listen_addr()).await {
-        if let Some(port) = tcp_port(&bound) {
-            if let Ok(addr) = format!("/ip4/127.0.0.1/tcp/{port}").parse::<Multiaddr>() {
-                let _ = mesh.add_external_address(addr).await;
-            }
-        }
+    // Bind the joiner's own (stable, persisted-identity) listen addresses so it is itself dialable;
+    // post-join steady-state discovery has members register/discover + dial each other. Then dial
+    // the rendezvous nodes.
+    let (mesh, libp2p_id, port) = build_transport(net, &rz_addrs)?;
+    // Advertise our own reachable addresses so the steady-state rendezvous registration carries a
+    // dialable record: the LAN IPv4 and routable IPv6 when this host has them, loopback otherwise.
+    for addr in external_addrs(&auto_bootstrap(port, &libp2p_id.to_string())) {
+        let _ = mesh.add_external_address(addr).await;
     }
 
     // Wait until at least one rendezvous node is connected.
@@ -776,7 +1272,7 @@ async fn discover_and_connect(
         .iter()
         .map(|t| (t.addr.to_string(), t.peer.to_bytes()))
         .collect();
-    Ok((mesh, inviter, rz_config))
+    Ok((mesh, inviter, rz_config, port))
 }
 
 /// Found a new server: bind all interfaces (so LAN/internet peers can reach it, not just
@@ -797,118 +1293,53 @@ async fn found_server(
     rendezvous: String,
     is_dm: bool,
 ) -> Result<FoundResult, String> {
-    let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
-        .parse()
-        .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
-    let relay = relay.trim().to_string();
-    let relay_dial: Vec<Multiaddr> = if relay.is_empty() {
+    // This server's own network identity + stable port, minted once here and sealed to disk, so
+    // every later launch keeps the same PeerId and port and the invites minted today still resolve
+    // tomorrow. Per server, never per device (see `ServerNet`).
+    let mut net = new_server_net(&advertise, &relay, &rendezvous);
+    let relay_dial: Vec<Multiaddr> = if net.relay.is_empty() {
         Vec::new()
     } else {
-        vec![relay
+        vec![net
+            .relay
             .parse()
             .map_err(|e: libp2p::multiaddr::Error| format!("bad relay address: {e}"))?]
     };
-    let (mesh, libp2p_id) =
-        MeshService::new_tcp(Some(listen), &relay_dial).map_err(|e| e.to_string())?;
-
-    // Discover the OS-assigned port; advertise loopback (same-machine) plus the user's
-    // reachable address if given, so the invite works for same-machine, LAN, or internet.
-    let bound = timeout(Duration::from_secs(10), mesh.next_listen_addr())
-        .await
-        .map_err(|_| "listen-addr timeout".to_string())?
-        .ok_or_else(|| "transport stopped".to_string())?;
-    let port = tcp_port(&bound).ok_or_else(|| "no bound TCP port".to_string())?;
+    let (mesh, libp2p_id, port) = build_transport(&net, &relay_dial)?;
+    net.port = port;
     let id = libp2p_id.to_string();
-    let mut bootstrap = vec![format!("/ip4/127.0.0.1/tcp/{port}/p2p/{id}")];
-    if !advertise.trim().is_empty() {
-        bootstrap.push(build_advertised(&advertise, port, &id)?);
-    }
 
-    // No manual address and no relay? Best-effort UPnP: give the router a few seconds to open a
-    // port and report our public address, then fold it into the invite as a directly-dialable
-    // bootstrap; a peer can connect with no relay, no port-forward (when the router cooperates).
-    if advertise.trim().is_empty() && relay.is_empty() {
-        if let Ok(Some(ext)) = timeout(Duration::from_secs(4), mesh.next_external_addr()).await {
-            bootstrap.push(format!("{ext}/p2p/{id}"));
-        }
+    // Everything that makes us reachable from off this machine. `reload_one` runs the very same
+    // helper, so a restart reproduces this reachability instead of collapsing to loopback.
+    let (reach, problems) = establish_reachability(&mesh, &id, port, &net).await;
+    if !problems.is_empty() {
+        // The user typed these addresses moments ago; tell them rather than founding a server that
+        // silently nobody can reach.
+        return Err(problems.join("; "));
     }
-
-    // Reserve a relay circuit and prefer the relayed address (NAT traversal, no port-forward).
-    if !relay.is_empty() {
-        // Wait for the relay connection before reserving (the relay-client transport needs
-        // a live connection to reserve over).
-        timeout(Duration::from_secs(20), async {
-            loop {
-                if let Some(TransportEvent::PeerConnected(_)) = mesh.next_event().await {
-                    break;
-                }
-            }
-        })
-        .await
-        .map_err(|_| "could not connect to the relay".to_string())?;
-        let circuit: Multiaddr = format!("{relay}/p2p-circuit")
-            .parse()
-            .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
-        mesh.listen_on(circuit).await.map_err(|e| e.to_string())?;
-        let circuit_addr = timeout(Duration::from_secs(20), async {
-            loop {
-                match mesh.next_listen_addr().await {
-                    Some(a) if a.to_string().contains("p2p-circuit") => return Some(a),
-                    Some(_) => continue,
-                    None => return None,
-                }
-            }
-        })
-        .await
-        .map_err(|_| "relay reservation timed out".to_string())?
-        .ok_or_else(|| "relay reservation failed".to_string())?;
-        bootstrap.insert(0, circuit_addr.to_string()); // prefer the relayed address
-    }
-
-    // Optional rendezvous: connect to it + advertise our reachable address(es) on the raw mesh
-    // (so the deferred registration can flush), keeping a handle to register each invite's
-    // namespace after the server is spawned. The founder is then discoverable with no hard-coded
-    // address; a joiner needs only the pasted invite.
-    let rendezvous = rendezvous.trim().to_string();
-    let (rz_target, rz_handle): (Option<RendezvousTarget>, Option<MeshHandle>) = if rendezvous
-        .is_empty()
-    {
-        (None, None)
-    } else {
-        let rz = validate_rendezvous_addrs(std::slice::from_ref(&rendezvous))
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .next()
-            .ok_or_else(|| "no rendezvous address".to_string())?;
-        mesh.dial(rz.addr.clone()).await.map_err(|e| e.to_string())?;
-        let rz_peer = phase0_peer_id(&rz.peer);
-        timeout(Duration::from_secs(20), async {
-            loop {
-                if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                    if p == rz_peer {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| "could not connect to the rendezvous".to_string())?;
-        // Advertise our routable addresses so the deferred registration can flush. A relay
-        // *circuit* address is intentionally not advertised here; it auto-promotes to an external
-        // address on reservation (in the transport actor), so the rendezvous still learns it.
-        for addr in external_addrs(&bootstrap) {
-            mesh.add_external_address(addr)
-                .await
-                .map_err(|e| e.to_string())?;
-        }
-        (Some(rz), Some(mesh.handle()))
-    };
+    let Reachability {
+        bootstrap,
+        rz_target,
+        rz_handle,
+    } = reach;
+    // Take the UPnP channel before the transport disappears into the server, so a background task
+    // can wait out a realistic router-discovery window without holding up the UI.
+    let upnp_rx = mesh.take_external_addrs().await;
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
-    let mut server = Server::found(mesh, device, OsCryptoRng, Box::new(SystemClock), display_name)
+    let mut server = Server::found(
+        mesh,
+        device,
+        OsCryptoRng,
+        Box::new(SystemClock),
+        display_name,
+    )
+    .map_err(|e| e.to_string())?;
+    server
+        .subscribe_control()
+        .await
         .map_err(|e| e.to_string())?;
-    server.subscribe_control().await.map_err(|e| e.to_string())?;
     attach_blob_store(&state, &mut server).await;
     // Steady-state discovery: tell the server which rendezvous to re-register/discover at, so the
     // actor re-finds the group after a restart. (The founder already advertised + connected above.)
@@ -954,9 +1385,15 @@ async fn found_server(
         is_dm,
     )
     .await;
-    // Seal the new server + the registry to disk (if the store is unlocked).
+    // Seal the new server, its network identity and the registry to disk (if the store is
+    // unlocked). The identity has to land before the first restart or the invite just minted dies
+    // with the process that made it.
     persist_server(&state, server_id).await;
+    persist_server_net(&state, server_id, &net).await;
     persist_registry(&state).await;
+    if let Some(rx) = upnp_rx {
+        spawn_upnp_fold(app.clone(), server_id, rx, id);
+    }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -974,13 +1411,18 @@ async fn join_server(
     display_name: String,
     is_dm: bool,
 ) -> Result<FoundResult, String> {
-    let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
-    let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
+    let invite = decode_and_verify_invite(&invite_hex)?;
+
+    // A joiner gets its own per-server identity + stable port too: it is a full member afterwards,
+    // so its peer record has to keep resolving across restarts exactly like the founder's.
+    let mut net = new_server_net("", "", "");
 
     // If the invite points at a rendezvous, discover the inviter there (no hard-coded address);
     // otherwise dial the invite's bootstrap addresses directly (loopback / LAN / relayed).
     let (mesh, inviter, rz_config) = if !invite.rendezvous.is_empty() {
-        discover_and_connect(&invite).await?
+        let (mesh, inviter, rz_config, port) = discover_and_connect(&invite, &net).await?;
+        net.port = port;
+        (mesh, inviter, rz_config)
     } else {
         let addrs: Vec<Multiaddr> = invite
             .bootstrap
@@ -995,7 +1437,8 @@ async fn join_server(
             .find_map(target_peer_in_multiaddr)
             .ok_or_else(|| "bootstrap has no peer id".to_string())?;
         let inviter = phase0_peer_id(&inviter_lp);
-        let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
+        let (mesh, _id, port) = build_transport(&net, &addrs)?;
+        net.port = port;
         // Wait for the connection to the inviter before requesting the join.
         timeout(Duration::from_secs(20), async {
             loop {
@@ -1057,8 +1500,9 @@ async fn join_server(
         is_dm,
     )
     .await;
-    // Seal the joined server + the registry to disk (if the store is unlocked).
+    // Seal the joined server, its network identity and the registry to disk (if unlocked).
     persist_server(&state, server_id).await;
+    persist_server_net(&state, server_id, &net).await;
     persist_registry(&state).await;
     Ok(FoundResult {
         server: server_id,
@@ -1122,7 +1566,9 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
 async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<String, String> {
     let (bootstrap, rendezvous, handle) = {
         let servers = state.servers.lock().await;
-        let e = servers.get(&server).ok_or_else(|| "unknown server".to_string())?;
+        let e = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
         (e.bootstrap.clone(), e.rendezvous.clone(), e.mesh.clone())
     };
     let actor = actor_of(&state, server).await?;
@@ -1159,7 +1605,11 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
 /// Rename a server; a **local** display label in this client's rail (server names are not
 /// shared between members), persisted to the registry.
 #[tauri::command]
-async fn rename_server(state: State<'_, AppState>, server: u64, name: String) -> Result<(), String> {
+async fn rename_server(
+    state: State<'_, AppState>,
+    server: u64,
+    name: String,
+) -> Result<(), String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("name cannot be empty".into());
@@ -2334,9 +2784,6 @@ async fn reload_one(
     snapshot: &[u8],
     record: &ServerRecord,
 ) -> Result<(), String> {
-    let listen: Multiaddr = "/ip4/0.0.0.0/tcp/0"
-        .parse()
-        .map_err(|e: libp2p::multiaddr::Error| e.to_string())?;
     // 9g: dial the last-known peers (from the persisted peer records) at construction, so a
     // reloaded joiner reconnects on its own as those peers come online.
     let redial: Vec<Multiaddr> = peer_addrs_from_snapshot(snapshot)
@@ -2344,71 +2791,66 @@ async fn reload_one(
         .iter()
         .filter_map(|s| s.parse().ok())
         .collect();
-    let (mesh, libp2p_id) =
-        MeshService::new_tcp(Some(listen), &redial).map_err(|e| e.to_string())?;
-    // Capture the current loopback bootstrap. The OS-assigned port changes across reloads (the
-    // 9f caveat), so a freshly-minted invite must carry the *new* address; capture it here
-    // rather than reuse the persisted (stale) one. Best-effort same-machine reach; re-advertising
-    // a LAN/relay address on reload is a networking follow-up (tied to rendezvous).
-    let bootstrap = match timeout(Duration::from_secs(10), mesh.next_listen_addr()).await {
-        Ok(Some(addr)) => tcp_port(&addr)
-            .map(|p| vec![format!("/ip4/127.0.0.1/tcp/{p}/p2p/{libp2p_id}")])
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    // Advertise our (new-port) reachable address unconditionally, so that if this server has a
-    // persisted steady-state rendezvous config (restored from the snapshot), the actor's discovery
-    // tick can re-register a dialable record. Harmless for a server without rendezvous.
+
+    // The persisted invite is still read first: for a server founded before the network record
+    // existed it is the only surviving record of which rendezvous this server used.
+    let persisted_invite = (!record.invite.is_empty())
+        .then(|| {
+            hex::decode(&record.invite)
+                .ok()
+                .map(|b| InviteToken::decode(&b).ok())
+        })
+        .flatten()
+        .flatten();
+    let invite_rendezvous = persisted_invite
+        .as_ref()
+        .and_then(|i| i.rendezvous.first().cloned())
+        .unwrap_or_default();
+
+    // Rebuild on the SAME libp2p identity and the SAME port as last launch. Both are what keep an
+    // already-issued invite redeemable: the invite names `/p2p/<id>` at a fixed port, and a
+    // regenerated pair is exactly what made a remote joiner time out.
+    let mut net = load_or_init_server_net(state, record.id, &invite_rendezvous).await;
+    let saved_port = net.port;
+    let relay_dial: Vec<Multiaddr> = net.relay.parse().into_iter().collect();
+    let dial: Vec<Multiaddr> = redial.into_iter().chain(relay_dial).collect();
+    let (mesh, libp2p_id, port) = build_transport(&net, &dial)?;
+    net.port = port;
+
+    // Re-run the founder's reachability work verbatim: the advertise address, the UPnP probe, the
+    // relay-circuit reservation and the rendezvous registration. Before this, a reload rebuilt a
+    // loopback-only bootstrap and every invite minted afterwards was same-machine only.
+    let id = libp2p_id.to_string();
+    let (reach, problems) = establish_reachability(&mesh, &id, port, &net).await;
+    for p in &problems {
+        // Unlike founding, a reload never fails over this: the user is not standing at a form, and
+        // a server that loads with reduced reach still reads its history and re-dials its peers.
+        eprintln!("reload: server {} reachability: {p}", record.id);
+    }
+    let Reachability {
+        bootstrap,
+        rz_target,
+        rz_handle,
+    } = reach;
+    // Advertise our reachable addresses unconditionally, so that a server whose steady-state
+    // rendezvous config was restored from the snapshot can re-register a dialable record on the
+    // actor's next discovery tick. Harmless for a server without rendezvous.
     for addr in external_addrs(&bootstrap) {
         let _ = mesh.add_external_address(addr).await;
     }
+    let upnp_rx = mesh.take_external_addrs().await;
 
-    // If the persisted invite was discovery-enabled, re-connect to its rendezvous, re-advertise
-    // our (new-port) address, and re-register the invite's namespace there; so the founder is
-    // discoverable again after restart, and fresh invites can register via the kept handle. The
-    // rz addrs ride in the persisted invite (not separately persisted). Best-effort.
-    let persisted_invite = (!record.invite.is_empty())
-        .then(|| hex::decode(&record.invite).ok().map(|b| InviteToken::decode(&b).ok()))
-        .flatten()
-        .flatten();
-    let mut rz_vec: Vec<String> = Vec::new();
-    let mut rz_handle: Option<MeshHandle> = None;
-    if let Some(invite) = &persisted_invite {
-        if let Some(rz) = validate_rendezvous_addrs(&invite.rendezvous)
-            .ok()
-            .and_then(|v| v.into_iter().next())
-        {
-            if mesh.dial(rz.addr.clone()).await.is_ok() {
-                let rz_peer = phase0_peer_id(&rz.peer);
-                let connected = timeout(Duration::from_secs(15), async {
-                    loop {
-                        if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                            if p == rz_peer {
-                                break;
-                            }
-                        }
-                    }
-                })
-                .await
-                .is_ok();
-                if connected {
-                    for addr in external_addrs(&bootstrap) {
-                        let _ = mesh.add_external_address(addr).await;
-                    }
-                    let handle = mesh.handle();
-                    let _ = register_join_ns(
-                        &handle,
-                        &invite.group_id,
-                        &invite.invite_nonce,
-                        &rz,
-                    )
-                    .await;
-                    rz_vec = invite.rendezvous.clone();
-                    rz_handle = Some(handle);
-                }
-            }
-        }
+    // Re-register the persisted invite's own (nonce-keyed) namespace, so the invite that is about
+    // to be re-presented in the UI still resolves for whoever is holding it. (`rz_handle` is `Some`
+    // only when `rz_target` is, so this is the full set of conditions.)
+    if let (Some(rz), Some(handle), Some(invite)) = (
+        rz_target.as_ref(),
+        rz_handle.as_ref(),
+        persisted_invite.as_ref(),
+    ) {
+        let _ = register_join_ns(handle, &invite.group_id, &invite.invite_nonce, rz).await;
     }
+    let rz_vec: Vec<String> = rz_target.iter().map(|t| t.addr.to_string()).collect();
 
     let mut server = Server::restore(
         snapshot,
@@ -2418,15 +2860,20 @@ async fn reload_one(
         &record.display_name,
     )
     .map_err(|e| e.to_string())?;
-    server.subscribe_control().await.map_err(|e| e.to_string())?;
+    server
+        .subscribe_control()
+        .await
+        .map_err(|e| e.to_string())?;
     attach_blob_store(state, &mut server).await;
 
     // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
-    // (rendezvous infra was down at reload), drop it: it would not resolve; no registration, and
-    // after a reload the only bootstrap is a stale new-port loopback. The rail then prompts a fresh
-    // invite (which re-registers). A direct (non-rendezvous) invite is presented unchanged.
-    let discovery_unregistered =
-        persisted_invite.as_ref().is_some_and(|i| !i.rendezvous.is_empty()) && rz_handle.is_none();
+    // (rendezvous infra was down at reload), drop it: it would not resolve. The rail then prompts a
+    // fresh invite (which re-registers). A direct (non-rendezvous) invite is presented unchanged;
+    // it now survives a restart properly, since the peer id and port behind it no longer move.
+    let discovery_unregistered = persisted_invite
+        .as_ref()
+        .is_some_and(|i| !i.rendezvous.is_empty())
+        && rz_handle.is_none();
     let presented_invite = if record.invite.is_empty() || discovery_unregistered {
         None
     } else {
@@ -2451,6 +2898,14 @@ async fn reload_one(
             is_dm: record.is_dm,
         },
     );
+    // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
+    // `load_or_init_server_net`, before the transport came up.)
+    if net.port != saved_port {
+        persist_server_net(state, record.id, &net).await;
+    }
+    if let Some(rx) = upnp_rx {
+        spawn_upnp_fold(app.clone(), record.id, rx, id);
+    }
     Ok(())
 }
 
@@ -3204,11 +3659,123 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tcp_port_is_extracted() {
+    fn listen_port_is_extracted_from_tcp_and_quic_addresses() {
         let a: Multiaddr = "/ip4/192.168.1.5/tcp/54321".parse().unwrap();
-        assert_eq!(tcp_port(&a), Some(54321));
+        assert_eq!(listen_port(&a), Some(54321));
         let b: Multiaddr = "/ip4/0.0.0.0/tcp/0".parse().unwrap();
-        assert_eq!(tcp_port(&b), Some(0));
+        assert_eq!(listen_port(&b), Some(0));
+        // A QUIC address carries the port on /udp/; matching only /tcp/ would drop it silently.
+        let c: Multiaddr = "/ip4/0.0.0.0/udp/54321/quic-v1".parse().unwrap();
+        assert_eq!(listen_port(&c), Some(54321));
+        let d: Multiaddr = "/ip6/::/udp/1234/quic-v1".parse().unwrap();
+        assert_eq!(listen_port(&d), Some(1234));
+        let e: Multiaddr = "/ip6/::1/tcp/9".parse().unwrap();
+        assert_eq!(listen_port(&e), Some(9));
+    }
+
+    #[test]
+    fn a_server_binds_both_families_and_both_transports_on_one_port() {
+        let addrs: Vec<String> = listen_addrs(31337).iter().map(|a| a.to_string()).collect();
+        assert_eq!(
+            addrs,
+            vec![
+                "/ip4/0.0.0.0/tcp/31337",
+                "/ip6/::/tcp/31337",
+                "/ip4/0.0.0.0/udp/31337/quic-v1",
+                "/ip6/::/udp/31337/quic-v1",
+            ]
+        );
+        // The degenerate no-port-reserved case binds exactly ONE address: an OS-assigned port
+        // would give each listener a different number and destroy the single-port model.
+        assert_eq!(listen_addrs(0).len(), 1);
+        assert_eq!(listen_addrs(0)[0].to_string(), "/ip4/0.0.0.0/tcp/0");
+    }
+
+    #[test]
+    fn a_host_address_yields_both_a_tcp_and_a_quic_bootstrap() {
+        let id = "12D3KooWfakepeerid";
+        assert_eq!(
+            dialable_addrs("203.0.113.7".parse().unwrap(), 9000, id),
+            vec![
+                format!("/ip4/203.0.113.7/tcp/9000/p2p/{id}"),
+                format!("/ip4/203.0.113.7/udp/9000/quic-v1/p2p/{id}"),
+            ]
+        );
+        assert_eq!(
+            dialable_addrs("2001:db8::5".parse().unwrap(), 443, id),
+            vec![
+                format!("/ip6/2001:db8::5/tcp/443/p2p/{id}"),
+                format!("/ip6/2001:db8::5/udp/443/quic-v1/p2p/{id}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_globally_routable_addresses_are_advertised() {
+        const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        // Loopback, RFC1918, CGNAT, link-local, ULA: none of these mean anything to a remote peer,
+        // and publishing them maps this machine's internal network for anyone who asks.
+        for host in [
+            "/ip4/127.0.0.1",
+            "/ip4/10.1.2.3",
+            "/ip4/192.168.1.5",
+            "/ip4/172.20.0.1",
+            "/ip4/100.70.0.1",
+            "/ip4/169.254.1.1",
+            "/ip6/::1",
+            "/ip6/fd00::1",
+            "/ip6/fe80::1",
+        ] {
+            let private = format!("{host}/tcp/9/p2p/{ID}");
+            assert!(
+                external_addrs(std::slice::from_ref(&private)).is_empty(),
+                "{private} must not be advertised"
+            );
+        }
+
+        // A real public address is advertised, with our own /p2p/ stripped (libp2p re-appends it).
+        let public = format!("/ip4/203.0.113.7/udp/9000/quic-v1/p2p/{ID}");
+        let out = external_addrs(&[public]);
+        assert_eq!(
+            out.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+            vec!["/ip4/203.0.113.7/udp/9000/quic-v1"]
+        );
+
+        // A mixed list keeps only the routable entries; no fallback to loopback any more.
+        let mixed = vec![
+            format!("/ip4/127.0.0.1/tcp/9/p2p/{ID}"),
+            format!("/ip6/2001:db8::5/tcp/9/p2p/{ID}"),
+        ];
+        assert_eq!(external_addrs(&mixed).len(), 1);
+    }
+
+    #[test]
+    fn the_listen_port_prefers_the_seed_derived_home_port() {
+        let net = ServerNet {
+            key_seed: [42u8; 32],
+            port: 0,
+            advertise: String::new(),
+            relay: String::new(),
+            rendezvous: String::new(),
+            record_seq: 0,
+        };
+        // Nothing is holding the derived port on a test machine, so that is what gets chosen, and
+        // it is chosen again on the next call: stability is the whole point.
+        let home = net.derived_port();
+        assert_eq!(choose_port(&net), home);
+        assert_eq!(choose_port(&net), home);
+
+        // Squat it, and the chooser falls back rather than starting with no listener; the number
+        // it falls back to is still a real, bindable port.
+        let squatter =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, home)).unwrap();
+        let fallback = choose_port(&net);
+        assert_ne!(fallback, home);
+        assert_ne!(fallback, 0);
+        drop(squatter);
+        // Once the squatter leaves, the server comes home on its own (the port-forward the user
+        // configured keeps working) rather than drifting further each launch.
+        assert_eq!(choose_port(&net), home);
     }
 
     #[test]
@@ -3232,9 +3799,69 @@ mod tests {
         // A full multiaddr that already carries /p2p/ (e.g. a relay circuit) is used as-is.
         let circuit = "/ip4/198.51.100.1/tcp/4000/p2p/RELAY/p2p-circuit";
         assert_eq!(build_advertised(circuit, 9000, id).unwrap(), circuit);
+        // A bare IPv6 literal is recognised by its own shape and uses the bound port; the
+        // bracketed form carries an explicit one. Without this, every colon in an IPv6 address
+        // looked like a host:port separator and the address was silently mangled into an /ip4/.
+        assert_eq!(
+            build_advertised("2001:db8::5", 9000, id).unwrap(),
+            format!("/ip6/2001:db8::5/tcp/9000/p2p/{id}")
+        );
+        assert_eq!(
+            build_advertised("[2001:db8::5]:443", 9000, id).unwrap(),
+            format!("/ip6/2001:db8::5/tcp/443/p2p/{id}")
+        );
+        assert_eq!(
+            build_advertised("[2001:db8::5]", 9000, id).unwrap(),
+            format!("/ip6/2001:db8::5/tcp/9000/p2p/{id}")
+        );
         // Empty / malformed are rejected.
         assert!(build_advertised("", 9000, id).is_err());
         assert!(build_advertised("1.2.3.4:notaport", 9000, id).is_err());
+        assert!(build_advertised("[2001:db8::5", 9000, id).is_err());
+        assert!(build_advertised("[2001:db8::5]:nope", 9000, id).is_err());
+    }
+
+    #[test]
+    fn a_forged_invite_is_rejected_at_the_paste_before_anything_is_dialled() {
+        use catcoms_mls::ServerGroup;
+
+        // A genuine invite, minted the way `found_server` mints one, carrying attacker-visible
+        // bootstrap and rendezvous vectors.
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let good = group
+            .mint_invite_with_rendezvous(
+                &device,
+                [9u8; 16],
+                1_000_000,
+                vec!["/ip4/203.0.113.7/tcp/9000/p2p/ID".into()],
+                vec!["/ip4/198.51.100.1/tcp/5000/p2p/RZ".into()],
+            )
+            .unwrap();
+        let good_hex = hex::encode(good.encode());
+        assert!(decode_and_verify_invite(&good_hex).is_ok());
+        // Surrounding whitespace from a paste is fine.
+        assert!(decode_and_verify_invite(&format!("  {good_hex}\n")).is_ok());
+
+        // Flip a signature bit: structurally perfect, cryptographically worthless. This is the
+        // shape a forged invite takes, and `InviteToken::decode` alone waves it through. Rejecting
+        // it here is what stops the client binding a listener and dialling the two attacker-chosen
+        // hosts above (the sync layer's own check happens several dials too late).
+        let mut forged = good.clone();
+        forged.signature[0] ^= 1;
+        let err = decode_and_verify_invite(&hex::encode(forged.encode()))
+            .expect_err("a token with a broken signature must not be acted on");
+        assert!(err.contains("signature"), "unhelpful error: {err}");
+
+        // Editing the addresses after signing is the same failure: the vectors are inside the
+        // signed payload, so a swapped bootstrap host cannot survive the check.
+        let mut swapped = good.clone();
+        swapped.bootstrap = vec!["/ip4/192.0.2.66/tcp/1/p2p/ATTACKER".into()];
+        assert!(decode_and_verify_invite(&hex::encode(swapped.encode())).is_err());
+
+        // Garbage in the box is refused too, rather than panicking.
+        assert!(decode_and_verify_invite("not hex").is_err());
+        assert!(decode_and_verify_invite("00ff00ff").is_err());
     }
 
     #[test]
@@ -3244,8 +3871,12 @@ mod tests {
         ));
         // A lookalike host, another repo, and a non-https scheme are all refused, as is the
         // bare tracker root: only the prefilled new-issue form is ever launched.
-        assert!(!is_tracker_url("https://github.com.evil.test/Thalpy/Mewtual/issues/new?x"));
-        assert!(!is_tracker_url("https://github.com/Thalpy/Other/issues/new?x"));
+        assert!(!is_tracker_url(
+            "https://github.com.evil.test/Thalpy/Mewtual/issues/new?x"
+        ));
+        assert!(!is_tracker_url(
+            "https://github.com/Thalpy/Other/issues/new?x"
+        ));
         assert!(!is_tracker_url("file:///c:/windows/system32/calc.exe"));
         assert!(!is_tracker_url("https://github.com/Thalpy/Mewtual"));
     }

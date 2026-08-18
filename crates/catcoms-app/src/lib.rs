@@ -54,7 +54,7 @@ pub use pairing::{
 // The companion device identity a grant is redeemed with (multi-device M3): the bridge holds one
 // `PairingSecrets` and duplicates its device per granted server.
 pub use catcoms_mls::MlsDevice as PairedDevice;
-pub use store::{ServerRecord, ServerStore};
+pub use store::{ServerNet, ServerRecord, ServerStore};
 
 /// Errors surfaced to the UI/product layer.
 #[derive(Debug, Error)]

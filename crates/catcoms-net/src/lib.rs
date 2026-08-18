@@ -189,6 +189,31 @@ impl request_response::Codec for BytesCodec {
 /// The protocol string advertised by `identify`.
 const IDENTIFY_PROTO: &str = "/catcoms/id/1";
 
+/// The `agent_version` this node reports over `identify`.
+///
+/// libp2p's default is `rust-libp2p/<version>`, which hands anyone who completes a handshake a
+/// precise implementation-and-version fingerprint. Since a node now listens on a *stable* port
+/// under a *stable* peer id, a single internet-wide sweep of that port would otherwise build a
+/// map of `IP -> peer id -> library version`; a neutral, versionless string gives a scanner
+/// nothing to select vulnerable builds by.
+const AGENT_VERSION: &str = "catcoms";
+
+/// Build the `identify` config shared by the mesh, relay and rendezvous nodes.
+///
+/// `hide_listen_addrs` is the load-bearing part. Noise authenticates a connection but does not
+/// *authorize* it: identify runs immediately after the handshake, before anything checks
+/// membership, so whatever it carries is readable by any host on the internet that can reach the
+/// port. By default that includes the node's full listen-address set, i.e. its RFC1918 LAN
+/// addresses, which is an unforced disclosure of internal topology. Hiding them keeps the
+/// **confirmed external** addresses flowing (see `Behaviour::all_addresses`: only the raw listen
+/// set is withheld), which is what relay reservations, rendezvous registration and DCUtR actually
+/// consume, so NAT traversal is unaffected.
+fn identify_config(key: &libp2p::identity::Keypair) -> identify::Config {
+    identify::Config::new(IDENTIFY_PROTO.to_string(), key.public())
+        .with_agent_version(AGENT_VERSION.to_string())
+        .with_hide_listen_addrs(true)
+}
+
 /// The mesh node's libp2p behaviours. `relay_client` + `dcutr` + `identify` give
 /// NAT traversal: a node can reserve a slot on a relay, be dialed via a circuit
 /// address, and then hole-punch to a direct connection.
@@ -234,15 +259,16 @@ impl MeshBehaviour {
             request_response::Config::default(),
         );
         let dcutr = dcutr::Behaviour::new(key.public().to_peer_id());
-        let identify = identify::Behaviour::new(identify::Config::new(
-            IDENTIFY_PROTO.to_string(),
-            key.public(),
-        ));
+        let identify = identify::Behaviour::new(identify_config(key));
         let rendezvous_client = rendezvous::client::Behaviour::new(key.clone());
         let upnp = libp2p::upnp::tokio::Behaviour::default();
         let connection_limits = connection_limits::Behaviour::new(
             connection_limits::ConnectionLimits::default()
                 .with_max_pending_incoming(Some(64))
+                // A *total* inbound cap, not just a per-peer one: on a stable, well-known port
+                // this node is trivially enumerable, so a stranger flood has to hit a ceiling
+                // well below resource exhaustion. Far above any real roster.
+                .with_max_established_incoming(Some(256))
                 .with_max_established_per_peer(Some(8)),
         );
         Ok(Self {
@@ -290,7 +316,20 @@ pub fn build_memory_swarm() -> Swarm<MeshBehaviour> {
         .build()
 }
 
-/// Build a swarm over TCP (Noise + yamux), relay-client capable, for real networking.
+/// Reconstruct a libp2p ed25519 identity from a 32-byte seed the caller stores itself.
+///
+/// The seed is the smallest thing a caller can persist that pins a **stable `PeerId`**, and a
+/// stable `PeerId` is what keeps an already-issued invite (which embeds `/p2p/<id>`) redeemable
+/// after a restart. `seed` is taken by value and zeroized by libp2p on the way in, so the caller's
+/// copy is the only one left to protect.
+pub fn keypair_from_seed(mut seed: [u8; 32]) -> Result<libp2p::identity::Keypair, NetError> {
+    libp2p::identity::Keypair::ed25519_from_bytes(&mut seed)
+        .map_err(|e| NetError::Build(format!("bad identity seed: {e}")))
+}
+
+/// Build a swarm over TCP **and QUIC** (Noise + yamux for TCP; QUIC brings its own), relay-client
+/// capable, for real networking. A fresh (throwaway) identity: see [`build_tcp_swarm_with_key`]
+/// for the persisted-identity variant every long-lived node wants.
 pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
     let swarm = SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -300,6 +339,32 @@ pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
             yamux::Config::default,
         )
         .map_err(|e| NetError::Build(e.to_string()))?
+        .with_quic()
+        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .with_behaviour(MeshBehaviour::new)
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .build();
+    Ok(swarm)
+}
+
+/// Like [`build_tcp_swarm`] but with a **caller-supplied identity**, so a node can persist its
+/// keypair and keep a **stable peer id across restarts**; the same reason
+/// [`build_relay_swarm_with_key`] exists for the infra nodes. Without it every launch mints a new
+/// `PeerId` and silently kills every invite that embedded the old one (and every cached address a
+/// peer held for us).
+pub fn build_tcp_swarm_with_key(
+    key: libp2p::identity::Keypair,
+) -> Result<Swarm<MeshBehaviour>, NetError> {
+    let swarm = SwarmBuilder::with_existing_identity(key)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|e| NetError::Build(e.to_string()))?
+        .with_quic()
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| NetError::Build(e.to_string()))?
         .with_behaviour(MeshBehaviour::new)
@@ -364,10 +429,7 @@ pub fn build_memory_relay_swarm() -> Swarm<RelayBehaviour> {
 fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour {
     RelayBehaviour {
         relay: relay::Behaviour::new(key.public().to_peer_id(), relay::Config::default()),
-        identify: identify::Behaviour::new(identify::Config::new(
-            IDENTIFY_PROTO.to_string(),
-            key.public(),
-        )),
+        identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
     }
 }
@@ -433,10 +495,7 @@ fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour 
         .with_max_stored_cookies(4_096);
     RendezvousBehaviour {
         rendezvous: rendezvous::server::Behaviour::new(config),
-        identify: identify::Behaviour::new(identify::Config::new(
-            IDENTIFY_PROTO.to_string(),
-            key.public(),
-        )),
+        identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
         connection_limits: connection_limits::Behaviour::new(
             connection_limits::ConnectionLimits::default()
@@ -1053,7 +1112,9 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
-    upnp_rx: Mutex<mpsc::Receiver<Option<Multiaddr>>>,
+    /// `None` once [`MeshService::take_external_addrs`] has handed the receiver to a background
+    /// waiter (UPnP discovery outlives any call a UI can block on).
+    upnp_rx: Mutex<Option<mpsc::Receiver<Option<Multiaddr>>>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
@@ -1097,7 +1158,7 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
-            upnp_rx: Mutex::new(upnp_rx),
+            upnp_rx: Mutex::new(Some(upnp_rx)),
             upgrade_rx: Mutex::new(upgrade_rx),
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
@@ -1116,9 +1177,21 @@ impl MeshService {
     /// (e.g. invite minting) can fold it into a directly-dialable bootstrap so a peer can connect
     /// with no relay. UPnP is best-effort: this resolves to `None` both when there is no usable
     /// gateway (signalled promptly, so the caller doesn't wait out a full timeout) and once the
-    /// actor stops; either way the caller simply proceeds without a UPnP bootstrap.
+    /// actor stops; either way the caller simply proceeds without a UPnP bootstrap. Also `None`
+    /// once [`MeshService::take_external_addrs`] has moved the channel to a background waiter.
     pub async fn next_external_addr(&self) -> Option<Multiaddr> {
-        self.upnp_rx.lock().await.recv().await.flatten()
+        let mut guard = self.upnp_rx.lock().await;
+        guard.as_mut()?.recv().await.flatten()
+    }
+
+    /// Take ownership of the UPnP external-address channel so a **background** task can wait out a
+    /// realistic router-discovery window after this `MeshService` has been moved into the layers
+    /// above it. SSDP/IGD discovery routinely needs tens of seconds, which is far longer than
+    /// founding a server may block for; the answer therefore has to be collected by somebody who
+    /// outlives the call. Returns the receiver on the first call and `None` after that, so exactly
+    /// one consumer ever sees each address; [`MeshService::next_external_addr`] then yields `None`.
+    pub async fn take_external_addrs(&self) -> Option<mpsc::Receiver<Option<Multiaddr>>> {
+        self.upnp_rx.lock().await.take()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct
@@ -1221,27 +1294,67 @@ impl MeshService {
         Ok(Self::spawn(swarm))
     }
 
-    /// Build a **TCP** node that listens on `listen` and dials `dial`, then spawn
-    /// it. Also returns this node's libp2p `PeerId` so the caller can advertise a
-    /// dialable `/…/p2p/<id>` bootstrap address (e.g. inside an invite). Real
-    /// cross-process / cross-machine networking.
+    /// Build a **TCP + QUIC** node that listens on `listen` and dials `dial`, then spawn it. Also
+    /// returns this node's libp2p `PeerId` so the caller can advertise a dialable `/…/p2p/<id>`
+    /// bootstrap address (e.g. inside an invite). Real cross-process / cross-machine networking.
+    ///
+    /// The identity is fresh, so this node's `PeerId` lasts only as long as the process. A node
+    /// whose address goes into an invite wants [`MeshService::new_tcp_with_key`] instead.
     pub fn new_tcp(
         listen: Option<Multiaddr>,
         dial: &[Multiaddr],
     ) -> Result<(Self, libp2p::PeerId), NetError> {
-        let mut swarm = build_tcp_swarm()?;
+        let listen: Vec<Multiaddr> = listen.into_iter().collect();
+        let swarm = build_tcp_swarm()?;
+        let (svc, id, _bound) = Self::listen_dial_spawn(swarm, &listen, dial)?;
+        Ok((svc, id))
+    }
+
+    /// Like [`MeshService::new_tcp`] but with a **caller-supplied (persisted) identity** and a
+    /// *list* of listen addresses, so one node can bind IPv4 + IPv6 and TCP + QUIC under one
+    /// `PeerId`. Returns the addresses that actually bound: a single refusal (a saved port that
+    /// something else took while we were closed, or an IPv6 listener on a host with no IPv6 stack)
+    /// must not sink the node, so it is reported rather than fatal. Only an *empty* result for a
+    /// non-empty request is an error.
+    pub fn new_tcp_with_key(
+        key: libp2p::identity::Keypair,
+        listen: &[Multiaddr],
+        dial: &[Multiaddr],
+    ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
+        let swarm = build_tcp_swarm_with_key(key)?;
+        Self::listen_dial_spawn(swarm, listen, dial)
+    }
+
+    /// Apply the listen/dial set to a freshly-built swarm and spawn its actor. Shared by the
+    /// identity-less and persisted-identity constructors so they cannot drift.
+    fn listen_dial_spawn(
+        mut swarm: Swarm<MeshBehaviour>,
+        listen: &[Multiaddr],
+        dial: &[Multiaddr],
+    ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
         let libp2p_id = *swarm.local_peer_id();
-        if let Some(addr) = listen {
-            swarm
-                .listen_on(addr)
-                .map_err(|e| NetError::Listen(e.to_string()))?;
+        let mut bound = Vec::new();
+        let mut last_err = None;
+        for addr in listen {
+            match swarm.listen_on(addr.clone()) {
+                Ok(_) => bound.push(addr.clone()),
+                Err(e) => {
+                    tracing::warn!(%addr, error = %e, "listen refused; continuing on the others");
+                    last_err = Some(e.to_string());
+                }
+            }
+        }
+        if !listen.is_empty() && bound.is_empty() {
+            return Err(NetError::Listen(
+                last_err.unwrap_or_else(|| "no listen address bound".into()),
+            ));
         }
         for addr in dial {
             swarm
                 .dial(addr.clone())
                 .map_err(|e| NetError::Dial(e.to_string()))?;
         }
-        Ok((Self::spawn(swarm), libp2p_id))
+        Ok((Self::spawn(swarm), libp2p_id, bound))
     }
 
     /// A cheap, clonable [`MeshHandle`] to this node's command channel, for driving rendezvous
@@ -1406,5 +1519,40 @@ impl MeshTransport for MeshService {
             namespace: d.namespace,
             seq: d.seq,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_seed_pins_a_stable_peer_id() {
+        // The whole point of the persisted identity: the same 32 bytes must reproduce the same
+        // PeerId on every launch, or every invite that embedded `/p2p/<id>` dies on restart.
+        let seed = [7u8; 32];
+        let a = keypair_from_seed(seed).unwrap().public().to_peer_id();
+        let b = keypair_from_seed(seed).unwrap().public().to_peer_id();
+        assert_eq!(a, b, "the same seed must reproduce the same peer id");
+
+        // And a different seed is a different node (no accidental collapse to one identity,
+        // which would defeat the per-server identity separation the app relies on).
+        let mut other = [7u8; 32];
+        other[0] = 8;
+        let c = keypair_from_seed(other).unwrap().public().to_peer_id();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn rendezvous_addresses_are_validated() {
+        // A well-formed direct address with exactly one /p2p/ passes.
+        let good =
+            "/ip4/198.51.100.1/tcp/5000/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let out = validate_rendezvous_addrs(&[good.to_string()]).unwrap();
+        assert_eq!(out.len(), 1);
+        // A circuit address, a missing peer id, and a duplicate node are all refused.
+        assert!(validate_rendezvous_addrs(&[format!("{good}/p2p-circuit")]).is_err());
+        assert!(validate_rendezvous_addrs(&["/ip4/198.51.100.1/tcp/5000".to_string()]).is_err());
+        assert!(validate_rendezvous_addrs(&[good.to_string(), good.to_string()]).is_err());
     }
 }

@@ -23,6 +23,10 @@ libp2p = { version = "0.56", features = [
     "yamux",
     "macros",
     "tcp",
+    # QUIC alongside TCP: UDP hole-punching is materially more reliable than TCP's, so a
+    # NAT'd peer that cannot be reached over TCP often still comes up over QUIC (and the
+    # DCUtR upgrade path gets a second, better transport to work with).
+    "quic",
     "relay",
     "dcutr",
     "identify",
