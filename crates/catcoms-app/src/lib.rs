@@ -4761,6 +4761,22 @@ mod tests {
 
     const GENERAL: u128 = 1;
 
+    /// Let `s` apply everything currently queued for it, then stop.
+    ///
+    /// `sync_once` ends in `transport.next_event().await`, which yields `None` only once the
+    /// transport is *closed*: on an idle inbox it waits forever. So a fixed `for _ in 0..n` tick
+    /// count is not "sync a few times", it is a bet that at least `n` events are already queued,
+    /// and losing the bet hangs the test instead of failing it. Bound each tick instead and stop
+    /// at the first one with nothing to do. If the bound ever proves too short the test fails an
+    /// assertion, which is the failure mode we want: visible, not a wedged CI job.
+    async fn drain_sync(s: &mut Server<MemNetwork, ChaCha20Rng>) {
+        while let Ok(r) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), s.sync_once()).await
+        {
+            r.unwrap();
+        }
+    }
+
     fn founder() -> Server<MemNetwork, ChaCha20Rng> {
         let hub = Hub::new();
         Server::found(
@@ -5021,9 +5037,7 @@ mod tests {
         // The owner enforces the removal on its next reconcile ticks. (Re-admission is separately
         // blocked by the spent-certificate ledger; see `one_certificate_admits_one_device_once`;
         // and the revoked set, without needing a fragile second wire round-trip here.)
-        for _ in 0..4 {
-            alice.sync_once().await.unwrap();
-        }
+        drain_sync(&mut alice).await;
         assert!(
             !alice.members().contains(&phone_id),
             "the revoked companion's leaf is removed"
@@ -7280,9 +7294,7 @@ mod tests {
         assert_eq!(revs[0].author, bob.my_fingerprint());
         assert_eq!(revs[0].actor, alice.my_fingerprint());
         assert_eq!(revs[0].id, queue[0].id);
-        for _ in 0..4 {
-            bob.sync_once().await.unwrap();
-        }
+        drain_sync(&mut bob).await;
         assert_eq!(bob.read_wiki_page("Rules"), "be nice");
 
         // A second proposal is declined: never live, dropped from the queue, auditable.
@@ -7363,7 +7375,8 @@ mod tests {
         assert!(bob.write_wiki_page("Lore", "first draft").await.unwrap());
         clock.advance_ms(DAY_MS);
         assert!(bob.write_wiki_page("Lore", "second draft").await.unwrap());
-        alice.sync_once().await.unwrap();
+        // Two proposals were posted, so one tick would apply only the first.
+        drain_sync(&mut alice).await;
         assert_eq!(alice.wiki_pending_edits().len(), 2);
 
         // Day 2 + a moment: the first proposal's window has lapsed, the second's has not.
@@ -7383,9 +7396,7 @@ mod tests {
             "the approval is the live body; the lapsed proposal must not override it"
         );
         assert!(alice.wiki_pending_edits().is_empty());
-        for _ in 0..4 {
-            bob.sync_once().await.unwrap();
-        }
+        drain_sync(&mut bob).await;
         assert_eq!(bob.read_wiki_page("Lore"), "second draft");
 
         // Both are recorded, in the order they took effect.

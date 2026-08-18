@@ -11,6 +11,10 @@
   import { buildWikiTree, visibleRows, ancestorsOf } from "./wikitree";
   import { extractInfobox, infoboxTemplate } from "./infobox";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
+  import {
+    type Placement, type SpaceState, angularOffsets, applyOffsets, clampPitch, defaultSpace,
+    lassoCapture, parseSpace, project, unproject, wrapYaw,
+  } from "./space";
   import QRCode from "qrcode";
   import jsQR from "jsqr";
   // The repo-root logo, bundled by Vite as a same-origin asset (the CSP allows img-src 'self').
@@ -2641,6 +2645,7 @@
   function lockScreen() {
     if (locked) return;
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
+    spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
     showServerSettings = false;
     showFeedback = false;
@@ -2880,6 +2885,7 @@
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     activeServerId = id;
     inboxView = false;
+    spaceOpen = false; // navigating anywhere leaves the orbit view behind
     const s = servers.find((x) => x.id === id);
     if (s) s.dot = false;
     dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
@@ -5577,6 +5583,243 @@
     const tag = el.tagName;
     return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
   }
+
+  // ======================= 360 server space (the orbit view) =======================
+  // A memory palace over the rail: servers hang as billboards on a sphere around a
+  // fixed camera (yaw + clamped pitch, rotation only). The math lives in space.ts;
+  // this block owns the camera, the gestures (drag-look, hold-lasso, tray), and the
+  // per-device placement store. The view is an optional overlay: the rail stays the
+  // default, Ctrl+O (or the rail's orbit button) toggles in and out.
+  const SPACE_KEY = "catcoms.space";
+  function loadSpace(): SpaceState {
+    try {
+      return parseSpace(localStorage.getItem(SPACE_KEY));
+    } catch {
+      return defaultSpace();
+    }
+  }
+  let spaceState = $state<SpaceState>(loadSpace());
+  function saveSpace() {
+    try {
+      localStorage.setItem(SPACE_KEY, JSON.stringify(spaceState));
+    } catch {
+      error = "Could not save the space layout (storage full?)";
+    }
+  }
+  let spaceOpen = $state(false);
+  let spaceCam = $state<Placement>({ yaw: 0, pitch: 0 });
+  let spaceVw = $state(1200);
+  let spaceVh = $state(700);
+  // Focal length in px: shared by the CSS cube (perspective) and the JS projection,
+  // so the backdrop and the icons never drift apart. Scales with the window so the
+  // cube's 90-degree faces always cover the visible field (no seams at the edges).
+  let spaceF = $derived(Math.max(560, spaceVw * 0.55));
+  // Cursor as px offsets from the viewport centre (the projection's origin).
+  let spaceCursor = $state({ x: 0, y: 0 });
+  let spaceRoot = $state<HTMLElement | undefined>();
+  // One drag at a time: "maybe" until the pointer commits to a look-drag or the
+  // hold timer commits it to a lasso. Pointer capture starts only at that commit,
+  // so plain clicks still reach the server buttons underneath.
+  let spaceDrag: { id: number; sx: number; sy: number; yaw0: number; pitch0: number; mode: "maybe" | "look" } | null = null;
+  let spaceHoldTimer = 0;
+  let spaceLasso = $state<{ x: number; y: number; r: number; t0: number } | null>(null);
+  // Captured servers ride as angular offsets around the aim point until dropped.
+  let spaceCarried = $state<Record<number, Placement> | null>(null);
+  let spaceSwallowClick = false; // a drop's trailing click must not open a server
+  let spaceTrayPinned = $state(false);
+  let spaceTrayHeld = $state(false);
+  let spaceTray = $derived(spaceTrayPinned || spaceTrayHeld);
+  // Per-server livery accents, so a hovered server can glow in its own colour.
+  let spaceAccents = $state<Record<number, string>>({});
+  async function refreshSpaceAccents() {
+    for (const s of railServers) {
+      try {
+        const l = sanitizeLivery(await invoke<Livery>("get_livery", { server: s.id }));
+        const a = l.accent || (l.preset ? (PRESETS.find((p) => p.id === l.preset)?.sw ?? "") : "");
+        if (a) spaceAccents[s.id] = a;
+        else delete spaceAccents[s.id];
+      } catch {
+        /* unreachable server actor: no livery accent, the user accent covers it */
+      }
+    }
+  }
+  function toggleSpace() {
+    spaceOpen = !spaceOpen;
+    spaceLasso = null;
+    spaceCarried = null;
+    spaceTrayPinned = false;
+    spaceTrayHeld = false;
+    spaceDrag = null;
+    if (spaceOpen) refreshSpaceAccents();
+  }
+  // Where the placed servers land on screen this frame. While carrying, the group's
+  // placements are overridden by re-anchoring the stored offsets at the cursor's aim
+  // point, so the whole constellation follows the pointer without committing anything.
+  let spacePlaced = $derived.by(() => {
+    if (!spaceOpen) return [] as { s: ServerState; x: number; y: number; scale: number; carried: boolean }[];
+    const carriedIds = new Set(Object.keys(spaceCarried ?? {}).map(Number));
+    let eff = spaceState.placements;
+    if (spaceCarried) {
+      const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
+      eff = { ...eff, ...applyOffsets(spaceCarried, aim) };
+    }
+    const out: { s: ServerState; x: number; y: number; scale: number; carried: boolean }[] = [];
+    for (const s of railServers) {
+      const p = eff[s.id];
+      if (!p) continue;
+      const pr = project(spaceCam, p, spaceF);
+      if (!pr.visible) continue;
+      out.push({ s, x: pr.x, y: pr.y, scale: pr.scale, carried: carriedIds.has(s.id) });
+    }
+    return out;
+  });
+  // Servers with no place yet (new joins) wait in the tray until hung.
+  let spaceUnplaced = $derived(spaceOpen ? railServers.filter((s) => !spaceState.placements[s.id]) : []);
+  // "custom" without an uploaded panorama falls back to the default room.
+  let spaceBackdropEff = $derived(spaceState.backdrop === "custom" && !spaceState.custom ? "den" : spaceState.backdrop);
+  function spaceCursorFrom(e: PointerEvent) {
+    const r = spaceRoot?.getBoundingClientRect();
+    if (!r) return;
+    spaceCursor = { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 };
+  }
+  function spaceLassoLoop() {
+    if (!spaceLasso) return;
+    // The circle grows while held (66px/s after a snappy start) and caps well short
+    // of the viewport, so "hold longer" reads as "reach further" without ever lassoing
+    // the whole sky by accident.
+    spaceLasso = { ...spaceLasso, r: Math.min(300, 46 + (performance.now() - spaceLasso.t0) * 0.066) };
+    requestAnimationFrame(spaceLassoLoop);
+  }
+  function onSpaceDown(e: PointerEvent) {
+    if (e.button !== 0) return;
+    spaceCursorFrom(e);
+    spaceDrag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, yaw0: spaceCam.yaw, pitch0: spaceCam.pitch, mode: "maybe" };
+    clearTimeout(spaceHoldTimer);
+    // Holding still grows a lasso from the cursor, which also covers the single-server
+    // move (a lasso of one). While already carrying, the next press is a drop, not a grab.
+    if (!spaceCarried) {
+      spaceHoldTimer = window.setTimeout(() => {
+        if (!spaceDrag || spaceDrag.mode !== "maybe" || !spaceOpen) return;
+        spaceRoot?.setPointerCapture(spaceDrag.id);
+        spaceLasso = { x: spaceCursor.x, y: spaceCursor.y, r: 46, t0: performance.now() };
+        requestAnimationFrame(spaceLassoLoop);
+      }, 350);
+    }
+  }
+  function onSpaceMove(e: PointerEvent) {
+    spaceCursorFrom(e);
+    if (spaceLasso) {
+      spaceLasso = { ...spaceLasso, x: spaceCursor.x, y: spaceCursor.y };
+      return;
+    }
+    if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
+    const dx = e.clientX - spaceDrag.sx;
+    const dy = e.clientY - spaceDrag.sy;
+    if (spaceDrag.mode === "maybe") {
+      if (Math.hypot(dx, dy) < 6) return; // still a click or a hold
+      clearTimeout(spaceHoldTimer);
+      spaceDrag.mode = "look";
+      spaceRoot?.setPointerCapture(spaceDrag.id);
+    }
+    // Grab semantics: the world follows the hand, small-angle px-to-degrees via f.
+    const k = (180 / Math.PI) / spaceF;
+    spaceCam = { yaw: wrapYaw(spaceDrag.yaw0 - dx * k), pitch: clampPitch(spaceDrag.pitch0 + dy * k) };
+  }
+  function onSpaceUp(e: PointerEvent) {
+    clearTimeout(spaceHoldTimer);
+    if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
+    const mode = spaceDrag.mode;
+    spaceDrag = null;
+    if (spaceLasso) {
+      const caught = lassoCapture(spaceState.placements, spaceCam, spaceLasso.x, spaceLasso.y, spaceLasso.r, spaceF);
+      if (caught.length) {
+        const aim = unproject(spaceCam, spaceLasso.x, spaceLasso.y, spaceF);
+        spaceCarried = angularOffsets(caught, spaceState.placements, aim);
+      }
+      spaceLasso = null;
+      spaceSwallowClick = true;
+      return;
+    }
+    if (mode === "maybe" && spaceCarried) {
+      // A plain click while carrying: drop the constellation where the cursor aims.
+      const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
+      spaceState.placements = { ...spaceState.placements, ...applyOffsets(spaceCarried, aim) };
+      spaceCarried = null;
+      saveSpace();
+      spaceSwallowClick = true;
+    }
+  }
+  // Drops and lasso releases produce a trailing click on whatever sat under the
+  // pointer; capture-phase swallow keeps that click from opening a server.
+  function onSpaceClickCapture(e: MouseEvent) {
+    if (!spaceSwallowClick) return;
+    spaceSwallowClick = false;
+    e.stopPropagation();
+    e.preventDefault();
+  }
+  function spaceIconClick(id: number) {
+    if (spaceCarried || spaceSwallowClick) return;
+    switchServer(id); // switchServer also folds the space away
+  }
+  function spaceServerMenu(s: ServerState): MenuItem[] {
+    return [
+      { label: "Open", onSelect: () => spaceIconClick(s.id) },
+      {
+        label: "Return to tray",
+        onSelect: () => {
+          const { [s.id]: _gone, ...rest } = spaceState.placements;
+          spaceState.placements = rest;
+          saveSpace();
+        },
+      },
+    ];
+  }
+  // Tray tap: the server flies to wherever the camera is aiming (the reticle).
+  function placeFromTray(id: number) {
+    spaceState.placements = { ...spaceState.placements, [id]: { yaw: spaceCam.yaw, pitch: spaceCam.pitch } };
+    saveSpace();
+  }
+  function setSpaceBackdrop(b: string) {
+    spaceState.backdrop = b as SpaceState["backdrop"];
+    saveSpace();
+  }
+  // A custom panorama: one equirectangular 2:1 image, downscaled and stored locally
+  // (it is a per-device preference, exactly like the placements).
+  async function loadSpacePano(fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file) return;
+    try {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res();
+        img.onerror = () => rej(new Error("not an image"));
+        img.src = url;
+      });
+      const w = Math.min(2048, img.naturalWidth);
+      const h = Math.round((img.naturalHeight / img.naturalWidth) * w);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      c.getContext("2d")?.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      spaceState.custom = c.toDataURL("image/jpeg", 0.82);
+      spaceState.backdrop = "custom";
+      saveSpace();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+  // Background-position for one 90-degree wall slice of an equirect 2:1 panorama
+  // (v1 shows equirect quarters flat on the cube: near-field distortion accepted).
+  function panoPos(faceYaw: number): string {
+    return `${(((faceYaw + 180) / 90 - 0.5) / 3) * 100}% 50%`;
+  }
+  const SPACE_BACKDROP_TILES = [
+    { id: "den", name: "The Den" },
+    { id: "ridge", name: "Nightfall Ridge" },
+    { id: "void", name: "Void Deck" },
+  ];
   // Panic release: folding the drawer (or the whole stage) away must not leave a note sounding
   // in everyone else's ears. untrack keeps the release out of this effect's dependency set.
   $effect(() => {
@@ -7169,6 +7412,16 @@
         // furniture rather than modals, so they only fold once nothing else on screen wants it.
         else if (focusOpen) exitFocus();
         else if (stageOpen) stageOpen = false;
+        // The space folds last: carrying and the tray release first, then the view itself.
+        else if (spaceOpen && spaceCarried) spaceCarried = null;
+        else if (spaceOpen && spaceTrayPinned) spaceTrayPinned = false;
+        else if (spaceOpen) spaceOpen = false;
+        return;
+      }
+      // Hold T while the space is up: the tray of unplaced servers slides out.
+      if (spaceOpen && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "t" && !typingTarget(e.target)) {
+        e.preventDefault();
+        if (!e.repeat) spaceTrayHeld = true;
         return;
       }
       // Ctrl/Cmd+Shift+F: search with the advanced filter panel already open.
@@ -7192,6 +7445,10 @@
         } else if (e.key.toLowerCase() === "k") {
           e.preventDefault();
           openQuickSwitch();
+        } else if (e.key.toLowerCase() === "o") {
+          // Orbit: the 360 server space, from anywhere inside the unlocked app.
+          e.preventDefault();
+          toggleSpace();
         } else if (e.key.toLowerCase() === "f") {
           // Search messages in the active conversation (no browser find in the webview).
           if (activeServerId !== null) {
@@ -7205,6 +7462,7 @@
     // Melody keys are held instruments, not triggers: the lift is what commits the note value.
     const onKeyUp = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
+      if (k === "t") spaceTrayHeld = false; // the tray is held open, not toggled
       // Release by the pinned note, not by what sits at that key now: the register may have
       // moved (or the drawer closed) between the press and the lift.
       const inst = instKeyNotes.get(k);
@@ -7224,6 +7482,7 @@
       stopPlayback();
       instKeyNotes.clear();
       instReleaseAll(); // a note stranded here keeps sounding in every other ear in the call
+      spaceTrayHeld = false; // the keyup that would close it may land in another window
     };
     // The thumb buttons walk the same history as the title bar's arrows. They arrive as buttons
     // 3 and 4; preventDefault stops the webview from acting on them as well.
@@ -7489,6 +7748,122 @@
     <path d="M12 7.8v4.1" />
     <circle cx="12" cy="14.2" r="0.85" fill="currentColor" stroke="none" />
   </svg>
+{/snippet}
+
+{#snippet icoOrbit()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="4.6" />
+    <ellipse cx="12" cy="12" rx="9.4" ry="3.6" transform="rotate(-18 12 12)" />
+    <circle cx="19.4" cy="8.2" r="1.1" fill="currentColor" stroke="none" />
+  </svg>
+{/snippet}
+
+<!-- One 90-degree wall of a preset space backdrop. All fills ride the theme tokens, so
+     presets and accent overrides recolor the room itself; nothing here is a literal hex. -->
+{#snippet spaceWall(b: string, fy: number)}
+  {#if b === "den"}
+    {#if fy === 0}
+      <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <rect x="30" y="26" width="40" height="40" rx="1.2" style="fill: color-mix(in oklab, var(--bg-0) 55%, black); stroke: var(--border); stroke-width: 0.7" />
+        <path d="M50 26v40M30 46h40" style="stroke: var(--border); stroke-width: 0.7; fill: none" />
+        <circle cx="58" cy="36" r="4.4" style="fill: var(--text-2); opacity: 0.85" />
+        <circle cx="55.8" cy="34.5" r="0.9" style="fill: var(--muted); opacity: 0.6" />
+        <circle cx="36" cy="32" r="0.5" style="fill: var(--text-2); opacity: 0.7" />
+        <circle cx="42" cy="56" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <circle cx="65" cy="59" r="0.45" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="33" cy="61" r="0.4" style="fill: var(--text-2); opacity: 0.45" />
+        <rect x="28.5" y="66" width="43" height="2.4" rx="0.5" style="fill: var(--bg-elev); stroke: var(--border); stroke-width: 0.4" />
+      </svg>
+      <div class="sp-cat">{@html catSleepArt}</div>
+    {:else if fy === 90}
+      <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <rect x="37" y="36" width="26" height="17" rx="1" style="fill: color-mix(in oklab, var(--bg-0) 55%, black); stroke: var(--border); stroke-width: 0.7" />
+        <rect x="41" y="40" width="12" height="1.5" rx="0.6" style="fill: var(--accent); opacity: 0.55" />
+        <rect x="41" y="43.6" width="17" height="1.5" rx="0.6" style="fill: var(--accent); opacity: 0.3" />
+        <rect x="41" y="47.2" width="8" height="1.5" rx="0.6" style="fill: var(--accent); opacity: 0.4" />
+        <rect x="48" y="53" width="4" height="3.2" style="fill: color-mix(in oklab, var(--bg-elev) 70%, var(--bg-0))" />
+        <rect x="30" y="56.2" width="40" height="2.6" rx="0.7" style="fill: var(--bg-elev); stroke: var(--border); stroke-width: 0.4" />
+        <rect x="32.5" y="58.8" width="1.8" height="13" style="fill: color-mix(in oklab, var(--bg-elev) 70%, var(--bg-0))" />
+        <rect x="65.7" y="58.8" width="1.8" height="13" style="fill: color-mix(in oklab, var(--bg-elev) 70%, var(--bg-0))" />
+        <path d="M64 55.4q0.8-2.6 3-1.8q0.5 1.3-0.9 1.8z" style="fill: var(--bg-elev); stroke: var(--border); stroke-width: 0.3" />
+      </svg>
+    {:else if fy === 180}
+      <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <rect x="32" y="28" width="36" height="46" rx="1" style="fill: color-mix(in oklab, var(--panel) 65%, var(--bg-0)); stroke: var(--border); stroke-width: 0.7" />
+        <path d="M32 44h36M32 60h36" style="stroke: var(--border); stroke-width: 0.7; fill: none" />
+        <rect x="35" y="35.5" width="2.6" height="8.5" style="fill: color-mix(in oklab, var(--accent) 40%, var(--bg-elev))" />
+        <rect x="38.5" y="33.8" width="2.2" height="10.2" style="fill: color-mix(in oklab, var(--muted) 35%, var(--bg-elev))" />
+        <rect x="41.6" y="36.4" width="2.6" height="7.6" style="fill: color-mix(in oklab, var(--accent) 20%, var(--bg-elev))" />
+        <rect x="45.2" y="34.6" width="2" height="9.4" style="fill: color-mix(in oklab, var(--text-2) 25%, var(--bg-elev))" />
+        <rect x="53" y="37.6" width="8.4" height="6.4" rx="0.8" style="fill: var(--bg-elev); stroke: var(--border); stroke-width: 0.4" />
+        <path d="M37 56.6q-1.4-3.4 2-3.4h4.4q3.4 0 2 3.4q-1 2-2.5 0.5h-3.4q-1.5 1.5-2.5-0.5z" style="fill: var(--bg-elev); stroke: var(--border); stroke-width: 0.3" />
+        <rect x="52" y="63" width="7.5" height="9" style="fill: color-mix(in oklab, var(--muted) 25%, var(--bg-elev)); opacity: 0.85" />
+        <rect x="38" y="66" width="10" height="6" style="fill: color-mix(in oklab, var(--accent) 25%, var(--bg-elev)); opacity: 0.85" />
+      </svg>
+    {:else}
+      <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <rect x="42" y="30" width="16" height="42" style="fill: var(--panel); stroke: var(--border); stroke-width: 0.7" />
+        <circle cx="44.5" cy="52" r="0.9" style="fill: var(--faint)" />
+        <path d="M64 65l5 0l-0.9 7l-3.2 0z" style="fill: color-mix(in oklab, var(--bg-elev) 70%, var(--bg-0)); stroke: var(--border); stroke-width: 0.3" />
+        <path d="M66.5 65q-3.4-5.4-6.4-5.9q4-1.5 6.4 2.4q1-5.9 4.4-6.9q-1.5 4.4-3 7.4q3.4-2.4 5.4-1q-3 2.5-5.9 4z" style="fill: color-mix(in oklab, var(--ok) 22%, var(--bg-elev))" />
+      </svg>
+    {/if}
+  {:else if b === "ridge"}
+    <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      {#if fy === 0}
+        <circle cx="66" cy="30" r="5" style="fill: var(--text-2); opacity: 0.8" />
+        <circle cx="30" cy="24" r="0.5" style="fill: var(--text-2); opacity: 0.7" />
+        <circle cx="48" cy="34" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <path d="M0 66L18 48L34 62L52 42L72 60L88 52L100 60L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 75%, var(--bg-0))" />
+        <path d="M0 74L24 62L50 72L78 64L100 72L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 35%, var(--bg-0))" />
+      {:else if fy === 90}
+        <circle cx="38" cy="26" r="0.5" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="70" cy="34" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <path d="M0 62L22 44L46 60L68 38L88 58L100 50L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 75%, var(--bg-0))" />
+        <path d="M0 76L30 64L64 74L100 66L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 35%, var(--bg-0))" />
+      {:else if fy === 180}
+        <circle cx="26" cy="30" r="0.5" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="58" cy="22" r="0.4" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="84" cy="36" r="0.4" style="fill: var(--text-2); opacity: 0.4" />
+        <path d="M0 58L26 50L44 58L70 46L100 62L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 75%, var(--bg-0))" />
+        <path d="M0 78Q50 70 100 78L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 35%, var(--bg-0))" />
+        <path d="M20 82Q50 78 80 82" style="stroke: var(--text-2); stroke-width: 0.4; opacity: 0.25; fill: none" />
+      {:else}
+        <circle cx="44" cy="28" r="0.5" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="76" cy="24" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <path d="M0 54L20 46L42 64L66 44L84 60L100 56L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 75%, var(--bg-0))" />
+        <path d="M0 72L36 62L70 76L100 68L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 35%, var(--bg-0))" />
+      {/if}
+    </svg>
+  {:else}
+    <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      {#if fy === 0}
+        <circle cx="64" cy="36" r="4.2" style="fill: var(--bg-elev); stroke: color-mix(in oklab, var(--accent) 45%, var(--bg-elev)); stroke-width: 0.4" />
+        <ellipse cx="64" cy="36" rx="7.4" ry="2" transform="rotate(-18 64 36)" style="stroke: var(--accent); stroke-width: 0.4; opacity: 0.55; fill: none" />
+        <circle cx="30" cy="28" r="0.5" style="fill: var(--text-2); opacity: 0.75" />
+        <circle cx="44" cy="50" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <circle cx="76" cy="58" r="0.45" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="52" cy="24" r="0.35" style="fill: var(--text-2); opacity: 0.45" />
+      {:else if fy === 90}
+        <circle cx="34" cy="34" r="0.5" style="fill: var(--text-2); opacity: 0.7" />
+        <circle cx="58" cy="26" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <circle cx="70" cy="48" r="0.5" style="fill: var(--text-2); opacity: 0.65" />
+        <circle cx="46" cy="60" r="0.35" style="fill: var(--text-2); opacity: 0.4" />
+        <circle cx="26" cy="52" r="0.4" style="fill: var(--text-2); opacity: 0.55" />
+      {:else if fy === 180}
+        <circle cx="40" cy="30" r="0.5" style="fill: var(--text-2); opacity: 0.7" />
+        <circle cx="64" cy="40" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <circle cx="30" cy="56" r="0.45" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="74" cy="60" r="0.35" style="fill: var(--text-2); opacity: 0.45" />
+        <path d="M20 20l2.6 0M21.3 18.7l0 2.6" style="stroke: var(--text-2); stroke-width: 0.3; opacity: 0.5" />
+      {:else}
+        <circle cx="50" cy="28" r="0.5" style="fill: var(--text-2); opacity: 0.7" />
+        <circle cx="28" cy="42" r="0.4" style="fill: var(--text-2); opacity: 0.5" />
+        <circle cx="66" cy="52" r="0.45" style="fill: var(--text-2); opacity: 0.6" />
+        <circle cx="80" cy="30" r="0.35" style="fill: var(--text-2); opacity: 0.45" />
+      {/if}
+    </svg>
+  {/if}
 {/snippet}
 
 {#snippet icoLock()}
@@ -8758,6 +9133,7 @@
         </div>
         <div class="rail-fixed rail-foot">
           <div class="rail-sep"></div>
+          <button class="server-icon orbit-btn" class:active={spaceOpen} title="Server space (Ctrl+O)" aria-label="Open the 360 server space" onclick={toggleSpace}>{@render icoOrbit()}</button>
           <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" aria-label="Send feedback" onclick={() => (showFeedback = true)}>{@render icoFeedback()}</button>
           <button class="server-icon gear" title="Settings" aria-label="Settings" onclick={() => (showSettings = true)}>{@render icoGear()}</button>
         </div>
@@ -10495,6 +10871,125 @@
       </div>
     {/if}
 
+    {#if spaceOpen}
+      <!-- The 360 server space. One fixed camera, rotation only: the CSS cube renders the
+           backdrop while the icons are JS-projected with the same focal length, so the two
+           layers always agree. Pointer story: drag looks, hold grows a lasso, click opens. -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="space-view"
+        class:sp-carrying={!!spaceCarried}
+        data-backdrop={spaceBackdropEff}
+        bind:this={spaceRoot}
+        bind:clientWidth={spaceVw}
+        bind:clientHeight={spaceVh}
+        onpointerdown={onSpaceDown}
+        onpointermove={onSpaceMove}
+        onpointerup={onSpaceUp}
+        onpointercancel={onSpaceUp}
+        onclickcapture={onSpaceClickCapture}
+      >
+        <div class="sp-scene" style={`perspective:${spaceF}px`}>
+          <!-- translateZ(f) first: CSS puts the eye f in front of the scene plane, so the cube
+               must slide forward to centre on it. Without this the backdrop pans at roughly
+               half the icons' angular rate (the icons' projection assumes an eye-centred cube). -->
+          <div class="sp-cube" style={`transform: translateZ(${spaceF}px) rotateX(${spaceCam.pitch}deg) rotateY(${spaceCam.yaw}deg)`}>
+            {#each [0, 90, 180, 270] as fy (fy)}
+              <div
+                class="sp-face sp-wall"
+                style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateY(${-fy}deg) translateZ(${-spaceF}px);${
+                  spaceBackdropEff === "custom"
+                    ? ` background-image:url(${spaceState.custom}); background-size:400% 200%; background-repeat:repeat-x; background-position:${panoPos(fy)};`
+                    : ""
+                }`}
+              >
+                {#if spaceBackdropEff !== "custom"}
+                  {@render spaceWall(spaceBackdropEff, fy)}
+                {/if}
+              </div>
+            {/each}
+            <div class="sp-face sp-ceil" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(-90deg) translateZ(${-spaceF}px)`}></div>
+            <div class="sp-face sp-floor" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(90deg) translateZ(${-spaceF}px)`}></div>
+          </div>
+        </div>
+
+        <svg class="sp-reticle" viewBox="0 0 40 40" aria-hidden="true">
+          <circle cx="20" cy="20" r="9" />
+          <path d="M20 4v8M20 28v8M4 20h8M28 20h8" />
+        </svg>
+
+        <div class="sp-icons">
+          {#each spacePlaced as it (it.s.id)}
+            <button
+              class="sp-srv"
+              class:sp-unread={it.s.unread.length > 0 || it.s.dot}
+              class:sp-carried={it.carried}
+              style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)};${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
+              data-name={it.s.name}
+              onclick={() => spaceIconClick(it.s.id)}
+              use:contextMenu={() => spaceServerMenu(it.s)}
+            >
+              {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
+                <img class="rail-img" src={"data:image/jpeg;base64," + serverIcons[it.s.id]} alt="" />
+              {:else}
+                {monogram(it.s.name)}
+              {/if}
+              {#if it.s.unread.length}
+                <span class="rail-badge">{it.s.unread.length}</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+
+        {#if spaceLasso}
+          <div class="sp-lasso" style={`left:${spaceVw / 2 + spaceLasso.x}px; top:${spaceVh / 2 + spaceLasso.y}px; width:${spaceLasso.r * 2}px; height:${spaceLasso.r * 2}px`}></div>
+        {/if}
+
+        <div class="sp-hud">
+          <div class="sp-hud-line">orbit · {spaceBackdropEff === "custom" ? "custom" : (SPACE_BACKDROP_TILES.find((b) => b.id === spaceBackdropEff)?.name ?? spaceBackdropEff)}</div>
+          <div class="sp-hud-sub">yaw {Math.round(spaceCam.yaw)}° · pitch {Math.round(spaceCam.pitch)}°</div>
+          {#if spaceCarried}
+            <div class="sp-hud-carry">carrying {Object.keys(spaceCarried).length} · click to drop · esc cancels</div>
+          {/if}
+        </div>
+
+        <div class="sp-keys">
+          <span class="sp-key"><b>[drag]</b> look</span>
+          <span class="sp-key"><b>[hold]</b> lasso</span>
+          <button class="sp-key sp-key-btn" class:active={spaceTray} onclick={() => (spaceTrayPinned = !spaceTrayPinned)}><b>[t]</b> tray</button>
+          <button class="sp-key sp-key-btn" onclick={toggleSpace}><b>[esc]</b> exit</button>
+        </div>
+
+        {#if spaceTray}
+          <div class="sp-tray">
+            <div class="sp-tray-head">
+              <span class="sp-micro">server tray</span>
+              <span class="sp-chip">unplaced · {spaceUnplaced.length}</span>
+              <span class="sp-tray-hint">tap a server: it flies to where you aim</span>
+            </div>
+            {#if spaceUnplaced.length}
+              <div class="sp-tray-row">
+                {#each spaceUnplaced as s (s.id)}
+                  <button class="sp-tray-item" onclick={() => placeFromTray(s.id)}>
+                    <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
+                      {#if serverIcons[s.id] && appearance.icons !== "flat"}
+                        <img class="rail-img" src={"data:image/jpeg;base64," + serverIcons[s.id]} alt="" />
+                      {:else}
+                        {monogram(s.name)}
+                      {/if}
+                    </span>
+                    <span class="sp-tray-name">{s.name}</span>
+                  </button>
+                {/each}
+              </div>
+            {:else}
+              <p class="sp-tray-empty">Every server is placed. Hold anywhere to lasso and rearrange.</p>
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     {#if showSettings}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
       <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showSettings = false; }}>
@@ -10586,6 +11081,23 @@
                 />
                 <span>Flat server icons: monograms instead of uploaded images</span>
               </label>
+              <div class="field" style="margin-top:8px">
+                <span class="muted small">Server space (Ctrl+O): the 360° room your servers hang in. Backdrop:</span>
+                <div class="space-set-row">
+                  {#each SPACE_BACKDROP_TILES as b (b.id)}
+                    <button type="button" class="ghost small" class:active={spaceState.backdrop === b.id} onclick={() => setSpaceBackdrop(b.id)}>{b.name}</button>
+                  {/each}
+                  {#if spaceState.custom}
+                    <button type="button" class="ghost small" class:active={spaceState.backdrop === "custom"} onclick={() => setSpaceBackdrop("custom")}>Custom</button>
+                  {/if}
+                  <label class="ghost small space-file">
+                    {spaceState.custom ? "Replace image…" : "Custom image…"}
+                    <input type="file" accept="image/*" onchange={(e) => loadSpacePano(e.currentTarget.files)} />
+                  </label>
+                  <button type="button" class="ghost small" onclick={() => { spaceState.placements = {}; saveSpace(); }}>Forget placements</button>
+                </div>
+                <span class="muted small">A custom backdrop is one equirectangular (2:1) image. Backdrop and placements stay on this device, like desktop icon positions.</span>
+              </div>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <label class="toggle">
                   <input

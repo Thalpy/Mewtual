@@ -7762,3 +7762,445 @@ button.juke-q:hover {
   background: var(--accent);
   transition: width 0.2s linear;
 }
+
+/* ==================== 360 server space (the orbit view) ==================== */
+/* A fixed camera inside a CSS cube; server icons are JS-projected billboards on
+   a flat layer above it. Everything colours from the tokens, so presets, accent
+   overrides, and livery restyle the room itself. Per-server accents arrive as
+   --sp-a on the icon (its livery accent); the user accent is the fallback. */
+.space-view {
+  position: fixed;
+  top: var(--titlebar-h);
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  overflow: hidden;
+  background: var(--bg-0);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+}
+.space-view:active {
+  cursor: grabbing;
+}
+.space-view.sp-carrying {
+  cursor: crosshair;
+}
+.sp-scene {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.sp-cube {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform-style: preserve-3d;
+  will-change: transform;
+}
+.sp-face {
+  position: absolute;
+  left: 0;
+  top: 0;
+  backface-visibility: hidden;
+}
+/* Wall grounds per backdrop; the faint vertical rules are the sphere wireframe. */
+.space-view[data-backdrop="den"] .sp-wall {
+  background-image:
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 6%, transparent) 0 1px, transparent 1px 12.5%),
+    linear-gradient(color-mix(in oklab, var(--panel) 62%, var(--bg-0)), color-mix(in oklab, var(--panel) 22%, var(--bg-0)));
+}
+.space-view[data-backdrop="ridge"] .sp-wall {
+  background-image:
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 5%, transparent) 0 1px, transparent 1px 12.5%),
+    linear-gradient(color-mix(in oklab, var(--bg-0) 60%, black), color-mix(in oklab, var(--panel) 45%, var(--bg-0)));
+}
+.space-view[data-backdrop="void"] .sp-wall {
+  background-image:
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 7%, transparent) 0 1px, transparent 1px 12.5%),
+    linear-gradient(color-mix(in oklab, var(--bg-0) 55%, black), color-mix(in oklab, var(--bg-0) 80%, black));
+}
+.space-view[data-backdrop="custom"] .sp-wall {
+  background-color: color-mix(in oklab, var(--bg-0) 60%, black);
+}
+.sp-ceil {
+  background: color-mix(in oklab, var(--bg-0) 65%, black);
+}
+.space-view[data-backdrop="den"] .sp-floor {
+  /* moonlight pooling under the window (the front wall) */
+  background: radial-gradient(ellipse 40% 28% at 50% 78%, color-mix(in oklab, var(--text-2) 7%, var(--bg-0)), var(--bg-0) 70%);
+}
+.space-view[data-backdrop="ridge"] .sp-floor {
+  background: color-mix(in oklab, var(--panel) 35%, var(--bg-0));
+}
+.space-view[data-backdrop="void"] .sp-floor {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 10%, transparent) 0 1px, transparent 1px 10%),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 10%, transparent) 0 1px, transparent 1px 10%),
+    linear-gradient(color-mix(in oklab, var(--bg-0) 70%, black), color-mix(in oklab, var(--bg-0) 70%, black));
+}
+.space-view[data-backdrop="custom"] .sp-floor {
+  background: color-mix(in oklab, var(--bg-0) 60%, black);
+}
+.sp-art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.sp-cat {
+  position: absolute;
+  left: 58.5%;
+  top: 57%;
+  width: 7%;
+  color: var(--faint);
+  opacity: 0.9;
+  pointer-events: none;
+}
+.sp-cat svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.sp-reticle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 40px;
+  height: 40px;
+  margin: -20px 0 0 -20px;
+  fill: none;
+  stroke: var(--text-2);
+  stroke-width: 1;
+  opacity: 0.5;
+  pointer-events: none;
+  animation: sp-ret 3.2s ease-in-out infinite;
+}
+/* Icons: the layer ignores the pointer so drag-look works between them; each
+   button opts back in. left/top come from the projection; --sp-s is its scale. */
+.sp-icons {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.sp-srv {
+  position: absolute;
+  width: 46px;
+  height: 46px;
+  margin: -23px 0 0 -23px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  pointer-events: auto;
+  cursor: pointer;
+  transform: scale(var(--sp-s, 1));
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.sp-srv .rail-img {
+  border-radius: 50%;
+}
+/* Quick state reads: unread breathes in the server's own accent (its livery
+   accent when it has one); mentions keep the gold rail badge. */
+.sp-srv.sp-unread {
+  border-color: var(--sp-a, var(--accent));
+  color: var(--text);
+  animation: sp-glow 2.8s ease-in-out infinite;
+}
+/* Mouseover: the server pulses in its own accent and introduces itself. */
+.sp-srv:hover {
+  border-color: var(--sp-a, var(--accent));
+  color: var(--text);
+  animation: sp-pulse 1.1s ease-out infinite;
+}
+.sp-srv:hover::after {
+  content: attr(data-name);
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--panel);
+  border: 1px solid color-mix(in oklab, var(--sp-a, var(--accent)) 55%, var(--panel));
+  border-radius: var(--r);
+  padding: 2px 8px;
+  font-size: 0.62rem;
+  font-weight: 400;
+  color: var(--text-2);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.sp-srv.sp-carried {
+  pointer-events: none;
+  z-index: 2;
+  border-color: var(--sp-a, var(--accent));
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--sp-a, var(--accent)), 0 10px 26px rgba(0, 0, 0, 0.6);
+  animation: sp-wiggle 0.5s ease-in-out infinite alternate;
+}
+@keyframes sp-glow {
+  0%, 100% {
+    box-shadow: 0 0 0 1px var(--sp-a, var(--accent)), 0 0 10px color-mix(in oklab, var(--sp-a, var(--accent)) 35%, transparent), 0 4px 14px rgba(0, 0, 0, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 1px var(--sp-a, var(--accent)), 0 0 24px color-mix(in oklab, var(--sp-a, var(--accent)) 70%, transparent), 0 4px 14px rgba(0, 0, 0, 0.5);
+  }
+}
+@keyframes sp-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--sp-a, var(--accent)) 55%, transparent), 0 4px 14px rgba(0, 0, 0, 0.5);
+  }
+  100% {
+    box-shadow: 0 0 0 14px transparent, 0 4px 14px rgba(0, 0, 0, 0.5);
+  }
+}
+@keyframes sp-wiggle {
+  from {
+    transform: scale(var(--sp-s, 1)) rotate(-2.4deg);
+  }
+  to {
+    transform: scale(var(--sp-s, 1)) rotate(2.4deg);
+  }
+}
+@keyframes sp-ret {
+  0%, 100% {
+    opacity: 0.4;
+  }
+  50% {
+    opacity: 0.72;
+  }
+}
+/* The lasso: grows while held; the slow spin walks the dashes (marching ants). */
+.sp-lasso {
+  position: absolute;
+  border: 1.5px dashed var(--accent);
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--accent) 6%, transparent);
+  pointer-events: none;
+  animation: sp-spin 14s linear infinite;
+}
+@keyframes sp-spin {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+/* Chrome: mono micro HUD top-left, bracketed hotkeys bottom-centre. */
+.sp-hud {
+  position: absolute;
+  left: 16px;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  pointer-events: none;
+  z-index: 3;
+}
+.sp-hud-line {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.sp-hud-sub {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.sp-hud-carry {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.sp-keys {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  z-index: 3;
+}
+.sp-key {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 2px 7px;
+  background: color-mix(in oklab, var(--bg-0) 72%, transparent);
+}
+.sp-key b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+button.sp-key-btn {
+  cursor: pointer;
+}
+button.sp-key-btn:hover {
+  border-color: var(--accent);
+}
+.sp-key-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* The tray: where unplaced servers wait. Slides over the hotkey bar. */
+.sp-tray {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding: 10px 16px 34px;
+  animation: sp-tray-in 0.16s ease-out;
+}
+@keyframes sp-tray-in {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.sp-tray-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.sp-micro {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+.sp-chip {
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.sp-tray-hint {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.sp-tray-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+.sp-tray-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  width: 88px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-2);
+}
+.sp-disc {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+.sp-tray-item:hover .sp-disc {
+  border-color: var(--sp-a, var(--accent));
+  animation: sp-pulse 1.1s ease-out infinite;
+}
+.sp-tray-name {
+  font-size: 0.68rem;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sp-tray-empty {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+/* Settings row for the backdrop picker; the label matches button.ghost by hand. */
+.space-set-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0;
+}
+.space-set-row .active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+label.space-file {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text-2);
+  font-weight: 500;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+label.space-file:hover {
+  background: var(--bg-elev);
+}
+label.space-file input {
+  display: none;
+}
+/* Motion is a preference here like everywhere else in the chrome. */
+:root[data-motion="off"] :is(.sp-srv, .sp-srv:hover, .sp-lasso, .sp-reticle, .sp-tray, .sp-tray-item:hover .sp-disc) {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sp-srv,
+  .sp-srv:hover,
+  .sp-lasso,
+  .sp-reticle,
+  .sp-tray,
+  .sp-tray-item:hover .sp-disc {
+    animation: none;
+  }
+}

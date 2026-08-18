@@ -4,10 +4,51 @@
 [advisories]
 yanked = "deny"
 
+# Each ignore is a decision, not a mute button: it names why the advisory does not reach us and
+# what would make it reach us. Re-read this list whenever the MLS stack moves.
+
+# Build-time proc-macro crates that are merely unmaintained, not vulnerable. Both arrive
+# transitively (paste via the crypto stack, proc-macro-error2 via libcrux's hax-lib-macros) and
+# neither has a safe upgrade. They run at build time and ship no code into the binary.
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0436"
+reason = "paste: unmaintained, no vulnerability, transitive, no upgrade available"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0173"
+reason = "proc-macro-error2: unmaintained, no vulnerability, transitive, no upgrade available"
+
+# The three libcrux advisories below are pinned in place by openmls_rust_crypto 0.5, which
+# requires hpke-rs ^0.6, which requires libcrux-sha3 0.0.8. The fixed 0.0.10 cannot be selected
+# without moving to the openmls 0.9 release-candidate line, which is a protocol decision rather
+# than a lint fix. Drop these ignores the moment openmls_rust_crypto 0.5.x bumps hpke-rs.
+#
+# Neither SHAKE advisory is reachable from this app: crates/catcoms-mls/src/config.rs pins the
+# single ciphersuite MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519 and advertises no other,
+# so the group never negotiates SHA-3/SHAKE or ML-KEM at all.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0207"
+reason = "libcrux-sha3 incremental SHAKE: unreachable, our pinned ciphersuite never uses SHAKE"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0208"
+reason = "libcrux-sha3 AVX2 SHAKE-256 panic: unreachable, our pinned ciphersuite never uses SHAKE"
+
+# NOTE: this one is architecture-scoped, not unreachable. It is inert on the x64 builds we ship
+# today, and becomes live the day Mewtual builds for aarch64 (Windows on ARM, Apple Silicon,
+# ARM Linux). Revisit before adding any ARM target.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0212"
+reason = "libcrux-secrets constant-time swap on aarch64: we ship x64 only; revisit for any ARM build"
+
 [bans]
 # Flag duplicate versions of the same crate; tighten to "deny" as the tree stabilises.
 multiple-versions = "warn"
 wildcards = "deny"
+# Our own crates depend on each other by path with no version, which cargo-deny counts as a
+# wildcard. That check exists to stop `foo = "*"` against a registry, which this is not: a path
+# dependency resolves to the tree in front of you, so there is no unpinned third party involved.
+allow-wildcard-paths = true
 
 [licenses]
 # Permissive + the copyleft variants we expect from the crypto/p2p ecosystem.
@@ -20,8 +61,18 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # File-level copyleft, reached only by linking unmodified crates: hpke-rs (via OpenMLS) and
+    # attohttpc (via igd-next, for UPnP port mapping). MPL-2.0 obligations attach to modified
+    # MPL files, so using these as dependencies does not reach into our own source.
+    "MPL-2.0",
 ]
 confidence-threshold = 0.9
+
+# Our own crates carry no `license` field and are all `publish = false`. The project's terms live
+# in /LICENSE, which is bespoke rather than an SPDX identifier, so there is nothing to declare
+# here that cargo-deny could verify. This check is about what we consume, not what we are.
+[licenses.private]
+ignore = true
 
 [sources]
 unknown-registry = "deny"
