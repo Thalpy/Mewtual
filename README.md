@@ -198,22 +198,55 @@ The founder advertises one or more addresses in the invite:
 Relays forward encrypted bytes; they do not join the MLS group or receive its keys. Automatic
 rendezvous discovery exists in the core/CLI but is not yet fully wired into the desktop flow.
 
-## Build a distributable app
+## Build a Windows release
 
-Do not share a debug executable: it expects a local Vite server. Build a self-contained release
-executable instead:
+Release builds embed the frontend inside the application. Do not distribute an executable from
+`target/debug`: debug builds expect the local Vite development server to be running.
 
-```sh
+You need Rust 1.89, Node.js/npm, and the [Tauri prerequisites for
+Windows](https://v2.tauri.app/start/prerequisites/#windows). From the repository root, run:
+
+```powershell
 cd apps/desktop
-npm install
-npm run build
+npm ci
+npm test
+npm run check
 npm run tauri build -- --bundles nsis
 ```
 
-The Windows installer is written beneath
-`apps/desktop/src-tauri/target/release/bundle/nsis/`. It is not code-signed, so Windows
-SmartScreen may display a warning. For a local portable build, use
-`npm run tauri build -- --no-bundle`; the executable is written directly to `target/release/`.
+The Tauri command runs the production frontend build automatically and then creates the NSIS
+installer at:
+
+```text
+apps/desktop/src-tauri/target/release/bundle/nsis/
+```
+
+For the first alpha, the resulting file is
+`Mewtual_0.1.0-alpha.1_x64-setup.exe`. Before sharing it, you can calculate a checksum from the
+repository root:
+
+```powershell
+Get-FileHash -Algorithm SHA256 `
+  "apps/desktop/src-tauri/target/release/bundle/nsis/Mewtual_0.1.0-alpha.1_x64-setup.exe"
+```
+
+The alpha installer is not code-signed, so Windows SmartScreen may display a warning. A local
+portable executable can be built with `npm run tauri build -- --no-bundle`; it is written to
+`apps/desktop/src-tauri/target/release/mewtual-desktop.exe`.
+
+### Publish a GitHub alpha
+
+The manual **Release desktop alpha** workflow in `.github/workflows/release.yml` performs the
+frontend checks, builds the Windows installer, and creates a draft GitHub prerelease:
+
+1. Commit and push the release version and changelog to `main`.
+2. Open the repository's **Actions** tab on GitHub.
+3. Select **Release desktop alpha**, then select **Run workflow**.
+4. When it succeeds, open **Releases**, review the generated draft and installer, and publish
+   it as a prerelease.
+
+The version in `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, and
+`apps/desktop/src-tauri/tauri.conf.json` must match before starting the workflow.
 
 ## Try the protocol from the CLI
 

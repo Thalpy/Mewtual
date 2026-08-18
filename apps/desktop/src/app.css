@@ -55,26 +55,32 @@
   background: var(--bg-0);
 }
 
-/* -------- presets: values only, never structure -------- */
-:root[data-preset="aurum"] {
+/* -------- presets: values only, never structure --------
+   Each also matches a bare [data-preset] element, so a scoped surface (the livery
+   preview) can wear a whole palette without duplicating these values. */
+:root[data-preset="aurum"],
+[data-preset="aurum"] {
   --bg-0: #141109; --panel: #1a160c; --bg-elev: #251e10;
   --border: #3a3120; --border-soft: #2c2517;
   --text: #f0e8d8; --text-2: #d4c9ae; --muted: #a3987e; --faint: #6e6448;
   --accent: #e2a83d; --accent-hi: #ecbc61; --on-accent: #141109;
 }
-:root[data-preset="verdant"] {
+:root[data-preset="verdant"],
+[data-preset="verdant"] {
   --bg-0: #0f1512; --panel: #141b17; --bg-elev: #1c2620;
   --border: #27362d; --border-soft: #1f2b24;
   --text: #e2efe6; --text-2: #bed2c6; --muted: #84a091; --faint: #4f6559;
   --accent: #57c77a; --accent-hi: #74d492; --on-accent: #0f1512;
 }
-:root[data-preset="garnet"] {
+:root[data-preset="garnet"],
+[data-preset="garnet"] {
   --bg-0: #161012; --panel: #1d1417; --bg-elev: #291b1f;
   --border: #3b262c; --border-soft: #2d1e23;
   --text: #f0e6e8; --text-2: #d6c4c9; --muted: #a38b92; --faint: #6e565c;
   --accent: #e0574b; --accent-hi: #ef7568; --on-accent: #161012;
 }
-:root[data-preset="slate"] {
+:root[data-preset="slate"],
+[data-preset="slate"] {
   --bg-0: #12151a; --panel: #171b21; --bg-elev: #20262e;
   --border: #2b333d; --border-soft: #222932;
   --text: #e4e9f0; --text-2: #c2ccd8; --muted: #8a97a8; --faint: #566374;
@@ -311,27 +317,80 @@ main {
 }
 
 /* The mascot sits next to the wordmark: not an indicator you read, one you notice. It shares the
-   wordmark's colour so it never competes with the ticker for attention. */
+   wordmark's colour so it never competes with the ticker for attention. It is also a button (it
+   follows the mention it is pointing at), so it resets the UA button chrome down to the glyph:
+   the hit target must not read as a control until you are on it.
+
+   It takes the bar's whole height rather than sitting as a 16px chip in the middle of it:
+   the strip is 30px of mostly empty drag region, and the mascot is the one thing in it worth
+   looking at. It is the only full-bleed element here, which is what makes it read as the app's
+   face rather than as another status glyph. */
 .tb-cat {
   display: flex;
   align-items: center;
-  width: 16px;
-  height: 16px;
+  justify-content: center;
+  align-self: stretch;
+  aspect-ratio: 1;
   flex: none;
   margin-left: 1px;
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--faint);
-  transition: color 200ms ease;
+  cursor: pointer;
+  transition: color 200ms ease, transform 200ms ease;
+}
+.tb-cat:hover {
+  color: var(--text);
+}
+.tb-cat:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .tb-cat svg {
   display: block;
   width: 100%;
   height: 100%;
+  /* The art is a 20-unit stroked drawing built for a 16px chip; at bar height its 1.6 would
+     out-weigh every hairline around it. Re-weighted in user units so the drawn line lands back
+     near the chrome's own, whatever the bar's height happens to be. */
+  stroke-width: 1.1;
 }
 
 /* Something is waiting for you: the one moment the cat is allowed to carry colour. */
 .titlebar:not(.blurred) .tb-cat.wants {
   color: var(--warn);
+}
+
+/* -------- petting poses --------
+   Held for a moment after a click, on top of whatever mood the art is already drawing. Both are
+   pure transform, so neither can shift the strip's layout by a pixel. They scale from the centre
+   and the drawing only fills about four-fifths of its own viewBox, so the ink stays inside the
+   bar at the peak of the stretch even though the box briefly does not. */
+.tb-cat[data-pose="stretch"] {
+  animation: cat-stretch 700ms ease;
+}
+.tb-cat[data-pose="startle"] {
+  animation: cat-startle 420ms ease;
+}
+@keyframes cat-stretch {
+  0% { transform: scale(1, 1); }
+  30% { transform: scale(1.16, 0.86) translateY(1px); }
+  62% { transform: scale(0.94, 1.14) translateY(-2px); }
+  100% { transform: scale(1, 1); }
+}
+@keyframes cat-startle {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(-1.5px, -1px) rotate(-6deg); }
+  60% { transform: translate(1.5px, 0) rotate(5deg); }
+}
+/* Reduced motion: the pose still happens, it just does not bounce. */
+@media (prefers-reduced-motion: reduce) {
+  .tb-cat[data-pose="stretch"],
+  .tb-cat[data-pose="startle"] {
+    animation: none;
+  }
 }
 
 /* -------- cat ears --------
@@ -5899,11 +5958,12 @@ button.stage-chev:hover {
   color: var(--muted);
 }
 
-/* Peer rows. */
+/* Peer rows. The top padding is a touch generous because the first row's ears sit above its
+   avatar, and this list is a scroller: without the room they would be shaved off at the edge. */
 .stage-peers {
   list-style: none;
   margin: 0;
-  padding: 4px 0;
+  padding: 9px 0 4px;
   max-height: 40vh;
   overflow-y: auto;
 }
@@ -5920,6 +5980,7 @@ button.stage-chev:hover {
   min-height: 26px;
 }
 .stage-av {
+  position: relative;
   display: inline-flex;
   border-radius: 50%;
   flex: none;
@@ -5929,6 +5990,61 @@ button.stage-chev:hover {
   box-shadow:
     0 0 0 2px var(--accent),
     0 0 8px 1px var(--accent-dim);
+}
+
+/* -------- ears on a face --------
+   The window's own silhouette, perched on whichever face is talking. `data-perk` is the
+   quantised RMS (0..3), so a loud voice wears its ears up and a quiet one wears them flat; the
+   ring next to it says whether, these say how much. Sized from the parent so one rule serves
+   both the 22px roster face and the 72px focus face, and positioned out of flow so adding them
+   moved no layout. Bottom transform origin: ears swivel from the skull, they do not slide. */
+.cat-ears {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% - 3px);
+  width: 86%;
+  aspect-ratio: 40 / 12;
+  color: var(--faint);
+  pointer-events: none;
+  transform-origin: 50% 100%;
+  transform: translateX(-50%) scaleY(0.3);
+  opacity: 0.55;
+  /* Matches the 120ms meter tick, so the ears glide between readings instead of stepping. */
+  transition: transform 120ms ease, opacity 120ms ease, color 120ms ease;
+}
+.cat-ears svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.cat-ears[data-perk="1"] {
+  transform: translateX(-50%) scaleY(0.68);
+  opacity: 0.9;
+  color: var(--accent-dim);
+}
+.cat-ears[data-perk="2"] {
+  transform: translateX(-50%) scaleY(1);
+  opacity: 1;
+  color: var(--accent);
+}
+/* Loudest step: fully up, and the only one that moves on its own. A shout should look like one. */
+.cat-ears[data-perk="3"] {
+  transform: translateX(-50%) scaleY(1.18);
+  opacity: 1;
+  color: var(--accent);
+  animation: ear-twitch 260ms ease-in-out infinite alternate;
+}
+@keyframes ear-twitch {
+  from { transform: translateX(-50%) scaleY(1.18) rotate(-2.5deg); }
+  to { transform: translateX(-50%) scaleY(1.1) rotate(2.5deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cat-ears {
+    transition: none;
+  }
+  .cat-ears[data-perk="3"] {
+    animation: none;
+  }
 }
 .stage-nm {
   font-size: 0.82rem;
@@ -6709,6 +6825,7 @@ button.focus-chip:hover {
 
 /* No video: the avatar stands in, scaled well past its 22px roster size. */
 .focus-face {
+  position: relative;
   display: inline-flex;
 }
 .focus-face .avatar {
@@ -8223,7 +8340,9 @@ label.space-file input {
 .stx-nav-zone {
   flex: 1 1 34%;
   min-width: 0;
-  background: var(--bg-0);
+  /* Same surface job as the app's sidebar (--panel over the --bg-0 floor): swapping them
+     here made the takeover read as a different app. */
+  background: var(--panel);
   display: flex;
   justify-content: flex-end;
   overflow-y: auto;
@@ -8340,8 +8459,9 @@ button.stx-item.danger {
 .stx-content-zone {
   flex: 2 1 66%;
   min-width: 0;
-  background: var(--panel);
+  background: var(--bg-0);
   display: flex;
+  position: relative; /* the ESC ring floats in this corner */
 }
 
 .stx-content {
@@ -8438,9 +8558,11 @@ button.stx-item.danger {
 
 /* --- live preview rail --- */
 .stx-prev {
-  width: 252px;
+  width: 300px;
   flex: none;
-  padding: 34px 0 36px;
+  /* Clears the floating ESC ring, so every card below runs the rail's full width. */
+  padding: 78px 0 36px;
+  font-family: var(--ui); /* re-stated so a scoped --ui (a livery draft) reaches it */
   border-left: 1px solid var(--border-soft);
   display: flex;
   flex-direction: column;
@@ -8470,7 +8592,7 @@ button.stx-item.danger {
   margin: 0 14px;
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
-  background: var(--bg-0);
+  background: var(--panel);
   overflow: hidden;
   flex: none;
 }
@@ -8537,7 +8659,7 @@ button.stx-item.danger {
 
 .stx-mini-chat {
   flex: 1;
-  background: var(--panel);
+  background: var(--bg-0); /* the chat surface is the floor, as in the app */
   padding: 6px 7px;
   display: flex;
   flex-direction: column;
@@ -8661,11 +8783,15 @@ button.stx-item.danger {
 }
 
 /* --- ESC ring --- */
+/* Floated into the zone's corner rather than holding a column of its own: the preview
+   rail then runs full width and passes underneath it. */
 button.stx-esc {
-  width: 68px;
+  position: absolute;
+  top: 10px;
+  right: 14px;
+  z-index: 2;
+  width: auto;
   flex: none;
-  align-self: flex-start;
-  margin-top: 34px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -8743,4 +8869,180 @@ button.stx-esc:hover .stx-esc-ring {
   text-shadow:
     1px 0 0 color-mix(in oklab, var(--danger) 70%, transparent),
     -1px 0 0 color-mix(in oklab, var(--info) 70%, transparent);
+}
+
+/* Custom two-stop name gradient (grad2-rrggbb-rrggbb-deg): the image arrives inline from
+   the effect string; only the clip lives here. Like .fx-gradient, the color property is
+   never touched, so anything reading currentcolor still gets the flat colour. */
+.fx-grad2 {
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.grad-maker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.grad-maker input[type="range"] {
+  flex: 1;
+  max-width: 180px;
+}
+
+/* Header rows: the avatar owns the gutter (it was dead space beside the name line) and
+   the time moves inline after the name, so the picture runs bigger without costing the
+   text column a pixel. Grouped rows keep the gutter time. */
+.messages li > .t .gutter-avatar {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  line-height: 0;
+  color: inherit;
+  font: inherit;
+}
+
+.messages li > .t .gutter-avatar .avatar {
+  width: 34px;
+  height: 34px;
+}
+
+.messages li > .t .gutter-avatar .avatar.fallback {
+  font-size: 0.95rem;
+}
+
+.messages li:not(.grouped) > .t {
+  padding-top: 3px;
+}
+
+/* The settings preview renders the real log at miniature scale: undo the log's
+   fill-the-column instincts inside a preview card. */
+.stx-pcard .messages {
+  flex: none;
+  overflow: visible;
+  padding: 4px 0 6px;
+}
+
+/* Motion-off (the Appearance toggle) freezes the animated name effects, matching the
+   reduced-motion media rule they already honour; the picker dims those tiles and says
+   why in the title. */
+:root[data-motion="off"] .fx-rainbow,
+:root[data-motion="off"] .fx-wave,
+:root[data-motion="off"] .fx-pulse {
+  animation: none;
+}
+
+.ns-tile.motion-dead {
+  opacity: 0.55;
+}
+
+/* Multi-stop gradient creator: each stop is a colour well with a small delete disc. */
+.grad-stop {
+  position: relative;
+  display: inline-flex;
+}
+
+.grad-stop .grad-del {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--muted);
+  font-size: 0.55rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.grad-stop .grad-del:hover {
+  color: var(--danger-hi);
+  border-color: var(--danger-brd);
+}
+
+/* The stop row must WRAP: eight wells plus the angle slider outgrow the column. The
+   row-gap leaves headroom for the delete discs that overhang each well's top edge. */
+.grad-maker {
+  flex-wrap: wrap;
+  row-gap: 12px;
+  margin-top: 8px;
+}
+
+.grad-maker input[type="color"] {
+  width: 34px;
+  height: 26px;
+  padding: 2px;
+  flex: none;
+}
+
+.grad-maker input[type="range"] {
+  min-width: 120px;
+}
+
+/* Animated custom gradient: one full tile period (the image is 200% with the first stop
+   repeated at the end, so 0% -> 200% wraps seamlessly). Duration/direction arrive inline
+   from the effect string; motion-off wins over that inline animation, hence !important. */
+@keyframes fx-grad2-scroll {
+  from {
+    background-position: 0% 0%;
+  }
+  to {
+    background-position: 200% 200%;
+  }
+}
+
+:root[data-motion="off"] .fx-grad2 {
+  animation: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fx-grad2 {
+    animation: none !important;
+  }
+}
+
+/* Tint rows: a fixed-width target label keeps the two colour wells vertically aligned. */
+.grad-maker .tint-lbl {
+  width: 76px;
+  flex: none;
+}
+
+/* The message log inside a preview card sits on the chat surface, like the real one. */
+.stx-plog {
+  background: var(--bg-0);
+}
+
+/* Server icon in the preview's mini rail. */
+.stx-mini-rail .mini-ico {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: none;
+}
+
+/* Background pattern, scoped to the livery preview: the shipped rules are :root-only
+   (they paint .channel), so the draft needs its own copy aimed at the mini chat. */
+.stx-prev[data-livery-pattern="grid"] .stx-mini-chat,
+.stx-prev[data-livery-pattern="grid"] .stx-plog {
+  background-image:
+    repeating-linear-gradient(0deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 12px),
+    repeating-linear-gradient(90deg, color-mix(in oklab, var(--accent) 4%, transparent) 0 1px, transparent 1px 12px);
+}
+
+.stx-prev[data-livery-pattern="diag"] .stx-mini-chat,
+.stx-prev[data-livery-pattern="diag"] .stx-plog {
+  background-image: repeating-linear-gradient(45deg, color-mix(in oklab, var(--accent) 3%, transparent) 0 1px, transparent 1px 10px);
+}
+
+.stx-prev[data-livery-pattern="dots"] .stx-mini-chat,
+.stx-prev[data-livery-pattern="dots"] .stx-plog {
+  background-image: radial-gradient(color-mix(in oklab, var(--accent) 7%, transparent) 1px, transparent 1.5px);
+  background-size: 12px 12px;
 }

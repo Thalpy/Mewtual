@@ -381,6 +381,67 @@
       error = String(err);
     }
   }
+  // Custom ground tint for a livery: two stops washed into Nightshade's grounds (floor
+  // and rail toward the first, panels toward the second). The result is a plain #rrggbb
+  // per token, so it rides the EXISTING colour allow-list: every client's read-side
+  // sanitizer already accepts it, no protocol change and no new fields.
+  const NIGHT_GROUNDS: Record<string, string> = {
+    "--bg-0": "#131218",
+    "--panel": "#1a1922",
+    "--bg-elev": "#232130",
+    "--border": "#2e2b3d",
+    "--border-soft": "#24222f",
+  };
+  const GROUND_KEYS = Object.keys(NIGHT_GROUNDS);
+  function hexMix(a: string, b: string, t: number): string {
+    const c = (s: string, i: number) => parseInt(s.slice(i, i + 2), 16);
+    const mix = (i: number) => Math.round(c(a, i) + (c(b, i) - c(a, i)) * t).toString(16).padStart(2, "0");
+    return `#${mix(1)}${mix(3)}${mix(5)}`;
+  }
+  // Two independent tint targets: BACKGROUND (the floor and rail) and SIDEBARS (panels,
+  // inputs, borders), each a colour + an intensity. Intensity is the mix ratio, capped at
+  // 60% so the grounds stay dark and the untouched text tokens stay legible.
+  let liveryTintBgC = $state("#3d2350");
+  let liveryTintBgS = $state(28);
+  let liveryTintSideC = $state("#23163a");
+  let liveryTintSideS = $state(28);
+  function tintTokens(): Record<string, string> {
+    const tb = Math.max(0, Math.min(60, liveryTintBgS)) / 100;
+    const ts = Math.max(0, Math.min(60, liveryTintSideS)) / 100;
+    return {
+      "--bg-0": hexMix(NIGHT_GROUNDS["--bg-0"], liveryTintBgC, tb),
+      "--border-soft": hexMix(NIGHT_GROUNDS["--border-soft"], liveryTintBgC, tb * 0.9),
+      "--panel": hexMix(NIGHT_GROUNDS["--panel"], liveryTintSideC, ts),
+      "--bg-elev": hexMix(NIGHT_GROUNDS["--bg-elev"], liveryTintSideC, ts * 1.05),
+      "--border": hexMix(NIGHT_GROUNDS["--border"], liveryTintSideC, ts * 1.05),
+    };
+  }
+  let draftTinted = $derived(GROUND_KEYS.some((k) => k in liveryDraft.tokens));
+  function applyTint() {
+    liveryDraft = { ...liveryDraft, tokens: { ...liveryDraft.tokens, ...tintTokens() } };
+  }
+  function clearTint() {
+    const tokens = { ...liveryDraft.tokens };
+    for (const k of GROUND_KEYS) delete tokens[k];
+    liveryDraft = { ...liveryDraft, tokens };
+  }
+  // The whole draft as inline custom properties for the Livery preview: colours, corners
+  // and interface font, so every control previews before anything is published. The
+  // preset rides a data-attribute (the palette rules match a scoped element too), as does
+  // the background pattern.
+  function liveryDraftVars(): string {
+    const parts: string[] = [];
+    const accent = liveryDraft.accent || PRESETS.find((p) => p.id === liveryDraft.preset)?.sw || "";
+    if (accent) parts.push(`--accent:${accent}`, `--accent-hi:color-mix(in oklab, ${accent} 80%, white)`);
+    for (const [k, v] of Object.entries(liveryDraft.tokens)) {
+      if (LIVERY_TOKENS.includes(k) && HEX_COLOR.test(v)) parts.push(`${k}:${v}`);
+    }
+    const rad = LIVERY_RADIUS[liveryDraft.tokens["radius"] ?? ""];
+    if (rad?.r) parts.push(`--r:${rad.r}`, `--r-lg:${rad.rlg}`);
+    const font = LIVERY_FONTS[liveryDraft.tokens["font"] ?? ""];
+    if (font && liveryDraft.tokens["font"] !== "system") parts.push(`--ui:${font}`);
+    return parts.join(";");
+  }
   // Livery-draft token editing (radius/font/pattern enum ids; "" removes the override).
   function setDraftToken(key: string, val: string) {
     const tokens = { ...liveryDraft.tokens };
@@ -1939,9 +2000,10 @@
     { id: "rounded", label: "Rounded" },
     { id: "gothic", label: "Gothic" },
   ];
+  // "gradient" (the old accent-mix effect) is deliberately absent from the picker: the
+  // custom creator below covers it. Peers who still wear it keep rendering fine.
   const NAME_EFFECTS: { id: string; label: string }[] = [
     { id: "none", label: "Solid" },
-    { id: "gradient", label: "Gradient" },
     { id: "neon", label: "Neon" },
     { id: "rainbow", label: "Rainbow" },
     { id: "wave", label: "Wave" },
@@ -1950,6 +2012,11 @@
     { id: "retro", label: "Retro" },
     { id: "glitch", label: "Glitch" },
   ];
+  // Rainbow/wave/pulse are ANIMATIONS: with motion off (the Appearance toggle or the
+  // OS's reduced-motion) they freeze and look like Solid, so their tiles say so.
+  const ANIM_FX = new Set(["rainbow", "wave", "pulse"]);
+  const prefersStill = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let fxMotionOff = $derived(appearance.motion === "off" || prefersStill);
   // Curated name colours that stay legible on the dark grounds (content, not theme).
   const NAME_COLORS = ["#977df2", "#6ca0d8", "#57c77a", "#d8a657", "#e0574b", "#e879c0", "#6ee7d8", "#c6c2d6"];
   // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default. All chosen
@@ -1964,6 +2031,27 @@
     { label: "Rose", value: "linear-gradient(135deg,#7a1f3d,#3d1020)" },
     { label: "Slate", value: "#3a3f4b" },
   ];
+  // Custom gradient creator. Name gradients pack 2..8 stops + an angle into the OPAQUE
+  // effect string as `grad2-rrggbb(-rrggbb)+-deg`: the backend never interprets it, and
+  // a build that predates gradients sees an unknown class and falls back to the member's
+  // flat colour (graceful, never garbled). Bubble gradients reuse the bubble channel,
+  // which already carries preset gradient strings.
+  // Optional animation suffix `-a<speed>[r]`: the gradient scrolls along its own angle
+  // (that IS the vector; `r` reverses it), speed 1..10 sets the pace. Encoded in the same
+  // opaque string, so peers on this build animate it and older builds stay flat.
+  const GRAD2_RE = /^grad2-((?:[0-9a-f]{6})(?:-[0-9a-f]{6}){1,7})-(\d{1,3})(?:-a(\d{1,2})(r?))?$/;
+  const GRAD_MAX_STOPS = 8;
+  let pGradStops = $state<string[]>(["#e879c0", "#977df2"]);
+  let pGradDeg = $state(90);
+  let pGradSpeed = $state(0);
+  let pGradRev = $state(false);
+  const grad2Id = () =>
+    `grad2-${pGradStops.map((s) => s.slice(1).toLowerCase()).join("-")}-${Math.max(0, Math.min(360, pGradDeg))}` +
+    (pGradSpeed > 0 ? `-a${Math.min(10, pGradSpeed)}${pGradRev ? "r" : ""}` : "");
+  const BUB_GRAD_RE = /^linear-gradient\(135deg,(#[0-9a-fA-F]{6}),(#[0-9a-fA-F]{6})\)$/;
+  let pBubA = $state("#41295a");
+  let pBubB = $state("#1a2980");
+  const customBubble = () => `linear-gradient(135deg,${pBubA},${pBubB})`;
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
@@ -2351,8 +2439,25 @@
   // `fx-<id>` (harmless: no rule matches), but the id is stripped to [a-z0-9-] first so an
   // untrusted profile can't smuggle extra class names into the span.
   function fxClass(effect: string): string {
+    if (GRAD2_RE.test(effect)) return "fx-grad2";
     const id = effect.toLowerCase().replace(/[^a-z0-9-]/g, "");
     return id && id !== "none" ? `fx-${id}` : "";
+  }
+  // The inline half of a custom name gradient: the image itself. The clip rules live in
+  // .fx-grad2, so without this style (an old build, a non-matching effect) nothing clips.
+  function fxStyle(effect: string): string {
+    const m = GRAD2_RE.exec(effect);
+    if (!m) return "";
+    const stops = m[1].split("-").map((h) => "#" + h);
+    const speed = m[3] ? Math.min(10, +m[3]) : 0;
+    if (!speed) return `;background-image:linear-gradient(${m[2]}deg, ${stops.join(", ")})`;
+    // Animated: the first stop repeats at the end so the 200% tile wraps seamlessly; the
+    // keyframes scroll one full tile period. Motion-off rules freeze this with !important.
+    const dur = ((11 - speed) * 1.2).toFixed(1);
+    return (
+      `;background-image:linear-gradient(${m[2]}deg, ${[...stops, stops[0]].join(", ")})` +
+      `;background-size:200% 200%;animation:fx-grad2-scroll ${dur}s linear infinite${m[4] === "r" ? " reverse" : ""}`
+    );
   }
   function colorStyle(color: string): string {
     return color ? `color:${color}` : "";
@@ -3020,6 +3125,20 @@
       pBubble = me.bubble ?? "";
       pAvatar = me.avatar || "";
       pBanner = me.banner || "";
+      // Re-seat the gradient creators on whatever the saved profile carries, so opening
+      // the editor shows the stops you actually published rather than the defaults.
+      const g = GRAD2_RE.exec(pEffect);
+      if (g) {
+        pGradStops = g[1].split("-").map((h) => "#" + h);
+        pGradDeg = +g[2];
+        pGradSpeed = g[3] ? Math.min(10, +g[3]) : 0;
+        pGradRev = g[4] === "r";
+      }
+      const bg = BUB_GRAD_RE.exec(pBubble);
+      if (bg && !BUBBLE_PRESETS.some((b) => b.value === pBubble)) {
+        pBubA = bg[1];
+        pBubB = bg[2];
+      }
     }
   }
 
@@ -6485,6 +6604,13 @@
   let stageOpen = $state(false); // the expanded stage (vs. the collapsed call bar)
   let speaking = $state<Record<string, boolean>>({}); // "me" or a peer fp -> above the talk floor
   let micLevel = $state(0); // 0..1, drives the meter
+  // How far each voice's ears are up: the same RMS the ring uses, quantised to four steps. It is
+  // quantised for the same reason the mic meter is drawn as four bars rather than a continuous
+  // fill: a value that changes every tick would re-render the stage eight times a second for a
+  // difference no eye can see. Four steps is enough for ears to read as twitching.
+  let earPerk = $state<Record<string, number>>({}); // "me" or a peer fp -> 0..3
+  const perkOf = (rms: number): number =>
+    rms <= SPEAK_FLOOR ? 0 : Math.min(3, 1 + Math.floor((rms / METER_FULL) * 2.4));
   let linksUp = $derived(callParticipants.filter((fp) => callPeerStates[fp] === "connected").length);
   type Meter = { src: MediaStreamAudioSourceNode; an: AnalyserNode; buf: ReturnType<typeof mkBuf> };
   const mkBuf = (n: number) => new Uint8Array(n);
@@ -6517,6 +6643,10 @@
       const { [key]: _s, ...rest } = speaking;
       speaking = rest;
     }
+    if (earPerk[key] !== undefined) {
+      const { [key]: _p, ...rest } = earPerk;
+      earPerk = rest;
+    }
   }
   function rmsOf(m: Meter): number {
     m.an.getByteTimeDomainData(m.buf);
@@ -6531,19 +6661,26 @@
     clearInterval(meterTimer);
     meterTimer = setInterval(() => {
       const next: Record<string, boolean> = {};
+      const perk: Record<string, number> = {};
       let mine = 0;
       for (const [key, m] of Object.entries(meters)) {
         const rms = rmsOf(m);
         if (key === "me") mine = rms;
         next[key] = rms > SPEAK_FLOOR;
+        perk[key] = perkOf(rms);
       }
       // A muted mic transmits nothing, so it must never read as speaking however loud the room is.
       next.me = !callMuted && (next.me ?? false);
+      if (callMuted) perk.me = 0; // and ears that twitch to a muted mic would be a lie about it
       // Only publish on a real change: a fresh object every 120ms would re-render the stage for
       // nothing eight times a second.
       const keys = Object.keys(next);
       if (keys.length !== Object.keys(speaking).length || keys.some((k) => speaking[k] !== next[k])) {
         speaking = next;
+      }
+      const pkeys = Object.keys(perk);
+      if (pkeys.length !== Object.keys(earPerk).length || pkeys.some((k) => earPerk[k] !== perk[k])) {
+        earPerk = perk;
       }
       micLevel = callMuted ? 0 : Math.min(1, mine / METER_FULL);
     }, 120);
@@ -6558,6 +6695,7 @@
       try { void c.close(); } catch { /* already closed */ }
     }
     speaking = {};
+    earPerk = {};
     micLevel = 0;
   }
   // The connection glyph: three states, mono, no prose. EST is a live edge, NEG is still
@@ -7277,6 +7415,99 @@
             : catIdleArt,
   );
 
+  // Why the cat is in the pose it is in. The mascot is the one indicator with no words on it, so
+  // this is the readout that makes it legible: it goes on the button's title and its aria-label.
+  // Same rule as the rest of the strip: a locked screen may describe the app's state but must
+  // never name its content, so the locked and unfocused cases say nothing about channels.
+  let catWhy = $derived(
+    locked
+      ? "asleep: the vault is locked"
+      : !windowFocused
+        ? "asleep: this window isn't focused"
+        : mentionChannels.size > 0
+          ? `ears up: ${mentionChannels.size} channel${mentionChannels.size === 1 ? "" : "s"} mentioned you (click to go)`
+          : activeDownloads > 0
+            ? `busy: ${activeDownloads} transfer${activeDownloads === 1 ? "" : "s"} running`
+            : "settled: nothing is waiting (click to pet)",
+  );
+
+  // A pose the cat holds for a moment after being touched, on top of whatever mood it is in.
+  // Transient and purely local: nothing about it is sent, stored, or reflected anywhere.
+  let catPose = $state<"" | "stretch" | "startle">("");
+  let catPoseTimer: ReturnType<typeof setTimeout> | undefined;
+  function holdPose(p: "stretch" | "startle", ms: number) {
+    clearTimeout(catPoseTimer);
+    catPose = p;
+    catPoseTimer = setTimeout(() => (catPose = ""), ms);
+  }
+
+  // A purr: low sawtooth under a ~22 Hz tremolo, which is roughly where a real one sits. Built on
+  // the same lazily-created context the chimes use, and gated by the same sound preference; a
+  // toy that ignores "sounds off" is a bug, however small.
+  function playPurr() {
+    if (!soundOn) return;
+    try {
+      audioCtx = audioCtx ?? new AudioContext();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") void ctx.resume();
+      const now = ctx.currentTime;
+      const osc = ctx.createOscillator();
+      osc.type = "sawtooth";
+      osc.frequency.setValueAtTime(26, now);
+      // The rumble sits under a low-pass so it reads as a purr and not as a buzz.
+      const filt = ctx.createBiquadFilter();
+      filt.type = "lowpass";
+      filt.frequency.value = 220;
+      // Tremolo: an LFO on the gain is what turns a drone into a purr.
+      const lfo = ctx.createOscillator();
+      lfo.type = "sine";
+      lfo.frequency.value = 22;
+      const lfoGain = ctx.createGain();
+      lfoGain.gain.value = 0.05;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.07, now + 0.12);
+      gain.gain.setValueAtTime(0.07, now + 0.62);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
+      lfo.connect(lfoGain).connect(gain.gain);
+      osc.connect(filt).connect(gain).connect(ctx.destination);
+      osc.start(now);
+      lfo.start(now);
+      osc.stop(now + 0.95);
+      lfo.stop(now + 0.95);
+    } catch {
+      /* no Web Audio here: the cat purrs silently */
+    }
+  }
+
+  // Touching the cat. When something wants you the mascot is already saying so, so the click
+  // follows it: the oldest unread mention (Sets keep insertion order, so the first entry is the
+  // one that has been waiting longest). Otherwise there is nowhere to go and it is just a cat.
+  function petCat() {
+    if (!locked && mentionChannels.size > 0) {
+      const target = [...mentionChannels][0];
+      void goMention(target);
+      return;
+    }
+    // Asleep and prodded: a startle, no purr. Awake and idle: a stretch and a rumble.
+    if (locked || !windowFocused) holdPose("startle", 420);
+    else {
+      holdPose("stretch", 700);
+      playPurr();
+    }
+  }
+  // Following the cat is a navigation like any other, so it goes through the step machinery and
+  // Back returns you to whatever you were reading.
+  async function goMention(channel: string) {
+    navStepStart();
+    try {
+      switchView("chat");
+      await switchTo(channel);
+    } finally {
+      navStepEnd();
+    }
+  }
+
   // ---- ticker view state ----------------------------------------------------
   // An item crawls exactly once and is then consumed: the lane is a notification, not a loop.
   // When the queue empties the slot settles back to the ident line, so a bar that is moving
@@ -7674,7 +7905,7 @@
 </script>
 
 {#snippet styledName(name: string, color: string, font: string, effect: string)}
-  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color)}>{name}</span>
+  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color) + fxStyle(effect)}>{name}</span>
 {/snippet}
 
 {#snippet nameTag(fp: string)}
@@ -7737,17 +7968,52 @@
       <span class="muted">Effect</span>
       <div class="ns-tiles">
         {#each NAME_EFFECTS as fx}
+          {@const dead = fxMotionOff && ANIM_FX.has(fx.id)}
           <button
             type="button"
             class="ns-tile"
             class:active={pEffect === fx.id}
-            title={fx.label}
+            class:motion-dead={dead}
+            title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : fx.label}
             aria-label={fx.label}
             aria-pressed={pEffect === fx.id}
             onclick={() => (pEffect = fx.id)}
           ><span class="name {fxClass(fx.id)}" style={colorStyle(pColor)}>{fx.label}</span></button>
         {/each}
+        <button
+          type="button"
+          class="ns-tile"
+          class:active={GRAD2_RE.test(pEffect)}
+          title="Custom gradient: your stops, your angle"
+          aria-label="Custom gradient"
+          aria-pressed={GRAD2_RE.test(pEffect)}
+          onclick={() => (pEffect = grad2Id())}
+        ><span class="name fx-grad2" style={`color:${pGradStops[0]}` + fxStyle(grad2Id())}>Gradient</span></button>
       </div>
+      {#if GRAD2_RE.test(pEffect)}
+        <div class="grad-maker">
+          {#each pGradStops as stop, si (si)}
+            <span class="grad-stop">
+              <input type="color" value={stop} aria-label={`Gradient stop ${si + 1}`} oninput={(e) => { pGradStops[si] = e.currentTarget.value; pEffect = grad2Id(); }} />
+              {#if pGradStops.length > 2}
+                <button type="button" class="grad-del" title="Remove this stop" aria-label={`Remove gradient stop ${si + 1}`} onclick={() => { pGradStops.splice(si, 1); pEffect = grad2Id(); }}>✕</button>
+              {/if}
+            </span>
+          {/each}
+          {#if pGradStops.length < GRAD_MAX_STOPS}
+            <button type="button" class="ghost small" onclick={() => { pGradStops.push(pGradStops[pGradStops.length - 1]); pEffect = grad2Id(); }}>＋ stop</button>
+          {/if}
+          <input type="range" min="0" max="360" step="15" value={pGradDeg} aria-label="Gradient angle" oninput={(e) => { pGradDeg = +e.currentTarget.value; pEffect = grad2Id(); }} />
+          <span class="muted small">{pGradDeg}°</span>
+        </div>
+        <div class="grad-maker">
+          <span class="muted small">Scroll</span>
+          <input type="range" min="0" max="10" step="1" value={pGradSpeed} aria-label="Gradient scroll speed" oninput={(e) => { pGradSpeed = +e.currentTarget.value; pEffect = grad2Id(); }} />
+          <button type="button" class="ghost small" disabled={!pGradSpeed} onclick={() => { pGradRev = !pGradRev; pEffect = grad2Id(); }}>{pGradRev ? "◀ reverse" : "▶ forward"}</button>
+          <span class="muted small">{pGradSpeed ? `speed ${pGradSpeed}` : "still"}</span>
+        </div>
+        <span class="muted small">Up to {GRAD_MAX_STOPS} stops. Scroll follows the gradient's angle{fxMotionOff ? " (motion is off, so it holds still for you)" : ""}. Builds that predate gradients show your flat colour instead.</span>
+      {/if}
     </div>
     <div class="field">
       <span class="muted">Colour</span>
@@ -7784,7 +8050,22 @@
             onclick={() => (pBubble = b.value)}
           >{#if !b.value}Aa{/if}</button>
         {/each}
+        <button
+          type="button"
+          class="bubble-swatch"
+          class:active={pBubble === customBubble()}
+          title="Custom gradient"
+          style={`background:${customBubble()}`}
+          onclick={() => (pBubble = customBubble())}
+        ></button>
       </div>
+      {#if pBubble === customBubble()}
+        <div class="grad-maker">
+          <input type="color" value={pBubA} aria-label="Bubble gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; pBubble = customBubble(); }} />
+          <input type="color" value={pBubB} aria-label="Bubble gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; pBubble = customBubble(); }} />
+        </div>
+        <span class="muted small">Keep it dark enough to read white text on: a text shadow backs it up, but not by much.</span>
+      {/if}
     </div>
     <div class="field">
       <span class="muted">Avatar</span>
@@ -7808,6 +8089,41 @@
     </p>
     <button onclick={saveProfile}>Save profile</button>
   </div>
+{/snippet}
+
+<!-- The settings live preview: the REAL message-log markup at miniature scale, fed by the
+     profile DRAFT, so it can never drift from the log and every knob (density, text size,
+     clock, flatten, bubble, name style) applies the moment you turn it. -->
+{#snippet previewLog()}
+  {@const pv = appearance.flat || !pBubble ? "" : `background:${pBubble}`}
+  <ul class="messages stx-plog">
+    <li class:has-bubble={!!pv} style={pv}>
+      <span class="t">
+        <span class="gutter-avatar">
+          {#if pAvatar}
+            <img class="avatar" src={imgSrc(pAvatar)} alt="" />
+          {:else}
+            <span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+          {/if}
+        </span>
+      </span>
+      <div class="m-body">
+        <span class="author">
+          <span class="author-link">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+          {#if myFp && badges[myFp]}
+            {@const b = badges[myFp]}
+            <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""}>{b.label}</span>
+          {/if}
+          <span class="time">{fmtTime(Date.now())}</span>
+        </span>
+        <span class="text">tea is ready when you are <span class="mention mention-me">@you</span></span>
+      </div>
+    </li>
+    <li class="grouped" class:has-bubble={!!pv} style={pv}>
+      <span class="t">{fmtTime(Date.now())}</span>
+      <div class="m-body"><span class="text">bringing biscuits too</span></div>
+    </li>
+  </ul>
 {/snippet}
 
 <!-- One roster row in the member column (rendered under the online / offline group heads). -->
@@ -8207,6 +8523,16 @@
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M6 9.2 12 15.2l6-6" />
   </svg>
+{/snippet}
+
+<!--
+  Ears on a face. The same silhouette the window wears, perked by how loud that voice is right
+  now: the speaking ring already says WHETHER someone is talking, so these say HOW MUCH, off the
+  identical RMS reading. Both come from `earPerk`, so the ring and the ears can never disagree.
+  Decoration with a job: in a busy room the twitch finds the live speaker faster than a border.
+-->
+{#snippet catEars(key: string)}
+  <span class="cat-ears" data-perk={earPerk[key] ?? 0} aria-hidden="true">{@html earsSvg}</span>
 {/snippet}
 
 <!-- Live mic level: four bars lit from micLevel. Muted reads as empty, never as "quiet". -->
@@ -8703,7 +9029,15 @@
 >
   <span class="tb-ears" aria-hidden="true">{@html earsSvg}</span>
   <span class="tb-brand" data-tauri-drag-region>Mewtual</span>
-  <span class="tb-cat" class:wants={mentionChannels.size > 0 && !locked} aria-hidden="true">{@html catArt}</span>
+  <button
+    type="button"
+    class="tb-cat"
+    class:wants={mentionChannels.size > 0 && !locked}
+    data-pose={catPose}
+    title={catWhy}
+    aria-label={`Mascot: ${catWhy}`}
+    onclick={petCat}
+  >{@html catArt}</button>
   {#if !locked}
     <div class="tb-nav">
       <button
@@ -9385,7 +9719,7 @@
           <div class="rail-sep"></div>
           <button class="server-icon orbit-btn" class:active={spaceOpen} title="Server space (Ctrl+O)" aria-label="Open the 360 server space" onclick={toggleSpace}>{@render icoOrbit()}</button>
           <button class="server-icon feedback-btn" title="Send feedback (bug / feature request)" aria-label="Send feedback" onclick={() => (showFeedback = true)}>{@render icoFeedback()}</button>
-          <button class="server-icon gear" title="Settings" aria-label="Settings" onclick={() => (showSettings = true)}>{@render icoGear()}</button>
+          <button class="server-icon gear" title="Settings" aria-label="Settings" onclick={() => openSettings()}>{@render icoGear()}</button>
         </div>
       </nav>
 
@@ -9560,7 +9894,7 @@
         {@render contextNav(false)}
 
         {#if canInvite || cur?.invite}
-          <button class="ghost invite-quick" onclick={() => openServerSettings()}>＋ Invite someone</button>
+          <button class="ghost invite-quick" onclick={() => openServerSettings(null, "invites")}>＋ Invite someone</button>
         {/if}
         {@render youPanel()}
         {/if}
@@ -9825,6 +10159,7 @@
                 m.ts - messages[mi - 1].ts < 300000}
               {@const bubble = appearance.flat ? "" : bubbleStyle(m.author)}
               {@const tick = deliveryTick(m)}
+              {@const ident = identityOf(m.author)}
               <li
                 data-mi={mi}
                 class:own={m.author === myFp}
@@ -9838,9 +10173,19 @@
                 style={bubble}
                 use:contextMenu={() => messageMenu(m)}
               >
-                <span class="t" title={new Date(m.ts).toLocaleString()}>
-                  {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}{fmtTime(m.ts)}
-                </span>
+                {#if grouped}
+                  <span class="t" title={new Date(m.ts).toLocaleString()}>
+                    {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}{fmtTime(m.ts)}
+                  </span>
+                {:else}
+                  <!-- Header rows: the avatar owns the gutter (dead space anyway) and the time
+                       moves inline after the name, so the picture runs bigger for free. -->
+                  <span class="t">
+                    <button class="gutter-avatar" type="button" title="View profile" onclick={() => showProfile(ident.fp)}>
+                      {@render avatarTag(ident.fp)}
+                    </button>
+                  </span>
+                {/if}
                 <div class="m-body">
                 {#if m.reply_to}
                   {@const parent = msgById.get(m.reply_to)}
@@ -9859,17 +10204,22 @@
                   </button>
                 {/if}
                 {#if !grouped}
-                  {@const ident = identityOf(m.author)}
                   <span class="author">
                     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
                     <span class="author-link" role="button" tabindex="0" onclick={() => showProfile(ident.fp)}>
-                      {@render avatarTag(ident.fp)}
                       {@render nameTag(ident.fp)}
                     </span>
                     {#if ident.tag}<span class="dev-tag" title="Sent from this member's linked device">· {ident.tag}</span>{/if}
                     {#if m.author !== myFp && verifiedFps.has(m.author)}
                       <span class="vf-check" title="You verified this member out of band">✓</span>
                     {/if}
+                    {#if badges[m.author]}
+                      {@const b = badges[m.author]}
+                      <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
+                    {/if}
+                    <span class="time" title={new Date(m.ts).toLocaleString()}>
+                      {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}{fmtTime(m.ts)}
+                    </span>
                     {#if m.pinned}<span class="pin-mark" title="Pinned message">{@render icoPin()}</span>{/if}
                   </span>
                 {:else if m.pinned}
@@ -10587,7 +10937,7 @@
               {@const vol = peerVolumes[fp] ?? 1}
               <li class="stage-peer">
                 <div class="stage-row">
-                  <span class="stage-av" class:talking={speaking[fp]}>{@render avatarTag(fp)}</span>
+                  <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render avatarTag(fp)}</span>
                   <span class="stage-nm">{@render nameTag(fp)}</span>
                   <span class="stage-spacer"></span>
                   {#if (remoteHeld[fp] ?? []).length > 0}
@@ -10747,7 +11097,7 @@
                 <!-- svelte-ignore a11y_media_has_caption -->
                 <video class="focus-vid" class:contain={vid === 2} autoplay playsinline muted use:srcObject={stream}></video>
               {:else}
-                <span class="focus-face">{@render avatarTag(fp)}</span>
+                <span class="focus-face">{@render catEars(me ? "me" : fp)}{@render avatarTag(fp)}</span>
               {/if}
               <span class="focus-name">
                 <span class="focus-nm">{me ? "you" : nameOf(fp)}</span>
@@ -11521,11 +11871,7 @@
               </div>
               <div class="stx-pcard">
                 <div class="stx-pcap">MESSAGE</div>
-                <div class="stx-pmsg">
-                  <div class="stx-pnew">NEW · 2 UNREAD</div>
-                  <span class="stx-pname">kes</span><span class="stx-ptime">{fmtTime(Date.now())}</span>
-                  <div class="stx-pbody"><span class="stx-pmention">@you</span> tea is ready when you are</div>
-                </div>
+                {@render previewLog()}
               </div>
               <div class="stx-pcard">
                 <div class="stx-pcap">CONTROLS</div>
@@ -11561,10 +11907,7 @@
               </div>
               <div class="stx-pcard">
                 <div class="stx-pcap">IN CHAT</div>
-                <div class="stx-pmsg">
-                  <span class="stx-pname">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span><span class="stx-ptime">{fmtTime(Date.now())}</span>
-                  <div class="stx-pbody">on my way with the tea</div>
-                </div>
+                {@render previewLog()}
               </div>
               <p class="muted small stx-pnote">Exactly what members of this server see, card and chat both.</p>
             </aside>
@@ -11578,16 +11921,41 @@
     {/if}
 
     {#if showServerSettings}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showServerSettings = false; }}>
-        <div class="overlay-card">
-          <header class="overlay-head">
-            <h2>Server settings</h2>
-            <button class="ghost" onclick={() => (showServerSettings = false)}>✕</button>
-          </header>
-          <div class="overlay-body">
-            <section class="set-section">
-              <h3>Server</h3>
+      <div class="stx" role="dialog" aria-label="Server settings">
+        <div class="stx-nav-zone">
+          <nav class="stx-nav">
+            <div class="stx-srv-head">
+              {#if activeServerId !== null && serverIcons[activeServerId] && appearance.icons !== "flat"}
+                <img class="avatar" src={imgSrc(serverIcons[activeServerId])} alt="" />
+              {:else}
+                <span class="avatar fallback">{monogram(cur?.name ?? "")}</span>
+              {/if}
+              <span class="srv-meta"><b>{cur?.name ?? ""}</b> <span class="role-badge {myRole}">{myRole}</span></span>
+            </div>
+            <label class="stx-search">
+              <input bind:value={setSearch} placeholder="Search settings" />
+            </label>
+            {#each ["Overview", "People", "Content", "Voice", "Danger"] as cat (cat)}
+              {@const pages = filterPages(SRV_SET_PAGES, setSearch).filter((p) => p.cat === cat)}
+              {#if pages.length}
+                <div class="stx-cat">{cat}</div>
+                {#each pages as p (p.id)}
+                  <button type="button" class="stx-item" class:active={serverSettingsPage === p.id} class:danger={p.danger} onclick={() => (serverSettingsPage = p.id)}>{p.label}</button>
+                {/each}
+              {/if}
+            {/each}
+            <div class="stx-foot">
+              <span>{roster.length} MEMBERS</span>
+              {#if canModerate}<span>YOU CAN MODERATE</span>{/if}
+            </div>
+          </nav>
+        </div>
+        <div class="stx-content-zone">
+          <div class="stx-content">
+            {#if serverSettingsPage === "overview"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // OVERVIEW</div>
+              <h1>Overview</h1>
+              <section class="set-section">
               <p>{cur?.name ?? ":"} <span class="role-badge {myRole}">{myRole}</span></p>
               <form class="rename-row" onsubmit={(e) => { e.preventDefault(); renameServer(); }}>
                 <input bind:value={serverNameDraft} placeholder="Server name" />
@@ -11598,6 +11966,11 @@
                 <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
                 <span>Notify me of voice calls on this server</span>
               </label>
+              </section>
+            {:else if serverSettingsPage === "calls"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // CALLS &amp; RELAY</div>
+              <h1>Calls &amp; Relay</h1>
+              <section class="set-section">
               <div class="field">
                 <span class="muted">Shared voice relay (TURN)</span>
                 <p class="muted small">Optional. A TURN server for voice calls that can't hole-punch (symmetric NAT).
@@ -11609,10 +11982,11 @@
                   <label><span class="muted small">Credential</span><input type="password" bind:value={srvTurnCred} onchange={saveSrvTurn} /></label>
                 </div>
               </div>
-            </section>
-
-            <section class="set-section">
-              <h3>Livery</h3>
+              </section>
+            {:else if serverSettingsPage === "livery"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LIVERY</div>
+              <h1>Livery</h1>
+              <section class="set-section">
               {#if canModerate}
                 <p class="muted small">
                   Publish a colour scheme members see while they're on this server. Anyone can opt
@@ -11669,6 +12043,29 @@
                       oninput={(e) => (liveryDraft = { ...liveryDraft, accent: e.currentTarget.value })}
                     />
                   </div>
+                </div>
+                <div class="field" style="margin-top:8px">
+                  <span class="muted small">Ground tint: wash the room in your own colours, background and sidebars separately.</span>
+                  <div class="grad-maker">
+                    <span class="muted small tint-lbl">Background</span>
+                    <input type="color" value={liveryTintBgC} aria-label="Background tint colour" oninput={(e) => { liveryTintBgC = e.currentTarget.value; if (draftTinted) applyTint(); }} />
+                    <input type="range" min="0" max="60" step="2" value={liveryTintBgS} aria-label="Background tint intensity" oninput={(e) => { liveryTintBgS = +e.currentTarget.value; if (draftTinted) applyTint(); }} />
+                    <span class="muted small">{liveryTintBgS}%</span>
+                  </div>
+                  <div class="grad-maker">
+                    <span class="muted small tint-lbl">Sidebars</span>
+                    <input type="color" value={liveryTintSideC} aria-label="Sidebar tint colour" oninput={(e) => { liveryTintSideC = e.currentTarget.value; if (draftTinted) applyTint(); }} />
+                    <input type="range" min="0" max="60" step="2" value={liveryTintSideS} aria-label="Sidebar tint intensity" oninput={(e) => { liveryTintSideS = +e.currentTarget.value; if (draftTinted) applyTint(); }} />
+                    <span class="muted small">{liveryTintSideS}%</span>
+                  </div>
+                  <div class="grad-maker">
+                    {#if draftTinted}
+                      <button type="button" class="ghost small" onclick={clearTint}>Clear tint</button>
+                    {:else}
+                      <button type="button" class="ghost small" onclick={applyTint}>Apply tint</button>
+                    {/if}
+                  </div>
+                  <span class="muted small">Intensity is how far the colour sinks in. A tint mixes into the default dark grounds and stands in for the preset's own, so the preview on the right is the truth: text tokens stay untouched, and green, gold and red keep their jobs.</span>
                 </div>
                 <div class="field" style="margin-top:8px">
                   <span class="muted small">Corners</span>
@@ -11738,10 +12135,11 @@
                     : "No livery published. Owners and admins can set one."}
                 </p>
               {/if}
-            </section>
-
-            <section class="set-section">
-              <h4 class="members-h4">Members &amp; roles</h4>
+              </section>
+            {:else if serverSettingsPage === "members"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // MEMBERS</div>
+              <h1>Members</h1>
+              <section class="set-section">
               <ul class="role-list">
                 {#each roster as m}
                   {@const r = roles[m.fingerprint] ?? "member"}
@@ -11752,11 +12150,6 @@
                     {#if badges[m.fingerprint]}
                       {@const b = badges[m.fingerprint]}
                       <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""}>{b.label}</span>
-                    {/if}
-                    {#if canModerate}
-                      <button class="ghost small" onclick={() => (badgeEditFp === m.fingerprint ? (badgeEditFp = "") : openBadgeEditor(m.fingerprint))}>
-                        {badges[m.fingerprint] ? "Edit badge" : "Badge…"}
-                      </button>
                     {/if}
                     {#if myRole === "owner" && !m.you && r !== "owner"}
                       {#if r === "admin"}
@@ -11769,6 +12162,38 @@
                       {:else}
                         <button class="ghost small danger-btn" onclick={() => (confirmRemoveFp = m.fingerprint)}>Remove</button>
                       {/if}
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              <p class="muted small">
+                The owner is the founder (the MLS committer). Member removal is owner-only and
+                protocol-enforced. Admins can invite newcomers: the owner serializes each
+                admission, so it completes when the owner is next online: and a demotion is
+                replay-proof (a removed admin can't re-grant itself).
+              </p>
+              {#if myRole !== "owner"}
+                <p class="muted small">Only the owner can change roles.</p>
+              {/if}
+              </section>
+            {:else if serverSettingsPage === "badges"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // BADGES</div>
+              <h1>Badges</h1>
+              <section class="set-section">
+              <p class="muted small">Little chips admins pin next to a member's name. Role names are reserved: a badge can never impersonate one.</p>
+              <ul class="role-list">
+                {#each roster as m}
+                  <li>
+                    {@render avatarTag(m.fingerprint)}
+                    {@render nameTag(m.fingerprint)}
+                    {#if badges[m.fingerprint]}
+                      {@const b = badges[m.fingerprint]}
+                      <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""}>{b.label}</span>
+                    {/if}
+                    {#if canModerate}
+                      <button class="ghost small" onclick={() => (badgeEditFp === m.fingerprint ? (badgeEditFp = "") : openBadgeEditor(m.fingerprint))}>
+                        {badges[m.fingerprint] ? "Edit badge" : "Badge…"}
+                      </button>
                     {/if}
                   </li>
                   {#if badgeEditFp === m.fingerprint && canModerate}
@@ -11789,14 +12214,13 @@
                   {/if}
                 {/each}
               </ul>
-              <p class="muted small">
-                The owner is the founder (the MLS committer). Member removal is owner-only and
-                protocol-enforced. Admins can invite newcomers: the owner serializes each
-                admission, so it completes when the owner is next online: and a demotion is
-                replay-proof (a removed admin can't re-grant itself).
-              </p>
+              </section>
+            {:else if serverSettingsPage === "sdevices"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // DEVICES</div>
+              <h1>Devices</h1>
               {#if myRole === "owner" && Object.keys(deviceMap).length}
-                <h3 style="margin-top:10px"><span>Linked devices</span></h3>
+                <section class="set-section">
+                <h3><span>Linked devices</span></h3>
                 <ul class="dev-panel">
                   {#each Object.entries(deviceMap) as [cfp, d] (cfp)}
                     <li title={cfp}>
@@ -11819,15 +12243,18 @@
                   same grant can't re-add it. Losing your original (founding) device means you can't
                   add or revoke devices here; recover by having the server owner re-admit you.
                 </p>
+                </section>
+              {:else if myRole === "owner"}
+                <p class="muted small">No linked devices yet: members pair extras from Settings → Devices on their own machines.</p>
+              {:else}
+                <p class="muted small">Only the owner sees the device roster. Pair your own extra device from Settings → Devices.</p>
               {/if}
-              {#if myRole !== "owner"}
-                <p class="muted small">Only the owner can change roles.</p>
-              {/if}
-            </section>
 
-            {#if cur?.invite || canInvite}
+            {:else if serverSettingsPage === "invites"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // INVITES</div>
+              <h1>Invites</h1>
+              {#if cur?.invite || canInvite}
               <section class="set-section">
-                <h3>Invite someone</h3>
                 <p class="muted small">Single-use: share it with one person to join this server. Generate a fresh
                   one anytime (after a restart, or once the last one was used).</p>
                 {#if myRole === "admin"}
@@ -11852,10 +12279,13 @@
                   </button>
                 {/if}
               </section>
-            {/if}
-
-            <section class="set-section">
-              <h3>Custom emoji</h3>
+              {:else}
+                <p class="muted small">Nothing to mint right now: invites appear here once you can create one.</p>
+              {/if}
+            {:else if serverSettingsPage === "emoji"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // EMOJI &amp; STICKERS</div>
+              <h1>Emoji &amp; Stickers</h1>
+              <section class="set-section">
               <p class="muted small">Type <code>:code:</code> in chat to use one. Shared with the whole server.</p>
               {#if Object.keys(emojiMap).length}
                 <div class="emoji-grid manage">
@@ -11881,16 +12311,59 @@
                 </label>
               </form>
               <p class="muted small">Size sets how big <code>:code:</code> renders in messages (reactions stay small).</p>
-            </section>
-
-            {#if activeServerId !== null}
-              <section class="set-section danger">
-                <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
-                  Leave this server
-                </button>
               </section>
+            {:else if serverSettingsPage === "leave"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LEAVE</div>
+              <h1>Leave Server</h1>
+              {#if activeServerId !== null}
+                <section class="set-section danger">
+                  <p class="muted small">Leaving forgets this server on this device. Coming back needs a fresh invite.</p>
+                  <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
+                    Leave this server
+                  </button>
+                </section>
+              {/if}
             {/if}
           </div>
+          {#if serverSettingsPage === "livery"}
+            {@const draftPattern = liveryDraft.tokens["pattern"]}
+            <aside
+              class="stx-prev"
+              data-preset={liveryDraft.preset || null}
+              data-livery-pattern={draftPattern && draftPattern !== "none" ? draftPattern : null}
+              style={liveryDraftVars()}
+            >
+              <div class="stx-ph"><i></i>AS MEMBERS SEE IT</div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">CHROME</div>
+                <div class="stx-mini">
+                  <div class="stx-mini-rail">
+                    {#if livery.icon}<img class="mini-ico" src={imgSrc(livery.icon)} alt="" />{:else}<i class="on"></i>{/if}
+                    <i></i><i></i>
+                  </div>
+                  <div class="stx-mini-side"><i class="on" style="width:90%"></i><i style="width:70%"></i><i style="width:80%"></i><i style="width:55%"></i></div>
+                  <div class="stx-mini-chat"><i class="nm"></i><i style="width:80%"></i><i style="width:60%"></i></div>
+                </div>
+              </div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">MESSAGE</div>
+                {@render previewLog()}
+              </div>
+              <div class="stx-pcard">
+                <div class="stx-pcap">CONTROLS</div>
+                <div class="stx-pctl">
+                  <button class="primary small" type="button">Send</button>
+                  <button class="ghost small" type="button">Cancel</button>
+                  <span class="stx-pdot"></span>
+                </div>
+              </div>
+              <p class="muted small stx-pnote">Rendered with your draft before you publish. Anyone can opt out in their own Appearance.</p>
+            </aside>
+          {/if}
+          <button type="button" class="stx-esc" onclick={() => (showServerSettings = false)} title="Close (Esc)">
+            <span class="stx-esc-ring">✕</span>
+            <span>ESC</span>
+          </button>
         </div>
       </div>
     {/if}
