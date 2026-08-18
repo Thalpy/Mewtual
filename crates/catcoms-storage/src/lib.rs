@@ -33,7 +33,7 @@ pub use retention::{
     BlobEntry, BlobKind, BlobState, Expiry, ExpiryPolicy, GcReport, HolderOracle, RetentionIndex,
     ServerId, ONE_MONTH_MS,
 };
-pub use vault::open_or_create_vault;
+pub use vault::{open_or_create_vault, vault_exists};
 
 /// Errors from the storage layer.
 #[derive(Debug, Error)]

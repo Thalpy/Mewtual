@@ -19,6 +19,14 @@
 > Mewtual is an experimental, early-stage project. The desktop app works, but it has not
 > received an independent security audit and should not yet be treated as production-ready.
 
+The first Windows alpha is version **0.1.0-alpha.1**. Once published, installers are available
+from [GitHub Releases](https://github.com/Thalpy/Mewtual/releases). Alpha installers are not
+code-signed, so Windows SmartScreen may display a warning.
+
+Once installed, Mewtual checks for a newer release on launch and offers it: updates are
+minisign-signed and verified before anything is installed, and nothing installs without your
+click. Maintainers: see [docs/RELEASING.md](docs/RELEASING.md).
+
 ## What is Mewtual?
 
 Mewtual is a desktop app for private group communication without a central service holding
@@ -199,12 +207,13 @@ executable instead:
 cd apps/desktop
 npm install
 npm run build
-npm run tauri build -- --no-bundle
+npm run tauri build -- --bundles nsis
 ```
 
-The result is written to `apps/desktop/src-tauri/target/release/` (`.exe` on Windows). The
-current Tauri configuration produces the executable without an installer bundle or code
-signature.
+The Windows installer is written beneath
+`apps/desktop/src-tauri/target/release/bundle/nsis/`. It is not code-signed, so Windows
+SmartScreen may display a warning. For a local portable build, use
+`npm run tauri build -- --no-bundle`; the executable is written directly to `target/release/`.
 
 ## Try the protocol from the CLI
 

@@ -208,11 +208,27 @@ const EDITED: &str = "edited";
 const REPLY_TO: &str = "reply_to";
 const PINNED: &str = "pinned";
 const TOPIC: &str = "topic";
+const JUKEBOX: &str = "jukebox";
+const JB_CID: &str = "cid";
+const JB_NAME: &str = "name";
+const JB_AUTHOR: &str = "author";
+const JB_ADDED: &str = "added_ms";
 
 /// Maximum length of a channel topic, in UTF-8 bytes. The topic lives in the channel
 /// document, so this bounds what every member replicates; the same reason the livery and
 /// avatar values are capped.
 pub const MAX_CHANNEL_TOPIC_BYTES: usize = 256;
+
+/// Maximum length of a jukebox entry's content address, in hex digits. Wide enough for any
+/// address the file path mints; a value that is not hex within this budget is not a file this
+/// server can ever hand back, so it is refused at write time rather than stored to fail later.
+pub const MAX_JUKEBOX_CID_CHARS: usize = 128;
+/// Maximum length of a jukebox entry's display name, in UTF-8 bytes; the same reason the
+/// channel topic is capped, since the queue rides the channel document every member replicates.
+pub const MAX_JUKEBOX_NAME_BYTES: usize = 200;
+/// Maximum number of entries one channel's jukebox holds. The whole queue is replicated with
+/// every change, so this bounds what a full playlist costs each member.
+pub const MAX_JUKEBOX_ENTRIES: usize = 64;
 
 /// Append a `{id, author, text, ts}` message to a channel document (the canonical edit).
 pub fn append_message(
@@ -356,6 +372,103 @@ fn read_topic(doc: &AutoCommit) -> String {
 /// and lose one of, and a concurrent set is a clean last-writer-wins.
 fn set_topic_in_doc(doc: &mut AutoCommit, topic: &str) -> Result<(), AutomergeError> {
     doc.put(ROOT, TOPIC, topic)
+}
+
+/// One entry in a channel's jukebox queue as the UI sees it. `cid` is the hex content address of
+/// an already-shared file, fetched over the file path like any other embed, so an entry whose
+/// blob has not arrived yet still lists fine; it just cannot play yet. The `author` is the
+/// adder's **device fingerprint**, resolved to a display name at render time like a message
+/// author.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JukeEntry {
+    /// A stable per-entry id (random hex), minted like a message id; so a removal addresses
+    /// exactly one entry under concurrent merges.
+    pub id: String,
+    /// The lowercase hex content address of the queued file.
+    pub cid: String,
+    /// The display name shown in the queue (never empty in a stored entry).
+    pub name: String,
+    /// The adder's device fingerprint.
+    pub author: String,
+    /// When the entry was queued, epoch-millis (the adder's injected clock).
+    pub added_ms: u64,
+}
+
+/// Add one jukebox entry to a channel document, keyed by its id. The queue is a map at the
+/// document ROOT (which always exists) and each entry is its own sub-map under a unique random
+/// key, so two members queueing at once write disjoint keys that both survive a merge.
+fn add_juke_entry_in_doc(doc: &mut AutoCommit, e: &JukeEntry) -> Result<(), AutomergeError> {
+    let queue = match doc.get(ROOT, JUKEBOX)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(ROOT, JUKEBOX, ObjType::Map)?,
+    };
+    let entry = doc.put_object(&queue, e.id.as_str(), ObjType::Map)?;
+    doc.put(&entry, JB_CID, e.cid.as_str())?;
+    doc.put(&entry, JB_NAME, e.name.as_str())?;
+    doc.put(&entry, JB_AUTHOR, e.author.as_str())?;
+    doc.put(&entry, JB_ADDED, e.added_ms as i64)?;
+    Ok(())
+}
+
+/// Remove the jukebox entry with `id` from a channel document. Ids are unique keys, so this
+/// removes (at most) the single matching entry. Returns whether one was there.
+fn remove_juke_entry_in_doc(doc: &mut AutoCommit, id: &str) -> Result<bool, AutomergeError> {
+    let Some((Value::Object(ObjType::Map), queue)) = doc.get(ROOT, JUKEBOX)? else {
+        return Ok(false);
+    };
+    if doc.get(&queue, id)?.is_none() {
+        return Ok(false);
+    }
+    doc.delete(&queue, id)?;
+    Ok(true)
+}
+
+/// Materialize a channel document's jukebox, sorted by **queue time ascending** (ties broken by
+/// id, so every member reads the same order). An entry without a usable content address or name
+/// is skipped, so a malformed doc degrades to "fewer tracks" rather than unplayable rows.
+fn read_jukebox(doc: &AutoCommit) -> Vec<JukeEntry> {
+    let mut out = Vec::new();
+    if let Ok(Some((Value::Object(ObjType::Map), queue))) = doc.get(ROOT, JUKEBOX) {
+        for id in doc.keys(&queue) {
+            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&queue, &id) {
+                let cid = juke_cid_field(doc, &entry, JB_CID);
+                let name = str_field(doc, &entry, JB_NAME);
+                if cid.is_empty() || name.is_empty() {
+                    continue; // a cleared/malformed entry is not a playable track
+                }
+                out.push(JukeEntry {
+                    id,
+                    cid,
+                    name,
+                    author: str_field(doc, &entry, JB_AUTHOR),
+                    added_ms: int_field(doc, &entry, JB_ADDED),
+                });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.added_ms.cmp(&b.added_ms).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Read a jukebox entry's content address, applying the same shape check the writer applies
+/// (see [`MAX_JUKEBOX_CID_CHARS`]); a peer that wrote junk reads as "no address" rather than as
+/// something the UI would try to fetch.
+fn juke_cid_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
+    let v = str_field(doc, obj, key);
+    if valid_juke_cid(&v) {
+        v
+    } else {
+        String::new()
+    }
+}
+
+/// Whether `cid` is a plausible file content address: 1..=[`MAX_JUKEBOX_CID_CHARS`] lowercase
+/// hex digits. Deliberately strict about case, so one file has exactly one queue-visible
+/// spelling and a duplicate cannot hide behind a different one.
+fn valid_juke_cid(cid: &str) -> bool {
+    !cid.is_empty()
+        && cid.len() <= MAX_JUKEBOX_CID_CHARS
+        && cid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Edit the text of the message with `id` in a channel document, stamping `edited`. Returns
@@ -1098,19 +1211,12 @@ fn valid_wiki_name(name: &str) -> Result<String, AppError> {
 /// of them (winner last, so it takes precedence) and deletes hit all of them; otherwise a
 /// format set on the losing side would silently vanish, or a deleted page's entry resurface.
 fn wiki_meta_objs(doc: &AutoCommit) -> Vec<ObjId> {
-    doc.get_all(ROOT, WIKI_META_KEY)
-        .into_iter()
-        .flatten()
-        .filter_map(|(v, id)| matches!(v, Value::Object(ObjType::Map)).then_some(id))
-        .collect()
+    reserved_map_objs(doc, WIKI_META_KEY)
 }
 
 /// Get (or create) the wiki's metadata map; the conflict winner if several exist.
 fn wiki_meta_obj(doc: &mut AutoCommit) -> Result<ObjId, AutomergeError> {
-    match doc.get(ROOT, WIKI_META_KEY)? {
-        Some((Value::Object(ObjType::Map), id)) => Ok(id),
-        _ => doc.put_object(ROOT, WIKI_META_KEY, ObjType::Map),
-    }
+    reserved_map_obj(doc, WIKI_META_KEY)
 }
 
 /// Record a page's render `format` (`"md"` or `"wiki"`). A plain last-writer-wins scalar put:
@@ -1137,9 +1243,12 @@ fn read_wiki_meta(doc: &AutoCommit) -> HashMap<String, String> {
     out
 }
 
-/// Delete a wiki page; its body and its metadata entry.
+/// Delete a wiki page; its body and its metadata entry. The body delete is guarded: a page
+/// can exist only as an accepted pending edit (review mode), with no stored body yet.
 fn delete_wiki_page_op(doc: &mut AutoCommit, name: &str) -> Result<(), AutomergeError> {
-    doc.delete(ROOT, name)?;
+    if doc.get(ROOT, name)?.is_some() {
+        doc.delete(ROOT, name)?;
+    }
     for meta in wiki_meta_objs(doc) {
         if doc.get(&meta, name)?.is_some() {
             doc.delete(&meta, name)?;
@@ -1166,6 +1275,324 @@ fn rename_wiki_page_op(doc: &mut AutoCommit, from: &str, to: &str) -> Result<(),
         set_wiki_format(doc, to, &format)?;
     }
     delete_wiki_page_op(doc, from)
+}
+
+// --- wiki history + reviewed (pending) edits (11x) ---------------------------
+//
+// Three more reserved NUL-prefixed root keys beside `\u{0}meta`, invisible to the page reader
+// (`read_wiki_map` skips NUL keys and non-`Text` values) and merged straight through by older
+// peers, so none of this disturbs a client that predates the feature:
+//
+// * `\u{0}hist`    - `page name -> { revision id -> { author, ts, body, kind, actor, note } }`.
+//   Every materialized change appends a revision holding the **full body snapshot** (pages are
+//   small text; a snapshot makes diff/rollback trivial and survives merges losslessly).
+// * `\u{0}pending` - `pending id -> { page, author, ts, expires, body }`: member edits awaiting
+//   review while the server's review mode is on.
+// * `\u{0}cfg`     - wiki-wide settings; today `review_days` (0 = off), an owner/admin LWW put.
+//
+// **Auto-acceptance is read-time, not write-time.** A pending edit whose deadline has passed is
+// treated as the page's live body by every reader deterministically (`doc + now -> state`);
+// nobody races to "apply" it, which matters in a CRDT where two peers splicing the same text
+// concurrently would duplicate it. The expired entry is folded into `\u{0}hist` lazily, by the
+// next *direct* write to that page, under a **deterministic revision id (= the pending id)** so
+// two peers folding concurrently converge on one history entry.
+//
+// Like the meta map, each container is created lazily, so two peers can concurrently `put_object`
+// it and automerge keeps both with one winner: reads union **all** conflicting containers
+// (winner last) and deletes hit all of them.
+
+/// The reserved root key holding the wiki's revision history (`page -> rev id -> revision`).
+const WIKI_HIST_KEY: &str = "\u{0}hist";
+/// The reserved root key holding pending (review-mode) edits (`pending id -> pending edit`).
+const WIKI_PENDING_KEY: &str = "\u{0}pending";
+/// The reserved root key holding wiki-wide settings (`review_days`).
+const WIKI_CFG_KEY: &str = "\u{0}cfg";
+/// The `\u{0}cfg` field: days a member edit waits for review before auto-accepting; 0 = off.
+const WCFG_REVIEW_DAYS: &str = "review_days";
+/// The most a review window may be: an unreviewed edit auto-accepts after at most this long.
+pub const MAX_WIKI_REVIEW_DAYS: u32 = 30;
+/// One day in milliseconds (review windows are whole days).
+const DAY_MS: u64 = 86_400_000;
+
+const WH_AUTHOR: &str = "author";
+const WH_TS: &str = "ts";
+const WH_BODY: &str = "body";
+const WH_KIND: &str = "kind";
+const WH_ACTOR: &str = "actor";
+const WH_NOTE: &str = "note";
+
+const WP_PAGE: &str = "page";
+const WP_AUTHOR: &str = "author";
+const WP_TS: &str = "ts";
+const WP_EXPIRES: &str = "expires";
+const WP_BODY: &str = "body";
+
+/// One entry in a page's revision history, newest-last as [`read_wiki_history`] returns them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WikiRevision {
+    /// Stable revision id. For a revision born from a pending edit (approved / auto-accepted /
+    /// rejected) this **is** the pending id, so concurrent folding converges on one entry.
+    pub id: String,
+    /// The **proposer's** device fingerprint (who wrote the words), resolved to a display name
+    /// at render time like a message author.
+    pub author: String,
+    /// When the revision took effect, epoch-millis (for an auto-accepted edit, its deadline).
+    pub ts: u64,
+    /// The full page body as of this revision.
+    pub body: String,
+    /// What happened: `"edit"`, `"approve"`, `"auto"`, `"reject"`, `"rollback"`, `"delete"`,
+    /// or `"rename"`. A `"reject"` revision records the *proposed* body that was declined; it
+    /// was never live.
+    pub kind: String,
+    /// The reviewer's fingerprint for `"approve"`/`"reject"`; empty otherwise.
+    pub actor: String,
+    /// Context: the old name for `"rename"`, the restored revision id for `"rollback"`.
+    pub note: String,
+}
+
+/// A member edit sitting in the review queue.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WikiPendingEdit {
+    /// Stable id (random hex, minted like a message id).
+    pub id: String,
+    /// The page this edit targets (which may not exist yet: page creation queues too).
+    pub page: String,
+    /// The proposer's device fingerprint.
+    pub author: String,
+    /// When it was submitted, epoch-millis.
+    pub ts: u64,
+    /// When it auto-accepts if nobody reviews it, epoch-millis.
+    pub expires_ts: u64,
+    /// The proposed full page body.
+    pub body: String,
+}
+
+/// Every map currently living at reserved root key `key`, in automerge's conflict order (the
+/// **last** is the winner `doc.get` would return). Same union-read rationale as
+/// [`wiki_meta_objs`]: lazily-created containers can conflict, and a read must see all of them.
+fn reserved_map_objs(doc: &AutoCommit, key: &str) -> Vec<ObjId> {
+    doc.get_all(ROOT, key)
+        .into_iter()
+        .flatten()
+        .filter_map(|(v, id)| matches!(v, Value::Object(ObjType::Map)).then_some(id))
+        .collect()
+}
+
+/// Get (or create) the winner map at reserved root key `key`.
+fn reserved_map_obj(doc: &mut AutoCommit, key: &str) -> Result<ObjId, AutomergeError> {
+    match doc.get(ROOT, key)? {
+        Some((Value::Object(ObjType::Map), id)) => Ok(id),
+        _ => doc.put_object(ROOT, key, ObjType::Map),
+    }
+}
+
+/// Append one revision to `page`'s history. Writing the same revision id twice (concurrent
+/// folding of the same expired pending) converges: both writers store identical fields, and
+/// the id keys one entry.
+fn append_wiki_rev(
+    doc: &mut AutoCommit,
+    page: &str,
+    rev: &WikiRevision,
+) -> Result<(), AutomergeError> {
+    let hist = reserved_map_obj(doc, WIKI_HIST_KEY)?;
+    let pmap = match doc.get(&hist, page)? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(&hist, page, ObjType::Map)?,
+    };
+    let entry = match doc.get(&pmap, rev.id.as_str())? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(&pmap, rev.id.as_str(), ObjType::Map)?,
+    };
+    doc.put(&entry, WH_AUTHOR, rev.author.as_str())?;
+    doc.put(&entry, WH_TS, rev.ts as i64)?;
+    doc.put(&entry, WH_BODY, rev.body.as_str())?;
+    doc.put(&entry, WH_KIND, rev.kind.as_str())?;
+    doc.put(&entry, WH_ACTOR, rev.actor.as_str())?;
+    doc.put(&entry, WH_NOTE, rev.note.as_str())?;
+    Ok(())
+}
+
+/// Materialize `page`'s stored revision history, oldest first (ties broken by id, so every
+/// member reads the same order). Unions all conflicting containers at both levels; a revision
+/// id seen twice keeps the winner's copy.
+fn read_wiki_history(doc: &AutoCommit, page: &str) -> Vec<WikiRevision> {
+    let mut by_id: HashMap<String, WikiRevision> = HashMap::new();
+    for hist in reserved_map_objs(doc, WIKI_HIST_KEY) {
+        let pmaps: Vec<ObjId> = doc
+            .get_all(&hist, page)
+            .into_iter()
+            .flatten()
+            .filter_map(|(v, id)| matches!(v, Value::Object(ObjType::Map)).then_some(id))
+            .collect();
+        for pmap in pmaps {
+            for id in doc.keys(&pmap) {
+                if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&pmap, &id) {
+                    by_id.insert(
+                        id.clone(),
+                        WikiRevision {
+                            id,
+                            author: str_field(doc, &entry, WH_AUTHOR),
+                            ts: int_field(doc, &entry, WH_TS),
+                            body: str_field(doc, &entry, WH_BODY),
+                            kind: str_field(doc, &entry, WH_KIND),
+                            actor: str_field(doc, &entry, WH_ACTOR),
+                            note: str_field(doc, &entry, WH_NOTE),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    let mut out: Vec<WikiRevision> = by_id.into_values().collect();
+    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Store one pending edit in the review queue.
+fn write_wiki_pending(doc: &mut AutoCommit, p: &WikiPendingEdit) -> Result<(), AutomergeError> {
+    let pend = reserved_map_obj(doc, WIKI_PENDING_KEY)?;
+    let entry = match doc.get(&pend, p.id.as_str())? {
+        Some((Value::Object(ObjType::Map), id)) => id,
+        _ => doc.put_object(&pend, p.id.as_str(), ObjType::Map)?,
+    };
+    doc.put(&entry, WP_PAGE, p.page.as_str())?;
+    doc.put(&entry, WP_AUTHOR, p.author.as_str())?;
+    doc.put(&entry, WP_TS, p.ts as i64)?;
+    doc.put(&entry, WP_EXPIRES, p.expires_ts as i64)?;
+    doc.put(&entry, WP_BODY, p.body.as_str())?;
+    Ok(())
+}
+
+/// Every pending edit in the doc (expired ones included; callers split on `expires_ts`),
+/// oldest first, ties broken by id.
+fn read_wiki_pending_all(doc: &AutoCommit) -> Vec<WikiPendingEdit> {
+    let mut by_id: HashMap<String, WikiPendingEdit> = HashMap::new();
+    for pend in reserved_map_objs(doc, WIKI_PENDING_KEY) {
+        for id in doc.keys(&pend) {
+            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&pend, &id) {
+                let page = str_field(doc, &entry, WP_PAGE);
+                if page.is_empty() {
+                    continue; // a cleared/malformed entry is not a pending edit
+                }
+                by_id.insert(
+                    id.clone(),
+                    WikiPendingEdit {
+                        id,
+                        page,
+                        author: str_field(doc, &entry, WP_AUTHOR),
+                        ts: int_field(doc, &entry, WP_TS),
+                        expires_ts: int_field(doc, &entry, WP_EXPIRES),
+                        body: str_field(doc, &entry, WP_BODY),
+                    },
+                );
+            }
+        }
+    }
+    let mut out: Vec<WikiPendingEdit> = by_id.into_values().collect();
+    out.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+    out
+}
+
+/// Remove a pending edit from **all** conflicting queue containers (like the meta delete).
+fn delete_wiki_pending(doc: &mut AutoCommit, id: &str) -> Result<(), AutomergeError> {
+    for pend in reserved_map_objs(doc, WIKI_PENDING_KEY) {
+        if doc.get(&pend, id)?.is_some() {
+            doc.delete(&pend, id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Re-target every pending edit aimed at page `from` to page `to` (a rename keeps the queue
+/// meaningful; an orphaned proposal would otherwise resurrect the old name at its deadline).
+fn repoint_wiki_pending(doc: &mut AutoCommit, from: &str, to: &str) -> Result<(), AutomergeError> {
+    for pend in reserved_map_objs(doc, WIKI_PENDING_KEY) {
+        let ids: Vec<String> = doc.keys(&pend).collect();
+        for id in ids {
+            if let Ok(Some((Value::Object(ObjType::Map), entry))) = doc.get(&pend, &id) {
+                if str_field(doc, &entry, WP_PAGE) == from {
+                    doc.put(&entry, WP_PAGE, to)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The configured review window in days (0 = review off). Unions conflicting config maps,
+/// winner last; junk or out-of-range values read as "off" rather than surprising behavior.
+fn read_wiki_review_days(doc: &AutoCommit) -> u32 {
+    let mut days = 0u32;
+    for cfg in reserved_map_objs(doc, WIKI_CFG_KEY) {
+        let v = int_field(doc, &cfg, WCFG_REVIEW_DAYS);
+        if v <= MAX_WIKI_REVIEW_DAYS as u64 {
+            days = v as u32;
+        }
+    }
+    days
+}
+
+/// Set the review window (a plain LWW put; a toggle, like a page format).
+fn write_wiki_review_days(doc: &mut AutoCommit, days: u32) -> Result<(), AutomergeError> {
+    let cfg = reserved_map_obj(doc, WIKI_CFG_KEY)?;
+    doc.put(&cfg, WCFG_REVIEW_DAYS, days as i64)?;
+    Ok(())
+}
+
+/// The pending edits that have passed their deadline as of `now`: auto-accepted, in
+/// acceptance order (oldest deadline first, ties by id). The **last** one per page is that
+/// page's effective body.
+fn expired_wiki_pending(doc: &AutoCommit, now: u64) -> Vec<WikiPendingEdit> {
+    let mut out: Vec<WikiPendingEdit> = read_wiki_pending_all(doc)
+        .into_iter()
+        .filter(|p| p.expires_ts <= now)
+        .collect();
+    out.sort_by(|a, b| {
+        a.expires_ts
+            .cmp(&b.expires_ts)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// Overlay auto-accepted pending edits onto the stored page map: the read-time half of
+/// review mode. `map` is mutated into the **effective** wiki every reader (pages, bodies,
+/// backlinks, pinning) sees.
+fn overlay_accepted_pending(doc: &AutoCommit, now: u64, map: &mut HashMap<String, String>) {
+    for p in expired_wiki_pending(doc, now) {
+        map.insert(p.page, p.body);
+    }
+}
+
+/// Fold `page`'s expired pending edits into its history (kind `"auto"`, ts = the deadline,
+/// revision id = the pending id, so concurrent folds converge) and drop them from the queue.
+/// Called at the head of every direct write to the page; the caller then writes the new body,
+/// which supersedes the accepted content the history entry preserves.
+fn fold_expired_wiki_pending(
+    doc: &mut AutoCommit,
+    page: &str,
+    now: u64,
+) -> Result<(), AutomergeError> {
+    for p in expired_wiki_pending(doc, now) {
+        if p.page != page {
+            continue;
+        }
+        append_wiki_rev(
+            doc,
+            page,
+            &WikiRevision {
+                id: p.id.clone(),
+                author: p.author,
+                ts: p.expires_ts,
+                body: p.body,
+                kind: "auto".into(),
+                actor: String::new(),
+                note: String::new(),
+            },
+        )?;
+        delete_wiki_pending(doc, &p.id)?;
+    }
+    Ok(())
 }
 
 // --- server events (the calendar) -------------------------------------------
@@ -1196,12 +1623,18 @@ const C_START: &str = "start";
 const C_END: &str = "end";
 const C_AUTHOR: &str = "author";
 const C_CREATED: &str = "created";
+/// The event's optional poster image, stored as the file's lowercase hex content address (the
+/// same address a `![alt](cid:HEX)` embed names), never as inline bytes: the calendar document
+/// is replicated to every member, so it carries the pointer and the blob travels the file path.
+const C_IMAGE: &str = "image";
 
 /// Maximum length of a server-event title, in UTF-8 bytes. Events live in a document every
 /// member replicates, so; like the channel topic and the livery values; they are size-bounded.
 pub const MAX_EVENT_TITLE_BYTES: usize = 120;
 /// Maximum length of a server-event body (its longer description), in UTF-8 bytes.
 pub const MAX_EVENT_BODY_BYTES: usize = 1024;
+/// Maximum length of a server-event image reference: one 32-byte content address in hex.
+pub const MAX_EVENT_IMAGE_HEX: usize = 64;
 
 /// One scheduled server event as the UI sees it. The `author` is the creator's **device
 /// fingerprint** (the key its [`Profile`] is stored under), resolved to a display name at
@@ -1223,6 +1656,10 @@ pub struct ServerEvent {
     pub author: String,
     /// When the event was created, epoch-millis (the creator's injected clock).
     pub created_ts: u64,
+    /// The lowercase hex content address of the event's poster image, or empty for none. The
+    /// blob is fetched over the file path like any other embed, so an event whose image has not
+    /// arrived yet still reads fine; it just shows without a picture.
+    pub image: String,
 }
 
 /// Write one event entry into the calendar document, keyed by its id.
@@ -1242,6 +1679,7 @@ fn write_event(doc: &mut AutoCommit, e: &ServerEvent) -> Result<(), AutomergeErr
     doc.put(&entry, C_END, e.end_ts as i64)?;
     doc.put(&entry, C_AUTHOR, e.author.as_str())?;
     doc.put(&entry, C_CREATED, e.created_ts as i64)?;
+    doc.put(&entry, C_IMAGE, e.image.as_str())?;
     Ok(())
 }
 
@@ -1278,6 +1716,9 @@ fn read_events(doc: &AutoCommit) -> Vec<ServerEvent> {
                     end_ts: int_field(doc, &entry, C_END),
                     author: str_field(doc, &entry, C_AUTHOR),
                     created_ts: int_field(doc, &entry, C_CREATED),
+                    // A peer that predates the field, or one that wrote junk, reads as "no
+                    // image" rather than as a broken address the UI would try to fetch.
+                    image: hex_cid_field(doc, &entry, C_IMAGE),
                 });
             }
         }
@@ -1669,6 +2110,9 @@ pub struct FileUsage {
     pub status_count: usize,
     /// How many chat messages, across every channel open on this device, reference it.
     pub chat_count: usize,
+    /// How many calendar events use it: as their poster image, or through a marker in their
+    /// description.
+    pub event_count: usize,
 }
 
 impl FileUsage {
@@ -1679,7 +2123,21 @@ impl FileUsage {
     }
     /// Whether the file is referenced anywhere at all.
     pub fn is_empty(&self) -> bool {
-        self.wiki_pages.is_empty() && self.status_count == 0 && self.chat_count == 0
+        self.wiki_pages.is_empty()
+            && self.status_count == 0
+            && self.chat_count == 0
+            && self.event_count == 0
+    }
+}
+
+/// Read a content-address field: a lowercase hex string, or empty if absent, another type, or
+/// not a plausible address (so a malformed entry can never send the UI fetching nonsense).
+fn hex_cid_field(doc: &AutoCommit, obj: &ObjId, key: &str) -> String {
+    let v = str_field(doc, obj, key);
+    if !v.is_empty() && v.len() <= MAX_EVENT_IMAGE_HEX && v.bytes().all(|b| b.is_ascii_hexdigit()) {
+        v.to_ascii_lowercase()
+    } else {
+        String::new()
     }
 }
 
@@ -2072,6 +2530,85 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync
             .doc(DocType::Channel, channel)
             .map(|d| read_topic(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Queue a shared file in a channel's **jukebox**: the channel's persistent playlist. Replies
+    /// with the entry's fresh id. **Any member may**, exactly like setting the channel topic: the
+    /// queue is channel *content*, not presentation, so this is deliberately not owner/admin
+    /// gated. The `author` recorded in the entry is this device's own fingerprint, self-reported;
+    /// real attribution is the inner signature on the op in the CRDT layer, which is what an
+    /// audit reads, so a client lying in this field gains nothing.
+    ///
+    /// `cid` is the hex content address of an already-shared file; it is checked for shape only,
+    /// not for presence, since the blob may still be in flight to this device.
+    ///
+    /// Rejects a `cid` that is not 1..=[`MAX_JUKEBOX_CID_CHARS`] lowercase hex digits, a blank
+    /// name or one over [`MAX_JUKEBOX_NAME_BYTES`] UTF-8 bytes, and any add to a queue already
+    /// holding [`MAX_JUKEBOX_ENTRIES`] entries.
+    pub async fn jukebox_add(
+        &mut self,
+        channel: u128,
+        cid: &str,
+        name: &str,
+    ) -> Result<String, AppError> {
+        if !valid_juke_cid(cid) {
+            return Err(AppError::Invalid(
+                "a jukebox entry must name a file content address".into(),
+            ));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(AppError::Invalid("a jukebox entry needs a name".into()));
+        }
+        if name.len() > MAX_JUKEBOX_NAME_BYTES {
+            return Err(AppError::Invalid(format!(
+                "jukebox entry name too long: {} bytes (max {MAX_JUKEBOX_NAME_BYTES})",
+                name.len()
+            )));
+        }
+        if self.jukebox(channel).len() >= MAX_JUKEBOX_ENTRIES {
+            return Err(AppError::Invalid(format!(
+                "the jukebox is full (max {MAX_JUKEBOX_ENTRIES} entries)"
+            )));
+        }
+        let entry = JukeEntry {
+            id: self.sync.random_id(),
+            cid: cid.to_string(),
+            name: name.to_string(),
+            author: self.my_fingerprint(),
+            added_ms: self.sync.now_ms(),
+        };
+        let id = entry.id.clone();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                add_juke_entry_in_doc(d, &entry)
+            })
+            .await?;
+        Ok(id)
+    }
+
+    /// Remove a jukebox entry (by id) from a channel. **Any member may**, like adding one; a
+    /// shared queue that only its author could prune would strand tracks whose adder has left.
+    /// Idempotent: removing an entry that is already gone is `Ok`, so a double click (or two
+    /// members pruning the same track at once) is not an error.
+    pub async fn jukebox_remove(&mut self, channel: u128, entry: &str) -> Result<(), AppError> {
+        let entry = entry.to_string();
+        self.sync
+            .post(DocType::Channel, channel, move |d| {
+                remove_juke_entry_in_doc(d, &entry).map(|_| ())
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// A channel's jukebox queue, sorted by queue time ascending (empty if none, or if the
+    /// channel is not open). It lives in the channel's own document, so it replicates, persists
+    /// and catches up exactly like its messages.
+    pub fn jukebox(&self, channel: u128) -> Vec<JukeEntry> {
+        self.sync
+            .doc(DocType::Channel, channel)
+            .map(|d| read_jukebox(d.doc()))
             .unwrap_or_default()
     }
 
@@ -2727,6 +3264,11 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         for body in self.wiki_map().values() {
             scan_file_markers(body, &mut out);
         }
+        // Proposed bodies pin too: a file embedded in an edit awaiting review must still be
+        // fetchable when the edit lands, however long the window ran.
+        for p in self.wiki_pending_edits() {
+            scan_file_markers(&p.body, &mut out);
+        }
         out
     }
 
@@ -2763,10 +3305,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     .count()
             })
             .sum();
+        // An event names its poster image by address directly, not through a body marker, so
+        // that field is matched as well as scanned text.
+        let event_count = self
+            .events()
+            .iter()
+            .filter(|e| e.image == hex || mentions(&e.body))
+            .count();
         FileUsage {
             wiki_pages,
             status_count,
             chat_count,
+            event_count,
         }
     }
 
@@ -2829,14 +3379,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// post or a channel topic, so this is deliberately not owner/admin gated. The op is
     /// inner-signed by this device, so authorship is attributable exactly as for a message.
     ///
+    /// `image` is the hex content address of an already-shared file (empty for none); it is
+    /// checked for shape only, not for presence, since the blob may still be in flight to this
+    /// device when the event is written.
+    ///
     /// Rejects a blank title, a title over [`MAX_EVENT_TITLE_BYTES`] / a body over
-    /// [`MAX_EVENT_BODY_BYTES`] UTF-8 bytes, and an `end_ts` before `start_ts` (`0` = no end).
+    /// [`MAX_EVENT_BODY_BYTES`] UTF-8 bytes, an `end_ts` before `start_ts` (`0` = no end), and an
+    /// `image` that is not a hex address of at most [`MAX_EVENT_IMAGE_HEX`] digits.
     pub async fn create_event(
         &mut self,
         title: &str,
         body: &str,
         start_ts: u64,
         end_ts: u64,
+        image: &str,
     ) -> Result<String, AppError> {
         let title = title.trim();
         if title.is_empty() {
@@ -2859,6 +3415,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 "an event cannot end before it starts".into(),
             ));
         }
+        let image = image.trim().to_ascii_lowercase();
+        if !image.is_empty()
+            && (image.len() > MAX_EVENT_IMAGE_HEX || !image.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(AppError::Invalid(
+                "an event image must be a file content address".into(),
+            ));
+        }
         let event = ServerEvent {
             id: self.sync.random_id(),
             title: title.to_string(),
@@ -2867,6 +3431,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             end_ts,
             author: self.my_fingerprint(),
             created_ts: self.sync.now_ms(),
+            image,
         };
         let id = event.id.clone();
         self.sync
@@ -2923,11 +3488,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// The full wiki as a `page name -> body` map.
+    /// The full wiki as a `page name -> body` map: the **effective** wiki, with pending edits
+    /// past their review deadline overlaid as accepted (read-time auto-acceptance; see the
+    /// `\u{0}hist` module comment). Every consumer (pages, bodies, backlinks, pinning) reads
+    /// through this, so an auto-accepted edit is live everywhere at once.
     pub fn wiki_map(&self) -> HashMap<String, String> {
+        let now = self.sync.now_ms();
         self.sync
             .doc(DocType::Wiki, WIKI_DOC)
-            .map(|d| read_wiki_map(d.doc()))
+            .map(|d| {
+                let doc = d.doc();
+                let mut map = read_wiki_map(doc);
+                overlay_accepted_pending(doc, now, &mut map);
+                map
+            })
             .unwrap_or_default()
     }
 
@@ -2953,12 +3527,242 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Create or update a wiki page (the body merges character-by-character).
-    pub async fn write_wiki_page(&mut self, name: &str, body: &str) -> Result<(), AppError> {
+    ///
+    /// Returns whether the edit was **queued for review** rather than published: with the
+    /// server's review mode on (`wiki_review_days() > 0`), a plain member's save becomes a
+    /// [`WikiPendingEdit`] that an owner/admin approves or declines, auto-accepting at its
+    /// deadline; owner/admin saves always publish immediately. `Ok(false)` = live now.
+    pub async fn write_wiki_page(&mut self, name: &str, body: &str) -> Result<bool, AppError> {
+        self.write_wiki_page_as(name, body, "edit", "").await
+    }
+
+    /// The shared write path behind [`write_wiki_page`](Self::write_wiki_page) and
+    /// [`restore_wiki_page`](Self::restore_wiki_page): review-gate, fold, write, record.
+    async fn write_wiki_page_as(
+        &mut self,
+        name: &str,
+        body: &str,
+        kind: &str,
+        note: &str,
+    ) -> Result<bool, AppError> {
         let name = valid_wiki_name(name)?;
+        let me = self.my_fingerprint();
+        let now = self.sync.now_ms();
+        let review = self.wiki_review_days();
+        if review > 0 && matches!(self.my_role(), Role::Member) {
+            let pending = WikiPendingEdit {
+                id: self.sync.random_id(),
+                page: name,
+                author: me,
+                ts: now,
+                expires_ts: now.saturating_add(u64::from(review) * DAY_MS),
+                body: body.to_string(),
+            };
+            self.sync
+                .post(DocType::Wiki, WIKI_DOC, |d| write_wiki_pending(d, &pending))
+                .await?;
+            return Ok(true);
+        }
+        let rev = WikiRevision {
+            id: self.sync.random_id(),
+            author: me,
+            ts: now,
+            body: body.to_string(),
+            kind: kind.to_string(),
+            actor: String::new(),
+            note: note.to_string(),
+        };
         self.sync
-            .post(DocType::Wiki, WIKI_DOC, |d| write_wiki_page(d, &name, body))
+            .post(DocType::Wiki, WIKI_DOC, |d| {
+                fold_expired_wiki_pending(d, &name, now)?;
+                write_wiki_page(d, &name, body)?;
+                append_wiki_rev(d, &name, &rev)
+            })
+            .await?;
+        Ok(false)
+    }
+
+    /// A page's revision history, oldest first: the stored revisions plus a synthesized
+    /// `"auto"` entry for every pending edit past its deadline that no write has folded in
+    /// yet (so the reader always sees acceptance the moment it happens, storage or not).
+    pub fn wiki_history(&self, page: &str) -> Vec<WikiRevision> {
+        let now = self.sync.now_ms();
+        self.sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| {
+                let doc = d.doc();
+                let mut revs = read_wiki_history(doc, page);
+                for p in expired_wiki_pending(doc, now) {
+                    if p.page == page && !revs.iter().any(|r| r.id == p.id) {
+                        revs.push(WikiRevision {
+                            id: p.id,
+                            author: p.author,
+                            ts: p.expires_ts,
+                            body: p.body,
+                            kind: "auto".into(),
+                            actor: String::new(),
+                            note: String::new(),
+                        });
+                    }
+                }
+                revs.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+                revs
+            })
+            .unwrap_or_default()
+    }
+
+    /// The live review queue: pending edits still inside their window, oldest first. An edit
+    /// past its deadline is auto-accepted and no longer reviewable, so it is not listed.
+    pub fn wiki_pending_edits(&self) -> Vec<WikiPendingEdit> {
+        let now = self.sync.now_ms();
+        self.sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| {
+                read_wiki_pending_all(d.doc())
+                    .into_iter()
+                    .filter(|p| p.expires_ts > now)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The server's wiki review window in days; `0` = edits publish immediately (the default).
+    pub fn wiki_review_days(&self) -> u32 {
+        self.sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| read_wiki_review_days(d.doc()))
+            .unwrap_or_default()
+    }
+
+    /// Set the wiki review window: member edits wait up to `days` (max
+    /// [`MAX_WIKI_REVIEW_DAYS`]) for owner/admin review, then auto-accept; `0` turns review
+    /// off. **Owner or admin only** (honest-client gating, like the livery).
+    pub async fn set_wiki_review_days(&mut self, days: u32) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can set the wiki review window".into(),
+            ));
+        }
+        if days > MAX_WIKI_REVIEW_DAYS {
+            return Err(AppError::Invalid(format!(
+                "review window longer than {MAX_WIKI_REVIEW_DAYS} days"
+            )));
+        }
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| write_wiki_review_days(d, days))
             .await?;
         Ok(())
+    }
+
+    /// Approve a pending edit: publish its body and record an `"approve"` revision (id = the
+    /// pending id, author = the proposer, actor = the approver). **Owner or admin only.**
+    pub async fn approve_wiki_edit(&mut self, pending_id: &str) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can approve a wiki edit".into(),
+            ));
+        }
+        let now = self.sync.now_ms();
+        let Some(pending) = self
+            .sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| read_wiki_pending_all(d.doc()))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.id == pending_id)
+        else {
+            return Err(AppError::Invalid(format!(
+                "no pending wiki edit {pending_id:?}"
+            )));
+        };
+        let rev = WikiRevision {
+            id: pending.id.clone(),
+            author: pending.author.clone(),
+            ts: now,
+            body: pending.body.clone(),
+            kind: "approve".into(),
+            actor: self.my_fingerprint(),
+            note: String::new(),
+        };
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| {
+                // Fold first: an OLDER proposal for this page that lapsed while this one waited
+                // is already the live body by the read-time overlay. Left in the queue it would
+                // keep overriding the body this approval just published, so it becomes stored
+                // history here and stops being an overlay.
+                fold_expired_wiki_pending(d, &pending.page, now)?;
+                write_wiki_page(d, &pending.page, &pending.body)?;
+                append_wiki_rev(d, &pending.page, &rev)?;
+                delete_wiki_pending(d, &pending.id)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Decline a pending edit: drop it from the queue and record a `"reject"` revision holding
+    /// the proposed body (auditable, never live). **Owner or admin only.** An edit past its
+    /// deadline has already auto-accepted and errors; roll the page back instead.
+    pub async fn reject_wiki_edit(&mut self, pending_id: &str) -> Result<(), AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can decline a wiki edit".into(),
+            ));
+        }
+        let now = self.sync.now_ms();
+        let Some(pending) = self
+            .sync
+            .doc(DocType::Wiki, WIKI_DOC)
+            .map(|d| read_wiki_pending_all(d.doc()))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|p| p.id == pending_id)
+        else {
+            return Err(AppError::Invalid(format!(
+                "no pending wiki edit {pending_id:?}"
+            )));
+        };
+        if pending.expires_ts <= now {
+            return Err(AppError::Invalid(
+                "this edit already auto-accepted; roll the page back instead".into(),
+            ));
+        }
+        let rev = WikiRevision {
+            id: pending.id.clone(),
+            author: pending.author.clone(),
+            ts: now,
+            body: pending.body.clone(),
+            kind: "reject".into(),
+            actor: self.my_fingerprint(),
+            note: String::new(),
+        };
+        self.sync
+            .post(DocType::Wiki, WIKI_DOC, |d| {
+                // Same fold as on approval: a lapsed older proposal is settled content, not a
+                // standing overlay, and declining this one must not leave that ambiguous.
+                fold_expired_wiki_pending(d, &pending.page, now)?;
+                append_wiki_rev(d, &pending.page, &rev)?;
+                delete_wiki_pending(d, &pending.id)
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Restore a page to an earlier revision's body. Routed through the normal write path, so
+    /// with review mode on a plain member's restore queues like any other edit (returns
+    /// `true`); otherwise it publishes a `"rollback"` revision noting the restored id.
+    pub async fn restore_wiki_page(&mut self, page: &str, rev_id: &str) -> Result<bool, AppError> {
+        let page = valid_wiki_name(page)?;
+        let Some(rev) = self
+            .wiki_history(&page)
+            .into_iter()
+            .find(|r| r.id == rev_id)
+        else {
+            return Err(AppError::Invalid(format!(
+                "no revision {rev_id:?} of wiki page {page:?}"
+            )));
+        };
+        self.write_wiki_page_as(&page, &rev.body, "rollback", rev_id)
+            .await
     }
 
     /// Set a wiki page's render format; `"md"` or `"wiki"`; any other value is refused.
@@ -2981,27 +3785,63 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(())
     }
 
-    /// Delete a wiki page (and its format metadata). Errors if the page does not exist.
+    /// Delete a wiki page (and its format metadata). Errors if the page does not exist. With
+    /// review mode on, **owner/admin only** (a delete would sidestep review); its open
+    /// proposals are dropped with it, and a `"delete"` revision preserves the last body.
     pub async fn delete_wiki_page(&mut self, name: &str) -> Result<(), AppError> {
         let name = valid_wiki_name(name)?;
-        if !self.wiki_map().contains_key(&name) {
-            return Err(AppError::Invalid(format!("no such wiki page {name:?}")));
+        if self.wiki_review_days() > 0 && matches!(self.my_role(), Role::Member) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can delete a page while edit review is on".into(),
+            ));
         }
+        let Some(last_body) = self.wiki_map().get(&name).cloned() else {
+            return Err(AppError::Invalid(format!("no such wiki page {name:?}")));
+        };
+        let now = self.sync.now_ms();
+        let rev = WikiRevision {
+            id: self.sync.random_id(),
+            author: self.my_fingerprint(),
+            ts: now,
+            body: last_body,
+            kind: "delete".into(),
+            actor: String::new(),
+            note: String::new(),
+        };
         self.sync
-            .post(DocType::Wiki, WIKI_DOC, |d| delete_wiki_page_op(d, &name))
+            .post(DocType::Wiki, WIKI_DOC, |d| {
+                fold_expired_wiki_pending(d, &name, now)?;
+                let open: Vec<String> = read_wiki_pending_all(d)
+                    .into_iter()
+                    .filter(|p| p.page == name)
+                    .map(|p| p.id)
+                    .collect();
+                for id in open {
+                    delete_wiki_pending(d, &id)?;
+                }
+                append_wiki_rev(d, &name, &rev)?;
+                delete_wiki_page_op(d, &name)
+            })
             .await?;
         Ok(())
     }
 
     /// Rename a wiki page, carrying its body and format. Errors if `from` does not exist or
-    /// `to` already does (a rename never silently clobbers a page).
+    /// `to` already does (a rename never silently clobbers a page). With review mode on,
+    /// **owner/admin only**; open proposals follow the page to its new name, and a
+    /// `"rename"` revision on the new name notes where it came from.
     pub async fn rename_wiki_page(&mut self, from: &str, to: &str) -> Result<(), AppError> {
         let from = valid_wiki_name(from)?;
         let to = valid_wiki_name(to)?;
-        let pages = self.wiki_map();
-        if !pages.contains_key(&from) {
-            return Err(AppError::Invalid(format!("no such wiki page {from:?}")));
+        if self.wiki_review_days() > 0 && matches!(self.my_role(), Role::Member) {
+            return Err(AppError::Invalid(
+                "only an owner or admin can rename a page while edit review is on".into(),
+            ));
         }
+        let pages = self.wiki_map();
+        let Some(body) = pages.get(&from).cloned() else {
+            return Err(AppError::Invalid(format!("no such wiki page {from:?}")));
+        };
         if from != to && pages.contains_key(&to) {
             return Err(AppError::Invalid(format!(
                 "wiki page {to:?} already exists"
@@ -3010,9 +3850,25 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         if from == to {
             return Ok(());
         }
+        let now = self.sync.now_ms();
+        let rev = WikiRevision {
+            id: self.sync.random_id(),
+            author: self.my_fingerprint(),
+            ts: now,
+            body: body.clone(),
+            kind: "rename".into(),
+            actor: String::new(),
+            note: from.clone(),
+        };
         self.sync
             .post(DocType::Wiki, WIKI_DOC, |d| {
-                rename_wiki_page_op(d, &from, &to)
+                fold_expired_wiki_pending(d, &from, now)?;
+                rename_wiki_page_op(d, &from, &to)?;
+                // The stored body the op copied can trail the effective one (an accepted
+                // pending not folded elsewhere); write the body every reader saw.
+                write_wiki_page(d, &to, &body)?;
+                repoint_wiki_pending(d, &from, &to)?;
+                append_wiki_rev(d, &to, &rev)
             })
             .await?;
         Ok(())
@@ -4685,6 +5541,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_jukebox_queue_validates_its_entries_and_is_count_capped() {
+        let mut alice = founder();
+        alice.open_channel(GENERAL).await.unwrap();
+        assert!(alice.jukebox(GENERAL).is_empty(), "no queue by default");
+
+        let id = alice
+            .jukebox_add(GENERAL, "deadbeef", "Track One")
+            .await
+            .unwrap();
+        let queue = alice.jukebox(GENERAL);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+        assert_eq!(queue[0].cid, "deadbeef");
+        assert_eq!(queue[0].name, "Track One");
+        assert_eq!(queue[0].author, alice.my_fingerprint());
+        assert_eq!(queue[0].added_ms, 1_000, "stamped from the injected clock");
+        // A queue op is not a message; the channel's chat is untouched.
+        assert!(alice.messages(GENERAL).is_empty());
+
+        // A removal addresses exactly one entry, and removing a missing entry is a no-op.
+        alice.jukebox_remove(GENERAL, &id).await.unwrap();
+        assert!(alice.jukebox(GENERAL).is_empty());
+        alice.jukebox_remove(GENERAL, &id).await.unwrap();
+        alice.jukebox_remove(GENERAL, "nosuchentry").await.unwrap();
+
+        // A cid must be lowercase hex within budget, and a name must be non-blank and within
+        // its byte budget; every refusal leaves the queue as it was.
+        for bad in ["", "DEADBEEF", "dead beef", "deadbeefg", "0x12"] {
+            assert!(
+                alice.jukebox_add(GENERAL, bad, "Track").await.is_err(),
+                "cid {bad:?} is not a content address"
+            );
+        }
+        let long_cid = "a".repeat(MAX_JUKEBOX_CID_CHARS + 1);
+        assert!(alice
+            .jukebox_add(GENERAL, &long_cid, "Track")
+            .await
+            .is_err());
+        assert!(alice.jukebox_add(GENERAL, "beef", "   ").await.is_err());
+        let over = "n".repeat(MAX_JUKEBOX_NAME_BYTES + 1);
+        assert!(alice.jukebox_add(GENERAL, "beef", &over).await.is_err());
+        // The name cap counts UTF-8 *bytes*, not chars, like the topic cap.
+        let multibyte = "é".repeat(MAX_JUKEBOX_NAME_BYTES / 2 + 1); // 2 bytes each
+        assert!(alice
+            .jukebox_add(GENERAL, "beef", &multibyte)
+            .await
+            .is_err());
+        assert!(alice.jukebox(GENERAL).is_empty(), "nothing was queued");
+
+        // Exactly at the cap is fine; the next add is refused and changes nothing.
+        for i in 0..MAX_JUKEBOX_ENTRIES {
+            alice
+                .jukebox_add(GENERAL, &format!("bee{i:x}"), &format!("Track {i}"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+        assert!(alice
+            .jukebox_add(GENERAL, "beef", "One Too Many")
+            .await
+            .is_err());
+        assert_eq!(alice.jukebox(GENERAL).len(), MAX_JUKEBOX_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn a_jukebox_queue_round_trips_between_two_members() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+        let id = alice
+            .jukebox_add(GENERAL, "cafe01", "Opening Theme")
+            .await
+            .unwrap();
+
+        // Bob joins via an invite, over the hub (Alice serves the join with a tick).
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let bob_net = hub.join(PeerId::from_u64(2));
+        let (bob, _) = tokio::join!(
+            Server::join(
+                bob_net,
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(ManualClock::new(2_000)),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+
+        // The queue rides the channel document, so catch-up delivers it with the messages.
+        bob.open_channel(GENERAL).await.unwrap();
+        let (applied, _) = tokio::join!(
+            bob.request_channel_catchup(alice_peer, GENERAL),
+            alice.sync_once(),
+        );
+        assert_eq!(applied.unwrap(), 1, "Bob applied Alice's queue op");
+        let queue = bob.jukebox(GENERAL);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].id, id);
+        assert_eq!(queue[0].cid, "cafe01");
+        assert_eq!(queue[0].name, "Opening Theme");
+        assert_eq!(
+            queue[0].author,
+            alice.my_fingerprint(),
+            "the entry carries Alice's authorship, not the reader's"
+        );
+
+        // …and *any* member may prune it; Bob is not the owner and is not refused.
+        assert_ne!(bob.my_role(), Role::Owner);
+        bob.jukebox_remove(GENERAL, &id).await.unwrap();
+        assert!(bob.jukebox(GENERAL).is_empty());
+        assert!(alice.sync_once().await.unwrap());
+        assert!(
+            alice.jukebox(GENERAL).is_empty(),
+            "the removal reached Alice"
+        );
+    }
+
+    #[tokio::test]
     async fn a_member_edits_and_deletes_its_own_messages_by_stable_id() {
         let mut alice = founder();
         alice.open_channel(GENERAL).await.unwrap();
@@ -5177,7 +6163,7 @@ mod tests {
         // channel; so an event Alice created reaches the joiner.
         alice.open_calendar().await.unwrap();
         alice
-            .create_event("Launch party", "bring cake", 9_000, 0)
+            .create_event("Launch party", "bring cake", 9_000, 0, "")
             .await
             .unwrap();
         bob.open_calendar().await.unwrap();
@@ -5197,7 +6183,10 @@ mod tests {
             bob.delete_event(&events[0].id).await.is_err(),
             "a non-author, non-moderator cannot delete someone else's event"
         );
-        let bobs = bob.create_event("Bob's raid", "", 8_000, 0).await.unwrap();
+        let bobs = bob
+            .create_event("Bob's raid", "", 8_000, 0, "")
+            .await
+            .unwrap();
         assert_eq!(bob.events().len(), 2);
         bob.delete_event(&bobs).await.unwrap();
         assert_eq!(bob.events().len(), 1, "Bob removed his own event");
@@ -5840,11 +6829,11 @@ mod tests {
 
         // Created out of order; `events()` returns them by start time ascending.
         let later = alice
-            .create_event("Retro", "how did it go", 5_000, 6_000)
+            .create_event("Retro", "how did it go", 5_000, 6_000, "")
             .await
             .unwrap();
         let sooner = alice
-            .create_event("  Standup  ", "", 2_000, 0)
+            .create_event("  Standup  ", "", 2_000, 0, "")
             .await
             .unwrap();
         let feed = alice.events();
@@ -5863,21 +6852,21 @@ mod tests {
 
         // Validation: a blank title, over-cap title/body, and an end before the start are refused.
         assert!(matches!(
-            alice.create_event("   ", "b", 1, 0).await,
+            alice.create_event("   ", "b", 1, 0, "").await,
             Err(AppError::Invalid(_))
         ));
         let over_title = "t".repeat(MAX_EVENT_TITLE_BYTES + 1);
         assert!(matches!(
-            alice.create_event(&over_title, "", 1, 0).await,
+            alice.create_event(&over_title, "", 1, 0, "").await,
             Err(AppError::Invalid(_))
         ));
         let over_body = "b".repeat(MAX_EVENT_BODY_BYTES + 1);
         assert!(matches!(
-            alice.create_event("ok", &over_body, 1, 0).await,
+            alice.create_event("ok", &over_body, 1, 0, "").await,
             Err(AppError::Invalid(_))
         ));
         assert!(matches!(
-            alice.create_event("backwards", "", 5_000, 4_999).await,
+            alice.create_event("backwards", "", 5_000, 4_999, "").await,
             Err(AppError::Invalid(_))
         ));
         // …but exactly at each cap is accepted, and `end_ts == start_ts` is a zero-length event.
@@ -5887,6 +6876,7 @@ mod tests {
                 &"b".repeat(MAX_EVENT_BODY_BYTES),
                 7_000,
                 7_000,
+                "",
             )
             .await
             .unwrap();
@@ -5901,6 +6891,55 @@ mod tests {
             alice.delete_event("no-such-event").await,
             Err(AppError::Invalid(_))
         ));
+    }
+
+    /// An event's poster image is a plain content address: normalized on the way in, refused when
+    /// it isn't a hex address, and reported by `file_usage` so Properties doesn't claim the file
+    /// is unused while an event is showing it.
+    #[tokio::test]
+    async fn event_image_is_a_validated_content_address_and_counts_as_usage() {
+        let mut alice = founder();
+        alice.open_calendar().await.unwrap();
+        alice.open_files().await.unwrap();
+
+        let cid = alice
+            .add_file("poster.png", "image/png", "", b"png")
+            .await
+            .unwrap();
+        let hex = cid.to_hex();
+        alice
+            .create_event("Launch", "", 4_000, 0, &hex.to_uppercase())
+            .await
+            .unwrap();
+        assert_eq!(
+            alice.events()[0].image,
+            hex,
+            "the address is stored lowercase, whatever case it arrived in"
+        );
+
+        // Shape is all that is checked, but it IS checked: a non-address never reaches the doc.
+        assert!(matches!(
+            alice.create_event("Bad", "", 4_000, 0, "not-a-cid").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice
+                .create_event("Long", "", 4_000, 0, &"a".repeat(MAX_EVENT_IMAGE_HEX + 1))
+                .await,
+            Err(AppError::Invalid(_))
+        ));
+        assert_eq!(alice.events().len(), 1, "only the valid create landed");
+
+        // The poster is named by the `image` field, not by a body marker, so usage has to match
+        // that field too; and an event body marker counts like any other reference.
+        let usage = alice.file_usage(&cid);
+        assert_eq!(usage.event_count, 1);
+        assert!(!usage.is_empty(), "an event-only use is still a use");
+        alice
+            .create_event("Also", &format!("see ![p](cid:{hex})"), 5_000, 0, "")
+            .await
+            .unwrap();
+        assert_eq!(alice.file_usage(&cid).event_count, 2);
     }
 
     #[tokio::test]
@@ -6103,6 +7142,368 @@ mod tests {
             read_wiki_map(&a).get("P").map(String::as_str),
             Some("Hello dear world!")
         );
+    }
+
+    // ---------- wiki history + review mode (11x) ----------
+
+    /// Found Alice and join Bob over one hub, both with the SAME manual clock, wikis open.
+    async fn wiki_duo(
+        clock: &ManualClock,
+    ) -> (
+        Server<MemNetwork, ChaCha20Rng>,
+        Server<MemNetwork, ChaCha20Rng>,
+        PeerId,
+    ) {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = Server::found(
+            hub.join(alice_peer),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(clock.clone()),
+            "alice",
+        )
+        .unwrap();
+        alice.subscribe_control().await.unwrap();
+        let invite = alice.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(clock.clone()),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        alice.open_wiki().await.unwrap();
+        bob.open_wiki().await.unwrap();
+        (alice, bob, alice_peer)
+    }
+
+    #[tokio::test]
+    async fn wiki_history_records_edits_and_a_rollback_restores() {
+        let clock = ManualClock::new(T0);
+        let hub = Hub::new();
+        let mut alice = founder_on(&hub, PeerId::from_u64(1), &clock, 1);
+        alice.open_wiki().await.unwrap();
+        assert!(
+            !alice.write_wiki_page("Home", "first").await.unwrap(),
+            "review off: the write publishes"
+        );
+        clock.advance_ms(1_000);
+        alice.write_wiki_page("Home", "second").await.unwrap();
+
+        let revs = alice.wiki_history("Home");
+        assert_eq!(revs.len(), 2);
+        assert!(revs.iter().all(|r| r.kind == "edit"));
+        assert!(revs.iter().all(|r| r.author == alice.my_fingerprint()));
+        assert_eq!(revs[0].body, "first");
+        assert_eq!(revs[1].body, "second");
+        assert!(revs[0].ts <= revs[1].ts);
+        assert!(alice.wiki_history("Nowhere").is_empty());
+
+        // Roll back to the first revision: the body returns and the act is itself a revision.
+        clock.advance_ms(1_000);
+        let queued = alice
+            .restore_wiki_page("Home", &revs[0].id.clone())
+            .await
+            .unwrap();
+        assert!(!queued);
+        assert_eq!(alice.read_wiki_page("Home"), "first");
+        let revs2 = alice.wiki_history("Home");
+        assert_eq!(revs2.len(), 3);
+        assert_eq!(revs2[2].kind, "rollback");
+        assert_eq!(revs2[2].note, revs[0].id);
+        assert!(matches!(
+            alice.restore_wiki_page("Home", "no-such-rev").await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_wiki_review_window_is_role_gated_and_capped() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, _) = wiki_duo(&clock).await;
+        assert_eq!(alice.wiki_review_days(), 0, "review starts off");
+
+        assert!(matches!(
+            bob.set_wiki_review_days(5).await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            alice.set_wiki_review_days(MAX_WIKI_REVIEW_DAYS + 1).await,
+            Err(AppError::Invalid(_))
+        ));
+        alice.set_wiki_review_days(5).await.unwrap();
+        assert_eq!(alice.wiki_review_days(), 5);
+        // The setting is shared state: Bob reads it once the op reaches him.
+        bob.sync_once().await.unwrap();
+        assert_eq!(bob.wiki_review_days(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_member_edit_queues_and_an_admin_approves_or_declines() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, _) = wiki_duo(&clock).await;
+        alice.set_wiki_review_days(5).await.unwrap();
+        bob.sync_once().await.unwrap();
+
+        // Bob (a plain member) saves: queued, not published; the owner publishes directly.
+        assert!(bob.write_wiki_page("Rules", "be nice").await.unwrap());
+        assert!(!bob.wiki_map().contains_key("Rules"), "not live yet");
+        alice.sync_once().await.unwrap();
+        let queue = alice.wiki_pending_edits();
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0].page, "Rules");
+        assert_eq!(queue[0].author, bob.my_fingerprint());
+        assert_eq!(queue[0].expires_ts, T0 + 5 * DAY_MS);
+        assert!(
+            !alice.write_wiki_page("Home", "hi").await.unwrap(),
+            "owner edits bypass review"
+        );
+
+        // Bob may not approve; Alice approves and the page goes live with a history record.
+        assert!(matches!(
+            bob.approve_wiki_edit(&queue[0].id).await,
+            Err(AppError::Invalid(_))
+        ));
+        alice.approve_wiki_edit(&queue[0].id).await.unwrap();
+        assert_eq!(alice.read_wiki_page("Rules"), "be nice");
+        assert!(alice.wiki_pending_edits().is_empty());
+        let revs = alice.wiki_history("Rules");
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].kind, "approve");
+        assert_eq!(revs[0].author, bob.my_fingerprint());
+        assert_eq!(revs[0].actor, alice.my_fingerprint());
+        assert_eq!(revs[0].id, queue[0].id);
+        for _ in 0..4 {
+            bob.sync_once().await.unwrap();
+        }
+        assert_eq!(bob.read_wiki_page("Rules"), "be nice");
+
+        // A second proposal is declined: never live, dropped from the queue, auditable.
+        clock.advance_ms(1_000);
+        assert!(bob.write_wiki_page("Rules", "no rules!").await.unwrap());
+        alice.sync_once().await.unwrap();
+        let queue = alice.wiki_pending_edits();
+        assert_eq!(queue.len(), 1);
+        alice.reject_wiki_edit(&queue[0].id).await.unwrap();
+        assert_eq!(alice.read_wiki_page("Rules"), "be nice");
+        assert!(alice.wiki_pending_edits().is_empty());
+        let revs = alice.wiki_history("Rules");
+        assert_eq!(revs.len(), 2);
+        assert_eq!(revs[1].kind, "reject");
+        assert_eq!(revs[1].body, "no rules!");
+        assert!(matches!(
+            alice.approve_wiki_edit("no-such-pending").await,
+            Err(AppError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unreviewed_edit_auto_accepts_at_its_deadline() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, _) = wiki_duo(&clock).await;
+        alice.set_wiki_review_days(3).await.unwrap();
+        bob.sync_once().await.unwrap();
+
+        assert!(bob.write_wiki_page("Lore", "the tale").await.unwrap());
+        alice.sync_once().await.unwrap();
+        assert!(!alice.wiki_map().contains_key("Lore"));
+
+        // Nobody reviews it; at the deadline every reader sees it accepted, deterministically.
+        clock.advance_ms(3 * DAY_MS);
+        assert_eq!(alice.read_wiki_page("Lore"), "the tale");
+        assert_eq!(bob.read_wiki_page("Lore"), "the tale");
+        assert!(
+            alice.wiki_pending_edits().is_empty(),
+            "past its window it is no longer reviewable"
+        );
+        let revs = alice.wiki_history("Lore");
+        assert_eq!(revs.len(), 1);
+        assert_eq!(revs[0].kind, "auto");
+        assert_eq!(revs[0].author, bob.my_fingerprint());
+        assert_eq!(revs[0].ts, T0 + 3 * DAY_MS);
+        // Declining now is too late.
+        assert!(matches!(
+            alice.reject_wiki_edit(&revs[0].id).await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // The next direct write folds the acceptance into stored history and supersedes it.
+        clock.advance_ms(1_000);
+        alice
+            .write_wiki_page("Lore", "the tale, edited")
+            .await
+            .unwrap();
+        let revs = alice.wiki_history("Lore");
+        assert_eq!(revs.len(), 2);
+        assert_eq!(revs[0].kind, "auto");
+        assert_eq!(revs[1].kind, "edit");
+        assert_eq!(alice.read_wiki_page("Lore"), "the tale, edited");
+        bob.sync_once().await.unwrap();
+        assert_eq!(bob.read_wiki_page("Lore"), "the tale, edited");
+        assert_eq!(bob.wiki_history("Lore").len(), 2);
+    }
+
+    #[tokio::test]
+    async fn approving_a_proposal_settles_an_older_one_that_lapsed_while_it_waited() {
+        // Two proposals for one page. The first lapses (auto-accepted by the read-time overlay)
+        // while the second is still in review. Approving the second must WIN: if the lapsed one
+        // stayed in the queue it would keep overlaying its body on top of the approval.
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, _) = wiki_duo(&clock).await;
+        alice.set_wiki_review_days(2).await.unwrap();
+        bob.sync_once().await.unwrap();
+
+        assert!(bob.write_wiki_page("Lore", "first draft").await.unwrap());
+        clock.advance_ms(DAY_MS);
+        assert!(bob.write_wiki_page("Lore", "second draft").await.unwrap());
+        alice.sync_once().await.unwrap();
+        assert_eq!(alice.wiki_pending_edits().len(), 2);
+
+        // Day 2 + a moment: the first proposal's window has lapsed, the second's has not.
+        clock.advance_ms(DAY_MS + 1);
+        let queue = alice.wiki_pending_edits();
+        assert_eq!(queue.len(), 1, "only the second is still reviewable");
+        assert_eq!(
+            alice.read_wiki_page("Lore"),
+            "first draft",
+            "the lapsed one is live"
+        );
+
+        alice.approve_wiki_edit(&queue[0].id).await.unwrap();
+        assert_eq!(
+            alice.read_wiki_page("Lore"),
+            "second draft",
+            "the approval is the live body; the lapsed proposal must not override it"
+        );
+        assert!(alice.wiki_pending_edits().is_empty());
+        for _ in 0..4 {
+            bob.sync_once().await.unwrap();
+        }
+        assert_eq!(bob.read_wiki_page("Lore"), "second draft");
+
+        // Both are recorded, in the order they took effect.
+        let revs = alice.wiki_history("Lore");
+        assert_eq!(revs.len(), 2);
+        assert_eq!(revs[0].kind, "auto");
+        assert_eq!(revs[0].body, "first draft");
+        assert_eq!(revs[1].kind, "approve");
+        assert_eq!(revs[1].body, "second draft");
+    }
+
+    #[tokio::test]
+    async fn review_mode_gates_member_delete_and_rename() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, _) = wiki_duo(&clock).await;
+        alice
+            .write_wiki_page("Guides/Setup", "plug it in")
+            .await
+            .unwrap();
+        bob.sync_once().await.unwrap();
+
+        // Review off: a member deletes/renames like today.
+        clock.advance_ms(1_000);
+        bob.rename_wiki_page("Guides/Setup", "Guides/Install")
+            .await
+            .unwrap();
+        alice.sync_once().await.unwrap();
+        assert_eq!(alice.read_wiki_page("Guides/Install"), "plug it in");
+        let revs = alice.wiki_history("Guides/Install");
+        assert_eq!(revs.last().unwrap().kind, "rename");
+        assert_eq!(revs.last().unwrap().note, "Guides/Setup");
+
+        // Review on: a member's delete/rename would sidestep the queue, so both are gated.
+        alice.set_wiki_review_days(7).await.unwrap();
+        bob.sync_once().await.unwrap();
+        assert!(matches!(
+            bob.delete_wiki_page("Guides/Install").await,
+            Err(AppError::Invalid(_))
+        ));
+        assert!(matches!(
+            bob.rename_wiki_page("Guides/Install", "Elsewhere").await,
+            Err(AppError::Invalid(_))
+        ));
+
+        // The owner's delete records the last body and drops open proposals for the page.
+        assert!(bob
+            .write_wiki_page("Guides/Install", "unplug it")
+            .await
+            .unwrap());
+        alice.sync_once().await.unwrap();
+        assert_eq!(alice.wiki_pending_edits().len(), 1);
+        clock.advance_ms(1_000);
+        alice.delete_wiki_page("Guides/Install").await.unwrap();
+        assert!(!alice.wiki_map().contains_key("Guides/Install"));
+        assert!(alice.wiki_pending_edits().is_empty());
+        let revs = alice.wiki_history("Guides/Install");
+        assert_eq!(revs.last().unwrap().kind, "delete");
+        assert_eq!(revs.last().unwrap().body, "plug it in");
+        // With the page (and its proposals) gone, the deadline passing resurrects nothing.
+        clock.advance_ms(8 * DAY_MS);
+        assert!(!alice.wiki_map().contains_key("Guides/Install"));
+    }
+
+    #[test]
+    fn concurrent_folds_of_one_expired_pending_converge_to_one_revision() {
+        // Two peers both fold the same expired pending edit into history (each alongside its
+        // own direct write), then merge: the deterministic revision id (= the pending id)
+        // keys ONE history entry, and the queue entry is gone everywhere.
+        let mut base = AutoCommit::new();
+        write_wiki_page(&mut base, "P", "old").unwrap();
+        write_wiki_pending(
+            &mut base,
+            &WikiPendingEdit {
+                id: "pend-1".into(),
+                page: "P".into(),
+                author: "carol".into(),
+                ts: 1_000,
+                expires_ts: 2_000,
+                body: "proposed".into(),
+            },
+        )
+        .unwrap();
+        let mut a = base.fork();
+        let mut b = base.fork();
+        fold_expired_wiki_pending(&mut a, "P", 3_000).unwrap();
+        write_wiki_page(&mut a, "P", "a's edit").unwrap();
+        fold_expired_wiki_pending(&mut b, "P", 3_000).unwrap();
+        write_wiki_page(&mut b, "P", "b's edit").unwrap();
+        a.merge(&mut b).unwrap();
+
+        assert!(read_wiki_pending_all(&a).is_empty());
+        let revs = read_wiki_history(&a, "P");
+        assert_eq!(revs.len(), 1, "one converged auto revision, not two");
+        assert_eq!(revs[0].id, "pend-1");
+        assert_eq!(revs[0].kind, "auto");
+        assert_eq!(revs[0].body, "proposed");
+    }
+
+    #[tokio::test]
+    async fn a_pending_embed_pins_its_file() {
+        let clock = ManualClock::new(T0);
+        let (mut alice, mut bob, _) = wiki_duo(&clock).await;
+        alice.open_files().await.unwrap();
+        bob.open_files().await.unwrap();
+        alice.set_wiki_review_days(5).await.unwrap();
+        bob.sync_once().await.unwrap();
+
+        let cid = bob
+            .add_file("cat.png", "image/png", "wiki/Cats", b"CAT")
+            .await
+            .unwrap();
+        assert!(bob
+            .write_wiki_page("Cats", &format!("![a cat](cid:{})", cid.to_hex()))
+            .await
+            .unwrap());
+        // Queued, not live; but the embed must survive until the edit lands either way.
+        assert!(!bob.wiki_map().contains_key("Cats"));
+        assert!(bob.wiki_pinned_cids().contains(&cid.to_hex()));
     }
 
     #[tokio::test]

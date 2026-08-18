@@ -1,6 +1,6 @@
 [package]
 name = "mewtual-desktop"
-version = "0.0.0"
+version = "0.1.0-alpha.1"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -27,6 +27,8 @@ catcoms-net = { path = "../../../crates/catcoms-net" }
 catcoms-rt = { path = "../../../crates/catcoms-rt" }
 catcoms-sync = { path = "../../../crates/catcoms-sync" }
 catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]

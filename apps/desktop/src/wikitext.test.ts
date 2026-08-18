@@ -18,6 +18,7 @@ import {
   escText,
   inlineToHtml,
   parseRedirect,
+  plainSummary,
   stripMagicWords,
   tocDirective,
   wikitextToHtml,
@@ -343,6 +344,9 @@ test("an embed's alt text is attribute-escaped", () => {
 
 // --- things deliberately not supported ------------------------------------------------------------------
 
+// The converter has no template engine: a `{{template}}` stays literal here. The one exception
+// lives a layer up, in `render.ts`, which lifts a page's `{{Infobox …}}` block out before either
+// converter runs (see `infobox.ts`), so this pass never sees it.
 test("{{templates}} render as literal text", () => {
   assert.equal(wikitextToHtml("{{Infobox|a=1}}"), "<p>{{Infobox|a=1}}</p>");
 });
@@ -447,4 +451,32 @@ test("WIKI_LINK_RE splits page from label and leaves the label optional", () => 
 
 test("WIKI_LINK_RE rejects a page name long enough to be a denial-of-service", () => {
   assert.equal(WIKI_LINK_RE.exec(`[[${"x".repeat(200)}]]`), null);
+});
+
+// --- link-card previews ---------------------------------------------------------------------------
+
+test("plainSummary reads out the prose of either format, not its markup", () => {
+  assert.equal(
+    plainSummary("== Rules ==\n* '''No''' spoilers\n* Be [[Kind|kind]]"),
+    "Rules No spoilers Be kind",
+  );
+  assert.equal(
+    plainSummary("# Heading\n\nSome **bold** text with a [label](file:ab) link."),
+    "Heading Some bold text with a label link.",
+  );
+});
+
+test("plainSummary drops what a preview cannot show: embeds, code, templates, tables", () => {
+  assert.equal(plainSummary("![a cat](cid:deadbeef) Look at this"), "Look at this");
+  assert.equal(plainSummary("before\n```\ncode()\n```\nafter"), "before after");
+  assert.equal(plainSummary("{{infobox}}Body"), "Body");
+  assert.equal(plainSummary("| a | b |\nprose"), "prose");
+  assert.equal(plainSummary("#REDIRECT [[Elsewhere]]"), "");
+});
+
+test("plainSummary bounds the preview and marks where it was cut", () => {
+  const out = plainSummary("word ".repeat(80), 20);
+  assert.equal(out, "word word word word…", "cut at the bound, with no trailing space before it");
+  assert.ok(out.length <= 21, "never longer than the bound plus the ellipsis");
+  assert.equal(plainSummary("short", 20), "short", "under the bound, nothing is added");
 });

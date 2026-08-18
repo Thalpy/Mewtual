@@ -239,6 +239,22 @@ struct UiEvent {
     start_ts: u64,
     end_ts: u64,
     author: String,
+    /// Hex content address of the event's poster image, or empty for none; downloaded through
+    /// the same `download_file` path as an inline embed.
+    image: String,
+}
+
+/// One channel-jukebox entry as serialized to the frontend. `cid` is the hex content address of
+/// the queued file (downloaded through the same `download_file` path as any other embed),
+/// `added_ms` is epoch-millis, and `author` is the adder's device fingerprint, resolved to a
+/// display name via the profiles map exactly like a message author.
+#[derive(Serialize, Clone)]
+struct UiJukeEntry {
+    id: String,
+    cid: String,
+    name: String,
+    author: String,
+    added_ms: u64,
 }
 
 /// A shared file as serialized to the frontend. `cid` is the hex content address used to
@@ -273,6 +289,8 @@ struct UiFileUsage {
     status_count: usize,
     /// Chat messages referencing it, across every channel open on this device.
     chat_count: usize,
+    /// Calendar events using it as their poster image or referencing it in their description.
+    event_count: usize,
     /// `wiki_pages` is non-empty ⇒ the file is wiki-pinned and must never drop out of
     /// circulation, whatever its recorded expiry says.
     pinned: bool,
@@ -1634,6 +1652,7 @@ async fn get_file_usage(
         wiki_pages: usage.wiki_pages,
         status_count: usage.status_count,
         chat_count: usage.chat_count,
+        event_count: usage.event_count,
     })
 }
 
@@ -1728,6 +1747,8 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
 /// Create a server event; re-seals the server. **Any member may**; an event is server content,
 /// like a channel or a status post. Rejected with a message when the title is blank or over 120
 /// UTF-8 bytes, the body is over 1024, or the end time precedes the start (`endTs: 0` = no end).
+/// `image` is the hex content address of an already-shared file (empty for none), checked for
+/// shape only: the blob is fetched over the file path like any other embed.
 /// An `events-changed` event follows, so the UI re-reads the calendar.
 #[tauri::command]
 async fn create_event(
@@ -1737,9 +1758,12 @@ async fn create_event(
     body: String,
     start_ts: u64,
     end_ts: u64,
+    image: String,
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
-    actor.create_event(title, body, start_ts, end_ts).await?;
+    actor
+        .create_event(title, body, start_ts, end_ts, image)
+        .await?;
     persist_server(&state, server).await;
     Ok(())
 }
@@ -1768,6 +1792,7 @@ async fn get_events(state: State<'_, AppState>, server: u64) -> Result<Vec<UiEve
             start_ts: e.start_ts,
             end_ts: e.end_ts,
             author: e.author,
+            image: e.image,
         })
         .collect())
 }
@@ -1843,18 +1868,156 @@ async fn get_wiki_page(
     Ok(actor.read_wiki_page(name).await)
 }
 
-/// Create or update a wiki page.
+/// Create or update a wiki page. Returns `true` when the server's review mode queued the
+/// edit for owner/admin approval instead of publishing it immediately.
 #[tauri::command]
 async fn save_wiki_page(
     state: State<'_, AppState>,
     server: u64,
     name: String,
     body: String,
+) -> Result<bool, String> {
+    let actor = actor_of(&state, server).await?;
+    let queued = actor.write_wiki_page(name, body).await?;
+    persist_server(&state, server).await;
+    Ok(queued)
+}
+
+/// One entry in a wiki page's revision history, as the UI reads it.
+#[derive(Serialize, Clone)]
+struct UiWikiRev {
+    /// Stable revision id (for a reviewed edit, the pending-edit id it came from).
+    id: String,
+    /// The proposer's device fingerprint (resolved to a display name at render time).
+    author: String,
+    /// When the revision took effect, epoch-millis.
+    ts: u64,
+    /// The full page body as of this revision.
+    body: String,
+    /// "edit" | "approve" | "auto" | "reject" | "rollback" | "delete" | "rename".
+    kind: String,
+    /// The reviewer's fingerprint for approve/reject; empty otherwise.
+    actor: String,
+    /// Context: the old name for "rename", the restored revision id for "rollback".
+    note: String,
+}
+
+/// A member edit awaiting review, as the UI reads it.
+#[derive(Serialize, Clone)]
+struct UiWikiPending {
+    id: String,
+    page: String,
+    author: String,
+    ts: u64,
+    expires_ts: u64,
+    body: String,
+}
+
+/// A wiki page's revision history, oldest first (auto-accepted edits included).
+#[tauri::command]
+async fn get_wiki_history(
+    state: State<'_, AppState>,
+    server: u64,
+    page: String,
+) -> Result<Vec<UiWikiRev>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .wiki_history(page)
+        .await
+        .into_iter()
+        .map(|r| UiWikiRev {
+            id: r.id,
+            author: r.author,
+            ts: r.ts,
+            body: r.body,
+            kind: r.kind,
+            actor: r.actor,
+            note: r.note,
+        })
+        .collect())
+}
+
+/// The live review queue: member edits still inside their window, oldest first.
+#[tauri::command]
+async fn get_wiki_pending(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<UiWikiPending>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .wiki_pending_edits()
+        .await
+        .into_iter()
+        .map(|p| UiWikiPending {
+            id: p.id,
+            page: p.page,
+            author: p.author,
+            ts: p.ts,
+            expires_ts: p.expires_ts,
+            body: p.body,
+        })
+        .collect())
+}
+
+/// The wiki review window in days (0 = edits publish immediately).
+#[tauri::command]
+async fn get_wiki_review_days(state: State<'_, AppState>, server: u64) -> Result<u32, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor.wiki_review_days().await)
+}
+
+/// Set the wiki review window in days, 0..=30 (owner/admin only).
+#[tauri::command]
+async fn set_wiki_review_days(
+    state: State<'_, AppState>,
+    server: u64,
+    days: u32,
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
-    actor.write_wiki_page(name, body).await;
+    actor.set_wiki_review_days(days).await?;
     persist_server(&state, server).await;
     Ok(())
+}
+
+/// Approve a pending wiki edit (owner/admin only): publishes it and records the revision.
+#[tauri::command]
+async fn approve_wiki_edit(
+    state: State<'_, AppState>,
+    server: u64,
+    id: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.approve_wiki_edit(id).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Decline a pending wiki edit (owner/admin only; errors once it has auto-accepted).
+#[tauri::command]
+async fn reject_wiki_edit(
+    state: State<'_, AppState>,
+    server: u64,
+    id: String,
+) -> Result<(), String> {
+    let actor = actor_of(&state, server).await?;
+    actor.reject_wiki_edit(id).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Restore a page to an earlier revision. Returns `true` when review mode queued the
+/// restore for approval instead of publishing it.
+#[tauri::command]
+async fn restore_wiki_page(
+    state: State<'_, AppState>,
+    server: u64,
+    page: String,
+    rev: String,
+) -> Result<bool, String> {
+    let actor = actor_of(&state, server).await?;
+    let queued = actor.restore_wiki_page(page, rev).await?;
+    persist_server(&state, server).await;
+    Ok(queued)
 }
 
 /// The wiki's per-page render formats (name -> "md" | "wiki"). A page absent from the map has
@@ -2015,6 +2178,64 @@ async fn get_channel_topic(
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
     Ok(actor.channel_topic(id).await)
+}
+
+/// Queue a shared file (by content address) in a channel's jukebox; its persistent playlist.
+/// **Any member may**, like setting the topic; rejected when the cid is not a content address,
+/// the name is blank or over 200 UTF-8 bytes, or the queue already holds 64 entries. Replies
+/// with the new entry's id. A `channel-updated` event for this channel follows, so the UI
+/// re-reads the queue exactly as it re-reads messages.
+#[tauri::command]
+async fn jukebox_add(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    cid: String,
+    name: String,
+) -> Result<String, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    let entry = actor.jukebox_add(id, cid, name).await?;
+    persist_server(&state, server).await;
+    Ok(entry)
+}
+
+/// Remove a jukebox entry (by entry id) from a channel; any member, and idempotent.
+#[tauri::command]
+async fn jukebox_remove(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    entry: String,
+) -> Result<(), String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    actor.jukebox_remove(id, entry).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Read a channel's jukebox queue, sorted by queue time ascending.
+#[tauri::command]
+async fn get_jukebox(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+) -> Result<Vec<UiJukeEntry>, String> {
+    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .jukebox(id)
+        .await
+        .into_iter()
+        .map(|e| UiJukeEntry {
+            id: e.id,
+            cid: e.cid,
+            name: e.name,
+            author: e.author,
+            added_ms: e.added_ms,
+        })
+        .collect())
 }
 
 /// Read a channel's current messages (by id).
@@ -2209,6 +2430,65 @@ async fn reload_one(
         },
     );
     Ok(())
+}
+
+/// The only external URL prefix the app will hand to the OS: our own issue tracker's
+/// new-issue form. `open_issue_url` is a launcher, and a launcher that takes any URL is a way
+/// to point the user's browser (or a registered `foo://` handler) anywhere, so the allowlist
+/// is a constant here rather than anything the webview can influence.
+const ISSUE_URL_PREFIX: &str = "https://github.com/Thalpy/Mewtual/issues/new?";
+
+/// Is this a new-issue URL on our own tracker? Split out from the command so the allowlist
+/// itself is testable without launching a browser.
+fn is_tracker_url(url: &str) -> bool {
+    url.starts_with(ISSUE_URL_PREFIX)
+}
+
+/// Open a prefilled bug report / feature request on the tracker in the user's default browser.
+/// Mewtual has no service of its own to receive feedback, so filing means handing GitHub a
+/// filled-in form: the app carries no GitHub credentials and posts nothing itself, and the user
+/// submits (and so authors) the issue from their own browser.
+#[tauri::command]
+async fn open_issue_url(url: String) -> Result<(), String> {
+    if !is_tracker_url(&url) {
+        return Err("refusing to open a URL outside the issue tracker".into());
+    }
+    // Deliberately no shell: `cmd /C start` would read the `&` between query parameters as a
+    // command separator. Each launcher below takes the URL as one literal argv entry instead.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", &url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(&url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&url);
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Is there already a vault on this machine? The frontend asks before it draws the gate:
+/// `unlock` creates the vault when there isn't one, so without this the same screen serves
+/// "unlock" and "choose your secret forever", and a typo on a fresh install silently founds a
+/// second identity rather than failing. Says nothing about whether any secret opens it.
+#[tauri::command]
+async fn vault_exists(app: AppHandle) -> Result<bool, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("vault");
+    Ok(ServerStore::exists(&dir))
 }
 
 /// Unlock the on-disk store with `passphrase` and reload every persisted server. Called once
@@ -2808,8 +3088,13 @@ async fn join_one_grant(
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
+        // Update checking lives in Rust so the download and its minisign verification never
+        // touch the webview: the frontend only asks "is there one?" and "install it".
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
+            vault_exists,
             unlock,
             found_server,
             join_server,
@@ -2857,6 +3142,13 @@ pub fn run() {
             set_wiki_format,
             delete_wiki_page,
             rename_wiki_page,
+            get_wiki_history,
+            get_wiki_pending,
+            get_wiki_review_days,
+            set_wiki_review_days,
+            approve_wiki_edit,
+            reject_wiki_edit,
+            restore_wiki_page,
             get_roles,
             set_admin,
             remove_member,
@@ -2868,6 +3160,9 @@ pub fn run() {
             set_pin,
             set_channel_topic,
             get_channel_topic,
+            jukebox_add,
+            jukebox_remove,
+            get_jukebox,
             get_inbox,
             get_messages,
             pairing_begin,
@@ -2875,7 +3170,8 @@ pub fn run() {
             pairing_mint,
             pairing_decline,
             pairing_open,
-            pairing_join
+            pairing_join,
+            open_issue_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Mewtual desktop app");
@@ -2917,5 +3213,18 @@ mod tests {
         // Empty / malformed are rejected.
         assert!(build_advertised("", 9000, id).is_err());
         assert!(build_advertised("1.2.3.4:notaport", 9000, id).is_err());
+    }
+
+    #[test]
+    fn only_our_issue_tracker_can_be_opened() {
+        assert!(is_tracker_url(
+            "https://github.com/Thalpy/Mewtual/issues/new?labels=bug&title=x&body=y"
+        ));
+        // A lookalike host, another repo, and a non-https scheme are all refused, as is the
+        // bare tracker root: only the prefilled new-issue form is ever launched.
+        assert!(!is_tracker_url("https://github.com.evil.test/Thalpy/Mewtual/issues/new?x"));
+        assert!(!is_tracker_url("https://github.com/Thalpy/Other/issues/new?x"));
+        assert!(!is_tracker_url("file:///c:/windows/system32/calc.exe"));
+        assert!(!is_tracker_url("https://github.com/Thalpy/Mewtual"));
     }
 }

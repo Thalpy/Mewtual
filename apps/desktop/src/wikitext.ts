@@ -119,6 +119,36 @@ export function stripMagicWords(text: string): string {
   return (text ?? "").replace(MAGIC_RE, "");
 }
 
+/**
+ * A one-line plain-text summary of a page/post body: the text a reader would see, with the markup
+ * of *both* formats taken out (they share this one path because a link card never knows which
+ * format the body it is previewing was written in).
+ *
+ * Deliberately a stripper and not a parser: a card preview only ever needs the prose, so an
+ * unrecognized construct degrades to "the marks show through" rather than to broken output. Image
+ * embeds drop out entirely; a link keeps its label, which IS the prose the author wrote.
+ */
+export function plainSummary(text: string, max = 180): string {
+  let t = stripMagicWords(text ?? "");
+  t = t.replace(/<!--[\s\S]*?-->/g, " "); // html comments
+  t = t.replace(/```[\s\S]*?(?:```|$)/g, " "); // fenced code, closed or running to the end
+  t = t.replace(/^\s*#redirect\s*\[\[[^\]\n]*\]\]/i, " "); // a redirect marker is not prose
+  t = t.replace(/!\[[^\]\n]*\]\([^)\n]*\)/g, " "); // an embed: the picture carries the meaning
+  t = t.replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, "$1"); // [label](target) keeps its label
+  t = t.replace(/\[\[[ \t]*([^\]|\n]*?)[ \t]*(?:\|([^\]\n]*))?\]\]/g, (_m, page, label) =>
+    (label ?? "").trim() || page,
+  );
+  t = t.replace(/\{\{[\s\S]*?\}\}/g, " "); // templates, including a multi-line {{Infobox …}} card
+  t = t.replace(/^[ \t]*\|.*$/gm, " "); // table rows and their markup
+  t = t.replace(/^[ \t]*[-=_]{3,}[ \t]*$/gm, " "); // horizontal rules / setext underlines
+  t = t.replace(/^[ \t]*=+[ \t]*([^=\n]+?)[ \t]*=+[ \t]*$/gm, "$1"); // wikitext headings
+  t = t.replace(/^[ \t]*#{1,6}[ \t]+/gm, ""); // markdown headings
+  t = t.replace(/^[ \t]*(?:[*#:;>-]+|\d+[.)])[ \t]+/gm, ""); // bullets, indents, quotes
+  t = t.replace(/(\*\*|__|~~|'{2,5}|`)/g, ""); // emphasis + inline code marks
+  t = t.replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max).trimEnd() + "\u2026" : t;
+}
+
 // --- the inline pass --------------------------------------------------------------------------------
 
 /** A sticky (offset-matching) copy of an `^`-anchored grammar regex. */

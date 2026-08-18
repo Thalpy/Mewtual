@@ -22,8 +22,9 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem, Livery,
-    MemberBadge, MemberView, MessageStats, Profile, Server, ServerEvent,
+    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem, JukeEntry,
+    Livery, MemberBadge, MemberView, MessageStats, Profile, Server, ServerEvent, WikiPendingEdit,
+    WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -92,6 +93,24 @@ pub enum AppCommand {
     ChannelTopic {
         channel: u128,
         reply: oneshot::Sender<String>,
+    },
+    /// Queue a shared file in a channel's jukebox (any member); replies with the entry id.
+    JukeboxAdd {
+        channel: u128,
+        cid: String,
+        name: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Remove a jukebox entry (by id) from a channel (any member).
+    JukeboxRemove {
+        channel: u128,
+        entry: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query a channel's current jukebox queue.
+    Jukebox {
+        channel: u128,
+        reply: oneshot::Sender<Vec<JukeEntry>>,
     },
     /// Pull a channel's history from `peer` (e.g. right after joining).
     CatchUp { peer: PeerId, channel: u128 },
@@ -261,6 +280,7 @@ pub enum AppCommand {
         body: String,
         start_ts: u64,
         end_ts: u64,
+        image: String,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Delete a server event by id (its author, or an owner/admin).
@@ -285,8 +305,45 @@ pub enum AppCommand {
         name: String,
         reply: oneshot::Sender<String>,
     },
-    /// Create or update a wiki page.
-    WriteWikiPage { name: String, body: String },
+    /// Create or update a wiki page. Replies `Ok(true)` when review mode queued the edit
+    /// for approval instead of publishing it.
+    WriteWikiPage {
+        name: String,
+        body: String,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
+    /// Query a page's revision history (oldest first; auto-accepted edits included).
+    WikiHistory {
+        page: String,
+        reply: oneshot::Sender<Vec<WikiRevision>>,
+    },
+    /// Query the live review queue (pending edits still inside their window, oldest first).
+    WikiPendingEdits {
+        reply: oneshot::Sender<Vec<WikiPendingEdit>>,
+    },
+    /// Query the wiki review window in days (0 = off).
+    WikiReviewDays { reply: oneshot::Sender<u32> },
+    /// Set the wiki review window in days, 0..=30 (owner/admin only).
+    SetWikiReviewDays {
+        days: u32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Approve a pending wiki edit by id (owner/admin only).
+    ApproveWikiEdit {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Decline a pending wiki edit by id (owner/admin only; errors once auto-accepted).
+    RejectWikiEdit {
+        id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Restore a page to an earlier revision (replies `Ok(true)` when queued for review).
+    RestoreWikiPage {
+        page: String,
+        rev: String,
+        reply: oneshot::Sender<Result<bool, String>>,
+    },
     /// Query the wiki's per-page render formats (name -> "md" | "wiki"); absent = markdown.
     WikiMeta {
         reply: oneshot::Sender<HashMap<String, String>>,
@@ -593,6 +650,64 @@ impl ServerActor {
             .is_err()
         {
             return String::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Queue a shared file in a channel's jukebox; replies with the entry id. Any member may;
+    /// see [`Server::jukebox_add`]. A `ChannelUpdated` event follows.
+    pub async fn jukebox_add(
+        &self,
+        channel: u128,
+        cid: String,
+        name: String,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::JukeboxAdd {
+                channel,
+                cid,
+                name,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Remove a jukebox entry (by id) from a channel. Any member may; see
+    /// [`Server::jukebox_remove`]. A `ChannelUpdated` event follows if it changed.
+    pub async fn jukebox_remove(&self, channel: u128, entry: String) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::JukeboxRemove {
+                channel,
+                entry,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch a channel's jukebox queue (empty if none).
+    pub async fn jukebox(&self, channel: u128) -> Vec<JukeEntry> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Jukebox { channel, reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
         }
         rx.await.unwrap_or_default()
     }
@@ -1264,6 +1379,7 @@ impl ServerActor {
         body: String,
         start_ts: u64,
         end_ts: u64,
+        image: String,
     ) -> Result<String, String> {
         let (reply, rx) = oneshot::channel();
         if self
@@ -1273,6 +1389,7 @@ impl ServerActor {
                 body,
                 start_ts,
                 end_ts,
+                image,
                 reply,
             })
             .await
@@ -1418,15 +1535,144 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
-    /// Create or update a wiki page (a `WikiUpdated` event follows).
-    pub async fn write_wiki_page(&self, name: impl Into<String>, body: impl Into<String>) {
-        let _ = self
+    /// Create or update a wiki page (a `WikiUpdated` event follows). `Ok(true)` = review
+    /// mode queued the edit for approval instead of publishing it.
+    pub async fn write_wiki_page(
+        &self,
+        name: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Result<bool, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
             .cmd_tx
             .send(AppCommand::WriteWikiPage {
                 name: name.into(),
                 body: body.into(),
+                reply,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Fetch a page's revision history (oldest first; auto-accepted edits included).
+    pub async fn wiki_history(&self, page: impl Into<String>) -> Vec<WikiRevision> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiHistory {
+                page: page.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch the live review queue (pending edits still inside their window, oldest first).
+    pub async fn wiki_pending_edits(&self) -> Vec<WikiPendingEdit> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiPendingEdits { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch the wiki review window in days (0 = off).
+    pub async fn wiki_review_days(&self) -> u32 {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WikiReviewDays { reply })
+            .await
+            .is_err()
+        {
+            return 0;
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Set the wiki review window in days, 0..=30; owner/admin only (a `WikiUpdated` event
+    /// follows).
+    pub async fn set_wiki_review_days(&self, days: u32) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SetWikiReviewDays { days, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Approve a pending wiki edit (owner/admin only; a `WikiUpdated` event follows).
+    pub async fn approve_wiki_edit(&self, id: impl Into<String>) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ApproveWikiEdit {
+                id: id.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Decline a pending wiki edit (owner/admin only; a `WikiUpdated` event follows).
+    pub async fn reject_wiki_edit(&self, id: impl Into<String>) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RejectWikiEdit {
+                id: id.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Restore a page to an earlier revision; `Ok(true)` = queued for review (a `WikiUpdated`
+    /// event follows either way).
+    pub async fn restore_wiki_page(
+        &self,
+        page: impl Into<String>,
+        rev: impl Into<String>,
+    ) -> Result<bool, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RestoreWikiPage {
+                page: page.into(),
+                rev: rev.into(),
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Fetch the wiki's per-page render formats (name -> "md" | "wiki"); a page absent from the
@@ -1708,6 +1954,38 @@ where
                     Some(AppCommand::ChannelTopic { channel, reply }) => {
                         let _ = reply.send(server.channel_topic(channel));
                     }
+                    Some(AppCommand::JukeboxAdd {
+                        channel,
+                        cid,
+                        name,
+                        reply,
+                    }) => {
+                        let res = server
+                            .jukebox_add(channel, &cid, &name)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
+                    Some(AppCommand::JukeboxRemove {
+                        channel,
+                        entry,
+                        reply,
+                    }) => {
+                        let res = server
+                            .jukebox_remove(channel, &entry)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if channel_changed(&server, channel, &mut counts) {
+                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        }
+                    }
+                    Some(AppCommand::Jukebox { channel, reply }) => {
+                        let _ = reply.send(server.jukebox(channel));
+                    }
                     Some(AppCommand::CatchUp { peer, channel }) => {
                         if let Err(e) = server.request_channel_catchup(peer, channel).await {
                             tracing::warn!(error = %e, channel, "catch-up failed");
@@ -1977,9 +2255,9 @@ where
                             let _ = event_tx.send(AppEvent::StatusUpdated).await;
                         }
                     }
-                    Some(AppCommand::CreateEvent { title, body, start_ts, end_ts, reply }) => {
+                    Some(AppCommand::CreateEvent { title, body, start_ts, end_ts, image, reply }) => {
                         let res = server
-                            .create_event(&title, &body, start_ts, end_ts)
+                            .create_event(&title, &body, start_ts, end_ts, &image)
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
@@ -2048,10 +2326,61 @@ where
                     Some(AppCommand::ReadWikiPage { name, reply }) => {
                         let _ = reply.send(server.read_wiki_page(&name));
                     }
-                    Some(AppCommand::WriteWikiPage { name, body }) => {
-                        if let Err(e) = server.write_wiki_page(&name, &body).await {
-                            tracing::warn!(error = %e, "write_wiki_page failed");
+                    Some(AppCommand::WriteWikiPage { name, body, reply }) => {
+                        let res = server
+                            .write_wiki_page(&name, &body)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
+                    }
+                    Some(AppCommand::WikiHistory { page, reply }) => {
+                        let _ = reply.send(server.wiki_history(&page));
+                    }
+                    Some(AppCommand::WikiPendingEdits { reply }) => {
+                        let _ = reply.send(server.wiki_pending_edits());
+                    }
+                    Some(AppCommand::WikiReviewDays { reply }) => {
+                        let _ = reply.send(server.wiki_review_days());
+                    }
+                    Some(AppCommand::SetWikiReviewDays { days, reply }) => {
+                        let res = server
+                            .set_wiki_review_days(days)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ApproveWikiEdit { id, reply }) => {
+                        let res = server
+                            .approve_wiki_edit(&id)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::RejectWikiEdit { id, reply }) => {
+                        let res = server
+                            .reject_wiki_edit(&id)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if wiki_changed(&server, &mut last_wiki) {
+                            let _ = event_tx.send(AppEvent::WikiUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::RestoreWikiPage { page, rev, reply }) => {
+                        let res = server
+                            .restore_wiki_page(&page, &rev)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
                         if wiki_changed(&server, &mut last_wiki) {
                             let _ = event_tx.send(AppEvent::WikiUpdated).await;
                         }
@@ -2249,8 +2578,8 @@ where
     (ServerActor { cmd_tx }, event_rx, handle)
 }
 
-/// Whether a channel's rendered content (its messages or its topic) changed since last seen
-/// (updating the record).
+/// Whether a channel's rendered content (its messages, its topic or its jukebox) changed since
+/// last seen (updating the record).
 /// Synchronous; the `&Server` borrow ends before the caller awaits the event send, so
 /// the actor future stays `Send` (a `&Server` held across an await would require
 /// `Server: Sync`, which it is not).
@@ -2271,6 +2600,12 @@ where
     // The topic is part of the channel's rendered state, so a peer's topic change refreshes the
     // UI through the same `ChannelUpdated` the message list uses.
     server.channel_topic(channel).hash(&mut h);
+    // The jukebox queue rides the same channel document and the same rendered header, so a
+    // peer's add/remove refreshes the UI through this `ChannelUpdated` too.
+    for e in &server.jukebox(channel) {
+        e.id.hash(&mut h);
+        e.name.hash(&mut h);
+    }
     for m in &server.messages(channel) {
         m.id.hash(&mut h);
         m.text.hash(&mut h);
@@ -2339,9 +2674,16 @@ where
     }
 }
 
-/// What [`wiki_changed`] compares: the page map **and** the per-page format metadata. A format
-/// toggle leaves every body byte-identical, so the bodies alone would miss it.
-type WikiSnapshot = (HashMap<String, String>, HashMap<String, String>);
+/// What [`wiki_changed`] compares: the page map, the per-page format metadata, the review
+/// queue, and the review window. A format toggle leaves every body byte-identical, a newly
+/// queued proposal changes no page at all, and a review-window flip is pure settings; each
+/// still must reach the UI as a `WikiUpdated`.
+type WikiSnapshot = (
+    HashMap<String, String>,
+    HashMap<String, String>,
+    Vec<WikiPendingEdit>,
+    u32,
+);
 
 /// The wiki's current bodies + formats.
 fn wiki_snapshot<T, R>(server: &Server<T, R>) -> WikiSnapshot
@@ -2349,7 +2691,12 @@ where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    (server.wiki_map(), server.wiki_meta())
+    (
+        server.wiki_map(),
+        server.wiki_meta(),
+        server.wiki_pending_edits(),
+        server.wiki_review_days(),
+    )
 }
 
 /// Whether the wiki changed since last seen (a page added/removed/renamed, a body edited or a

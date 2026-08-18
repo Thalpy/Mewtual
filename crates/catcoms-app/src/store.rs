@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use catcoms_crypto::{seal, unseal, KeyHierarchy, SealedBlob};
 use catcoms_rt::{CryptoRngCore, OsCryptoRng};
-use catcoms_storage::{open_or_create_vault, BlobStore, SealingBlobStore};
+use catcoms_storage::{open_or_create_vault, vault_exists, BlobStore, SealingBlobStore};
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::Zeroizing;
 
@@ -55,6 +55,13 @@ impl ServerStore {
         let keys = open_or_create_vault(&dir, passphrase, rng)?;
         fs::create_dir_all(dir.join("servers")).map_err(|e| AppError::Io(e.to_string()))?;
         Ok(Self { dir, keys })
+    }
+
+    /// Has a store ever been opened at `dir`? [`Self::open`] creates one when it has not, so
+    /// this is what tells a first run apart from an unlock attempt; without it a typo on a
+    /// fresh install founds a second identity instead of failing.
+    pub fn exists(dir: impl AsRef<Path>) -> bool {
+        vault_exists(dir)
     }
 
     fn server_path(&self, id: u64) -> PathBuf {

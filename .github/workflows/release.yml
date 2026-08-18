@@ -1,0 +1,77 @@
+name: Release desktop alpha
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Build Windows installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.89.0
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Test frontend
+        working-directory: apps/desktop
+        run: npm test
+
+      - name: Check frontend
+        working-directory: apps/desktop
+        run: npm run check
+
+      # The release is a draft so it can be reviewed before anyone sees it, but it is NOT marked
+      # as a prerelease: GitHub's `releases/latest/download/...` skips prereleases, and that is
+      # the URL the in-app updater reads its manifest from.
+      - name: Build installer and create draft release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the installer so the in-app updater will accept it. Without these the build
+          # still succeeds, but it produces no signature and existing installs cannot update.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          tagName: v__VERSION__
+          releaseName: Mewtual v__VERSION__
+          # Shown verbatim in the app's update prompt, so keep it about THIS release.
+          releaseBody: |
+            An alpha build of Mewtual.
+
+            This experimental build has not received an independent security audit. Use it
+            only for testing with people you trust. The installer is unsigned, so Windows
+            SmartScreen may display a warning.
+
+            See CHANGELOG.md for what changed, and for known limitations.
+          releaseDraft: true
+          # Publishes latest.json alongside the installer: the manifest the updater polls.
+          includeUpdaterJson: true
+          # tauri.official.conf.json carries the update endpoint, the public key and the
+          # updater artifacts, and is merged in HERE rather than living in tauri.conf.json.
+          # The repository is public: without this split, anyone's fork or source build would
+          # poll the maintainer's release feed and offer to overwrite itself with an official
+          # binary. Paths are resolved from the working directory (apps/desktop).
+          args: --bundles nsis --config src-tauri/tauri.official.conf.json

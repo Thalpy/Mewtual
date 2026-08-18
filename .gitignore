@@ -17,3 +17,11 @@ crates/*/fuzz/artifacts
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+# Signing keys. The updater's private key is meant to live outside the repo entirely
+# (~/.tauri/), so nothing here should ever match: this is a backstop for the day someone
+# runs `tauri signer generate` without -w, or drops a copy in to debug a release.
+*.key
+*.pem
+*.p12
+*.pfx

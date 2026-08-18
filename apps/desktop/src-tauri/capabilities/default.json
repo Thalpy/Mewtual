@@ -1,7 +1,19 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window: core APIs (events for the actor's ChannelUpdated/MembersChanged, window). Custom app commands (found_server, send_message, get_messages) are callable without an explicit ACL entry.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Default capability for the main window: core APIs (events for the actor's ChannelUpdated/MembersChanged, window). The explicit window entries drive our own title bar (decorations are off). Custom app commands (found_server, send_message, get_messages) are callable without an explicit ACL entry. The updater/process pair lets the app check GitHub for a signed release and relaunch into it once the user accepts.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }

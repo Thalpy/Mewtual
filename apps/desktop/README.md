@@ -39,15 +39,16 @@ other's messages over real TCP loopback. Don't close terminal 1 while window 2 i
 **Do not send a debug exe** (`target/debug/...`). A debug build is a *dev* build: it
 loads the UI from the Vite dev server (`http://localhost:1420`), so on any other machine
 the window shows an Edge **"can't reach the page"** error. Build a self-contained
-**release** exe with the frontend embedded:
+**release** installer with the frontend embedded:
 
 ```sh
 npm run build
-npm run tauri build -- --no-bundle    # exe at src-tauri/target/release/
+npm run tauri build -- --bundles nsis # installer beneath src-tauri/target/release/bundle/nsis/
 ```
 
-The release exe still needs the **WebView2 runtime** on the target PC (default on
-Windows 11; a free installer for older Windows).
+The unsigned alpha installer may trigger a Windows SmartScreen warning. It still needs the
+**WebView2 runtime** on the target PC (default on Windows 11; a free installer for older
+Windows). For a local portable build, use `npm run tauri build -- --no-bundle`.
 
 ## Networking
 

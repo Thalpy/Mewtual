@@ -29,6 +29,28 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   redesign with full user customisation, **server livery + shared icons**
   (`DocType::Livery`), the **verify-identity** surface, **channel topics**, and the
   delivery-states design (D1–D3 in progress).
+  **11x: wiki history + edit review + nested pages.** The wiki doc gained three more
+  NUL-reserved keys beside `\u{0}meta` (older peers merge them blind): `\u{0}hist`
+  (per-page revisions: author fp, ts, full-body snapshot, kind edit/approve/auto/reject/
+  rollback/delete/rename), `\u{0}pending` (member edits awaiting review) and `\u{0}cfg`
+  (`review_days`, 0=off, ≤30, owner/admin-set). With review on, a member's save queues;
+  owner/admin approve/decline; **auto-acceptance at the deadline is READ-TIME** (effective
+  `wiki_map()` overlays expired pendings; nobody races to apply in the CRDT) and is folded
+  into stored history by the next direct write under a **deterministic rev id (= pending
+  id)** so concurrent folds converge. Member delete/rename are gated while review is on;
+  pending bodies count toward `wiki_pinned_cids`. Sidebar: `/`-separated names render as a
+  collapsible tree (`wikitree.ts`); history browser + review queue diff via `linediff.ts`
+  (Myers). New `Server` methods: `wiki_history`, `wiki_pending_edits`, `wiki_review_days`,
+  `set_wiki_review_days`, `approve_wiki_edit`, `reject_wiki_edit`, `restore_wiki_page`;
+  `write_wiki_page` now returns `queued: bool`, mirrored through actor + bridge
+  (`get_wiki_history`/`get_wiki_pending`/`get_wiki_review_days`/`set_wiki_review_days`/
+  `approve_wiki_edit`/`reject_wiki_edit`/`restore_wiki_page`).
+  Also **wiki infoboxes** (`infobox.ts`, pure + unit-tested): a `{{Infobox …}}` block is lifted
+  by `renderWiki` **before** either converter runs and rendered with that page's own inline
+  renderer, so one syntax serves both markdown and wikitext pages; it emits a `<table
+  class="wiki-infobox">` (only `colspan` was added to the sanitizer allow-list). An image field
+  accepts **only** the `![alt](cid:HEX)` marker: a bare content address would be invisible to
+  the never-decay scan and could expire while the card still referenced it.
   **221 tests passing** as of 2026-07 (+ livery/icon/topic suites since; the GUI WebView
   is the one manually-verified surface; both halves compile). See Known limitations.
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:

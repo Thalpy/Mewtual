@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/Thalpy/Mewtual/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhFMUIzNTBBQkQ2MUYxNDIKUldSQzhXRzlDalVianVhL1l4NUlEcVAyMGZoelNIUFFyQ1RFbG96Z2ZndTYzWU5oWXR0UE1uMlEK"
+    }
+  }
+}

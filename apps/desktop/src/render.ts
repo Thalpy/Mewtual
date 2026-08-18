@@ -31,12 +31,14 @@ import {
   embedHtml,
   emojiHtml,
   escText,
+  inlineToHtml,
   mentionHtml,
   refLinkHtml,
   stripMagicWords,
   wikiLinkHtml,
   wikitextToHtml,
 } from "./wikitext.ts";
+import { extractInfobox, infoboxHtml } from "./infobox.ts";
 
 // The token grammar lives in `wikitext.ts` (both renderers need it) but is re-exported here: this
 // is the module `refs.ts`'s round-trip tests pin the composer's markers against.
@@ -174,7 +176,8 @@ function configure() {
 
 // No media/script/raw-HTML tags: emoji + embeds are <span> placeholders the resolver fills.
 // h5/h6 stay out (the wikitext converter clamps deep headings to h4); <dl>/<dt>/<dd> and <caption>
-// are here for wikitext's definition lists and table captions; inert structure, no new capability.
+// are here for wikitext's definition lists and table captions; `colspan` for the infobox's
+// full-width picture and section rows; inert structure, no new capability.
 const SANITIZE = {
   ALLOWED_TAGS: [
     "a", "b", "strong", "i", "em", "u", "s", "del", "code", "pre", "span", "br", "p",
@@ -184,7 +187,7 @@ const SANITIZE = {
   ALLOWED_ATTR: [
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
     "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "data-event-id",
-    "tabindex", "role", "aria-hidden",
+    "tabindex", "role", "aria-hidden", "colspan",
   ],
 };
 
@@ -206,7 +209,15 @@ export function renderWiki(text: string, format?: string): string {
   configure();
   selfMentionName = ""; // no "mention-me" self-highlight outside chat/status
   const src = text ?? "";
+  // The infobox is one block in either format, so it comes out before either converter runs and
+  // its values are rendered with THIS page's inline renderer. It leads the output because the
+  // card floats at the top right of the article wherever the author wrote the block.
+  const { box, rest } = extractInfobox(src);
+  const wiki = format === "wiki";
   // __TOC__/__NOTOC__ are directives the page chrome reads (tocDirective), not content, in both.
-  const html = format === "wiki" ? wikitextToHtml(src) : (marked.parse(stripMagicWords(src)) as string);
-  return DOMPurify.sanitize(html, SANITIZE) as string;
+  const body = wiki ? wikitextToHtml(rest) : (marked.parse(stripMagicWords(rest)) as string);
+  const card = box
+    ? infoboxHtml(box, wiki ? inlineToHtml : (s) => marked.parseInline(stripMagicWords(s)) as string)
+    : "";
+  return DOMPurify.sanitize(card + body, SANITIZE) as string;
 }

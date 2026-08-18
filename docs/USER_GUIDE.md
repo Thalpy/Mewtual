@@ -16,11 +16,13 @@ This guide covers the **desktop app** (`apps/desktop`).
 cd apps/desktop
 npm install
 npm run build
-npm run tauri build -- --no-bundle      # self-contained exe → src-tauri/target/release/
+npm run tauri build -- --bundles nsis
 ```
 
-Send `src-tauri/target/release/mewtual-desktop` (`.exe` on Windows). The recipient needs
-the **WebView2 runtime** (built into Windows 11; a free installer for older Windows).
+Send the installer beneath `src-tauri/target/release/bundle/nsis/`. The unsigned alpha may
+trigger a Windows SmartScreen warning. The recipient needs the **WebView2 runtime** (built into
+Windows 11; a free installer for older Windows). Use `--no-bundle` instead only when you
+specifically need a local portable executable.
 
 > **Don't share a debug build** (`target/debug/…`). A debug build loads its UI from a local
 > dev server and shows a "can't reach the page" error on any other machine.
@@ -73,8 +75,14 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 ## 4. The layout
 
 - **Left rail**; your servers (one icon each) + **＋** to add one + **💬** to send feedback
-  (a bug report or feature request; Mewtual has no servers, so it composes a report you copy
-  and share with the maintainer) + **⚙** for Settings.
+  (a bug report or feature request: **File on GitHub** opens a prefilled issue on the tracker in
+  your browser for you to review and submit, and **Copy report** puts the same text on your
+  clipboard if you would rather send it another way) + **⚙** for Settings.
+- **Updates**; a few seconds after launch Mewtual asks GitHub whether a newer release exists. If
+  one does, a card appears bottom right with the release notes and three choices: **Update and
+  restart**, **Later** (it asks again next launch), or **Skip this version** (it never asks about
+  that one again). Nothing installs unless you press Update, and **Settings → Updates** can check
+  on demand, including for a version you skipped.
 - **Sidebar**; the server's channels and its member list (with role badges).
 - **Main pane tabs**; **Chat · Files · Status · Wiki · Profile**. Click a tab to switch.
 
@@ -124,11 +132,21 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   different text (click to open; a **red** link means it doesn't exist yet; click to create it).
 - **`:code:`** inserts a custom emoji (see Files → emoji below). The 😀 button in the
   composer opens a picker.
+- **Link cards**; a reference that sits **on a line of its own** unfurls into a small card
+  showing what it points at: the opening of a wiki page, a file's size and who shared it, a
+  status post's text, an event's time and description, plus a picture where there is one. A
+  reference written *inside* a sentence stays an inline chip, so your prose isn't broken up
+  (and a bulleted list of links stays a list).
+  Clicking a card opens the thing it describes; right-clicking one offers its actions.
 
 ### Sharing media (drag-and-drop embeds)
 - **Drag an image, video, or audio file onto the chat box** (or use the 📎 button) and it
   **embeds inline** in your message. The same works in the Status composer and the Wiki
   editor. Embedded files are stored in the fileshare (under `embed/…` or `wiki/<page>/…`).
+- **Click an embedded image to view it full screen**; Esc or a click outside closes it, and
+  **Actual size** switches between fit-to-window and 1:1. **Right-click** an image for
+  **Properties** (size, type, who shared it, where it's used), **Download**, its address, and
+  the message's own actions.
 
 ---
 
@@ -191,7 +209,7 @@ type a `code` and upload an image. Then anyone types `:code:` to use it.
 
 ---
 
-## 7. Wiki & status
+## 7. Wiki, status & events
 
 - **Wiki**; collaborative pages, each written in **Markdown or Wikitext** (a per-page
   `md / wiki` switch in Edit mode, shared with every member; wikitext gives you
@@ -205,8 +223,37 @@ type a `code` and upload an image. Then anyone types `:code:` to use it.
   (link/embed shared files, status posts, other pages, events). Files embedded in a wiki page
   are **pinned; they never drop out of circulation**. The **?** button shows in-app
   formatting help. Same-page edits from two members merge character-by-character.
+- **Infobox**; the summary card that floats at a page's top right, Wikipedia-style. Write one
+  `{{Infobox …}}` block (the **▤** toolbar button drops the skeleton in), with `| key = value`
+  lines: `title`, `image` and `caption` are the card's own chrome, every other line becomes a
+  labelled row **in the order you wrote them**, and a line with an empty value becomes a
+  section band. Values take the usual markup: `[[links]]`, `:emoji:`, bold. The picture must be
+  a real embed (drop a file in the editor or use **+ insert**, then move the marker onto the
+  `image =` line), which is also what keeps it **pinned** so it never expires. One infobox per
+  page, and it works the same in Markdown and Wikitext pages.
+- **Organising pages**; put `/` in a page name (`Guides/Setup/Linux`) and the sidebar nests
+  it under **collapsible folders**; the standard wiki-subpage scheme, so the page list never
+  becomes one giant flat wall. Folders are just shared name prefixes: nothing extra to
+  create, and a folder disappears with its last page. The search box still matches full
+  names.
+- **Page history**; every page has a **history** button (page header): each revision with
+  **who wrote it, when, and what changed** (a line diff against the previous revision), plus
+  renames, deletes, approvals and rollbacks. Select a revision and **restore this version**
+  to roll the page back; a restore is recorded as a new revision, so nothing is ever erased.
+- **Edit review** (optional, per server); an owner/admin can set a **review window** (1–30
+  days) in the wiki sidebar's **Review** section. While it's on, a plain member's save
+  becomes a **pending change**: the page stays as-is until an **owner/admin approves it**
+  (it publishes immediately) or **declines it** (recorded in history, never published).
+  **Unreviewed changes auto-publish when the window lapses**, so an absent moderator can't
+  silence the wiki forever. Admins see the queue (with diffs) under **Review** above the
+  page list; authors see an "awaiting review" note on the page. While review is on,
+  rename/delete are owner/admin-only, and files embedded in pending edits stay pinned.
 - **Status**; a per-server feed of short posts (announcements/activity). Supports the same
   rich text + media embeds.
+- **Events**; a per-server calendar (**Ctrl+7**). Any member can add one with a title,
+  start/end time, description and an optional **image**; the image is shared like any other
+  file and shows on the event itself and on every link to it. The event's author, an owner or
+  an admin can delete it. Upcoming events also appear in the cross-server **News** feed.
 
 ---
 

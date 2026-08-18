@@ -47,6 +47,14 @@ pub fn open_or_create_vault(
     Ok(KeyHierarchy::new(dek))
 }
 
+/// Does a vault already exist under `dir`? The gate before [`open_or_create_vault`] is asked to
+/// open one: that call *creates* on first use, so a UI with no way to tell the two cases apart
+/// turns a mistyped passphrase on a fresh install into a brand-new identity, silently. Says
+/// nothing about whether any given passphrase opens it.
+pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
+    dir.as_ref().join(VAULT_FILE).exists()
+}
+
 /// Seal a DEK under a fresh-salt passphrase store and encode the vault file bytes.
 fn seal_and_encode(
     dek: &Dek,
@@ -115,6 +123,20 @@ mod tests {
         assert!(open_or_create_vault(dir.path(), b"guess", &mut rng).is_err());
         let kh3 = open_or_create_vault(dir.path(), b"correct horse battery", &mut rng).unwrap();
         assert_eq!(db1, kh3.db_key().unwrap());
+    }
+
+    #[test]
+    fn existence_flips_only_once_a_vault_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(3);
+        // A directory that exists but holds no vault is still a first run: the UI keys its whole
+        // setup-vs-unlock decision on this, and a false positive would hide the confirm step.
+        assert!(!vault_exists(dir.path()));
+        open_or_create_vault(dir.path(), b"pw", &mut rng).unwrap();
+        assert!(vault_exists(dir.path()));
+        // A failed unlock must not look like a fresh machine on the next launch.
+        assert!(open_or_create_vault(dir.path(), b"wrong", &mut rng).is_err());
+        assert!(vault_exists(dir.path()));
     }
 
     #[test]
