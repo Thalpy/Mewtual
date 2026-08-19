@@ -93,3 +93,37 @@ its backend rung first.
 Working rule carried out of this: **adversarial review happens per slice, before the commit
 that lands it.** Batching it at the end is how unreviewed work reached `main` twice.
 
+## Field test, 2026-08-19: first successful internet P2P session
+
+Two machines, different networks, over the internet. **Text, image and audio transfer all
+worked.** The founder's router cooperated with UPnP, so there was no relay, no port forward and
+no manually entered address: the zero-config direct path (rung 0b) carried a real session. This
+is the first end-to-end confirmation that the invite path works for a remote user, which is the
+failure this whole workstream started from.
+
+Issues observed, in the user's words, to be worked after the outstanding P-defects:
+
+1. **An existing (pre-update) server's invites did not work; a newly created server's did.**
+   Suspected cause: a server founded before the identity-persistence work re-keys once on first
+   launch, and its `advertise`/`relay` settings were never persisted so they are lost. The
+   `get_invite` self-heal (`67a32b7`) should now cover the address half. **Needs verifying
+   against a genuinely pre-existing server.** The user's suggestion, worth considering on its
+   own merits: require an explicit "create new invite" before any invite code is shown, so a
+   stale one can never be copied.
+2. **Voice would not connect** over the internet, while text and files did. Expected shape: the
+   media plane is a WebRTC mesh in the webview and does not ride the libp2p transport at all, so
+   UPnP on the libp2p port buys it nothing and it needs STUN, or TURN under symmetric NAT. See
+   `design-voice.md` phase 4 (move media onto the relay/DCUtR fabric).
+3. **No upload progress, and an upload appeared to finish and then hang.** Download progress
+   exists (per-chunk `DownloadProgress`); the upload side has no equivalent. The Transfers tab
+   needs to track uploads as first-class, not just downloads.
+4. **Messages do not clearly indicate when they have been sent.** The delivery-states design
+   (D1-D3) is listed as in progress and is what this needs.
+5. **In a DM you appear as the person you are DMing** (identity/label bug in the DM view). The
+   user was also unsure the DM itself worked, so this needs reproducing before diagnosis.
+6. **Debug output is needed** to make any of the above diagnosable by a user rather than by
+   reading source. Being built now: a per-server join-attempt log with distinct outcomes, an
+   opt-in `tracing` log with its path shown in the UI (the desktop app currently initialises no
+   subscriber at all, so every warning it logs is discarded), and a connectivity panel on the
+   create/join screens.
+
