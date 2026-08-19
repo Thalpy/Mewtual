@@ -1816,15 +1816,58 @@ async fn open_channel(
     Ok(id.to_string())
 }
 
+/// Does `current` offer a way to reach us that `minted` does not?
+///
+/// An `InviteToken` signs its bootstrap list, so an address learned after minting cannot be
+/// patched in: the invite has to be re-minted or it is simply wrong. This is the predicate that
+/// decides when that is worth doing, and it is deliberately one-directional. Losing an address
+/// (a relay circuit that dropped) does not make an invite stale, because the remaining addresses
+/// still work and re-minting would invalidate nothing and churn a nonce for no one's benefit.
+/// Gaining one does, because the invite is now strictly less useful than the node it points at.
+fn invite_missing_addresses(minted: &[String], current: &[String]) -> bool {
+    current.iter().any(|a| !minted.contains(a))
+}
+
 /// The single-use invite to share (founder only); `None` for a joiner.
+///
+/// Re-mints first if reachability improved since the stored invite was made. This exists because
+/// of a real ordering trap: founding mints the invite immediately, but UPnP takes seconds to
+/// answer, so the very invite a user naturally copies was the one that lacked the public address
+/// the router had just opened. A friend on another network then got "timed out connecting to the
+/// server" and every fix underneath looked broken.
+///
+/// Doing it here rather than in the UPnP path is what makes it general: every display path goes
+/// through this command, so *any* later reachability gain (UPnP, a relay circuit, a rendezvous
+/// registration) produces a correct invite the next time anyone looks, with no event to miss and
+/// no frontend change to keep in step.
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
-    Ok(state
-        .servers
-        .lock()
-        .await
-        .get(&server)
-        .and_then(|e| e.invite.clone()))
+    let (stored, current) = {
+        let servers = state.servers.lock().await;
+        match servers.get(&server) {
+            Some(e) => (e.invite.clone(), e.bootstrap.clone()),
+            None => return Ok(None),
+        }
+    };
+    let Some(hex_invite) = stored else {
+        return Ok(None); // a joiner mints nothing
+    };
+    let stale = hex::decode(&hex_invite)
+        .ok()
+        .and_then(|b| InviteToken::decode(&b).ok())
+        .is_some_and(|t| invite_missing_addresses(&t.bootstrap, &current));
+    if !stale {
+        return Ok(Some(hex_invite));
+    }
+    // Best effort: a re-mint that fails (no longer owner, actor gone) must not lose the invite
+    // the caller already has, so fall back to it rather than surfacing an error here.
+    match mint_and_store_invite(&state, server).await {
+        Ok(fresh) => Ok(Some(fresh)),
+        Err(e) => {
+            eprintln!("get_invite: re-mint after a reachability change failed: {e}");
+            Ok(Some(hex_invite))
+        }
+    }
 }
 
 /// Mint a **fresh** single-use invite on demand (owner/admin only; gated in `Server::mint_invite`),
@@ -1834,6 +1877,13 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
 /// hard-coded address. Replaces the server's stored invite and re-seals the registry.
 #[tauri::command]
 async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<String, String> {
+    mint_and_store_invite(&state, server).await
+}
+
+/// Mint a fresh single-use invite from the server's *current* bootstrap and rendezvous config,
+/// store it as the server's invite, and persist. Shared by the explicit "Generate new invite"
+/// action and by [`get_invite`]'s self-heal, so both mint the same way and neither can drift.
+async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, String> {
     let (bootstrap, rendezvous, handle) = {
         let servers = state.servers.lock().await;
         let e = servers
@@ -3991,6 +4041,45 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The trap this guards: founding mints the invite immediately, UPnP answers seconds later,
+    /// so the invite a user copies first is the one *without* the public address their router
+    /// just opened. Their friend on another network then gets an unactionable timeout. This
+    /// predicate is what makes the invite self-heal the next time anyone reads it.
+    #[test]
+    fn an_invite_is_stale_only_when_reachability_was_gained() {
+        let lan = "/ip4/192.168.0.5/tcp/9000/p2p/ID".to_string();
+        let loop_ = "/ip4/127.0.0.1/tcp/9000/p2p/ID".to_string();
+        let public = "/ip4/203.0.113.9/tcp/9000/p2p/ID".to_string();
+
+        // The real case: UPnP landed after the mint, so the stored invite is missing the address
+        // that is the entire point of the mapping.
+        assert!(invite_missing_addresses(
+            &[loop_.clone(), lan.clone()],
+            &[public.clone(), loop_.clone(), lan.clone()]
+        ));
+
+        // Nothing gained: no re-mint, so reading the invite repeatedly cannot churn nonces.
+        assert!(!invite_missing_addresses(
+            &[public.clone(), loop_.clone()],
+            &[public.clone(), loop_.clone()]
+        ));
+        // Order is not a change.
+        assert!(!invite_missing_addresses(
+            &[public.clone(), loop_.clone()],
+            &[loop_.clone(), public.clone()]
+        ));
+        // Deliberately one-directional: an address *lost* (a relay circuit that dropped) leaves
+        // the rest working, so it is not worth invalidating a nonce somebody may be about to use.
+        assert!(!invite_missing_addresses(
+            &[public.clone(), loop_.clone(), lan.clone()],
+            &[loop_.clone()]
+        ));
+        // Degenerate cases stay quiet rather than re-minting forever.
+        assert!(!invite_missing_addresses(&[], &[]));
+        assert!(!invite_missing_addresses(&[public.clone()], &[]));
+        assert!(invite_missing_addresses(&[], &[public]));
+    }
 
     #[test]
     fn listen_port_is_extracted_from_tcp_and_quic_addresses() {
