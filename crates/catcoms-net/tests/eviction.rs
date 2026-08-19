@@ -79,6 +79,30 @@ async fn connected_within(
     seen
 }
 
+/// Drain `node`'s events for the whole window and return the peers **still connected** at the
+/// end: connects insert, disconnects remove. Used where the question is not "did it ever
+/// connect" but "did any connection survive", which is the only thing an eviction has to answer
+/// when it races an establishing connection.
+async fn still_connected_after_window(node: &MeshService) -> HashSet<PeerId> {
+    let mut live = HashSet::new();
+    let _ = tokio::time::timeout(WINDOW, async {
+        loop {
+            match node.next_event().await {
+                Some(TransportEvent::PeerConnected(p)) => {
+                    live.insert(p);
+                }
+                Some(TransportEvent::PeerDisconnected(p)) => {
+                    live.remove(&p);
+                }
+                Some(_) => continue,
+                None => panic!("mesh actor stopped"),
+            }
+        }
+    })
+    .await;
+    live
+}
+
 /// Drive `node`'s events until `want` disconnects, or give up after `WINDOW`.
 async fn disconnects(node: &MeshService, want: PeerId) -> bool {
     tokio::time::timeout(WINDOW, async {
@@ -240,4 +264,78 @@ async fn lifting_an_eviction_lets_a_re_invited_peer_back_in() {
         seen.contains(&member_peer),
         "a re-invited member must be able to connect again, or the re-invite silently times out"
     );
+}
+
+/// **MEDIUM 3.** An eviction issued while the peer is mid-connect must not leave a live
+/// connection behind, whichever way the actor happens to interleave the two.
+///
+/// Two orderings are possible and both must end the same way. If the deny is installed first,
+/// `Eviction` refuses the connection outright. If the connection passes the gate first and the
+/// command is drained before its `ConnectionEstablished` event, the deny is in place but
+/// `allow_block_list` was never told to close anything, because the peer was not yet in the
+/// actor's map: the `ConnectionEstablished` arm has to notice and close it. Which of the two runs
+/// is `select!`'s random choice, so this test does not force an interleaving; it asserts the
+/// property that has to hold under either. A regression here shows up as a peer that is connected
+/// at the end of the window and stays that way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_eviction_racing_an_establishing_connection_leaves_nothing_live() {
+    let (evictor, addr, _evictor_id) = listener().await;
+
+    let (member, member_id) = MeshService::new_tcp(None, std::slice::from_ref(&addr)).unwrap();
+    let member_peer = phase0_peer_id(&member_id);
+
+    // Issue the eviction immediately, with the dial already in flight: no wait for
+    // `PeerConnected`, so the deny and the connection race each other for real.
+    evictor.evict_peer(member_peer).await.unwrap();
+    // Keep dialing throughout, so a single lost race cannot look like success.
+    for _ in 0..5 {
+        let _ = member.dial_addr(&addr.to_string()).await;
+    }
+
+    let live = still_connected_after_window(&evictor).await;
+    assert!(
+        !live.contains(&member_peer),
+        "an evicted peer must not still hold a connection at the end of the window,          whether it was refused at the gate or closed after racing past it"
+    );
+}
+
+/// **MEDIUM 2.** A relay this node routes a circuit *through* is infrastructure, and therefore
+/// undeniable, exactly like one it reserves on.
+///
+/// The dial gate resolves the LAST `/p2p/` of an address, which for
+/// `…/p2p/RELAY/p2p-circuit/p2p/TARGET` is the target, so the relay half used to be recorded
+/// nowhere. That left the attack with the largest blast radius wide open: no *device* ever
+/// legitimately claims a relay's transport id, so both sync-layer checks pass, and a companion
+/// device claiming it and then being removed in an ordinary "drop my old phone" would have had
+/// every member evict the relay it routes through.
+///
+/// The circuit dial here is expected to fail (the listener is not a relay server). That is fine
+/// and is the point: the relay is noted from the **address**, before any dial outcome exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_this_node_routes_through_cannot_be_evicted() {
+    let (relay, relay_addr, relay_id) = listener().await;
+    let relay_peer = phase0_peer_id(&relay_id);
+
+    let (client, _client_id) = MeshService::new_tcp(None, &[]).unwrap();
+
+    // Route a circuit through it, naming some third peer as the target.
+    let elsewhere = libp2p::identity::Keypair::generate_ed25519()
+        .public()
+        .to_peer_id();
+    let circuit = format!("{relay_addr}/p2p-circuit/p2p/{elsewhere}");
+    client.dial_addr(&circuit).await.unwrap();
+
+    // A hostile eviction naming the relay, as a removed member's forged record would produce.
+    client.evict_peer(relay_peer).await.unwrap();
+
+    // The relay must still be reachable: dial it directly and require a connection.
+    for _ in 0..5 {
+        let _ = client.dial_addr(&relay_addr.to_string()).await;
+    }
+    let seen = connected_within(&client, |s| s.contains(&relay_peer)).await;
+    assert!(
+        seen.contains(&relay_peer),
+        "a relay this node routes a circuit through must survive an eviction aimed at it"
+    );
+    drop(relay);
 }

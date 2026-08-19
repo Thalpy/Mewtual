@@ -2759,16 +2759,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Mint a single-use, device-bound invite to this server (the inviting device
     /// is this member). Record it so this node can later admit the joiner.
     pub fn mint_invite(
-        &mut self,
+        &self,
         invite_nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        let token = self
+        Ok(self
             .group
-            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?;
-        self.lift_all_evictions();
-        Ok(token)
+            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?)
     }
 
     /// Mint an invite that also carries zero-knowledge **rendezvous** infra addresses
@@ -2776,21 +2774,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// [`join_namespace`] without a hard-coded address. The rendezvous set is bound
     /// into the inviter signature.
     pub fn mint_invite_with_rendezvous(
-        &mut self,
+        &self,
         invite_nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        let token = self.group.mint_invite_with_rendezvous(
+        Ok(self.group.mint_invite_with_rendezvous(
             &self.device,
             invite_nonce,
             expires_at_ms,
             bootstrap,
             rendezvous,
-        )?;
-        self.lift_all_evictions();
-        Ok(token)
+        )?)
     }
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
@@ -3561,16 +3557,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ///    first and check 1 therefore accepted it: the victim's genuine record is refused by
     ///    check 1, but its claim is still visible to this check as long as it was learned at all.
     /// 3. the transport refuses to evict any peer **this node's own configuration** names as a
-    ///    relay, a rendezvous or a bootstrap, which is the case with the worst blast radius and
-    ///    the one no record from the wire can talk it out of.
+    ///    relay, a rendezvous or a bootstrap, including one it merely routes a circuit through.
+    ///    That is the case with the worst blast radius, and it is the one check no record from
+    ///    the wire can talk this node out of. It protects infrastructure this process has been
+    ///    told about, not infrastructure in general.
     ///
-    /// **Residual, stated rather than papered over:** a member that publishes a squat claim on a
-    /// victim *before* that victim's own record reaches a given node, and is then removed, still
-    /// gets that node to evict the victim. Check 1 shrinks this to a propagation race that the
-    /// attacker has to win per node, and check 3 keeps infrastructure out of reach entirely, but
-    /// the race is not closed here and cannot be: closing it needs the deferred binding between a
-    /// device key and a transport identity. Eviction stays a best-effort primitive and no
-    /// property may be made to depend on it.
+    /// **Residual, stated rather than papered over, and it is not a coin-flip.** A member that
+    /// publishes a squat claim on a victim *before* that victim's own record reaches a given node,
+    /// and is then removed, still gets that node to evict the victim. Three things stack in the
+    /// attacker's favour: a newly joined member starts with an **empty** record map, so there is
+    /// nothing to collide with; Adds are announced to every member on the control topic, so the
+    /// attacker knows exactly when to push; and the duplicate check runs before the `seq`
+    /// comparison, so a device may retarget its claimed `peer_id` at any time with a higher `seq`
+    /// (which it must be able to do, since a node's network identity can legitimately change).
+    /// An attacker publishing on every observed join wins on essentially every new member, and
+    /// the payoff does not even need a removal: while the squat stands, the victim's genuine
+    /// record is refused on those nodes, suppressing its PEX addresses and presence dot for as
+    /// long as the attacker stays in the roster. Closing this needs the deferred binding between
+    /// a device key and a transport identity. Eviction is best-effort and no property may be made
+    /// to depend on it.
     fn queue_eviction(&mut self, target: &DeviceId) {
         if *target == self.device.device_id() {
             return; // our own removal: there is nobody to disconnect but ourselves
@@ -3666,7 +3671,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.evicted_devices = kept;
     }
 
-    /// Lift **every** outstanding eviction, because this node has just minted an invite.
+    /// Lift **every** outstanding eviction: an explicit "I intend to admit somebody" action.
     ///
     /// Readmission alone cannot drive the lift at the node that matters. At the **inviter**, the
     /// roster only changes once the joiner's join request has been served, and that request is a
@@ -3675,15 +3680,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// allowed until the roster changes: a deadlock, at exactly the node doing the admitting.
     /// (Every other member is fine; they learn the Add over the control topic.)
     ///
-    /// Minting is the earliest point at which this node has said, in its own voice, that it is
-    /// willing to admit somebody. An `InviteToken` is not bound to an invitee device, so this
-    /// cannot be narrower than "everyone currently evicted"; that is a real cost, and it is
-    /// bounded by `MAX_EVICTED_DEVICES`. The alternative is that remove-then-re-invite, which the
-    /// product ships a button for, simply does not work.
+    /// **Deliberately NOT called from `mint_invite`.** Minting looks like the moment the owner
+    /// declares willingness to admit, and for the "Generate new invite" button it is; but minting
+    /// is also reached automatically. The desktop re-mints an invite whenever the stored one is
+    /// missing an address the node has since gained (UPnP answering after founding, a relay
+    /// circuit reserving, a rendezvous registering), so tying the lift to minting would re-admit
+    /// every removed member the next time anyone so much as *opened the invite panel*, with
+    /// nobody deciding it and no trace that it happened. A silent re-admission is worse than the
+    /// deadlock it fixes, because the deadlock at least fails loudly. Only a deliberate
+    /// user-facing action calls this.
     ///
-    /// Only the **owner and admins** can mint (`Server::require_invite_permission`), so this is
-    /// not a lever an ordinary member can pull.
-    fn lift_all_evictions(&mut self) {
+    /// An `InviteToken` is not bound to an invitee device, so this cannot be narrower than
+    /// "everyone currently evicted"; that is a real cost, bounded by `MAX_EVICTED_DEVICES`.
+    /// Narrowing it by *who* needs an invite bound to an invitee device, which is the same
+    /// missing binding that makes eviction best-effort in the first place.
+    ///
+    /// The product layer gates this behind the invite permission (owner/admin), so it is not a
+    /// lever an ordinary member can pull.
+    pub fn lift_all_evictions(&mut self) {
         if self.evicted_devices.is_empty() {
             return;
         }
@@ -8121,8 +8135,8 @@ mod tests {
     /// Readmission alone cannot do it at the node that matters. At the **inviter**, the roster
     /// only changes once the joiner's join request has been served, and that request needs a
     /// connection the eviction refuses: the roster cannot change until the connection is allowed,
-    /// and the connection is not allowed until the roster changes. So minting an invite, which is
-    /// this node declaring in its own voice that it will admit somebody, is what lifts it.
+    /// and the connection is not allowed until the roster changes. So an explicit
+    /// `lift_all_evictions` (the "Generate new invite" action, and only that) is what breaks it.
     ///
     /// The transport fake here **enforces** the eviction, and the rejoin uses the **same** peer id
     /// that was evicted. With either of those missing this test passes against the deadlock.
@@ -8151,10 +8165,6 @@ mod tests {
         );
         joined.unwrap();
 
-        // Mint the re-invite **before** the removal, so nothing about this token can be what
-        // lifts the eviction later. This is the invite the deadlock swallows.
-        let stale_invite = asy.mint_invite([2u8; 16], u64::MAX, vec![]).unwrap();
-
         stash_peer_record(&mut asy, bob_id, *bob_peer.as_bytes());
         asy.request_remove(&bob_id).await.unwrap();
         assert_eq!(*asy.transport.evicted.lock().unwrap(), vec![bob_peer]);
@@ -8163,9 +8173,10 @@ mod tests {
             "the fake enforces: Bob's traffic no longer reaches Alice"
         );
 
-        // With the eviction standing, Bob cannot be admitted at all: his join request never
-        // reaches Alice's membership layer, so neither side makes progress. This is the deadlock,
-        // demonstrated rather than described.
+        // With the eviction standing, Bob cannot be admitted at all, even holding a valid invite:
+        // his join request never reaches Alice's membership layer, so neither side makes progress.
+        // This is the deadlock, demonstrated rather than described.
+        let stale_invite = asy.mint_invite([2u8; 16], u64::MAX, vec![]).unwrap();
         let stuck = tokio::time::timeout(tokio::time::Duration::from_millis(250), async {
             tokio::join!(
                 request_join(&bob_net, alice_peer, &bob, &stale_invite),
@@ -8179,8 +8190,9 @@ mod tests {
         );
         assert!(!asy.group.contains_device(&bob_id), "and he is still out");
 
-        // Now the owner re-invites him. Minting is the lift.
+        // The owner deliberately re-invites him: "Generate new invite" mints AND lifts.
         let invite2 = asy.mint_invite([3u8; 16], u64::MAX, vec![]).unwrap();
+        asy.lift_all_evictions();
         let admitted = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
             tokio::join!(
                 request_join(&bob_net, alice_peer, &bob, &invite2),
@@ -8190,7 +8202,7 @@ mod tests {
         .await;
         assert!(
             admitted.is_ok(),
-            "after minting an invite the joiner must be able to reach the inviter"
+            "after an explicit lift the joiner must be able to reach the inviter"
         );
         // Bob's own half fails *in this test only*: one `MlsDevice` cannot hold two groups with
         // the same group id inside one in-process openmls provider. Alice's half, which is the
@@ -8208,6 +8220,55 @@ mod tests {
             asy.evicted_devices.is_empty(),
             "the ledger entry is consumed, so it is not lifted again every tick"
         );
+    }
+
+    /// **Minting must not lift.** An invite is re-minted *automatically*, not only when a person
+    /// asks for one: the desktop re-mints whenever the node has gained an address the stored
+    /// invite does not mention (UPnP answering after founding, a relay circuit reserving, a
+    /// rendezvous registering), so merely opening the invite panel can mint. Lifting there would
+    /// re-admit every removed member with nobody deciding it and no trace that it happened, which
+    /// is worse than the deadlock the lift exists to fix because it fails silently.
+    ///
+    /// So: the mint path leaves the eviction exactly where it was, and only the explicit call
+    /// lifts it. This is the same call path the self-heal uses (`Server::mint_invite` →
+    /// `ChannelSync::mint_invite`).
+    #[tokio::test]
+    async fn an_automatic_re_mint_does_not_lift_an_eviction() {
+        let mut node = recording_node();
+        let gone = DeviceId::from_bytes([3u8; 32]);
+        let gone_peer = PeerId::new([8u8; 32]);
+        stash_peer_record(&mut node, gone, *gone_peer.as_bytes());
+        node.queue_eviction(&gone);
+        node.drain_evictions().await;
+        assert_eq!(*node.transport.evicted.lock().unwrap(), vec![gone_peer]);
+
+        // Re-mint several times, exactly as a stale-invite self-heal does on every reachability
+        // gain. Nothing about that is a decision to re-admit anybody.
+        for n in 0..3u8 {
+            node.mint_invite([n; 16], u64::MAX, vec![]).unwrap();
+            node.mint_invite_with_rendezvous([n + 100; 16], u64::MAX, vec![], vec![])
+                .unwrap();
+            node.drain_evictions().await;
+        }
+        assert!(
+            node.transport.unevicted.lock().unwrap().is_empty(),
+            "an automatic re-mint must not lift a standing eviction"
+        );
+        assert_eq!(
+            node.evicted_devices.len(),
+            1,
+            "and the ledger still remembers who is out"
+        );
+
+        // The explicit action does lift it.
+        node.lift_all_evictions();
+        node.drain_evictions().await;
+        assert_eq!(
+            *node.transport.unevicted.lock().unwrap(),
+            vec![gone_peer],
+            "the deliberate action is what re-admits"
+        );
+        assert!(node.evicted_devices.is_empty());
     }
 
     /// A lift must never release a transport peer that some **other** standing eviction still
@@ -9278,7 +9339,7 @@ mod tests {
         // A plain member (no admin grant) requests an admission; the owner's on_add_request must
         // reject it at the role re-check; no commit, no admission.
         let (_hub, mut members, _ids) = build_members(3).await; // owner + two plain members
-        let plain = &mut members[1];
+        let plain = &members[1];
         // Forge a well-formed, correctly-signed Add-request from the plain member.
         let invite = plain.mint_invite([8u8; 16], u64::MAX, vec![]).unwrap();
         let dave = MlsDevice::generate().unwrap();
@@ -10534,7 +10595,7 @@ mod tests {
 
         // Mint an invite and build the exact bytes a joiner would send for it.
         fn req_for(
-            node: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
+            node: &ChannelSync<MemNetwork, ChaCha20Rng>,
             nonce: [u8; 16],
             expires: u64,
         ) -> (InviteToken, Vec<u8>) {
@@ -10562,7 +10623,7 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Undecodable);
 
         // A structurally fine invite for someone else's group.
-        let (mut wrong, _) = req_for(&mut node, [1u8; 16], u64::MAX);
+        let (mut wrong, _) = req_for(&node, [1u8; 16], u64::MAX);
         wrong.group_id = b"some other group".to_vec();
         assert!(node
             .serve_join(joiner, &encode_join_req(&wrong, &spare_kp))
@@ -10570,7 +10631,7 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::WrongGroup);
 
         // An invite naming a different inviter device: this member structurally cannot admit.
-        let (mut elsewhere, _) = req_for(&mut node, [2u8; 16], u64::MAX);
+        let (mut elsewhere, _) = req_for(&node, [2u8; 16], u64::MAX);
         elsewhere.inviter_device_id = MlsDevice::generate().unwrap().device_id();
         assert!(node
             .serve_join(joiner, &encode_join_req(&elsewhere, &spare_kp))
@@ -10583,7 +10644,7 @@ mod tests {
         );
 
         // Edited after signing: the inviter is still us, so this is the signature check firing.
-        let (mut forged, _) = req_for(&mut node, [3u8; 16], u64::MAX);
+        let (mut forged, _) = req_for(&node, [3u8; 16], u64::MAX);
         forged.expires_at_ms = u64::MAX - 1;
         assert!(node
             .serve_join(joiner, &encode_join_req(&forged, &spare_kp))
@@ -10591,17 +10652,17 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::BadSignature);
 
         // The three ledger causes, which are the ones that must never collapse together.
-        let (_, expired) = req_for(&mut node, [4u8; 16], 9_000);
+        let (_, expired) = req_for(&node, [4u8; 16], 9_000);
         assert!(node.serve_join(joiner, &expired).is_none());
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Expired);
 
-        let (_, revoked) = req_for(&mut node, [5u8; 16], u64::MAX);
+        let (_, revoked) = req_for(&node, [5u8; 16], u64::MAX);
         node.ledger.revoke([5u8; 16]);
         assert!(node.serve_join(joiner, &revoked).is_none());
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Revoked);
 
         // A genuine admission, then the very same request replayed.
-        let (_, good) = req_for(&mut node, [6u8; 16], u64::MAX);
+        let (_, good) = req_for(&node, [6u8; 16], u64::MAX);
         let resp = node.serve_join(joiner, &good).expect("admitted");
         assert_eq!(resp.first(), Some(&JOIN_READY));
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Admitted);

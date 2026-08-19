@@ -184,7 +184,7 @@ block in `HANDOVER.md` for what happens otherwise).
 | **[~]** | P3 rendezvous fillable / census / cookies | `e35b1b2` | **DEFERRED by decision (2026-08-19), documented not fixed.** Occupancy, TTL, cookies and per-prefix quotas done. The census is **rate-limited, not prevented**: rejecting a namespace-less `Discover`, clamping the caller's `limit`, and evicting a registration all need the upstream `Registrations` store vendored (~600 lines), which is a fork in a security-critical path. Revisit before any public deployment; see the note below |
 | **[x]** | P4 call-signal FIFO kills voice group-wide | `32dab2a` | |
 | **[~]** | P5 connection limits | `0af1583`, *(uncommitted)* | Both missing caps are now set. Inbound was already capped (64 pending / 256 established / 8 per peer); added `max_pending_outgoing(32)` (the bound on being made to dial a large address set, from an invite's bootstrap list, a PEX record or a rendezvous response) and `max_established(320)` (a *total* cap, inbound and outbound together; the inbound cap bounded none of this node's own dials, relay circuits or rendezvous links). Each carries a doc comment saying what it buys and what it costs, in the `relay_node.rs` style. **Left:** neither limit is proven to bind. The mesh swarm's limits are constants inside `MeshBehaviour::new` with no config seam to turn down, and `connection_limits::ConnectionLimits` exposes no getters, so the `infra_limits.rs` discipline (turn a limit down until the operation fails) needs a knob that does not exist yet. Stays `[~]` until it does: an unexercised limit is a limit nobody knows the units of |
-| **[~]** | P6 no eviction primitive | *(uncommitted)* | Built, then reworked after a hostile review found a CRITICAL in the first version. `MeshTransport::evict_peer`/`unevict_peer` (default-inert, so the memory transport is unaffected) → `Command::Evict`/`Unevict` → an `Eviction` gate behaviour keyed on the **phase-0** peer id, declared **first** in `MeshBehaviour` so it refuses before `gossipsub` allocates anything for the connection (`to_peer` is a forward hash, so the deny is computable at connection time), plus `allow_block_list` to close connections that were already live. Driven from every path that merges a removal, via `note_removal_applied`: `commit_remove_now`, `note_commit_applied` (roster diff around `process_incoming`, since MLS reports only *that* a removal happened) and the fork-contest winner branch. Deny entries do **not** expire on a timer; they are bounded at 256, oldest-first, and are lifted by **readmission** (reconciled against the roster, so every Add path clears it), which is what keeps remove-then-re-invite working now that node identities are stable across restarts. **Left, and why it is `[~]`:** the `DeviceId → transport peer` link is still the self-asserted `PeerDescriptor.peer_id`, and the signature binds that value to its signer without binding it to *naming* its signer, so it is attacker-chosen. Three checks make acting on it safe (ingest refuses a peer id another device already claims; `queue_eviction` refuses one a remaining member or this node claims; the transport refuses to evict any relay/rendezvous/bootstrap **this node's own configuration** names), but a squatter whose forged record reaches a node **before** the victim's genuine one still gets that node to evict the victim. Closing that needs the deferred device-key-to-transport-identity binding. Also: the deny list is process-local and not persisted, each member evicts only when *it* applies the removal (so a lagging member stays attached), and no member grants circuit reservations today (`relay_client` only), so that half is closed by construction rather than tested |
+| **[~]** | P6 no eviction primitive | *(uncommitted)* | Built, then reworked twice after hostile reviews. `MeshTransport::evict_peer`/`unevict_peer` (default-inert, so the memory transport is unaffected) → `Command::Evict`/`Unevict` → an `Eviction` gate behaviour keyed on the **phase-0** peer id, declared **first** in `MeshBehaviour` so it refuses before `gossipsub` allocates anything (`to_peer` is a forward hash, so the deny is computable at connection time), plus `allow_block_list` to close connections that were already live and a `ConnectionEstablished` check to close one that raced past the gate before the deny landed. Driven from every path that merges a removal via `note_removal_applied`: `commit_remove_now`, `note_commit_applied` (roster diff around `process_incoming`) and the fork-contest winner branch. Deny entries do not expire on a timer; they are bounded at 256, oldest-first, and are lifted only by an **explicit** owner/admin action (`Server::readmit_evicted_peers`, wired to the desktop's "Generate new invite" and nothing else). Readmission alone cannot drive it: at the inviter the roster cannot change until the joiner's request is served, and that request needs the very connection the eviction refuses. Minting deliberately does **not** lift, because minting is also automatic; `get_invite` re-mints whenever the node has gained an address the stored invite lacks, so tying the lift to minting re-admitted every removed member the next time anybody opened the invite panel. **Left, and why it is `[~]`:** (a) the `DeviceId → transport peer` link is still the self-asserted `PeerDescriptor.peer_id`, and the signature binds that value to its signer without binding it to *naming* its signer, so it is attacker-chosen; three checks bound the damage but do not close it (see the section 11 entry for the honest reading of the residual, which is worse than a race). (b) Infrastructure is out of reach only where **this node's own configuration names it**: relays and rendezvous it dials, reserves on, registers at or routes through. An infra node this process has never been told about is not protected. (c) The lift cannot be narrower than "everyone currently evicted", because an `InviteToken` is not bound to an invitee device, so one deliberate re-invite re-admits every outstanding eviction at once. (d) The deny list is process-local and not persisted, each member evicts only when *it* applies the removal (so a lagging member stays attached), and no member grants circuit reservations today (`relay_client` only), so that half is closed by construction rather than tested |
 | **[x]** | P7 invite bootstrap addresses unvalidated | `32dab2a` | |
 | **[~]** | P8 eclipse source count attacker-supplied | `32dab2a` | Counts roots that returned a peer, with decay. Cannot be finished without P9: without `tag_verified`, a hostile inviter naming two rendezvous it controls still pins the count by serving one fabricated record from each |
 | **[ ]** | P9 membership tag never carried on the wire | | `tag_verified` is hardcoded `false` at two sites, so the "member-tag-verified" ranking tier does not exist. Blocks finishing P8 |
@@ -444,11 +444,12 @@ First, the eviction is aimed at the peer id the removed member **asserted about 
 signature on that record binds the value to its signer without binding it to *naming* its signer.
 So a switchboard that published a peer id that is not its own keeps its connections, and a member
 that published *somebody else's* can aim the group's disconnect at that somebody. The transport
-therefore refuses to evict any relay, rendezvous or bootstrap this node's own configuration names,
-which is the case with the worst blast radius, and the sync layer refuses a peer id a remaining
-member also claims; a squatter that wins the propagation race against its victim's own record is
-the residual, and only the deferred device-key binding closes it. A switchboard is exactly the
-member with both the motive and the position.
+refuses to evict any relay, rendezvous or bootstrap **this node's own configuration names** (which
+now includes one it merely routes through, not only one it reserves on), and the sync layer refuses
+a peer id a remaining member also claims. Neither closes the case where the squat lands before the
+victim's own record does; only the deferred device-key binding does. A switchboard is exactly the
+member with both the motive and the position, so this rung cannot treat the primitive as more than
+best-effort.
 
 Second, eviction is per node and fires when a member *applies* the removal, so a member still
 lagging on that commit is still attached to the ex-member; the grandfathered topic window is
@@ -456,8 +457,13 @@ narrowed by that much rather than closed, and remains subscribed and derivable f
 removals.
 
 Third, a switchboard that is removed and later re-invited must be able to reconnect, so the deny
-is lifted on readmission rather than expiring. That is correct for membership and it means an
-eviction is exactly as durable as the removal itself, no more.
+is lifted by an **explicit owner/admin action** rather than expiring. That keeps an eviction exactly
+as durable as the removal itself, but it is coarse: an invite names no invitee, so one lift releases
+*every* outstanding eviction, including for ex-members nobody meant to re-admit. Anyone re-inviting
+one removed switchboard is, for that moment, re-admitting all of them. And the lift must stay bound
+to a person's action: it was briefly attached to invite *minting*, which is also reached
+automatically whenever the node gains an address its stored invite lacks, so every eviction in the
+group was silently released the next time anyone opened the invite panel.
 
 **Disclosure is consent, not a badge**, and v1's version was defeatable three ways: post-join
 promotion (nothing binds the capability to join time, so a member can become the switchboard a
@@ -751,21 +757,58 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
   `PeerDescriptor`. The signature binds the value **to** its signer; nothing binds it to *naming*
   its signer, so a member can publish a record carrying a third party's transport peer, be removed
   in the ordinary way, and have every member disconnect and refuse that third party. Three checks
-  now bound this (ingest refuses a duplicate claim; the eviction refuses a peer id a remaining
-  member or this node claims; the transport refuses to evict infrastructure this node's own
-  configuration names), and the residual is a squatter whose record reaches a node before its
-  victim's does. **Only the deferred device-key-to-transport-identity binding closes it**, which
-  makes that deferral load-bearing rather than cosmetic. Until then, eviction is best-effort and
-  no property may be made to depend on it.
-- **The duplicate-claim rule costs the victim a record.** First claim wins at ingest, so a
-  squatter that publishes before a member's genuine record suppresses that record on nodes that
-  saw the squat first: that member loses PEX addresses and its presence dot there until the
-  squatter leaves the roster. Bounded (a removed device's record is dropped, so the claim does not
-  outlive the membership) and far smaller than the harm it prevents, but it is a real cost.
+  bound this (ingest refuses a duplicate claim; the eviction refuses a peer id a remaining member
+  or this node claims; the transport refuses to evict infrastructure this node's own configuration
+  names). **Only the deferred device-key-to-transport-identity binding closes it**, which makes
+  that deferral load-bearing rather than cosmetic. Until then, eviction is best-effort and no
+  property may be made to depend on it.
+- **The residual is not a coin-flip, and calling it "a race the attacker has to win" was
+  flattering.** Three things stack in the attacker's favour. A newly joined member starts with an
+  **empty** record map, so nothing is there to collide with. Adds are announced to everyone on the
+  control topic, so an attacker knows exactly when a new member appears and can push its squat
+  immediately. And the duplicate check runs **before** the `seq` comparison, so a device can
+  retarget its claimed `peer_id` at any moment with a higher `seq` (which it must be able to do,
+  since a node's network identity can legitimately change). An attacker that publishes on every
+  observed join therefore wins on essentially every new member. Worse, the payoff does not need a
+  removal at all: while the squat stands, the victim's genuine record is refused on those nodes, so
+  its PEX addresses and presence dot are suppressed there for as long as the attacker stays in the
+  roster. The removal-driven disconnect is the escalation, not the entry price.
+- **The duplicate-claim rule costs the victim a record.** First claim wins at ingest. Bounded (a
+  removed device's record is dropped, so the claim does not outlive the membership) and far smaller
+  than the harm it prevents, but it is a real cost and it is the mechanism the entry above abuses.
 - **Eviction is not persisted and does not reach a lagging member.** The deny list is process-local
   (deliberately: a restart brings up a fresh swarm with no connections, and the ex-member is then
   an unauthenticated stranger holding none of the group's keys), and each member evicts when *it*
   applies the removal, so a member still behind on that commit stays attached to the ex-member.
+- **Lifting an eviction is coarser than the removal that caused it.** An `InviteToken` names no
+  invitee, so one deliberate lift releases every outstanding eviction rather than one.
+  Owner/admin-gated and bounded at 256, and the alternative was that remove-then-re-invite
+  deadlocks at the inviter, but a narrower lift needs an invite bound to an invitee device, which
+  is its own design and is the same missing binding that makes eviction best-effort at all.
+- **The lift must never be attached to an automatic path, and nearly was.** It was first wired to
+  `mint_invite`, on the reasoning that minting is the owner declaring willingness to admit. That
+  reasoning holds for the button and not for the call graph: `get_invite` re-mints on its own
+  whenever the node has become reachable in a way the stored invite does not mention (UPnP
+  answering at startup, a relay circuit reserving, a rendezvous registering), so opening the invite
+  panel released every eviction in the group with nobody deciding it and no trace. It is now
+  `Server::readmit_evicted_peers`, a separate owner/admin command wired to `mint_invite_fresh`
+  only. Worth remembering as a shape rather than an incident: a security control whose *release*
+  is folded into a convenience action gets released by convenience. The defect lived in the
+  interaction between two files with different owners, and neither diff showed it alone.
+- **A time-boxed admission window was considered instead, and declined.** The idea: rather than an
+  explicit lift, allow a removed peer back for as long as an invite is outstanding. It is narrower
+  in *time* but not in *who*, and it fails on the same ground the automatic lift did: the window
+  would be opened by the automatic re-mint, so it would restore precisely the silent re-admission,
+  with a timer on top. It also re-introduces "a decision nobody made, because a clock advanced",
+  which is the argument against expiring deny entries in the first place, and it would need a
+  `Clock` plumbed into the mesh actor's deny path (which, unlike `admission.rs`, has none). An
+  explicit lift is auditable: one action, one moment, and it can carry UI copy naming what is
+  being re-admitted, which is what rung 2's consent story needs. The genuinely better answer is
+  neither: bind the invite to an invitee device so the lift can be narrow in *who*.
+- **The establish/deny race closer is not deterministically exercised.** Whether an eviction
+  reaches the actor before or after an in-flight connection's `ConnectionEstablished` is
+  `select!`'s choice, so the socket test asserts the property under either ordering rather than
+  forcing the interesting one.
 - **The fork-contest winner path's eviction is untested.** It is one call on a branch that needs
   `max_committer_rank >= 1`, which the project deliberately does not enable, so it is covered by
   construction (all three merge branches now funnel through `note_removal_applied`) rather than by

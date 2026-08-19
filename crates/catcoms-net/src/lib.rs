@@ -2175,6 +2175,42 @@ mod tests {
         );
     }
 
+    /// A circuit address names **two** peers, and which one you resolve decides whether the
+    /// relay is protected from eviction.
+    ///
+    /// `dial_gated` gates on `target_peer_in_multiaddr`, which returns the LAST `/p2p/`, i.e. the
+    /// target. So a relay used purely as dial transit was never recorded as infrastructure, and a
+    /// companion device claiming its transport id could get every member to evict the relay they
+    /// route through by being removed in the ordinary way. `dial_gated` now notes the relay half
+    /// as well; this pins the discrimination the whole fix rests on.
+    #[test]
+    fn a_circuit_address_names_the_relay_and_the_target_separately() {
+        let relay = libp2p_peer();
+        let target = libp2p_peer();
+        let circuit: Multiaddr =
+            format!("/ip4/198.51.100.1/tcp/4000/p2p/{relay}/p2p-circuit/p2p/{target}")
+                .parse()
+                .unwrap();
+
+        assert_eq!(
+            target_peer_in_multiaddr(&circuit),
+            Some(target),
+            "the dial gate resolves the TARGET, which is why the relay needed noting separately"
+        );
+        assert_eq!(
+            relay_peer_in_circuit_addr(&circuit),
+            Some(relay),
+            "and the relay is recoverable from the same address"
+        );
+
+        // A plain direct address has a target and no relay, so noting infra off it is a no-op.
+        let direct: Multiaddr = format!("/ip4/198.51.100.1/tcp/4000/p2p/{target}")
+            .parse()
+            .unwrap();
+        assert_eq!(target_peer_in_multiaddr(&direct), Some(target));
+        assert_eq!(relay_peer_in_circuit_addr(&direct), None);
+    }
+
     #[test]
     fn a_seed_pins_a_stable_peer_id() {
         // The whole point of the persisted identity: the same 32 bytes must reproduce the same

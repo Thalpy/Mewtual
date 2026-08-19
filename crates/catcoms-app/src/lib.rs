@@ -2812,6 +2812,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         path: &str,
         bytes: &[u8],
     ) -> Result<Cid, AppError> {
+        self.add_file_with_progress(name, mime, path, bytes, None)
+            .await
+    }
+
+    /// As [`add_file`](Self::add_file), but reports completed local upload work as
+    /// `(steps_done, steps_total)`. Each sealed/stored chunk is one step and publishing the file
+    /// index entry is the final step, so `done == total` means the file is actually visible to the
+    /// group rather than merely copied into local storage.
+    pub async fn add_file_with_progress(
+        &mut self,
+        name: &str,
+        mime: &str,
+        path: &str,
+        bytes: &[u8],
+        progress: Option<&tokio::sync::mpsc::Sender<(usize, usize)>>,
+    ) -> Result<Cid, AppError> {
         if bytes.len() > MAX_FILE_BYTES {
             return Err(AppError::Invalid(format!(
                 "file too large: {} bytes (max {MAX_FILE_BYTES})",
@@ -2841,7 +2857,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .filter(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
             .collect();
         if let Some(twin) = twins.first() {
+            if let Some(p) = progress {
+                let _ = p.send((0, 1)).await;
+            }
             if twins.iter().any(|e| e.name == name && e.path == folder) {
+                if let Some(p) = progress {
+                    let _ = p.send((1, 1)).await;
+                }
                 return Ok(plaintext_cid); // already shared under this exact name + folder
             }
             // Same content, new name/folder: list it again against the SAME sealed blobs; but
@@ -2852,19 +2874,33 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
                 })
                 .await?;
+            if let Some(p) = progress {
+                let _ = p.send((1, 1)).await;
+            }
             return Ok(plaintext_cid);
         }
+        let chunk_count = bytes.len().max(1).div_ceil(CHUNK_BYTES);
+        let total_steps = chunk_count + 1; // the final step publishes the index entry
+        if let Some(p) = progress {
+            let _ = p.send((0, total_steps)).await;
+        }
         let mut chunks = Vec::new();
-        for chunk in bytes.chunks(CHUNK_BYTES) {
+        for (i, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
             let (file_ref, ciphertext) = self.sync.seal_file(chunk, mime)?;
             self.sync.put_blob(&ciphertext)?;
             chunks.push(file_ref);
+            if let Some(p) = progress {
+                let _ = p.send((i + 1, total_steps)).await;
+            }
         }
         if chunks.is_empty() {
             // An empty file is still one (empty) chunk, so the manifest always has >= 1.
             let (file_ref, ciphertext) = self.sync.seal_file(&[], mime)?;
             self.sync.put_blob(&ciphertext)?;
             chunks.push(file_ref);
+            if let Some(p) = progress {
+                let _ = p.send((1, total_steps)).await;
+            }
         }
         let manifest = FileManifest {
             plaintext_cid,
@@ -2878,6 +2914,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
             })
             .await?;
+        if let Some(p) = progress {
+            let _ = p.send((total_steps, total_steps)).await;
+        }
         Ok(plaintext_cid)
     }
 
@@ -4652,18 +4691,35 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
 
     /// Mint a single-use invite to this server.
     ///
-    /// `&mut self` because minting also **lifts any outstanding transport evictions**: a member
-    /// removed earlier cannot otherwise reach this node to redeem an invite, since the eviction
-    /// refuses its connection and the roster cannot change until that connection is allowed. See
-    /// `ChannelSync::lift_all_evictions`.
+    /// Minting does **not** lift outstanding transport evictions; see
+    /// [`Server::readmit_evicted_peers`] for why that is a separate, deliberate action.
     pub fn mint_invite(
-        &mut self,
+        &self,
         nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, AppError> {
         self.require_invite_permission()?;
         Ok(self.sync.mint_invite(nonce, expires_at_ms, bootstrap)?)
+    }
+
+    /// Lift every outstanding transport eviction (P6), so a member removed earlier can reach
+    /// this node again to redeem an invite.
+    ///
+    /// This is the **deliberate** half of remove-then-re-invite and must be wired only to an
+    /// explicit user action ("Generate new invite"), never to a path that can run on its own.
+    /// The desktop re-mints an invite automatically whenever the node gains an address the
+    /// stored invite does not mention, so folding this into minting would silently re-admit
+    /// every removed member the next time anybody opened the invite panel. See
+    /// `ChannelSync::lift_all_evictions`.
+    ///
+    /// Owner/admin only, the same gate as minting: it is the same declaration of intent.
+    /// It cannot be narrower than "everyone currently evicted", because an `InviteToken` names
+    /// no invitee.
+    pub fn readmit_evicted_peers(&mut self) -> Result<(), AppError> {
+        self.require_invite_permission()?;
+        self.sync.lift_all_evictions();
+        Ok(())
     }
 
     /// Gate on the caller being owner/admin (Phase 10h). Policy-layer: enforced for honest
@@ -4679,9 +4735,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Mint an invite that also carries rendezvous infra addresses (discovery-enabled).
-    /// `&mut self` for the same reason as [`Server::mint_invite`].
     pub fn mint_invite_with_rendezvous(
-        &mut self,
+        &self,
         nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
@@ -7937,6 +7992,31 @@ mod tests {
         assert!(alice.file_available(&cid), "all chunks are held locally");
         let got = alice.download_file(&cid).await.unwrap();
         assert_eq!(got, data, "the chunked file reassembles byte-for-byte");
+    }
+
+    #[tokio::test]
+    async fn upload_progress_finishes_only_after_the_file_is_published() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![7u8; CHUNK_BYTES + 1];
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        alice
+            .add_file_with_progress(
+                "progress.bin",
+                "application/octet-stream",
+                "",
+                &data,
+                Some(&tx),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(rx.recv().await, Some((0, 3)));
+        assert_eq!(rx.recv().await, Some((1, 3)));
+        assert_eq!(rx.recv().await, Some((2, 3)));
+        assert_eq!(rx.recv().await, Some((3, 3)));
+        assert_eq!(alice.files().len(), 1, "100% means the listing is visible");
     }
 
     #[tokio::test]

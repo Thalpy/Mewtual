@@ -60,6 +60,7 @@ pub enum AppCommand {
         channel: u128,
         text: String,
         reply_to: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Edit the text of one of your own messages (by id) in a channel.
     EditMessage {
@@ -194,6 +195,7 @@ pub enum AppCommand {
         mime: String,
         path: String,
         bytes: Vec<u8>,
+        progress: Option<mpsc::Sender<(usize, usize)>>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Query the shared file list.
@@ -420,6 +422,12 @@ pub enum AppCommand {
         rendezvous: Vec<String>,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    /// Lift every outstanding transport eviction (P6). Owner/admin only. Wired **only** to the
+    /// explicit "Generate new invite" action: minting is also reached automatically by the
+    /// invite panel's self-heal, and lifting there would silently re-admit every removed member.
+    ReadmitEvictedPeers {
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// This member's origin identity on this server: its device id plus the group id.
     /// Read-only; the grant ceremony (multi-device M2) needs both to anchor the SAS
     /// and to tell the new device which group a grant is for.
@@ -533,16 +541,9 @@ impl ServerActor {
         }
     }
 
-    /// Send a chat message to a channel (fire-and-forget; a `ChannelUpdated` event follows).
+    /// Send a chat message to a channel; a `ChannelUpdated` event follows on success.
     pub async fn send_message(&self, channel: u128, text: impl Into<String>) {
-        let _ = self
-            .cmd_tx
-            .send(AppCommand::SendMessage {
-                channel,
-                text: text.into(),
-                reply_to: String::new(),
-            })
-            .await;
+        let _ = self.send_reply(channel, text, String::new()).await;
     }
 
     /// Send a chat message replying to `reply_to` (the parent message's id).
@@ -551,15 +552,22 @@ impl ServerActor {
         channel: u128,
         text: impl Into<String>,
         reply_to: impl Into<String>,
-    ) {
-        let _ = self
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
             .cmd_tx
             .send(AppCommand::SendMessage {
                 channel,
                 text: text.into(),
                 reply_to: reply_to.into(),
+                reply,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Edit the text of one of your own messages (by id) in a channel.
@@ -822,6 +830,23 @@ impl ServerActor {
                 bootstrap,
                 reply,
             })
+            .await
+            .is_err()
+        {
+            return Err("server actor stopped".into());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
+    /// Lift every outstanding transport eviction (owner/admin only), so a previously removed
+    /// member can reach this node to redeem an invite. Call from the **explicit** invite action
+    /// only; see `Server::readmit_evicted_peers`.
+    pub async fn readmit_evicted_peers(&self) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ReadmitEvictedPeers { reply })
             .await
             .is_err()
         {
@@ -1100,6 +1125,19 @@ impl ServerActor {
         path: String,
         bytes: Vec<u8>,
     ) -> Result<String, String> {
+        self.add_file_with_progress(name, mime, path, bytes, None)
+            .await
+    }
+
+    /// Share a file while reporting sealed/stored chunks plus final index publication.
+    pub async fn add_file_with_progress(
+        &self,
+        name: String,
+        mime: String,
+        path: String,
+        bytes: Vec<u8>,
+        progress: Option<mpsc::Sender<(usize, usize)>>,
+    ) -> Result<String, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -1108,6 +1146,7 @@ impl ServerActor {
                 mime,
                 path,
                 bytes,
+                progress,
                 reply,
             })
             .await
@@ -1932,11 +1971,18 @@ where
                         channel,
                         text,
                         reply_to,
+                        reply,
                     }) => {
-                        if let Err(e) = server.send_reply(channel, &text, &reply_to).await {
+                        let res = server
+                            .send_reply(channel, &text, &reply_to)
+                            .await
+                            .map_err(|e| e.to_string());
+                        if let Err(e) = &res {
                             tracing::warn!(error = %e, channel, "send_message failed");
                         }
-                        if channel_changed(&server, channel, &mut counts) {
+                        let changed = res.is_ok() && channel_changed(&server, channel, &mut counts);
+                        let _ = reply.send(res);
+                        if changed {
                             let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
                         }
                     }
@@ -2157,9 +2203,9 @@ where
                             let _ = event_tx.send(AppEvent::DevicesUpdated).await;
                         }
                     }
-                    Some(AppCommand::AddFile { name, mime, path, bytes, reply }) => {
+                    Some(AppCommand::AddFile { name, mime, path, bytes, progress, reply }) => {
                         let res = server
-                            .add_file(&name, &mime, &path, &bytes)
+                            .add_file_with_progress(&name, &mime, &path, &bytes, progress.as_ref())
                             .await
                             .map(|cid| cid.to_hex())
                             .map_err(|e| e.to_string());
@@ -2573,6 +2619,10 @@ where
                             .mint_invite_with_rendezvous(nonce, expires_at_ms, bootstrap, rendezvous)
                             .map(|t| t.encode())
                             .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::ReadmitEvictedPeers { reply }) => {
+                        let res = server.readmit_evicted_peers().map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::OriginIdentity { reply }) => {
