@@ -7,6 +7,11 @@
   import { onMount, tick, untrack } from "svelte";
   import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
+  import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
+  import {
+    TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
+    type TransferPiece,
+  } from "./transfer-visual";
   import { plainSummary } from "./wikitext";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
   import { buildWikiTree, visibleRows, ancestorsOf } from "./wikitree";
@@ -17,8 +22,8 @@
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
-    type Placement, type SpaceState, angularOffsets, applyOffsets, clampPitch, defaultSpace,
-    lassoCapture, parseSpace, project, unproject, wrapYaw,
+    type Placement, type ScreenPoint, type SpaceState, angularOffsets, applyOffsets, clampPitch,
+    defaultSpace, lassoCapturePath, parseSpace, project, separatePlacements, unproject, wrapYaw,
   } from "./space";
   import QRCode from "qrcode";
   import jsQR from "jsqr";
@@ -3377,10 +3382,12 @@
   function availOf(f: UiFile): Avail {
     const dl =
       activeServerId !== null ? downloads[dlKey(activeServerId, f.cid)] : undefined;
-    if (dl && dl.status === "downloading")
+    if (dl && (dl.status === "downloading" || dl.status === "verifying"))
       return { cls: "downloading", icon: "↓", label: `Downloading ${Math.round(dl.progress * 100)}%` };
-    if (dl && dl.status === "queued")
-      return { cls: "downloading", icon: "↓", label: "Queued" };
+    if (dl && (dl.status === "queued" || dl.status === "waiting"))
+      return hasPeers
+        ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
+        : { cls: "offline", icon: "○", label: "No peers online" };
     if (f.total > 0 && f.held >= f.total)
       return { cls: "local", icon: "●", label: "On this device" };
     if (f.held > 0)
@@ -4539,6 +4546,9 @@
       id: uploadId,
       name,
       path,
+      size: file.size,
+      done: 0,
+      total: Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES)),
       status: "reading",
       progress: 0,
       ts: Date.now(),
@@ -4557,6 +4567,7 @@
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
+        uploads[key].done = uploads[key].total;
       }
       return cid;
     } catch (e) {
@@ -4996,14 +5007,24 @@
   async function downloadFile(f: UiFile) {
     if (activeServerId === null) return;
     const key = dlKey(activeServerId, f.cid);
+    const started = Date.now();
+    const held = Math.min(f.held, f.total);
     downloads[key] = {
       server: activeServerId,
       cid: f.cid,
       name: f.name,
       author: f.author,
       status: "queued",
-      progress: 0,
-      ts: Date.now(),
+      progress: f.total > 0 ? held / f.total : 0,
+      done: held,
+      total: f.total,
+      heldBefore: held,
+      bytesDone: f.total > 0 ? Math.round(f.size * held / f.total) : 0,
+      bytesTotal: f.size,
+      networkBytesDone: 0,
+      speed: 0,
+      lastRateAt: started,
+      ts: started,
     };
     try {
       const base64 = await invoke<string>("download_file", { server: activeServerId, cid: f.cid });
@@ -5013,11 +5034,19 @@
       document.body.appendChild(a);
       a.click();
       a.remove();
-      if (downloads[key]) downloads[key].status = "done";
+      if (downloads[key]) {
+        downloads[key].status = "done";
+        downloads[key].progress = 1;
+        downloads[key].done = downloads[key].total;
+        downloads[key].bytesDone = downloads[key].bytesTotal;
+      }
       refreshFiles(); // the file's chunks are now held locally: update its availability
     } catch (e) {
       error = String(e);
-      if (downloads[key]) downloads[key].status = "failed";
+      if (downloads[key]) {
+        downloads[key].status = "failed";
+        downloads[key].error = String(e);
+      }
     }
   }
 
@@ -5105,8 +5134,17 @@
     name: string;
     author: string; // the uploader (the file's source)
     provider?: string; // the live serving peer's fingerprint, when bytes came over the network
-    status: "queued" | "downloading" | "done" | "failed";
+    status: "queued" | "waiting" | "downloading" | "verifying" | "done" | "failed";
     progress: number; // 0..1
+    done: number;
+    total: number;
+    heldBefore: number;
+    bytesDone: number;
+    bytesTotal: number;
+    networkBytesDone: number;
+    speed: number;
+    lastRateAt: number;
+    error?: string;
     ts: number;
   };
   // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
@@ -5118,7 +5156,10 @@
     id: string;
     name: string;
     path: string;
-    status: "reading" | "uploading" | "done" | "failed";
+    size: number;
+    done: number;
+    total: number;
+    status: "reading" | "uploading" | "publishing" | "done" | "failed";
     progress: number; // 0..1; 0..0.1 is the webview read, the remainder is backend work
     error?: string;
     ts: number;
@@ -5149,9 +5190,15 @@
   );
   let activeTransfers = $derived(
     transferList.filter((t) =>
-      t.status === "queued" || t.status === "downloading" || t.status === "reading" || t.status === "uploading"
+      t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
+      t.status === "verifying" || t.status === "reading" || t.status === "uploading" ||
+      t.status === "publishing"
     ).length
   );
+  let movingTransfers = $derived(
+    transferList.filter((t) => transferIsActive(t) && transferConnected(t)).length
+  );
+  let waitingTransfers = $derived(Math.max(0, activeTransfers - movingTransfers));
   let finishedTransfers = $derived(transferList.length - activeTransfers);
   let failedTransfers = $derived(transferList.filter((t) => t.status === "failed").length);
   function clearFinishedTransfers() {
@@ -5163,6 +5210,71 @@
       if (u.server === activeServerId && (u.status === "done" || u.status === "failed"))
         delete uploads[k];
     }
+  }
+
+  function transferConnected(t: TransferRow): boolean {
+    if (t.direction === "upload" || t.status === "done") return true;
+    return !!t.provider || onlineCount > 1 || t.done >= t.total;
+  }
+
+  function transferIsActive(t: TransferRow): boolean {
+    return t.status === "reading" || t.status === "uploading" || t.status === "publishing" ||
+      t.status === "downloading" || t.status === "verifying";
+  }
+
+  function transferPieceStates(t: TransferRow): TransferPiece[] {
+    return transferPieces(
+      t.total,
+      t.done,
+      transferIsActive(t) && t.status !== "publishing" && t.status !== "verifying",
+      transferConnected(t),
+      t.status === "failed",
+      t.status === "done",
+    );
+  }
+
+  function transferTone(t: TransferRow): string {
+    if (t.status === "done") return "complete";
+    if (t.status === "failed" || !transferConnected(t)) return "error";
+    if (t.status === "queued" || t.status === "waiting" || t.status === "reading" ||
+        t.status === "publishing" || t.status === "verifying") return "waiting";
+    return "active";
+  }
+
+  function transferStatus(t: TransferRow): string {
+    const pct = Math.round(t.progress * 100);
+    if (t.status === "done") return t.direction === "upload" ? "✓ Available" : "✓ Received";
+    if (t.status === "failed") {
+      return t.direction === "download" && onlineCount <= 1 ? "No connection" : "✕ Failed";
+    }
+    if (t.direction === "upload") {
+      if (t.status === "reading") return `Preparing ${pct}%`;
+      if (t.status === "publishing") return "Publishing…";
+      return `Processing ${pct}%`;
+    }
+    if (!transferConnected(t)) return "No connection";
+    if (t.status === "queued" || t.status === "waiting") return "Waiting for source…";
+    if (t.status === "verifying") return "Verifying…";
+    return `Receiving ${pct}%`;
+  }
+
+  function transferHover(t: TransferRow): string {
+    const lines = [
+      `Status: ${transferStatus(t).replace(/[✓✕…]/g, "").trim()}`,
+      `Chunks ready: ${Math.min(t.done, t.total)} / ${t.total}`,
+    ];
+    if (t.direction === "download") {
+      lines.push(`Data ready: ${formatBytes(t.bytesDone)} / ${formatBytes(t.bytesTotal)}`);
+      lines.push(`Source: ${t.provider ? nameOf(t.provider) : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
+      if (t.speed > 0 && t.status === "downloading") lines.push(`Speed: ${formatRate(t.speed)}`);
+      if (t.heldBefore > 0) lines.push(`Already held when started: ${t.heldBefore} chunk${t.heldBefore === 1 ? "" : "s"}`);
+    } else {
+      lines.push(`File size: ${formatBytes(t.size)}`);
+      lines.push("Source: this device");
+      lines.push("Availability: members download these chunks on demand");
+    }
+    if (t.error) lines.push(`Detail: ${t.error}`);
+    return lines.join("\n");
   }
   // Advisory eclipse hint for the active server (the node may be isolated: verify a member out of
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
@@ -5625,11 +5737,14 @@
   // The lexicographically-smaller fingerprint is the polite end and yields on collision.
   type CallPeer = {
     fp: string;
+    server: number;
+    channel: string;
     pc: RTCPeerConnection;
     dc: RTCDataChannel | null;
     polite: boolean;
     makingOffer: boolean;
     ignoreOffer: boolean;
+    lastRetry: number;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
@@ -5640,8 +5755,12 @@
   let callChannel = $state(""); // the channel id of my active voice room ("" = not in a call)
   let callChannelName = $state(""); // for the call bar
   let callServer: number | null = null; // the server the room is on
+  let callSelfFp = $state(""); // identity on callServer; the viewed server may change mid-call
   let localStream: MediaStream | null = null;
   const callPeers: Record<string, CallPeer> = {};
+  // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
+  // remote description instead of throwing it away and making the call depend on event timing.
+  const waitingIce: Record<string, RTCIceCandidateInit[]> = {};
 
   // Voice-room presence: `${server}:${channel}` -> { fp: lastSeenMs }, from periodic pings members in
   // a room broadcast. Drives the per-channel "in voice" indicators + the room-active notification.
@@ -5767,19 +5886,43 @@
   function b64dec(b: string): string {
     return new TextDecoder().decode(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
   }
-  async function sendSignal(targetFp: string, msg: Record<string, unknown>) {
-    if (callServer === null) return;
+  async function sendSignal(server: number, targetFp: string, msg: Record<string, unknown>): Promise<boolean> {
     try {
-      await invoke("send_call_signal", { server: callServer, targetFp, payload: b64enc(JSON.stringify(msg)) });
-    } catch {
-      /* peer unreachable: ignore (mesh tolerates a missing edge) */
+      const delivered = await invoke<boolean>("send_call_signal", {
+        server,
+        targetFp,
+        payload: b64enc(JSON.stringify(msg)),
+      });
+      if (!delivered) console.warn("voice signal had no member route", { server, targetFp, type: msg.type });
+      return delivered;
+    } catch (e) {
+      console.warn("voice signal failed", { server, targetFp, type: msg.type, error: String(e) });
+      return false;
     }
   }
-  // Send a signal to every online member of the call's server.
-  function broadcast(msg: Record<string, unknown>) {
-    for (const m of roster) {
-      if (m.fingerprint !== myFp && onlineMembers.has(m.fingerprint)) void sendSignal(m.fingerprint, msg);
+  // Send against the CALL server's live roster, never the server currently being viewed. Fetching
+  // this small in-memory view also lets a background call pick up newly-reconnected members.
+  async function broadcastOn(server: number, selfFp: string, msg: Record<string, unknown>) {
+    try {
+      const [membersHere, onlineHere] = await Promise.all([
+        invoke<Member[]>("get_members", { server }),
+        invoke<string[]>("get_online_members", { server }),
+      ]);
+      const online = new Set(onlineHere);
+      for (const m of membersHere) {
+        if (m.fingerprint !== selfFp && online.has(m.fingerprint)) {
+          void sendSignal(server, m.fingerprint, msg);
+        }
+      }
+    } catch (e) {
+      console.warn("voice broadcast could not read its server roster", { server, error: String(e) });
     }
+  }
+  // Capture the room synchronously: leaveVoice clears global state immediately after sending bye.
+  function broadcast(msg: Record<string, unknown>) {
+    const server = callServer;
+    const selfFp = callSelfFp;
+    if (server !== null && selfFp) void broadcastOn(server, selfFp, msg);
   }
   // --- Audio devices ----------------------------------------------------------------------------
   // Which mic/speaker this install uses. Remembered locally (per machine, not per server), applied
@@ -6121,15 +6264,28 @@
   // Cursor as px offsets from the viewport centre (the projection's origin).
   let spaceCursor = $state({ x: 0, y: 0 });
   let spaceRoot = $state<HTMLElement | undefined>();
-  // One drag at a time: "maybe" until the pointer commits to a look-drag or the
-  // hold timer commits it to a lasso. Pointer capture starts only at that commit,
-  // so plain clicks still reach the server buttons underneath.
-  let spaceDrag: { id: number; sx: number; sy: number; yaw0: number; pitch0: number; mode: "maybe" | "look" } | null = null;
+  // One gesture at a time. Background presses can become look-drags or, after a
+  // hold, freehand lassos. Server and tray presses become direct drags after the
+  // movement threshold; plain clicks still reach their buttons.
+  type SpaceDragMode = "background-maybe" | "look" | "lasso" | "server-maybe" | "server" | "tray-maybe" | "tray";
+  let spaceDrag: {
+    id: number;
+    sx: number;
+    sy: number;
+    cx0: number;
+    cy0: number;
+    yaw0: number;
+    pitch0: number;
+    mode: SpaceDragMode;
+    serverId?: number;
+  } | null = null;
   let spaceHoldTimer = 0;
-  let spaceLasso = $state<{ x: number; y: number; r: number; t0: number } | null>(null);
+  let spaceLasso = $state<{ points: ScreenPoint[] } | null>(null);
   // Captured servers ride as angular offsets around the aim point until dropped.
   let spaceCarried = $state<Record<number, Placement> | null>(null);
   let spaceSwallowClick = false; // a drop's trailing click must not open a server
+  let spaceEntering = $state<number | null>(null);
+  let spaceEnterTimer = 0;
   let spaceTrayPinned = $state(false);
   let spaceTrayHeld = $state(false);
   let spaceTray = $derived(spaceTrayPinned || spaceTrayHeld);
@@ -6148,6 +6304,8 @@
     }
   }
   function toggleSpace() {
+    clearTimeout(spaceEnterTimer);
+    spaceEntering = null;
     spaceOpen = !spaceOpen;
     spaceLasso = null;
     spaceCarried = null;
@@ -6179,6 +6337,31 @@
   });
   // Servers with no place yet (new joins) wait in the tray until hung.
   let spaceUnplaced = $derived(spaceOpen ? railServers.filter((s) => !spaceState.placements[s.id]) : []);
+  // A restrained constellation layer gives the floating icons some shared depth.
+  // Each visible server links only to its nearest neighbour, with duplicates folded.
+  let spaceLinks = $derived.by(() => {
+    const links: { key: string; x1: number; y1: number; x2: number; y2: number }[] = [];
+    const seen = new Set<string>();
+    for (const a of spacePlaced) {
+      let nearest: (typeof spacePlaced)[number] | null = null;
+      let nearestD = 360;
+      for (const b of spacePlaced) {
+        if (a.s.id === b.s.id) continue;
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d < nearestD) {
+          nearest = b;
+          nearestD = d;
+        }
+      }
+      if (!nearest) continue;
+      const ids = [a.s.id, nearest.s.id].sort((x, y) => x - y);
+      const key = `${ids[0]}:${ids[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      links.push({ key, x1: a.x, y1: a.y, x2: nearest.x, y2: nearest.y });
+    }
+    return links;
+  });
   // "custom" without an uploaded panorama falls back to the default room.
   let spaceBackdropEff = $derived(spaceState.backdrop === "custom" && !spaceState.custom ? "den" : spaceState.backdrop);
   function spaceCursorFrom(e: PointerEvent) {
@@ -6186,45 +6369,85 @@
     if (!r) return;
     spaceCursor = { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 };
   }
-  function spaceLassoLoop() {
-    if (!spaceLasso) return;
-    // The circle grows while held (66px/s after a snappy start) and caps well short
-    // of the viewport, so "hold longer" reads as "reach further" without ever lassoing
-    // the whole sky by accident.
-    spaceLasso = { ...spaceLasso, r: Math.min(300, 46 + (performance.now() - spaceLasso.t0) * 0.066) };
-    requestAnimationFrame(spaceLassoLoop);
+  function newSpaceDrag(e: PointerEvent, mode: SpaceDragMode, serverId?: number) {
+    spaceCursorFrom(e);
+    spaceDrag = {
+      id: e.pointerId,
+      sx: e.clientX,
+      sy: e.clientY,
+      cx0: spaceCursor.x,
+      cy0: spaceCursor.y,
+      yaw0: spaceCam.yaw,
+      pitch0: spaceCam.pitch,
+      mode,
+      serverId,
+    };
   }
   function onSpaceDown(e: PointerEvent) {
-    if (e.button !== 0) return;
-    spaceCursorFrom(e);
-    spaceDrag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, yaw0: spaceCam.yaw, pitch0: spaceCam.pitch, mode: "maybe" };
+    if (e.button !== 0 || spaceEntering !== null) return;
+    const target = e.target as HTMLElement | null;
+    if (!spaceCarried && target?.closest("button, input, label, .sp-tray")) return;
+    newSpaceDrag(e, "background-maybe");
     clearTimeout(spaceHoldTimer);
-    // Holding still grows a lasso from the cursor, which also covers the single-server
-    // move (a lasso of one). While already carrying, the next press is a drop, not a grab.
+    // A lasso can only begin on empty space. A server press is handled by
+    // onSpaceServerDown and never reaches this timer.
     if (!spaceCarried) {
       spaceHoldTimer = window.setTimeout(() => {
-        if (!spaceDrag || spaceDrag.mode !== "maybe" || !spaceOpen) return;
+        if (!spaceDrag || spaceDrag.mode !== "background-maybe" || !spaceOpen) return;
+        spaceDrag.mode = "lasso";
         spaceRoot?.setPointerCapture(spaceDrag.id);
-        spaceLasso = { x: spaceCursor.x, y: spaceCursor.y, r: 46, t0: performance.now() };
-        requestAnimationFrame(spaceLassoLoop);
-      }, 350);
+        spaceLasso = { points: [{ x: spaceCursor.x, y: spaceCursor.y }] };
+      }, 320);
     }
+  }
+  function onSpaceServerDown(e: PointerEvent, id: number) {
+    if (e.button !== 0 || spaceEntering !== null || spaceCarried) return;
+    e.stopPropagation();
+    clearTimeout(spaceHoldTimer);
+    newSpaceDrag(e, "server-maybe", id);
+  }
+  function onSpaceTrayServerDown(e: PointerEvent, id: number) {
+    if (e.button !== 0 || spaceEntering !== null || spaceCarried) return;
+    e.stopPropagation();
+    clearTimeout(spaceHoldTimer);
+    newSpaceDrag(e, "tray-maybe", id);
   }
   function onSpaceMove(e: PointerEvent) {
     spaceCursorFrom(e);
-    if (spaceLasso) {
-      spaceLasso = { ...spaceLasso, x: spaceCursor.x, y: spaceCursor.y };
+    if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
+    if (spaceLasso && spaceDrag.mode === "lasso") {
+      const last = spaceLasso.points[spaceLasso.points.length - 1];
+      if (!last || Math.hypot(spaceCursor.x - last.x, spaceCursor.y - last.y) >= 4) {
+        spaceLasso = { points: [...spaceLasso.points, { x: spaceCursor.x, y: spaceCursor.y }] };
+      }
       return;
     }
-    if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
     const dx = e.clientX - spaceDrag.sx;
     const dy = e.clientY - spaceDrag.sy;
-    if (spaceDrag.mode === "maybe") {
+    if (spaceDrag.mode === "server-maybe" || spaceDrag.mode === "tray-maybe") {
+      if (Math.hypot(dx, dy) < 5) return;
+      clearTimeout(spaceHoldTimer);
+      spaceRoot?.setPointerCapture(spaceDrag.id);
+      const id = spaceDrag.serverId;
+      if (id === undefined) return;
+      if (spaceDrag.mode === "server-maybe") {
+        const grab = unproject(spaceCam, spaceDrag.cx0, spaceDrag.cy0, spaceF);
+        spaceCarried = angularOffsets([id], spaceState.placements, grab);
+        spaceDrag.mode = "server";
+      } else {
+        spaceCarried = { [id]: { yaw: 0, pitch: 0 } };
+        spaceDrag.mode = "tray";
+      }
+      return;
+    }
+    if (spaceDrag.mode === "server" || spaceDrag.mode === "tray") return;
+    if (spaceDrag.mode === "background-maybe") {
       if (Math.hypot(dx, dy) < 6) return; // still a click or a hold
       clearTimeout(spaceHoldTimer);
       spaceDrag.mode = "look";
       spaceRoot?.setPointerCapture(spaceDrag.id);
     }
+    if (spaceDrag.mode !== "look") return;
     // Grab semantics: the world follows the hand, small-angle px-to-degrees via f.
     const k = (180 / Math.PI) / spaceF;
     spaceCam = { yaw: wrapYaw(spaceDrag.yaw0 - dx * k), pitch: clampPitch(spaceDrag.pitch0 + dy * k) };
@@ -6235,23 +6458,34 @@
     const mode = spaceDrag.mode;
     spaceDrag = null;
     if (spaceLasso) {
-      const caught = lassoCapture(spaceState.placements, spaceCam, spaceLasso.x, spaceLasso.y, spaceLasso.r, spaceF);
+      const path = [...spaceLasso.points, { x: spaceCursor.x, y: spaceCursor.y }];
+      const caught = lassoCapturePath(spaceState.placements, spaceCam, path, spaceF);
       if (caught.length) {
-        const aim = unproject(spaceCam, spaceLasso.x, spaceLasso.y, spaceF);
+        const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
         spaceCarried = angularOffsets(caught, spaceState.placements, aim);
       }
       spaceLasso = null;
       spaceSwallowClick = true;
       return;
     }
-    if (mode === "maybe" && spaceCarried) {
+    if ((mode === "server" || mode === "tray") && spaceCarried) {
+      const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
+      commitSpacePlacements(applyOffsets(spaceCarried, aim));
+      spaceCarried = null;
+      spaceSwallowClick = true;
+      return;
+    }
+    if (mode === "background-maybe" && spaceCarried) {
       // A plain click while carrying: drop the constellation where the cursor aims.
       const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
-      spaceState.placements = { ...spaceState.placements, ...applyOffsets(spaceCarried, aim) };
+      commitSpacePlacements(applyOffsets(spaceCarried, aim));
       spaceCarried = null;
-      saveSpace();
       spaceSwallowClick = true;
     }
+  }
+  function spaceLassoPath(points: ScreenPoint[]): string {
+    if (!points.length) return "";
+    return `M ${points.map((p) => `${p.x + spaceVw / 2} ${p.y + spaceVh / 2}`).join(" L ")} Z`;
   }
   // Drops and lasso releases produce a trailing click on whatever sat under the
   // pointer; capture-phase swallow keeps that click from opening a server.
@@ -6262,8 +6496,18 @@
     e.preventDefault();
   }
   function spaceIconClick(id: number) {
-    if (spaceCarried || spaceSwallowClick) return;
-    switchServer(id); // switchServer also folds the space away
+    if (spaceCarried || spaceSwallowClick || spaceEntering !== null) return;
+    if (!spaceState.zoomOnOpen || fxMotionOff) {
+      void switchServer(id); // switchServer also folds the space away
+      return;
+    }
+    spaceEntering = id;
+    clearTimeout(spaceEnterTimer);
+    spaceEnterTimer = window.setTimeout(() => {
+      if (spaceEntering !== id) return;
+      spaceEntering = null;
+      void switchServer(id);
+    }, 440);
   }
   function spaceServerMenu(s: ServerState): MenuItem[] {
     return [
@@ -6280,15 +6524,39 @@
   }
   // Tray tap: the server flies to wherever the camera is aiming (the reticle).
   function placeFromTray(id: number) {
-    spaceState.placements = { ...spaceState.placements, [id]: { yaw: spaceCam.yaw, pitch: spaceCam.pitch } };
+    commitSpacePlacements({ [id]: { yaw: spaceCam.yaw, pitch: spaceCam.pitch } });
+  }
+  function spaceMinSeparation(size = spaceState.serverSize): number {
+    // Use the smallest possible focal length so a saved layout remains clear in
+    // a narrower window too; the small extra halo leaves the pulse room to breathe.
+    return (2 * Math.atan((size * 0.58) / 560) * 180) / Math.PI;
+  }
+  function commitSpacePlacements(moved: Record<number, Placement>) {
+    const merged = { ...spaceState.placements, ...moved };
+    spaceState.placements = separatePlacements(merged, Object.keys(moved).map(Number), spaceMinSeparation());
+    saveSpace();
+  }
+  function setSpaceServerSize(size: number) {
+    spaceState.serverSize = Math.max(32, Math.min(88, Math.round(size)));
+    spaceState.placements = separatePlacements(
+      spaceState.placements,
+      Object.keys(spaceState.placements).map(Number),
+      spaceMinSeparation(spaceState.serverSize),
+    );
+    saveSpace();
+  }
+  function setSpaceShape(shape: "circle" | "square") {
+    spaceState.shape = shape;
     saveSpace();
   }
   function setSpaceBackdrop(b: string) {
     spaceState.backdrop = b as SpaceState["backdrop"];
     saveSpace();
   }
-  // A custom panorama: one equirectangular 2:1 image, downscaled and stored locally
-  // (it is a per-device preference, exactly like the placements).
+  let spaceImageNote = $state("");
+  // A custom panorama is normalized to an exact 2:1 equirectangular canvas before
+  // storage. Centre-cropping odd aspect ratios avoids the stretching that made a
+  // portrait or phone photo look especially rough on the cube walls.
   async function loadSpacePano(fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file) return;
@@ -6300,19 +6568,73 @@
         img.onerror = () => rej(new Error("not an image"));
         img.src = url;
       });
-      const w = Math.min(2048, img.naturalWidth);
-      const h = Math.round((img.naturalHeight / img.naturalWidth) * w);
+      let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+      if (sw / sh > 2) {
+        sw = sh * 2;
+        sx = (img.naturalWidth - sw) / 2;
+      } else if (sw / sh < 2) {
+        sh = sw / 2;
+        sy = (img.naturalHeight - sh) / 2;
+      }
+      const w = Math.max(2, Math.min(2048, Math.floor(sw)));
+      const h = Math.max(1, Math.floor(w / 2));
       const c = document.createElement("canvas");
       c.width = w;
       c.height = h;
-      c.getContext("2d")?.drawImage(img, 0, 0, w, h);
+      c.getContext("2d")?.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
       URL.revokeObjectURL(url);
       spaceState.custom = c.toDataURL("image/jpeg", 0.82);
       spaceState.backdrop = "custom";
+      spaceImageNote = `${file.name} prepared as ${w} × ${h}${Math.abs(img.naturalWidth / img.naturalHeight - 2) > 0.01 ? " (centre-cropped to 2:1)" : ""}.`;
       saveSpace();
     } catch (err) {
       error = String(err);
     }
+  }
+  // A paint-over PNG for image editors. The cardinal centres, cube seams,
+  // horizon, visible band, and circular safe areas mirror this renderer.
+  function downloadSpaceTemplate() {
+    const c = document.createElement("canvas");
+    c.width = 2048;
+    c.height = 1024;
+    const x = c.getContext("2d");
+    if (!x) return;
+    x.fillStyle = "#11141d";
+    x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "rgba(118, 139, 255, 0.08)";
+    x.fillRect(0, 256, c.width, 512);
+    x.strokeStyle = "rgba(255, 255, 255, 0.28)";
+    x.lineWidth = 2;
+    x.setLineDash([12, 10]);
+    for (const seam of [256, 768, 1280, 1792]) {
+      x.beginPath(); x.moveTo(seam, 0); x.lineTo(seam, 1024); x.stroke();
+    }
+    x.strokeStyle = "rgba(118, 139, 255, 0.72)";
+    x.setLineDash([]);
+    x.beginPath(); x.moveTo(0, 512); x.lineTo(2048, 512); x.stroke();
+    x.strokeStyle = "rgba(118, 139, 255, 0.42)";
+    x.setLineDash([8, 8]);
+    for (const center of [0, 512, 1024, 1536, 2048]) {
+      x.beginPath(); x.arc(center, 512, 230, 0, Math.PI * 2); x.stroke();
+    }
+    x.font = "600 28px ui-monospace, monospace";
+    x.textAlign = "center";
+    x.fillStyle = "rgba(255, 255, 255, 0.82)";
+    [[0, "BACK / SEAM"], [512, "LEFT"], [1024, "FRONT"], [1536, "RIGHT"], [2048, "BACK / SEAM"]].forEach(([cx, label]) => {
+      x.fillText(String(label), Number(cx), 500);
+    });
+    x.font = "22px ui-monospace, monospace";
+    x.fillStyle = "rgba(255, 255, 255, 0.56)";
+    x.fillText("HORIZON — KEEP IMPORTANT DETAIL IN THE MIDDLE 50%", 1024, 548);
+    x.fillText("TOP / CEILING POLE — LOW DETAIL", 1024, 54);
+    x.fillText("BOTTOM / FLOOR POLE — LOW DETAIL", 1024, 988);
+    x.font = "18px ui-monospace, monospace";
+    x.fillStyle = "rgba(255, 255, 255, 0.4)";
+    x.fillText("2048 × 1024 EQUIRECTANGULAR · HIDE THIS GUIDE LAYER BEFORE EXPORT", 1024, 92);
+    const a = document.createElement("a");
+    a.download = "mewtual-server-space-guide-2048x1024.png";
+    a.href = c.toDataURL("image/png");
+    a.click();
   }
   // Background-position for one 90-degree wall slice of an equirect 2:1 panorama
   // (v1 shows equirect quarters flat on the cube: near-field distortion accepted).
@@ -6385,7 +6707,7 @@
   }
   // I am the DJ while the transport we follow is my own press.
   function jukeIsDj(): boolean {
-    return !!jukeAdopted && !!myFp && jukeAdopted.fromFp === myFp;
+    return !!jukeAdopted && !!callSelfFp && jukeAdopted.fromFp === callSelfFp;
   }
   // Where the deck should be right now: the adopted offset plus locally measured elapsed time,
   // frozen while paused or stale. The progress UI reads this.
@@ -6441,7 +6763,7 @@
   function jukeSend(entry: string, cid: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
     jukeSeq = Math.max(jukeSeq, jukeAdopted?.seq ?? 0) + 1;
-    jukeAdopt(jukeSeq, myFp, entry, cid, name, off, paused);
+    jukeAdopt(jukeSeq, callSelfFp, entry, cid, name, off, paused);
     broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, name, off, paused });
   }
   function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
@@ -6449,7 +6771,7 @@
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
-    jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === myFp ? "" : fromFp } : null;
+    jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
     if (!jukeNow) {
       jukeDur = 0;
       jukeStop(); // entry "" is the DJ saying the queue ran out
@@ -6757,12 +7079,80 @@
     focusDismissed = true; // otherwise the effect above re-opens it on the next frame
   }
   // Self first, then peers: one tile per person, and nothing else on the grid.
-  let focusTiles = $derived([myFp, ...callParticipants]);
+  let focusTiles = $derived([callSelfFp, ...callParticipants]);
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
-  function createPeer(fp: string): CallPeer {
+  async function negotiatePeer(peer: CallPeer) {
+    if (callPeers[peer.fp] !== peer || peer.pc.signalingState === "closed") return;
+    try {
+      peer.makingOffer = true;
+      await peer.pc.setLocalDescription();
+      if (peer.pc.localDescription?.type === "offer") {
+        void sendSignal(peer.server, peer.fp, {
+          callId: peer.channel,
+          type: "offer",
+          sdp: peer.pc.localDescription,
+        });
+      }
+    } catch (e) {
+      console.warn("voice negotiation failed", { peer: peer.fp, error: String(e) });
+    } finally {
+      peer.makingOffer = false;
+    }
+  }
+  async function flushWaitingIce(peer: CallPeer) {
+    if (!peer.pc.remoteDescription) return;
+    const queued = waitingIce[peer.fp] ?? [];
+    delete waitingIce[peer.fp];
+    for (const candidate of queued) {
+      try {
+        await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        if (!peer.ignoreOffer) console.warn("buffered ICE candidate was rejected", { peer: peer.fp, error: String(e) });
+      }
+    }
+  }
+  function recoverPeer(peer: CallPeer) {
+    const now = Date.now();
+    if (now - peer.lastRetry < 4000) return;
+    const action = heartbeatRecovery({
+      currentRoom: isCurrentVoiceRoom(callServer, callChannel, peer.server, peer.channel),
+      hasPeer: true,
+      connectionState: peer.pc.connectionState,
+      signalingState: peer.pc.signalingState,
+      localDescriptionType: peer.pc.localDescription?.type,
+    });
+    if (!action || action === "create") return;
+    peer.lastRetry = now;
+    if (action === "resend-offer" || action === "resend-answer") {
+      const sdp = peer.pc.localDescription;
+      if (sdp) void sendSignal(peer.server, peer.fp, { callId: peer.channel, type: sdp.type, sdp });
+      return;
+    }
+    try {
+      peer.pc.restartIce(); // raises negotiationneeded and sends a fresh ICE offer
+    } catch (e) {
+      console.warn("voice ICE restart failed", { peer: peer.fp, error: String(e) });
+    }
+  }
+
+  function createPeer(fp: string): CallPeer | null {
+    if (callPeers[fp]) return callPeers[fp];
+    const server = callServer;
+    const channel = callChannel;
+    if (server === null || !channel || !callSelfFp) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
-    const peer: CallPeer = { fp, pc, dc: null, polite: myFp < fp, makingOffer: false, ignoreOffer: false };
+    const peer: CallPeer = {
+      fp,
+      server,
+      channel,
+      pc,
+      dc: null,
+      polite: callSelfFp < fp,
+      makingOffer: false,
+      ignoreOffer: false,
+      lastRetry: 0,
+    };
     if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
     if (camStream) for (const t of camStream.getTracks()) pc.addTrack(t, camStream); // joiner while my video is live
     // The instrument channel: negotiated (same id on both ends) and created BEFORE the offer, so
@@ -6777,20 +7167,18 @@
     }
     // Perfect negotiation, offer side: fires for the initial tracks AND whenever video is added
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
-    pc.onnegotiationneeded = async () => {
-      try {
-        peer.makingOffer = true;
-        await pc.setLocalDescription();
-        void sendSignal(fp, { callId: callChannel, type: "offer", sdp: pc.localDescription });
-      } catch {
-        /* torn down mid-negotiation */
-      } finally {
-        peer.makingOffer = false;
+    pc.onnegotiationneeded = () => void negotiatePeer(peer);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        void sendSignal(peer.server, fp, { callId: peer.channel, type: "ice", candidate: e.candidate.toJSON() });
       }
     };
-    pc.onicecandidate = (e) => {
-      if (e.candidate) void sendSignal(fp, { callId: callChannel, type: "ice", candidate: e.candidate.toJSON() });
-    };
+    pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
+      peer: fp,
+      code: e.errorCode,
+      text: e.errorText,
+      url: e.url,
+    });
     pc.ontrack = (e) => {
       const stream = e.streams[0];
       if (!stream) return;
@@ -6807,7 +7195,8 @@
     };
     pc.onconnectionstatechange = () => {
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") removePeer(fp);
+      if (pc.connectionState === "failed") recoverPeer(peer);
+      else if (pc.connectionState === "closed") removePeer(fp);
     };
     callPeers[fp] = peer;
     callParticipants = Object.keys(callPeers);
@@ -6819,6 +7208,7 @@
       try { p.pc.close(); } catch { /* already closed */ }
       delete callPeers[fp];
     }
+    delete waitingIce[fp];
     document.getElementById(`call-audio-${fp}`)?.remove();
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
@@ -6990,8 +7380,21 @@
   async function joinVoice(channel: string, server: number, name: string) {
     if (inCall && callChannel === channel && callServer === server) return;
     if (inCall) leaveVoice();
+    let selfFp = "";
+    try {
+      const membersHere = await invoke<Member[]>("get_members", { server });
+      selfFp = membersHere.find((m) => m.you)?.fingerprint ?? "";
+    } catch (e) {
+      error = `Couldn't read the voice room's member list: ${String(e)}`;
+      return;
+    }
+    if (!selfFp) {
+      error = "Couldn't identify this device on the voice room's server.";
+      return;
+    }
     callServer = server;
-    if (!(await ensureMic())) { callServer = null; return; }
+    callSelfFp = selfFp;
+    if (!(await ensureMic())) { callServer = null; callSelfFp = ""; return; }
     callChannel = channel;
     callChannelName = name;
     inCall = true;
@@ -7003,14 +7406,14 @@
     startMeters();
     navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
     alertedRooms.delete(roomKey(server, channel));
-    recordPresence(server, channel, myFp);
+    recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
     broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0 }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0 });
-        recordPresence(callServer, callChannel, myFp); // keep my own presence fresh
+        recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
       }
     }, 5000);
@@ -7044,12 +7447,14 @@
     }
     clearInterval(pingTimer);
     pingTimer = undefined;
-    if (callServer !== null && callChannel) dropPresence(callServer, callChannel, myFp);
+    if (callServer !== null && callChannel && callSelfFp) dropPresence(callServer, callChannel, callSelfFp);
     inCall = false;
     callMuted = false;
     callChannel = "";
     callChannelName = "";
     callServer = null;
+    callSelfFp = "";
+    for (const fp of Object.keys(waitingIce)) delete waitingIce[fp];
   }
   function toggleMute() {
     callMuted = !callMuted;
@@ -7082,6 +7487,7 @@
     const cid = msg.callId as string | undefined;
     const type = msg.type as string | undefined;
     if (!cid || !type) return;
+    const currentRoom = inCall && isCurrentVoiceRoom(callServer, callChannel, server, cid);
     // Presence: both "hello" (a newcomer) and "voice-ping" (heartbeat) mean someone's in a room.
     if (type === "hello" || type === "voice-ping") {
       const wasActive = roomMembers(server, cid).length > 0;
@@ -7089,23 +7495,42 @@
       maybeNotifyRoom(server, cid, wasActive);
       // Broadcast mute states ride the presence pings (the data channel also carries them, but
       // pings cover the window before it opens). Only my own room's states matter to the UI.
-      if (inCall && cid === callChannel && typeof msg.mic === "number") {
+      if (currentRoom && typeof msg.mic === "number") {
         peerMeta = { ...peerMeta, [fromFp]: { mic: msg.mic === 1, inst: msg.inst === 1, vid: typeof msg.vid === "number" ? msg.vid : 0 } };
       }
-      if (type === "voice-ping") return; // presence only
+      if (type === "voice-ping") {
+        const peer = callPeers[fromFp];
+        const action = heartbeatRecovery({
+          currentRoom,
+          hasPeer: !!peer,
+          connectionState: peer?.pc.connectionState,
+          signalingState: peer?.pc.signalingState,
+          localDescriptionType: peer?.pc.localDescription?.type,
+        });
+        if (action === "create") createPeer(fromFp);
+        else if (action && peer) recoverPeer(peer);
+        return;
+      }
+    }
+    // A bye is useful presence cleanup even for a room other than the one I am in.
+    if (type === "bye") {
+      dropPresence(server, cid, fromFp);
+      if (currentRoom) removePeer(fromFp);
+      return;
     }
     // Everything below is only for MY current room.
-    if (!inCall || cid !== callChannel) return;
+    if (!currentRoom) return;
     if (type === "juke") {
       jukeRecv(fromFp, msg); // shared-listening transport: what is playing and where it is
       return;
     }
     if (type === "hello") {
-      if (callPeers[fromFp]) return;
+      if (callPeers[fromFp]) { recoverPeer(callPeers[fromFp]); return; }
       playBlip(79); // audible arrival: there is no lobby, so the room itself says someone joined
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
+      if (!peer) return;
       const pc = peer.pc;
       // Perfect negotiation, answer side: on a collision the impolite end ignores the incoming
       // offer (its own is in flight and will win); the polite end lets setRemoteDescription
@@ -7113,27 +7538,39 @@
       const collision = peer.makingOffer || pc.signalingState !== "stable";
       peer.ignoreOffer = !peer.polite && collision;
       if (peer.ignoreOffer) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
-      await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
-      void sendSignal(fromFp, { callId: callChannel, type: "answer", sdp: pc.localDescription });
-    } else if (type === "answer") {
-      const pc = callPeers[fromFp]?.pc;
-      // Guard against a stale answer landing after a rollback settled the state.
-      if (pc && pc.signalingState === "have-local-offer") {
+      try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        await flushWaitingIce(peer);
+        await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
+        void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
+      } catch (e) {
+        console.warn("voice offer handling failed", { peer: fromFp, error: String(e) });
+      }
+    } else if (type === "answer") {
+      const peer = callPeers[fromFp];
+      const pc = peer?.pc;
+      // Guard against a stale answer landing after a rollback settled the state.
+      if (peer && pc && pc.signalingState === "have-local-offer") {
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          await flushWaitingIce(peer);
+        } catch (e) {
+          console.warn("voice answer handling failed", { peer: fromFp, error: String(e) });
+        }
       }
     } else if (type === "ice") {
       const peer = callPeers[fromFp];
-      if (peer && msg.candidate) {
+      const candidate = msg.candidate as RTCIceCandidateInit | undefined;
+      if (!candidate) return;
+      if (!peer || !peer.pc.remoteDescription) {
+        waitingIce[fromFp] = bufferIce(waitingIce[fromFp] ?? [], candidate);
+      } else {
         try {
-          await peer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
-        } catch {
-          if (!peer.ignoreOffer) { /* genuinely stale candidate: harmless */ }
+          await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          if (!peer.ignoreOffer) console.warn("voice ICE candidate was rejected", { peer: fromFp, error: String(e) });
         }
       }
-    } else if (type === "bye") {
-      removePeer(fromFp);
-      dropPresence(server, cid, fromFp);
     }
   }
 
@@ -7916,20 +8353,43 @@
         cid: string;
         done: number;
         total: number;
+        bytes_done: number;
+        bytes_total: number;
+        network_bytes_done: number;
         provider: string | null;
       }>("download-progress", (e) => {
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
         if (!d) return; // only track explicitly-initiated downloads
-        d.progress = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+        const now = Date.now();
+        if (e.payload.network_bytes_done > d.networkBytesDone) {
+          d.speed = sampleRate(
+            d.speed,
+            d.networkBytesDone,
+            d.lastRateAt,
+            e.payload.network_bytes_done,
+            now,
+          );
+          d.lastRateAt = now;
+        }
+        d.networkBytesDone = e.payload.network_bytes_done;
+        d.total = e.payload.total;
+        d.done = Math.max(d.heldBefore, e.payload.done);
+        d.bytesTotal = e.payload.bytes_total;
+        d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
+        d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
         if (e.payload.done === 0) d.provider = undefined; // fresh transfer: drop any prior provider
         if (e.payload.provider) d.provider = e.payload.provider; // keep the latest live provider
-        if (e.payload.done >= e.payload.total) d.status = "done";
-        else if (d.status === "queued") d.status = "downloading";
+        if (e.payload.done >= e.payload.total) d.status = "verifying";
+        else if (!d.provider && onlineCount <= 1) d.status = "waiting";
+        else d.status = "downloading";
       }),
       listen<{ server: number; upload_id: string; done: number; total: number }>("upload-progress", (e) => {
         const u = uploads[uploadKey(e.payload.server, e.payload.upload_id)];
         if (!u || u.status === "done" || u.status === "failed") return;
-        u.status = "uploading";
+        const chunkTotal = Math.max(1, e.payload.total - 1);
+        u.total = chunkTotal;
+        u.done = Math.min(chunkTotal, e.payload.done);
+        u.status = e.payload.done >= e.payload.total - 1 ? "publishing" : "uploading";
         // Reading owns 0..10%. Backend work owns the rest, but only the completed invoke marks
         // the row Done: keep event progress just shy of 100% until persistence has also returned.
         const backend = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
@@ -8093,13 +8553,24 @@
         // furniture rather than modals, so they only fold once nothing else on screen wants it.
         else if (focusOpen) exitFocus();
         else if (stageOpen) stageOpen = false;
-        // The space folds last: carrying and the tray release first, then the view itself.
-        else if (spaceOpen && spaceCarried) spaceCarried = null;
+        // The space folds last: entry, carrying, and the tray release first, then the view itself.
+        else if (spaceOpen && spaceEntering !== null) {
+          clearTimeout(spaceEnterTimer);
+          spaceEntering = null;
+        }
+        else if (spaceOpen && spaceCarried) {
+          spaceCarried = null;
+          spaceDrag = null;
+        }
         else if (spaceOpen && spaceTrayPinned) spaceTrayPinned = false;
-        else if (spaceOpen) spaceOpen = false;
+        else if (spaceOpen) {
+          clearTimeout(spaceEnterTimer);
+          spaceEntering = null;
+          spaceOpen = false;
+        }
         return;
       }
-      // Hold T while the space is up: the tray of unplaced servers slides out.
+      // Hold T while the space is up: the draggable server tray slides out.
       if (spaceOpen && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "t" && !typingTarget(e.target)) {
         e.preventDefault();
         if (!e.repeat) spaceTrayHeld = true;
@@ -11227,40 +11698,54 @@
               <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
             {:else}
               <div class="dl-toolbar">
-                <span class="muted small">{activeTransfers} active · {transferList.length} total</span>
+                <span class="muted small">
+                  {movingTransfers} active{#if waitingTransfers} · {waitingTransfers} waiting{/if} · {transferList.length} total
+                </span>
                 <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+              </div>
+              <div class="transfer-legend" aria-label="Transfer piece colours">
+                <span><i class="transfer-piece held"></i>ready</span>
+                <span><i class="transfer-piece active"></i>transferring</span>
+                <span><i class="transfer-piece pending"></i>pending</span>
+                <span><i class="transfer-piece offline"></i>no connection</span>
               </div>
               <ul class="dl-list">
                 {#each transferList as d (d.key)}
+                  {@const pieces = transferPieceStates(d)}
                   <li class="dl-item">
                     <div class="dl-item-main">
                       <span class="dl-item-name">{#if d.direction === "upload"}↑{:else}↓{/if} {d.name}</span>
                       <span class="muted small">
                         {#if d.direction === "upload"}
                           {#if d.path}sharing to /{d.path}{:else}sharing to the group{/if}
-                        {:else if d.provider}from {nameOf(d.provider)}{:else}shared by {nameOf(d.author)}{/if}
+                        {:else if d.provider}receiving from {nameOf(d.provider)}
+                        {:else if !transferConnected(d)}waiting for a connected member
+                        {:else}shared by {nameOf(d.author)}{/if}
                       </span>
                     </div>
-                    <div class="dl-item-status {d.status}">
-                      {#if d.status === "downloading"}{Math.round(d.progress * 100)}%
-                      {:else if d.status === "queued"}Queued
-                      {:else if d.status === "reading"}Preparing {Math.round(d.progress * 100)}%
-                      {:else if d.status === "uploading"}Uploading {Math.round(d.progress * 100)}%
-                      {:else if d.status === "done"}✓ {#if d.direction === "upload"}Uploaded{:else}Downloaded{/if}
-                      {:else}✗ Failed{/if}
+                    <div class="dl-item-status {transferTone(d)}">
+                      {#if transferIsActive(d)}<span class="transfer-pulse" aria-hidden="true"></span>{/if}
+                      {transferStatus(d)}
                     </div>
-                    {#if d.status === "failed" && d.direction === "upload" && d.error}
+                    {#if d.status === "failed" && d.error}
                       <span class="dl-item-error" title={d.error}>{d.error}</span>
                     {/if}
-                    {#if d.status !== "failed"}
-                      <progress
-                        class="dl-item-bar"
-                        class:done={d.status === "done"}
-                        value={d.progress}
-                        max="1"
-                        aria-label={`Transfer progress for ${d.name}`}
-                      ></progress>
-                    {/if}
+                    <div
+                      class="transfer-piece-bar"
+                      role="progressbar"
+                      aria-label={`Transfer progress for ${d.name}`}
+                      aria-valuemin="0"
+                      aria-valuemax={d.total}
+                      aria-valuenow={Math.min(d.done, d.total)}
+                      title={transferHover(d)}
+                    >
+                      {#each pieces as piece}
+                        <span class="transfer-piece {piece}" aria-hidden="true"></span>
+                      {/each}
+                    </div>
+                    <span class="transfer-piece-count muted" title={transferHover(d)}>
+                      {Math.min(d.done, d.total)}/{d.total} chunks
+                    </span>
                   </li>
                 {/each}
               </ul>
@@ -11324,9 +11809,12 @@
           title="Open Transfers"
           onclick={() => switchView("downloads")}
         >
-          {#if activeTransfers}
-            <span class="warn-t">⇅ {activeTransfers} active</span>
+          {#if movingTransfers}
+            <span class="transfer-live"><span class="transfer-pulse" aria-hidden="true"></span>⇅ {movingTransfers} active</span>
+            {#if waitingTransfers}<span class="fail-t">· {waitingTransfers} waiting</span>{/if}
             {#if failedTransfers}<span class="fail-t">· ✗ {failedTransfers} failed</span>{/if}
+          {:else if waitingTransfers}
+            <span class="fail-t">○ {waitingTransfers} waiting for connection</span>
           {:else if failedTransfers}
             <span class="fail-t">✗ {failedTransfers} failed</span>
           {:else}
@@ -11349,7 +11837,7 @@
         <span class="call-title">Voice · #{callChannelName}</span>
         <span class="call-status">{callStatusText}</span>
         <div class="call-avatars">
-          {@render avatarTag(myFp)}
+          {@render avatarTag(callSelfFp)}
           {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
         </div>
         {@render micMeter()}
@@ -11443,9 +11931,9 @@
 
         <div class="stage-self">
           <div class="stage-row">
-            <span class="stage-av" class:talking={speaking.me}>{@render avatarTag(myFp)}</span>
-            <span class="stage-nm">{@render nameTag(myFp)}</span>
-            <span class="stage-fp">{myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>
+            <span class="stage-av" class:talking={speaking.me}>{@render avatarTag(callSelfFp)}</span>
+            <span class="stage-nm">{@render nameTag(callSelfFp)}</span>
+            <span class="stage-fp">{callSelfFp.slice(0, 4)}·{callSelfFp.slice(4, 8)}</span>
             <span class="stage-spacer"></span>
             {@render micMeter()}
           </div>
@@ -11541,7 +12029,7 @@
 
         <div class="focus-grid" style={`--focus-cols:${focusCols}`}>
           {#each focusTiles as fp (fp)}
-            {@const me = fp === myFp}
+            {@const me = fp === callSelfFp}
             {@const vid = me ? (myVideo === "screen" ? 2 : myVideo === "cam" ? 1 : 0) : peerMeta[fp]?.vid ?? 0}
             {@const stream = me ? localVideoStream : remoteStreams[fp] ?? null}
             {@const held = me ? callHeld : remoteHeld[fp] ?? []}
@@ -11844,7 +12332,10 @@
       <div
         class="space-view"
         class:sp-carrying={!!spaceCarried}
+        class:sp-entering={spaceEntering !== null}
         data-backdrop={spaceBackdropEff}
+        data-shape={spaceState.shape}
+        style={`--sp-server-size:${spaceState.serverSize}px`}
         bind:this={spaceRoot}
         bind:clientWidth={spaceVw}
         bind:clientHeight={spaceVh}
@@ -11854,64 +12345,76 @@
         onpointercancel={onSpaceUp}
         onclickcapture={onSpaceClickCapture}
       >
-        <div class="sp-scene" style={`perspective:${spaceF}px`}>
-          <!-- translateZ(f) first: CSS puts the eye f in front of the scene plane, so the cube
-               must slide forward to centre on it. Without this the backdrop pans at roughly
-               half the icons' angular rate (the icons' projection assumes an eye-centred cube). -->
-          <div class="sp-cube" style={`transform: translateZ(${spaceF}px) rotateX(${spaceCam.pitch}deg) rotateY(${spaceCam.yaw}deg)`}>
-            {#each [0, 90, 180, 270] as fy (fy)}
-              <div
-                class="sp-face sp-wall"
-                style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateY(${-fy}deg) translateZ(${-spaceF}px);${
-                  spaceBackdropEff === "custom"
-                    ? ` background-image:url(${spaceState.custom}); background-size:400% 200%; background-repeat:repeat-x; background-position:${panoPos(fy)};`
-                    : ""
-                }`}
-              >
-                {#if spaceBackdropEff !== "custom"}
-                  {@render spaceWall(spaceBackdropEff, fy)}
-                {/if}
-              </div>
-            {/each}
-            <div class="sp-face sp-ceil" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(-90deg) translateZ(${-spaceF}px)`}></div>
-            <div class="sp-face sp-floor" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(90deg) translateZ(${-spaceF}px)`}></div>
+        <div class="sp-world">
+          <div class="sp-scene" style={`perspective:${spaceF}px`}>
+            <!-- translateZ(f) first: CSS puts the eye f in front of the scene plane, so the cube
+                 must slide forward to centre on it. Without this the backdrop pans at roughly
+                 half the icons' angular rate (the icons' projection assumes an eye-centred cube). -->
+            <div class="sp-cube" style={`transform: translateZ(${spaceF}px) rotateX(${spaceCam.pitch}deg) rotateY(${spaceCam.yaw}deg)`}>
+              {#each [0, 90, 180, 270] as fy (fy)}
+                <div
+                  class="sp-face sp-wall"
+                  style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateY(${-fy}deg) translateZ(${-spaceF}px);${
+                    spaceBackdropEff === "custom"
+                      ? ` background-image:url(${spaceState.custom}); background-size:400% 200%; background-repeat:repeat-x; background-position:${panoPos(fy)};`
+                      : ""
+                  }`}
+                >
+                  {#if spaceBackdropEff !== "custom"}
+                    {@render spaceWall(spaceBackdropEff, fy)}
+                  {/if}
+                </div>
+              {/each}
+              <div class="sp-face sp-ceil" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(-90deg) translateZ(${-spaceF}px)`}></div>
+              <div class="sp-face sp-floor" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(90deg) translateZ(${-spaceF}px)`}></div>
+            </div>
           </div>
+          <div class="sp-atmosphere" aria-hidden="true"></div>
+          <svg class="sp-constellations" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">
+            {#each spaceLinks as link (link.key)}
+              <line x1={spaceVw / 2 + link.x1} y1={spaceVh / 2 + link.y1} x2={spaceVw / 2 + link.x2} y2={spaceVh / 2 + link.y2} />
+            {/each}
+          </svg>
+
+          <svg class="sp-reticle" viewBox="0 0 40 40" aria-hidden="true">
+            <circle cx="20" cy="20" r="9" />
+            <path d="M20 4v8M20 28v8M4 20h8M28 20h8" />
+          </svg>
+
+          <div class="sp-icons">
+            {#each spacePlaced as it (it.s.id)}
+              <button
+                class="sp-srv"
+                class:sp-unread={it.s.unread.length > 0 || it.s.dot}
+                class:sp-carried={it.carried}
+                class:sp-enter-target={spaceEntering === it.s.id}
+                style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
+                data-name={it.s.name}
+                onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
+                onclick={() => spaceIconClick(it.s.id)}
+                use:contextMenu={() => spaceServerMenu(it.s)}
+              >
+                {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
+                  <img class="rail-img" src={imgSrc(serverIcons[it.s.id])} alt="" draggable="false" />
+                {:else}
+                  {monogram(it.s.name)}
+                {/if}
+                {#if it.s.unread.length}
+                  <span class="rail-badge">{it.s.unread.length}</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+
+          {#if spaceLasso}
+            <svg class="sp-lasso" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">
+              <path d={spaceLassoPath(spaceLasso.points)} />
+            </svg>
+          {/if}
         </div>
-
-        <svg class="sp-reticle" viewBox="0 0 40 40" aria-hidden="true">
-          <circle cx="20" cy="20" r="9" />
-          <path d="M20 4v8M20 28v8M4 20h8M28 20h8" />
-        </svg>
-
-        <div class="sp-icons">
-          {#each spacePlaced as it (it.s.id)}
-            <button
-              class="sp-srv"
-              class:sp-unread={it.s.unread.length > 0 || it.s.dot}
-              class:sp-carried={it.carried}
-              style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)};${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
-              data-name={it.s.name}
-              onclick={() => spaceIconClick(it.s.id)}
-              use:contextMenu={() => spaceServerMenu(it.s)}
-            >
-              {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
-                <img class="rail-img" src={imgSrc(serverIcons[it.s.id])} alt="" />
-              {:else}
-                {monogram(it.s.name)}
-              {/if}
-              {#if it.s.unread.length}
-                <span class="rail-badge">{it.s.unread.length}</span>
-              {/if}
-            </button>
-          {/each}
-        </div>
-
-        {#if spaceLasso}
-          <div class="sp-lasso" style={`left:${spaceVw / 2 + spaceLasso.x}px; top:${spaceVh / 2 + spaceLasso.y}px; width:${spaceLasso.r * 2}px; height:${spaceLasso.r * 2}px`}></div>
-        {/if}
 
         <div class="sp-hud">
-          <div class="sp-hud-line">orbit · {spaceBackdropEff === "custom" ? "custom" : (SPACE_BACKDROP_TILES.find((b) => b.id === spaceBackdropEff)?.name ?? spaceBackdropEff)}</div>
+          <div class="sp-hud-line">orbit · {spaceBackdropEff === "custom" ? "custom" : (SPACE_BACKDROP_TILES.find((b) => b.id === spaceBackdropEff)?.name ?? spaceBackdropEff)} · {spaceState.shape}</div>
           <div class="sp-hud-sub">yaw {Math.round(spaceCam.yaw)}° · pitch {Math.round(spaceCam.pitch)}°</div>
           {#if spaceCarried}
             <div class="sp-hud-carry">carrying {Object.keys(spaceCarried).length} · click to drop · esc cancels</div>
@@ -11920,35 +12423,41 @@
 
         <div class="sp-keys">
           <span class="sp-key"><b>[drag]</b> look</span>
-          <span class="sp-key"><b>[hold]</b> lasso</span>
+          <span class="sp-key"><b>[icon drag]</b> move</span>
+          <span class="sp-key"><b>[hold + draw]</b> lasso</span>
           <button class="sp-key sp-key-btn" class:active={spaceTray} onclick={() => (spaceTrayPinned = !spaceTrayPinned)}><b>[t]</b> tray</button>
           <button class="sp-key sp-key-btn" onclick={toggleSpace}><b>[esc]</b> exit</button>
         </div>
 
         {#if spaceTray}
-          <div class="sp-tray">
+          <div class="sp-tray" onpointerdown={(e) => e.stopPropagation()}>
             <div class="sp-tray-head">
               <span class="sp-micro">server tray</span>
-              <span class="sp-chip">unplaced · {spaceUnplaced.length}</span>
-              <span class="sp-tray-hint">tap a server: it flies to where you aim</span>
+              <span class="sp-chip">{railServers.length} servers · {spaceUnplaced.length} unplaced</span>
+              <label class="sp-tray-size">
+                <span>size {spaceState.serverSize}</span>
+                <input type="range" min="32" max="88" step="2" value={spaceState.serverSize} aria-label="Server size" oninput={(e) => setSpaceServerSize(+e.currentTarget.value)} />
+              </label>
+              <span class="sp-tray-hint">drag into the room · tap places at the reticle</span>
             </div>
-            {#if spaceUnplaced.length}
+            {#if railServers.length}
               <div class="sp-tray-row">
-                {#each spaceUnplaced as s (s.id)}
-                  <button class="sp-tray-item" onclick={() => placeFromTray(s.id)}>
+                {#each railServers as s (s.id)}
+                  <button class="sp-tray-item" class:sp-already-placed={!!spaceState.placements[s.id]} onpointerdown={(e) => onSpaceTrayServerDown(e, s.id)} onclick={() => placeFromTray(s.id)}>
                     <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
                       {#if serverIcons[s.id] && appearance.icons !== "flat"}
-                        <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" />
+                        <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" draggable="false" />
                       {:else}
                         {monogram(s.name)}
                       {/if}
+                      {#if spaceState.placements[s.id]}<span class="sp-placed-mark" aria-hidden="true">✓</span>{/if}
                     </span>
                     <span class="sp-tray-name">{s.name}</span>
                   </button>
                 {/each}
               </div>
             {:else}
-              <p class="sp-tray-empty">Every server is placed. Hold anywhere to lasso and rearrange.</p>
+              <p class="sp-tray-empty">Your servers will appear here.</p>
             {/if}
           </div>
         {/if}
@@ -12183,6 +12692,7 @@
               <div class="stx-crumb">SETTINGS // APP // SERVER SPACE</div>
               <h1>Server Space</h1>
               <section class="set-section">
+                <h3>Room</h3>
                 <p class="muted small">The 360° room your servers hang in (Ctrl+O). Backdrop:</p>
                 <div class="space-set-row">
                   {#each SPACE_BACKDROP_TILES as b (b.id)}
@@ -12197,7 +12707,36 @@
                   </label>
                   <button type="button" class="ghost small" onclick={() => { spaceState.placements = {}; saveSpace(); }}>Forget placements</button>
                 </div>
-                <p class="muted small">A custom backdrop is one equirectangular (2:1) image. Backdrop and placements stay on this device, like desktop icon positions.</p>
+                <div class="stx-duo space-controls">
+                  <div class="field">
+                    <span class="muted small">Viewport shape</span>
+                    <div class="stx-seg">
+                      <button type="button" class:on={spaceState.shape === "circle"} onclick={() => setSpaceShape("circle")}>CIRCLE</button>
+                      <button type="button" class:on={spaceState.shape === "square"} onclick={() => setSpaceShape("square")}>SQUARE</button>
+                    </div>
+                  </div>
+                  <label class="field">
+                    <span class="muted small">Server size: {spaceState.serverSize}px</span>
+                    <input type="range" min="32" max="88" step="2" value={spaceState.serverSize} oninput={(e) => setSpaceServerSize(+e.currentTarget.value)} />
+                  </label>
+                </div>
+                <label class="toggle">
+                  <input type="checkbox" checked={spaceState.zoomOnOpen} onchange={() => { spaceState.zoomOnOpen = !spaceState.zoomOnOpen; saveSpace(); }} />
+                  <span>Zoom through a server when opening it</span>
+                </label>
+                <p class="muted small">Backdrop, shape, size, and placements stay on this device, like desktop icon positions. Drops automatically make room so servers cannot overlap.</p>
+              </section>
+              <section class="set-section">
+                <h3>Custom image guide</h3>
+                <div class="space-guide">
+                  <div>
+                    <strong>Use a 2:1 equirectangular panorama</strong>
+                    <p>2048 × 1024 works best. Keep important detail near the horizon and inside the middle half; make the left and right edges seamless. Other aspect ratios are centre-cropped automatically.</p>
+                    <p>The template marks all four viewing directions, cube seams, and circle-safe areas. Use it as an overlay in your image editor, then hide the guide before exporting.</p>
+                    {#if spaceImageNote}<p class="space-image-note">{spaceImageNote}</p>{/if}
+                  </div>
+                  <button type="button" class="ghost" onclick={downloadSpaceTemplate}>Download 2048 × 1024 guide</button>
+                </div>
               </section>
             {:else if settingsPage === "notifications"}
               <div class="stx-crumb">SETTINGS // APP // NOTIFICATIONS</div>
@@ -13054,11 +13593,14 @@
               anyone's device, and the file stays fetchable by address for as long as any member still holds it.
             </p>
 
-            {#if activeServerId !== null && downloads[dlKey(activeServerId, fileInfo.cid)] && (downloads[dlKey(activeServerId, fileInfo.cid)].status === "downloading" || downloads[dlKey(activeServerId, fileInfo.cid)].status === "queued")}
+            {#if activeServerId !== null && downloads[dlKey(activeServerId, fileInfo.cid)] && downloads[dlKey(activeServerId, fileInfo.cid)].status !== "done" && downloads[dlKey(activeServerId, fileInfo.cid)].status !== "failed"}
               {@const di = downloads[dlKey(activeServerId, fileInfo.cid)]}
               <label class="dl-progress">
                 <span class="muted small">
-                  {di.status === "queued" ? "Queued…" : `Downloading… ${Math.round(di.progress * 100)}%`}
+                  {#if di.status === "verifying"}Verifying…
+                  {:else if !di.provider && onlineCount <= 1 && di.done < di.total}No connection · waiting for a member
+                  {:else if di.status === "queued" || di.status === "waiting"}Waiting for source…
+                  {:else}Receiving… {Math.round(di.progress * 100)}%{/if}
                 </span>
                 <progress value={di.progress} max="1"></progress>
               </label>

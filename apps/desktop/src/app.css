@@ -34,6 +34,7 @@
   --danger-hi: #ef6f63;
   --danger-dim: color-mix(in oklab, var(--danger) 14%, var(--panel));
   --danger-brd: color-mix(in oklab, var(--danger) 40%, var(--panel));
+  --transfer: #4f9cf8;    /* bytes actively moving                */
 
   /* type */
   --ui: "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -2260,30 +2261,100 @@ button.primary:hover:not(:disabled) {
   white-space: nowrap;
 }
 .dl-item-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 0.8rem;
   white-space: nowrap;
 }
-.dl-item-status.done {
+.dl-item-status.complete {
   color: var(--ok);
 }
-.dl-item-status.failed {
+.dl-item-status.error {
   color: var(--danger);
 }
-.dl-item-status.queued {
+.dl-item-status.waiting {
+  color: var(--warn);
+}
+.dl-item-status.active {
+  color: var(--transfer);
+}
+.transfer-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--transfer);
+}
+
+.transfer-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentcolor;
+  box-shadow: 0 0 0 0 currentcolor;
+  animation: transfer-pulse 1.2s ease-out infinite;
+}
+@keyframes transfer-pulse {
+  60%, 100% { box-shadow: 0 0 0 5px transparent; }
+}
+
+.transfer-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px 14px;
   color: var(--muted);
+  font-size: 0.72rem;
 }
-.dl-item-status.downloading,
-.dl-item-status.reading,
-.dl-item-status.uploading {
-  color: var(--accent);
+.transfer-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
 }
-.dl-item-bar {
-  grid-column: 1 / -1;
-  width: 100%;
+.transfer-legend .transfer-piece {
+  width: 16px;
   height: 6px;
 }
-.dl-item-bar.done {
-  accent-color: var(--ok);
+.transfer-piece-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 2px;
+  width: 100%;
+  height: 10px;
+  padding: 1px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--bg-elev) 80%, transparent);
+  cursor: help;
+}
+.transfer-piece {
+  display: block;
+  flex: 1 1 0;
+  min-width: 3px;
+  border-radius: 2px;
+  background: var(--faint);
+}
+.transfer-piece.held { background: var(--ok); }
+.transfer-piece.active {
+  background: var(--transfer);
+  animation: transfer-active 900ms ease-in-out infinite alternate;
+}
+.transfer-piece.pending { background: var(--warn); }
+.transfer-piece.offline,
+.transfer-piece.failed { background: var(--danger); }
+@keyframes transfer-active {
+  from { filter: brightness(0.85); }
+  to { filter: brightness(1.35); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .transfer-pulse,
+  .transfer-piece.active {
+    animation: none;
+  }
+}
+.transfer-piece-count {
+  grid-column: 1 / -1;
+  justify-self: end;
+  font-size: 0.7rem;
+  cursor: help;
 }
 .dl-item-error {
   grid-column: 1 / -1;
@@ -2294,15 +2365,12 @@ button.primary:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-/* Progress bars read as pills. */
-.dl-item-bar,
+/* File-info progress remains a continuous pill; Transfers uses chunk pieces above. */
 .dl-progress progress {
   border-radius: 999px;
   overflow: hidden;
 }
-.dl-item-bar::-webkit-progress-bar,
 .dl-progress progress::-webkit-progress-bar,
-.dl-item-bar::-webkit-progress-value,
 .dl-progress progress::-webkit-progress-value {
   border-radius: 999px;
 }
@@ -7951,6 +8019,36 @@ button.juke-q:hover {
 .space-view.sp-carrying {
   cursor: crosshair;
 }
+.sp-world {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  isolation: isolate;
+  transform-origin: 50% 50%;
+}
+.space-view[data-shape="circle"] {
+  background:
+    radial-gradient(circle at 50% 50%, color-mix(in oklab, var(--panel) 38%, var(--bg-0)) 0 48vmin, var(--bg-0) calc(48vmin + 2px));
+}
+.space-view[data-shape="circle"] .sp-world {
+  clip-path: circle(calc(50vmin - 20px) at 50% 50%);
+}
+.sp-world::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  box-shadow:
+    inset 0 0 90px color-mix(in oklab, var(--bg-0) 62%, transparent),
+    inset 0 0 220px color-mix(in oklab, var(--accent) 5%, transparent);
+}
+.space-view[data-shape="circle"] .sp-world::after {
+  border-radius: 50%;
+  box-shadow:
+    inset 0 0 70px 14px color-mix(in oklab, var(--bg-0) 72%, transparent),
+    inset 0 0 0 1px color-mix(in oklab, var(--accent) 28%, transparent);
+}
 .sp-scene {
   position: absolute;
   inset: 0;
@@ -8016,6 +8114,36 @@ button.juke-q:hover {
   height: 100%;
   display: block;
 }
+.sp-atmosphere {
+  position: absolute;
+  inset: -8%;
+  z-index: 1;
+  opacity: 0.42;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle at 12% 28%, color-mix(in oklab, var(--text-2) 64%, transparent) 0 1px, transparent 1.5px),
+    radial-gradient(circle at 78% 17%, color-mix(in oklab, var(--accent) 58%, transparent) 0 1px, transparent 1.6px),
+    radial-gradient(circle at 66% 72%, color-mix(in oklab, var(--text-2) 45%, transparent) 0 1.2px, transparent 1.8px),
+    radial-gradient(circle at 34% 82%, color-mix(in oklab, var(--accent) 48%, transparent) 0 0.8px, transparent 1.5px);
+  background-size: 127px 113px, 181px 157px, 233px 199px, 293px 251px;
+  animation: sp-drift 28s linear infinite alternate;
+}
+.sp-constellations {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+  overflow: visible;
+  pointer-events: none;
+}
+.sp-constellations line {
+  stroke: color-mix(in oklab, var(--accent) 18%, transparent);
+  stroke-width: 1;
+  stroke-dasharray: 3 8;
+  vector-effect: non-scaling-stroke;
+  animation: sp-link-flow 9s linear infinite;
+}
 .sp-cat {
   position: absolute;
   left: 58.5%;
@@ -8042,6 +8170,7 @@ button.juke-q:hover {
   stroke-width: 1;
   opacity: 0.5;
   pointer-events: none;
+  z-index: 2;
   animation: sp-ret 3.2s ease-in-out infinite;
 }
 /* Icons: the layer ignores the pointer so drag-look works between them; each
@@ -8050,18 +8179,19 @@ button.juke-q:hover {
   position: absolute;
   inset: 0;
   pointer-events: none;
+  z-index: 2;
 }
 .sp-srv {
   position: absolute;
-  width: 46px;
-  height: 46px;
-  margin: -23px 0 0 -23px;
+  width: var(--sp-server-size, 46px);
+  height: var(--sp-server-size, 46px);
+  margin: calc(var(--sp-server-size, 46px) / -2) 0 0 calc(var(--sp-server-size, 46px) / -2);
   border-radius: 50%;
   background: var(--bg-elev);
   border: 1px solid var(--border);
   color: var(--text-2);
   font-family: var(--mono);
-  font-size: 0.7rem;
+  font-size: clamp(0.62rem, calc(var(--sp-server-size, 46px) * 0.015), 0.92rem);
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -8071,6 +8201,8 @@ button.juke-q:hover {
   cursor: pointer;
   transform: scale(var(--sp-s, 1));
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  animation: sp-breathe 2.8s ease-in-out var(--sp-delay, 0s) infinite;
+  will-change: transform, box-shadow;
 }
 .sp-srv .rail-img {
   border-radius: 50%;
@@ -8080,13 +8212,18 @@ button.juke-q:hover {
 .sp-srv.sp-unread {
   border-color: var(--sp-a, var(--accent));
   color: var(--text);
-  animation: sp-glow 2.8s ease-in-out infinite;
 }
-/* Mouseover: the server pulses in its own accent and introduces itself. */
+/* Every server breathes. Mouseover becomes deliberately tactile: a tight shake
+   plus a much hotter livery-coloured halo, while it introduces itself. */
 .sp-srv:hover {
   border-color: var(--sp-a, var(--accent));
   color: var(--text);
-  animation: sp-pulse 1.1s ease-out infinite;
+  box-shadow:
+    0 0 0 2px color-mix(in oklab, var(--sp-a, var(--accent)) 82%, white),
+    0 0 28px 8px color-mix(in oklab, var(--sp-a, var(--accent)) 72%, transparent),
+    0 10px 24px rgba(0, 0, 0, 0.62);
+  animation: sp-hover-shake 0.16s linear infinite, sp-hot-glow 0.72s ease-in-out infinite alternate;
+  z-index: 6;
 }
 .sp-srv:hover::after {
   content: attr(data-name);
@@ -8120,6 +8257,28 @@ button.juke-q:hover {
     box-shadow: 0 0 0 1px var(--sp-a, var(--accent)), 0 0 24px color-mix(in oklab, var(--sp-a, var(--accent)) 70%, transparent), 0 4px 14px rgba(0, 0, 0, 0.5);
   }
 }
+@keyframes sp-breathe {
+  0%, 100% {
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 0 color-mix(in oklab, var(--sp-a, var(--accent)) 28%, transparent);
+  }
+  50% {
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.55), 0 0 18px 4px color-mix(in oklab, var(--sp-a, var(--accent)) 42%, transparent);
+  }
+}
+@keyframes sp-hover-shake {
+  0%, 100% { transform: scale(var(--sp-s, 1)) translate(0, 0) rotate(0); }
+  25% { transform: scale(var(--sp-s, 1)) translate(-1.5px, 0.5px) rotate(-1.4deg); }
+  50% { transform: scale(var(--sp-s, 1)) translate(1px, -1px) rotate(1.2deg); }
+  75% { transform: scale(var(--sp-s, 1)) translate(1.5px, 1px) rotate(-0.7deg); }
+}
+@keyframes sp-hot-glow {
+  from {
+    box-shadow: 0 0 0 1px var(--sp-a, var(--accent)), 0 0 18px 5px color-mix(in oklab, var(--sp-a, var(--accent)) 58%, transparent), 0 8px 20px rgba(0, 0, 0, 0.58);
+  }
+  to {
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--sp-a, var(--accent)) 76%, white), 0 0 40px 12px color-mix(in oklab, var(--sp-a, var(--accent)) 84%, transparent), 0 12px 30px rgba(0, 0, 0, 0.68);
+  }
+}
 @keyframes sp-pulse {
   0% {
     box-shadow: 0 0 0 0 color-mix(in oklab, var(--sp-a, var(--accent)) 55%, transparent), 0 4px 14px rgba(0, 0, 0, 0.5);
@@ -8144,22 +8303,58 @@ button.juke-q:hover {
     opacity: 0.72;
   }
 }
-/* The lasso: grows while held; the slow spin walks the dashes (marching ants). */
+@keyframes sp-drift {
+  from { transform: translate3d(-1%, -0.5%, 0) scale(1); }
+  to { transform: translate3d(2%, 1.5%, 0) scale(1.035); }
+}
+@keyframes sp-link-flow {
+  to { stroke-dashoffset: -44; }
+}
+/* The freehand lasso closes itself on release; the marching stroke makes the
+   enclosed selection readable over both dark and photographic backdrops. */
 .sp-lasso {
   position: absolute;
-  border: 1.5px dashed var(--accent);
-  border-radius: 50%;
-  background: color-mix(in oklab, var(--accent) 6%, transparent);
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 3;
   pointer-events: none;
-  animation: sp-spin 14s linear infinite;
 }
-@keyframes sp-spin {
-  from {
-    transform: translate(-50%, -50%) rotate(0deg);
-  }
-  to {
-    transform: translate(-50%, -50%) rotate(360deg);
-  }
+.sp-lasso path {
+  fill: color-mix(in oklab, var(--accent) 10%, transparent);
+  stroke: color-mix(in oklab, var(--accent) 86%, white);
+  stroke-width: 1.7;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  stroke-dasharray: 7 5;
+  vector-effect: non-scaling-stroke;
+  animation: sp-lasso-walk 0.6s linear infinite;
+}
+@keyframes sp-lasso-walk {
+  to { stroke-dashoffset: -24; }
+}
+/* Optional click-through transition: the chosen server becomes the doorway and
+   the room falls behind it. It is bypassed in JS when motion is disabled. */
+.space-view.sp-entering .sp-world {
+  animation: sp-world-enter 0.44s cubic-bezier(0.2, 0.72, 0.18, 1) forwards;
+}
+.space-view.sp-entering .sp-srv:not(.sp-enter-target) {
+  animation: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.space-view.sp-entering .sp-srv.sp-enter-target {
+  z-index: 9;
+  pointer-events: none;
+  animation: sp-server-enter 0.44s cubic-bezier(0.2, 0.72, 0.18, 1) forwards;
+}
+@keyframes sp-world-enter {
+  to { transform: scale(1.18); filter: brightness(0.55) blur(3px); }
+}
+@keyframes sp-server-enter {
+  0% { transform: scale(var(--sp-s, 1)); opacity: 1; }
+  68% { opacity: 1; }
+  100% { transform: scale(calc(var(--sp-s, 1) * 15)); opacity: 0; }
 }
 /* Chrome: mono micro HUD top-left, bracketed hotkeys bottom-centre. */
 .sp-hud {
@@ -8278,6 +8473,20 @@ button.sp-key-btn:hover {
   letter-spacing: 0.06em;
   color: var(--faint);
 }
+.sp-tray-size {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.sp-tray-size input {
+  width: 92px;
+  accent-color: var(--accent);
+}
 .sp-tray-row {
   display: flex;
   flex-wrap: wrap;
@@ -8288,7 +8497,7 @@ button.sp-key-btn:hover {
   flex-direction: column;
   align-items: center;
   gap: 5px;
-  width: 88px;
+  width: max(88px, calc(var(--sp-server-size, 46px) + 28px));
   background: transparent;
   border: none;
   padding: 0;
@@ -8296,8 +8505,9 @@ button.sp-key-btn:hover {
   color: var(--text-2);
 }
 .sp-disc {
-  width: 44px;
-  height: 44px;
+  position: relative;
+  width: var(--sp-server-size, 46px);
+  height: var(--sp-server-size, 46px);
   border-radius: 50%;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -8308,6 +8518,23 @@ button.sp-key-btn:hover {
   font-family: var(--mono);
   font-size: 0.7rem;
   font-weight: 700;
+}
+.sp-tray-item.sp-already-placed .sp-disc {
+  border-color: color-mix(in oklab, var(--sp-a, var(--accent)) 48%, var(--border));
+}
+.sp-placed-mark {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--panel);
+  border: 1px solid var(--sp-a, var(--accent));
+  color: var(--sp-a, var(--accent));
+  font: 700 0.55rem/1 var(--mono);
 }
 .sp-tray-item:hover .sp-disc {
   border-color: var(--sp-a, var(--accent));
@@ -8353,18 +8580,67 @@ label.space-file:hover {
 label.space-file input {
   display: none;
 }
+.space-controls {
+  margin-top: 14px;
+  align-items: end;
+}
+.space-controls input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.space-guide {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 14px;
+  background:
+    linear-gradient(135deg, color-mix(in oklab, var(--accent) 7%, transparent), transparent 55%),
+    var(--bg-elev);
+}
+.space-guide strong {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+.space-guide p {
+  margin: 5px 0 0;
+  max-width: 68ch;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+.space-guide .space-image-note {
+  color: var(--accent);
+}
 /* Motion is a preference here like everywhere else in the chrome. */
-:root[data-motion="off"] :is(.sp-srv, .sp-srv:hover, .sp-lasso, .sp-reticle, .sp-tray, .sp-tray-item:hover .sp-disc) {
+:root[data-motion="off"] :is(.sp-srv, .sp-srv:hover, .sp-lasso path, .sp-reticle, .sp-tray, .sp-tray-item:hover .sp-disc, .sp-atmosphere, .sp-constellations line, .sp-world) {
   animation: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .sp-srv,
   .sp-srv:hover,
-  .sp-lasso,
+  .sp-lasso path,
   .sp-reticle,
   .sp-tray,
-  .sp-tray-item:hover .sp-disc {
+  .sp-tray-item:hover .sp-disc,
+  .sp-atmosphere,
+  .sp-constellations line,
+  .sp-world {
     animation: none;
+  }
+}
+@media (max-width: 760px) {
+  .sp-tray-head {
+    flex-wrap: wrap;
+  }
+  .sp-tray-hint {
+    width: 100%;
+    margin-left: 0;
+  }
+  .space-guide {
+    grid-template-columns: 1fr;
   }
 }
 

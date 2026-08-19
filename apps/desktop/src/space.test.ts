@@ -14,8 +14,10 @@ import {
   clampPitch,
   defaultSpace,
   lassoCapture,
+  lassoCapturePath,
   parseSpace,
   project,
+  separatePlacements,
   unproject,
   wrapYaw,
   yawDelta,
@@ -92,6 +94,30 @@ test("lasso captures inside, not outside, not behind", () => {
   assert.deepEqual(caught.sort(), [1, 2]);
 });
 
+test("a freehand lasso captures only projected servers inside its closed path", () => {
+  const placements = {
+    1: { yaw: 0, pitch: 0 },
+    2: { yaw: 4, pitch: 2 },
+    3: { yaw: 30, pitch: 0 },
+    4: { yaw: 180, pitch: 0 },
+  };
+  const path = [
+    { x: -70, y: -70 },
+    { x: 100, y: -65 },
+    { x: 105, y: 80 },
+    { x: -80, y: 75 },
+  ];
+  assert.deepEqual(lassoCapturePath(placements, { yaw: 0, pitch: 0 }, path, F).sort(), [1, 2]);
+});
+
+test("a held click and a line are not treated as freehand lassos", () => {
+  const placements = { 1: { yaw: 0, pitch: 0 } };
+  assert.deepEqual(lassoCapturePath(placements, { yaw: 0, pitch: 0 }, [{ x: 0, y: 0 }], F), []);
+  assert.deepEqual(lassoCapturePath(placements, { yaw: 0, pitch: 0 }, [
+    { x: -20, y: 0 }, { x: 0, y: 0 }, { x: 20, y: 0 },
+  ], F), []);
+});
+
 test("carrying a group keeps its arrangement across the wrap", () => {
   const placements = { 1: { yaw: 355, pitch: 10 }, 2: { yaw: 5, pitch: -10 } };
   const grab = { yaw: 0, pitch: 0 };
@@ -106,6 +132,29 @@ test("carrying a group keeps its arrangement across the wrap", () => {
 test("applyOffsets clamps pitch on drop", () => {
   const dropped = applyOffsets({ 1: { yaw: 0, pitch: 30 } }, { yaw: 0, pitch: 50 });
   assert.equal(dropped[1].pitch, PITCH_MAX);
+});
+
+test("collision separation keeps fixed servers still and nudges moved servers apart", () => {
+  const placements = {
+    1: { yaw: 0, pitch: 0 },
+    2: { yaw: 0, pitch: 0 },
+    3: { yaw: 0, pitch: 0 },
+  };
+  const out = separatePlacements(placements, [2, 3], 6);
+  assert.deepEqual(out[1], placements[1]);
+  const a = project(out[1], out[2], F);
+  const b = project(out[1], out[3], F);
+  assert.ok(Math.hypot(a.x, a.y) > 70);
+  assert.ok(Math.hypot(b.x, b.y) > 70);
+  assert.ok(Math.hypot(a.x - b.x, a.y - b.y) > 70);
+});
+
+test("collision separation handles the yaw seam", () => {
+  const out = separatePlacements({
+    1: { yaw: 359, pitch: 0 },
+    2: { yaw: 1, pitch: 0 },
+  }, [2], 8);
+  assert.notDeepEqual(out[2], { yaw: 1, pitch: 0 });
 });
 
 test("parseSpace survives garbage and hand-edits", () => {
@@ -125,4 +174,21 @@ test("parseSpace rejects unknown backdrops but keeps placements", () => {
   const s = parseSpace(JSON.stringify({ backdrop: "matrix", placements: { 1: { yaw: 10, pitch: 5 } } }));
   assert.equal(s.backdrop, "den");
   assert.deepEqual(s.placements, { 1: { yaw: 10, pitch: 5 } });
+});
+
+test("parseSpace validates new interaction preferences and migrates old stores", () => {
+  const old = parseSpace(JSON.stringify({ backdrop: "ridge", placements: {} }));
+  assert.equal(old.shape, "square");
+  assert.equal(old.serverSize, 46);
+  assert.equal(old.zoomOnOpen, true);
+
+  const parsed = parseSpace(JSON.stringify({
+    shape: "circle",
+    serverSize: 999,
+    zoomOnOpen: false,
+    placements: {},
+  }));
+  assert.equal(parsed.shape, "circle");
+  assert.equal(parsed.serverSize, 88);
+  assert.equal(parsed.zoomOnOpen, false);
 });

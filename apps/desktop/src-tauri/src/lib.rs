@@ -452,6 +452,10 @@ struct DownloadProgressEvt {
     cid: String,
     done: usize,
     total: usize,
+    bytes_done: u64,
+    bytes_total: u64,
+    /// Bytes fetched from peers during this transfer (excludes chunks already held locally).
+    network_bytes_done: u64,
     provider: Option<String>,
 }
 #[derive(Serialize, Clone)]
@@ -2829,12 +2833,19 @@ async fn download_file(
             cid: cid.clone(),
             done: 0,
             total,
+            bytes_done: 0,
+            bytes_total: size,
+            network_bytes_done: 0,
             provider: None,
         },
     );
     let mut out = Vec::with_capacity(size as usize);
+    let mut network_bytes_done = 0u64;
     for i in 0..total {
         let (chunk, provider) = actor.fetch_file_chunk(raw.clone(), i).await?;
+        if provider.is_some() {
+            network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
+        }
         out.extend_from_slice(&chunk);
         let _ = app.emit(
             "download-progress",
@@ -2843,6 +2854,9 @@ async fn download_file(
                 cid: cid.clone(),
                 done: i + 1,
                 total,
+                bytes_done: out.len() as u64,
+                bytes_total: size,
+                network_bytes_done,
                 provider,
             },
         );
