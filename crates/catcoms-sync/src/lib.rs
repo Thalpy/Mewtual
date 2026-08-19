@@ -8501,10 +8501,12 @@ mod tests {
             "only the peers the policy planned are retired, got {first} planned and {} retired",
             alice.dialed_peers.len()
         );
-        // Tidy up before the cache assertions below.
-        alice
-            .address_cache
-            .retain(|c| c.peer.len() == 32 && c.peer[0] & 0xF0 != 0xA0);
+        // Tidy up before the cache assertions below. Retain Bob by his *exact* device id, not by
+        // the filler rows' byte pattern: a real device id is a BLAKE3 hash, so it matches the
+        // `0xA0` nibble one time in sixteen, and this cleanup then deleted the genuine member too
+        // and left the count assertion below reading 0. That made the test flaky, not the code.
+        let bob_peer = bob.device.device_id().as_bytes().to_vec();
+        alice.address_cache.retain(|c| c.peer == bob_peer);
         alice.dialed_peers.clear();
 
         // ...and a sealed cache carrying the row does not resurrect them either: the load-time

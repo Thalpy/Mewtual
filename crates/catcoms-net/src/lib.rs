@@ -31,12 +31,15 @@
 //! [`infra_transport`] for the metered TCP and TCP/443 WebSocket transports.
 
 pub mod admission;
+pub mod fdlimit;
 pub mod infra_transport;
 pub mod metering;
 pub mod relay_node;
 pub mod rendezvous_node;
 
-pub use infra_transport::{is_websocket_addr, is_wildcard_addr, load_ws_tls_pem, WsTlsConfig};
+pub use infra_transport::{
+    is_advertisable, is_websocket_addr, is_wildcard_addr, load_ws_tls_pem, WsTlsConfig,
+};
 pub use metering::ByteMeters;
 pub use relay_node::{
     build_memory_relay_swarm, build_relay_swarm, build_relay_swarm_with_key, run_relay,
@@ -48,7 +51,7 @@ pub use rendezvous_node::{
     RendezvousNode,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -68,7 +71,7 @@ use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous, request_response, tcp,
+    connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous, request_response,
     yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
@@ -338,25 +341,15 @@ pub fn keypair_from_seed(mut seed: [u8; 32]) -> Result<libp2p::identity::Keypair
         .map_err(|e| NetError::Build(format!("bad identity seed: {e}")))
 }
 
-/// Build a swarm over TCP **and QUIC** (Noise + yamux for TCP; QUIC brings its own), relay-client
-/// capable, for real networking. A fresh (throwaway) identity: see [`build_tcp_swarm_with_key`]
-/// for the persisted-identity variant every long-lived node wants.
+/// Build a swarm over TCP, QUIC **and WebSocket**, with DNS resolution, relay-client capable, for
+/// real networking. A fresh (throwaway) identity: see [`build_tcp_swarm_with_key`] for the
+/// persisted-identity variant every long-lived node wants.
 pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
-    let swarm = SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .with_quic()
-        .with_relay_client(noise::Config::new, yamux::Config::default)
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(MeshBehaviour::new)
-        .map_err(|e| NetError::Build(e.to_string()))?
-        .build();
-    Ok(swarm)
+    // Identical to the keyed builder with a throwaway keypair, which is exactly what
+    // `SwarmBuilder::with_new_identity` does internally. Sharing one implementation is what keeps
+    // the transport stack from drifting between the two entry points, which is how the missing
+    // WebSocket half of rung 4 went unnoticed.
+    build_tcp_swarm_with_key(libp2p::identity::Keypair::generate_ed25519())
 }
 
 /// Like [`build_tcp_swarm`] but with a **caller-supplied identity**, so a node can persist its
@@ -364,24 +357,22 @@ pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
 /// [`build_relay_swarm_with_key`] exists for the infra nodes. Without it every launch mints a new
 /// `PeerId` and silently kills every invite that embedded the old one (and every cached address a
 /// peer held for us).
+///
+/// The transport stack (TCP + WebSocket + QUIC, DNS-resolving) is assembled in
+/// [`infra_transport::client_transport`]; see there for why WebSocket and DNS are part of it and
+/// what adding DNS changes for layers that assumed `/dns4` addresses were undialable.
 pub fn build_tcp_swarm_with_key(
     key: libp2p::identity::Keypair,
 ) -> Result<Swarm<MeshBehaviour>, NetError> {
-    let swarm = SwarmBuilder::with_existing_identity(key)
+    Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )
+        .with_other_transport(infra_transport::client_transport)
         .map_err(|e| NetError::Build(e.to_string()))?
-        .with_quic()
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| NetError::Build(e.to_string()))?
         .with_behaviour(MeshBehaviour::new)
         .map_err(|e| NetError::Build(e.to_string()))?
-        .build();
-    Ok(swarm)
+        .build())
 }
 
 // ----- mapping helpers -------------------------------------------------------
@@ -415,6 +406,29 @@ pub fn target_peer_in_multiaddr(addr: &Multiaddr) -> Option<libp2p::PeerId> {
 fn is_relayed(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| p == Protocol::P2pCircuit)
 }
+
+/// The **relay**'s peer id in a circuit address `…/p2p/<relay>/p2p-circuit[/p2p/<target>]`, i.e.
+/// the last `/p2p/` component before `/p2p-circuit`.
+///
+/// Used to recognise a relay as an infra target, which is what earns it the strict one-connection
+/// dial condition: infra nodes are where the thundering herd actually lands, because every member
+/// of every group converges on the same few of them.
+fn relay_peer_in_circuit_addr(addr: &Multiaddr) -> Option<libp2p::PeerId> {
+    let mut last_p2p = None;
+    for proto in addr.iter() {
+        match proto {
+            Protocol::P2p(id) => last_p2p = Some(id),
+            Protocol::P2pCircuit => return last_p2p,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// How many peers the per-address dial ledger tracks before it is cleared wholesale. The ledger
+/// only holds addresses whose dial has not yet resolved, so it drains itself in the normal case;
+/// this bounds the pathological one (many peers, no outcomes) without any time-based expiry.
+const MAX_DIAL_LEDGER_PEERS: usize = 1_024;
 
 /// A validated rendezvous infra target: a direct (non-circuit) multiaddr and its peer id.
 #[derive(Debug, Clone)]
@@ -535,6 +549,17 @@ struct Actor {
     peers: HashMap<PeerId, libp2p::PeerId>,
     pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
     pending_publish: Vec<(Topic, Bytes)>,
+    /// Peers this node uses as **infrastructure**: rendezvous nodes it registers or discovers at,
+    /// and relays it holds (or is opening) a circuit reservation on. Learned from the commands
+    /// that name them; nothing else can tell an infra target from a member at dial time.
+    infra_peers: HashSet<libp2p::PeerId>,
+    /// Addresses this node is dialing, or is already connected to a peer over. The dial gate is
+    /// keyed on **(peer, address)** rather than on peer: a repeat of an address already covered is
+    /// suppressed, a *new* address for a peer we already reach is not.
+    covered_addrs: HashMap<libp2p::PeerId, HashSet<Multiaddr>>,
+    /// Member-peer dials accumulated during one drain of the command queue, so a peer's addresses
+    /// are handed to libp2p as one racing dial rather than N sequential ones.
+    pending_dials: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
 }
 
 impl Actor {
@@ -544,7 +569,19 @@ impl Actor {
             tokio::select! {
                 maybe_cmd = self.cmd_rx.recv() => {
                     match maybe_cmd {
-                        Some(cmd) => self.handle_command(cmd),
+                        Some(cmd) => {
+                            self.handle_command(cmd);
+                            // Drain whatever the caller has already queued before touching the
+                            // swarm again. A dial plan arrives as one `Command::Dial` per address
+                            // (the sync layer loops over a peer's addresses), so draining first is
+                            // what lets those addresses be raced in a single dial. Nothing here
+                            // depends on the drain succeeding: an address that misses the batch is
+                            // dialed on its own, which is still correct, just less efficient.
+                            while let Ok(next) = self.cmd_rx.try_recv() {
+                                self.handle_command(next);
+                            }
+                            self.flush_dials();
+                        }
                         None => break, // all handles dropped
                     }
                 }
@@ -614,6 +651,11 @@ impl Actor {
                 }
             },
             Command::Listen(addr) => {
+                // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
+                // relay named in it is an infra target from here on.
+                if let Some(relay) = relay_peer_in_circuit_addr(&addr) {
+                    self.infra_peers.insert(relay);
+                }
                 if let Err(e) = self.swarm.listen_on(addr.clone()) {
                     tracing::warn!(%addr, error = %e, "listen failed");
                 }
@@ -626,12 +668,14 @@ impl Actor {
                 self.flush_pending_registers();
             }
             Command::RendezvousRegister { namespace, rz_node } => {
+                self.infra_peers.insert(rz_node);
                 // Defer until we have an external address to advertise; flushed on
                 // the next confirmed external address (e.g. a circuit reservation).
                 self.pending_registers.push((namespace, rz_node));
                 self.flush_pending_registers();
             }
             Command::RendezvousDiscover { namespace, rz_node } => {
+                self.infra_peers.insert(rz_node);
                 tracing::debug!(%rz_node, namespace = %namespace, "rendezvous discover");
                 self.swarm.behaviour_mut().rendezvous_client.discover(
                     Some(namespace),
@@ -643,16 +687,35 @@ impl Actor {
         }
     }
 
-    /// Dial `addr`, but **not** if we already have (or are already opening) a connection to the
-    /// peer it names. Second half of P11.
+    /// Dial `addr`, gated on **(peer, address)** rather than on peer. Second half of P11.
     ///
     /// `Swarm::dial(Multiaddr)` builds `DialOpts` with `peer_id: None` and
-    /// `PeerCondition::Always`, so an existing connection never suppresses a new dial. Combined
+    /// `PeerCondition::Always`, so an existing connection never suppressed a new dial. Combined
     /// with an unjittered per-server discovery timer that dials plus registers plus discovers for
-    /// every namespace in the grandfather window, every member of every group reconverges on the
+    /// every namespace in the grandfather window, every member of every group reconverged on the
     /// same infra node inside one timer period after an outage: a thundering herd aimed at
-    /// precisely the node that just came back. Naming the target peer and asking for
-    /// `DisconnectedAndNotDialing` collapses that to one dial per peer.
+    /// precisely the node that just came back.
+    ///
+    /// The first fix for that gated on the **peer**, and gated too hard. Two things broke:
+    ///
+    /// - a peer first reached over a relay circuit was never dialed directly when its direct
+    ///   address arrived later, because a connection to it already existed. The pair stayed pinned
+    ///   to the relay, which is the opposite of what the ladder wants;
+    /// - the sync layer issues one `Command::Dial` per address, so for a peer with N addresses the
+    ///   first was dialed and addresses 2..N returned `DialPeerConditionFalse` and were
+    ///   **discarded**. One stale cached address at the front of the list made a peer unreachable
+    ///   for a whole discovery tick.
+    ///
+    /// So the condition is now split by target:
+    ///
+    /// - **Infra targets** (rendezvous nodes and relays, learned from the commands that name them)
+    ///   keep the strict condition. That is where the herd is, one connection is all anyone needs,
+    ///   and they are addressed by a single well-known address anyway.
+    /// - **Member peers** are batched: a peer's addresses accumulate over one drain of the command
+    ///   queue and go to libp2p as one `DialOpts::peer_id(p).addresses(all)`, which races them
+    ///   itself and keeps one connection. A (peer, address) already in flight is suppressed; a new
+    ///   address for an already-connected peer is not, which is what lets a direct address
+    ///   preempt a relayed connection.
     ///
     /// An address with no `/p2p/<id>` names no peer, so it cannot be gated; it is dialed as
     /// before. (The jitter half of P11 lives in the caller that drives the timer.)
@@ -663,8 +726,33 @@ impl Actor {
             }
             return;
         };
+        if self.infra_peers.contains(&target) {
+            self.dial_infra(target, addr);
+            return;
+        }
+        if self.covered_addrs.len() > MAX_DIAL_LEDGER_PEERS {
+            // Entries are dropped when a peer disconnects or a dial fails, so this is the
+            // pathological case rather than the normal one. Clearing wholesale costs at worst a
+            // duplicate dial attempt.
+            tracing::debug!("dial ledger over its cap; clearing");
+            self.covered_addrs.clear();
+        }
+        if !self
+            .covered_addrs
+            .entry(target)
+            .or_default()
+            .insert(addr.clone())
+        {
+            tracing::trace!(%addr, peer = %target, "dial suppressed: this address is already dialing or connected");
+            return;
+        }
+        self.pending_dials.entry(target).or_default().push(addr);
+    }
+
+    /// Dial an infra target under the strict one-connection-per-peer condition.
+    fn dial_infra(&mut self, target: libp2p::PeerId, addr: Multiaddr) {
         if self.swarm.is_connected(&target) {
-            tracing::trace!(%addr, peer = %target, "dial suppressed: already connected");
+            tracing::trace!(%addr, peer = %target, "infra dial suppressed: already connected");
             return;
         }
         let opts = DialOpts::peer_id(target)
@@ -672,13 +760,81 @@ impl Actor {
             .condition(PeerCondition::DisconnectedAndNotDialing)
             .build();
         match self.swarm.dial(opts) {
-            Ok(()) => tracing::debug!(%addr, peer = %target, "dialing"),
+            Ok(()) => tracing::debug!(%addr, peer = %target, "dialing infra node"),
             // `DialError::DialPeerConditionFalse` is the condition doing its job (a dial to this
             // peer is already in flight), not a failure worth warning about.
             Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
-                tracing::trace!(%addr, peer = %target, ?cond, "dial suppressed: already dialing");
+                tracing::trace!(%addr, peer = %target, ?cond, "infra dial suppressed: already dialing");
             }
             Err(e) => tracing::warn!(%addr, error = %e, "dial failed"),
+        }
+    }
+
+    /// Issue one racing dial per member peer whose addresses accumulated during this drain.
+    ///
+    /// `PeerCondition::Always` is correct here precisely because the gate above already decided:
+    /// every address in the batch is one libp2p is not currently trying, and a peer we are already
+    /// connected to may still be worth dialing at a *new* address (the relay-to-direct upgrade).
+    fn flush_dials(&mut self) {
+        for (peer, addrs) in std::mem::take(&mut self.pending_dials) {
+            let count = addrs.len();
+            let opts = DialOpts::peer_id(peer)
+                .addresses(addrs)
+                .condition(PeerCondition::Always)
+                .build();
+            match self.swarm.dial(opts) {
+                Ok(()) => tracing::debug!(peer = %peer, addresses = count, "dialing"),
+                Err(e) => {
+                    tracing::warn!(peer = %peer, error = %e, "dial failed");
+                    self.covered_addrs.remove(&peer);
+                }
+            }
+        }
+    }
+
+    /// Forget every address recorded for a peer, so a later tick may dial it again. Called when
+    /// the peer goes away entirely; while it is reachable, its covered addresses are what stop a
+    /// discovery tick reopening the same connection over and over.
+    fn clear_dial_ledger(&mut self, peer: &libp2p::PeerId) {
+        self.covered_addrs.remove(peer);
+    }
+
+    /// Record the address a connection actually came up on, so a repeat dial of it is suppressed.
+    ///
+    /// The dialed multiaddr usually carries a trailing `/p2p/<id>` that the established endpoint
+    /// address does not, so both forms are recorded: the dialed one by [`Actor::dial_gated`] and
+    /// the observed one here.
+    fn cover_addr(&mut self, peer: libp2p::PeerId, addr: Multiaddr) {
+        self.covered_addrs.entry(peer).or_default().insert(addr);
+    }
+
+    /// Release the addresses a failed dial had reserved, so the next tick may retry them.
+    ///
+    /// A transport-level failure names the addresses that failed, and only those are released: the
+    /// other addresses of a peer that is up over one of them must stay covered. Any other dial
+    /// error is about the peer as a whole, so the whole entry goes.
+    fn release_failed_dial(
+        &mut self,
+        peer: Option<libp2p::PeerId>,
+        error: &libp2p::swarm::DialError,
+    ) {
+        let Some(peer) = peer else { return };
+        match error {
+            libp2p::swarm::DialError::Transport(failed) => {
+                if let Some(set) = self.covered_addrs.get_mut(&peer) {
+                    for (addr, _) in failed {
+                        set.remove(addr);
+                        // The dialed form carries `/p2p/<id>`; the reported one may not.
+                        set.remove(&addr.clone().with(Protocol::P2p(peer)));
+                    }
+                    if set.is_empty() {
+                        self.covered_addrs.remove(&peer);
+                    }
+                }
+            }
+            _ => {
+                self.covered_addrs.remove(&peer);
+            }
         }
     }
 
@@ -750,6 +906,11 @@ impl Actor {
             } => {
                 let relayed = is_relayed(endpoint.get_remote_address());
                 tracing::debug!(peer = %peer_id, relayed, "connection established");
+                // Record the address this came up on. Repeating a dial of an address already
+                // carrying a connection is the thundering herd P11 describes, and is suppressed;
+                // a *new* address for the same peer is not, which is how a direct address preempts
+                // a relayed connection instead of the pair staying pinned to the relay.
+                self.cover_addr(peer_id, endpoint.get_remote_address().clone());
                 let peer = to_peer(&peer_id);
                 // Only surface `PeerConnected` on the *first* connection to a peer;
                 // a DCUtR upgrade opens a second (direct) connection to a peer we
@@ -761,6 +922,11 @@ impl Actor {
                         .await;
                 }
             }
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                // The attempt is over, so a later tick may retry rather than being suppressed by a
+                // ledger entry that nothing would ever clear.
+                self.release_failed_dial(peer_id, &error);
+            }
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 num_established,
@@ -768,6 +934,8 @@ impl Actor {
             } => {
                 if num_established == 0 {
                     tracing::debug!(peer = %peer_id, "peer disconnected");
+                    // Nothing covers this peer any more, so the next tick is free to dial it.
+                    self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
                     let _ = self
@@ -993,6 +1161,9 @@ impl MeshService {
             peers: HashMap::new(),
             pending_req: HashMap::new(),
             pending_publish: Vec::new(),
+            infra_peers: HashSet::new(),
+            covered_addrs: HashMap::new(),
+            pending_dials: HashMap::new(),
         };
         tokio::spawn(actor.run());
         Self {

@@ -9,6 +9,7 @@
 //! `debug_log_<timestamp>.txt`.
 
 use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -94,9 +95,15 @@ enum Command {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 4000)]
         port: u16,
-        /// IP to bind. The default binds every interface, which then requires --external.
-        #[arg(long, default_value = "0.0.0.0")]
-        host: String,
+        /// IP to bind, as a bare address (`0.0.0.0`, `::`, `198.51.100.7`). Repeatable, so a
+        /// dual-stack node can bind both families. Defaults to `0.0.0.0`, which binds every IPv4
+        /// interface and then requires --external.
+        ///
+        /// Parsed as an IP address rather than pasted into `/ip4/{host}/...`, which is what made
+        /// `--host ::` unparseable and left `ipv6_prefix_bits` dead configuration on every
+        /// deployed node.
+        #[arg(long)]
+        host: Vec<String>,
         /// Persist the relay identity to this file (created if absent), so the peer id; and
         /// therefore every invite that embeds the relay's multiaddr; survives restarts.
         #[arg(long)]
@@ -128,9 +135,23 @@ enum Command {
         /// The budget window, in seconds.
         #[arg(long)]
         budget_window_secs: Option<u64>,
-        /// Concurrent connections allowed from one source prefix (a /24 or a /64).
+        /// Bytes one source prefix may move per budget window before the whole prefix is
+        /// disconnected and refused. The byte budget that binds, because peer ids are free.
+        #[arg(long)]
+        prefix_budget_bytes: Option<u64>,
+        /// Concurrent connections allowed from one source prefix (a /24 or a /56).
         #[arg(long)]
         max_conns_per_prefix: Option<usize>,
+        /// Concurrent connections allowed from one source prefix while the node is shedding.
+        /// Under pressure, breadth beats depth: serve many sources a little.
+        #[arg(long)]
+        max_conns_per_prefix_saturated: Option<usize>,
+        /// While shedding, refuse every new inbound connection instead of only tightening the
+        /// per-prefix quota. Off by default, and turning it on is a deliberate choice to go dark
+        /// under load rather than degrade: it also leaves the peers already causing the load
+        /// connected, because it only refuses newcomers.
+        #[arg(long)]
+        refuse_all_when_saturated: bool,
     },
     /// Run a zero-knowledge rendezvous server: members register their signed peer
     /// records under blinded namespaces and discover each other. Print its address.
@@ -140,9 +161,10 @@ enum Command {
         /// TCP port to listen on.
         #[arg(long, default_value_t = 5000)]
         port: u16,
-        /// IP to bind.
-        #[arg(long, default_value = "0.0.0.0")]
-        host: String,
+        /// IP to bind, as a bare address (`0.0.0.0`, `::`, `198.51.100.7`). Repeatable for a
+        /// dual-stack node. Defaults to `0.0.0.0`.
+        #[arg(long)]
+        host: Vec<String>,
         /// Persist the rendezvous identity to this file (created if absent), for a stable peer id
         /// across restarts (so invites carrying the rendezvous address keep working).
         #[arg(long)]
@@ -170,9 +192,23 @@ enum Command {
         /// Discovery requests one peer may make per window before it is cut off.
         #[arg(long)]
         max_discovers_per_window: Option<u32>,
-        /// Concurrent connections allowed from one source prefix (a /24 or a /64).
+        /// Registration records served to one source prefix per window before the prefix is cut
+        /// off. This is the census limit: the caller picks how many requests to make, not how
+        /// many records come back.
+        #[arg(long)]
+        max_records_per_window: Option<u32>,
+        /// Concurrent connections allowed from one source prefix (a /24 or a /56).
         #[arg(long)]
         max_conns_per_prefix: Option<usize>,
+        /// Concurrent connections allowed from one source prefix while the node is shedding.
+        #[arg(long)]
+        max_conns_per_prefix_saturated: Option<usize>,
+        /// While shedding, refuse every new inbound connection instead of only tightening the
+        /// per-prefix quota. Off by default; a rendezvous under occupancy pressure can still
+        /// answer queries perfectly well, so blanket-refusing breaks discovery for people who
+        /// only want to read the noticeboard.
+        #[arg(long)]
+        refuse_all_when_saturated: bool,
     },
     /// Join a server using an invite file written by `serve`, over real libp2p, then
     /// catch up the channel and print it.
@@ -222,7 +258,7 @@ impl WsArgs {
     }
 
     /// The WebSocket listen address for `host`, if the listener was requested.
-    fn listen_addr(&self, host: &str) -> Result<Option<Multiaddr>, Box<dyn Error>> {
+    fn listen_addr(&self, host: IpAddr) -> Result<Option<Multiaddr>, Box<dyn Error>> {
         let Some(port) = self.ws_port else {
             if self.ws_cert.is_some() {
                 return Err("--ws-cert was given without --ws-port; nothing would listen".into());
@@ -234,7 +270,9 @@ impl WsArgs {
         } else {
             "ws"
         };
-        Ok(Some(format!("/ip4/{host}/tcp/{port}/{suffix}").parse()?))
+        Ok(Some(
+            format!("/{}/{host}/tcp/{port}/{suffix}", ip_proto(host)).parse()?,
+        ))
     }
 }
 
@@ -259,6 +297,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cmd @ Command::Rendezvous { .. } => run_rendezvous_node(cmd).await?,
     }
     Ok(())
+}
+
+/// The multiaddr protocol name for an IP address family.
+fn ip_proto(ip: IpAddr) -> &'static str {
+    match ip {
+        IpAddr::V4(_) => "ip4",
+        IpAddr::V6(_) => "ip6",
+    }
+}
+
+/// Parse the repeatable `--host` values, defaulting to the IPv4 wildcard.
+///
+/// Both runners used to build their listen address by pasting the flag into `/ip4/{host}/tcp/...`,
+/// so `--host ::` produced `/ip4/::/tcp/4000`, which does not parse. No node could bind IPv6 at
+/// all, which made `ipv6_prefix_bits` dead configuration everywhere.
+fn parse_hosts(hosts: &[String]) -> Result<Vec<IpAddr>, Box<dyn Error>> {
+    if hosts.is_empty() {
+        return Ok(vec![IpAddr::V4(Ipv4Addr::UNSPECIFIED)]);
+    }
+    hosts
+        .iter()
+        .map(|h| {
+            h.parse::<IpAddr>().map_err(|e| {
+                format!(
+                    "bad --host {h:?}: {e}. Give a bare IP address, for example 0.0.0.0, :: or \
+                     198.51.100.7 (not a multiaddr)."
+                )
+                .into()
+            })
+        })
+        .collect()
+}
+
+/// The TCP listen multiaddr for one bind address.
+fn tcp_listen_addr(ip: IpAddr, port: u16) -> Result<Multiaddr, Box<dyn Error>> {
+    Ok(format!("/{}/{ip}/tcp/{port}", ip_proto(ip)).parse()?)
 }
 
 /// Parse and validate the `--external` multiaddrs an infra node advertises.
@@ -310,7 +384,10 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         peer_budget_bytes,
         node_budget_bytes,
         budget_window_secs,
+        prefix_budget_bytes,
         max_conns_per_prefix,
+        max_conns_per_prefix_saturated,
+        refuse_all_when_saturated,
     } = cmd
     else {
         unreachable!("dispatched only for Command::Relay")
@@ -343,9 +420,16 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
     if let Some(v) = budget_window_secs {
         limits.budget_window_secs = v;
     }
+    if let Some(v) = prefix_budget_bytes {
+        limits.prefix_budget_bytes = v;
+    }
     if let Some(v) = max_conns_per_prefix {
         limits.admission.max_conns_per_prefix = v;
     }
+    if let Some(v) = max_conns_per_prefix_saturated {
+        limits.admission.max_conns_per_prefix_saturated = v;
+    }
+    limits.admission.refuse_all_when_saturated = refuse_all_when_saturated;
 
     let key = match identity {
         Some(path) => load_or_create_identity(&path)?,
@@ -353,22 +437,36 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
     };
     let mut node = RelayNode::build(key, limits.clone(), ws.tls()?)?;
     let relay_id = node.local_peer_id();
-    node.listen_on(format!("/ip4/{host}/tcp/{port}").parse()?)?;
-    if let Some(ws_addr) = ws.listen_addr(&host)? {
-        node.listen_on(ws_addr.clone())?;
-        println!("[relay] websocket listener on {ws_addr}");
+    let hosts = parse_hosts(&host)?;
+    for ip in &hosts {
+        node.listen_on(tcp_listen_addr(*ip, port)?)?;
+        if let Some(ws_addr) = ws.listen_addr(*ip)? {
+            node.listen_on(ws_addr.clone())?;
+            println!("[relay] websocket listener on {ws_addr}");
+        }
     }
-    for addr in parse_external(&external)? {
+    let external = parse_external(&external)?;
+    if !external.is_empty() && ws.ws_port.is_some() {
+        // Explicit external addresses replace auto-advertisement entirely, which is right for a
+        // wildcard bind and wrong for the WebSocket port an operator forgot to repeat.
+        println!(
+            "[relay] note: --external was given, so ONLY those addresses are advertised. The \
+             websocket listener is not advertised unless you pass it as --external too."
+        );
+    }
+    for addr in external {
         node.add_external_address(addr)?;
     }
 
     // Pre-flight before the banner: a node that announces itself and then exits reads as a
-    // crash, when it is in fact an actionable configuration error (P12).
+    // crash, when it is in fact an actionable configuration error (P12), or a descriptor limit
+    // that would produce EMFILE instead of a clean refusal.
     node.check_advertisable()?;
+    node.check_fd_limit()?;
 
     println!("== Mewtual relay ==");
     println!("[relay] running on tcp/{port} (peer {relay_id})");
-    println!("[relay] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{relay_id}");
+    println!("[relay] dialable as /<ip4|ip6>/<this-host-ip>/tcp/{port}/p2p/{relay_id}");
     println!(
         "[relay] limits: {} reservations, {} circuits, {} bytes/circuit, {}s/circuit",
         limits.max_reservations,
@@ -377,8 +475,18 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         limits.max_circuit_duration_secs
     );
     println!(
-        "[relay] budget: {} bytes/peer and {} bytes/node per {}s window",
-        limits.peer_budget_bytes, limits.node_budget_bytes, limits.budget_window_secs
+        "[relay] budget: {} bytes/peer, {} bytes/source-prefix and {} bytes/node per {}s window",
+        limits.peer_budget_bytes,
+        limits.prefix_budget_bytes,
+        limits.node_budget_bytes,
+        limits.budget_window_secs
+    );
+    println!(
+        "[relay] a full {} circuits at the nominal voice rate would move {} bytes per window, \
+         against a node budget of {}",
+        limits.max_circuits,
+        limits.nominal_window_bytes(),
+        limits.node_budget_bytes
     );
     println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
     node.run().await?; // runs until the process is killed
@@ -399,7 +507,10 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         max_cookies,
         max_ttl_secs,
         max_discovers_per_window,
+        max_records_per_window,
         max_conns_per_prefix,
+        max_conns_per_prefix_saturated,
+        refuse_all_when_saturated,
     } = cmd
     else {
         unreachable!("dispatched only for Command::Rendezvous")
@@ -424,9 +535,16 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
     if let Some(v) = max_discovers_per_window {
         limits.max_discovers_per_window = v;
     }
+    if let Some(v) = max_records_per_window {
+        limits.max_records_per_window = v;
+    }
     if let Some(v) = max_conns_per_prefix {
         limits.admission.max_conns_per_prefix = v;
     }
+    if let Some(v) = max_conns_per_prefix_saturated {
+        limits.admission.max_conns_per_prefix_saturated = v;
+    }
+    limits.admission.refuse_all_when_saturated = refuse_all_when_saturated;
 
     let key = match identity {
         Some(path) => load_or_create_identity(&path)?,
@@ -434,26 +552,31 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
     };
     let mut node = RendezvousNode::build(key, limits.clone(), ws.tls()?)?;
     let rz_id = node.local_peer_id();
-    node.listen_on(format!("/ip4/{host}/tcp/{port}").parse()?)?;
-    if let Some(ws_addr) = ws.listen_addr(&host)? {
-        node.listen_on(ws_addr.clone())?;
-        println!("[rendezvous] websocket listener on {ws_addr}");
+    for ip in parse_hosts(&host)? {
+        node.listen_on(tcp_listen_addr(ip, port)?)?;
+        if let Some(ws_addr) = ws.listen_addr(ip)? {
+            node.listen_on(ws_addr.clone())?;
+            println!("[rendezvous] websocket listener on {ws_addr}");
+        }
     }
     for addr in parse_external(&external)? {
-        node.add_external_address(addr);
+        node.add_external_address(addr)?;
     }
+    node.check_fd_limit()?;
 
     println!("== Mewtual rendezvous ==");
     println!("[rendezvous] running on tcp/{port} (peer {rz_id})");
-    println!("[rendezvous] dialable as /ip4/<this-host-ip>/tcp/{port}/p2p/{rz_id}");
+    println!("[rendezvous] dialable as /<ip4|ip6>/<this-host-ip>/tcp/{port}/p2p/{rz_id}");
     println!(
         "[rendezvous] limits: {} registrations ({} per peer, {} per source prefix), {} cookies, \
-         max TTL {}s",
+         max TTL {}s, {} records served per source per {}s",
         limits.max_registrations_total,
         limits.max_registrations_per_peer,
         limits.max_registrations_per_prefix,
         limits.max_stored_cookies,
-        limits.max_ttl_secs
+        limits.max_ttl_secs,
+        limits.max_records_per_window,
+        limits.query_window_secs
     );
     println!("[rendezvous] members register/discover under blinded namespaces; Ctrl-C to stop");
     node.run().await?; // runs until the process is killed

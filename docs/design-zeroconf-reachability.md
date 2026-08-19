@@ -94,6 +94,27 @@ least three block any public deployment.
 - **P12. `run_relay` advertises `0.0.0.0`** as an external address when no external address was
   supplied, so reservations carry an undialable address and fail silently. Make the
   misconfiguration an error rather than a doc comment.
+- **P13 (NEW, opened by the rung-4 client work). Invite-supplied *rendezvous* addresses are not
+  range-validated, and client-side DNS now resolves.** `validate_rendezvous_addrs` checks three
+  things: not a circuit, exactly one `/p2p/`, distinct peer ids. It does **not** reject private,
+  loopback, link-local or CGNAT literals, and it does not reject `/dns4`, `/dns6` or `/dnsaddr`.
+  The bootstrap path is now validated (`dialable_bootstrap`), so the two halves of the same invite
+  are treated inconsistently.
+
+  Adding the WebSocket and DNS transports to the client for rung 4 changed the exposure: a
+  `/dns4/...` address in an invite previously failed at transport selection and now **resolves and
+  dials**. So a malicious inviter can point a name at `192.168.1.x`, rotate the A record per query,
+  and have every joiner sweep its own LAN, which is the attack the peer-record validator was added
+  to stop, reached through the one path that has no validator.
+
+  This is **not** fixed, deliberately. The obvious fix (reject DNS here) collides head-on with rung
+  4, whose entire point is that clients dial `/dns4/<name>/tcp/443/tls/ws`, and that address is
+  legitimately a rendezvous or relay address. The distinction that actually matters is
+  **operator-configured** (trusted, may be a name) versus **invite-supplied** (attacker-controlled,
+  must be a literal in a routable range), and `validate_rendezvous_addrs` currently serves both
+  callers without distinguishing them. Splitting it is the fix, and it is a security change to a
+  validator that the real-socket e2e tests depend on, so it wants its own review rather than a
+  late patch.
 
 ## 2. The constraint, stated plainly
 

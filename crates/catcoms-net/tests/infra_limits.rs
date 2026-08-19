@@ -9,7 +9,17 @@
 //! 3. the per-circuit byte cap **binds**: turn it down and the transfer dies. A limit nobody has
 //!    watched fire is a limit nobody knows the units of.
 //!
-//! Plus the P11 dial gate: an existing connection must suppress a redundant dial.
+//! Then the two admission limits that are the whole reason the node is safe to expose, exercised
+//! the same way (turn them down until a connection is refused):
+//!
+//! 4. the **per-source-prefix connection quota** refuses the second caller from one address, no
+//!    matter what identity it presents;
+//! 5. the **per-source-prefix byte budget** disconnects and refuses the *address* that blew it, so
+//!    a caller that mints a fresh keypair and comes straight back is still refused. That is the
+//!    difference between a defence that costs an attacker addresses and one that costs them a
+//!    keypair, and the shipped code had only the latter.
+//!
+//! Plus the P11 dial gate: an existing connection must suppress a redundant dial to an infra node.
 //!
 //! All three nodes are on TCP loopback. Neither mesh node takes a listen address, so neither has
 //! a direct address for DCUtR to punch to and the traffic provably stays on the relay: without
@@ -28,6 +38,27 @@ use libp2p::Multiaddr;
 /// Payload for the relayed transfer: eight times the 128 KiB that upstream's default budget
 /// allows for a whole circuit, in **both** directions summed.
 const PAYLOAD: usize = 1024 * 1024;
+
+/// Whether a freshly-built node can reach `target` within `secs`.
+///
+/// Every call mints a brand new `MeshService`, and therefore a brand new libp2p identity, from the
+/// same loopback address. That is exactly the shape of the evasion these limits exist to stop: a
+/// defence keyed on `PeerId` sees a stranger every time and lets them all in.
+async fn fresh_node_reaches(target: &Multiaddr, secs: u64) -> bool {
+    let (probe, _id) = MeshService::new_tcp(None, &[]).unwrap();
+    probe.dial(target.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(secs), async {
+        loop {
+            match probe.next_event().await {
+                Some(TransportEvent::PeerConnected(_)) => return,
+                Some(_) => continue,
+                None => panic!("mesh actor stopped"),
+            }
+        }
+    })
+    .await
+    .is_ok()
+}
 
 /// Drive a mesh node until it reports a peer connection, or fail the test.
 async fn await_connected(node: &MeshService) {
@@ -146,6 +177,7 @@ async fn a_sized_relay_carries_a_payload_the_upstream_default_would_kill() {
     // Keep the sweep out of the way; this test is about the circuit budget, not the shed path.
     let limits = RelayLimits {
         sweep_secs: 3_600,
+        rate_window_secs: 3_600,
         ..Default::default()
     };
     let (relay_addr, relay_id, meters, relay_task) = spawn_relay(limits).await;
@@ -203,6 +235,7 @@ async fn the_per_circuit_byte_cap_binds() {
     // 128 KiB default really did make files and calls impossible.
     let limits = RelayLimits {
         sweep_secs: 3_600,
+        rate_window_secs: 3_600,
         max_circuit_bytes: (PAYLOAD / 4) as u64,
         ..Default::default()
     };
@@ -239,6 +272,122 @@ async fn the_per_circuit_byte_cap_binds() {
         outcome.is_err(),
         "a {PAYLOAD}-byte transfer must not fit in a {}-byte circuit budget",
         PAYLOAD / 4
+    );
+
+    responder.abort();
+    relay_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_per_source_prefix_connection_quota_binds() {
+    // Turned down to one connection per source network. Loopback is one `/24`, so the second
+    // caller is refused however many identities it is willing to generate: the quota is keyed on
+    // the address, which is the only identifier on the wire that costs an attacker anything.
+    let limits = RelayLimits {
+        sweep_secs: 3_600,
+        rate_window_secs: 3_600,
+        admission: catcoms_net::admission::AdmissionConfig {
+            max_conns_per_prefix: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (relay_addr, relay_id, _meters, relay_task) = spawn_relay(limits).await;
+    let target: Multiaddr = format!("{relay_addr}/p2p/{relay_id}").parse().unwrap();
+
+    // The first caller from this prefix takes the only slot.
+    let (first, _) = MeshService::new_tcp(None, &[]).unwrap();
+    first.dial(target.clone()).await.unwrap();
+    await_connected(&first).await;
+
+    // A second, with a different peer id, is refused. Not slow: refused.
+    assert!(
+        !fresh_node_reaches(&target, 5).await,
+        "the per-prefix connection quota did not bind: a second identity from the same source \
+         address was admitted"
+    );
+
+    relay_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn blowing_the_byte_budget_denies_the_address_not_just_the_keypair() {
+    // CRITICAL 2, relay half, over real sockets. The byte budget used to deny the `PeerId` that
+    // blew it, and a `PeerId` is a self-minted keypair: rotating it evaded the per-peer budget
+    // entirely, which is what left only the node aggregate binding and made the whole node
+    // reachable by a handful of self-owned circuits.
+    //
+    // Budgets are turned down to a quarter of the test payload so one relayed transfer blows them,
+    // and the sweep runs every second so the shed lands inside the test.
+    let payload = PAYLOAD as u64;
+    let limits = RelayLimits {
+        sweep_secs: 1,
+        peer_budget_bytes: payload / 4,
+        prefix_budget_bytes: payload / 4,
+        shed_cooldown_secs: 600,
+        ..Default::default()
+    };
+    let (relay_addr, relay_id, meters, relay_task) = spawn_relay(limits).await;
+    let target: Multiaddr = format!("{relay_addr}/p2p/{relay_id}").parse().unwrap();
+
+    // Control: before anything is spent, a fresh identity from this address is admitted. Without
+    // this the test would also pass against a relay that was simply never listening.
+    assert!(
+        fresh_node_reaches(&target, 20).await,
+        "the relay refused a fresh caller before any budget was spent"
+    );
+
+    // Move enough bytes through a circuit to blow the budget. The relay charges the payload twice
+    // (in from the source, out to the destination), so one transfer is well over.
+    let (server, server_id) = MeshService::new_tcp(None, &[]).unwrap();
+    let circuit = reserve_circuit(&server, &relay_addr, relay_id).await;
+    let responder = tokio::spawn(async move {
+        while let Some(event) = server.next_event().await {
+            if let TransportEvent::Request {
+                data, responder, ..
+            } = event
+            {
+                responder.respond(Bytes::from(vec![0u8; data.len()]));
+            }
+        }
+    });
+    let (client, _) = MeshService::new_tcp(None, std::slice::from_ref(&circuit)).unwrap();
+    await_peer(&client, phase0_peer_id(&server_id)).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(60),
+        client.request(
+            phase0_peer_id(&server_id),
+            ProtocolId("/catcoms/rr/1"),
+            Bytes::from(vec![7u8; PAYLOAD]),
+        ),
+    )
+    .await;
+    assert!(
+        meters.total_bytes() > payload / 4,
+        "the transfer did not spend the budget: only {} bytes metered",
+        meters.total_bytes()
+    );
+
+    // Wait for the shed to land rather than guessing at it: the sweep disconnects everything in
+    // the offending prefix, so the client losing its peer *is* the signal that the sweep has run.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match client.next_event().await {
+                Some(TransportEvent::PeerDisconnected(_)) => return,
+                Some(_) => continue,
+                None => panic!("mesh actor stopped"),
+            }
+        }
+    })
+    .await
+    .expect("the relay never shed the peers that blew its byte budget");
+
+    // Now the deny has to reach the *address*. This probe is a brand new identity from the same
+    // source, which is exactly what a per-peer deny lets straight back in.
+    assert!(
+        !fresh_node_reaches(&target, 8).await,
+        "a source that blew the relay's byte budget was still admitted under a fresh keypair: the \
+         deny is on the identity, not the address"
     );
 
     responder.abort();
