@@ -2209,6 +2209,11 @@ where
                             .await
                             .map(|cid| cid.to_hex())
                             .map_err(|e| e.to_string());
+                        // Close the progress stream before resolving the command. The desktop
+                        // bridge drains that stream before returning from its invoke; retaining
+                        // this sender until the end of the arm can otherwise leave the transfer
+                        // UI waiting behind an unrelated (and potentially back-pressured) event.
+                        drop(progress);
                         let _ = reply.send(res);
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;

@@ -5057,6 +5057,8 @@
       t.status === "queued" || t.status === "downloading" || t.status === "reading" || t.status === "uploading"
     ).length
   );
+  let finishedTransfers = $derived(transferList.length - activeTransfers);
+  let failedTransfers = $derived(transferList.filter((t) => t.status === "failed").length);
   function clearFinishedTransfers() {
     for (const [k, d] of Object.entries(downloads)) {
       if (d.server === activeServerId && (d.status === "done" || d.status === "failed"))
@@ -9171,7 +9173,7 @@
     </form>
   {:else if view === "downloads"}
     <h3><span>Transfers</span></h3>
-    <button class="ghost small ctx-action" onclick={clearFinishedTransfers}>Clear finished</button>
+    <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
     {#each upcomingEvents.slice(0, 5) as e (e.id)}
@@ -11055,6 +11057,7 @@
             {:else}
               <div class="dl-toolbar">
                 <span class="muted small">{activeTransfers} active · {transferList.length} total</span>
+                <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
               </div>
               <ul class="dl-list">
                 {#each transferList as d (d.key)}
@@ -11075,9 +11078,13 @@
                       {:else if d.status === "done"}✓ {#if d.direction === "upload"}Uploaded{:else}Downloaded{/if}
                       {:else}✗ Failed{/if}
                     </div>
-                    {#if d.status === "downloading" || d.status === "queued" || d.status === "reading" || d.status === "uploading"}
+                    {#if d.status === "failed" && d.direction === "upload" && d.error}
+                      <span class="dl-item-error" title={d.error}>{d.error}</span>
+                    {/if}
+                    {#if d.status !== "failed"}
                       <progress
                         class="dl-item-bar"
+                        class:done={d.status === "done"}
                         value={d.progress}
                         max="1"
                         aria-label={`Transfer progress for ${d.name}`}
@@ -11139,7 +11146,23 @@
         {@render icoLock()} vault <span class="ok-t">unlocked</span>
       </button>
       {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
-      {#if activeTransfers}<span class="seg"><span class="warn-t">⇅ {activeTransfers} transfer{activeTransfers === 1 ? "" : "s"}</span></span>{/if}
+      {#if transferList.length}
+        <button
+          class="seg sb-transfers"
+          class:active={view === "downloads"}
+          title="Open Transfers"
+          onclick={() => switchView("downloads")}
+        >
+          {#if activeTransfers}
+            <span class="warn-t">⇅ {activeTransfers} active</span>
+            {#if failedTransfers}<span class="fail-t">· ✗ {failedTransfers} failed</span>{/if}
+          {:else if failedTransfers}
+            <span class="fail-t">✗ {failedTransfers} failed</span>
+          {:else}
+            <span class="ok-t">✓ {finishedTransfers} finished</span>
+          {/if}
+        </button>
+      {/if}
       <span class="sb-spacer"></span>
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>

@@ -2273,6 +2273,17 @@ button.primary:hover:not(:disabled) {
   width: 100%;
   height: 6px;
 }
+.dl-item-bar.done {
+  accent-color: var(--ok);
+}
+.dl-item-error {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Progress bars read as pills. */
 .dl-item-bar,
@@ -3496,6 +3507,7 @@ button.call-start {
 }
 .statusbar .ok-t { color: var(--ok); }
 .statusbar .warn-t { color: var(--warn); }
+.statusbar .fail-t { color: var(--danger); }
 .statusbar .sb-spacer { flex: 1; }
 
 /* --- UI overhaul: dedicated member column (right of the content area) --- */
@@ -5636,6 +5648,21 @@ button.you-panel:hover {
 .statusbar .sb-lock .ico {
   width: 1.15em;
   height: 1.15em;
+}
+.statusbar .sb-transfers {
+  padding: 0 4px;
+  border: none;
+  border-radius: var(--r);
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--faint);
+  cursor: pointer;
+}
+.statusbar .sb-transfers:hover,
+.statusbar .sb-transfers.active {
+  background: var(--bg-elev);
 }
 
 /* ============================================================
