@@ -8,7 +8,7 @@ what the first draft asserted and why it was wrong, so the mistake is not re-mad
 **Where it stands (2026-08-19):** the invite path is fixed and the two deployment-blocking
 CRITICALs are closed. **Section 1c is the status board** and is the answer to "is P-whatever
 fixed"; **section 9** tracks the ladder itself, of which rungs 0 and 1 are built and the rest
-are not. Open defects: P3 (hard half), P6, P9, P10, with P5 and P8
+are not. Open defects: P3 (hard half), P9, P10, with P5, P6 and P8
 partial. Nothing here is deployed.
 
 Extends [`ARCHITECTURE.md`](ARCHITECTURE.md), [`design-6e-rendezvous.md`](design-6e-rendezvous.md),
@@ -183,8 +183,8 @@ block in `HANDOVER.md` for what happens otherwise).
 | **[x]** | P2 relay sized for a lab | `e35b1b2` | |
 | **[~]** | P3 rendezvous fillable / census / cookies | `e35b1b2` | **DEFERRED by decision (2026-08-19), documented not fixed.** Occupancy, TTL, cookies and per-prefix quotas done. The census is **rate-limited, not prevented**: rejecting a namespace-less `Discover`, clamping the caller's `limit`, and evicting a registration all need the upstream `Registrations` store vendored (~600 lines), which is a fork in a security-critical path. Revisit before any public deployment; see the note below |
 | **[x]** | P4 call-signal FIFO kills voice group-wide | `32dab2a` | |
-| **[~]** | P5 connection limits | `0af1583` | Inbound capped at 256, which closes the attack. No total cap and no pending-outgoing cap |
-| **[ ]** | P6 no eviction primitive | | No `Command::Disconnect`, no block list. A removed member's established connections and granted circuit reservations survive removal indefinitely. Needed before switchboards (rung 2) ship |
+| **[~]** | P5 connection limits | `0af1583`, *(uncommitted)* | Both missing caps are now set. Inbound was already capped (64 pending / 256 established / 8 per peer); added `max_pending_outgoing(32)` (the bound on being made to dial a large address set, from an invite's bootstrap list, a PEX record or a rendezvous response) and `max_established(320)` (a *total* cap, inbound and outbound together; the inbound cap bounded none of this node's own dials, relay circuits or rendezvous links). Each carries a doc comment saying what it buys and what it costs, in the `relay_node.rs` style. **Left:** neither limit is proven to bind. The mesh swarm's limits are constants inside `MeshBehaviour::new` with no config seam to turn down, and `connection_limits::ConnectionLimits` exposes no getters, so the `infra_limits.rs` discipline (turn a limit down until the operation fails) needs a knob that does not exist yet. Stays `[~]` until it does: an unexercised limit is a limit nobody knows the units of |
+| **[~]** | P6 no eviction primitive | *(uncommitted)* | Built, then reworked after a hostile review found a CRITICAL in the first version. `MeshTransport::evict_peer`/`unevict_peer` (default-inert, so the memory transport is unaffected) → `Command::Evict`/`Unevict` → an `Eviction` gate behaviour keyed on the **phase-0** peer id, declared **first** in `MeshBehaviour` so it refuses before `gossipsub` allocates anything for the connection (`to_peer` is a forward hash, so the deny is computable at connection time), plus `allow_block_list` to close connections that were already live. Driven from every path that merges a removal, via `note_removal_applied`: `commit_remove_now`, `note_commit_applied` (roster diff around `process_incoming`, since MLS reports only *that* a removal happened) and the fork-contest winner branch. Deny entries do **not** expire on a timer; they are bounded at 256, oldest-first, and are lifted by **readmission** (reconciled against the roster, so every Add path clears it), which is what keeps remove-then-re-invite working now that node identities are stable across restarts. **Left, and why it is `[~]`:** the `DeviceId → transport peer` link is still the self-asserted `PeerDescriptor.peer_id`, and the signature binds that value to its signer without binding it to *naming* its signer, so it is attacker-chosen. Three checks make acting on it safe (ingest refuses a peer id another device already claims; `queue_eviction` refuses one a remaining member or this node claims; the transport refuses to evict any relay/rendezvous/bootstrap **this node's own configuration** names), but a squatter whose forged record reaches a node **before** the victim's genuine one still gets that node to evict the victim. Closing that needs the deferred device-key-to-transport-identity binding. Also: the deny list is process-local and not persisted, each member evicts only when *it* applies the removal (so a lagging member stays attached), and no member grants circuit reservations today (`relay_client` only), so that half is closed by construction rather than tested |
 | **[x]** | P7 invite bootstrap addresses unvalidated | `32dab2a` | |
 | **[~]** | P8 eclipse source count attacker-supplied | `32dab2a` | Counts roots that returned a peer, with decay. Cannot be finished without P9: without `tag_verified`, a hostile inviter naming two rendezvous it controls still pins the count by serving one fabricated record from each |
 | **[ ]** | P9 membership tag never carried on the wire | | `tag_verified` is hardcoded `false` at two sites, so the "member-tag-verified" ranking tier does not exist. Blocks finishing P8 |
@@ -435,10 +435,29 @@ budget is a large multiple of any home uplink. Requirements: an **aggregate** eg
 a user-set monthly cap, auto-demotion when it is hit, never auto-offering switchboarding on a
 metered or mobile connection, and consent copy that **leads with cost**.
 
-**Removal does not revoke a switchboard's position.** There is no `Disconnect` command and no
-deny-list behaviour (P6), so established connections and granted reservations survive removal,
-and the grandfathered topic window keeps an ex-member on the wire for two more removals. Both
-need fixing before this rung ships.
+**Removal now detaches a switchboard, but only best-effort.** P6 is built: applying a Remove
+commit asks the transport to evict the removed peer, which closes every live connection to it
+(and with it anything scoped to that connection, which is what a granted circuit reservation is)
+and refuses the next. Three things this rung still has to reckon with.
+
+First, the eviction is aimed at the peer id the removed member **asserted about itself**, and the
+signature on that record binds the value to its signer without binding it to *naming* its signer.
+So a switchboard that published a peer id that is not its own keeps its connections, and a member
+that published *somebody else's* can aim the group's disconnect at that somebody. The transport
+therefore refuses to evict any relay, rendezvous or bootstrap this node's own configuration names,
+which is the case with the worst blast radius, and the sync layer refuses a peer id a remaining
+member also claims; a squatter that wins the propagation race against its victim's own record is
+the residual, and only the deferred device-key binding closes it. A switchboard is exactly the
+member with both the motive and the position.
+
+Second, eviction is per node and fires when a member *applies* the removal, so a member still
+lagging on that commit is still attached to the ex-member; the grandfathered topic window is
+narrowed by that much rather than closed, and remains subscribed and derivable for two more
+removals.
+
+Third, a switchboard that is removed and later re-invited must be able to reconnect, so the deny
+is lifted on readmission rather than expiring. That is correct for membership and it means an
+eviction is exactly as durable as the removal itself, no more.
 
 **Disclosure is consent, not a badge**, and v1's version was defeatable three ways: post-join
 promotion (nothing binds the capability to join time, so a member can become the switchboard a
@@ -726,6 +745,31 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
   discovered candidate scores flat.
 
 ### Hardening residuals, deliberately deferred
+
+- **Eviction (P6) rests on a self-asserted peer id, and that value is attacker-chosen.** The only
+  `DeviceId → transport peer` link is the `peer_id` field a device signs into its own
+  `PeerDescriptor`. The signature binds the value **to** its signer; nothing binds it to *naming*
+  its signer, so a member can publish a record carrying a third party's transport peer, be removed
+  in the ordinary way, and have every member disconnect and refuse that third party. Three checks
+  now bound this (ingest refuses a duplicate claim; the eviction refuses a peer id a remaining
+  member or this node claims; the transport refuses to evict infrastructure this node's own
+  configuration names), and the residual is a squatter whose record reaches a node before its
+  victim's does. **Only the deferred device-key-to-transport-identity binding closes it**, which
+  makes that deferral load-bearing rather than cosmetic. Until then, eviction is best-effort and
+  no property may be made to depend on it.
+- **The duplicate-claim rule costs the victim a record.** First claim wins at ingest, so a
+  squatter that publishes before a member's genuine record suppresses that record on nodes that
+  saw the squat first: that member loses PEX addresses and its presence dot there until the
+  squatter leaves the roster. Bounded (a removed device's record is dropped, so the claim does not
+  outlive the membership) and far smaller than the harm it prevents, but it is a real cost.
+- **Eviction is not persisted and does not reach a lagging member.** The deny list is process-local
+  (deliberately: a restart brings up a fresh swarm with no connections, and the ex-member is then
+  an unauthenticated stranger holding none of the group's keys), and each member evicts when *it*
+  applies the removal, so a member still behind on that commit stays attached to the ex-member.
+- **The fork-contest winner path's eviction is untested.** It is one call on a branch that needs
+  `max_committer_rank >= 1`, which the project deliberately does not enable, so it is covered by
+  construction (all three merge branches now funnel through `note_removal_applied`) rather than by
+  a test.
 
 - **The served PEX set is chosen in randomised map order.** Local retention is 512 records, the
   wire cap is 64, so `serve_pex` picks 64 of up to 512 by `HashMap` iteration order. It spreads

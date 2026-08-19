@@ -4651,8 +4651,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Mint a single-use invite to this server.
+    ///
+    /// `&mut self` because minting also **lifts any outstanding transport evictions**: a member
+    /// removed earlier cannot otherwise reach this node to redeem an invite, since the eviction
+    /// refuses its connection and the roster cannot change until that connection is allowed. See
+    /// `ChannelSync::lift_all_evictions`.
     pub fn mint_invite(
-        &self,
+        &mut self,
         nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
@@ -4674,8 +4679,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Mint an invite that also carries rendezvous infra addresses (discovery-enabled).
+    /// `&mut self` for the same reason as [`Server::mint_invite`].
     pub fn mint_invite_with_rendezvous(
-        &self,
+        &mut self,
         nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,

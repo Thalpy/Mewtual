@@ -580,6 +580,7 @@ dependencies = [
 name = "catcoms-sync"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "automerge",
  "blake3",
  "bytes",

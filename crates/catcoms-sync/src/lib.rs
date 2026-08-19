@@ -1298,6 +1298,12 @@ pub struct PeerDescriptor {
     pub signature: [u8; 64],
 }
 
+/// Cap on how many removed devices are remembered for readmission (see
+/// `ChannelSync::evicted_devices`). Matches the transport's own deny-list cap: remembering more
+/// than the transport can deny would let a lift be queued for an entry the transport already
+/// dropped, which is harmless but pointless.
+const MAX_EVICTED_DEVICES: usize = 256;
+
 /// The canonical bytes a peer signs over its own record (length-prefixed, so no two
 /// distinct records collide).
 fn peer_record_signing_payload(
@@ -2052,6 +2058,19 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     config: SyncConfig,
     /// Membership commits queued for the control topic (drained in async run_once).
     outbox: Vec<(Topic, Vec<u8>)>,
+    /// Transport peers to **evict** (P6): queued by an applied Remove commit, drained in the
+    /// async `run_once` (the transport verb is async, the commit path is not). Transient and
+    /// deliberately absent from the snapshot: it names transport connections, and a reload brings
+    /// up a fresh transport holding none of them. Bounded by `max_outbox` on the same reasoning.
+    eviction_outbox: Vec<PeerId>,
+    /// The reverse: transport peers to **un**-evict, because their device is a member again.
+    unevict_outbox: Vec<PeerId>,
+    /// Devices this node has evicted, and the transport peer each was evicted as. Read only to
+    /// answer "has this device been readmitted?", which is what lifts an eviction; a removal is
+    /// permanent until the group itself says otherwise, and re-inviting somebody is the group
+    /// saying otherwise. Insertion-ordered and bounded like the transport's own deny list, and
+    /// transient for the same reason (a reload brings up a fresh transport denying nobody).
+    evicted_devices: VecDeque<(DeviceId, PeerId)>,
     /// Membership commits we have applied/produced, retained to serve catch-up to
     /// peers that missed them. Ordered by `commit_epoch` (insertion order).
     commit_log: VecDeque<CommitRecord>,
@@ -2280,6 +2299,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             needs_resync: false,
             config: SyncConfig::default(),
             outbox: Vec::new(),
+            eviction_outbox: Vec::new(),
+            unevict_outbox: Vec::new(),
+            evicted_devices: VecDeque::new(),
             commit_log: VecDeque::new(),
             pending_commits: BTreeMap::new(),
             past_keys: BTreeMap::new(),
@@ -2737,14 +2759,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Mint a single-use, device-bound invite to this server (the inviting device
     /// is this member). Record it so this node can later admit the joiner.
     pub fn mint_invite(
-        &self,
+        &mut self,
         invite_nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        Ok(self
+        let token = self
             .group
-            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?)
+            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?;
+        self.lift_all_evictions();
+        Ok(token)
     }
 
     /// Mint an invite that also carries zero-knowledge **rendezvous** infra addresses
@@ -2752,19 +2776,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// [`join_namespace`] without a hard-coded address. The rendezvous set is bound
     /// into the inviter signature.
     pub fn mint_invite_with_rendezvous(
-        &self,
+        &mut self,
         invite_nonce: [u8; 16],
         expires_at_ms: u64,
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        Ok(self.group.mint_invite_with_rendezvous(
+        let token = self.group.mint_invite_with_rendezvous(
             &self.device,
             invite_nonce,
             expires_at_ms,
             bootstrap,
             rendezvous,
-        )?)
+        )?;
+        self.lift_all_evictions();
+        Ok(token)
     }
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
@@ -2829,6 +2855,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.drive_outgoing_device_adds();
         // Flush any queued membership-commit broadcasts + Add-request retransmits.
         self.drain_outbox().await;
+        // …and detach anyone an applied removal evicted (and re-admit anyone readmitted). At the
+        // top of the tick, so a removal applied from an inbound commit (or drained out of the
+        // buffered-commit queue) reaches the transport on the very next turn of the loop.
+        self.drain_evictions().await;
         self.drain_welcome_outbox().await;
         // Owner: push finalized admit results to admins here too; a tick that admitted may be
         // cancelled (in a select!-driven loop) after publishing the commit but before sending the
@@ -2867,6 +2897,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // …and a relayed companion admission (multi-device M3), same shape.
                     self.drain_device_add_queue();
                     self.drain_outbox().await;
+                    // An inbound Remove evicts here, in the same tick that applied it: waiting
+                    // for the next one would leave the ex-member attached across the rotation.
+                    self.drain_evictions().await;
                     self.resync_if_needed().await;
                 } else {
                     self.on_gossip(from, &data);
@@ -3457,12 +3490,230 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         );
     }
 
-    /// React to an applied inbound commit: rotate the routing secret iff it removed
-    /// a member. (The local committer path calls [`Self::rotate_routing_secret`]
-    /// directly, since `commit_remove_now` is always a removal.)
-    fn note_commit_applied(&mut self, incoming: &Incoming) {
+    /// React to an applied inbound commit: rotate the routing secret iff it removed a member,
+    /// and **evict** whoever it removed. (The local committer path calls
+    /// [`Self::note_removal_applied`] directly, since `commit_remove_now` is always a removal and
+    /// already knows the target.)
+    ///
+    /// `before` is the roster as it stood immediately before `process_incoming`; MLS reports only
+    /// *whether* a commit removed anyone, so the departed devices are recovered by diffing. That
+    /// costs one roster clone per applied commit, which is bounded by the group size.
+    fn note_commit_applied(&mut self, incoming: &Incoming, before: &[DeviceId]) {
         if matches!(incoming, Incoming::CommitApplied { removed: true }) {
-            self.rotate_routing_secret();
+            self.note_removal_applied(before);
+        }
+    }
+
+    /// Rotate the routing secret and evict everyone an applied commit removed.
+    ///
+    /// Every path that merges a removal funnels through here, including the fork-contest branch
+    /// where *this* node's own commit won: that branch used to rotate without evicting, which
+    /// would have made a winning committer the one member that leaves the removed peer attached.
+    fn note_removal_applied(&mut self, before: &[DeviceId]) {
+        self.rotate_routing_secret();
+        let after: HashSet<DeviceId> = self.group.member_device_ids().into_iter().collect();
+        for gone in before.iter().filter(|d| !after.contains(d)) {
+            self.queue_eviction(gone);
+        }
+    }
+
+    /// The transport peer a member device asserted about itself, if we hold its peer record.
+    ///
+    /// This is the identity gap, in one function. The sync layer works in `DeviceId`s
+    /// (content-addressed device keys, MLS-anchored) and the transport works in transport peer
+    /// ids; the only link between them is the `peer_id` field a device signs into its own
+    /// [`PeerDescriptor`], and binding a device key to a transport identity is a documented
+    /// deferral.
+    ///
+    /// **The signature binds the value to its signer; it does not bind the value to naming the
+    /// signer.** A modified client can sign a record carrying somebody else's transport peer id.
+    /// That is harmless for a caller that only *labels* the record's own device
+    /// (`connected_member_fingerprints`), and it is not harmless at all for a caller that takes
+    /// an action **against** the value, which eviction does. So a caller of this must assume the
+    /// answer can name a third party, and [`Self::queue_eviction`] carries the checks that make
+    /// acting on it safe. It is also simply absent for a member whose record we never learned.
+    fn transport_peer_of(&self, device: &DeviceId) -> Option<PeerId> {
+        self.peer_records
+            .get(device)
+            .map(|d| PeerId::new(d.peer_id))
+    }
+
+    /// Queue a transport-level eviction for a removed member (P6).
+    ///
+    /// Rotating the routing secret takes the removed member's keys; this takes its *connection*.
+    /// Without it an ex-member keeps an established link (and, once rung 2's switchboards grant
+    /// them, a circuit reservation) indefinitely, so it stays on other members' traffic path and
+    /// can still observe that the group is active.
+    ///
+    /// # Why this cannot be pointed at somebody else
+    ///
+    /// The peer id comes from the removed member's own record and nothing binds it to that
+    /// member, so on its own it is an attacker-chosen value: name the owner, get removed
+    /// normally, and every member disconnects and permanently refuses the group's only committer.
+    /// Three checks, in three different places, make acting on the value safe, and each is needed
+    /// because the others lose to a case alone:
+    ///
+    /// 1. `ingest_peer_record` refuses a record claiming a transport peer **another device has
+    ///    already claimed**, so a squatter cannot install a duplicate claim on a member whose
+    ///    genuine record this node already holds.
+    /// 2. here: refuse a peer id that **any remaining member's** record claims, and refuse this
+    ///    node's own. This is what closes the ordering window where a squatter's record arrived
+    ///    first and check 1 therefore accepted it: the victim's genuine record is refused by
+    ///    check 1, but its claim is still visible to this check as long as it was learned at all.
+    /// 3. the transport refuses to evict any peer **this node's own configuration** names as a
+    ///    relay, a rendezvous or a bootstrap, which is the case with the worst blast radius and
+    ///    the one no record from the wire can talk it out of.
+    ///
+    /// **Residual, stated rather than papered over:** a member that publishes a squat claim on a
+    /// victim *before* that victim's own record reaches a given node, and is then removed, still
+    /// gets that node to evict the victim. Check 1 shrinks this to a propagation race that the
+    /// attacker has to win per node, and check 3 keeps infrastructure out of reach entirely, but
+    /// the race is not closed here and cannot be: closing it needs the deferred binding between a
+    /// device key and a transport identity. Eviction stays a best-effort primitive and no
+    /// property may be made to depend on it.
+    fn queue_eviction(&mut self, target: &DeviceId) {
+        if *target == self.device.device_id() {
+            return; // our own removal: there is nobody to disconnect but ourselves
+        }
+        let resolved = self.transport_peer_of(target);
+        // A removed device is not a member, so its record must not be retained: `ingest_peer_record`
+        // would refuse it now, and keeping it would let a departed squatter hold a peer-id claim
+        // (check 1 above) for the rest of the process, permanently suppressing the real owner of
+        // that peer id.
+        self.peer_records.remove(target);
+        self.peer_record_seen.remove(target);
+        let Some(peer) = resolved else {
+            tracing::debug!(
+                "removed member has no known peer record; no transport eviction possible"
+            );
+            return;
+        };
+        if peer == self.transport.local_peer() {
+            tracing::warn!(
+                "removed member's record named THIS node's transport peer; not evicting"
+            );
+            return;
+        }
+        // Check 2: somebody who is still a member also claims this peer id, so acting on it would
+        // disconnect a current member rather than the one that left.
+        let contested = self
+            .peer_records
+            .iter()
+            .any(|(d, desc)| desc.peer_id == *peer.as_bytes() && self.group.contains_device(d));
+        if contested {
+            tracing::warn!(
+                "removed member's record named a transport peer a current member also claims; \
+                 not evicting"
+            );
+            return;
+        }
+        if !self.eviction_outbox.contains(&peer) {
+            self.eviction_outbox.push(peer);
+        }
+        // Remember who was evicted as what, so readmitting the device lifts it again.
+        self.evicted_devices.retain(|(d, _)| d != target);
+        self.evicted_devices.push_back((*target, peer));
+        while self.evicted_devices.len() > MAX_EVICTED_DEVICES {
+            self.evicted_devices.pop_front();
+        }
+        // Same bound as the broadcast outbox, and for the same reason: a transport that keeps
+        // failing must not grow a queue. Dropping the oldest is safe because an eviction that is
+        // never delivered leaves exactly today's behaviour.
+        while self.eviction_outbox.len() > self.config.max_outbox {
+            self.eviction_outbox.remove(0);
+        }
+    }
+
+    /// Lift the eviction on any evicted device the group contains **again**.
+    ///
+    /// Reconciled against the roster rather than hooked onto an Add, deliberately: a device is
+    /// readmitted by the owner's local admit, by an inbound Add commit, and by the fork-contest
+    /// winner path, and hooking one of the three is how the next one gets missed. The scan is
+    /// skipped entirely while nothing is evicted, which is the normal case.
+    fn reconcile_readmissions(&mut self) {
+        if self.evicted_devices.is_empty() {
+            return;
+        }
+        let mut kept = VecDeque::with_capacity(self.evicted_devices.len());
+        let mut readmitted = Vec::new();
+        for (device, peer) in std::mem::take(&mut self.evicted_devices) {
+            if self.group.contains_device(&device) {
+                readmitted.push(peer);
+            } else {
+                kept.push_back((device, peer));
+            }
+        }
+        for peer in readmitted {
+            // Never release a transport peer some **other** standing eviction still names. A
+            // removed device's record is dropped, which frees its peer id under "first claim
+            // wins", so a second device can claim the same peer, be removed, and be readmitted;
+            // lifting on that readmission would quietly let the *original* ex-member back in.
+            // Refcounting by peer is what keeps a lift as narrow as the eviction that earned it.
+            //
+            // (Re-resolving the readmitted device's record instead would not work: a device that
+            // has just rejoined has no record yet, precisely because removal deleted the old one.)
+            if kept.iter().any(|(_, p)| *p == peer) {
+                tracing::warn!(
+                    "a readmitted device's transport peer is still under another eviction;                      not lifting"
+                );
+                continue;
+            }
+            tracing::info!("a previously removed device was readmitted; lifting its eviction");
+            if !self.unevict_outbox.contains(&peer) {
+                self.unevict_outbox.push(peer);
+            }
+        }
+        self.evicted_devices = kept;
+    }
+
+    /// Lift **every** outstanding eviction, because this node has just minted an invite.
+    ///
+    /// Readmission alone cannot drive the lift at the node that matters. At the **inviter**, the
+    /// roster only changes once the joiner's join request has been served, and that request is a
+    /// transport request *to the inviter*, which the eviction gate refuses on the joiner's peer
+    /// id. The roster cannot change until the connection is allowed and the connection is not
+    /// allowed until the roster changes: a deadlock, at exactly the node doing the admitting.
+    /// (Every other member is fine; they learn the Add over the control topic.)
+    ///
+    /// Minting is the earliest point at which this node has said, in its own voice, that it is
+    /// willing to admit somebody. An `InviteToken` is not bound to an invitee device, so this
+    /// cannot be narrower than "everyone currently evicted"; that is a real cost, and it is
+    /// bounded by `MAX_EVICTED_DEVICES`. The alternative is that remove-then-re-invite, which the
+    /// product ships a button for, simply does not work.
+    ///
+    /// Only the **owner and admins** can mint (`Server::require_invite_permission`), so this is
+    /// not a lever an ordinary member can pull.
+    fn lift_all_evictions(&mut self) {
+        if self.evicted_devices.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = self.evicted_devices.len(),
+            "invite minted; lifting outstanding evictions so a re-invited member can reach us"
+        );
+        for (_, peer) in std::mem::take(&mut self.evicted_devices) {
+            if !self.unevict_outbox.contains(&peer) {
+                self.unevict_outbox.push(peer);
+            }
+        }
+    }
+
+    /// Ask the transport to detach every peer an applied removal evicted, and to re-admit every
+    /// peer whose device has been readmitted to the group. Failures are dropped rather than
+    /// re-queued: the membership change has already been committed to the MLS group and must not
+    /// be held up by a transport that cannot honour the verb (the in-memory one never can), and a
+    /// retry loop against a closed transport would be pure noise.
+    async fn drain_evictions(&mut self) {
+        self.reconcile_readmissions();
+        for peer in std::mem::take(&mut self.unevict_outbox) {
+            if let Err(e) = self.transport.unevict_peer(peer).await {
+                tracing::debug!(error = %e, ?peer, "transport declined to lift an eviction");
+            }
+        }
+        for peer in std::mem::take(&mut self.eviction_outbox) {
+            if let Err(e) = self.transport.evict_peer(peer).await {
+                tracing::debug!(error = %e, ?peer, "transport declined to evict a removed member");
+            }
         }
     }
 
@@ -3795,6 +4046,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// record can only ever vouch for *that* member; a malicious record claiming another member's
     /// `peer_id` can mislabel only its own dot, never another's. A member we hold no record for yet
     /// (no PEX) just won't show until we learn it; a safe under-count, never a false positive.
+    ///
+    /// **That argument is about *labelling* and does not generalise.** It holds here because this
+    /// function only ever attaches a record to the device that signed it. A caller that instead
+    /// takes an action **against** an asserted `peer_id` is acting on an attacker-chosen value;
+    /// see `queue_eviction` for the checks that case needs.
     pub fn connected_member_fingerprints(&self) -> Vec<String> {
         let mut fps = BTreeSet::new();
         for (device, desc) in &self.peer_records {
@@ -4114,6 +4370,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         if !desc.verify_self() {
             tracing::trace!("dropping peer record with an invalid self-signature");
+            return false;
+        }
+        // The self-signature binds `peer_id` **to** its signer; nothing binds it to *naming* its
+        // signer, so two members can claim the same transport peer. Harmless while a record is
+        // only ever used to label its own device, and not harmless at all now that an applied
+        // removal takes an action against the value: a member could claim a third party's peer,
+        // be removed normally, and have every member disconnect and permanently refuse the
+        // victim. First claim wins, and this node's own transport peer is claimed by definition.
+        //
+        // What it costs: a squatter that publishes before a member's genuine record suppresses
+        // that record here, so the member loses PEX addresses and presence on this node until the
+        // squatter leaves the roster (`queue_eviction` drops a removed device's record, so the
+        // claim does not outlive the membership). That is a far smaller harm than the one it
+        // prevents, and it is a fair trade only because the alternative is unbounded.
+        let claimed_elsewhere = self
+            .peer_records
+            .iter()
+            .any(|(d, e)| *d != device && e.peer_id == desc.peer_id);
+        if claimed_elsewhere || desc.peer_id == *self.transport.local_peer().as_bytes() {
+            tracing::warn!("dropping peer record claiming a transport peer another device claims");
             return false;
         }
         let is_new = !self.peer_records.contains_key(&device);
@@ -4869,12 +5145,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let we_won = p.mine.as_ref().map(|m| m.commit_id) == Some(winner_id);
         let i_removed = p.mine.as_ref().map(|m| m.removed).unwrap_or(false);
         self.snapshot_epoch_keys();
+        // See `apply_commit_in_order`: the pre-commit roster is what names an applied removal's
+        // departed members on all three branches below.
+        let before = self.group.member_device_ids();
         let advanced = match &p.mine {
             Some(_) if we_won => match self.group.merge_staged_self(&self.device) {
                 // We won: merge our own staged commit.
                 Ok(()) => {
                     if i_removed {
-                        self.rotate_routing_secret();
+                        // Rotate AND evict. Rotating alone here (which is what this branch used
+                        // to do) would leave a winning committer as the single member that keeps
+                        // the removed peer attached.
+                        self.note_removal_applied(&before);
                     }
                     true
                 }
@@ -4894,7 +5176,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .process_incoming(&self.device, &p.best.mls_commit)
                 {
                     Ok(inc) => {
-                        self.note_commit_applied(&inc);
+                        self.note_commit_applied(&inc, &before);
                         true
                     }
                     Err(e) => {
@@ -4909,7 +5191,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             {
                 // Pure applier: apply the winner.
                 Ok(inc) => {
-                    self.note_commit_applied(&inc);
+                    self.note_commit_applied(&inc, &before);
                     true
                 }
                 Err(e) => {
@@ -4978,13 +5260,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return false;
         }
         self.snapshot_epoch_keys();
+        // The roster as it stands *before* the commit, so an applied removal can name who left
+        // (MLS reports only that a removal happened). Bounded by the group size.
+        let before = self.group.member_device_ids();
         match self
             .group
             .process_incoming(&self.device, &record.mls_commit)
         {
             Ok(inc) => {
                 self.evict_past_keys();
-                self.note_commit_applied(&inc);
+                self.note_commit_applied(&inc, &before);
                 self.record_commit(record.clone());
                 self.stats.commits_applied += 1;
                 tracing::info!(
@@ -5100,6 +5385,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.commit_remove_now(target);
         self.drain_outbox().await;
+        self.drain_evictions().await;
         Ok(())
     }
 
@@ -5168,6 +5454,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // (the removed member cannot export the post-removal routing secret).
         let publish_topic = self.control_topic.clone();
         self.rotate_routing_secret();
+        // Detach the member we just removed, not only re-key around it (P6). Queued rather than
+        // performed here because the transport verb is async and this path is not; drained by
+        // `request_remove` and at the top of every `run_once`.
+        self.queue_eviction(target);
         self.record_commit(record.clone());
         self.stats.commits_applied += 1;
         let mut framed = vec![CTRL_COMMIT];
@@ -7174,7 +7464,7 @@ impl<T: MeshTransport, R: CryptoRngCore> fmt::Debug for ChannelSync<T, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use catcoms_rt::{Hub, ManualClock, MemNetwork};
+    use catcoms_rt::{Hub, ManualClock, MemNetwork, TransportError};
     use rand_chacha::ChaCha20Rng;
     use rand_core::SeedableRng;
 
@@ -7364,7 +7654,595 @@ mod tests {
         assert_eq!(bsy.epoch(), 2, "genuine commit applies");
     }
 
-    /// A single-member sync node (no peers); enough to exercise the buffering
+    /// A [`MemNetwork`] that **records** the eviction verbs the membership layer asks for.
+    ///
+    /// The in-memory transport has no connections, so it cannot honour `evict_peer`; the default
+    /// inert implementation is correct there. That leaves the wiring (does an applied Remove
+    /// actually reach the transport, aimed at the right peer?) untestable without a socket unless
+    /// something observes the call, which is what this does. Everything else forwards.
+    #[derive(Debug)]
+    struct RecordingNet {
+        inner: MemNetwork,
+        evicted: std::sync::Mutex<Vec<PeerId>>,
+        unevicted: std::sync::Mutex<Vec<PeerId>>,
+        /// Peers currently evicted. This fake **enforces** as well as records, because a fake
+        /// that only records cannot show the failure that matters: an eviction refuses the
+        /// removed peer's connection, and the inviter's roster cannot change until that
+        /// connection is allowed, so recording alone hides a deadlock instead of exposing it.
+        denied: std::sync::Mutex<HashSet<PeerId>>,
+    }
+
+    impl RecordingNet {
+        fn new(inner: MemNetwork) -> Self {
+            Self {
+                inner,
+                evicted: std::sync::Mutex::new(Vec::new()),
+                unevicted: std::sync::Mutex::new(Vec::new()),
+                denied: std::sync::Mutex::new(HashSet::new()),
+            }
+        }
+        fn is_denied(&self, peer: &PeerId) -> bool {
+            self.denied.lock().expect("mutex").contains(peer)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MeshTransport for RecordingNet {
+        fn local_peer(&self) -> PeerId {
+            self.inner.local_peer()
+        }
+        async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
+            self.inner.subscribe(topic).await
+        }
+        async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError> {
+            self.inner.unsubscribe(topic).await
+        }
+        async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            self.inner.publish(topic, data).await
+        }
+        async fn request(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            if self.is_denied(&peer) {
+                return Err(TransportError::Unreachable(peer));
+            }
+            self.inner.request(peer, proto, data).await
+        }
+        async fn next_event(&self) -> Option<TransportEvent> {
+            loop {
+                let event = self.inner.next_event().await?;
+                let from = match &event {
+                    TransportEvent::Gossip { from, .. } => Some(*from),
+                    TransportEvent::Request { from, .. } => Some(*from),
+                    TransportEvent::PeerConnected(p) => Some(*p),
+                    TransportEvent::PeerDisconnected(_) => None,
+                };
+                // An evicted peer has no connection, so nothing it sends reaches the membership
+                // layer. Dropping the event drops its `Responder` with it, so the sender sees
+                // `NoResponse`, exactly as it would against a node that refused its connection.
+                if from.is_some_and(|p| self.is_denied(&p)) {
+                    continue;
+                }
+                return Some(event);
+            }
+        }
+        async fn evict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
+            self.evicted.lock().expect("mutex").push(peer);
+            self.denied.lock().expect("mutex").insert(peer);
+            Ok(())
+        }
+        async fn unevict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
+            self.unevicted.lock().expect("mutex").push(peer);
+            self.denied.lock().expect("mutex").remove(&peer);
+            Ok(())
+        }
+    }
+
+    /// A single-member sync node on a recording transport.
+    fn recording_node() -> ChannelSync<RecordingNet, ChaCha20Rng> {
+        let alice = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&alice).unwrap();
+        let hub = Hub::new();
+        ChannelSync::new(
+            RecordingNet::new(hub.join(PeerId::from_u64(1))),
+            group,
+            alice,
+            ChaCha20Rng::seed_from_u64(0),
+            Box::new(ManualClock::new(1_000)),
+        )
+    }
+
+    /// Store a peer record for `device` claiming `peer_id`, exactly as PEX would.
+    fn stash_peer_record(
+        node: &mut ChannelSync<RecordingNet, ChaCha20Rng>,
+        device: DeviceId,
+        peer_id: [u8; 32],
+    ) {
+        node.peer_records.insert(
+            device,
+            PeerDescriptor {
+                device_pubkey: vec![0u8; 32],
+                peer_id,
+                addresses: vec![],
+                seq: 1,
+                signature: [0u8; 64],
+            },
+        );
+    }
+
+    /// P6, the identity gap in isolation: a `DeviceId` resolves to the transport peer the device
+    /// **asserted about itself**, and to nothing at all when no record was ever learned.
+    ///
+    /// This is the whole reason eviction is best-effort, so it is pinned on its own: a removed
+    /// member whose record we never saw, or one that published a peer id that is not its own,
+    /// simply is not evicted. Getting `None` here must stay a survivable outcome, never a panic
+    /// and never a fallback to some other peer.
+    #[test]
+    fn a_device_resolves_only_to_the_peer_id_it_signed_for_itself() {
+        let mut node = recording_node();
+        let member = DeviceId::from_bytes([9u8; 32]);
+        assert_eq!(
+            node.transport_peer_of(&member),
+            None,
+            "an unknown device resolves to nothing, not to a guess"
+        );
+
+        stash_peer_record(&mut node, member, [4u8; 32]);
+        assert_eq!(
+            node.transport_peer_of(&member),
+            Some(PeerId::new([4u8; 32])),
+            "resolution uses the peer id from that device's own record"
+        );
+
+        // A second device with a different record does not collide with the first.
+        let other = DeviceId::from_bytes([10u8; 32]);
+        stash_peer_record(&mut node, other, [5u8; 32]);
+        assert_eq!(
+            node.transport_peer_of(&member),
+            Some(PeerId::new([4u8; 32]))
+        );
+        assert_eq!(node.transport_peer_of(&other), Some(PeerId::new([5u8; 32])));
+    }
+
+    /// **F1, check 2.** A removed member's record naming a transport peer that a *current*
+    /// member also claims must not be acted on, and neither must one naming this node itself.
+    ///
+    /// This is the check that makes eviction safe to point at an attacker-chosen value. Without
+    /// it, any member with a modified client signs a record carrying the owner's peer id, is
+    /// removed by the owner in the ordinary way, and every member disconnects and permanently
+    /// refuses the group's only committer.
+    #[test]
+    fn an_eviction_is_refused_when_it_would_hit_a_current_member_or_this_node() {
+        let mut node = recording_node();
+        let own_peer = *node.transport.local_peer().as_bytes();
+
+        // A removed device whose record names THIS node's transport peer.
+        let liar = DeviceId::from_bytes([1u8; 32]);
+        stash_peer_record(&mut node, liar, own_peer);
+        node.queue_eviction(&liar);
+        assert!(
+            node.eviction_outbox.is_empty(),
+            "a record naming this node must never evict this node"
+        );
+
+        // A removed device whose record names a peer a *remaining* member also claims.
+        let mut node = recording_node();
+        let victim_peer = [77u8; 32];
+        let victim_device = node.device.device_id(); // definitely still a member
+        stash_peer_record(&mut node, victim_device, victim_peer);
+        let squatter = DeviceId::from_bytes([2u8; 32]);
+        stash_peer_record(&mut node, squatter, victim_peer);
+        node.queue_eviction(&squatter);
+        assert!(
+            node.eviction_outbox.is_empty(),
+            "a peer id a current member claims must never be evicted"
+        );
+
+        // The honest case still works: a removed device whose peer id nobody else claims.
+        let mut node = recording_node();
+        let gone = DeviceId::from_bytes([3u8; 32]);
+        stash_peer_record(&mut node, gone, [8u8; 32]);
+        node.queue_eviction(&gone);
+        assert_eq!(
+            node.eviction_outbox,
+            vec![PeerId::new([8u8; 32])],
+            "an uncontested peer id is still evicted"
+        );
+        assert!(
+            node.peer_record(&gone).is_none(),
+            "a removed device's record is dropped, so its peer-id claim cannot outlive it"
+        );
+    }
+
+    /// **F1, check 1.** A peer record claiming a transport peer another device already claims is
+    /// refused at ingest, as is one claiming this node's own transport peer.
+    ///
+    /// Ingest is where the duplicate claim can be stopped cheaply, before it is ever relayed on
+    /// to anyone else. It is not sufficient alone (a squatter whose record arrives first is the
+    /// one stored, which is what `queue_eviction`'s check 2 is for), but without it a squatter
+    /// could install a collision on a member this node already knows about.
+    #[tokio::test]
+    async fn a_peer_record_claiming_another_devices_transport_peer_is_refused() {
+        let hub = Hub::new();
+        let alice = MlsDevice::generate().unwrap();
+        let alice_group = ServerGroup::create(&alice).unwrap();
+        let alice_peer = PeerId::from_u64(1);
+        let mut asy = ChannelSync::new(
+            hub.join(alice_peer),
+            alice_group,
+            alice,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+        );
+
+        // Bob and Carol join, so both are roster members with valid signing keys.
+        let mut joined = Vec::new();
+        for (n, nonce) in [(2u64, [1u8; 16]), (3u64, [2u8; 16])] {
+            let dev = MlsDevice::generate().unwrap();
+            let invite = asy.mint_invite(nonce, 10_000, vec![]).unwrap();
+            let net = hub.join(PeerId::from_u64(n));
+            let (res, _) = tokio::join!(
+                request_join(&net, alice_peer, &dev, &invite),
+                asy.run_once(),
+            );
+            let (group, routing) = res.unwrap();
+            joined.push(ChannelSync::new_joined(
+                net,
+                group,
+                dev,
+                ChaCha20Rng::seed_from_u64(n),
+                Box::new(ManualClock::new(1_000)),
+                routing,
+            ));
+        }
+        let mut it = joined.into_iter();
+        let mut bob = it.next().unwrap();
+        let mut carol = it.next().unwrap();
+
+        // Bob publishes an honest record; Alice takes it.
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+            .unwrap();
+        let bob_record = bob.self_record().unwrap().clone();
+        assert!(asy.ingest_peer_record(bob_record.clone()));
+
+        // Carol signs a record claiming BOB's transport peer. It is validly signed by a current
+        // member, so every check that existed before this one passes.
+        carol
+            .publish_self_record(vec!["/ip4/203.0.113.3/tcp/1".into()], 1)
+            .unwrap();
+        let mut squat = carol.self_record().unwrap().clone();
+        squat.peer_id = bob_record.peer_id;
+        let payload = peer_record_signing_payload(
+            &squat.device_pubkey,
+            &squat.peer_id,
+            &squat.addresses,
+            squat.seq,
+        );
+        squat.signature = carol.device.sign(&payload).unwrap();
+        assert!(squat.verify_self(), "the squat is genuinely well-signed");
+
+        assert!(
+            !asy.ingest_peer_record(squat.clone()),
+            "a record claiming another device's transport peer must be refused"
+        );
+        assert_eq!(
+            asy.transport_peer_of(&carol.device.device_id()),
+            None,
+            "and it must not be stored"
+        );
+
+        // A record claiming ALICE's own transport peer is refused for the same reason.
+        let mut self_squat = squat;
+        self_squat.peer_id = *asy.transport.local_peer().as_bytes();
+        let payload = peer_record_signing_payload(
+            &self_squat.device_pubkey,
+            &self_squat.peer_id,
+            &self_squat.addresses,
+            self_squat.seq,
+        );
+        self_squat.signature = carol.device.sign(&payload).unwrap();
+        assert!(
+            !asy.ingest_peer_record(self_squat),
+            "a record claiming this node's own transport peer must be refused"
+        );
+    }
+
+    /// A queued eviction is bounded and never aimed at ourselves.
+    ///
+    /// The self-check matters because the roster diff on the inbound path names *whoever left*,
+    /// and a member applying its own removal sees itself leave; evicting our own transport peer
+    /// would be a node disconnecting from itself.
+    #[test]
+    fn the_eviction_queue_is_bounded_and_never_targets_this_node() {
+        let mut node = recording_node();
+        let own = node.device.device_id();
+        let own_peer = *node.transport.local_peer().as_bytes();
+        stash_peer_record(&mut node, own, own_peer);
+        node.queue_eviction(&own);
+        assert!(
+            node.eviction_outbox.is_empty(),
+            "a node must never queue an eviction of itself"
+        );
+
+        // Past the bound: the queue stops growing (the bound the broadcast outbox uses).
+        let cap = node.config.max_outbox;
+        for n in 0..(cap as u64 + 16) {
+            let d = DeviceId::from_bytes([(n % 251) as u8; 32]);
+            let mut peer = [0u8; 32];
+            peer[24..].copy_from_slice(&n.to_be_bytes());
+            stash_peer_record(&mut node, d, peer);
+            node.queue_eviction(&d);
+        }
+        assert!(
+            node.eviction_outbox.len() <= cap,
+            "the eviction queue must be bounded (got {}, cap {cap})",
+            node.eviction_outbox.len()
+        );
+        assert!(
+            node.evicted_devices.len() <= MAX_EVICTED_DEVICES,
+            "the readmission ledger must be bounded too"
+        );
+    }
+
+    /// P6 on the **committer's own** removal path: `request_remove` must not only rotate the
+    /// routing secret, it must detach the member it removed. Before this, a removed member kept
+    /// every established connection (and any circuit reservation granted over one) indefinitely,
+    /// which is the difference between losing the keys and being removed.
+    #[tokio::test]
+    async fn removing_a_member_evicts_it_from_the_transport() {
+        let hub = Hub::new();
+        let alice = MlsDevice::generate().unwrap();
+        let alice_group = ServerGroup::create(&alice).unwrap();
+        let alice_peer = PeerId::from_u64(1);
+        let mut asy = ChannelSync::new(
+            RecordingNet::new(hub.join(alice_peer)),
+            alice_group,
+            alice,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+        );
+
+        let bob = MlsDevice::generate().unwrap();
+        let bob_id = bob.device_id();
+        let bob_peer = PeerId::from_u64(2);
+        let invite = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+        let bob_net = hub.join(bob_peer);
+        let (joined, _) = tokio::join!(
+            request_join(&bob_net, alice_peer, &bob, &invite),
+            asy.run_once(),
+        );
+        joined.unwrap();
+
+        // Bob published a peer record naming his transport peer, exactly as PEX delivers one.
+        stash_peer_record(&mut asy, bob_id, *bob_peer.as_bytes());
+        assert!(asy.transport.evicted.lock().unwrap().is_empty());
+
+        asy.request_remove(&bob_id).await.unwrap();
+
+        assert_eq!(
+            *asy.transport.evicted.lock().unwrap(),
+            vec![bob_peer],
+            "the removed member must be evicted from the transport, not only re-keyed around"
+        );
+        assert!(
+            asy.eviction_outbox.is_empty(),
+            "a delivered eviction is not left queued"
+        );
+    }
+
+    /// P6 on the **inbound apply** path: a member that merely applies somebody else's Remove
+    /// commit must evict the removed peer too. Driving it only from the committer would leave
+    /// every other member still attached to the ex-member, which is precisely the case rung 2
+    /// cares about (the switchboard is usually not the owner).
+    ///
+    /// MLS reports only *that* a commit removed someone, so this also pins the roster diff: the
+    /// evicted peer must be the one that actually left, not whoever the commit came from.
+    #[tokio::test]
+    async fn applying_an_inbound_remove_commit_evicts_the_removed_peer() {
+        let hub = Hub::new();
+        let alice = MlsDevice::generate().unwrap();
+        let alice_group = ServerGroup::create(&alice).unwrap();
+        let alice_peer = PeerId::from_u64(1);
+        let mut asy = ChannelSync::new(
+            hub.join(alice_peer),
+            alice_group,
+            alice,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+        );
+
+        // Bob joins on a recording transport (he is the *applier* under test).
+        let bob = MlsDevice::generate().unwrap();
+        let invite_b = asy.mint_invite([1u8; 16], 10_000, vec![]).unwrap();
+        let bob_net = RecordingNet::new(hub.join(PeerId::from_u64(2)));
+        let (bob_joined, _) = tokio::join!(
+            request_join(&bob_net, alice_peer, &bob, &invite_b),
+            asy.run_once(),
+        );
+        let (bob_group, bob_routing) = bob_joined.unwrap();
+        let mut bsy = ChannelSync::new_joined(
+            bob_net,
+            bob_group,
+            bob,
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            bob_routing,
+        );
+
+        // Carol joins (Alice commits at epoch 1); Bob applies that Add to reach the same epoch.
+        let carol = MlsDevice::generate().unwrap();
+        let carol_id = carol.device_id();
+        let carol_peer = PeerId::from_u64(3);
+        let invite_c = asy.mint_invite([2u8; 16], 10_000, vec![]).unwrap();
+        let carol_net = hub.join(carol_peer);
+        let (carol_joined, _) = tokio::join!(
+            request_join(&carol_net, alice_peer, &carol, &invite_c),
+            asy.run_once(),
+        );
+        carol_joined.unwrap();
+        let add_commit = asy
+            .commit_log
+            .iter()
+            .find(|r| r.commit_epoch == 1)
+            .expect("Alice retained the Add commit")
+            .clone();
+        bsy.on_control(alice_peer, &framed_commit(&add_commit));
+        assert_eq!(bsy.epoch(), 2, "Bob applied the Add");
+
+        // Bob knows Carol's peer record, and nothing has been evicted yet.
+        stash_peer_record(&mut bsy, carol_id, *carol_peer.as_bytes());
+        assert!(bsy.transport.evicted.lock().unwrap().is_empty());
+
+        // Alice removes Carol; Bob applies that commit off the control topic.
+        asy.request_remove(&carol_id).await.unwrap();
+        let remove_commit = asy
+            .commit_log
+            .iter()
+            .find(|r| r.commit_epoch == 2)
+            .expect("Alice retained the Remove commit")
+            .clone();
+        bsy.on_control(alice_peer, &framed_commit(&remove_commit));
+        assert_eq!(bsy.routing_label(), 1, "Bob rotated on the removal");
+        bsy.drain_evictions().await;
+
+        assert_eq!(
+            *bsy.transport.evicted.lock().unwrap(),
+            vec![carol_peer],
+            "an applier evicts the member the commit removed"
+        );
+    }
+
+    /// **F2.** Removing a member and later re-inviting it must work, and the lift has to come
+    /// from something the evicted peer does **not** have to connect in order to trigger.
+    ///
+    /// Readmission alone cannot do it at the node that matters. At the **inviter**, the roster
+    /// only changes once the joiner's join request has been served, and that request needs a
+    /// connection the eviction refuses: the roster cannot change until the connection is allowed,
+    /// and the connection is not allowed until the roster changes. So minting an invite, which is
+    /// this node declaring in its own voice that it will admit somebody, is what lifts it.
+    ///
+    /// The transport fake here **enforces** the eviction, and the rejoin uses the **same** peer id
+    /// that was evicted. With either of those missing this test passes against the deadlock.
+    #[tokio::test]
+    async fn readmitting_a_removed_device_lifts_its_eviction() {
+        let hub = Hub::new();
+        let alice = MlsDevice::generate().unwrap();
+        let alice_group = ServerGroup::create(&alice).unwrap();
+        let alice_peer = PeerId::from_u64(1);
+        let mut asy = ChannelSync::new(
+            RecordingNet::new(hub.join(alice_peer)),
+            alice_group,
+            alice,
+            ChaCha20Rng::seed_from_u64(1),
+            Box::new(ManualClock::new(1_000)),
+        );
+
+        let bob = MlsDevice::generate().unwrap();
+        let bob_id = bob.device_id();
+        let bob_peer = PeerId::from_u64(2);
+        let invite = asy.mint_invite([1u8; 16], u64::MAX, vec![]).unwrap();
+        let bob_net = hub.join(bob_peer);
+        let (joined, _) = tokio::join!(
+            request_join(&bob_net, alice_peer, &bob, &invite),
+            asy.run_once(),
+        );
+        joined.unwrap();
+
+        // Mint the re-invite **before** the removal, so nothing about this token can be what
+        // lifts the eviction later. This is the invite the deadlock swallows.
+        let stale_invite = asy.mint_invite([2u8; 16], u64::MAX, vec![]).unwrap();
+
+        stash_peer_record(&mut asy, bob_id, *bob_peer.as_bytes());
+        asy.request_remove(&bob_id).await.unwrap();
+        assert_eq!(*asy.transport.evicted.lock().unwrap(), vec![bob_peer]);
+        assert!(
+            asy.transport.is_denied(&bob_peer),
+            "the fake enforces: Bob's traffic no longer reaches Alice"
+        );
+
+        // With the eviction standing, Bob cannot be admitted at all: his join request never
+        // reaches Alice's membership layer, so neither side makes progress. This is the deadlock,
+        // demonstrated rather than described.
+        let stuck = tokio::time::timeout(tokio::time::Duration::from_millis(250), async {
+            tokio::join!(
+                request_join(&bob_net, alice_peer, &bob, &stale_invite),
+                asy.run_once(),
+            )
+        })
+        .await;
+        assert!(
+            stuck.is_err(),
+            "precondition: while evicted, Bob cannot reach the inviter to be readmitted"
+        );
+        assert!(!asy.group.contains_device(&bob_id), "and he is still out");
+
+        // Now the owner re-invites him. Minting is the lift.
+        let invite2 = asy.mint_invite([3u8; 16], u64::MAX, vec![]).unwrap();
+        let admitted = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            tokio::join!(
+                request_join(&bob_net, alice_peer, &bob, &invite2),
+                asy.run_once(),
+            )
+        })
+        .await;
+        assert!(
+            admitted.is_ok(),
+            "after minting an invite the joiner must be able to reach the inviter"
+        );
+        // Bob's own half fails *in this test only*: one `MlsDevice` cannot hold two groups with
+        // the same group id inside one in-process openmls provider. Alice's half, which is the
+        // half under test, ran to completion.
+        assert!(
+            asy.group.contains_device(&bob_id),
+            "Bob is a member again, which is only reachable if the deny was lifted"
+        );
+        assert_eq!(
+            *asy.transport.unevicted.lock().unwrap(),
+            vec![bob_peer],
+            "and the lift went to the peer that was evicted"
+        );
+        assert!(
+            asy.evicted_devices.is_empty(),
+            "the ledger entry is consumed, so it is not lifted again every tick"
+        );
+    }
+
+    /// A lift must never release a transport peer that some **other** standing eviction still
+    /// names. Removal drops the removed device's record, which frees its peer id under "first
+    /// claim wins", so a second device can claim the same peer, be removed, and be readmitted;
+    /// without this the lift would quietly let the original ex-member back in.
+    #[test]
+    fn a_lift_does_not_release_a_peer_another_eviction_still_holds() {
+        let mut node = recording_node();
+        let shared = PeerId::new([42u8; 32]);
+        let still_out = DeviceId::from_bytes([1u8; 32]);
+        let readmitted = node.device.device_id(); // a device the roster definitely contains
+
+        node.evicted_devices.push_back((still_out, shared));
+        node.evicted_devices.push_back((readmitted, shared));
+
+        node.reconcile_readmissions();
+        assert!(
+            node.unevict_outbox.is_empty(),
+            "the shared peer is still under a standing eviction; it must not be released"
+        );
+        assert_eq!(
+            node.evicted_devices.len(),
+            1,
+            "but the readmitted device's own ledger entry is still consumed"
+        );
+
+        // Once the other eviction goes too, the peer is released.
+        node.evicted_devices.clear();
+        node.evicted_devices.push_back((readmitted, shared));
+        node.reconcile_readmissions();
+        assert_eq!(node.unevict_outbox, vec![shared]);
+    }
+
+    /// A single-member sync node (no peers); enough to exercise the buffering    /// A single-member sync node (no peers); enough to exercise the buffering
     /// bounds, which are pure local logic.
     fn solo_node() -> ChannelSync<MemNetwork, ChaCha20Rng> {
         let alice = MlsDevice::generate().unwrap();
@@ -8400,7 +9278,7 @@ mod tests {
         // A plain member (no admin grant) requests an admission; the owner's on_add_request must
         // reject it at the role re-check; no commit, no admission.
         let (_hub, mut members, _ids) = build_members(3).await; // owner + two plain members
-        let plain = &members[1];
+        let plain = &mut members[1];
         // Forge a well-formed, correctly-signed Add-request from the plain member.
         let invite = plain.mint_invite([8u8; 16], u64::MAX, vec![]).unwrap();
         let dave = MlsDevice::generate().unwrap();
@@ -8564,8 +9442,12 @@ mod tests {
         assert_eq!(alice.connected_member_fingerprints(), vec![bob_fp.clone()]);
 
         // A malicious member (Bob) re-publishes a fresher record forging Carol's transport id.
-        // Because presence is matched per-device (each record vouches only for its own device key),
-        // this can at most mislabel Bob's OWN dot; it must never hide or steal Carol's presence.
+        //
+        // This used to be *stored*, on the reasoning that presence is matched per-device so a
+        // forged record can at most mislabel Bob's own dot. That reasoning held for presence and
+        // nowhere else: once an applied removal acts **against** an asserted peer id, a stored
+        // duplicate claim is how a member aims a group-wide disconnect at somebody else. So the
+        // duplicate claim is now refused at ingest, and both properties are asserted here.
         let forged_payload = peer_record_signing_payload(
             &bob.device.public_key_bytes(),
             carol_peer.as_bytes(),
@@ -8579,11 +9461,14 @@ mod tests {
             seq: 9,
             signature: bob.device.sign(&forged_payload).unwrap(),
         };
-        let _ = alice.ingest_peer_record(forged);
+        assert!(
+            !alice.ingest_peer_record(forged),
+            "a record claiming a transport peer another device already claims is refused",
+        );
         assert_eq!(
             alice.peer_record(&ids[1]).unwrap().peer_id,
-            *carol_peer.as_bytes(),
-            "the fresher forged record is stored",
+            *bob_peer.as_bytes(),
+            "and Bob's own genuine record is left in place, not overwritten by the forgery",
         );
 
         // Carol connects. Carol shows online from HER OWN record regardless of Bob's forgery.
@@ -8594,6 +9479,34 @@ mod tests {
         );
 
         // Disconnect clears liveness for everyone keyed off carol_peer.
+        alice.test_set_connected(carol_peer, false);
+        assert!(!alice.connected_member_fingerprints().contains(&carol_fp));
+
+        // The refusal above stops a duplicate claim arriving **over the wire**. It does not make
+        // the state unreachable: `restore` inserts persisted records with no signature, roster or
+        // duplicate check, so any snapshot taken before that rule existed contains exactly this.
+        // The per-device attribution property therefore still has to hold when it does, which is
+        // what the original version of this test covered and what must not be lost with it.
+        alice.peer_records.insert(
+            ids[1],
+            PeerDescriptor {
+                device_pubkey: bob.device.public_key_bytes(),
+                peer_id: *carol_peer.as_bytes(),
+                addresses: vec![],
+                seq: 9,
+                signature: [0u8; 64],
+            },
+        );
+        alice.test_set_connected(carol_peer, true);
+        let fps = alice.connected_member_fingerprints();
+        assert!(
+            fps.contains(&carol_fp),
+            "a stored duplicate claim must not hide Carol, who is matched by her OWN record"
+        );
+        assert!(
+            fps.contains(&bob_fp),
+            "it mislabels only the dot of the device that made the claim"
+        );
         alice.test_set_connected(carol_peer, false);
         assert!(!alice.connected_member_fingerprints().contains(&carol_fp));
     }
@@ -9621,7 +10534,7 @@ mod tests {
 
         // Mint an invite and build the exact bytes a joiner would send for it.
         fn req_for(
-            node: &ChannelSync<MemNetwork, ChaCha20Rng>,
+            node: &mut ChannelSync<MemNetwork, ChaCha20Rng>,
             nonce: [u8; 16],
             expires: u64,
         ) -> (InviteToken, Vec<u8>) {
@@ -9649,7 +10562,7 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Undecodable);
 
         // A structurally fine invite for someone else's group.
-        let (mut wrong, _) = req_for(&node, [1u8; 16], u64::MAX);
+        let (mut wrong, _) = req_for(&mut node, [1u8; 16], u64::MAX);
         wrong.group_id = b"some other group".to_vec();
         assert!(node
             .serve_join(joiner, &encode_join_req(&wrong, &spare_kp))
@@ -9657,7 +10570,7 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::WrongGroup);
 
         // An invite naming a different inviter device: this member structurally cannot admit.
-        let (mut elsewhere, _) = req_for(&node, [2u8; 16], u64::MAX);
+        let (mut elsewhere, _) = req_for(&mut node, [2u8; 16], u64::MAX);
         elsewhere.inviter_device_id = MlsDevice::generate().unwrap().device_id();
         assert!(node
             .serve_join(joiner, &encode_join_req(&elsewhere, &spare_kp))
@@ -9670,7 +10583,7 @@ mod tests {
         );
 
         // Edited after signing: the inviter is still us, so this is the signature check firing.
-        let (mut forged, _) = req_for(&node, [3u8; 16], u64::MAX);
+        let (mut forged, _) = req_for(&mut node, [3u8; 16], u64::MAX);
         forged.expires_at_ms = u64::MAX - 1;
         assert!(node
             .serve_join(joiner, &encode_join_req(&forged, &spare_kp))
@@ -9678,17 +10591,17 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::BadSignature);
 
         // The three ledger causes, which are the ones that must never collapse together.
-        let (_, expired) = req_for(&node, [4u8; 16], 9_000);
+        let (_, expired) = req_for(&mut node, [4u8; 16], 9_000);
         assert!(node.serve_join(joiner, &expired).is_none());
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Expired);
 
-        let (_, revoked) = req_for(&node, [5u8; 16], u64::MAX);
+        let (_, revoked) = req_for(&mut node, [5u8; 16], u64::MAX);
         node.ledger.revoke([5u8; 16]);
         assert!(node.serve_join(joiner, &revoked).is_none());
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Revoked);
 
         // A genuine admission, then the very same request replayed.
-        let (_, good) = req_for(&node, [6u8; 16], u64::MAX);
+        let (_, good) = req_for(&mut node, [6u8; 16], u64::MAX);
         let resp = node.serve_join(joiner, &good).expect("admitted");
         assert_eq!(resp.first(), Some(&JOIN_READY));
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Admitted);

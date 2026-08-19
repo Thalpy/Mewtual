@@ -58,10 +58,12 @@ pub use rendezvous_node::{
     RendezvousNode,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -72,14 +74,19 @@ use catcoms_rt::{
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use libp2p::core::transport::MemoryTransport;
+use libp2p::core::transport::PortUse;
 use libp2p::core::upgrade::Version;
+use libp2p::core::Endpoint;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
+use libp2p::swarm::{
+    dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, SwarmEvent, THandler,
+    THandlerInEvent, THandlerOutEvent, ToSwarm,
+};
 use libp2p::{
-    connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous, request_response,
-    yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
+    allow_block_list, connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous,
+    request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -254,6 +261,18 @@ pub(crate) fn identify_config(key: &libp2p::identity::Keypair) -> identify::Conf
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct MeshBehaviour {
+    // The two refusal behaviours are declared FIRST, and the order is load-bearing rather than
+    // cosmetic. The derive runs each field's connection handlers in declaration order and stops
+    // at the first refusal, so anything declared ahead of a protocol behaviour refuses before
+    // that behaviour has allocated per-connection state for a caller it is about to lose.
+    /// Connection caps so a discovery/registration flood cannot exhaust us.
+    pub connection_limits: connection_limits::Behaviour,
+    /// The **eviction gate** (P6): refuses every connection to a peer a Remove commit detached,
+    /// including the first. See [`Eviction`] for why it is here and not behind `gossipsub`.
+    pub eviction: Eviction,
+    /// Closes connections that were **already live** when an eviction landed. [`Eviction`]
+    /// refuses new ones; this is the half that severs what is already attached.
+    pub blocked_peers: allow_block_list::Behaviour<allow_block_list::BlockedPeers>,
     /// Topic fan-out.
     pub gossipsub: gossipsub::Behaviour,
     /// Addressed request/response.
@@ -271,8 +290,6 @@ pub struct MeshBehaviour {
     /// reachable (the discovered public address is advertised + folded into a fresh invite); no
     /// relay needed when the router cooperates.
     pub upnp: libp2p::upnp::tokio::Behaviour,
-    /// Connection caps so a discovery/registration flood cannot exhaust us.
-    pub connection_limits: connection_limits::Behaviour,
 }
 
 impl MeshBehaviour {
@@ -303,9 +320,38 @@ impl MeshBehaviour {
                 // this node is trivially enumerable, so a stranger flood has to hit a ceiling
                 // well below resource exhaustion. Far above any real roster.
                 .with_max_established_incoming(Some(256))
-                .with_max_established_per_peer(Some(8)),
+                .with_max_established_per_peer(Some(8))
+                // P5, the two caps that were still unset.
+                //
+                // Pending **outgoing**: the bound on how much dialling this node can be *told*
+                // to do. A dial plan is assembled from address sets this node did not author
+                // (up to `MAX_PEX_ADDRESSES` per member record, plus a rendezvous response, plus
+                // an invite's bootstrap list), and each pending dial holds a socket, a DNS
+                // resolution and a half-open TCP or QUIC handshake. 32 is comfortably above the
+                // widest legitimate burst (one member's addresses raced in a single dial, times
+                // a few members reconnecting at once after an outage) and far below the point
+                // where a fanned-out dial set costs this machine its file descriptors or gets
+                // it flagged as a scanner by a home router's connection tracker. What it costs:
+                // during a genuine reconnect storm the 33rd dial is refused rather than queued,
+                // so convergence takes another discovery tick.
+                .with_max_pending_outgoing(Some(32))
+                // Total **established**, inbound and outbound together. The inbound cap above
+                // does not bound this: relay circuits, rendezvous nodes and every peer this node
+                // dialled are outbound, so a node that has been fed a large address set can hold
+                // an unbounded number of connections while sitting at zero inbound. 320 is the
+                // inbound ceiling plus 64 of headroom for this node's own dials (a roster of any
+                // realistic size, plus its infra nodes, plus the second connection DCUtR opens
+                // per peer while an upgrade is in flight). What it costs: past 320 the swarm
+                // refuses new connections *including outbound ones this node wanted*, so a node
+                // deliberately configured with hundreds of peers would stop dialling rather than
+                // degrade; that is the intended failure, because the alternative is failing on
+                // file descriptors with no diagnosis.
+                .with_max_established(Some(320)),
         );
         Ok(Self {
+            connection_limits,
+            eviction: Eviction::default(),
+            blocked_peers: allow_block_list::Behaviour::default(),
             gossipsub,
             request_response,
             relay_client,
@@ -313,7 +359,6 @@ impl MeshBehaviour {
             identify,
             rendezvous_client,
             upnp,
-            connection_limits,
         })
     }
 }
@@ -601,6 +646,222 @@ enum Command {
         namespace: rendezvous::Namespace,
         rz_node: libp2p::PeerId,
     },
+    /// **Evict** a peer (P6): close every connection to it and refuse the next one. Issued by
+    /// the membership layer when a Remove commit is applied. See
+    /// [`catcoms_rt::MeshTransport::evict_peer`] for why it is best-effort.
+    Evict(PeerId),
+    /// Lift an eviction, because the peer's device is a **member again**. The product ships a
+    /// re-invite button and node identities are stable across restarts, so without this an
+    /// ex-member who is later re-invited dials the founder, is refused at the connection handler,
+    /// and the join times out with nothing to diagnose.
+    Unevict(PeerId),
+}
+
+/// Cap on the eviction deny list.
+///
+/// 256 removals is far more membership churn than any friend circle or community server will
+/// see in one process lifetime, so in practice the list never reaches the bound and nothing is
+/// ever silently re-admitted. The cap exists because an unbounded list is a defect regardless of
+/// how slowly it fills, not because this one is expected to fill.
+const MAX_EVICTED_PEERS: usize = 256;
+
+/// The eviction deny list: peers a Remove commit detached, keyed by the **phase-0** [`PeerId`]
+/// (the BLAKE3-of-libp2p-peer-id form every layer above the transport addresses peers by, and the
+/// only form the membership layer holds; see `PeerDescriptor::peer_id`).
+///
+/// Keying on the phase-0 id is what lets the deny be enforced at connection time. `to_peer` is a
+/// **forward** hash: the wire always supplies the `libp2p::PeerId`, so the phase-0 id is always
+/// computable from it, even though the reverse is not. An earlier version keyed on the
+/// `libp2p::PeerId` instead, and could therefore only recognise an evicted peer *after* letting a
+/// connection establish, which meant the first post-eviction connection was fully set up (with
+/// every behaviour ahead of the deny allocating for it) before being torn down.
+///
+/// The `Option<libp2p::PeerId>` is not used for recognition; it records whether a **live**
+/// connection was closed for this entry via `allow_block_list`, so the same block can be lifted
+/// when the entry is dropped by the bound or by [`Command::Unevict`]. One store, so the deny set
+/// and the block set cannot drift apart.
+///
+/// # Expiry
+///
+/// Entries do **not** expire on a timer. `admission.rs` uses time windows because the peers it
+/// denies are anonymous strangers whose ids cost a keypair, so a permanent entry there is both
+/// useless (evaded for free) and a memory-growth vector an attacker drives. Neither holds here:
+/// the fill rate is one entry per membership removal in one group, which nothing hostile can
+/// drive, and a timer would re-admit a peer at a moment nobody chose. What *does* lift an entry
+/// is the membership layer saying so: a re-invited member is un-evicted as soon as the group
+/// contains its device again (`ChannelSync::drain_evictions`). Readmission is the right signal,
+/// time is not.
+///
+/// The list is process-local and is deliberately **not** persisted: a restart brings up a fresh
+/// swarm with no connections and no reservations, and an ex-member reconnecting to it is an
+/// unauthenticated stranger holding none of the group's keys. The attachment this exists to break
+/// does not survive the restart either.
+#[derive(Debug, Default)]
+struct EvictedPeers {
+    /// Insertion order, so the bound drops the **oldest** eviction first: the newest removals
+    /// are the ones whose connections are most likely to still be live.
+    order: VecDeque<PeerId>,
+    /// Each evicted peer, and the `libp2p::PeerId` whose live connections were closed for it,
+    /// if any (see the type docs).
+    entries: HashMap<PeerId, Option<libp2p::PeerId>>,
+}
+
+impl EvictedPeers {
+    /// Record an eviction. Returns the entry pushed out by the bound, if it had a live block, so
+    /// the caller can lift it and keep `allow_block_list`'s set the same size as this one.
+    fn deny(&mut self, peer: PeerId) -> Option<libp2p::PeerId> {
+        if self.entries.contains_key(&peer) {
+            return None; // already evicted; do not disturb the ordering
+        }
+        self.entries.insert(peer, None);
+        self.order.push_back(peer);
+        if self.order.len() > MAX_EVICTED_PEERS {
+            if let Some(old) = self.order.pop_front() {
+                return self.entries.remove(&old).flatten();
+            }
+        }
+        None
+    }
+
+    /// Lift an eviction. Returns the live block to release, if one was installed.
+    fn allow(&mut self, peer: &PeerId) -> Option<libp2p::PeerId> {
+        self.order.retain(|p| p != peer);
+        self.entries.remove(peer).flatten()
+    }
+
+    /// Whether `peer` is currently denied.
+    fn is_denied(&self, peer: &PeerId) -> bool {
+        self.entries.contains_key(peer)
+    }
+
+    /// Note that `allow_block_list` was asked to close live connections to this entry, so the
+    /// block can be released again when the entry goes.
+    fn note_blocked(&mut self, peer: PeerId, libp2p_peer: libp2p::PeerId) {
+        if let Some(slot) = self.entries.get_mut(&peer) {
+            *slot = Some(libp2p_peer);
+        }
+    }
+
+    /// How many peers are currently denied (diagnostics/tests).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// A connection was refused because the peer has been evicted from the group.
+#[derive(Debug)]
+pub struct Evicted(PeerId);
+
+impl std::fmt::Display for Evicted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "peer {:?} has been evicted from the group", self.0)
+    }
+}
+
+impl std::error::Error for Evicted {}
+
+/// The eviction gate: a [`NetworkBehaviour`] that refuses **every** connection to an evicted
+/// peer, including the first one.
+///
+/// It exists rather than leaning on `allow_block_list` alone because of *where in the pipeline*
+/// the refusal has to happen. The `NetworkBehaviour` derive calls each field's
+/// `handle_established_inbound_connection` in **declaration order** and stops at the first
+/// refusal, so a deny sitting behind `gossipsub` is a deny that runs after gossipsub has already
+/// allocated a peer entry, a sender and a handler for the connection, and after
+/// `ConnectionEstablished` has been dispatched to the behaviours; that is where gossipsub queues
+/// a Subscribe for every mesh topic, and those topic hashes are the freshly-rotated member-only
+/// ones, addressed to the member just removed. Whether they reach the wire before the close is a
+/// scheduling race nobody here controls, so the refusal has to come first rather than be timed.
+/// This behaviour is therefore declared **ahead of** every protocol behaviour in
+/// [`MeshBehaviour`].
+///
+/// The same ordering fixes a leak. A connection refused *behind* gossipsub leaves gossipsub's
+/// entry in place forever: it ignores `ListenFailure`, and no close is ever dispatched for a
+/// connection that never established, so an evicted peer redialling in a loop grows that entry's
+/// connection vector at a rate it chooses. Refused in front of gossipsub, none of it is
+/// allocated in the first place.
+///
+/// `allow_block_list` is still carried alongside, for the one thing this cannot do: closing
+/// connections that are **already live** when the eviction lands.
+#[derive(Debug, Default)]
+pub struct Eviction {
+    denied: EvictedPeers,
+}
+
+impl Eviction {
+    fn enforce(&self, peer: &libp2p::PeerId) -> Result<(), ConnectionDenied> {
+        let phase0 = to_peer(peer);
+        if self.denied.is_denied(&phase0) {
+            tracing::debug!(peer = %peer, "refusing a connection to an evicted peer");
+            return Err(ConnectionDenied::new(Evicted(phase0)));
+        }
+        Ok(())
+    }
+}
+
+impl NetworkBehaviour for Eviction {
+    type ConnectionHandler = dummy::ConnectionHandler;
+    type ToSwarm = Infallible;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: libp2p::PeerId,
+        _: &Multiaddr,
+        _: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        // The earliest point at which an inbound connection's peer id is known at all (it comes
+        // out of Noise) and, because this behaviour is declared first, the earliest point at
+        // which anything in this swarm has spent state on it.
+        self.enforce(&peer)?;
+        Ok(dummy::ConnectionHandler)
+    }
+
+    fn handle_pending_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: Option<libp2p::PeerId>,
+        _: &[Multiaddr],
+        _: Endpoint,
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        if let Some(peer) = peer {
+            self.enforce(&peer)?;
+        }
+        Ok(Vec::new())
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: libp2p::PeerId,
+        _: &Multiaddr,
+        _: Endpoint,
+        _: PortUse,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        // An address with no `/p2p/` names no peer, so the pending hook above cannot judge it;
+        // this catches the dial that only learns who it reached once Noise completed.
+        self.enforce(&peer)?;
+        Ok(dummy::ConnectionHandler)
+    }
+
+    fn on_swarm_event(&mut self, _event: FromSwarm<'_>) {}
+
+    fn on_connection_handler_event(
+        &mut self,
+        _peer: libp2p::PeerId,
+        _: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
+        libp2p::core::util::unreachable(event)
+    }
+
+    fn poll(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        Poll::Pending
+    }
 }
 
 type InboundResponses = FuturesUnordered<
@@ -639,6 +900,18 @@ struct Actor {
     /// Member-peer dials accumulated during one drain of the command queue, so a peer's addresses
     /// are handed to libp2p as one racing dial rather than N sequential ones.
     pending_dials: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
+    /// Peers **this node's own configuration** named as infrastructure or as a bootstrap: the
+    /// relays it reserves on, the rendezvous nodes it registers/discovers at, and the addresses
+    /// it was constructed to dial. They are never deniable by a membership action.
+    ///
+    /// This is the transport's half of the defence against an eviction aimed at a third party.
+    /// The membership layer resolves a removed device to a peer id that the removed device
+    /// *asserted*, and nothing binds that assertion to the device, so a member with a modified
+    /// client can name the group's relay in its own peer record and have every other member
+    /// block it on removal, taking NAT traversal down group-wide. What a peer *is* to this node
+    /// is decided here, locally, by what this node was told to dial; no record from the wire can
+    /// change it. Kept separate from `infra_peers`, which carries dial-gating semantics.
+    protected: HashSet<libp2p::PeerId>,
 }
 
 impl Actor {
@@ -733,7 +1006,7 @@ impl Actor {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
                 // relay named in it is an infra target from here on.
                 if let Some(relay) = relay_peer_in_circuit_addr(&addr) {
-                    self.infra_peers.insert(relay);
+                    self.note_infra(relay);
                 }
                 if let Err(e) = self.swarm.listen_on(addr.clone()) {
                     tracing::warn!(%addr, error = %e, "listen failed");
@@ -747,14 +1020,14 @@ impl Actor {
                 self.flush_pending_registers();
             }
             Command::RendezvousRegister { namespace, rz_node } => {
-                self.infra_peers.insert(rz_node);
+                self.note_infra(rz_node);
                 // Defer until we have an external address to advertise; flushed on
                 // the next confirmed external address (e.g. a circuit reservation).
                 self.pending_registers.push((namespace, rz_node));
                 self.flush_pending_registers();
             }
             Command::RendezvousDiscover { namespace, rz_node } => {
-                self.infra_peers.insert(rz_node);
+                self.note_infra(rz_node);
                 tracing::debug!(%rz_node, namespace = %namespace, "rendezvous discover");
                 self.swarm.behaviour_mut().rendezvous_client.discover(
                     Some(namespace),
@@ -763,6 +1036,89 @@ impl Actor {
                     rz_node,
                 );
             }
+            Command::Evict(peer) => self.evict(peer),
+            Command::Unevict(peer) => self.unevict(peer),
+        }
+    }
+
+    /// Learn that `peer` is infrastructure this node uses, and make it undeniable.
+    ///
+    /// Lifting an eviction here is what closes an ordering window: a relay or rendezvous is
+    /// dialed before it is *named* as infra (the dial comes first, the reservation or the
+    /// registration second), so a hostile eviction landing in between would otherwise stick. A
+    /// peer this node has decided to use as infrastructure outranks anything a removed member
+    /// claimed about it.
+    fn note_infra(&mut self, peer: libp2p::PeerId) {
+        self.infra_peers.insert(peer);
+        if self.protected.insert(peer) {
+            self.lift_eviction(to_peer(&peer));
+        }
+    }
+
+    /// Whether a phase-0 id names a peer this node's own configuration protects.
+    ///
+    /// Linear over a set that holds a handful of relays and rendezvous nodes, deliberately: a
+    /// second map keyed on the phase-0 id could drift out of step with this one, and the whole
+    /// point of the check is that it cannot be talked out of.
+    fn is_protected(&self, peer: PeerId) -> bool {
+        self.protected.iter().any(|p| to_peer(p) == peer)
+    }
+
+    /// Detach an evicted peer (P6) and keep it detached.
+    ///
+    /// Two halves, because refusing and severing are different operations. [`Eviction`] refuses
+    /// every future connection, and it can do so from the phase-0 id alone because `to_peer` is a
+    /// forward hash. `allow_block_list` closes the connections that are **already live**, which
+    /// needs the `libp2p::PeerId`; that is known exactly when the peer is connected, which is the
+    /// only case in which there is anything to close.
+    ///
+    /// Closing the connection is also what revokes anything scoped to it: a relay reservation
+    /// lives on the connection it was granted over, so a node acting as a relay (rung 2's
+    /// switchboards) drops the ex-member's circuit slot here rather than holding it until it
+    /// expires. This node runs `relay_client` only, so today there is nothing of the sort to drop.
+    fn evict(&mut self, peer: PeerId) {
+        // A membership action must never be able to disconnect this node's own infrastructure.
+        // The peer id an eviction names came off the wire in a removed member's self-signed
+        // record, and nothing binds that value to its signer, so without this check any member
+        // could name the group's relay and have everyone block it on the way out.
+        if self.is_protected(peer) {
+            tracing::warn!(
+                ?peer,
+                "refusing to evict a peer this node uses as infrastructure or bootstrap"
+            );
+            return;
+        }
+        if peer == to_peer(self.swarm.local_peer_id()) {
+            tracing::warn!("refusing to evict this node itself");
+            return;
+        }
+        let b = self.swarm.behaviour_mut();
+        if let Some(displaced) = b.eviction.denied.deny(peer) {
+            // The bound pushed an older eviction out; release its block so `allow_block_list`'s
+            // set stays the same size as the deny list rather than growing behind it.
+            b.blocked_peers.unblock_peer(displaced);
+        }
+        match self.peers.get(&peer).copied() {
+            Some(libp2p_peer) => {
+                tracing::info!(peer = %libp2p_peer, "evicting peer: closing live connections");
+                let b = self.swarm.behaviour_mut();
+                b.blocked_peers.block_peer(libp2p_peer);
+                b.eviction.denied.note_blocked(peer, libp2p_peer);
+            }
+            None => tracing::info!(?peer, "evicted peer is not connected; refused from here on"),
+        }
+    }
+
+    /// Lift an eviction: the peer's device is a member again (or the peer turned out to be
+    /// infrastructure). Idempotent, and a no-op for a peer that was never evicted.
+    fn unevict(&mut self, peer: PeerId) {
+        self.lift_eviction(peer);
+    }
+
+    fn lift_eviction(&mut self, peer: PeerId) {
+        let b = self.swarm.behaviour_mut();
+        if let Some(blocked) = b.eviction.denied.allow(&peer) {
+            b.blocked_peers.unblock_peer(blocked);
         }
     }
 
@@ -799,6 +1155,16 @@ impl Actor {
     /// An address with no `/p2p/<id>` names no peer, so it cannot be gated; it is dialed as
     /// before. (The jitter half of P11 lives in the caller that drives the timer.)
     fn dial_gated(&mut self, addr: Multiaddr) {
+        // Routing *through* a relay makes it this node's infrastructure just as surely as
+        // reserving on it does, and only the reservation path was noting it. The gate below
+        // resolves the LAST `/p2p/` component, which for `…/p2p/RELAY/p2p-circuit/p2p/TARGET` is
+        // the target, so a relay used purely as transit was never protected: a companion device
+        // claiming the relay's transport id (no *device* legitimately claims one, so both sync
+        // checks pass) and then being removed in an ordinary "drop my old phone" would have had
+        // every member evict the relay it routes through.
+        if let Some(relay) = relay_peer_in_circuit_addr(&addr) {
+            self.note_infra(relay);
+        }
         let Some(target) = target_peer_in_multiaddr(&addr) else {
             if let Err(e) = self.swarm.dial(addr.clone()) {
                 tracing::warn!(%addr, error = %e, "dial failed");
@@ -845,7 +1211,15 @@ impl Actor {
             Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
                 tracing::trace!(%addr, peer = %target, ?cond, "infra dial suppressed: already dialing");
             }
-            Err(e) => tracing::warn!(%addr, error = %e, "dial failed"),
+            Err(e) => {
+                // Drop the ledger entry so the next tick retries. A dial refused *before* it
+                // starts (`max_pending_outgoing` at its cap, say) produces no
+                // `OutgoingConnectionError`, so nothing else would ever clear it and the node
+                // would stop dialing its own relay or rendezvous for the rest of the process.
+                // `flush_dials` already does this for member peers.
+                tracing::warn!(%addr, error = %e, "dial failed");
+                self.release_failed_dial(Some(target), &e);
+            }
         }
     }
 
@@ -991,6 +1365,23 @@ impl Actor {
                 // a relayed connection instead of the pair staying pinned to the relay.
                 self.cover_addr(peer_id, endpoint.get_remote_address().clone());
                 let peer = to_peer(&peer_id);
+                // Race closer. `Eviction` refuses *new* connections, but a connection that
+                // passed the gate before the deny was installed is already established, and
+                // whether this arm or the command channel runs first is `select!`'s random
+                // choice. When the command won, `Actor::evict` looked in `peers`, found nothing
+                // and never asked `allow_block_list` to close anything, leaving a live
+                // connection that neither half would ever tear down. Closing it here costs one
+                // set lookup per connection and keeps both sets consistent.
+                //
+                // Deliberately NOT an early return: the peer is still recorded and still
+                // announced, so the close below produces a matched `PeerDisconnected` rather
+                // than an unpaired one. This is a race closer, never the enforcement.
+                if self.swarm.behaviour().eviction.denied.is_denied(&peer) {
+                    tracing::info!(peer = %peer_id, "evicted peer raced the deny; closing");
+                    let b = self.swarm.behaviour_mut();
+                    b.blocked_peers.block_peer(peer_id);
+                    b.eviction.denied.note_blocked(peer, peer_id);
+                }
                 // Only surface `PeerConnected` on the *first* connection to a peer;
                 // a DCUtR upgrade opens a second (direct) connection to a peer we
                 // already know, and must not look like a new peer to layers above.
@@ -1017,6 +1408,9 @@ impl Actor {
                     self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
+                    // Always paired: an evicted peer is refused by `Eviction` before a connection
+                    // is ever established, so it cannot reach this arm without having been
+                    // announced as connected first.
                     let _ = self
                         .event_tx
                         .send(TransportEvent::PeerDisconnected(peer))
@@ -1219,6 +1613,12 @@ impl std::fmt::Debug for Command {
 impl MeshService {
     /// Spawn the actor for an already-built (listening/dialing) swarm.
     pub fn spawn(swarm: Swarm<MeshBehaviour>) -> Self {
+        Self::spawn_protecting(swarm, Vec::new())
+    }
+
+    /// [`MeshService::spawn`], plus the peers this node was **constructed to dial** (its
+    /// bootstrap/infra set). Those are never deniable by an eviction: see `Actor::protected`.
+    fn spawn_protecting(swarm: Swarm<MeshBehaviour>, protected: Vec<libp2p::PeerId>) -> Self {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
@@ -1243,6 +1643,7 @@ impl MeshService {
             infra_peers: HashSet::new(),
             covered_addrs: HashMap::new(),
             pending_dials: HashMap::new(),
+            protected: protected.into_iter().collect(),
         };
         tokio::spawn(actor.run());
         Self {
@@ -1383,7 +1784,8 @@ impl MeshService {
                 .dial(addr.clone())
                 .map_err(|e| NetError::Dial(e.to_string()))?;
         }
-        Ok(Self::spawn(swarm))
+        let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
+        Ok(Self::spawn_protecting(swarm, protected))
     }
 
     /// Build a **TCP + QUIC** node that listens on `listen` and dials `dial`, then spawn it. Also
@@ -1446,7 +1848,10 @@ impl MeshService {
                 .dial(addr.clone())
                 .map_err(|e| NetError::Dial(e.to_string()))?;
         }
-        Ok((Self::spawn(swarm), libp2p_id, bound))
+        // Whatever this node was constructed to dial is its bootstrap/infra set, chosen locally
+        // and never by a peer record, so no eviction may take it away (see `Actor::protected`).
+        let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
+        Ok((Self::spawn_protecting(swarm, protected), libp2p_id, bound))
     }
 
     /// A cheap, clonable [`MeshHandle`] to this node's command channel, for driving rendezvous
@@ -1612,11 +2017,163 @@ impl MeshTransport for MeshService {
             seq: d.seq,
         })
     }
+
+    async fn evict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Evict(peer))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    async fn unevict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Unevict(peer))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A helper peer id distinct per `n`.
+    fn ev_peer(n: u64) -> PeerId {
+        PeerId::from_u64(n)
+    }
+
+    fn libp2p_peer() -> libp2p::PeerId {
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+    }
+
+    /// The eviction deny list is bounded, and the bound drops the **oldest** eviction.
+    ///
+    /// Proved by pushing past the cap rather than by reading the constant: a list that grows
+    /// without limit is its own defect, and the only way to know the bound binds is to exceed it.
+    #[test]
+    fn the_eviction_list_is_bounded_and_drops_the_oldest_entry() {
+        let mut ev = EvictedPeers::default();
+        for n in 0..MAX_EVICTED_PEERS as u64 {
+            assert!(
+                ev.deny(ev_peer(n)).is_none(),
+                "no displacement below the cap"
+            );
+        }
+        assert_eq!(ev.len(), MAX_EVICTED_PEERS);
+        assert!(ev.is_denied(&ev_peer(0)));
+
+        // One past the cap: the list stays at the cap and the FIRST eviction is the one dropped.
+        assert!(ev.deny(ev_peer(MAX_EVICTED_PEERS as u64)).is_none());
+        assert_eq!(ev.len(), MAX_EVICTED_PEERS, "the cap binds");
+        assert!(
+            !ev.is_denied(&ev_peer(0)),
+            "the oldest eviction is the one dropped"
+        );
+        assert!(ev.is_denied(&ev_peer(1)), "the next-oldest survives");
+        assert!(
+            ev.is_denied(&ev_peer(MAX_EVICTED_PEERS as u64)),
+            "the newest eviction is retained"
+        );
+    }
+
+    /// Displacing an entry whose live connections were closed hands its `libp2p::PeerId` back, so
+    /// the caller can lift that block. Without it `allow_block_list`'s set would keep growing
+    /// behind this one's bound, which would make the bound cosmetic.
+    #[test]
+    fn a_displaced_eviction_returns_its_block_to_be_lifted() {
+        let mut ev = EvictedPeers::default();
+        let first = ev_peer(0);
+        let blocked = libp2p_peer();
+        ev.deny(first);
+        ev.note_blocked(first, blocked);
+
+        let mut displaced = None;
+        for n in 1..=MAX_EVICTED_PEERS as u64 {
+            if let Some(d) = ev.deny(ev_peer(n)) {
+                displaced = Some(d);
+            }
+        }
+        assert_eq!(
+            displaced,
+            Some(blocked),
+            "the displaced entry's block must come back so it can be lifted"
+        );
+
+        // An entry that never had a live connection closed has no block to lift.
+        let mut ev2 = EvictedPeers::default();
+        for n in 0..=MAX_EVICTED_PEERS as u64 {
+            assert!(ev2.deny(ev_peer(n)).is_none());
+        }
+    }
+
+    /// Lifting an eviction removes it from **both** halves: the peer stops being denied, and the
+    /// block installed for it comes back to be released. This is the re-invite path; an entry
+    /// that survived a lift would make a re-invited member permanently unreachable.
+    #[test]
+    fn lifting_an_eviction_clears_the_deny_and_returns_the_block() {
+        let mut ev = EvictedPeers::default();
+        let p = ev_peer(7);
+        let blocked = libp2p_peer();
+        ev.deny(p);
+        ev.note_blocked(p, blocked);
+        assert!(ev.is_denied(&p));
+
+        assert_eq!(ev.allow(&p), Some(blocked));
+        assert!(!ev.is_denied(&p), "a lifted eviction stops denying");
+        assert_eq!(ev.len(), 0);
+        assert_eq!(ev.allow(&p), None, "lifting twice is a no-op");
+
+        // A lift must also free the slot in the ordering, or the bound would count ghosts.
+        for n in 0..MAX_EVICTED_PEERS as u64 {
+            ev.deny(ev_peer(n));
+        }
+        assert_eq!(ev.len(), MAX_EVICTED_PEERS);
+        assert!(ev.is_denied(&ev_peer(0)), "no premature displacement");
+    }
+
+    /// Re-evicting an already-evicted peer is a no-op and does not disturb the ordering, so a
+    /// repeated removal cannot walk an entry to the front of the bound.
+    #[test]
+    fn re_denying_an_evicted_peer_does_not_disturb_the_ordering() {
+        let mut ev = EvictedPeers::default();
+        let p = ev_peer(7);
+        ev.deny(p);
+        assert!(ev.deny(p).is_none());
+        assert_eq!(ev.len(), 1);
+    }
+
+    /// The gate recognises an evicted peer from the **libp2p** id the wire supplies, by hashing
+    /// it forward to the phase-0 id the membership layer works in. This is the property that lets
+    /// the refusal happen at connection time instead of after a connection is established.
+    #[test]
+    fn the_gate_refuses_an_evicted_peer_by_forward_hashing_the_wire_identity() {
+        let mut gate = Eviction::default();
+        let victim = libp2p_peer();
+        let bystander = libp2p_peer();
+
+        assert!(
+            gate.enforce(&victim).is_ok(),
+            "nothing is denied by default"
+        );
+
+        gate.denied.deny(to_peer(&victim));
+        assert!(
+            gate.enforce(&victim).is_err(),
+            "an evicted peer is refused from its libp2p id alone"
+        );
+        assert!(
+            gate.enforce(&bystander).is_ok(),
+            "the refusal is targeted, not a blanket close"
+        );
+
+        gate.denied.allow(&to_peer(&victim));
+        assert!(
+            gate.enforce(&victim).is_ok(),
+            "a lifted eviction lets the peer back in"
+        );
+    }
 
     #[test]
     fn a_seed_pins_a_stable_peer_id() {

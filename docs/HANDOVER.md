@@ -186,8 +186,7 @@ TCP** (verified, incl. through a relay).
   then run a `Workflow` of hostile reviewers (crypto / DoS / guarantee-preservation /
   distributed-systems), fold findings in, then commit. Don't skip it for membership /
   admission / key-handling changes.
-- **Commit messages** end with a `Co-Authored-By: Claude <model> (1M context)` line
-  (history is `Opus 4.8`; use whichever model actually did the work). Use
+- **Commit messages** end with a `Co-Authored-By: Rosemary` line. Use
   `git commit -F <file>` for messages containing `==`/quotes (PowerShell here-strings
   mangle them).
 - **Memory**: `~/.claude/projects/.../memory/` holds durable facts; this repo's

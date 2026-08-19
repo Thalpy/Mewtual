@@ -21,6 +21,9 @@ automerge = "0.10"
 zeroize = "1"
 
 [dev-dependencies]
+# Only the test module needs it: the recording transport that proves an applied Remove reaches
+# `MeshTransport::evict_peer` has to implement the (async-trait) seam itself.
+async-trait.workspace = true
 catcoms-log = { path = "../catcoms-log" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-net = { path = "../catcoms-net" }

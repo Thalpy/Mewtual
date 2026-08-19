@@ -319,7 +319,7 @@ async fn joining_via_a_non_inviter_node_is_rejected() {
     let alice_group = ServerGroup::create(&alice).unwrap();
     let hub = Hub::new();
     let alice_peer = PeerId::from_u64(1);
-    let asy = ChannelSync::new(
+    let mut asy = ChannelSync::new(
         hub.join(alice_peer),
         alice_group,
         alice,
