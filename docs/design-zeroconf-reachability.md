@@ -538,8 +538,16 @@ Do not describe P8 as closed until P9 lands.
 
 ## 10. Open questions
 
-- **O1.** With both of its selling points retracted, is hosted mode worth a first-screen
-  question, or a Settings option for groups that outgrow friend circle? Product call.
+- **O1. RESOLVED (2026-08-19): hosted mode keeps its first-screen question**, reframed around
+  moderation rather than IP privacy. The product judgement that a group of strangers needs an
+  enforcement point stands; what changes is the copy, which may no longer promise either of the
+  two things v1 promised. The card may claim **immediate operator-triggered removal** (MLS Remove
+  is real, cryptographic and already built) and **reduced incidental exposure**. It may **not**
+  claim that members cannot see each other's addresses (voice discloses them outright, and DCUtR
+  has no kill switch), nor that a ban holds against a modified client (the chokepoint's only
+  handle is a self-minted peer id). It must disclose that the operator learns the membership set
+  and the traffic graph, and that the operator can silently withhold or delay a member's messages.
+  The "you can change your mind later" line must go until a mode migration is actually designed.
 - **O2.** Resolved in favour of the third option: the switchboard capability is a
   `DiscoveryPolicy` **ranking input**, never a promotion, and it lives in a TTL-bounded
   rendezvous registration rather than an unexpiring record. Require live corroboration (an actual
