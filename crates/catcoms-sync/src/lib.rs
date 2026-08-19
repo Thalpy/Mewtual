@@ -517,7 +517,26 @@ pub struct SyncStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatchupTask {
     /// Fetch and replay membership commits from `from_epoch` onward.
-    Commits { from_epoch: u64 },
+    Commits {
+        from_epoch: u64,
+        /// The epoch a peer demonstrably reached, when something proved we are genuinely
+        /// behind (an op or a commit record sealed under it); `None` for a speculative
+        /// probe on a fresh connection.
+        ///
+        /// This is what makes an **empty** bundle interpretable. Every honest, up-to-date
+        /// member answers a probe with an empty bundle, so counting that as a failure would
+        /// mark the whole pool failed on ordinary connects and starve the doc/blob fetches
+        /// that draw from the same pool. With a proven gap, an empty bundle means precisely
+        /// "this peer cannot fill it".
+        gap_at: Option<u64>,
+        /// The peer whose op revealed the gap, excluded from this attempt's candidates.
+        /// A member that joined *at* the commit we missed holds an empty `commit_log`, and
+        /// it is also the most-recently-seen peer (`remember_peer` ran on the same event),
+        /// so unfiltered most-recent-first selection asks the one peer guaranteed to answer
+        /// with nothing. First-choice only: every re-queue drops it, so a member whose sole
+        /// reachable peer is the newcomer still asks it rather than never chasing the gap.
+        avoid: Option<PeerId>,
+    },
     /// Fetch a document's history (to recover an op we could not decrypt).
     Doc { doc_type: DocType, doc_id: u128 },
 }
@@ -2850,7 +2869,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     self.drain_outbox().await;
                     self.resync_if_needed().await;
                 } else {
-                    self.on_gossip(&data);
+                    self.on_gossip(from, &data);
                 }
                 Ok(true)
             }
@@ -2933,30 +2952,76 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let tasks = std::mem::take(&mut self.catchup_queue);
         let mut attempted = false;
         for task in tasks {
-            let Some(peer) = self.pick_catchup_peer() else {
+            // The exclusion is consulted for this attempt only; `retry` is the same task with
+            // it dropped, so an exclusion can delay recovery by a tick but never prevent it.
+            let (avoid, retry) = match task {
+                CatchupTask::Commits {
+                    from_epoch,
+                    gap_at,
+                    avoid,
+                } => (
+                    avoid,
+                    CatchupTask::Commits {
+                        from_epoch,
+                        gap_at,
+                        avoid: None,
+                    },
+                ),
+                CatchupTask::Doc { .. } => (None, task),
+            };
+            // A gap another path already closed needs no request, and asking anyway would
+            // mark an innocent peer failed for the empty bundle it correctly returns.
+            if let CatchupTask::Commits {
+                gap_at: Some(gap), ..
+            } = task
+            {
+                if gap <= self.group.epoch() && self.pending_commits.is_empty() {
+                    continue;
+                }
+            }
+            let Some(peer) = self.pick_catchup_peer_avoiding(avoid) else {
                 // No usable catch-up source known yet; keep the task for a later
-                // tick (a new peer may appear). If every known peer is currently
-                // marked failed, that means we have tried them all without filling
-                // the gap; stop chasing until a fresh peer is seen.
-                if self.known_peers.is_empty() {
-                    self.catchup_queue.push(task);
+                // tick (a new peer may appear), and likewise when the exclusion is
+                // what ruled everyone out (the re-queued copy drops it). If every
+                // known peer is instead marked failed, that means we have tried them
+                // all without filling the gap; stop chasing until a fresh peer is seen.
+                if self.known_peers.is_empty() || avoid.is_some() {
+                    self.catchup_queue.push(retry);
                 }
                 continue;
             };
             attempted = true;
             match task {
-                CatchupTask::Commits { from_epoch } => {
+                CatchupTask::Commits {
+                    from_epoch, gap_at, ..
+                } => {
                     let before = self.group.epoch();
                     let _ = self.do_commit_catchup(peer, from_epoch).await;
-                    if self.pending_commits.is_empty() && self.group.epoch() > before {
-                        // Progress made: clear the failed-peer set and stop chasing.
-                        self.failed_catchup_peers.clear();
-                    } else if !self.pending_commits.is_empty() {
-                        // This peer did not fill the gap; exclude it and retry next
-                        // tick with a different source.
-                        self.note_failed_catchup_peer(peer);
-                        let here = self.group.epoch();
-                        self.enqueue_commit_catchup(here);
+                    let here = self.group.epoch();
+                    // "Filled" has to be judged against the proven gap, not against whether
+                    // the reply parsed: an empty bundle used to fall through both arms below,
+                    // marking nothing, so the next op re-picked the same peer forever.
+                    let progressed = here > before;
+                    let closed =
+                        self.pending_commits.is_empty() && gap_at.is_none_or(|gap| here >= gap);
+                    if closed {
+                        if progressed {
+                            // Progress made: clear the failed-peer set and stop chasing.
+                            self.failed_catchup_peers.clear();
+                        }
+                    } else {
+                        if progressed {
+                            // It moved us but did not finish (a bundle truncated to the
+                            // response budget); it is still a good source, so keep asking it.
+                            self.failed_catchup_peers.clear();
+                        } else {
+                            // Nothing usable came back. An **empty** bundle lands here, and
+                            // that is the defect: a member that joined at the missed commit
+                            // holds no commit log, and leaving it unmarked made the drain
+                            // re-pick it, most-recently-seen, on every single op forever.
+                            self.note_failed_catchup_peer(peer);
+                        }
+                        self.enqueue_commit_catchup_for(here, gap_at, None);
                     }
                 }
                 CatchupTask::Doc { doc_type, doc_id } => {
@@ -3003,16 +3068,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// un-handshaked candidates cannot crowd out a known-good source. Skips peers that
     /// just failed to fill a gap.
     fn pick_catchup_peer(&self) -> Option<PeerId> {
+        self.pick_catchup_peer_avoiding(None)
+    }
+
+    /// [`Self::pick_catchup_peer`], additionally skipping `avoid`: the peer whose op revealed
+    /// the gap this task is chasing. Skipping it changes only **whom we ask**; the response is
+    /// still verified, roster-checked and anti-replay bound exactly as before, and only a
+    /// verified response still promotes into `member_peers`, so no unproven peer becomes any
+    /// easier to believe.
+    fn pick_catchup_peer_avoiding(&self, avoid: Option<PeerId>) -> Option<PeerId> {
+        let eligible = |p: &&PeerId| !self.failed_catchup_peers.contains(p) && Some(**p) != avoid;
         self.member_peers
             .iter()
             .rev()
-            .find(|p| !self.failed_catchup_peers.contains(p))
-            .or_else(|| {
-                self.known_peers
-                    .iter()
-                    .rev()
-                    .find(|p| !self.failed_catchup_peers.contains(p))
-            })
+            .find(eligible)
+            .or_else(|| self.known_peers.iter().rev().find(eligible))
             .copied()
     }
 
@@ -3051,18 +3121,54 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Queue a membership-commit catch-up from `from_epoch` (deduped: at most one
     /// commit catch-up is ever queued at a time; bounded by `max_catchup_queue`).
     fn enqueue_commit_catchup(&mut self, from_epoch: u64) {
-        if self
+        self.enqueue_commit_catchup_for(from_epoch, None, None);
+    }
+
+    /// [`Self::enqueue_commit_catchup`], carrying what the detector knew: the epoch that proved
+    /// we are behind (`gap_at`) and the peer that proved it (`avoid`).
+    ///
+    /// Still at most one commit task, so a second detection **merges** rather than queues:
+    /// chase from the lowest epoch, keep any proof of a real gap, and keep the exclusion only
+    /// while one unambiguous peer is responsible. Two different peers revealing the same gap
+    /// means one of them may well be an older member that *can* serve it, so excluding both
+    /// could exclude the only source; the empty-bundle failure marking handles that case.
+    fn enqueue_commit_catchup_for(
+        &mut self,
+        from_epoch: u64,
+        gap_at: Option<u64>,
+        avoid: Option<PeerId>,
+    ) {
+        if let Some(CatchupTask::Commits {
+            from_epoch: queued_from,
+            gap_at: queued_gap,
+            avoid: queued_avoid,
+        }) = self
             .catchup_queue
-            .iter()
-            .any(|t| matches!(t, CatchupTask::Commits { .. }))
+            .iter_mut()
+            .find(|t| matches!(t, CatchupTask::Commits { .. }))
         {
+            *queued_avoid = match (*queued_avoid, avoid) {
+                (a, b) if a == b => a,
+                // A bare probe adopts the exclusion of a real detection.
+                (None, b) if queued_gap.is_none() => b,
+                _ => None,
+            };
+            *queued_from = (*queued_from).min(from_epoch);
+            *queued_gap = match (*queued_gap, gap_at) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
             return;
         }
         if self.catchup_queue.len() >= self.config.max_catchup_queue {
             tracing::warn!("catch-up queue full; dropping a commit catch-up task");
             return;
         }
-        self.catchup_queue.push(CatchupTask::Commits { from_epoch });
+        self.catchup_queue.push(CatchupTask::Commits {
+            from_epoch,
+            gap_at,
+            avoid,
+        });
     }
 
     /// Queue a document catch-up (deduped per document; bounded by `max_catchup_queue`).
@@ -4902,6 +5008,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Buffer a commit that arrived ahead of our epoch and chase the gap.
     fn buffer_future_commit(&mut self, record: CommitRecord) {
         let current = self.group.epoch();
+        let record_epoch = record.commit_epoch;
         let gap = record.commit_epoch.saturating_sub(current);
         if gap > self.config.max_commit_gap {
             tracing::warn!(
@@ -4930,7 +5037,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         self.stats.commits_buffered += 1;
-        self.enqueue_commit_catchup(current);
+        // The record itself proves the gap, so an empty answer to this chase is a failure.
+        self.enqueue_commit_catchup_for(current, Some(record_epoch), None);
     }
 
     /// Apply any buffered commits that now fill the immediate next slot, in order.
@@ -5486,7 +5594,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.group.member_device_ids()
     }
 
-    fn on_gossip(&mut self, data: &[u8]) {
+    fn on_gossip(&mut self, from: PeerId, data: &[u8]) {
         let sealed = match SealedOp::decode(data) {
             Ok(s) => s,
             Err(e) => {
@@ -5503,7 +5611,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         match sealed.epoch.cmp(&current) {
             Ordering::Equal => self.ingest_current(&sealed),
             Ordering::Less => self.ingest_past(&sealed),
-            Ordering::Greater => self.ingest_future(&sealed),
+            Ordering::Greater => self.ingest_future(from, &sealed),
         }
     }
 
@@ -5556,15 +5664,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// behind on membership commits. Chase the commits (to advance) and the
     /// document (to recover this op once we have caught up) rather than dropping
     /// it silently.
-    fn ingest_future(&mut self, sealed: &SealedOp) {
+    fn ingest_future(&mut self, from: PeerId, sealed: &SealedOp) {
         self.stats.ops_dropped_future_epoch += 1;
         let current = self.group.epoch();
         tracing::debug!(
             epoch = sealed.epoch,
             current,
+            ?from,
             "op sealed under a future epoch; chasing commits + doc catch-up"
         );
-        self.enqueue_commit_catchup(current);
+        // `from` reached `sealed.epoch`, so the gap is proven, and `from` is the peer least
+        // able to close it: if it joined at the commit we missed, its commit log is empty.
+        self.enqueue_commit_catchup_for(current, Some(sealed.epoch), Some(from));
         self.enqueue_doc_catchup(sealed.doc_type, sealed.doc_id);
     }
 
@@ -7695,6 +7806,195 @@ mod tests {
         assert_eq!(node.known_peers.len(), 3);
         // The most-recently-seen peer is chosen for catch-up.
         assert_eq!(node.pick_catchup_peer(), Some(PeerId::from_u64(9)));
+    }
+
+    // --- P14 recovery half: WHOM a missed-commit chase asks -------------------
+    //
+    // (`design-zeroconf-reachability.md` P14.) These are about selection only. Nothing here
+    // relaxes what makes an answer believable: a response is still roster-checked, signature-
+    // verified and anti-replay bound, and only such a response promotes into `member_peers`.
+
+    /// Build a group in which `bob` genuinely missed the commit that admitted `carol`: Bob is
+    /// never subscribed to the control topic, so nothing delivered it. Carol joined *at* that
+    /// commit, so her `commit_log` is empty and she cannot serve it; and she is the peer whose
+    /// later op reveals the gap. Returns `(hub, alice, bob, carol, ids)`.
+    async fn group_with_a_missed_commit(
+    ) -> (std::sync::Arc<Hub>, Member, Member, Member, Vec<DeviceId>) {
+        let (hub, members, ids) = build_members(3).await;
+        let mut it = members.into_iter();
+        let (alice, bob, carol) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+        assert_eq!(alice.epoch(), 2);
+        assert_eq!(bob.epoch(), 1, "Bob missed the commit that admitted Carol");
+        assert_eq!(carol.epoch(), 2);
+        assert!(
+            carol.commit_log.is_empty(),
+            "a member that joined at epoch N holds no commit log; it cannot serve that gap"
+        );
+        (hub, alice, bob, carol, ids)
+    }
+
+    #[tokio::test]
+    async fn an_empty_commit_bundle_marks_the_peer_failed_so_the_next_attempt_asks_someone_else() {
+        // The loop this closes: an empty bundle returned `Ok(0)` and marked nothing, so the
+        // drain re-picked the same most-recently-seen peer on every subsequent op, forever.
+        let (_hub, mut alice, mut bob, mut carol, _ids) = group_with_a_missed_commit().await;
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        bob.remember_peer(alice_peer);
+        bob.remember_peer(carol_peer); // most recently seen, so the unfiltered pick
+        assert_eq!(bob.pick_catchup_peer(), Some(carol_peer));
+
+        // Chase the gap with no exclusion, isolating the empty-bundle rule.
+        bob.enqueue_commit_catchup_for(1, Some(2), None);
+        let (_, _) = tokio::join!(bob.drain_catchup_queue(), carol.run_once());
+
+        assert_eq!(bob.epoch(), 1, "Carol had nothing to give");
+        assert!(
+            bob.failed_catchup_peers.contains(&carol_peer),
+            "an empty bundle is a failure for that peer, not a success"
+        );
+        assert_eq!(
+            bob.pick_catchup_peer(),
+            Some(alice_peer),
+            "so the next attempt asks somebody else"
+        );
+        assert!(
+            !bob.catchup_queue.is_empty(),
+            "and the gap is still being chased"
+        );
+
+        // That somebody else closes it.
+        let (_, _) = tokio::join!(bob.drain_catchup_queue(), alice.run_once());
+        assert_eq!(bob.epoch(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_peer_whose_op_revealed_the_gap_is_not_asked_to_fill_it() {
+        // `remember_peer` runs on the same inbound gossip event, so the newcomer is the
+        // most-recently-seen peer at the exact moment its own op proves we are behind.
+        let (_hub, alice, mut bob, mut carol, _ids) = group_with_a_missed_commit().await;
+        let (alice_peer, carol_peer) = (alice.local_peer(), carol.local_peer());
+        bob.note_candidate_peer(alice_peer); // as the product does after the join handshake
+        bob.open_channel(DocType::Channel, 1).await.unwrap();
+        carol.open_channel(DocType::Channel, 1).await.unwrap();
+        carol
+            .post(DocType::Channel, 1, |d| {
+                use automerge::{transaction::Transactable, ROOT};
+                d.put(ROOT, "hello", "from carol")
+            })
+            .await
+            .unwrap();
+
+        assert!(bob.run_once().await.unwrap()); // ingests Carol's future-epoch op
+        assert_eq!(bob.stats().ops_dropped_future_epoch, 1);
+        assert!(
+            bob.catchup_queue.contains(&CatchupTask::Commits {
+                from_epoch: 1,
+                gap_at: Some(2),
+                avoid: Some(carol_peer),
+            }),
+            "the gap carries the epoch that proved it and the peer that revealed it"
+        );
+        assert_eq!(
+            bob.pick_catchup_peer(),
+            Some(carol_peer),
+            "unfiltered, the newcomer is still the pick"
+        );
+        assert_eq!(
+            bob.pick_catchup_peer_avoiding(Some(carol_peer)),
+            Some(alice_peer),
+            "so the gap's own chase looks past it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gap_whose_only_source_is_the_excluded_peer_retries_instead_of_wedging() {
+        // The degenerate case: the peer that revealed the gap is the only one we can reach.
+        // It must not wedge (never chase again) and must not spin (ask on every tick forever).
+        let (_hub, mut alice, mut bob, mut carol, _ids) = group_with_a_missed_commit().await;
+        let carol_peer = carol.local_peer();
+        bob.remember_peer(carol_peer);
+        bob.enqueue_commit_catchup_for(1, Some(2), Some(carol_peer));
+
+        // Pass 1: nothing eligible, so no request leaves at all; the task survives without its
+        // exclusion, which is what stops the exclusion becoming a wedge.
+        assert!(!bob.drain_catchup_queue().await, "no peer was asked");
+        assert_eq!(
+            bob.catchup_queue,
+            vec![CatchupTask::Commits {
+                from_epoch: 1,
+                gap_at: Some(2),
+                avoid: None,
+            }]
+        );
+
+        // Pass 2: with the exclusion lapsed the newcomer is asked once, answers empty, and is
+        // marked failed.
+        let (_, _) = tokio::join!(bob.drain_catchup_queue(), carol.run_once());
+        assert_eq!(bob.stats().commit_catchups_requested, 1);
+        assert!(bob.failed_catchup_peers.contains(&carol_peer));
+
+        // Pass 3: every known peer is now failed, so the chase stops rather than spinning.
+        assert!(!bob.drain_catchup_queue().await);
+        assert!(bob.catchup_queue.is_empty());
+        assert_eq!(
+            bob.stats().commit_catchups_requested,
+            1,
+            "asked exactly once"
+        );
+
+        // Not wedged: the moment a peer that predates the commit is reachable, the next
+        // detection heals.
+        bob.remember_peer(alice.local_peer());
+        bob.enqueue_commit_catchup_for(1, Some(2), None);
+        let (_, _) = tokio::join!(bob.drain_catchup_queue(), alice.run_once());
+        assert_eq!(bob.epoch(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_missed_commit_heals_without_an_older_member_speaking() {
+        // The property the defect actually broke, and the test that would have caught it.
+        // Alice never posts, never gossips and never subscribes to the channel; she only
+        // answers the one request Bob directs at her. Before the fix Bob asked Carol on this
+        // tick and on every tick after it, and stayed at epoch 1 until some member that
+        // predated the commit happened to speak.
+        let (_hub, mut alice, mut bob, mut carol, ids) = group_with_a_missed_commit().await;
+        bob.note_candidate_peer(alice.local_peer());
+        bob.open_channel(DocType::Channel, 1).await.unwrap();
+        carol.open_channel(DocType::Channel, 1).await.unwrap();
+        carol
+            .post(DocType::Channel, 1, |d| {
+                use automerge::{transaction::Transactable, ROOT};
+                d.put(ROOT, "hello", "from carol")
+            })
+            .await
+            .unwrap();
+
+        assert!(bob.run_once().await.unwrap()); // sees the future-epoch op, queues the chase
+        assert_eq!(bob.epoch(), 1);
+
+        // One drain. The commit chase goes to Alice, and the doc chase that follows it goes
+        // to Alice too, because serving a verified bundle is what promoted her into the
+        // proven-member pool; so she answers two requests and Carol is never asked again.
+        let (_, _) = tokio::join!(bob.run_once(), async {
+            alice.run_once().await.unwrap();
+            alice.run_once().await.unwrap();
+        });
+
+        assert_eq!(bob.epoch(), 2, "the missed commit healed");
+        assert!(
+            bob.contains_member(&ids[2]),
+            "and Bob now sees the member it admitted"
+        );
+        assert_eq!(
+            bob.stats().commit_catchups_requested,
+            1,
+            "one request, aimed at a peer that could actually answer"
+        );
+        assert_eq!(
+            alice.stats().commits_served,
+            1,
+            "Alice only ever responded; she published nothing"
+        );
     }
 
     // --- member PEX (6e-3d-7) ------------------------------------------------

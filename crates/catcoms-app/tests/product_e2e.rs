@@ -222,6 +222,48 @@ async fn join_node(
     }
 }
 
+/// `join_node`, with the control-topic subscription deliberately withheld.
+///
+/// This is how a **genuinely missed** membership commit is modelled without reaching past the
+/// product surface: a node in this state never receives the broadcast admitting anybody after
+/// it, which is exactly the delivery failure the recovery path exists for. Everything else is
+/// the bridge's join sequence verbatim, so what recovers (or fails to) is the product's.
+#[allow(clippy::too_many_arguments)]
+async fn join_node_off_the_control_topic(
+    hub: &Arc<Hub>,
+    clock: &ManualClock,
+    peer: PeerId,
+    name: &str,
+    seed: u64,
+    inviter: PeerId,
+    invite: &InviteToken,
+) -> Node {
+    let server = Server::join(
+        hub.join(peer),
+        MlsDevice::generate().expect("a fresh MLS provider per device"),
+        ChaCha20Rng::seed_from_u64(seed),
+        Box::new(clock.clone()),
+        name,
+        inviter,
+        invite,
+    )
+    .await
+    .expect("join");
+    let (actor, events, task) = spawn(server);
+    actor.open_channel(general()).await;
+    actor.catch_up(inviter, general()).await;
+    actor.catch_up_profiles(inviter).await;
+    let fp = my_fp(&actor).await;
+    Node {
+        actor,
+        events,
+        task,
+        peer,
+        fp,
+        seq: 0,
+    }
+}
+
 /// Poll `probe` until it yields a value, draining `events` between attempts.
 ///
 /// The drain is load-bearing, not tidiness: the actor's event channel is bounded, so a test that
@@ -1286,23 +1328,8 @@ async fn owner_only_actions_are_refused_for_a_non_owner() {
 /// membership-commit broadcast admitting anybody after it, and sat at its join epoch forever.
 /// `join_node` above mirrors the fixed sequence; keep the two in step.
 ///
-/// **A second defect is still open, and this test does not cover it.** It only fails to bite here
-/// because a subscribed joiner receives the commit live and never needs recovery. If a commit is
-/// genuinely missed, the recovery still asks the one member who cannot answer: the lagging
-///    member does notice: the newcomer's first op is sealed under a future epoch, `ingest_future`
-///    enqueues a commit catch-up, and it is drained on the next tick. But `remember_peer(from)`
-///    runs on that same inbound gossip event, so the sender is the most-recently-seen peer, and
-///    `pick_catchup_peer` prefers the most recent (there is no proven `member_peers` entry: only
-///    a commit catch-up promotes, and a doc catch-up does not). The peer picked is therefore
-///    *by construction* the member whose arrival caused the gap, and a member that joined at
-///    epoch N holds an empty `commit_log`, so it answers with an empty bundle. An empty bundle
-///    returns `Ok(0)` and marks nothing failed, so every subsequent op from the newcomer repeats
-///    the identical choice forever.
-///
-/// It heals only when a member that *was* present for the commit posts a document op after the
-/// newcomer, which re-orders `known_peers` in time for the next drain. A discovery/PEX tick from
-/// the founder is not enough (verified): the next future-epoch op re-orders the newcomer back to
-/// the front before the queue drains. Tracked as P14 in `docs/design-zeroconf-reachability.md`.
+/// **The recovery half of the same defect is covered by the next test, not this one**: a
+/// subscribed joiner receives the commit live and never reaches the recovery path at all.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_third_member_is_visible_to_the_member_who_joined_before_them() {
     let hub = Hub::new();
@@ -1356,6 +1383,86 @@ async fn a_third_member_is_visible_to_the_member_who_joined_before_them() {
         3,
         "and the roster shows all three"
     );
+
+    alice.shutdown().await;
+    bob.shutdown().await;
+    carol.shutdown().await;
+}
+
+/// A **genuinely missed** membership commit heals on its own, with no member that predates it
+/// having to say a word.
+///
+/// This is the recovery half of P14 (`docs/design-zeroconf-reachability.md`), and the property
+/// the whole recovery path exists for. The lagging member does notice the gap: the newcomer's
+/// first op arrives sealed under a future epoch, `ingest_future` queues a commit catch-up, and
+/// it drains on the next tick. What was broken was **whom it asked**. `remember_peer(from)` runs
+/// on that same inbound gossip event, so the newcomer is the most-recently-seen peer at the
+/// exact moment the drain chooses, and `pick_catchup_peer` prefers the most recent; there is no
+/// proven `member_peers` entry to outrank it, because only a commit catch-up promotes and a
+/// document catch-up does not. So the peer asked was *by construction* the member whose arrival
+/// caused the gap, and a member that joined at epoch N holds an empty `commit_log`. Its empty
+/// bundle returned `Ok(0)` and marked nothing failed, so the next op repeated the identical
+/// choice, forever. It healed only when a member that *was* present for the commit happened to
+/// post a document op after the newcomer.
+///
+/// Hence the shape of this test: after Carol joins, **Alice never sends anything**. She answers
+/// what she is asked and nothing else, so a pass means the recovery aimed itself at a peer that
+/// could actually serve the gap rather than being rescued by an older member speaking.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_genuinely_missed_membership_commit_heals_without_an_older_member_speaking() {
+    let hub = Hub::new();
+    let clock = ManualClock::new(1_700_000_000_000);
+    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+
+    // Bob joins, but off the control topic: the commit admitting anyone after him is lost.
+    let invite = mint(&alice.actor, 7).await;
+    let mut bob = join_node_off_the_control_topic(
+        &hub,
+        &clock,
+        PeerId::from_u64(2),
+        "bob",
+        2,
+        alice.peer,
+        &invite,
+    )
+    .await;
+    assert_eq!(bob.actor.member_count().await, 2);
+
+    let invite = mint(&alice.actor, 8).await;
+    let carol = join_node(
+        &hub,
+        &clock,
+        PeerId::from_u64(3),
+        "carol",
+        3,
+        alice.peer,
+        &invite,
+    )
+    .await;
+    assert_eq!(alice.actor.member_count().await, 3, "the roster grew");
+    // Bob is deliberately not asserted to still read 2 here: the commit did not reach him over
+    // the control topic (he is not on it), but Carol publishes her profile the moment she is up,
+    // and that op is already enough to reveal the gap and drive the recovery. Whether the
+    // recovery has finished by this line is a race; that it finishes at all is the property.
+
+    // Only the newcomer speaks from here.
+    carol.actor.send_message(general(), "hi, I'm carol").await;
+
+    until(
+        "the lagging member recovers the commit it missed",
+        &mut bob.events,
+        || async { (bob.actor.member_count().await == 3).then_some(()) },
+    )
+    .await;
+    until(
+        "and can then read what the newcomer said",
+        &mut bob.events,
+        || async {
+            let msgs = bob.actor.messages(general()).await;
+            msgs.iter().any(|m| m.text == "hi, I'm carol").then_some(())
+        },
+    )
+    .await;
 
     alice.shutdown().await;
     bob.shutdown().await;

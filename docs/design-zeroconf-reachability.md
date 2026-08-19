@@ -8,7 +8,7 @@ what the first draft asserted and why it was wrong, so the mistake is not re-mad
 **Where it stands (2026-08-19):** the invite path is fixed and the two deployment-blocking
 CRITICALs are closed. **Section 1c is the status board** and is the answer to "is P-whatever
 fixed"; **section 9** tracks the ladder itself, of which rungs 0 and 1 are built and the rest
-are not. Open defects: P3 (hard half), P6, P9, P10, P13, P14 (recovery half), with P5 and P8
+are not. Open defects: P3 (hard half), P6, P9, P10, with P5 and P8
 partial. Nothing here is deployed.
 
 Extends [`ARCHITECTURE.md`](ARCHITECTURE.md), [`design-6e-rendezvous.md`](design-6e-rendezvous.md),
@@ -112,14 +112,13 @@ least three block any public deployment.
   and have every joiner sweep its own LAN, which is the attack the peer-record validator was added
   to stop, reached through the one path that has no validator.
 
-  This is **not** fixed, deliberately. The obvious fix (reject DNS here) collides head-on with rung
-  4, whose entire point is that clients dial `/dns4/<name>/tcp/443/tls/ws`, and that address is
-  legitimately a rendezvous or relay address. The distinction that actually matters is
+  **Fixed by splitting the validator by trust.** The obvious fix (reject DNS here) collides head-on
+  with rung 4, whose entire point is that clients dial `/dns4/<name>/tcp/443/tls/ws`, and that
+  address is legitimately a rendezvous or relay address. The distinction that actually matters is
   **operator-configured** (trusted, may be a name) versus **invite-supplied** (attacker-controlled,
-  must be a literal in a routable range), and `validate_rendezvous_addrs` currently serves both
-  callers without distinguishing them. Splitting it is the fix, and it is a security change to a
-  validator that the real-socket e2e tests depend on, so it wants its own review rather than a
-  late patch.
+  must be a literal in a routable range), and `validate_rendezvous_addrs` served both callers
+  without distinguishing them. There are now two functions with those two names; see the 1c row for
+  the exact rules and which call site got which.
 - **P14 (NEW, found by the product-layer suite). Missed-commit recovery asks the one member who
   cannot answer.** A member that misses a membership commit *does* detect it: the newcomer's first
   op arrives sealed under a future epoch, `ingest_future` enqueues a commit catch-up, and it drains
@@ -135,11 +134,35 @@ least three block any public deployment.
   newcomer. A discovery or PEX tick from the founder is **not** enough (verified): the next
   future-epoch op re-orders the newcomer back to the front before the queue drains.
 
-  Currently latent: the joiner control-topic fix means a commit is normally received live, so
-  recovery is not reached. It becomes live whenever a commit is genuinely missed, which is exactly
-  the case the recovery path exists for. Fix candidates: exclude the peer whose op revealed the gap
-  from that gap's catch-up candidates; treat an empty bundle from a peer as a failure for that peer
-  rather than a success; or prefer a peer known to have been present at the target epoch.
+  Was latent, because the joiner control-topic fix means a commit is normally received live and
+  recovery is not reached; it went live whenever a commit was genuinely missed, which is exactly
+  the case the recovery path exists for.
+
+  **FIXED.** Two composing changes in `catcoms-sync`, both in catch-up **selection** only:
+
+  1. `CatchupTask::Commits` now carries `gap_at`, the epoch something proved a peer had reached.
+     With a gap proven, a catch-up that returns **no progress** (an empty bundle included) marks
+     that peer failed and re-queues the chase, so the next attempt goes elsewhere. `gap_at` is
+     what makes this safe: a `PeerConnected` probe carries `None`, and every honest up-to-date
+     member answers a probe with an empty bundle, so marking those would have emptied the pool
+     that document and blob fetches draw from too. A peer that advanced us but did not finish
+     (a bundle truncated to the response budget) is *not* marked failed.
+  2. `ingest_future` now records the peer whose op revealed the gap, and that peer is skipped
+     when picking a source for that gap. It is a first-choice exclusion: every re-queue drops it,
+     so a member whose only reachable peer is the newcomer asks it once rather than never
+     chasing, and two different peers revealing the same gap cancels the exclusion (one of them
+     may be an older member that can actually serve it).
+
+  The third candidate, preferring a peer known to have been present at the target epoch, was
+  **not** built. It needs per-peer epoch-presence state that nothing currently records, and 1 and
+  2 already send the first request to a peer that can answer; `member_peers` (populated only by a
+  roster-verified signed catch-up) is the existing, security-meaningful version of "known good
+  source" and is already preferred. Revisit only if a real deployment shows repeated misses.
+
+  Regression-tested at both layers: `catcoms-sync`'s test module covers the empty-bundle failure
+  marking, the exclusion, the degenerate case where the excluded peer is the only one reachable
+  (retries, does not wedge or spin), and the property itself; `catcoms-app/tests/product_e2e.rs`
+  covers the property where a user would see it. All four fail against the unfixed code.
 
 ### 1c. Status board
 
@@ -168,8 +191,8 @@ block in `HANDOVER.md` for what happens otherwise).
 | **[ ]** | P10 no padding or size quantization | | Listed in `ARCHITECTURE.md` as a locked review fix and never built. Exact per-message and per-file sizes are visible to any forwarder, which matters more once rung 2 puts a member on the path |
 | **[x]** | P11 unjittered discovery, unconditional dials | `923a4eb`, `e35b1b2` | |
 | **[x]** | P12 relay advertised private addresses | `e35b1b2` | |
-| **[ ]** | P13 invite-supplied rendezvous addresses unvalidated | | Split the validator by trust: operator-configured may be a DNS name (rung 4 needs one), invite-supplied must be a routable IP literal. Same loopback rule the bootstrap path uses |
-| **[~]** | P14 a joiner never saw later members | `36ca2df` | Control-topic cause fixed. The **recovery** cause is open: a genuinely missed commit still asks the newcomer who caused the gap, and an empty bundle counts as success |
+| **[x]** | P13 invite-supplied rendezvous addresses unvalidated | *(uncommitted)* | Split by trust. `validate_operator_rendezvous_addrs` keeps today's behaviour (a DNS name is allowed; rung 4 needs one). `validate_invite_rendezvous_addrs` adds: no `/dns*`, and every literal globally routable, with loopback permitted only when the **whole set** is loopback, the same rule `dialable_bootstrap` uses. The range predicates moved into one shared `catcoms_net::addr` module that the desktop bridge and `is_advertisable` now both import, so there is no second classifier to disagree. Call sites: desktop `discover_and_connect` and `catcomsctl` join take the invite variant; desktop `connect_rendezvous`, desktop `mint_and_store_invite` and `catcomsctl serve --rendezvous` take the operator one. Also found: the pairing-grant path (`join_one_grant`) had no validation at all and now takes the operator variant |
+| **[x]** | P14 a joiner never saw later members | `36ca2df`, + this change | Both halves closed. Control-topic cause fixed in `36ca2df`; the recovery cause is fixed here: a commit chase carries the epoch that proved the gap and the peer that revealed it, an **empty** bundle answering a proven gap now marks that peer failed instead of counting as success, and the peer whose op revealed the gap is skipped for that gap's first attempt (a first-choice exclusion only, dropped on every re-queue, so it can never wedge). Selection only: response verification, the roster check, the nonce/epoch anti-replay and the two-pool separation are untouched |
 
 **Note on P3, and why invite limits do not apply.** The instinct to charge for registration is
 right; the mechanism has to sit where the attacker actually is. The rendezvous is public
