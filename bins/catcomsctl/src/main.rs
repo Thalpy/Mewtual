@@ -18,8 +18,8 @@ use automerge::{AutoCommit, AutomergeError, ObjType, ReadDoc, Value, ROOT};
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteLedger, InviteToken, MlsDevice, ServerGroup};
 use catcoms_net::{
-    phase0_peer_id, validate_rendezvous_addrs, MeshService, RelayLimits, RelayNode,
-    RendezvousLimits, RendezvousNode,
+    phase0_peer_id, validate_invite_rendezvous_addrs, validate_operator_rendezvous_addrs,
+    MeshService, RelayLimits, RelayNode, RendezvousLimits, RendezvousNode,
 };
 use catcoms_rt::{
     Clock, Hub, MemNetwork, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock,
@@ -600,10 +600,12 @@ async fn run_serve(
     relay: Option<String>,
     rendezvous: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
-    // Validate a rendezvous address up front (reject circuit / no-peer-id / duplicate).
+    // Validate a rendezvous address up front (reject circuit / no-peer-id / duplicate). This one
+    // is operator-typed (`--rendezvous` on this very command line), so a DNS name is allowed: a
+    // TCP/443 TLS/WebSocket node is dialled by name.
     let rz_target = match &rendezvous {
         Some(rz) => Some(
-            validate_rendezvous_addrs(std::slice::from_ref(rz))?
+            validate_operator_rendezvous_addrs(std::slice::from_ref(rz))?
                 .into_iter()
                 .next()
                 .expect("one validated target"),
@@ -794,7 +796,9 @@ async fn run_join(invite_file: PathBuf) -> Result<(), Box<dyn Error>> {
 /// `DiscoveryPolicy` decide what to dial (the net Actor never auto-dials), dial it, and
 /// join; with no hard-coded server address.
 async fn run_join_via_rendezvous(invite: InviteToken) -> Result<(), Box<dyn Error>> {
-    let targets = validate_rendezvous_addrs(&invite.rendezvous)?;
+    // Invite-supplied, so whoever wrote the invite chose these: the strict variant, which refuses
+    // names and every non-routable literal (P13).
+    let targets = validate_invite_rendezvous_addrs(&invite.rendezvous)?;
     let rz = targets
         .into_iter()
         .next()

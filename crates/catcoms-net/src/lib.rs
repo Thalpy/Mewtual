@@ -28,8 +28,10 @@
 //! The **infra** nodes (the zero-knowledge relay and rendezvous) live in their own modules;
 //! see [`relay_node`] and [`rendezvous_node`] for their sizing, byte accounting and
 //! load-shedding, [`admission`] for the source-prefix quotas both share, and
-//! [`infra_transport`] for the metered TCP and TCP/443 WebSocket transports.
+//! [`infra_transport`] for the metered TCP and TCP/443 WebSocket transports. [`addr`] holds
+//! the address classifiers every one of them (and the desktop bridge) shares.
 
+pub mod addr;
 pub mod admission;
 pub mod fdlimit;
 pub mod infra_transport;
@@ -37,6 +39,11 @@ pub mod metering;
 pub mod relay_node;
 pub mod rendezvous_node;
 
+pub use addr::{
+    addr_has_dns, addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
+    ipv4_is_globally_routable, ipv4_is_local, ipv4_is_undialable, ipv6_is_globally_routable,
+    ipv6_is_loopback,
+};
 pub use infra_transport::{
     is_advertisable, is_websocket_addr, is_wildcard_addr, load_ws_tls_pem, WsTlsConfig,
 };
@@ -439,14 +446,26 @@ pub struct RendezvousTarget {
     pub peer: libp2p::PeerId,
 }
 
-/// Validate an invite's `rendezvous` addresses (6e-3d-9): each must parse as a
-/// multiaddr, be **direct** (never a `/p2p-circuit`; a circuit rendezvous would route
-/// discovery through a relay), and carry a `/p2p/<id>`; and the peer ids must be
-/// **distinct**. The distinct-PeerId check catches accidental-duplicate misconfig
-/// **only**; it is *not* anti-collusion, so two secretly-cooperating rendezvous still
-/// count as ≤ 1 trust root in the eclipse layer regardless. Returns the parsed targets
-/// (in order) on success, so the caller can register/discover/dial against them.
-pub fn validate_rendezvous_addrs(addrs: &[String]) -> Result<Vec<RendezvousTarget>, NetError> {
+/// Validate **operator-configured** rendezvous addresses: the ones typed by the person running
+/// this node (the desktop create-server "rendezvous" field, `catcomsctl serve --rendezvous`).
+///
+/// The structural checks (6e-3d-9): each must parse as a multiaddr, be **direct** (never a
+/// `/p2p-circuit`; a circuit rendezvous would route discovery through a relay), and carry a
+/// `/p2p/<id>`; and the peer ids must be **distinct**. The distinct-PeerId check catches
+/// accidental-duplicate misconfig **only**; it is *not* anti-collusion, so two
+/// secretly-cooperating rendezvous still count as ≤ 1 trust root in the eclipse layer
+/// regardless. Returns the parsed targets (in order) on success, so the caller can
+/// register/discover/dial against them.
+///
+/// **No range or name check here, deliberately.** The operator is the trust root for their own
+/// node's configuration: pointing it at a rendezvous on their own LAN is a legitimate
+/// deployment, and rung 4 of the connectivity ladder *requires* a name, because a TCP/443
+/// TLS/WebSocket listener is dialled as `/dns4/<name>/tcp/443/tls/ws`. An address arriving in
+/// an **invite** is the opposite situation and gets [`validate_invite_rendezvous_addrs`]; see
+/// its doc comment for why one function serving both callers was defect P13.
+pub fn validate_operator_rendezvous_addrs(
+    addrs: &[String],
+) -> Result<Vec<RendezvousTarget>, NetError> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(addrs.len());
     for s in addrs {
@@ -481,6 +500,66 @@ pub fn validate_rendezvous_addrs(addrs: &[String]) -> Result<Vec<RendezvousTarge
         out.push(RendezvousTarget { addr, peer });
     }
     Ok(out)
+}
+
+/// Validate **invite-supplied** rendezvous addresses: the ones written by whoever produced a
+/// pasted invite, i.e. by the party we are guarding against.
+///
+/// Every structural check of [`validate_operator_rendezvous_addrs`] applies, and then each
+/// address must be a **globally routable IP literal**: no `/dns4`, `/dns6`, `/dnsaddr`, and no
+/// private, link-local, CGNAT (`100.64.0.0/10`), unique-local, multicast, reserved or
+/// documentation literal. See [`addr::addr_is_globally_routable`].
+///
+/// The two variants exist because one function was serving both callers, which was defect P13.
+/// The invite's *bootstrap* half was already validated while its *rendezvous* half was not, so
+/// the two halves of one attacker-authored invite were held to opposite standards. Adding the
+/// WebSocket and DNS transports to the client for rung 4 turned that into a live hole rather
+/// than a latent one: a `/dns4/...` in an invite used to fail at transport selection and now
+/// resolves and dials. A malicious inviter can point a name at `192.168.1.x`, rotate the A
+/// record per query, and have every joiner sweep its own LAN, which is exactly the attack the
+/// peer-record address filter was added to stop, reached through the one path with no filter.
+///
+/// **Loopback is allowed only when the entire set is loopback.** That is the genuine
+/// same-machine case (two instances on one dev box; the real-socket end-to-end tests bind
+/// loopback and carry it in an invite) and it cannot be used to make a remote joiner probe its
+/// own network, because a joiner elsewhere finds nothing there. Loopback *mixed* with a routable
+/// address is refused: it is not a fallback for anything, it can only ever probe ports on the
+/// reader's own machine. This is the rule the bootstrap half already uses (`dialable_bootstrap`
+/// in the desktop bridge), and it shares this crate's classifiers with it rather than restating
+/// them.
+pub fn validate_invite_rendezvous_addrs(
+    addrs: &[String],
+) -> Result<Vec<RendezvousTarget>, NetError> {
+    let targets = validate_operator_rendezvous_addrs(addrs)?;
+    // The same-machine case, judged over the whole set rather than per address.
+    if !targets.is_empty() && targets.iter().all(|t| addr::addr_is_loopback(&t.addr)) {
+        return Ok(targets);
+    }
+    for t in &targets {
+        if addr::addr_has_dns(&t.addr) {
+            return Err(NetError::Rendezvous(format!(
+                "an invite's rendezvous address must be an IP literal, not a name resolved at \
+                 dial time: {}",
+                t.addr
+            )));
+        }
+        if !addr::addr_is_globally_routable(&t.addr) {
+            return Err(NetError::Rendezvous(format!(
+                "an invite's rendezvous address must be globally routable: {}",
+                t.addr
+            )));
+        }
+    }
+    Ok(targets)
+}
+
+/// Compatibility alias for [`validate_operator_rendezvous_addrs`], the variant this name always
+/// meant. Kept so existing callers (including two `catcoms-sync` end-to-end tests) keep
+/// compiling; new code should name the variant it wants, because the difference is a trust
+/// boundary rather than a style preference. Not marked `#[deprecated]` only because the
+/// workspace builds with `-D warnings`.
+pub fn validate_rendezvous_addrs(addrs: &[String]) -> Result<Vec<RendezvousTarget>, NetError> {
+    validate_operator_rendezvous_addrs(addrs)
 }
 
 fn to_ident(topic: &Topic) -> gossipsub::IdentTopic {
@@ -1567,5 +1646,248 @@ mod tests {
         assert!(validate_rendezvous_addrs(&[format!("{good}/p2p-circuit")]).is_err());
         assert!(validate_rendezvous_addrs(&["/ip4/198.51.100.1/tcp/5000".to_string()]).is_err());
         assert!(validate_rendezvous_addrs(&[good.to_string(), good.to_string()]).is_err());
+    }
+
+    /// A deterministic peer id (no ambient RNG); `n` picks which one.
+    fn test_peer(n: u8) -> libp2p::PeerId {
+        let mut seed = [3u8; 32];
+        seed[0] = n;
+        keypair_from_seed(seed).unwrap().public().to_peer_id()
+    }
+
+    #[test]
+    fn the_operator_variant_still_accepts_a_dns_name() {
+        // Rung 4 of the connectivity ladder is a TLS/WebSocket listener on TCP/443, and the
+        // whole point of it is that clients dial it by NAME. If the operator variant ever
+        // starts rejecting names, rung 4 is broken, so pin it here rather than find out in
+        // the field.
+        let id = test_peer(1);
+        for name in [
+            format!("/dns4/rz.example.org/tcp/443/tls/ws/p2p/{id}"),
+            format!("/dns6/rz.example.org/tcp/443/tls/ws/p2p/{id}"),
+            format!("/dns/rz.example.org/tcp/443/tls/ws/p2p/{id}"),
+        ] {
+            assert!(
+                validate_operator_rendezvous_addrs(std::slice::from_ref(&name)).is_ok(),
+                "the operator may configure {name}"
+            );
+        }
+        // The operator is also entitled to point their own node at their own LAN.
+        assert!(validate_operator_rendezvous_addrs(&[format!(
+            "/ip4/192.168.1.5/tcp/5000/p2p/{id}"
+        )])
+        .is_ok());
+        // And the structural checks still apply to the operator too.
+        assert!(
+            validate_operator_rendezvous_addrs(&["/ip4/45.79.12.34/tcp/5000".to_string()]).is_err()
+        );
+    }
+
+    #[test]
+    fn the_invite_variant_keeps_the_structural_checks() {
+        let id1 = test_peer(1);
+        let id2 = test_peer(2);
+        let good = format!("/ip4/45.79.12.34/tcp/5000/p2p/{id1}");
+        assert_eq!(
+            validate_invite_rendezvous_addrs(std::slice::from_ref(&good))
+                .unwrap()
+                .len(),
+            1
+        );
+        // Circuit, no peer id, two peer ids, duplicate node: refused exactly as before, so the
+        // split did not lose a check.
+        assert!(validate_invite_rendezvous_addrs(&[format!("{good}/p2p-circuit")]).is_err());
+        assert!(
+            validate_invite_rendezvous_addrs(&["/ip4/45.79.12.34/tcp/5000".to_string()]).is_err()
+        );
+        assert!(validate_invite_rendezvous_addrs(&[format!("{good}/p2p/{id2}")]).is_err());
+        assert!(validate_invite_rendezvous_addrs(&[good.clone(), good]).is_err());
+    }
+
+    #[test]
+    fn the_invite_variant_refuses_names_and_unroutable_literals() {
+        let id = test_peer(1);
+        // A name resolves at dial time to whatever the invite's author currently points it at.
+        // With the rung-4 DNS transport wired into the client this is no longer a theoretical
+        // hole: it resolves and dials, so an inviter can rotate an A record per query and have
+        // every joiner sweep its own LAN. This is defect P13.
+        for name in [
+            "/dns4/scan.attacker.invalid/tcp/22",
+            "/dns6/scan.attacker.invalid/tcp/22",
+            "/dns/scan.attacker.invalid/tcp/22",
+            "/dnsaddr/scan.attacker.invalid",
+        ] {
+            let a = format!("{name}/p2p/{id}");
+            assert!(
+                validate_invite_rendezvous_addrs(std::slice::from_ref(&a)).is_err(),
+                "{a} must not survive an invite"
+            );
+        }
+
+        for host in [
+            // Private (RFC1918), the LAN-sweep payload itself.
+            "/ip4/192.168.1.5",
+            "/ip4/10.0.0.1",
+            "/ip4/172.16.4.4",
+            // Link-local: a different machine on every network the invite is opened on.
+            "/ip4/169.254.1.1",
+            "/ip6/fe80::1",
+            // Carrier-grade NAT, RFC 6598.
+            "/ip4/100.64.0.1",
+            "/ip4/100.127.255.254",
+            // IPv6 unique-local.
+            "/ip6/fd00::1",
+            "/ip6/fc00::1",
+            // Multicast: not an endpoint at all.
+            "/ip4/224.0.0.1",
+            "/ip4/239.255.255.250",
+            "/ip6/ff02::1",
+            // Reserved and unspecified.
+            "/ip4/0.0.0.0",
+            "/ip4/0.1.2.3",
+            "/ip4/240.0.0.1",
+            "/ip4/255.255.255.255",
+            "/ip6/::",
+            // Documentation and benchmark ranges, reserved precisely so they never route.
+            "/ip4/192.0.2.1",
+            "/ip4/198.51.100.1",
+            "/ip4/203.0.113.7",
+            "/ip4/198.18.0.1",
+            "/ip6/2001:db8::1",
+        ] {
+            let a = format!("{host}/tcp/5000/p2p/{id}");
+            assert!(
+                validate_invite_rendezvous_addrs(std::slice::from_ref(&a)).is_err(),
+                "{a} must not survive an invite"
+            );
+        }
+
+        // Two genuinely public literals are what an invite is supposed to carry.
+        for host in ["/ip4/45.79.12.34", "/ip6/2606:4700::1111"] {
+            let a = format!("{host}/tcp/5000/p2p/{id}");
+            assert!(
+                validate_invite_rendezvous_addrs(std::slice::from_ref(&a)).is_ok(),
+                "{a} is a normal public rendezvous address"
+            );
+        }
+    }
+
+    #[test]
+    fn the_invite_variant_is_not_fooled_by_ipv4_in_ipv6() {
+        // The mistake this pins: `Ipv6Addr::is_loopback()` is FALSE for `::ffff:127.0.0.1`, so
+        // testing the v6 properties directly lets every v4 rule be dodged by writing the same
+        // address in the other family. And the fold has to be `to_ipv4_mapped`, not `to_ipv4`:
+        // the latter also matches the deprecated `::a.b.c.d` form, which reads `::1` as
+        // "0.0.0.1" and misclassifies it.
+        let id = test_peer(1);
+        let id2 = test_peer(2);
+        for host in [
+            "/ip6/::ffff:192.168.1.5",
+            "/ip6/::ffff:10.0.0.1",
+            "/ip6/::ffff:169.254.1.1",
+            "/ip6/::ffff:224.0.0.1",
+            "/ip6/::ffff:100.64.0.1",
+            // The deprecated IPv4-compatible spelling of the same dodge.
+            "/ip6/::192.168.1.5",
+        ] {
+            let a = format!("{host}/tcp/5000/p2p/{id}");
+            assert!(
+                validate_invite_rendezvous_addrs(std::slice::from_ref(&a)).is_err(),
+                "{a} is a v4 address in v6 clothing"
+            );
+        }
+        // A mapped loopback is loopback, so it is judged by the same-machine rule rather than by
+        // the range rules: on its own it is the genuine two-instances-on-one-box case...
+        assert!(validate_invite_rendezvous_addrs(&[format!(
+            "/ip6/::ffff:127.0.0.1/tcp/5000/p2p/{id}"
+        )])
+        .is_ok());
+        // ...and mixed with a routable address it is refused, which is the case that matters:
+        // this is the exact spelling that defeated an earlier validator and had the joiner dial
+        // its own localhost while ignoring the real addresses.
+        assert!(validate_invite_rendezvous_addrs(&[
+            format!("/ip6/::ffff:127.0.0.1/tcp/5000/p2p/{id}"),
+            format!("/ip4/45.79.12.34/tcp/5000/p2p/{id2}"),
+        ])
+        .is_err());
+        // `::1` itself is loopback (not "0.0.0.1", which is what `to_ipv4` would have made of it),
+        // so the same-machine exemption applies to it too.
+        assert!(validate_invite_rendezvous_addrs(&[format!("/ip6/::1/tcp/5000/p2p/{id}")]).is_ok());
+        assert!(validate_invite_rendezvous_addrs(&[
+            format!("/ip6/::1/tcp/5000/p2p/{id}"),
+            format!("/ip4/45.79.12.34/tcp/5000/p2p/{id2}"),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn the_invite_variant_refuses_the_transitional_ranges() {
+        // The same dodge by a longer route: each of these embeds an IPv4 address that the host
+        // stack unwraps, so a routable-LOOKING v6 literal still reaches a private v4 target and
+        // none of the range checks would have seen it. Nothing this product mints publishes one.
+        let id = test_peer(1);
+        for host in [
+            // 2002::/16, 6to4. `2002:c0a8:0101::` is 192.168.1.1.
+            "/ip6/2002:c0a8:0101::1",
+            "/ip6/2002:2d4f:0c22::1",
+            // 64:ff9b::/96 and 64:ff9b:1::/48, NAT64.
+            "/ip6/64:ff9b::c0a8:105",
+            "/ip6/64:ff9b:1::1",
+            // 2001:0::/32, Teredo.
+            "/ip6/2001:0:4136:e378:8000:63bf:3fff:fdd2",
+        ] {
+            let a = format!("{host}/tcp/5000/p2p/{id}");
+            assert!(
+                validate_invite_rendezvous_addrs(std::slice::from_ref(&a)).is_err(),
+                "{a} is a transitional range"
+            );
+        }
+    }
+
+    #[test]
+    fn the_invite_variant_allows_loopback_only_when_the_whole_set_is_loopback() {
+        let id1 = test_peer(1);
+        let id2 = test_peer(2);
+        // The genuine same-machine case: two instances on one dev box, and the real-socket
+        // end-to-end tests, which bind loopback and carry it in an invite. A joiner elsewhere
+        // finds nothing at its own localhost, so this cannot be aimed at anyone.
+        let all_loopback = vec![
+            format!("/ip4/127.0.0.1/tcp/5000/p2p/{id1}"),
+            format!("/ip6/::1/tcp/5001/p2p/{id2}"),
+        ];
+        assert_eq!(
+            validate_invite_rendezvous_addrs(&all_loopback)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Mixed with anything routable it is refused: it is not a fallback for the routable
+        // address, it can only ever probe ports on the reader's own machine.
+        let mixed = vec![
+            format!("/ip4/127.0.0.1/tcp/5000/p2p/{id1}"),
+            format!("/ip4/45.79.12.34/tcp/5000/p2p/{id2}"),
+        ];
+        assert!(validate_invite_rendezvous_addrs(&mixed).is_err());
+
+        // The exemption is over the WHOLE set, so it cannot be unlocked by a set of one
+        // loopback plus one private address either.
+        let sneaky = vec![
+            format!("/ip4/127.0.0.1/tcp/5000/p2p/{id1}"),
+            format!("/ip4/192.168.1.5/tcp/5000/p2p/{id2}"),
+        ];
+        assert!(validate_invite_rendezvous_addrs(&sneaky).is_err());
+    }
+
+    #[test]
+    fn the_invite_variant_requires_a_literal_to_judge() {
+        // An address with no host component at all cannot be classified, and "classified later,
+        // by the dialer" is the hole. The memory transport is test-only and never appears in a
+        // real invite, so refusing it costs nothing.
+        let id = test_peer(1);
+        assert!(validate_invite_rendezvous_addrs(&[format!("/memory/1234/p2p/{id}")]).is_err());
+        // An empty vector is not an error; it means "this invite names no rendezvous", which
+        // each caller reports in its own words.
+        assert!(validate_invite_rendezvous_addrs(&[]).unwrap().is_empty());
     }
 }

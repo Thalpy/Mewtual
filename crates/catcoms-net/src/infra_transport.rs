@@ -27,7 +27,6 @@
 //! not depend on the choice either way: libp2p runs Noise inside the WebSocket, and everything
 //! above that is MLS ciphertext. The outer TLS exists purely to look like the web.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 
 use libp2p::core::muxing::StreamMuxerBox;
@@ -37,6 +36,7 @@ use libp2p::{noise, tcp, yamux, PeerId, Transport};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
+use crate::addr::{ipv4_is_globally_routable, ipv6_is_globally_routable, ipv6_is_loopback};
 use crate::admission::addr_prefix;
 use crate::metering::ByteMeters;
 use crate::NetError;
@@ -279,59 +279,17 @@ pub fn is_wildcard_addr(addr: &libp2p::Multiaddr) -> bool {
 /// An address with no IP component (the memory transport, or a `/dns4/...` name) is advertisable:
 /// there is nothing here to judge, and a DNS name is the *recommended* form for the `/tls/ws`
 /// listener.
+///
+/// The range rules themselves live in [`crate::addr`], shared with the invite-address validators
+/// and the desktop bridge, so a literal cannot be hostile to one of them and fine to another.
+/// Only the loopback exemption is local to this predicate.
 pub fn is_advertisable(addr: &libp2p::Multiaddr) -> bool {
     use libp2p::multiaddr::Protocol;
     addr.iter().all(|p| match p {
-        Protocol::Ip4(v4) => is_routable_v4(v4),
-        Protocol::Ip6(v6) => is_routable_v6(v6),
+        Protocol::Ip4(v4) => v4.is_loopback() || ipv4_is_globally_routable(&v4),
+        Protocol::Ip6(v6) => ipv6_is_loopback(&v6) || ipv6_is_globally_routable(&v6),
         _ => true,
     })
-}
-
-/// Whether an IPv4 address could plausibly be reached from the public internet.
-fn is_routable_v4(v4: Ipv4Addr) -> bool {
-    if v4.is_loopback() {
-        return true; // deliberately allowed; see `is_advertisable`.
-    }
-    let o = v4.octets();
-    !(v4.is_unspecified()
-        || v4.is_private()
-        || v4.is_link_local()
-        || v4.is_multicast()
-        || v4.is_broadcast()
-        || o[0] == 0                                        // 0.0.0.0/8, "this network"
-        || (o[0] == 100 && (64..=127).contains(&o[1]))      // 100.64.0.0/10, CGNAT
-        || (o[0] == 192 && o[1] == 0 && o[2] == 2)          // 192.0.2.0/24, TEST-NET-1
-        || (o[0] == 198 && o[1] == 51 && o[2] == 100)       // 198.51.100.0/24, TEST-NET-2
-        || (o[0] == 203 && o[1] == 0 && o[2] == 113)        // 203.0.113.0/24, TEST-NET-3
-        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))      // 198.18.0.0/15, benchmarking
-        || o[0] >= 240) // 240.0.0.0/4, reserved
-}
-
-/// Whether an IPv6 address could plausibly be reached from the public internet.
-fn is_routable_v6(v6: Ipv6Addr) -> bool {
-    if v6.is_loopback() {
-        return true;
-    }
-    if v6.is_unspecified() || v6.is_multicast() {
-        return false;
-    }
-    let seg = v6.segments();
-    // fe80::/10 link-local, fc00::/7 unique-local, 2001:db8::/32 documentation.
-    if (seg[0] & 0xffc0) == 0xfe80 || (seg[0] & 0xfe00) == 0xfc00 {
-        return false;
-    }
-    if seg[0] == 0x2001 && seg[1] == 0x0db8 {
-        return false;
-    }
-    // An IPv4-mapped or IPv4-compatible address is only as routable as the IPv4 inside it.
-    if let Some(v4) = v6.to_ipv4_mapped().or_else(|| match IpAddr::V6(v6) {
-        IpAddr::V6(x) if x.segments()[..6] == [0, 0, 0, 0, 0, 0] => x.to_ipv4(),
-        _ => None,
-    }) {
-        return is_routable_v4(v4);
-    }
-    true
 }
 
 #[cfg(test)]

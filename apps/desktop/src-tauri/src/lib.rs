@@ -21,7 +21,8 @@ use catcoms_app::{
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
-    keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_rendezvous_addrs,
+    addr_is_loopback, addr_is_private, addr_is_undialable, keypair_from_seed, phase0_peer_id,
+    target_peer_in_multiaddr, validate_invite_rendezvous_addrs, validate_operator_rendezvous_addrs,
     MeshHandle, MeshService, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
@@ -967,102 +968,13 @@ fn external_addr(s: &str) -> Option<Multiaddr> {
     Some(addr)
 }
 
-/// Whether an IPv4 literal means nothing outside this machine or this LAN.
-fn ipv4_is_local(ip: &std::net::Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_private()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        // RFC 6598 100.64.0.0/10, the carrier-grade-NAT block: routable in form, useless
-        // in practice, and `Ipv4Addr::is_shared` is still unstable.
-        || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
-}
-
-/// Whether a multiaddr names an address that means nothing outside this machine or this LAN:
-/// loopback, RFC1918 private space, the RFC6598 CGNAT block, IPv4 link-local, IPv6 unique-local
-/// (`fc00::/7`) or IPv6 link-local (`fe80::/10`), plus the unspecified addresses.
-///
-/// Such an address must never be **advertised**. Publishing it to a rendezvous or handing it to a
-/// remote peer over identify discloses this machine's internal topology to anyone who asks, and
-/// buys nothing: the recipient cannot route to it. (Loopback stays perfectly usable inside an
-/// invite's bootstrap list, which is the deliberately same-machine case; this predicate governs
-/// what leaves the box, not what an invite may carry.)
-fn addr_is_private(addr: &Multiaddr) -> bool {
-    addr.iter().any(|p| match p {
-        Protocol::Ip4(ip) => ipv4_is_local(&ip),
-        Protocol::Ip6(ip) => {
-            ip.is_loopback()
-                || ip.is_unspecified()
-                // fc00::/7 unique-local and fe80::/10 link-local; both `is_unique_local` and
-                // `is_unicast_link_local` are still unstable.
-                || (ip.segments()[0] & 0xfe00) == 0xfc00
-                || (ip.segments()[0] & 0xffc0) == 0xfe80
-                // An IPv4 address written in v6 form is still that address: without unwrapping
-                // it, `::ffff:192.168.1.5` reads as a routable v6 address and every rule above
-                // is dodged by spelling the same thing the other way. `to_ipv4_mapped`, not
-                // `to_ipv4`: the latter also matches the deprecated `::a.b.c.d` form, which
-                // sweeps in `::1` as "0.0.0.1" and misclassifies it.
-                || ip.to_ipv4_mapped().is_some_and(|v4| ipv4_is_local(&v4))
-        }
-        _ => false,
-    })
-}
-
-/// Whether an IPv4 literal cannot be a peer at all.
-fn ipv4_is_undialable(ip: &std::net::Ipv4Addr) -> bool {
-    let o = ip.octets();
-    ip.is_multicast()
-        || ip.is_link_local()
-        || ip.is_unspecified()
-        || ip.is_broadcast()
-        || o[0] == 0
-        || o[0] >= 240
-}
-
-/// Whether a multiaddr names something that cannot be a peer at all: a multicast group, an
-/// IPv4/IPv6 link-local address, the unspecified addresses, the IPv4 broadcast address, the
-/// reserved 0.0.0.0/8 and 240.0.0.0/4 blocks, or a **name resolved at dial time**.
-///
-/// Distinct from [`addr_is_private`], which asks a different question ("may we *advertise* this?")
-/// and deliberately includes LAN addresses. A LAN address is a perfectly good thing to *dial*
-/// (the most common first invite is someone in the same house); a multicast group is not an
-/// endpoint, and a link-local address means a different machine on every network the invite is
-/// opened on, which is what turns an invite into a scanner aimed at the reader's own segment.
-///
-/// DNS components are refused for the reason `peer_addr_is_routable` refuses them in a peer
-/// record: `/dns4/scan.attacker.tld/tcp/22` passes every check that can be made on the string and
-/// then resolves, at dial time, to whatever the invite's author currently points it at. Nothing
-/// this app mints ever contains one.
-fn addr_is_undialable(addr: &Multiaddr) -> bool {
-    addr.iter().any(|p| match p {
-        Protocol::Ip4(ip) => ipv4_is_undialable(&ip),
-        Protocol::Ip6(ip) => {
-            ip.is_multicast()
-                || ip.is_unspecified()
-                // fe80::/10 link-local (`is_unicast_link_local` is still unstable).
-                || (ip.segments()[0] & 0xffc0) == 0xfe80
-                // ...and the same address written as IPv4-in-IPv6 (mapped form only; see
-                // `addr_is_private`).
-                || ip.to_ipv4_mapped().is_some_and(|v4| ipv4_is_undialable(&v4))
-        }
-        Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => true,
-        _ => false,
-    })
-}
-
-/// Whether a multiaddr points at this machine. Folds IPv4-in-IPv6, so `/ip6/::ffff:127.0.0.1`
-/// is recognised as loopback rather than sorted into the routable half of
-/// [`dialable_bootstrap`] and dialled at the reader's own localhost.
-fn addr_is_loopback(addr: &Multiaddr) -> bool {
-    addr.iter().any(|p| match p {
-        Protocol::Ip4(ip) => ip.is_loopback(),
-        Protocol::Ip6(ip) => {
-            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-        }
-        _ => false,
-    })
-}
+// The address classifiers `dialable_bootstrap` and `external_addrs` are built from
+// (`addr_is_private`, `addr_is_undialable`, `addr_is_loopback`) now live in `catcoms_net::addr`,
+// imported at the top of this file. They were moved there when the rendezvous validator was split
+// by trust (P13) and needed the same rules: two classifiers that disagree about which literals are
+// hostile is the exact defect shape this whole family of checks exists to close, so there is one
+// set of them and every caller shares it. The policy built on top of them stays here, because it
+// is specific to an invite's bootstrap list.
 
 /// The most bootstrap addresses this client will actually dial out of one invite.
 ///
@@ -1326,7 +1238,9 @@ async fn connect_rendezvous(
     rendezvous: &str,
     bootstrap: &[String],
 ) -> Result<RendezvousTarget, String> {
-    let rz = validate_rendezvous_addrs(std::slice::from_ref(&rendezvous.to_string()))
+    // Operator-typed: this is the "rendezvous" field of the create-server form, so a DNS name is
+    // both legitimate and (for a TCP/443 TLS/WebSocket node) required.
+    let rz = validate_operator_rendezvous_addrs(std::slice::from_ref(&rendezvous.to_string()))
         .map_err(|e| e.to_string())?
         .into_iter()
         .next()
@@ -1551,7 +1465,11 @@ async fn discover_and_connect(
     net: &ServerNet,
     steps: &mut Vec<DiagStep>,
 ) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
-    let targets = validate_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
+    // Invite-supplied, so attacker-controlled: the strict variant. The bootstrap half of this same
+    // invite goes through `dialable_bootstrap` below; before P13 was fixed the two halves of one
+    // pasted string were held to opposite standards.
+    let targets =
+        validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
     if targets.is_empty() {
         return Err("invite carries no rendezvous address".into());
     }
@@ -2223,10 +2141,13 @@ async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, 
         let encoded = actor
             .mint_invite_with_rendezvous(nonce, expires, bootstrap, rendezvous.clone())
             .await?;
-        // Register the fresh invite's namespace so the new joiner can discover us.
+        // Register the fresh invite's namespace so the new joiner can discover us. This node's own
+        // rendezvous config (typed into the create-server form, or restored from its own sealed
+        // network record), so the operator variant: a joiner reading the invite we are about to
+        // mint validates it again on the way in, with the strict one.
         if let (Some(handle), Some(rz)) = (
             &handle,
-            validate_rendezvous_addrs(&rendezvous)
+            validate_operator_rendezvous_addrs(&rendezvous)
                 .ok()
                 .and_then(|v| v.into_iter().next()),
         ) {
@@ -4270,12 +4191,24 @@ async fn join_one_grant(
     // Steady-state discovery: keep the grant's rendezvous nodes so this companion can re-find the
     // group after a restart (post-join, group-keyed; unlike the pre-join namespace above, this
     // works from a grant). Mirrors `join_server`.
-    let rz_config: Vec<(String, Vec<u8>)> = grant
-        .rendezvous
-        .iter()
-        .filter_map(|s| s.parse::<Multiaddr>().ok())
-        .filter_map(|a| target_peer_in_multiaddr(&a).map(|p| (a.to_string(), p.to_bytes())))
-        .collect();
+    // A grant is authored by this user's own already-paired master device, which is where the
+    // rendezvous was typed in the first place, so it gets the operator variant (a name is allowed).
+    // It previously got no validation at all, not even the structural checks; a grant naming a
+    // circuit address or a relay chain would have been handed straight to the dialer. A grant
+    // whose rendezvous list does not validate simply pairs without steady-state discovery rather
+    // than failing the pairing, which is the same degradation as a grant that names none.
+    let rz_config: Vec<(String, Vec<u8>)> = match validate_operator_rendezvous_addrs(
+        &grant.rendezvous,
+    ) {
+        Ok(targets) => targets
+            .into_iter()
+            .map(|t| (t.addr.to_string(), t.peer.to_bytes()))
+            .collect(),
+        Err(e) => {
+            eprintln!("pair: the grant's rendezvous addresses were rejected ({e}); pairing without steady-state discovery");
+            Vec::new()
+        }
+    };
     if !rz_config.is_empty() {
         server.set_rendezvous_nodes(rz_config);
     }
