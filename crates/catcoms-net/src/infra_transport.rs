@@ -36,6 +36,7 @@ use libp2p::{noise, tcp, yamux, PeerId, Transport};
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 
+use crate::admission::addr_prefix;
 use crate::metering::ByteMeters;
 use crate::NetError;
 
@@ -96,9 +97,15 @@ pub fn load_ws_tls_pem(cert_pem: &Path, key_pem: &Path) -> Result<WsTlsConfig, N
 /// wrapper's `Unpin` bounds hold without `unsafe`, and the outer box is what the swarm builder
 /// wants. Two vtable hops per poll on an infra node that exists to move other people's bytes is
 /// a price worth paying for knowing how many bytes those are.
+/// `v4_bits`/`v6_bits` must be the same masks [`crate::admission::Admission`] is configured with.
+/// The per-prefix counter is what the shed path denies on (a `PeerId` is a free keypair, a prefix
+/// costs an attacker addresses), so a meter keyed on a different mask than the denier would charge
+/// one bucket and punish another.
 pub(crate) fn metered_tcp_transport(
     key: &libp2p::identity::Keypair,
     meters: &ByteMeters,
+    v4_bits: u8,
+    v6_bits: u8,
 ) -> Result<Boxed<(PeerId, StreamMuxerBox)>, BuildError> {
     let meters = meters.clone();
     let noise = noise::Config::new(key).map_err(|e| boxed_err(NetError::Build(e.to_string())))?;
@@ -106,10 +113,11 @@ pub(crate) fn metered_tcp_transport(
         .upgrade(Version::V1Lazy)
         .authenticate(noise)
         .multiplex(yamux::Config::default())
-        .map(move |(peer, muxer), _| {
+        .map(move |(peer, muxer), endpoint| {
+            let prefix = addr_prefix(endpoint.get_remote_address(), v4_bits, v6_bits);
             (
                 peer,
-                StreamMuxerBox::new(meters.meter(peer, StreamMuxerBox::new(muxer))),
+                StreamMuxerBox::new(meters.meter(peer, prefix, StreamMuxerBox::new(muxer))),
             )
         })
         .boxed())
@@ -124,6 +132,8 @@ pub(crate) fn metered_ws_transport(
     key: &libp2p::identity::Keypair,
     meters: &ByteMeters,
     tls: Option<WsTlsConfig>,
+    v4_bits: u8,
+    v6_bits: u8,
 ) -> Result<Boxed<(PeerId, StreamMuxerBox)>, BuildError> {
     let meters = meters.clone();
     let noise = noise::Config::new(key).map_err(|e| boxed_err(NetError::Build(e.to_string())))?;
@@ -135,10 +145,11 @@ pub(crate) fn metered_ws_transport(
         .upgrade(Version::V1Lazy)
         .authenticate(noise)
         .multiplex(yamux::Config::default())
-        .map(move |(peer, muxer), _| {
+        .map(move |(peer, muxer), endpoint| {
+            let prefix = addr_prefix(endpoint.get_remote_address(), v4_bits, v6_bits);
             (
                 peer,
-                StreamMuxerBox::new(meters.meter(peer, StreamMuxerBox::new(muxer))),
+                StreamMuxerBox::new(meters.meter(peer, prefix, StreamMuxerBox::new(muxer))),
             )
         })
         .boxed())

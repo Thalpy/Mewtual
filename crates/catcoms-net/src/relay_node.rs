@@ -390,11 +390,14 @@ impl RelayNode {
         let tcp_meters = meters.clone();
         let ws_meters = meters.clone();
         let behaviour_limits = limits.clone();
+        // The meter keys its per-prefix counter on the same masks the admission layer denies on.
+        let v4_bits = limits.admission.ipv4_prefix_bits;
+        let v6_bits = limits.admission.ipv6_prefix_bits;
         let swarm = SwarmBuilder::with_existing_identity(key)
             .with_tokio()
-            .with_other_transport(|k| metered_tcp_transport(k, &tcp_meters))
+            .with_other_transport(|k| metered_tcp_transport(k, &tcp_meters, v4_bits, v6_bits))
             .map_err(|e| NetError::Build(e.to_string()))?
-            .with_other_transport(|k| metered_ws_transport(k, &ws_meters, ws_tls))
+            .with_other_transport(|k| metered_ws_transport(k, &ws_meters, ws_tls, v4_bits, v6_bits))
             .map_err(|e| NetError::Build(e.to_string()))?
             .with_behaviour(move |k| relay_behaviour_with(k, &behaviour_limits))
             .map_err(|e| NetError::Build(e.to_string()))?
