@@ -70,6 +70,11 @@ enum Command {
         /// Where to write the (hex) invite token.
         #[arg(long, default_value = "catcoms-invite.txt")]
         invite_file: PathBuf,
+        /// How many single-use invites to mint. A ring of N+1 nodes needs N, so this is what
+        /// makes a real ring (rather than a single pair) testable from the CLI. Extra invites
+        /// are written as numbered siblings of --invite-file.
+        #[arg(long, default_value_t = 1)]
+        invites: usize,
         /// Host advertised in the bootstrap address (use the server's reachable IP).
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -288,10 +293,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Command::Serve {
             port,
             invite_file,
+            invites,
             host,
             relay,
             rendezvous,
-        } => run_serve(port, invite_file, host, relay, rendezvous).await?,
+        } => run_serve(port, invite_file, invites, host, relay, rendezvous).await?,
         Command::Join { invite_file } => run_join(invite_file).await?,
         cmd @ Command::Relay { .. } => run_relay_node(cmd).await?,
         cmd @ Command::Rendezvous { .. } => run_rendezvous_node(cmd).await?,
@@ -589,6 +595,7 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
 async fn run_serve(
     port: u16,
     invite_file: PathBuf,
+    invites: usize,
     host: String,
     relay: Option<String>,
     rendezvous: Option<String>,
@@ -663,19 +670,37 @@ async fn run_serve(
     })
     .await?;
 
+    // Invites are single-use, so a ring of N+1 nodes needs N of them. Minting one was fine for
+    // a two-node smoke test and made a real ring untestable from the CLI, which is the shape
+    // most worth exercising: it is where a joiner has to learn about members who arrive after
+    // it. `--invites 1` writes the given path unchanged; above that, each gets a numbered
+    // sibling so the files can be handed to separate machines.
     let now = SystemClock.now_ms();
-    let nonce = random_nonce();
-    let invite = match &rz_target {
-        Some(t) => sync.mint_invite_with_rendezvous(
-            nonce,
-            now + 3_600_000,
-            bootstrap.clone(),
-            vec![t.addr.to_string()],
-        )?,
-        None => sync.mint_invite(nonce, now + 3_600_000, bootstrap.clone())?,
-    };
-    let blob = hex::encode(invite.encode());
-    tokio::fs::write(&invite_file, &blob).await?;
+    let mut invite_paths: Vec<PathBuf> = Vec::new();
+    for i in 0..invites.max(1) {
+        let nonce = random_nonce();
+        let invite = match &rz_target {
+            Some(t) => sync.mint_invite_with_rendezvous(
+                nonce,
+                now + 3_600_000,
+                bootstrap.clone(),
+                vec![t.addr.to_string()],
+            )?,
+            None => sync.mint_invite(nonce, now + 3_600_000, bootstrap.clone())?,
+        };
+        let path = if i == 0 {
+            invite_file.clone()
+        } else {
+            numbered_sibling(&invite_file, i + 1)
+        };
+        tokio::fs::write(&path, hex::encode(invite.encode())).await?;
+        invite_paths.push(path);
+    }
+    // The first invite is also the one whose pre-join namespace gets registered below, so keep
+    // it named as before for every existing caller and script.
+    let invite = InviteToken::decode(&hex::decode(
+        tokio::fs::read_to_string(&invite_file).await?.trim(),
+    )?)?;
 
     // If a rendezvous was given, connect to it and register the server under the
     // invite's pre-join join_ns (so a joiner discovers us with no hard-coded address)
@@ -715,7 +740,14 @@ async fn run_serve(
     for b in &bootstrap {
         println!("[serve] bootstrap: {b}");
     }
-    println!("[serve] invite written to {}", invite_file.display());
+    for (i, p) in invite_paths.iter().enumerate() {
+        println!(
+            "[serve] invite {} of {} written to {}",
+            i + 1,
+            invite_paths.len(),
+            p.display()
+        );
+    }
     println!("[serve] serving; run `catcomsctl join` elsewhere; Ctrl-C to stop\n");
 
     // Serve indefinitely: admit joiners, answer catch-up, apply membership commits.
@@ -852,6 +884,13 @@ async fn join_and_converge(
         Box::new(SystemClock),
         routing,
     );
+    // A joiner has to subscribe the control topic, exactly as `run_serve` does for the founder.
+    // Without it `desired_routing_topics()` omits the control topics, this node never receives
+    // another membership commit, and every member who joins after it stays invisible to it
+    // forever. The desktop bridge had the identical omission; see P14 in
+    // `docs/design-zeroconf-reachability.md`. This is the same bug in the CLI, and it is why a
+    // ring (rather than a pair) was untestable from here even once `--invites` existed.
+    sync.subscribe_control().await?;
     sync.open_channel(DocType::Channel, GENERAL).await?;
     let applied = timeout(
         Duration::from_secs(20),
@@ -885,6 +924,20 @@ old-dropped={} doc-catchups={} | gauges: past-keys={} pending={} log={} peers={}
         s.commit_log_len,
         s.known_peers,
     );
+}
+
+/// `invite.txt` -> `invite-2.txt`, preserving any extension, so a run that mints several invites
+/// produces files that can be handed to separate machines without renaming.
+fn numbered_sibling(path: &std::path::Path, n: usize) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "invite".to_string());
+    let name = match path.extension() {
+        Some(ext) => format!("{stem}-{n}.{}", ext.to_string_lossy()),
+        None => format!("{stem}-{n}"),
+    };
+    path.with_file_name(name)
 }
 
 fn random_nonce() -> [u8; 16] {
@@ -1151,4 +1204,42 @@ fn field_join(sync: &ChannelSync<MemNetwork, OsCryptoRng>) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--invites N` hands each invite to a different machine, so the names have to be
+    /// predictable and must not collide with the first one. Pure function, so it is a unit test:
+    /// getting this wrong would silently overwrite invite 1 and make a ring look like a pair.
+    #[test]
+    fn numbered_siblings_are_predictable_and_keep_the_extension() {
+        let base = PathBuf::from("/tmp/invite.txt");
+        assert_eq!(
+            numbered_sibling(&base, 2),
+            PathBuf::from("/tmp/invite-2.txt")
+        );
+        assert_eq!(
+            numbered_sibling(&base, 10),
+            PathBuf::from("/tmp/invite-10.txt")
+        );
+        // No extension is a normal case for a CLI argument, not an error.
+        assert_eq!(
+            numbered_sibling(&PathBuf::from("/tmp/invite"), 3),
+            PathBuf::from("/tmp/invite-3")
+        );
+        // A dotted stem keeps only the final extension, matching Path::extension.
+        assert_eq!(
+            numbered_sibling(&PathBuf::from("a.b.txt"), 2),
+            PathBuf::from("a.b-2.txt")
+        );
+        // Every sibling is distinct from the original and from each other: the property that
+        // actually matters, since a collision would overwrite an invite someone is about to use.
+        let all: Vec<PathBuf> = (2..8).map(|n| numbered_sibling(&base, n)).collect();
+        assert!(!all.contains(&base));
+        for (i, a) in all.iter().enumerate() {
+            assert!(!all[i + 1..].contains(a), "duplicate sibling {a:?}");
+        }
+    }
 }
