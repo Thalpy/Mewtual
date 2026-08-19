@@ -2263,7 +2263,9 @@ button.primary:hover:not(:disabled) {
 .dl-item-status.queued {
   color: var(--muted);
 }
-.dl-item-status.downloading {
+.dl-item-status.downloading,
+.dl-item-status.reading,
+.dl-item-status.uploading {
   color: var(--accent);
 }
 .dl-item-bar {

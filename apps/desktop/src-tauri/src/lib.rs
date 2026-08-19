@@ -435,6 +435,13 @@ struct DownloadProgressEvt {
     provider: Option<String>,
 }
 #[derive(Serialize, Clone)]
+struct UploadProgressEvt {
+    server: u64,
+    upload_id: String,
+    done: usize,
+    total: usize,
+}
+#[derive(Serialize, Clone)]
 struct EclipseEvt {
     server: u64,
     caution: bool,
@@ -2114,14 +2121,38 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
 /// rendezvous, the fresh invite is also discovery-enabled and its new (nonce-keyed) namespace is
 /// registered there via the stored transport handle, so the new joiner can discover us with no
 /// hard-coded address. Replaces the server's stored invite and re-seals the registry.
+///
+/// This is also the **only** path that lifts outstanding transport evictions (P6). A member
+/// removed earlier cannot otherwise reach this node to redeem an invite: the eviction refuses its
+/// connection, and the roster cannot change until that connection is allowed. Deliberately not
+/// folded into `mint_and_store_invite`, because [`get_invite`] re-mints on its own whenever the
+/// node gains an address the stored invite does not mention (UPnP, a relay circuit, a rendezvous
+/// registration); lifting there would silently re-admit every removed member the next time
+/// anybody opened the invite panel, with nobody deciding it. Pressing "Generate new invite" is a
+/// person saying they intend to admit somebody; opening a panel is not.
+///
+/// Best-effort and last: a failure to lift must not lose the invite that was just minted.
 #[tauri::command]
 async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<String, String> {
-    mint_and_store_invite(&state, server).await
+    let invite = mint_and_store_invite(&state, server).await?;
+    match actor_of(&state, server).await {
+        Ok(actor) => {
+            if let Err(e) = actor.readmit_evicted_peers().await {
+                eprintln!("mint_invite_fresh: lifting outstanding evictions failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("mint_invite_fresh: no actor to lift evictions on: {e}"),
+    }
+    Ok(invite)
 }
 
 /// Mint a fresh single-use invite from the server's *current* bootstrap and rendezvous config,
 /// store it as the server's invite, and persist. Shared by the explicit "Generate new invite"
 /// action and by [`get_invite`]'s self-heal, so both mint the same way and neither can drift.
+///
+/// Minting only. Anything that should happen because a *person* asked for an invite, rather than
+/// because a stored one went stale, belongs in [`mint_invite_fresh`] and not here; the P6
+/// eviction lift is the first such thing.
 async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, String> {
     let (bootstrap, rendezvous, handle) = {
         let servers = state.servers.lock().await;
@@ -2444,18 +2475,48 @@ async fn get_badges(
 /// Share a file (base64-encoded bytes); returns its content-address hex.
 #[tauri::command]
 async fn add_file(
+    app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
     name: String,
     mime: String,
     path: String,
     data: String,
+    upload_id: Option<String>,
 ) -> Result<String, String> {
     let bytes = B64
         .decode(data.as_bytes())
         .map_err(|e| format!("bad file data: {e}"))?;
     let actor = actor_of(&state, server).await?;
-    let cid = actor.add_file(name, mime, path, bytes).await?;
+    let (progress, progress_task) = match upload_id {
+        Some(upload_id) => {
+            let (tx, mut rx) = mpsc::channel(64);
+            let task = tokio::spawn(async move {
+                while let Some((done, total)) = rx.recv().await {
+                    let _ = app.emit(
+                        "upload-progress",
+                        UploadProgressEvt {
+                            server,
+                            upload_id: upload_id.clone(),
+                            done,
+                            total,
+                        },
+                    );
+                }
+            });
+            (Some(tx), Some(task))
+        }
+        None => (None, None),
+    };
+    let result = actor
+        .add_file_with_progress(name, mime, path, bytes, progress)
+        .await;
+    // The actor drops its progress sender when the command completes. Drain every queued event
+    // before resolving the invoke so the frontend sees the bar advance before it paints Done.
+    if let Some(task) = progress_task {
+        let _ = task.await;
+    }
+    let cid = result?;
     persist_server(&state, server).await;
     Ok(cid)
 }
@@ -3173,7 +3234,9 @@ async fn send_message(
 ) -> Result<(), String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
-    actor.send_reply(id, text, reply_to.unwrap_or_default()).await;
+    actor
+        .send_reply(id, text, reply_to.unwrap_or_default())
+        .await?;
     persist_server(&state, server).await;
     Ok(())
 }

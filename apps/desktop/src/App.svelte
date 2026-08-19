@@ -1776,6 +1776,7 @@
   }
 
   let draft = $state("");
+  let sending = $state(false);
   let members = $state(1);
   let roster = $state<Member[]>([]);
   // Fingerprints of members reachable right now (a live connection): drives the roster's online
@@ -2183,13 +2184,7 @@
     evImageBusy = true;
     const tid = toast(`Uploading ${file.name}…`, "info", 0);
     try {
-      evImage = await invoke<string>("add_file", {
-        server: activeServerId,
-        name: file.name,
-        mime: file.type || "image/png",
-        path: myEmbedFolder,
-        data: await readBase64(file),
-      });
+      evImage = await addSharedFile(file, myEmbedFolder, file.name, file.type || "image/png");
       updateToast(tid, `Event image set: ${file.name}`, "ok");
       await refreshFiles();
     } catch (e) {
@@ -2743,13 +2738,7 @@
     try {
       // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
       const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
-      await invoke("add_file", {
-        server: activeServerId,
-        name: sz ? `${code}~${sz}` : code,
-        mime: file.type || "image/png",
-        path: "emoji",
-        data: await readBase64(file),
-      });
+      await addSharedFile(file, "emoji", sz ? `${code}~${sz}` : code, file.type || "image/png");
       newEmojiCode = "";
       await refreshFiles();
     } catch (e) {
@@ -4290,13 +4279,7 @@
       for (const file of Array.from(fileList)) {
         const tid = toast(`Uploading ${file.name}…`, "info", 0);
         try {
-          const cid = await invoke<string>("add_file", {
-            server: activeServerId,
-            name: file.name,
-            mime: file.type || "application/octet-stream",
-            path: `wiki/${activeWikiPage}`,
-            data: await readBase64(file),
-          });
+          const cid = await addSharedFile(file, `wiki/${activeWikiPage}`);
           const alt = file.name.replace(/[[\]]/g, " ");
           insertIntoWikiBody(`![${alt}](cid:${cid})`);
           updateToast(tid, `Embedded ${file.name} · save the page to publish`, "ok", 5000);
@@ -4470,17 +4453,68 @@
     }
   }
 
-  // Read a File as raw base64 (strips the data: prefix), for the add_file command.
-  function readBase64(file: File): Promise<string> {
+  // Read a File as raw base64 (strips the data: prefix), reporting the browser-side read before
+  // the backend starts sealing/storing chunks. The Transfers UI reserves its first 10% for this.
+  function readBase64(
+    file: File,
+    onProgress: ((done: number, total: number) => void) | undefined = undefined,
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(new Error("could not read file"));
+      reader.onprogress = (e) => onProgress?.(e.loaded, e.lengthComputable ? e.total : file.size);
       reader.onload = () => {
         const r = reader.result;
         resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
       };
       reader.readAsDataURL(file);
     });
+  }
+
+  // The one upload path used by files, embeds, wiki attachments, event art and custom emoji.
+  // Keeping it central means every group upload gets the same progress and terminal state.
+  async function addSharedFile(
+    file: File,
+    path: string,
+    name = file.name,
+    mime = file.type || "application/octet-stream",
+  ): Promise<string> {
+    if (activeServerId === null) throw new Error("no server selected");
+    const server = activeServerId;
+    const uploadId = crypto.randomUUID();
+    const key = uploadKey(server, uploadId);
+    uploads[key] = {
+      server,
+      id: uploadId,
+      name,
+      path,
+      status: "reading",
+      progress: 0,
+      ts: Date.now(),
+    };
+    try {
+      const data = await readBase64(file, (done, total) => {
+        const u = uploads[key];
+        if (u && u.status === "reading") u.progress = total > 0 ? 0.1 * done / total : 0;
+      });
+      const u = uploads[key];
+      if (u) {
+        u.status = "uploading";
+        u.progress = Math.max(u.progress, 0.1);
+      }
+      const cid = await invoke<string>("add_file", { server, name, mime, path, data, uploadId });
+      if (uploads[key]) {
+        uploads[key].status = "done";
+        uploads[key].progress = 1;
+      }
+      return cid;
+    } catch (e) {
+      if (uploads[key]) {
+        uploads[key].status = "failed";
+        uploads[key].error = String(e);
+      }
+      throw e;
+    }
   }
 
   // Share a file into the Files-tab's current folder.
@@ -4490,13 +4524,7 @@
     uploading = true;
     const tid = toast(`Sharing ${file.name}…`, "info", 0);
     try {
-      await invoke("add_file", {
-        server: activeServerId,
-        name: file.name,
-        mime: file.type || "application/octet-stream",
-        path: folder,
-        data: await readBase64(file),
-      });
+      await addSharedFile(file, folder);
       updateToast(tid, `Shared ${file.name}`, "ok");
       await refreshFiles();
     } catch (e) {
@@ -4516,13 +4544,7 @@
       for (const file of Array.from(fileList)) {
         const tid = toast(`Uploading ${file.name}…`, "info", 0);
         try {
-          const cid = await invoke<string>("add_file", {
-            server: activeServerId,
-            name: file.name,
-            mime: file.type || "application/octet-stream",
-            path: myEmbedFolder,
-            data: await readBase64(file),
-          });
+          const cid = await addSharedFile(file, myEmbedFolder);
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
           const alt = file.name.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
@@ -4979,7 +5001,7 @@
       fileInfoExpiryBusy = false;
     }
   }
-  // Tracked downloads keyed by file cid, for the Downloads tab + the file-info progress bar. Driven
+  // Tracked downloads keyed by file cid, for the Transfers tab + the file-info progress bar. Driven
   // by 'download-progress' events (per-chunk) from the actor. Only EXPLICIT downloads (the Download
   // button) are tracked here: background embed/preview fetches emit progress but create no entry.
   type DownloadInfo = {
@@ -4996,19 +5018,53 @@
   // exist on two servers, and switching servers must not show the other's transfers).
   let downloads = $state<Record<string, DownloadInfo>>({});
   const dlKey = (server: number, cid: string) => `${server}:${cid}`;
-  // The active server's downloads, newest first.
+  type UploadInfo = {
+    server: number;
+    id: string;
+    name: string;
+    path: string;
+    status: "reading" | "uploading" | "done" | "failed";
+    progress: number; // 0..1; 0..0.1 is the webview read, the remainder is backend work
+    error?: string;
+    ts: number;
+  };
+  let uploads = $state<Record<string, UploadInfo>>({});
+  const uploadKey = (server: number, id: string) => `${server}:${id}`;
+
+  // The active server's transfers, newest first. Uploads are first-class rows instead of a
+  // transient button label, so a completed share stays visibly completed until cleared.
   let downloadList = $derived(
     Object.values(downloads)
       .filter((d) => d.server === activeServerId)
       .sort((a, b) => b.ts - a.ts)
   );
-  let activeDownloads = $derived(
-    downloadList.filter((d) => d.status === "queued" || d.status === "downloading").length
+  let uploadList = $derived(
+    Object.values(uploads)
+      .filter((u) => u.server === activeServerId)
+      .sort((a, b) => b.ts - a.ts)
   );
-  function clearFinishedDownloads() {
+  type TransferRow =
+    | (DownloadInfo & { direction: "download"; key: string })
+    | (UploadInfo & { direction: "upload"; key: string });
+  let transferList = $derived(
+    [
+      ...downloadList.map((d): TransferRow => ({ ...d, direction: "download", key: `download:${d.cid}` })),
+      ...uploadList.map((u): TransferRow => ({ ...u, direction: "upload", key: `upload:${u.id}` })),
+    ].sort((a, b) => b.ts - a.ts)
+  );
+  let activeTransfers = $derived(
+    transferList.filter((t) =>
+      t.status === "queued" || t.status === "downloading" || t.status === "reading" || t.status === "uploading"
+    ).length
+  );
+  function clearFinishedTransfers() {
     for (const [k, d] of Object.entries(downloads)) {
       if (d.server === activeServerId && (d.status === "done" || d.status === "failed"))
         delete downloads[k];
+    }
+    for (const [k, u] of Object.entries(uploads)) {
+      if (u.server === activeServerId && (u.status === "done" || u.status === "failed"))
+        delete uploads[k];
     }
   }
   // Advisory eclipse hint for the active server (the node may be isolated: verify a member out of
@@ -7010,17 +7066,33 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || !cur || !cur.active || activeServerId === null) return;
+    if (!text || !cur || !cur.active || activeServerId === null || sending) return;
+    const server = activeServerId;
+    const channel = cur.active;
     const reply_to = replyingTo;
     const key = chanKey();
     draft = "";
     replyingTo = "";
     mentionQuery = null;
     if (key) delete drafts[key];
+    sending = true;
     try {
-      await invoke("send_message", { server: activeServerId, channel: cur.active, text, replyTo: reply_to });
+      await invoke("send_message", { server, channel, text, replyTo: reply_to });
+      // The channel-updated event normally refreshes this too, but the command acknowledgement is
+      // the deterministic local completion point. Do not leave the just-sent message dependent on
+      // event scheduling, and do not refresh a different conversation if the user switched away.
+      if (activeServerId === server && cur?.active === channel) await refresh();
     } catch (e) {
       error = String(e);
+      // Put the message back only if the user has not already started another one while the send
+      // was in flight. A failed send should never silently eat their text.
+      if (activeServerId === server && cur?.active === channel && !draft.trim()) {
+        draft = text;
+        if (key) drafts[key] = text;
+        replyingTo = reply_to;
+      }
+    } finally {
+      sending = false;
     }
   }
 
@@ -7504,7 +7576,7 @@
         ? catBlinkArt
         : mentionChannels.size > 0
           ? catAlertArt
-          : activeDownloads > 0
+          : activeTransfers > 0
             ? catSyncArt
             : catIdleArt,
   );
@@ -7520,8 +7592,8 @@
         ? "asleep: this window isn't focused"
         : mentionChannels.size > 0
           ? `ears up: ${mentionChannels.size} channel${mentionChannels.size === 1 ? "" : "s"} mentioned you (click to go)`
-          : activeDownloads > 0
-            ? `busy: ${activeDownloads} transfer${activeDownloads === 1 ? "" : "s"} running`
+          : activeTransfers > 0
+            ? `busy: ${activeTransfers} transfer${activeTransfers === 1 ? "" : "s"} running`
             : "settled: nothing is waiting (click to pet)",
   );
 
@@ -7719,6 +7791,15 @@
         if (e.payload.provider) d.provider = e.payload.provider; // keep the latest live provider
         if (e.payload.done >= e.payload.total) d.status = "done";
         else if (d.status === "queued") d.status = "downloading";
+      }),
+      listen<{ server: number; upload_id: string; done: number; total: number }>("upload-progress", (e) => {
+        const u = uploads[uploadKey(e.payload.server, e.payload.upload_id)];
+        if (!u || u.status === "done" || u.status === "failed") return;
+        u.status = "uploading";
+        // Reading owns 0..10%. Backend work owns the rest, but only the completed invoke marks
+        // the row Done: keep event progress just shy of 100% until persistence has also returned.
+        const backend = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+        u.progress = Math.max(u.progress, Math.min(0.99, 0.1 + backend * 0.89));
       }),
       listen<{ server: number }>("status-updated", (e) => {
         if (e.payload.server === activeServerId) refreshStatuses();
@@ -9090,7 +9171,7 @@
     </form>
   {:else if view === "downloads"}
     <h3><span>Transfers</span></h3>
-    <button class="ghost small ctx-action" onclick={clearFinishedDownloads}>Clear finished</button>
+    <button class="ghost small ctx-action" onclick={clearFinishedTransfers}>Clear finished</button>
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
     {#each upcomingEvents.slice(0, 5) as e (e.id)}
@@ -10109,7 +10190,7 @@
             </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
               <span class="sb-ico">↓</span>transfers
-              {#if activeDownloads}<span class="tab-count">{activeDownloads}</span>{/if}
+              {#if activeTransfers}<span class="tab-count">{activeTransfers}</span>{/if}
             </button>
           </nav>
         {/if}
@@ -10562,14 +10643,14 @@
                 bind:value={draft}
                 rows="1"
                 class="composer-input"
-                placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                placeholder={uploading ? "Uploading…" : sending ? "Sending…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
                 oninput={onComposerInput}
                 onkeydown={onComposerKeydown}
                 onblur={() => queueMicrotask(() => (mentionQuery = null))}
               ></textarea>
               <span class="c-hint">enter to send · shift+enter newline</span>
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
-              <button type="submit" disabled={uploading}>Send</button>
+              <button type="submit" disabled={uploading || sending}>{sending ? "Sending…" : "Send"}</button>
             </form>
           </div>
         {:else if view === "files"}
@@ -10967,31 +11048,40 @@
             {/if}
           </div>
         {:else if view === "downloads"}
-          <h2>Downloads</h2>
+          <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
-            {#if downloadList.length === 0}
-              <p class="muted">No downloads yet. Open a file and click <strong>↓ Download</strong> to start one.</p>
+            {#if transferList.length === 0}
+              <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
             {:else}
               <div class="dl-toolbar">
-                <span class="muted small">{activeDownloads} active · {downloadList.length} total</span>
+                <span class="muted small">{activeTransfers} active · {transferList.length} total</span>
               </div>
               <ul class="dl-list">
-                {#each downloadList as d (d.cid)}
+                {#each transferList as d (d.key)}
                   <li class="dl-item">
                     <div class="dl-item-main">
-                      <span class="dl-item-name">{d.name}</span>
+                      <span class="dl-item-name">{#if d.direction === "upload"}↑{:else}↓{/if} {d.name}</span>
                       <span class="muted small">
-                        {#if d.provider}from {nameOf(d.provider)}{:else}shared by {nameOf(d.author)}{/if}
+                        {#if d.direction === "upload"}
+                          {#if d.path}sharing to /{d.path}{:else}sharing to the group{/if}
+                        {:else if d.provider}from {nameOf(d.provider)}{:else}shared by {nameOf(d.author)}{/if}
                       </span>
                     </div>
                     <div class="dl-item-status {d.status}">
                       {#if d.status === "downloading"}{Math.round(d.progress * 100)}%
                       {:else if d.status === "queued"}Queued
-                      {:else if d.status === "done"}✓ Done
+                      {:else if d.status === "reading"}Preparing {Math.round(d.progress * 100)}%
+                      {:else if d.status === "uploading"}Uploading {Math.round(d.progress * 100)}%
+                      {:else if d.status === "done"}✓ {#if d.direction === "upload"}Uploaded{:else}Downloaded{/if}
                       {:else}✗ Failed{/if}
                     </div>
-                    {#if d.status === "downloading" || d.status === "queued"}
-                      <progress class="dl-item-bar" value={d.progress} max="1"></progress>
+                    {#if d.status === "downloading" || d.status === "queued" || d.status === "reading" || d.status === "uploading"}
+                      <progress
+                        class="dl-item-bar"
+                        value={d.progress}
+                        max="1"
+                        aria-label={`Transfer progress for ${d.name}`}
+                      ></progress>
                     {/if}
                   </li>
                 {/each}
@@ -11049,7 +11139,7 @@
         {@render icoLock()} vault <span class="ok-t">unlocked</span>
       </button>
       {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
-      {#if activeDownloads}<span class="seg"><span class="warn-t">⇣ {activeDownloads} transfer{activeDownloads === 1 ? "" : "s"}</span></span>{/if}
+      {#if activeTransfers}<span class="seg"><span class="warn-t">⇅ {activeTransfers} transfer{activeTransfers === 1 ? "" : "s"}</span></span>{/if}
       <span class="sb-spacer"></span>
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
