@@ -1,10 +1,15 @@
 # Zero-config reachability, switchboards, and server modes
 
-Status: **design, v2, not yet built.** Written 2026-08-18 after a confirmed field failure,
-then substantially rewritten the same day after three adversarial reviews (privacy /
-protocol / abuse-and-adoption) refuted several claims in v1. Sections marked
-**[v1 RETRACTED]** record what the first draft asserted and why it was wrong, so the mistake
-is not re-made.
+Status: **v2, partially built.** Written 2026-08-18 after a confirmed field failure, then
+substantially rewritten the same day after three adversarial reviews (privacy / protocol /
+abuse-and-adoption) refuted several claims in v1. Sections marked **[v1 RETRACTED]** record
+what the first draft asserted and why it was wrong, so the mistake is not re-made.
+
+**Where it stands (2026-08-19):** the invite path is fixed and the two deployment-blocking
+CRITICALs are closed. **Section 1c is the status board** and is the answer to "is P-whatever
+fixed"; **section 9** tracks the ladder itself, of which rungs 0 and 1 are built and the rest
+are not. Open defects: P3 (hard half), P6, P9, P10, P13, P14 (recovery half), with P5 and P8
+partial. Nothing here is deployed.
 
 Extends [`ARCHITECTURE.md`](ARCHITECTURE.md), [`design-6e-rendezvous.md`](design-6e-rendezvous.md),
 [`design-6e-relay.md`](design-6e-relay.md). Touches the boundary tracked in
@@ -135,6 +140,36 @@ least three block any public deployment.
   the case the recovery path exists for. Fix candidates: exclude the peer whose op revealed the gap
   from that gap's catch-up candidates; treat an empty bundle from a peer as a failure for that peer
   rather than a success; or prefer a peer known to have been present at the target epoch.
+
+### 1c. Status board
+
+Legend: **[x]** done · **[~]** partial, with what is left · **[ ]** open. Keep this current: it is
+the answer to "is P-whatever fixed", and a stale board is worse than none (see the corrections
+block in `HANDOVER.md` for what happens otherwise).
+
+| | Defect | Commit | Left to do |
+|---|---|---|---|
+| **[x]** | 1a.1 identity regenerated every launch | `0af1583` | |
+| **[x]** | 1a.2 random listen port | `0af1583` | |
+| **[x]** | 1a.3 reload rebuilt loopback-only invites | `0af1583` | |
+| **[x]** | 1a.4 UPnP crippled (4s, skipped) | `0af1583` | |
+| **[x]** | 1a.5 IPv4 and TCP only | `0af1583` | |
+| **[x]** | 1a.6 no `verify_self` before dialling | `0af1583` | |
+| **[x]** | 1a.7 `seq` not persisted across restart | `0af1583` | |
+| **[x]** | P1 PEX and `AddressCache` dead code | `32dab2a` | |
+| **[x]** | P2 relay sized for a lab | `e35b1b2` | |
+| **[~]** | P3 rendezvous fillable / census / cookies | `e35b1b2` | Occupancy, TTL, cookies and per-prefix quotas done. The census is **rate-limited, not prevented**: rejecting a namespace-less `Discover`, clamping the caller's `limit`, and evicting a registration all need the upstream `Registrations` store vendored (~600 lines) |
+| **[x]** | P4 call-signal FIFO kills voice group-wide | `32dab2a` | |
+| **[~]** | P5 connection limits | `0af1583` | Inbound capped at 256, which closes the attack. No total cap and no pending-outgoing cap |
+| **[ ]** | P6 no eviction primitive | | No `Command::Disconnect`, no block list. A removed member's established connections and granted circuit reservations survive removal indefinitely. Needed before switchboards (rung 2) ship |
+| **[x]** | P7 invite bootstrap addresses unvalidated | `32dab2a` | |
+| **[~]** | P8 eclipse source count attacker-supplied | `32dab2a` | Counts roots that returned a peer, with decay. Cannot be finished without P9: without `tag_verified`, a hostile inviter naming two rendezvous it controls still pins the count by serving one fabricated record from each |
+| **[ ]** | P9 membership tag never carried on the wire | | `tag_verified` is hardcoded `false` at two sites, so the "member-tag-verified" ranking tier does not exist. Blocks finishing P8 |
+| **[ ]** | P10 no padding or size quantization | | Listed in `ARCHITECTURE.md` as a locked review fix and never built. Exact per-message and per-file sizes are visible to any forwarder, which matters more once rung 2 puts a member on the path |
+| **[x]** | P11 unjittered discovery, unconditional dials | `923a4eb`, `e35b1b2` | |
+| **[x]** | P12 relay advertised private addresses | `e35b1b2` | |
+| **[ ]** | P13 invite-supplied rendezvous addresses unvalidated | | Split the validator by trust: operator-configured may be a DNS name (rung 4 needs one), invite-supplied must be a routable IP literal. Same loopback rule the bootstrap path uses |
+| **[~]** | P14 a joiner never saw later members | `36ca2df` | Control-topic cause fixed. The **recovery** cause is open: a genuinely missed commit still asks the newcomer who caused the gap, and an empty bundle counts as success |
 
 ## 2. The constraint, stated plainly
 
@@ -531,20 +566,23 @@ Each needs a line in [`THREAT-MODEL.md`](THREAT-MODEL.md):
 
 ## 9. Build order
 
-| Step | Work | Blocking? | Review |
-|---:|---|---|---|
-| 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
-| 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Attempts P8; **P9 is NOT included** (it lives in `catcoms-net`), and without `tag_verified` the P8 corroboration count is only partial: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
-| 2 | AutoNAT into `MeshBehaviour`; mDNS; pairwise reachability in the model | prerequisite for rungs 1, 2 | light |
-| 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
-| 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
-| 5 | Two-way invite code: MAC binding, 60s life, address validation, async join via the existing offline queue | needs 0-2 | yes |
-| 6 | Node capacity fixes (P2, P3), TCP/443 listener, jittered discovery (P11), relay external-address misconfig (P12), bootstrap address validation (P7) | **blocks any public deployment** | yes |
-| 7 | Switchboards: rendezvous-registered capability, relay-only never admit, aggregate egress budget, `Disconnect` plus deny list (P6), consent flow | needs 1, 2, 6 | **mandatory** |
-| 8 | Bootstrap node deployed, default on, live hysteretic expiry | needs 6, 7 | yes |
-| 9 | Port-forwarding wizard | needs 0 | none |
-| 10 | Hosted mode | **blocked on O1 and O4** | **mandatory** |
-| 11 | Public DHT | last, if ever | yes |
+Status legend as in section 1c. **Review is per slice, before the commit that lands it**, never a
+phase at the end: batching it is how unreviewed work reached `main` twice on 2026-08-18.
+
+| | Step | Work | Blocking? | Review |
+|---|---:|---|---|---|
+| **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
+| **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Attempts P8; **P9 is NOT included** (it lives in `catcoms-net`), and without `tag_verified` the P8 corroboration count is only partial: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
+| **[ ]** | 2 | AutoNAT into `MeshBehaviour`; mDNS; pairwise reachability in the model | prerequisite for rungs 1, 2 | light |
+| **[ ]** | 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
+| **[ ]** | 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
+| **[ ]** | 5 | Two-way invite code: MAC binding, 60s life, address validation, async join via the existing offline queue | needs 0-2 | yes |
+| **[~]** | 6 | Node capacity fixes (P2, P3), TCP/443 listener, jittered discovery (P11), relay external-address misconfig (P12), bootstrap address validation (P7) | **blocks any public deployment** | yes |
+| **[ ]** | 7 | Switchboards: rendezvous-registered capability, relay-only never admit, aggregate egress budget, `Disconnect` plus deny list (P6), consent flow | needs 1, 2, 6 | **mandatory** |
+| **[ ]** | 8 | Bootstrap node deployed, default on, live hysteretic expiry | needs 6, 7 | yes |
+| **[ ]** | 9 | Port-forwarding wizard | needs 0 | none |
+| **[ ]** | 10 | Hosted mode | **blocked on O1 and O4** | **mandatory** |
+| **[ ]** | 11 | Public DHT | last, if ever | yes |
 
 Independent of the ladder, worth fixing on their own: P4 (voice DoS), P5, P10 (padding).
 

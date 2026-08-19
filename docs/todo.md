@@ -53,3 +53,43 @@
 | 8 | Product model + Tauri desktop UI | planned |
 | 9 | Android | planned |
 | 10 | Hardening + calendar | planned |
+
+Features/things in stack:
+1. Draw waveform for midi in voice chat (fun) [Do we go full DAW lite?]
+2. needs better midi settings in the settings pannel
+3. a *lot* of settings are stubs and aren't fully integrated.
+4. 
+
+---
+
+## Reachability / connectivity work (2026-08-19)
+
+Triggered by a field failure: a remote user redeeming an invite got "timed out connecting to
+the server". Full design, defect list and status board in
+[`design-zeroconf-reachability.md`](design-zeroconf-reachability.md); section 1c there is the
+authoritative per-defect board, this is the summary.
+
+**Done.** The invite path (identity and port now persist, reload re-advertises, UPnP given a
+real window, IPv6 and QUIC, invite signature checked before dialling), peer exchange and the
+address cache wired end to end (which also fixed presence, cross-session re-dial and a
+permanent false eclipse alarm), both deployment-blocking CRITICALs on the relay and rendezvous
+nodes, a product-layer integration test suite, and the joiner control-topic bug that made
+later members invisible to earlier ones.
+
+**Open defects, all tracked in section 1c:** P3 (census is rate-limited, not prevented; needs
+upstream vendored), P6 (no eviction primitive), P9 (membership tag never on the wire, which
+also blocks finishing P8), P10 (no padding), P13 (invite-supplied address validator), P14's
+recovery half. P5 and P8 partial.
+
+**Not built: most of the ladder.** AutoNAT and mDNS, racing the rungs concurrently, failure
+messaging, the two-way invite code, switchboard members, the port-forwarding wizard, hosted
+mode, the public DHT. And one that is not code: **a bootstrap node has to be provisioned and
+run** before rung 4 means anything.
+
+**Designed but not implemented: the connectivity UI.** The create-server dialog still asks for
+three multiaddrs. Mockup and copy spec exist and are approved; most of what they display needs
+its backend rung first.
+
+Working rule carried out of this: **adversarial review happens per slice, before the commit
+that lands it.** Batching it at the end is how unreviewed work reached `main` twice.
+
