@@ -5058,4 +5058,16 @@ mod tests {
         assert!(!is_tracker_url("file:///c:/windows/system32/calc.exe"));
         assert!(!is_tracker_url("https://github.com/Thalpy/Mewtual"));
     }
+
+    #[test]
+    fn external_links_are_limited_to_http_and_https() {
+        assert!(is_external_http_url("https://example.com/path?cat=yes"));
+        assert!(is_external_http_url("http://localhost:1420/image.png"));
+
+        assert!(!is_external_http_url("javascript:alert(1)"));
+        assert!(!is_external_http_url("data:text/html,hello"));
+        assert!(!is_external_http_url("file:///c:/windows/system32/calc.exe"));
+        assert!(!is_external_http_url("https:///missing-host"));
+        assert!(!is_external_http_url(""));
+    }
 }

@@ -626,11 +626,9 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
 
 /// A channel one member creates is reachable by the other, backlog and all.
 ///
-/// There is no backend channel registry: a channel id is `BLAKE3(name)` and the list is
-/// frontend-local, so "Bob can see #plans" is entirely a matter of Alice's ops being fetchable
-/// by name. The late-open case is the one that broke twice historically (8i's founder-side
-/// asymmetry, fixed by 8j's any-peer catch-up), and it is the common one in practice: nobody
-/// has a channel open before it exists.
+/// Named channels now travel through the shared channel directory (covered at the actor boundary).
+/// This test separately pins the lower-level late-open case: a channel id is deterministic, and a
+/// member opening it after messages were posted must still recover the complete backlog.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late() {
     let plans = channel_id("plans");
@@ -1120,16 +1118,16 @@ async fn a_profile_change_on_one_node_reaches_the_other_members_roster() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 8. Wiki and status.
+// 8. Wiki, status and events.
 // ---------------------------------------------------------------------------------------------
 
-/// The two per-server feeds that are not chat still replicate.
+/// The per-server surfaces that are not chat still replicate.
 ///
-/// Both ride their own document types with their own topics, and both are opened by the actor at
-/// startup rather than on demand, so a subscription regression in either would look like "the
-/// wiki is empty for everyone but the author" rather than like a crash.
+/// They ride their own document types with their own topics, and are opened by the actor at
+/// startup rather than on demand, so a subscription regression would leave everyone but the
+/// author with a stale surface rather than producing an obvious crash.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_wiki_page_and_a_status_post_written_on_one_node_are_readable_on_the_other() {
+async fn wiki_status_and_events_written_on_one_node_reach_the_other() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
     let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
@@ -1157,6 +1155,17 @@ async fn a_wiki_page_and_a_status_post_written_on_one_node_are_readable_on_the_o
     );
 
     alice.actor.post_status("the new grinder arrived").await;
+    let event_id = alice
+        .actor
+        .create_event(
+            "Launch night".into(),
+            "Bring snacks".into(),
+            1_700_003_600_000,
+            0,
+            "".into(),
+        )
+        .await
+        .expect("any member may create an event");
 
     let body = until(
         "the wiki page reaches the other member",
@@ -1188,6 +1197,18 @@ async fn a_wiki_page_and_a_status_post_written_on_one_node_are_readable_on_the_o
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].text, "the new grinder arrived");
     assert_eq!(posts[0].author, alice.fp);
+
+    let events = until("the event reaches the other member", &mut bob.events, || async {
+        let events = bob.actor.events().await;
+        events.iter().any(|event| event.id == event_id).then_some(events)
+    })
+    .await;
+    let launch = events
+        .iter()
+        .find(|event| event.id == event_id)
+        .expect("the replicated event remains in the calendar");
+    assert_eq!(launch.title, "Launch night");
+    assert_eq!(launch.body, "Bring snacks");
 
     // A member editing the page converges back the other way (the wiki is char-level merged, so
     // this is a real edit of Alice's text, not a replacement document).

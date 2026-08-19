@@ -6,6 +6,7 @@
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onMount, tick, untrack } from "svelte";
   import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
+  import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
   import { plainSummary } from "./wikitext";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
   import { buildWikiTree, visibleRows, ancestorsOf } from "./wikitree";
@@ -4740,28 +4741,6 @@
         span.replaceWith(downloadChip(file));
       }
     }
-  }
-
-  function safeRemoteUrl(raw: string): string {
-    try {
-      const u = new URL(raw);
-      return (u.protocol === "https:" || u.protocol === "http:") && raw.length <= 4096 ? u.href : "";
-    } catch {
-      return "";
-    }
-  }
-
-  function pastedImageUrl(raw: string): string {
-    const safe = safeRemoteUrl(raw);
-    if (!safe) return "";
-    const u = new URL(safe);
-    if (/\.(?:png|jpe?g|gif|webp|avif)(?:$|[?#])/i.test(u.pathname + u.search + u.hash)) return safe;
-    if (u.hostname === "giphy.com" || u.hostname === "www.giphy.com") {
-      const tail = u.pathname.split("/").filter(Boolean).pop() ?? "";
-      const id = (tail.split("-").pop() ?? "").replace(/[^a-z0-9]/gi, "");
-      if (id) return `https://media.giphy.com/media/${id}/giphy.gif`;
-    }
-    return "";
   }
 
   function remoteImage(url: string, alt: string): HTMLImageElement {

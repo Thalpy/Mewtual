@@ -2020,6 +2020,11 @@ where
                 cmd = cmd_rx.recv() => match cmd {
                     Some(AppCommand::CreateChannel { name, reply }) => {
                         let res = server.create_channel(&name).await.map_err(|e| e.to_string());
+                        // The creator already opened this document as part of create_channel.
+                        // Do not immediately pull that same empty/new document from a peer: a
+                        // peer receiving the directory op may simultaneously be pulling it from
+                        // us, and the two actors would otherwise wait on each other's request.
+                        let locally_created = res.as_ref().ok().map(|channel| channel.id);
                         let _ = reply.send(res);
                         sync_channels(
                             &mut server,
@@ -2027,7 +2032,9 @@ where
                             &mut counts,
                             &event_tx,
                             None,
-                        ).await;
+                            locally_created,
+                        )
+                        .await;
                     }
                     Some(AppCommand::Channels { reply }) => {
                         let _ = reply.send(server.channels());
@@ -2042,7 +2049,9 @@ where
                             &mut counts,
                             &event_tx,
                             Some(peer),
-                        ).await;
+                            None,
+                        )
+                        .await;
                     }
                     Some(AppCommand::OpenChannel { channel, ack }) => {
                         if let Err(e) = server.open_channel(channel).await {
@@ -2744,7 +2753,9 @@ where
                             &mut counts,
                             &event_tx,
                             None,
-                        ).await;
+                            None,
+                        )
+                        .await;
                         for channel in counts.keys().copied().collect::<Vec<_>>() {
                             if channel_changed(&server, channel, &mut counts) {
                                 let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
@@ -2843,6 +2854,7 @@ async fn sync_channels<T, R>(
     sigs: &mut HashMap<u128, u64>,
     event_tx: &mpsc::Sender<AppEvent>,
     catchup_peer: Option<PeerId>,
+    locally_created: Option<u128>,
 ) where
     T: MeshTransport,
     R: CryptoRngCore,
@@ -2857,12 +2869,18 @@ async fn sync_channels<T, R>(
             tracing::warn!(error = %e, channel = channel.id, "open discovered channel failed");
             continue;
         }
-        let recovered = match catchup_peer {
-            Some(peer) => server.request_channel_catchup(peer, channel.id).await,
-            None => server.request_channel_catchup_any(channel.id).await,
-        };
-        if let Err(e) = recovered {
-            tracing::warn!(error = %e, channel = channel.id, "discovered channel catch-up failed");
+        if locally_created != Some(channel.id) {
+            let recovered = match catchup_peer {
+                Some(peer) => server.request_channel_catchup(peer, channel.id).await,
+                None => server.request_channel_catchup_any(channel.id).await,
+            };
+            if let Err(e) = recovered {
+                tracing::warn!(
+                    error = %e,
+                    channel = channel.id,
+                    "discovered channel catch-up failed"
+                );
+            }
         }
         channel_changed(server, channel.id, sigs);
     }
@@ -3339,8 +3357,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_founder_catches_up_a_channel_the_joiner_created() {
-        const SECRET: u128 = 0xBEEF;
+    async fn a_new_channel_and_its_messages_reach_existing_members() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
         let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
@@ -3361,13 +3378,29 @@ mod tests {
         .unwrap();
         let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
 
-        // Bob creates a channel Alice has never opened and posts to it.
-        bob.open_channel(SECRET).await;
-        bob.send_message(SECRET, "from bob").await;
+        // Bob creates a named channel. The shared directory must make it appear for Alice and
+        // subscribe her before any message is sent; users should not need to know or manually
+        // open the channel's derived document id.
+        let plans = bob.create_channel("plans").await.unwrap();
+        timeout(Duration::from_secs(60), async {
+            loop {
+                if alice.channels().await.iter().any(|c| c == &plans) {
+                    break;
+                }
+                match alice_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("alice actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("Alice did not discover Bob's channel");
+
+        bob.send_message(plans.id, "from bob").await;
         timeout(Duration::from_secs(60), async {
             loop {
                 if bob
-                    .messages(SECRET)
+                    .messages(plans.id)
                     .await
                     .iter()
                     .any(|m| m.text == "from bob")
@@ -3383,14 +3416,11 @@ mod tests {
         .await
         .expect("bob has his own message");
 
-        // Alice opens the same channel and pulls the backlog with no named peer; the
-        // founder catching up a joiner-created channel (the symmetric case 8i could not do).
-        alice.open_channel(SECRET).await;
-        alice.catch_up_any(SECRET).await;
+        // Posting to the discovered channel must then update Alice automatically too.
         timeout(Duration::from_secs(60), async {
             loop {
                 if alice
-                    .messages(SECRET)
+                    .messages(plans.id)
                     .await
                     .iter()
                     .any(|m| m.text == "from bob")
@@ -3404,7 +3434,7 @@ mod tests {
             }
         })
         .await
-        .expect("alice caught up the joiner-created channel from the best peer");
+        .expect("Alice did not receive a message in Bob's channel");
 
         alice.shutdown().await;
         bob.shutdown().await;
