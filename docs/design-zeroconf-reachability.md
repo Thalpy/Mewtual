@@ -115,6 +115,26 @@ least three block any public deployment.
   callers without distinguishing them. Splitting it is the fix, and it is a security change to a
   validator that the real-socket e2e tests depend on, so it wants its own review rather than a
   late patch.
+- **P14 (NEW, found by the product-layer suite). Missed-commit recovery asks the one member who
+  cannot answer.** A member that misses a membership commit *does* detect it: the newcomer's first
+  op arrives sealed under a future epoch, `ingest_future` enqueues a commit catch-up, and it drains
+  on the next tick. But `remember_peer(from)` runs on that same inbound gossip event, so the sender
+  is the most-recently-seen peer, and `pick_catchup_peer` prefers the most recent. There is no
+  proven `member_peers` entry to prefer instead, because only a commit catch-up promotes and a
+  document catch-up does not. So the peer asked is **by construction the member whose arrival
+  caused the gap**, and a member that joined at epoch N holds an empty `commit_log` and answers
+  with an empty bundle. An empty bundle returns `Ok(0)` and marks nothing failed, so every
+  subsequent op repeats the identical choice indefinitely.
+
+  It heals only when a member that *was* present for the commit posts a document op after the
+  newcomer. A discovery or PEX tick from the founder is **not** enough (verified): the next
+  future-epoch op re-orders the newcomer back to the front before the queue drains.
+
+  Currently latent: the joiner control-topic fix means a commit is normally received live, so
+  recovery is not reached. It becomes live whenever a commit is genuinely missed, which is exactly
+  the case the recovery path exists for. Fix candidates: exclude the peer whose op revealed the gap
+  from that gap's catch-up candidates; treat an empty bundle from a peer as a failure for that peer
+  rather than a success; or prefer a peer known to have been present at the target epoch.
 
 ## 2. The constraint, stated plainly
 

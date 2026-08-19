@@ -173,9 +173,11 @@ async fn mint(actor: &ServerActor, nonce: u8) -> InviteToken {
 /// Redeem an invite and spawn the joiner's actor, mirroring the bridge's `join_server` verbatim,
 /// including the catch-up fan-out it issues against the inviter right after `spawn`.
 ///
-/// Note what is *not* here: the bridge does not call `subscribe_control` on a joiner (it does on
-/// found and on reload). That asymmetry is deliberate to preserve, because these tests are only
-/// worth anything if they run the code path the product runs.
+/// This mirrors the bridge including its `subscribe_control` call. That call used to be missing
+/// on both join paths while `found_server` and `reload_one` had it, and the asymmetry meant a
+/// joiner never received another membership commit: a third member was invisible to it forever.
+/// This suite found that, and the bridge now subscribes on join too. Keep the two in step: these
+/// tests are only worth anything if they run the sequence the product runs.
 async fn join_node(
     hub: &Arc<Hub>,
     clock: &ManualClock,
@@ -196,6 +198,8 @@ async fn join_node(
     )
     .await
     .expect("join");
+    let mut server = server;
+    server.subscribe_control().await.expect("subscribe control");
     let (actor, events, task) = spawn(server);
     actor.open_channel(general()).await;
     actor.catch_up(inviter, general()).await;
@@ -1264,28 +1268,27 @@ async fn owner_only_actions_are_refused_for_a_non_owner() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// A defect this suite found. Left as a runnable, ignored test rather than deleted or weakened.
+// A defect this suite found, now fixed. The test stays as the regression guard.
 // ---------------------------------------------------------------------------------------------
 
-/// **KNOWN BUG (found by this suite; `#[ignore]`d because it fails against current behaviour).**
+/// A member who joined earlier must see a member who joins later.
 ///
-/// Invite a third person to a two-person server and the *second* person's client never shows
-/// them: their roster stays at two, and every message the newcomer sends is invisible to them,
-/// indefinitely. Only the founder and the newcomer see a group of three.
+/// **This suite found this broken.** Inviting a third person to a two-person server left the
+/// *second* person's client showing a roster of two forever, with every message the newcomer sent
+/// invisible to them. Only the founder and the newcomer saw a group of three. That is about as
+/// fundamental a breakage as a group chat can have, and no crate-level test could see it, because
+/// it lived in the product's own call sequence rather than in any protocol layer.
 ///
-/// Run it with `cargo test -p catcoms-app --test product_e2e -- --ignored`.
+/// **Cause, fixed:** a joiner never subscribed the control topic. The bridge called
+/// `subscribe_control()` in `found_server` and in `reload_one` but in neither join path, so
+/// `ChannelSync::control_subscribed` stayed `false` for the whole life of a joined server and
+/// `desired_routing_topics()` omitted the control topics. The joiner therefore never received the
+/// membership-commit broadcast admitting anybody after it, and sat at its join epoch forever.
+/// `join_node` above mirrors the fixed sequence; keep the two in step.
 ///
-/// Two independent causes, either of which alone would prevent it:
-///
-/// 1. **A joiner never subscribes the control topic.** `apps/desktop/src-tauri/src/lib.rs` calls
-///    `subscribe_control()` in `found_server` and in `reload_one`, but not in `join_server`, so
-///    `ChannelSync::control_subscribed` stays `false` for the whole life of a joined server and
-///    `desired_routing_topics()` omits the control topics. A joiner therefore never receives the
-///    membership-commit broadcast that admits anybody after it, and is stuck at its join epoch.
-///    Adding that one call makes this test pass, which is how the cause was confirmed; it is a
-///    production change, so it is reported rather than made here.
-///
-/// 2. **The missed-commit recovery always asks the one member who cannot answer.** The lagging
+/// **A second defect is still open, and this test does not cover it.** It only fails to bite here
+/// because a subscribed joiner receives the commit live and never needs recovery. If a commit is
+/// genuinely missed, the recovery still asks the one member who cannot answer: the lagging
 ///    member does notice: the newcomer's first op is sealed under a future epoch, `ingest_future`
 ///    enqueues a commit catch-up, and it is drained on the next tick. But `remember_peer(from)`
 ///    runs on that same inbound gossip event, so the sender is the most-recently-seen peer, and
@@ -1299,10 +1302,8 @@ async fn owner_only_actions_are_refused_for_a_non_owner() {
 /// It heals only when a member that *was* present for the commit posts a document op after the
 /// newcomer, which re-orders `known_peers` in time for the next drain. A discovery/PEX tick from
 /// the founder is not enough (verified): the next future-epoch op re-orders the newcomer back to
-/// the front before the queue drains. So in the ordinary case where the new arrival says hello
-/// first, the existing member sees nothing until someone older speaks.
+/// the front before the queue drains. Tracked as P14 in `docs/design-zeroconf-reachability.md`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "known bug: an existing joiner never learns about a later member; see the doc comment"]
 async fn a_third_member_is_visible_to_the_member_who_joined_before_them() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);

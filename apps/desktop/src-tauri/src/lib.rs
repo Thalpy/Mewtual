@@ -1713,6 +1713,15 @@ async fn join_server(
     )
     .await
     .map_err(|e| e.to_string())?;
+    // A joiner has to subscribe the control topic like the founder does. Without this,
+    // `control_subscribed` stays false, `desired_routing_topics()` omits the control topics, and
+    // this member never receives another membership commit for as long as it runs: a third person
+    // joining is invisible to it, and every message that person sends is dropped, indefinitely.
+    // `found_server` and `reload_one` both did this; the two join paths did not.
+    server
+        .subscribe_control()
+        .await
+        .map_err(|e| e.to_string())?;
     attach_blob_store(&state, &mut server).await;
     // Steady-state discovery: the joiner keeps the invite's rendezvous so the actor re-registers/
     // re-discovers there (re-finding the group after a restart, no fresh invite).
@@ -3824,6 +3833,12 @@ async fn join_one_grant(
     )
     .await
     .map_err(|e| e.to_string())?;
+    // Same omission as `join_server`, and the same consequence: a companion device that never
+    // subscribes the control topic stops seeing membership changes the moment it is paired.
+    server
+        .subscribe_control()
+        .await
+        .map_err(|e| e.to_string())?;
     attach_blob_store(state, &mut server).await;
     // Steady-state discovery: keep the grant's rendezvous nodes so this companion can re-find the
     // group after a restart (post-join, group-keyed; unlike the pre-join namespace above, this
