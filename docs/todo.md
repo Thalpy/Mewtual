@@ -76,11 +76,12 @@ permanent false eclipse alarm), both deployment-blocking CRITICALs on the relay 
 nodes, a product-layer integration test suite, and the joiner control-topic bug that made
 later members invisible to earlier ones.
 
-**Open defects, all tracked in section 1c:** P3 (census is rate-limited, not prevented; needs
-upstream vendored), P6 (no eviction primitive), P10 (no padding), P13 (invite-supplied address validator), P14's
-recovery half. P5 partial. **P8 is closed** and **P9 is closed as a decision** (the tag is not
-carried and will not be; it defends the rendezvous operator, not P8's hostile inviter, and no
-call site could act on it): see their 1c rows.
+**Every defect P1 to P14 is now worked to a conclusion** (2026-08-19). Nine closed outright.
+P3 deferred by decision. P5, P6 and P10 partial with their gaps named. P9 **closed as a
+decision**: its premise was false, since the membership tag is keyed on the same secret as the
+rendezvous namespace and so never defended the attacker P8 was filed about. The per-defect board
+in [`design-zeroconf-reachability.md`](design-zeroconf-reachability.md) section 1c is
+authoritative; section 11 carries the loose ends that are not defects.
 
 **Not built: most of the ladder.** AutoNAT and mDNS, racing the rungs concurrently, failure
 messaging, the two-way invite code, switchboard members, the port-forwarding wizard, hosted

@@ -51,7 +51,7 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   class="wiki-infobox">` (only `colspan` was added to the sanitizer allow-list). An image field
   accepts **only** the `![alt](cid:HEX)` marker: a bare content address would be invisible to
   the never-decay scan and could expire while the card still referenced it.
-  **393 tests passing** as of 2026-08-19 (was 221 in 2026-07; the GUI WebView
+  **493 tests passing** as of 2026-08-19 (was 221 in 2026-07; the GUI WebView
   is the one manually-verified surface; both halves compile). See Known limitations.
 - **Corrections (2026-08-19).** A reachability field failure ("timed out connecting to the
   server" when a remote user redeems an invite) triggered a design pass plus four adversarial
