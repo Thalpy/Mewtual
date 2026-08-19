@@ -51,8 +51,26 @@ the protocol- vs honest-client-enforced boundary and the hardening backlog.
   class="wiki-infobox">` (only `colspan` was added to the sanitizer allow-list). An image field
   accepts **only** the `![alt](cid:HEX)` marker: a bare content address would be invisible to
   the never-decay scan and could expire while the card still referenced it.
-  **221 tests passing** as of 2026-07 (+ livery/icon/topic suites since; the GUI WebView
+  **393 tests passing** as of 2026-08-19 (was 221 in 2026-07; the GUI WebView
   is the one manually-verified surface; both halves compile). See Known limitations.
+- **Corrections (2026-08-19).** A reachability field failure ("timed out connecting to the
+  server" when a remote user redeems an invite) triggered a design pass plus four adversarial
+  reviews, and they found several claims in *this document* to be false. Recorded here because
+  a status doc that overstates is worse than no status doc. See
+  [`design-zeroconf-reachability.md`](design-zeroconf-reachability.md) for the full defect list.
+  - **Live member presence never worked.** It is listed as shipped in the phase-8 row below.
+    `connected_member_fingerprints` reads `peer_records`, and member PEX was never wired into
+    the product (`publish_self_record` / `request_pex` had no callers outside `catcoms-sync`'s
+    own tests), so the map was permanently empty: roster online dots always dark, "N online"
+    always zero. Same root cause killed the 9g cross-session peer re-dial (it re-dialled
+    nothing) and made the eclipse advisory fire **unconditionally for every group of 4+**.
+    Fixed in `32dab2a`. The lesson worth keeping: crate-level tests all passed while three
+    shipped features were dead, because nothing tested the product path above `catcoms-sync`.
+  - **"`connection_limits` on every swarm" was not true**: `RelayBehaviour`, the one
+    internet-exposed swarm, had none. Being fixed alongside the relay/rendezvous hardening.
+  - **The desktop node regenerated its network identity on every launch** and bound a random
+    port, so every invite issued before a restart was addressed to a machine that no longer
+    existed, and after a restart invites carried a loopback address only. Fixed in `0af1583`.
 - Both CRITICALs the 6e-3d design pass found are **closed and adversarially reviewed**:
   **A1** (the pre-existing bug where the gossip topics hashed the plaintext-invite
   `group_id`, so any invite-holder could read all topics) and **Sybil-C1** (the
