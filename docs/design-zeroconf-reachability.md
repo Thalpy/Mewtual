@@ -705,3 +705,54 @@ Do not describe P8 as closed until P9 lands.
   once" pitch). Current lean: derive a per-install base port from the vault so it is stable and
   unpredictable, and accept a small per-server offset, with the wizard showing the user their own
   numbers.
+
+## 11. Open avenues
+
+Things surfaced by the reviews, the field test or the work itself that are **not** tracked as
+P-defects and would otherwise be lost. Not a roadmap: a list of loose ends with enough context
+to pick up cold. Keep it current; delete an entry when it lands or is deliberately dropped.
+
+### Blocks an honest answer somewhere
+
+- **AutoNAT (rung 0c) does not exist.** Consequence today: the connectivity panel cannot answer
+  "am I reachable from the internet" and correctly says unknown; a relay reservation or a UPnP
+  address is labelled evidence, not proof. Also the escalation trigger for rungs 1 and 2, and the
+  eligibility test for switchboards. The single highest-leverage missing piece.
+- **Per-dial outcomes are not observable.** `MeshService` races a dial set and only the winner
+  surfaces, so the panel shows per-address results as unknown rather than inventing them. Needs
+  per-dial event plumbing out of the transport.
+- **P9 blocks P8** and is tracked, but note the knock-on: without the membership tag on the wire
+  the `DiscoveryPolicy` "member-tag-verified" ranking tier does not exist at all, so every
+  discovered candidate scores flat.
+
+### Hardening residuals, deliberately deferred
+
+- **The served PEX set is chosen in randomised map order.** Local retention is 512 records, the
+  wire cap is 64, so `serve_pex` picks 64 of up to 512 by `HashMap` iteration order. It spreads
+  rather than pins and converges over ticks, but the selection is not deliberate.
+- **No idle-connection reaper**, so the per-prefix connection lockout is mitigated rather than
+  closed: an attacker holding idle sockets moves no bytes and makes no registrations, so neither
+  budget notices.
+- **The file-descriptor check reads but cannot raise** the soft limit (`setrlimit` needs `unsafe`
+  and the workspace denies it), and it reads `/proc/self/limits`, so it is Linux-only and a
+  documented no-op on Windows and macOS, where the default limit is also low.
+- **P3's census prevention** is deferred by decision: rate-limited, not prevented. Revisit before
+  any public deployment.
+- **P14's third refinement** (prefer a peer known present at the target epoch) was declined with
+  reasoning. Revisit only if a real deployment shows repeated misses.
+
+### Product gaps the copy now exposes
+
+- **Mode migration is not designed.** Switching a live group between friend-circle and hosted is
+  a topology change, not a setting. The "you can change your mind later" promise was removed from
+  the UI rather than kept, so a founder steered into friend circle has no stated path out.
+- **Hosted mode is blocked on O4**: a node-held ban list is a second authority that provably
+  diverges from the group's own, because ownership follows the lowest live MLS leaf and migrates.
+
+### Housekeeping
+
+- The **desktop workspace is not rustfmt-clean** (6 pre-existing diffs) and is not covered by the
+  build ritual, so `cargo fmt` there reformats unrelated code. Every agent has had to hand-match
+  its own hunks and revert the churn. Worth either fixing once or adding to the ritual.
+- Desktop clippy has a baseline of 2 lib and 4 lib-test warnings.
+
