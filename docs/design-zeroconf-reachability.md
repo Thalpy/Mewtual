@@ -493,7 +493,7 @@ Each needs a line in [`THREAT-MODEL.md`](THREAT-MODEL.md):
 | Step | Work | Blocking? | Review |
 |---:|---|---|---|
 | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
-| 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Includes P8 (real corroboration count) and P9 (carry the membership tag) | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
+| 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Attempts P8; **P9 is NOT included** (it lives in `catcoms-net`), and without `tag_verified` the P8 corroboration count is only partial: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
 | 2 | AutoNAT into `MeshBehaviour`; mDNS; pairwise reachability in the model | prerequisite for rungs 1, 2 | light |
 | 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
 | 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
@@ -506,6 +506,14 @@ Each needs a line in [`THREAT-MODEL.md`](THREAT-MODEL.md):
 | 11 | Public DHT | last, if ever | yes |
 
 Independent of the ladder, worth fixing on their own: P4 (voice DoS), P5, P10 (padding).
+
+**Note on P8 and P9.** The design specifies counting roots that returned a **tag-verified** peer.
+`tag_verified` is P9 and is not implemented, so a corroboration count built on unverified
+discovery records is still attacker-influenceable: a hostile inviter naming two rendezvous it
+controls need only serve one fabricated record from each to pin the source count at the
+threshold forever. Counting a root only once a peer it surfaced has survived
+`ingest_peer_record` (roster plus self-signature) is the interim measure; the real fix is P9.
+Do not describe P8 as closed until P9 lands.
 
 ## 10. Open questions
 

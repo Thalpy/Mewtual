@@ -14,10 +14,9 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::{
-    channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger,
-    PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord,
-    ServerStore, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES,
-    MAX_SERVER_ICON_BYTES,
+    channel_id, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger, PairingSecrets,
+    PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord, ServerStore,
+    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -879,6 +878,18 @@ fn external_addr(s: &str) -> Option<Multiaddr> {
     Some(addr)
 }
 
+/// Whether an IPv4 literal means nothing outside this machine or this LAN.
+fn ipv4_is_local(ip: &std::net::Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        // RFC 6598 100.64.0.0/10, the carrier-grade-NAT block: routable in form, useless
+        // in practice, and `Ipv4Addr::is_shared` is still unstable.
+        || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
+}
+
 /// Whether a multiaddr names an address that means nothing outside this machine or this LAN:
 /// loopback, RFC1918 private space, the RFC6598 CGNAT block, IPv4 link-local, IPv6 unique-local
 /// (`fc00::/7`) or IPv6 link-local (`fe80::/10`), plus the unspecified addresses.
@@ -890,16 +901,7 @@ fn external_addr(s: &str) -> Option<Multiaddr> {
 /// what leaves the box, not what an invite may carry.)
 fn addr_is_private(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
-        Protocol::Ip4(ip) => {
-            ip.is_loopback()
-                || ip.is_private()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                // RFC 6598 100.64.0.0/10, the carrier-grade-NAT block: routable in form, useless
-                // in practice, and `Ipv4Addr::is_shared` is still unstable.
-                || (ip.octets()[0] == 100 && (64..128).contains(&ip.octets()[1]))
-        }
+        Protocol::Ip4(ip) => ipv4_is_local(&ip),
         Protocol::Ip6(ip) => {
             ip.is_loopback()
                 || ip.is_unspecified()
@@ -907,46 +909,68 @@ fn addr_is_private(addr: &Multiaddr) -> bool {
                 // `is_unicast_link_local` are still unstable.
                 || (ip.segments()[0] & 0xfe00) == 0xfc00
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
+                // An IPv4 address written in v6 form is still that address: without unwrapping
+                // it, `::ffff:192.168.1.5` reads as a routable v6 address and every rule above
+                // is dodged by spelling the same thing the other way. `to_ipv4_mapped`, not
+                // `to_ipv4`: the latter also matches the deprecated `::a.b.c.d` form, which
+                // sweeps in `::1` as "0.0.0.1" and misclassifies it.
+                || ip.to_ipv4_mapped().is_some_and(|v4| ipv4_is_local(&v4))
         }
         _ => false,
     })
 }
 
+/// Whether an IPv4 literal cannot be a peer at all.
+fn ipv4_is_undialable(ip: &std::net::Ipv4Addr) -> bool {
+    let o = ip.octets();
+    ip.is_multicast()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || o[0] == 0
+        || o[0] >= 240
+}
+
 /// Whether a multiaddr names something that cannot be a peer at all: a multicast group, an
-/// IPv4/IPv6 link-local address, the unspecified addresses, the IPv4 broadcast address, or the
-/// reserved 0.0.0.0/8 and 240.0.0.0/4 blocks.
+/// IPv4/IPv6 link-local address, the unspecified addresses, the IPv4 broadcast address, the
+/// reserved 0.0.0.0/8 and 240.0.0.0/4 blocks, or a **name resolved at dial time**.
 ///
 /// Distinct from [`addr_is_private`], which asks a different question ("may we *advertise* this?")
 /// and deliberately includes LAN addresses. A LAN address is a perfectly good thing to *dial*
 /// (the most common first invite is someone in the same house); a multicast group is not an
 /// endpoint, and a link-local address means a different machine on every network the invite is
 /// opened on, which is what turns an invite into a scanner aimed at the reader's own segment.
+///
+/// DNS components are refused for the reason `peer_addr_is_routable` refuses them in a peer
+/// record: `/dns4/scan.attacker.tld/tcp/22` passes every check that can be made on the string and
+/// then resolves, at dial time, to whatever the invite's author currently points it at. Nothing
+/// this app mints ever contains one.
 fn addr_is_undialable(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
-        Protocol::Ip4(ip) => {
-            let o = ip.octets();
-            ip.is_multicast()
-                || ip.is_link_local()
-                || ip.is_unspecified()
-                || ip.is_broadcast()
-                || o[0] == 0
-                || o[0] >= 240
-        }
+        Protocol::Ip4(ip) => ipv4_is_undialable(&ip),
         Protocol::Ip6(ip) => {
             ip.is_multicast()
                 || ip.is_unspecified()
                 // fe80::/10 link-local (`is_unicast_link_local` is still unstable).
                 || (ip.segments()[0] & 0xffc0) == 0xfe80
+                // ...and the same address written as IPv4-in-IPv6 (mapped form only; see
+                // `addr_is_private`).
+                || ip.to_ipv4_mapped().is_some_and(|v4| ipv4_is_undialable(&v4))
         }
+        Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => true,
         _ => false,
     })
 }
 
-/// Whether a multiaddr points at this machine.
+/// Whether a multiaddr points at this machine. Folds IPv4-in-IPv6, so `/ip6/::ffff:127.0.0.1`
+/// is recognised as loopback rather than sorted into the routable half of
+/// [`dialable_bootstrap`] and dialled at the reader's own localhost.
 fn addr_is_loopback(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| match p {
         Protocol::Ip4(ip) => ip.is_loopback(),
-        Protocol::Ip6(ip) => ip.is_loopback(),
+        Protocol::Ip6(ip) => {
+            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
         _ => false,
     })
 }
@@ -3021,13 +3045,14 @@ async fn reload_one(
     snapshot: &[u8],
     record: &ServerRecord,
 ) -> Result<(), String> {
-    // 9g: dial the last-known peers (from the persisted peer records) at construction, so a
-    // reloaded joiner reconnects on its own as those peers come online.
-    let redial: Vec<Multiaddr> = peer_addrs_from_snapshot(snapshot)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
+    // 9g used to dial every address in the snapshot's peer records here, straight at the
+    // transport: up to `MAX_PEX_ADDRESSES` per record for every record ever stored, unconditional,
+    // bypassing `DiscoveryPolicy` and its dial budget entirely, and with no membership check, so a
+    // removed member was re-dialled on every launch for the life of the install. It was harmless
+    // only because `peer_records` was permanently empty; wiring PEX is what armed it.
+    //
+    // The re-dial now happens after the server is restored, via `dial_cached_peers`, which is
+    // roster-checked, address-validated, policy-ranked and budget-capped. See below.
 
     // The persisted invite is still read first: for a server founded before the network record
     // existed it is the only surviving record of which rendezvous this server used.
@@ -3050,8 +3075,7 @@ async fn reload_one(
     let mut net = load_or_init_server_net(state, record.id, &invite_rendezvous).await;
     let saved_port = net.port;
     let relay_dial: Vec<Multiaddr> = net.relay.parse().into_iter().collect();
-    let dial: Vec<Multiaddr> = redial.into_iter().chain(relay_dial).collect();
-    let (mesh, libp2p_id, port) = build_transport(&net, &dial)?;
+    let (mesh, libp2p_id, port) = build_transport(&net, &relay_dial)?;
     net.port = port;
 
     // Re-run the founder's reachability work verbatim: the advertise address, the UPnP probe, the
@@ -3136,6 +3160,19 @@ async fn reload_one(
                 _ => {}
             }
         }
+    }
+    // Re-dial the last-known members now that the roster is loaded (the Phase 9g healing path).
+    // `cache_known_records` folds the snapshot's restored peer records into the cache, pruning
+    // anyone no longer on the roster, and `dial_cached_peers` runs the survivors through the
+    // DiscoveryPolicy: routability-checked, ranked, and capped by the dial budget. The discovery
+    // tick repeats this every minute or so; doing it eagerly here is only about reconnect latency.
+    server.cache_known_records();
+    let redialled = server.dial_cached_peers().await;
+    if redialled > 0 {
+        eprintln!(
+            "reload: server {} re-dialled {redialled} known member(s)",
+            record.id
+        );
     }
 
     // If the persisted invite is discovery-enabled but we could NOT re-register its namespace
@@ -4035,6 +4072,54 @@ mod tests {
             .map(|n| a(&format!("/ip4/203.0.113.{n}")))
             .collect();
         assert_eq!(dialable_bootstrap(&flood).len(), MAX_BOOTSTRAP_DIALS);
+    }
+
+    #[test]
+    fn the_bootstrap_validators_are_not_fooled_by_ipv4_in_ipv6_or_by_a_name() {
+        const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let a = |h: &str| format!("{h}/tcp/9/p2p/{ID}");
+
+        // `::ffff:127.0.0.1` is loopback written the other way. Testing `Ipv6Addr` properties
+        // directly missed it, so it sorted into the "routable" half and the joiner dialled its
+        // own localhost while ignoring the invite's real addresses.
+        let mapped_loopback: Multiaddr = a("/ip6/::ffff:127.0.0.1").parse().unwrap();
+        assert!(addr_is_loopback(&mapped_loopback));
+        let mixed = vec![a("/ip6/::ffff:127.0.0.1"), a("/ip4/203.0.113.7")];
+        let out = dialable_bootstrap(&mixed);
+        assert_eq!(
+            out.len(),
+            1,
+            "the mapped loopback is not a routable address"
+        );
+        assert_eq!(out[0].to_string(), a("/ip4/203.0.113.7"));
+
+        // The same trick against the advertise gate: a private v4 in v6 clothing must not be
+        // published to a rendezvous.
+        for private in ["/ip6/::ffff:192.168.1.5", "/ip6/::ffff:10.0.0.1"] {
+            let addr = a(private);
+            assert!(
+                external_addrs(std::slice::from_ref(&addr)).is_empty(),
+                "{addr} must not be advertised"
+            );
+        }
+        // ...and a mapped multicast/link-local address is not a peer at all.
+        for undialable in ["/ip6/::ffff:224.0.0.1", "/ip6/::ffff:169.254.1.1"] {
+            let addr: Multiaddr = a(undialable).parse().unwrap();
+            assert!(addr_is_undialable(&addr), "{undialable} cannot be a peer");
+        }
+
+        // A name is resolved at dial time, so what it points at is whatever the invite's author
+        // says right now. Nothing this app mints contains one.
+        for name in [
+            "/dns4/scan.attacker.invalid/tcp/22",
+            "/dns6/scan.attacker.invalid/tcp/22",
+            "/dns/scan.attacker.invalid/tcp/22",
+            "/dnsaddr/scan.attacker.invalid",
+        ] {
+            let addr: Multiaddr = name.parse().unwrap();
+            assert!(addr_is_undialable(&addr), "{name} must not be dialled");
+        }
+        assert!(dialable_bootstrap(&["/dns4/x.invalid/tcp/9".to_string()]).is_empty());
     }
 
     #[test]

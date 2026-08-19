@@ -4789,9 +4789,26 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Ask a bounded handful of known peers for their member records (one PEX pass). Returns the
-    /// number of newly-known members. Driven from the actor's discovery tick.
+    /// number of newly-known members. Used by tests and by callers with no runtime to bound
+    /// individual requests with; the actor uses [`Server::pex_targets`] + [`Server::request_pex`]
+    /// so it can put a deadline on each request rather than on the whole pass.
     pub async fn drive_pex(&mut self) -> usize {
         self.sync.drive_pex().await
+    }
+
+    /// Choose this pass's PEX targets (and charge them against the requester-side rate limit).
+    pub fn pex_targets(&mut self) -> Vec<PeerId> {
+        self.sync.take_pex_targets()
+    }
+
+    /// Ask one peer for its member records. Returns the number of newly-known members.
+    pub async fn request_pex(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self.sync.request_pex(peer).await?)
+    }
+
+    /// Back a peer off after it failed to answer a PEX request within the caller's deadline.
+    pub fn note_pex_failure(&mut self, peer: PeerId) {
+        self.sync.note_pex_failure(peer);
     }
 
     /// Fold the currently-known member records into the cross-session address cache. Returns the

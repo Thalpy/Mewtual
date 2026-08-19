@@ -116,6 +116,17 @@ impl AddressCache {
         self.entries.values().cloned().collect()
     }
 
+    /// Keep only the entries `keep` returns `true` for.
+    ///
+    /// The cache had no removal path at all, and `insert` only ever adds, so a member who left
+    /// the group stayed a dial candidate for every future launch: the node that removed them
+    /// would re-dial them on startup forever, handing an ex-member a per-launch liveness and IP
+    /// oracle and an inbound connection slot. Being cached is not a standing entitlement; the
+    /// caller re-checks the roster and prunes on every refresh.
+    pub fn retain(&mut self, keep: impl Fn(&CachedPeer) -> bool) {
+        self.entries.retain(|_, cp| keep(cp));
+    }
+
     /// Insert/refresh a proven-member entry, keeping the **freshest** by signed `seq`.
     /// When over capacity, evict a decorrelated (RNG-chosen) victim so an attacker
     /// cannot steer which honest entry is dropped. The caller must have verified the
@@ -284,6 +295,27 @@ mod tests {
             AddressCache::from_bytes(&fresh, &[7u8; 32], CacheConfig::default()),
             Err(CacheError::Tampered)
         ));
+    }
+
+    #[test]
+    fn retain_drops_entries_the_caller_no_longer_vouches_for() {
+        // A member leaving the group must leave the cache with them, or the node that removed
+        // them keeps re-dialling them on every launch.
+        let mut c = AddressCache::new(CacheConfig::default());
+        let mut r = rng();
+        for p in 1..=4u8 {
+            c.insert(cached(p, 1), &mut r);
+        }
+        assert_eq!(c.len(), 4);
+        c.retain(|cp| cp.peer[0] % 2 == 0);
+        assert_eq!(c.len(), 2);
+        assert!(c.get(&vec![2u8; 32]).is_some());
+        assert!(c.get(&vec![3u8; 32]).is_none());
+        // And it survives the serialization round trip as the pruned set.
+        let key = [1u8; 32];
+        let back = AddressCache::from_bytes(&c.to_bytes(&key), &key, CacheConfig::default())
+            .expect("round trip");
+        assert_eq!(back.len(), 2);
     }
 
     #[test]

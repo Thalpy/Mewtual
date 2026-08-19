@@ -36,11 +36,11 @@ const DISCOVERY_DRAIN_MS: u64 = 500;
 const DELIVERY_THROTTLE_MS: u64 = 1_000;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
 const MAX_DISCOVERED_PER_TICK: usize = 16;
-/// Ceiling on one member-PEX pass (ms). `drive_pex` asks up to a handful of peers in turn, so an
-/// unbounded pass is only as fast as the slowest of them; a peer that accepts the request and
-/// then goes quiet must not hold the actor (and every queued UI command behind it) for longer
-/// than this. Whatever did not answer in the window is simply retried on the next tick.
-const PEX_DRIVE_MS: u64 = 5_000;
+/// Ceiling on a **single** member-PEX request (ms). Deliberately per request rather than per
+/// pass: a shared budget lets the first peer asked spend all of it, so a peer that accepts and
+/// never answers silently starves every peer behind it, on every tick, forever. Whatever misses
+/// its deadline is backed off (`note_pex_failure`) and retried on a later tick.
+const PEX_REQUEST_MS: u64 = 3_000;
 
 /// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
 /// error string). One chunk per command keeps the actor responsive during a large download.
@@ -2501,15 +2501,30 @@ where
                         // (candidates only; the first-contact route past a hostile rendezvous),
                         // and fold whatever we now know back into the cache for next launch.
                         //
-                        // Bounded like the discovery drain above, and for the same reason: PEX
-                        // asks several peers in turn, and a peer that accepts the request and
-                        // then never answers must cost this tick a bounded wait rather than
-                        // wedging the actor (and with it every UI command) behind it.
-                        let _ = tokio::time::timeout(
-                            std::time::Duration::from_millis(PEX_DRIVE_MS),
-                            server.drive_pex(),
-                        )
-                        .await;
+                        // Each request carries its own deadline, not the pass as a whole. One
+                        // budget for the pass meant a peer that accepted the first request and
+                        // then went quiet consumed the entire tick, every tick, and the peers
+                        // behind it were never reached: a self-eclipse of the discovery layer
+                        // for the price of one idle connection. A peer that misses its deadline
+                        // is backed off, so it also stops being picked for a while.
+                        for peer in server.pex_targets() {
+                            match tokio::time::timeout(
+                                std::time::Duration::from_millis(PEX_REQUEST_MS),
+                                server.request_pex(peer),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => {}
+                                Ok(Err(e)) => {
+                                    tracing::trace!(error = %e, "PEX request failed");
+                                    server.note_pex_failure(peer);
+                                }
+                                Err(_) => {
+                                    tracing::debug!("PEX request timed out; backing the peer off");
+                                    server.note_pex_failure(peer);
+                                }
+                            }
+                        }
                         server.dial_cached_peers().await;
                         server.cache_known_records();
                     }

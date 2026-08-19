@@ -29,23 +29,33 @@
 //!    never suspect (you simply *have* few peers); good reach OR enough trust roots clears
 //!    it (both must be low to suspect).
 //! 2. **Source collapse**: corroboration that once reached `min_sources` has since fallen
-//!    to a single effective root. This one fires **regardless of reach**, because term 1
-//!    alone is silent against the attacker who relays honestly: keeping reach high is
-//!    precisely how they stay under it while cutting every independent way to check.
+//!    to a single effective root, *while still reaching at least `min_sources` other
+//!    members*, held for `collapse_sustain_ms`. This one fires **regardless of reach**,
+//!    because term 1 alone is silent against the attacker who relays honestly: keeping
+//!    reach high is precisely how they stay under it while cutting every independent way
+//!    to check.
 //!
-//!    It is deliberately a *drop* (measured against the session's high-water mark) rather
-//!    than the absolute `S <= 1`. Nearly every real group is founded with exactly one
-//!    rendezvous, so an absolute test would raise CAUTION permanently for the common case
-//!    and reproduce, in a new place, the very false-positive storm this detector is being
-//!    fixed to stop. Losing corroboration you had is a signal; never having had any is
-//!    just a small group's normal condition.
+//!    Two guards keep it from becoming a false-positive generator in its own right, which
+//!    would be a straight trade of one useless alarm for another:
+//!
+//!    - It is a *drop*, measured against the session's high-water mark, not the absolute
+//!      `S <= 1`. Nearly every real group is founded with exactly one rendezvous, so an
+//!      absolute test would raise CAUTION permanently for the common case. Losing
+//!      corroboration you had is a signal; never having had any is a small group's normal
+//!      condition.
+//!    - It requires enough reachable members that corroboration was *possible*. Every root
+//!      is a rendezvous or a member that answered PEX, so in a healthy group `S` tracks how
+//!      many members you are talking to. Without this guard, a four-person group with two
+//!      people asleep reaches one member, counts that member as its one root, and alarms
+//!      every single evening.
 //!
 //! No ambient time: a `Clock` is injected on every [`EclipseDetector::observe`].
 
 use catcoms_rt::Clock;
 
-/// Tunable thresholds. The defaults (floor 3, reach 0.20, sources 2, 30 s grace/clear)
-/// are first guesses; surface them as config and tune against staging, never hard-code.
+/// Tunable thresholds. The defaults (floor 3, reach 0.20, sources 2, 30 s grace/clear,
+/// 5 min collapse sustain) are first guesses; surface them as config and tune against
+/// staging, never hard-code.
 #[derive(Debug, Clone, Copy)]
 pub struct EclipseConfig {
     /// Roster sizes at or below this never raise a warning (a small group genuinely
@@ -59,6 +69,11 @@ pub struct EclipseConfig {
     pub grace_ms: u64,
     /// Must look healthy continuously for this long before CAUTION clears (hysteresis).
     pub clear_ms: u64,
+    /// Corroboration must look collapsed continuously for this long before the source-collapse
+    /// term counts as suspect at all (the shared `grace_ms` then applies on top). Longer than
+    /// `grace_ms` because the root count only moves at the discovery cadence, so a couple of
+    /// ticks is the shortest observation worth believing. The default is five discovery periods.
+    pub collapse_sustain_ms: u64,
 }
 
 impl Default for EclipseConfig {
@@ -69,6 +84,7 @@ impl Default for EclipseConfig {
             min_sources: 2,
             grace_ms: 30_000,
             clear_ms: 30_000,
+            collapse_sustain_ms: 300_000,
         }
     }
 }
@@ -110,6 +126,10 @@ pub struct EclipseDetector {
     /// alarm measures a *drop* against; monotonic, so a group that never had corroboration never
     /// trips it (see the module docs).
     max_sources_seen: usize,
+    /// When corroboration first looked collapsed in the current spell (`None` if it does not look
+    /// collapsed right now). The collapse term's own sustain window, separate from the shared
+    /// grace, because the root count moves in whole steps at the discovery cadence.
+    collapse_since: Option<u64>,
 }
 
 impl EclipseDetector {
@@ -121,6 +141,7 @@ impl EclipseDetector {
             suspect_since: None,
             clear_since: None,
             max_sources_seen: 0,
+            collapse_since: None,
         }
     }
 
@@ -129,13 +150,11 @@ impl EclipseDetector {
         self.level
     }
 
-    /// Whether the snapshot looks suspect *right now* (before hysteresis): a big-enough roster
-    /// we can reach little of behind too few trust roots, **or** corroboration that has
-    /// collapsed to a single effective root after having had more. See the module docs for why
-    /// the second term is a drop rather than an absolute count.
-    fn instantaneously_suspect(&self, o: &EclipseObservation) -> bool {
+    /// The two raw suspicion terms for this observation, before either hysteresis window:
+    /// `(low reach behind too few sources, corroboration collapsed to a single root)`.
+    fn suspicion_terms(&self, o: &EclipseObservation) -> (bool, bool) {
         if o.roster_size <= self.config.roster_floor {
-            return false;
+            return (false, false);
         }
         let reach = if o.roster_size <= 1 {
             1.0
@@ -144,11 +163,24 @@ impl EclipseDetector {
         };
         let low_reach_and_sources =
             reach < self.config.min_reach && o.trust_roots < self.config.min_sources;
-        // Independent of the reach term on purpose: an attacker who relays honestly keeps reach
-        // high precisely so the first term stays quiet.
-        let sources_collapsed =
-            self.max_sources_seen >= self.config.min_sources && o.trust_roots <= 1;
-        low_reach_and_sources || sources_collapsed
+        // The collapse term is independent of the reach term on purpose: an attacker who relays
+        // honestly keeps reach high precisely so the first term stays quiet.
+        //
+        // It is gated instead on there being **enough reachable members for corroboration to
+        // have been possible at all**. Without that gate it fires on the most ordinary condition
+        // there is: a four-person group where two people are asleep reaches one member, that
+        // member is its one root, and the alarm sounds every evening. Every root is either a
+        // rendezvous or a member that answered PEX, so in a healthy group the root count tracks
+        // the number of members you are talking to; requiring `min_sources` reachable others
+        // means the term can only fire when you are talking to several members and yet only
+        // *one* source ever vouched for where anybody is. That is the eclipse shape, and the
+        // honest-relay attacker satisfies the gate by construction, so nothing is lost.
+        let corroboration_was_possible =
+            o.reachable_devices.saturating_sub(1) >= self.config.min_sources;
+        let sources_collapsed = self.max_sources_seen >= self.config.min_sources
+            && corroboration_was_possible
+            && o.trust_roots <= 1;
+        (low_reach_and_sources, sources_collapsed)
     }
 
     /// The most trust roots corroborated so far this session (the source-collapse baseline).
@@ -168,7 +200,20 @@ impl EclipseDetector {
         // Raise the collapse baseline first. Doing it before the test is what makes the alarm a
         // *drop*: this observation can only ever raise the bar, never trip itself.
         self.max_sources_seen = self.max_sources_seen.max(o.trust_roots);
-        let suspect = self.instantaneously_suspect(&o);
+        let (low_reach_and_sources, collapsed_now) = self.suspicion_terms(&o);
+        // The collapse term carries its own, longer sustain window on top of the shared grace.
+        // The reach term reads a value that moves continuously; the root count moves in whole
+        // steps at the discovery cadence, so a single unlucky tick (a rendezvous restarting, a
+        // pass that happened to reach nobody) is a full step down. Requiring it to hold across
+        // several ticks is what separates "a tick went badly" from "the sources are gone".
+        let collapse_held = if collapsed_now {
+            let since = *self.collapse_since.get_or_insert(now);
+            now.saturating_sub(since) >= self.config.collapse_sustain_ms
+        } else {
+            self.collapse_since = None;
+            false
+        };
+        let suspect = low_reach_and_sources || collapse_held;
         match self.level {
             EclipseLevel::Ok => {
                 if suspect {
@@ -309,26 +354,37 @@ mod tests {
         // The honest-relay attacker: reach stays perfect (they forward everything), so the
         // reach term never fires. What they *do* take away is every independent way to check,
         // and that has to be its own alarm or the detector is silent exactly when it matters.
-        let mut det = EclipseDetector::new(EclipseConfig::default());
+        let cfg = EclipseConfig::default();
+        let mut det = EclipseDetector::new(cfg);
         let clock = ManualClock::new(0);
         assert_eq!(det.observe(obs(12, 12, 3), &clock), EclipseLevel::Ok);
         assert_eq!(det.max_sources_seen(), 3);
 
-        // Corroboration collapses to one root; reach is still 100%.
+        // Corroboration collapses to one root; reach is still 100%. The collapse term has to
+        // hold for its own sustain window before it even counts as suspect...
         clock.advance_ms(1);
         assert_eq!(det.observe(obs(12, 12, 1), &clock), EclipseLevel::Ok);
-        clock.advance_ms(30_000);
+        clock.advance_ms(cfg.collapse_sustain_ms - 1);
+        assert_eq!(
+            det.observe(obs(12, 12, 1), &clock),
+            EclipseLevel::Ok,
+            "one bad tick is not a collapse"
+        );
+        // ...and then the shared grace applies on top of it.
+        clock.advance_ms(1);
+        assert_eq!(det.observe(obs(12, 12, 1), &clock), EclipseLevel::Ok);
+        clock.advance_ms(cfg.grace_ms);
         assert_eq!(
             det.observe(obs(12, 12, 1), &clock),
             EclipseLevel::Caution,
-            "a drop to a single effective root alarms independently of reach"
+            "a sustained drop to a single effective root alarms independently of reach"
         );
 
         // And it clears hysteretically once corroboration returns: the recovery has to hold for
         // the full clear window, so the first healthy observation only starts the timer.
         clock.advance_ms(1);
         assert_eq!(det.observe(obs(12, 12, 3), &clock), EclipseLevel::Caution);
-        clock.advance_ms(30_000);
+        clock.advance_ms(cfg.clear_ms);
         assert_eq!(det.observe(obs(12, 12, 3), &clock), EclipseLevel::Ok);
     }
 
@@ -339,8 +395,42 @@ mod tests {
         let mut det = EclipseDetector::new(EclipseConfig::default());
         let clock = ManualClock::new(0);
         det.observe(obs(12, 12, 3), &clock);
-        clock.advance_ms(120_000);
+        clock.advance_ms(600_000);
         assert_eq!(det.observe(obs(12, 12, 2), &clock), EclipseLevel::Ok);
+    }
+
+    #[test]
+    fn a_group_whose_other_members_went_to_bed_does_not_alarm() {
+        // The single most common real-world condition, and the one the collapse term got wrong
+        // on its first pass: four people, everyone was online earlier (so the high-water mark is
+        // set), and now all but one have gone to bed. Reach is fine, one root answers, and the
+        // detector must stay quiet or alarm fatigue destroys the only eclipse signal there is.
+        let mut det = EclipseDetector::new(EclipseConfig::default());
+        let clock = ManualClock::new(0);
+        // Earlier in the day: everyone up, three roots.
+        assert_eq!(det.observe(obs(4, 4, 3), &clock), EclipseLevel::Ok);
+
+        // Evening: only one other member left, so only one root. Hours pass.
+        for _ in 0..40 {
+            clock.advance_ms(60_000);
+            assert_eq!(
+                det.observe(obs(4, 2, 1), &clock),
+                EclipseLevel::Ok,
+                "reaching one member with one root is a quiet evening, not an eclipse"
+            );
+        }
+
+        // And with everybody asleep the reach term owns the case; the collapse term must not
+        // double-count a node that has nobody at all to be corroborated by.
+        let mut det = EclipseDetector::new(EclipseConfig::default());
+        let clock = ManualClock::new(0);
+        det.observe(obs(4, 4, 3), &clock);
+        clock.advance_ms(600_000);
+        let (_, collapsed) = det.suspicion_terms(&obs(4, 1, 0));
+        assert!(
+            !collapsed,
+            "a node reaching nobody cannot have lost corroboration it could have had"
+        );
     }
 
     #[test]
