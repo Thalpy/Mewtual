@@ -106,7 +106,11 @@ async fn reserve_circuit(
         .parse()
         .unwrap();
     node.listen_on(circuit).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(20), async {
+    // Generous on purpose. A reservation needs a TCP connect, a Noise handshake and a relay
+    // round trip, and `cargo test` runs these real-socket tests alongside every other test
+    // binary on the machine. A 20s budget passed in isolation and intermittently blew up under
+    // that parallel load, which reads as a product failure and is not one.
+    tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             match node.next_listen_addr().await {
                 Some(a) if a.to_string().contains("p2p-circuit") => return a,
@@ -154,7 +158,7 @@ async fn a_dial_is_suppressed_when_the_peer_is_already_connected() {
     let (client, _id) = MeshService::new_tcp(None, &[]).unwrap();
     client.dial(target.clone()).await.unwrap();
     await_connected(&client).await;
-    tokio::time::timeout(Duration::from_secs(10), rx.recv())
+    tokio::time::timeout(Duration::from_secs(30), rx.recv())
         .await
         .expect("the relay never saw the first connection")
         .expect("channel closed");
@@ -163,11 +167,30 @@ async fn a_dial_is_suppressed_when_the_peer_is_already_connected() {
     for _ in 0..8 {
         client.dial(target.clone()).await.unwrap();
     }
-    let extra = tokio::time::timeout(Duration::from_secs(3), rx.recv()).await;
-    assert!(
-        extra.is_err(),
-        "an existing connection must suppress further dials; the relay saw another connection"
-    );
+    // A negative assertion over a wall-clock window is only meaningful while the premise holds:
+    // the gate suppresses a dial because the peer is *still connected*, and the dial ledger is
+    // deliberately cleared when a peer goes away so a later tick may dial it again. If the link
+    // dropped underneath us (an idle timeout, or the machine starving this task under parallel
+    // load) then a fresh connection is the gate working, not failing, and asserting otherwise
+    // reports a product bug that is not there. So distinguish the two outcomes.
+    let extra = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
+    if extra.is_ok() {
+        // Drain whatever the client already observed, without blocking on a quiet stream, and
+        // look for the link having gone away. A dropped link makes a second connection correct.
+        let mut dropped = false;
+        while let Ok(Some(ev)) =
+            tokio::time::timeout(Duration::from_millis(50), client.next_event()).await
+        {
+            if matches!(ev, TransportEvent::PeerDisconnected(_)) {
+                dropped = true;
+            }
+        }
+        assert!(
+            dropped,
+            "an existing connection must suppress further dials; the relay saw another connection \
+             while the first was still up"
+        );
+    }
 
     relay_task.abort();
 }

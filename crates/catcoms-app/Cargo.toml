@@ -25,6 +25,12 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 
 [dev-dependencies]
+# The product layer is transport-generic, so almost every test here runs on the in-memory mesh.
+# `tcp_product_e2e` is the exception: connect/disconnect only exist on a real transport, and
+# presence is defined in terms of them, so that one test needs a real libp2p node.
+catcoms-net = { path = "../catcoms-net" }
+catcoms-log = { path = "../catcoms-log" }
+libp2p = { version = "0.56", features = ["tokio"] }
 rand_chacha = "0.3"
 rand_core = "0.6"
 tempfile = "3"
