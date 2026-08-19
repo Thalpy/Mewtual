@@ -71,6 +71,9 @@ struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
     next_id: Mutex<u64>,
     store: Mutex<Option<ServerStore>>,
+    /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
+    /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
+    session_resumable: Mutex<bool>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -208,7 +211,24 @@ async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> 
 struct FoundResult {
     server: u64,
     channel: String,
+    channels: Vec<UiChannel>,
     is_dm: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct UiChannel {
+    id: String,
+    name: String,
+}
+
+fn ui_channels(channels: Vec<catcoms_app::ChannelInfo>) -> Vec<UiChannel> {
+    channels
+        .into_iter()
+        .map(|c| UiChannel {
+            id: c.id.to_string(),
+            name: c.name,
+        })
+        .collect()
 }
 
 /// A chat message as serialized to the frontend.
@@ -539,6 +559,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
             match ev {
+                AppEvent::ChannelsUpdated => {
+                    let _ = app.emit("channels-changed", ServerEvt { server });
+                }
                 AppEvent::ChannelUpdated { channel } => {
                     // Channel ids are u128; send as a string (JS numbers lose precision).
                     let _ = app.emit(
@@ -1774,6 +1797,7 @@ async fn found_server_inner(
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
+    let channels = ui_channels(actor.channels().await);
     let server_id = register_server(
         app,
         state,
@@ -1816,6 +1840,7 @@ async fn found_server_inner(
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
+        channels,
         is_dm,
     })
 }
@@ -1990,6 +2015,7 @@ async fn join_server_inner(
 
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
+    actor.catch_up_channel_index(inviter).await;
     actor.open_channel(general).await;
     actor.catch_up(inviter, general).await;
     actor.catch_up_profiles(inviter).await;
@@ -2000,6 +2026,7 @@ async fn join_server_inner(
     actor.catch_up_calendar(inviter).await;
     actor.catch_up_wiki(inviter).await;
     actor.catch_up_roles(inviter).await;
+    let channels = ui_channels(actor.channels().await);
     // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
     let server_id = register_server(
         app,
@@ -2023,6 +2050,7 @@ async fn join_server_inner(
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
+        channels,
         is_dm,
     })
 }
@@ -2055,11 +2083,19 @@ async fn open_channel(
     server: u64,
     name: String,
 ) -> Result<String, String> {
-    let id = channel_id(&name);
     let actor = actor_of(&state, server).await?;
-    actor.open_channel(id).await;
-    actor.catch_up_any(id).await;
-    Ok(id.to_string())
+    let channel = actor.create_channel(name).await?;
+    persist_server(&state, server).await;
+    Ok(channel.id.to_string())
+}
+
+/// Read the server-wide channel directory.
+#[tauri::command]
+async fn get_channels(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<UiChannel>, String> {
+    Ok(ui_channels(actor_of(&state, server).await?.channels().await))
 }
 
 /// Does `current` offer a way to reach us that `minted` does not?
@@ -3453,7 +3489,39 @@ struct ReloadedServer {
     name: String,
     invite: String,
     channel: String,
+    channels: Vec<UiChannel>,
     is_dm: bool,
+}
+
+async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
+    let servers: Vec<_> = state
+        .servers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, e)| {
+            (
+                *id,
+                e.name.clone(),
+                e.invite.clone().unwrap_or_default(),
+                e.is_dm,
+                e.actor.clone(),
+            )
+        })
+        .collect();
+    let mut reloaded = Vec::with_capacity(servers.len());
+    for (server, name, invite, is_dm, actor) in servers {
+        reloaded.push(ReloadedServer {
+            server,
+            name,
+            invite,
+            channel: channel_id("general").to_string(),
+            channels: ui_channels(actor.channels().await),
+            is_dm,
+        });
+    }
+    reloaded.sort_by_key(|s| s.server);
+    reloaded
 }
 
 /// Reload one sealed server from disk onto a fresh transport and register it under its
@@ -3651,6 +3719,41 @@ fn is_tracker_url(url: &str) -> bool {
     url.starts_with(ISSUE_URL_PREFIX)
 }
 
+fn is_external_http_url(url: &str) -> bool {
+    if url.is_empty() || url.len() > 4096 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return false;
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|r| !r.is_empty() && !r.starts_with(['/', '?', '#']))
+}
+
+fn launch_url(url: &str) -> Result<(), String> {
+    // Deliberately no shell: `cmd /C start` would interpret query-string separators. Each
+    // launcher receives the URL as one literal argv entry.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Open a prefilled bug report / feature request on the tracker in the user's default browser.
 /// Mewtual has no service of its own to receive feedback, so filing means handing GitHub a
 /// filled-in form: the app carries no GitHub credentials and posts nothing itself, and the user
@@ -3660,28 +3763,16 @@ async fn open_issue_url(url: String) -> Result<(), String> {
     if !is_tracker_url(&url) {
         return Err("refusing to open a URL outside the issue tracker".into());
     }
-    // Deliberately no shell: `cmd /C start` would read the `&` between query parameters as a
-    // command separator. Each launcher below takes the URL as one literal argv entry instead.
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("rundll32.exe");
-        c.args(["url.dll,FileProtocolHandler", &url]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(&url);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(&url);
-        c
-    };
-    cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    launch_url(&url)
+}
+
+/// Open a chat/wiki link in the system browser, keeping the Mewtual webview on the conversation.
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<(), String> {
+    if !is_external_http_url(&url) {
+        return Err("only http and https links can be opened".into());
+    }
+    launch_url(&url)
 }
 
 /// Is there already a vault on this machine? The frontend asks before it draws the gate:
@@ -3721,17 +3812,8 @@ async fn unlock(
     // process kept running), don't reload from disk; that would spawn a duplicate actor +
     // transport per server. Return the servers already registered so the rail repopulates.
     if state.store.lock().await.is_some() {
-        let servers = state.servers.lock().await;
-        return Ok(servers
-            .iter()
-            .map(|(id, e)| ReloadedServer {
-                server: *id,
-                name: e.name.clone(),
-                invite: e.invite.clone().unwrap_or_default(),
-                channel: channel_id("general").to_string(),
-                is_dm: e.is_dm,
-            })
-            .collect());
+        *state.session_resumable.lock().await = true;
+        return Ok(running_servers(&state).await);
     }
 
     let records = store.load_registry().map_err(|e| e.to_string())?;
@@ -3785,10 +3867,30 @@ async fn unlock(
             name: record.display_name.clone(),
             invite: record.invite.clone(),
             channel: channel_id("general").to_string(),
+            channels: ui_channels(actor_of(&state, record.id).await?.channels().await),
             is_dm: record.is_dm,
         });
     }
+    *state.session_resumable.lock().await = true;
     Ok(reloaded)
+}
+
+/// Restore an already-unlocked frontend after F5/HMR without asking for the vault passphrase
+/// again. An explicit UI lock disables this path until `unlock` verifies the passphrase.
+#[tauri::command]
+async fn resume_session(
+    state: State<'_, AppState>,
+) -> Result<Option<Vec<ReloadedServer>>, String> {
+    if !*state.session_resumable.lock().await || state.store.lock().await.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(running_servers(&state).await))
+}
+
+#[tauri::command]
+async fn lock_session(state: State<'_, AppState>) -> Result<(), String> {
+    *state.session_resumable.lock().await = false;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4279,6 +4381,7 @@ async fn join_one_grant(
     let general = channel_id("general");
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
+    actor.catch_up_channel_index(contact).await;
     actor.catch_up(contact, general).await;
     actor.catch_up_profiles(contact).await;
     actor.catch_up_livery(contact).await;
@@ -4455,11 +4558,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             vault_exists,
+            resume_session,
+            lock_session,
             unlock,
             found_server,
             join_server,
             leave_server,
             open_channel,
+            get_channels,
             get_invite,
             mint_invite_fresh,
             rename_server,
@@ -4535,7 +4641,8 @@ pub fn run() {
             pairing_decline,
             pairing_open,
             pairing_join,
-            open_issue_url
+            open_issue_url,
+            open_external_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Mewtual desktop app");

@@ -30,6 +30,7 @@ import {
   WIKI_LINK_RE,
   embedHtml,
   emojiHtml,
+  escAttr,
   escText,
   inlineToHtml,
   mentionHtml,
@@ -145,6 +146,26 @@ const embed: TokenizerAndRendererExtension = {
   },
 };
 
+// An explicitly-authored remote markdown image is kept inert until the UI resolver validates the
+// protocol and constructs the <img> itself. Raw HTML still cannot create media, preserving the
+// sanitizer boundary while allowing `![cat](https://…/cat.gif)` to work.
+const remoteEmbed: TokenizerAndRendererExtension = {
+  name: "remoteembed",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("![");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const m = /^!\[([^\]\n]{0,200})\]\((https?:\/\/[^\s)]+)\)/i.exec(src);
+    if (!m) return undefined;
+    return { type: "remoteembed", raw: m[0], alt: m[1], url: m[2] };
+  },
+  renderer(token) {
+    return `<span class="embed remote-embed" data-remote-url="${escAttr(token.url)}" data-alt="${escAttr(token.alt)}"></span>`;
+  },
+};
+
 // `[label](file:HEX)` / `[label](status:ID)` → an in-app reference chip (inserted by the composer's
 // "+" picker). Matched ahead of marked's own link syntax so these app-only schemes never reach an
 // `<a href>`; the app resolves the target from the data- attribute instead, so a reference can
@@ -170,7 +191,7 @@ const refLink: TokenizerAndRendererExtension = {
 let configured = false;
 function configure() {
   if (configured) return;
-  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed, refLink], breaks: true, gfm: true });
+  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed, remoteEmbed, refLink], breaks: true, gfm: true });
   configured = true;
 }
 
@@ -186,6 +207,7 @@ const SANITIZE = {
   ],
   ALLOWED_ATTR: [
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
+    "data-remote-url",
     "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "data-event-id",
     "tabindex", "role", "aria-hidden", "colspan",
   ],

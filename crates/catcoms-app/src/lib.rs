@@ -192,6 +192,66 @@ pub fn channel_id(name: &str) -> u128 {
     u128::from_be_bytes(bytes.as_bytes()[..16].try_into().expect("16 bytes"))
 }
 
+/// One entry in the server-wide channel directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInfo {
+    pub id: u128,
+    pub name: String,
+}
+
+/// The channel directory is one small, shared CRDT document; message content remains split into
+/// the per-channel documents addressed by [`channel_id`].
+const CHANNEL_INDEX_DOC: u128 = 0;
+pub const MAX_CHANNEL_NAME_CHARS: usize = 64;
+
+fn validate_channel_name(name: &str) -> Result<String, AppError> {
+    let display = name.trim();
+    if display.is_empty() {
+        return Err(AppError::Invalid("a channel needs a name".into()));
+    }
+    if display.chars().count() > MAX_CHANNEL_NAME_CHARS {
+        return Err(AppError::Invalid(format!(
+            "channel name too long (max {MAX_CHANNEL_NAME_CHARS} characters)"
+        )));
+    }
+    if display.chars().any(char::is_control) {
+        return Err(AppError::Invalid(
+            "channel names cannot contain control characters".into(),
+        ));
+    }
+    Ok(display.to_string())
+}
+
+fn read_channel_index(doc: &AutoCommit) -> Vec<ChannelInfo> {
+    let mut out = Vec::new();
+    for key in doc.keys(ROOT) {
+        let Ok(id) = u128::from_str_radix(&key, 16) else {
+            continue;
+        };
+        let name = str_field(doc, &ROOT, &key);
+        // Do not let a malformed or hostile catalog entry redirect a human-readable name to a
+        // different document. The id is entirely derived from that name.
+        if !name.is_empty() && channel_id(&name) == id {
+            out.push(ChannelInfo { id, name });
+        }
+    }
+    let general = ChannelInfo {
+        id: channel_id("general"),
+        name: "general".into(),
+    };
+    if !out.iter().any(|c| c.id == general.id) {
+        // Backwards compatibility for servers created before the shared directory existed.
+        out.push(general);
+    }
+    out.sort_by(|a, b| {
+        (a.id != channel_id("general"))
+            .cmp(&(b.id != channel_id("general")))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out.dedup_by_key(|c| c.id);
+    out
+}
+
 /// Wall-clock ceiling on a join handshake. Past this the joiner gives up (and the user can
 /// retry); so an Option-C admin invite whose owner never comes online can't wedge it forever.
 const JOIN_TIMEOUT_SECS: u64 = 120;
@@ -2383,6 +2443,61 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub async fn open_channel(&mut self, channel: u128) -> Result<(), AppError> {
         self.sync.open_channel(DocType::Channel, channel).await?;
         Ok(())
+    }
+
+    /// Open the shared channel directory. Actors do this once at startup, before opening every
+    /// channel currently listed in it.
+    pub async fn open_channel_index(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::ChannelIndex, CHANNEL_INDEX_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// The server's shared channel list. Legacy servers always expose `general`, even before the
+    /// first directory write has propagated.
+    pub fn channels(&self) -> Vec<ChannelInfo> {
+        self.sync
+            .doc(DocType::ChannelIndex, CHANNEL_INDEX_DOC)
+            .map(|d| read_channel_index(d.doc()))
+            .unwrap_or_else(|| {
+                vec![ChannelInfo {
+                    id: channel_id("general"),
+                    name: "general".into(),
+                }]
+            })
+    }
+
+    /// Add a channel to the shared directory and subscribe to its message document locally.
+    /// Repeating the same normalized name is idempotent.
+    pub async fn create_channel(&mut self, name: &str) -> Result<ChannelInfo, AppError> {
+        let name = validate_channel_name(name)?;
+        let info = ChannelInfo {
+            id: channel_id(&name),
+            name,
+        };
+        if !self.channels().iter().any(|c| c.id == info.id) {
+            let key = format!("{:032x}", info.id);
+            let value = info.name.clone();
+            self.sync
+                .post(DocType::ChannelIndex, CHANNEL_INDEX_DOC, |d| {
+                    d.put(ROOT, key, value)
+                })
+                .await?;
+        }
+        self.open_channel(info.id).await?;
+        Ok(info)
+    }
+
+    /// Pull the shared channel directory from one known member.
+    pub async fn request_channel_index_catchup(
+        &mut self,
+        peer: PeerId,
+    ) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::ChannelIndex, CHANNEL_INDEX_DOC)
+            .await?)
     }
 
     /// Send a chat message to a channel. The message is **authored by this device's

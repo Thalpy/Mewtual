@@ -22,9 +22,9 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem,
-    JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats, Profile, Server,
-    ServerEvent, WikiPendingEdit, WikiRevision,
+    ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView,
+    InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats, Profile,
+    Server, ServerEvent, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -49,6 +49,17 @@ type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    /// Create (or idempotently open) a channel and publish it to the shared directory.
+    CreateChannel {
+        name: String,
+        reply: oneshot::Sender<Result<ChannelInfo, String>>,
+    },
+    /// Query the shared channel directory.
+    Channels {
+        reply: oneshot::Sender<Vec<ChannelInfo>>,
+    },
+    /// Pull the channel directory from the join contact, then subscribe/catch up every entry.
+    CatchUpChannelIndex { peer: PeerId },
     /// Open a channel (subscribe + create locally). Acked once subscribed, so a caller
     /// can avoid racing a subsequent publish ahead of the subscription.
     OpenChannel {
@@ -474,6 +485,8 @@ pub enum AppCommand {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// The shared channel directory changed; the UI should re-fetch it (`channels`).
+    ChannelsUpdated,
     /// A channel's message list changed; the UI should re-fetch it (`messages`). Using
     /// a re-fetch signal (rather than diffed deltas) keeps ordering robust under CRDT
     /// merges of concurrent messages.
@@ -528,6 +541,41 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    /// Create a channel in the shared directory.
+    pub async fn create_channel(&self, name: impl Into<String>) -> Result<ChannelInfo, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::CreateChannel {
+                name: name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Read the shared channel directory.
+    pub async fn channels(&self) -> Vec<ChannelInfo> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Channels { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the shared channel directory from `peer` after joining.
+    pub async fn catch_up_channel_index(&self, peer: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::CatchUpChannelIndex { peer })
+            .await;
+    }
+
     /// Open a channel and wait until it is subscribed.
     pub async fn open_channel(&self, channel: u128) {
         let (ack, done) = oneshot::channel();
@@ -1884,6 +1932,21 @@ where
         // edit/delete/add all surface a `ChannelUpdated`.
         let mut counts: HashMap<u128, u64> = HashMap::new();
         let mut members = server.member_count();
+        // The directory itself is shared. Seed `general` for legacy/new servers, then open every
+        // known message document so later gossip and reconnect catch-up have somewhere to land.
+        if let Err(e) = server.open_channel_index().await {
+            tracing::warn!(error = %e, "open_channel_index failed");
+        }
+        if let Err(e) = server.create_channel("general").await {
+            tracing::warn!(error = %e, "seed general channel failed");
+        }
+        let mut last_channels = server.channels();
+        for channel in last_channels.iter().map(|c| c.id) {
+            if let Err(e) = server.open_channel(channel).await {
+                tracing::warn!(error = %e, channel, "open listed channel failed");
+            }
+            channel_changed(&server, channel, &mut counts);
+        }
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
         // customize color/font/effect later via SetProfile). Seed ONLY when this device has no
@@ -1955,6 +2018,32 @@ where
             tokio::select! {
                 biased;
                 cmd = cmd_rx.recv() => match cmd {
+                    Some(AppCommand::CreateChannel { name, reply }) => {
+                        let res = server.create_channel(&name).await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        sync_channels(
+                            &mut server,
+                            &mut last_channels,
+                            &mut counts,
+                            &event_tx,
+                            None,
+                        ).await;
+                    }
+                    Some(AppCommand::Channels { reply }) => {
+                        let _ = reply.send(server.channels());
+                    }
+                    Some(AppCommand::CatchUpChannelIndex { peer }) => {
+                        if let Err(e) = server.request_channel_index_catchup(peer).await {
+                            tracing::warn!(error = %e, "channel directory catch-up failed");
+                        }
+                        sync_channels(
+                            &mut server,
+                            &mut last_channels,
+                            &mut counts,
+                            &event_tx,
+                            Some(peer),
+                        ).await;
+                    }
                     Some(AppCommand::OpenChannel { channel, ack }) => {
                         if let Err(e) = server.open_channel(channel).await {
                             tracing::warn!(error = %e, channel, "open_channel failed");
@@ -2649,6 +2738,13 @@ where
                 },
                 cont = server.sync_once() => match cont {
                     Ok(true) => {
+                        sync_channels(
+                            &mut server,
+                            &mut last_channels,
+                            &mut counts,
+                            &event_tx,
+                            None,
+                        ).await;
                         for channel in counts.keys().copied().collect::<Vec<_>>() {
                             if channel_changed(&server, channel, &mut counts) {
                                 let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
@@ -2736,6 +2832,42 @@ where
         }
     });
     (ServerActor { cmd_tx }, event_rx, handle)
+}
+
+/// Notice channel-directory changes, subscribe newly-discovered channel documents, and recover
+/// their existing history. The catalog event is emitted only after those subscriptions exist, so
+/// clicking a channel immediately cannot race its first catch-up.
+async fn sync_channels<T, R>(
+    server: &mut Server<T, R>,
+    last: &mut Vec<ChannelInfo>,
+    sigs: &mut HashMap<u128, u64>,
+    event_tx: &mpsc::Sender<AppEvent>,
+    catchup_peer: Option<PeerId>,
+) where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let next = server.channels();
+    if next == *last {
+        return;
+    }
+    let prior: std::collections::HashSet<u128> = last.iter().map(|c| c.id).collect();
+    for channel in next.iter().filter(|c| !prior.contains(&c.id)) {
+        if let Err(e) = server.open_channel(channel.id).await {
+            tracing::warn!(error = %e, channel = channel.id, "open discovered channel failed");
+            continue;
+        }
+        let recovered = match catchup_peer {
+            Some(peer) => server.request_channel_catchup(peer, channel.id).await,
+            None => server.request_channel_catchup_any(channel.id).await,
+        };
+        if let Err(e) = recovered {
+            tracing::warn!(error = %e, channel = channel.id, "discovered channel catch-up failed");
+        }
+        channel_changed(server, channel.id, sigs);
+    }
+    *last = next;
+    let _ = event_tx.send(AppEvent::ChannelsUpdated).await;
 }
 
 /// Whether a channel's rendered content (its messages, its topic or its jukebox) changed since

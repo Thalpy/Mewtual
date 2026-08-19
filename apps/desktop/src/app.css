@@ -1563,6 +1563,15 @@ img.emoji {
   border-radius: var(--r);
 }
 
+.messages.drag-over,
+.file-list.drag-over,
+.wiki.drag-over,
+.event-form.drag-over {
+  outline: 2px dashed var(--accent-hi);
+  outline-offset: -4px;
+  background: color-mix(in oklab, var(--accent) 10%, transparent);
+}
+
 .attach {
   display: inline-flex;
   align-items: center;
@@ -4325,6 +4334,13 @@ button.you-panel:hover {
 .dtick.d-part { color: var(--warn); }
 .dtick.d-none { color: var(--danger); }
 .dtick.d-wait { color: var(--faint); }
+.dtick.d-pending,
+.m-receipt.d-pending .mr-g {
+  color: var(--accent-hi);
+  display: inline-block;
+  animation: send-spin 0.9s linear infinite;
+}
+@keyframes send-spin { to { transform: rotate(360deg); } }
 
 /* --- Channel rows: separate hash, accent when active/unread --- */
 .channel-list .chan-hash {
@@ -5624,6 +5640,7 @@ button.you-panel:hover {
 .m-receipt.d-part { color: color-mix(in oklab, var(--warn) 70%, var(--faint)); }
 .m-receipt.d-none { color: var(--danger); }
 .m-receipt.d-wait { color: var(--faint); }
+.m-receipt.d-pending { color: var(--faint); }
 
 /* --- The status bar's vault segment is the lock control (Ctrl+L). --- */
 .statusbar .sb-lock {

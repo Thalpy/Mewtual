@@ -2925,6 +2925,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // (commit catch-up is point-to-point, so it works off-topic). Deduped,
                 // and skipped on the committer (it never lags and must keep serving).
                 self.maybe_probe_for_missed_commits();
+                // Gossip only carries live edits; it does not replay anything written while this
+                // member was offline. Pull every document we already have open whenever a peer
+                // reconnects so chat, wiki, calendar, status and the channel directory converge
+                // without requiring the user to visit each surface or send a sacrificial message.
+                // `enqueue_doc_catchup` deduplicates and bounds this work.
+                for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
+                    self.enqueue_doc_catchup(doc_type, doc_id);
+                }
                 Ok(true)
             }
             Some(TransportEvent::PeerDisconnected(peer)) => {
@@ -3107,10 +3115,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// easier to believe.
     fn pick_catchup_peer_avoiding(&self, avoid: Option<PeerId>) -> Option<PeerId> {
         let eligible = |p: &&PeerId| !self.failed_catchup_peers.contains(p) && Some(**p) != avoid;
+        let live = |p: &&PeerId| eligible(p) && self.connected_peers.contains(*p);
         self.member_peers
             .iter()
             .rev()
-            .find(eligible)
+            .find(live)
+            .or_else(|| self.known_peers.iter().rev().find(live))
+            // A newly-restored/joined synchronizer can know a usable peer before the transport's
+            // public connect event reaches this loop, so retain the historical non-live fallback.
+            .or_else(|| self.member_peers.iter().rev().find(eligible))
             .or_else(|| self.known_peers.iter().rev().find(eligible))
             .copied()
     }
@@ -4183,21 +4196,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Ok(false);
         };
         let (req, _auth) = self.build_authed_request(KIND_DM_INVITE, invite)?;
-        self.transport
+        let response = self
+            .transport
             .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
             .await?;
-        Ok(true)
+        // An empty response used to be counted as delivery even when authentication failed or the
+        // receiver rejected an empty/malformed invite. Only the recipient's explicit ack means a
+        // friend request reached its pending queue.
+        Ok(response.as_ref() == [1])
     }
 
     /// Serve an inbound `KIND_DM_INVITE`: authenticate the sender as a current member, then queue
-    /// the invite as a pending friend request (deduped on the sender, bounded). Never replies data.
-    fn serve_dm_invite(&mut self, data: &[u8]) {
+    /// the invite as a pending friend request (deduped on the sender, bounded). Returns whether it
+    /// was accepted so the sender can distinguish delivery from an empty rejection response.
+    fn serve_dm_invite(&mut self, data: &[u8]) -> bool {
         let Some((invite, req_pubkey, _auth)) = self.authenticate_request(KIND_DM_INVITE, data)
         else {
-            return;
+            return false;
         };
         if invite.is_empty() {
-            return;
+            return false;
         }
         let from = roles::fingerprint(&DeviceId::from_public_key_bytes(&req_pubkey));
         // Dedup on the sender (a re-send replaces the prior pending request), then bound the queue.
@@ -4206,6 +4224,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         while self.pending_dm_invites.len() > MAX_PENDING_DM_INVITES {
             self.pending_dm_invites.remove(0);
         }
+        true
     }
 
     /// Push a call-signalling message (opaque payload) to current member `target_fp` over this group.
@@ -6006,9 +6025,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Vec::new()
             }
             Some((&KIND_DM_INVITE, rest)) => {
-                // A member delivered a DM (friend) invite; queue it as a pending request. Empty ack.
-                self.serve_dm_invite(rest);
-                Vec::new()
+                // A member delivered a DM (friend) invite. An explicit one-byte ack is the only
+                // result the sender treats as delivered.
+                if self.serve_dm_invite(rest) { vec![1] } else { Vec::new() }
             }
             Some((&KIND_CALL_SIGNAL, rest)) => {
                 // A member sent a call-signalling message; queue it for the actor to drain. Empty ack.

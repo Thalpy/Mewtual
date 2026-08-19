@@ -61,8 +61,8 @@
   // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
-  type Found = { server: number; channel: string; is_dm: boolean };
-  type Reloaded = { server: number; name: string; invite: string; channel: string; is_dm: boolean };
+  type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
@@ -206,8 +206,8 @@
   // Semantic colours (green=presence, gold=mentions, red=danger) are constant in every preset.
   type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string; clock: string; scale: number };
   const APPEARANCE_KEY = "catcoms.appearance";
-  // clock: "" = the locale's habit, "12"/"24" force a convention. scale: chat text size in
-  // percent (100 = the density's own base size); clamped where applied, not where stored.
+  // clock: "" = the locale's habit, "12"/"24" force a convention. scale: whole-interface text
+  // size in percent; clamped where applied, not where stored.
   const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true, icons: "", motion: "", clock: "", scale: 100 };
   function loadAppearance(): Appearance {
     try {
@@ -544,14 +544,11 @@
       el.style.setProperty("--accent", accent);
       el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
     }
-    // Chat text size: a personal multiplier on the density's own base. Never livery-controllable,
-    // and cleared first so returning the slider to 100% restores the token untouched.
-    el.style.removeProperty("--fs-msg");
-    const scale = Math.min(140, Math.max(70, appearance.scale || 100));
-    if (scale !== 100) {
-      const base = appearance.density === "compact" ? 0.78 : 0.84;
-      el.style.setProperty("--fs-msg", `${((base * scale) / 100).toFixed(3)}rem`);
-    }
+    // Scale the root rather than one chat token: menus, member names, dialogs and every other
+    // rem-sized label now follow the same accessibility preference.
+    const scale = Math.min(200, Math.max(70, appearance.scale || 100));
+    if (scale === 100) el.style.removeProperty("font-size");
+    else el.style.fontSize = `${scale}%`;
     try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); } catch { /* best-effort */ }
   });
 
@@ -1777,6 +1774,7 @@
 
   let draft = $state("");
   let sending = $state(false);
+  let pendingSendNonce = 0;
   let members = $state(1);
   let roster = $state<Member[]>([]);
   // Fingerprints of members reachable right now (a live connection): drives the roster's online
@@ -2181,6 +2179,10 @@
   async function pickEventImage(fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file || activeServerId === null) return;
+    if (!file.type.startsWith("image/")) {
+      toast("Drop an image to use it as the event poster", "err", 3500);
+      return;
+    }
     evImageBusy = true;
     const tid = toast(`Uploading ${file.name}…`, "info", 0);
     try {
@@ -2213,7 +2215,7 @@
   function fmtEventWhen(e: UiEvent): string {
     const s = new Date(e.start_ts);
     const day = dayLabel(e.start_ts);
-    const t = s.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const t = s.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
     const end = e.end_ts ? `–${new Date(e.end_ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}` : "";
     return `${day} · ${t}${end}`;
   }
@@ -2224,6 +2226,7 @@
   let inboxMode = $state<"mentions" | "news">("mentions");
   let newsItems = $state<NewsItem[]>([]);
   let newsLoading = $state(false);
+  let newsUnseen = $state(false);
   async function loadNews() {
     newsLoading = true;
     const items: NewsItem[] = [];
@@ -2550,9 +2553,11 @@
     void inboxView; // returning from the inbox recreates the chat DOM too
     tick().then(() => {
       resolveMedia(messagesEl);
+      resolveRemoteMedia(messagesEl);
       resolveEmoji(messagesEl);
       resolveRefCards(messagesEl);
       resolveMedia(statusEl);
+      resolveRemoteMedia(statusEl);
       resolveEmoji(statusEl);
       resolveRefCards(statusEl);
     });
@@ -2576,12 +2581,14 @@
     tick().then(() => {
       if (!wikiEdit) {
         resolveMedia(wikiEl);
+        resolveRemoteMedia(wikiEl);
         resolveEmoji(wikiEl);
         resolveWikiLinks(wikiEl);
         resolveRefCards(wikiEl);
         decorateWikiHeadings(wikiEl);
       } else if (wikiPreview) {
         resolveMedia(wikiPreviewEl);
+        resolveRemoteMedia(wikiPreviewEl);
         resolveEmoji(wikiPreviewEl);
         resolveWikiLinks(wikiPreviewEl);
         resolveRefCards(wikiPreviewEl);
@@ -2769,6 +2776,25 @@
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
+  function restoreReloaded(reloaded: Reloaded[]) {
+    servers = reloaded.map((r) => ({
+      id: r.server,
+      name: r.name,
+      channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }],
+      active: r.channel,
+      unread: [],
+      invite: r.invite,
+      dot: false,
+      isDm: r.is_dm,
+    }));
+    locked = false;
+    try { sessionStorage.removeItem("catcoms.explicit-lock"); } catch { /* best effort */ }
+    const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
+    if (firstServer) void switchServer(firstServer.id);
+    loadInbox();
+    refreshAllServerIcons();
+  }
+
   async function unlock(secret = unlockSecret()) {
     if (!secret) return;
     unlocking = true;
@@ -2786,18 +2812,7 @@
       sigilWord = "";
       stopPlayback();
       melodySeq = [];
-      for (const r of reloaded) {
-        servers = [
-          ...servers,
-          { id: r.server, name: r.name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: r.invite, dot: false, isDm: r.is_dm },
-        ];
-      }
-      locked = false;
-      passphrase = "";
-      const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
-      if (firstServer) switchServer(firstServer.id);
-      loadInbox(); // populate the inbox badge once the reloaded servers are live
-      refreshAllServerIcons(); // rail icons come from each server's livery doc
+      restoreReloaded(reloaded);
     } catch (e) {
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
       error = String(e);
@@ -2813,6 +2828,8 @@
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen() {
     if (locked) return;
+    try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
+    void invoke("lock_session");
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
@@ -2922,9 +2939,10 @@
   }
 
   function addServer(r: Found, name: string) {
+    const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     servers = [
       ...servers,
-      { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
+      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
     ];
     showAdd = false;
     // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
@@ -2948,7 +2966,7 @@
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
-        { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
+        { id: r.server, name, channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
       ];
       const invite = (await invoke<string | null>("get_invite", { server: r.server })) ?? "";
       const sent = invite
@@ -3163,6 +3181,18 @@
     }
   }
 
+  async function refreshChannels(server: number) {
+    try {
+      const channels = await invoke<Channel[]>("get_channels", { server });
+      const s = servers.find((x) => x.id === server);
+      if (!s || !channels.length) return;
+      s.channels = channels;
+      if (!channels.some((c) => c.id === s.active)) s.active = channels[0].id;
+    } catch {
+      // Older backend: retain the locally-known list.
+    }
+  }
+
   // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
   // channel): everything else closes the search bar, as before.
   async function switchTo(id: string, keepSearch = false) {
@@ -3248,6 +3278,8 @@
   // ✓ all reachable confirmed · ✓✓ the whole roster confirmed.
   function deliveryTick(m: Msg): { g: string; cls: string; tip: string } | null {
     if (m.author !== myFp || !m.id) return null;
+    if (m.id.startsWith("pending:"))
+      return { g: "◌", cls: "d-pending", tip: "Saving this message locally…" };
     const total = Math.max(members - 1, 0);
     if (total === 0) return null; // alone here: nothing to deliver to
     const d = delivery[m.id];
@@ -3269,8 +3301,10 @@
   // words. Shown on your latest message (the state you actually care about) and on any older
   // one that hasn't settled yet; a delivered-and-superseded message stays quiet.
   function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
+    if (mi !== lastOwnIdx) return null;
     const t = deliveryTick(m);
     if (!t || !m.id) return null;
+    if (t.cls === "d-pending") return { g: t.g, label: "sending…", cls: t.cls, tip: t.tip };
     if ((t.cls === "d-all" || t.cls === "d-ok") && mi !== lastOwnIdx) return null;
     const d = delivery[m.id];
     const total = Math.max(members - 1, 0);
@@ -3550,6 +3584,20 @@
     if (sl) {
       e.preventDefault();
       await openStatusRef(sl.getAttribute("data-status-id") ?? "");
+      return;
+    }
+    // Never let an external anchor navigate this webview: doing so replaces the entire Mewtual
+    // UI and leaves the window effectively softlocked. The native side accepts http(s) only and
+    // hands the URL to the user's normal browser without invoking a shell.
+    const link = target?.closest("a[href]") as HTMLAnchorElement | null;
+    if (link) {
+      e.preventDefault();
+      const url = link.href || link.getAttribute("href") || "";
+      try {
+        await invoke("open_external_url", { url });
+      } catch (err) {
+        error = String(err);
+      }
     }
   }
 
@@ -3639,8 +3687,9 @@
   async function copyText(text: string) {
     try {
       await navigator.clipboard.writeText(text);
+      toast("Copied to clipboard", "ok", 1800);
     } catch {
-      /* clipboard may be unavailable in the webview */
+      toast("Clipboard unavailable: select and copy the text manually", "err", 3500);
     }
   }
 
@@ -4294,6 +4343,7 @@
   }
   function onWikiDrop(e: DragEvent) {
     e.preventDefault();
+    e.stopPropagation();
     dragOver = false;
     wikiEmbed(e.dataTransfer?.files ?? null);
   }
@@ -4519,19 +4569,34 @@
 
   // Share a file into the Files-tab's current folder.
   async function uploadFile(fileList: FileList | null) {
-    const file = fileList?.[0];
-    if (!file || activeServerId === null) return;
+    if (!fileList?.length || activeServerId === null) return;
     uploading = true;
-    const tid = toast(`Sharing ${file.name}…`, "info", 0);
     try {
-      await addSharedFile(file, folder);
-      updateToast(tid, `Shared ${file.name}`, "ok");
+      for (const file of Array.from(fileList)) {
+        const tid = toast(`Sharing ${file.name}…`, "info", 0);
+        try {
+          await addSharedFile(file, folder);
+          updateToast(tid, `Shared ${file.name}`, "ok");
+        } catch (e) {
+          updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
+        }
+      }
       await refreshFiles();
-    } catch (e) {
-      updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
     } finally {
       uploading = false;
     }
+  }
+
+  function onFilesDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    void uploadFile(e.dataTransfer?.files ?? null);
+  }
+
+  function onEventDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    void pickEventImage(e.dataTransfer?.files ?? null);
   }
 
   // Embed media (image/video/audio) into the chat/status composer: upload under this
@@ -4674,6 +4739,57 @@
       } catch {
         span.replaceWith(downloadChip(file));
       }
+    }
+  }
+
+  function safeRemoteUrl(raw: string): string {
+    try {
+      const u = new URL(raw);
+      return (u.protocol === "https:" || u.protocol === "http:") && raw.length <= 4096 ? u.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function pastedImageUrl(raw: string): string {
+    const safe = safeRemoteUrl(raw);
+    if (!safe) return "";
+    const u = new URL(safe);
+    if (/\.(?:png|jpe?g|gif|webp|avif)(?:$|[?#])/i.test(u.pathname + u.search + u.hash)) return safe;
+    if (u.hostname === "giphy.com" || u.hostname === "www.giphy.com") {
+      const tail = u.pathname.split("/").filter(Boolean).pop() ?? "";
+      const id = (tail.split("-").pop() ?? "").replace(/[^a-z0-9]/gi, "");
+      if (id) return `https://media.giphy.com/media/${id}/giphy.gif`;
+    }
+    return "";
+  }
+
+  function remoteImage(url: string, alt: string): HTMLImageElement {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = alt;
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    img.className = "embed-media embed-image remote-image";
+    img.title = "Remote image · click to view full size";
+    img.dataset.remoteImage = "1";
+    return img;
+  }
+
+  // Resolve explicit remote-image markdown and bare direct image/Giphy links. The renderer emits
+  // only inert placeholders; raw member HTML still cannot inject an image element.
+  function resolveRemoteMedia(container: HTMLElement | undefined) {
+    if (!container) return;
+    for (const span of Array.from(container.querySelectorAll<HTMLElement>("[data-remote-url]:not([data-resolved])"))) {
+      span.dataset.resolved = "1";
+      const url = safeRemoteUrl(span.dataset.remoteUrl ?? "");
+      if (url) span.replaceWith(remoteImage(url, span.dataset.alt ?? "Remote image"));
+    }
+    for (const a of Array.from(container.querySelectorAll<HTMLAnchorElement>("a[href]:not([data-remote-checked])"))) {
+      a.dataset.remoteChecked = "1";
+      const url = pastedImageUrl(a.href);
+      if (!url) continue;
+      a.replaceWith(remoteImage(url, a.textContent?.trim() || "Remote image"));
     }
   }
 
@@ -5492,6 +5608,11 @@
   function openInbox() {
     inboxView = true;
     dmHome = false;
+    if (newsUnseen) {
+      inboxMode = "news";
+      newsUnseen = false;
+      loadNews();
+    }
     loadInbox();
   }
   // Open the server + channel an inbox entry points at and scroll to the message.
@@ -7078,14 +7199,30 @@
     mentionQuery = null;
     if (key) delete drafts[key];
     sending = true;
+    const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
+    messages = [...messages, {
+      id: pendingId,
+      author: myFp,
+      text,
+      ts: Date.now(),
+      edited: 0,
+      reactions: [],
+      reply_to,
+      pinned: false,
+    }];
+    await tick();
     try {
       await invoke("send_message", { server, channel, text, replyTo: reply_to });
+      sending = false;
       // The channel-updated event normally refreshes this too, but the command acknowledgement is
       // the deterministic local completion point. Do not leave the just-sent message dependent on
       // event scheduling, and do not refresh a different conversation if the user switched away.
       if (activeServerId === server && cur?.active === channel) await refresh();
     } catch (e) {
       error = String(e);
+      if (activeServerId === server && cur?.active === channel) {
+        messages = messages.filter((m) => m.id !== pendingId);
+      }
       // Put the message back only if the user has not already started another one while the send
       // was in flight. A failed send should never silently eat their text.
       if (activeServerId === server && cur?.active === channel && !draft.trim()) {
@@ -7305,9 +7442,11 @@
     try {
       await navigator.clipboard.writeText(wrapInvite(cur.invite, cur.id));
       copied = true;
+      toast("Friend code copied", "ok", 1800);
       setTimeout(() => (copied = false), 1500);
     } catch {
       // Clipboard may be unavailable in the webview: the textarea allows manual copy.
+      toast("Clipboard unavailable: select and copy the code manually", "err", 3500);
     }
   }
 
@@ -7708,15 +7847,29 @@
     // Look for a new release shortly after launch rather than during it: the first seconds
     // belong to unlocking and reconnecting, and nothing here is urgent.
     const updateTimer = setTimeout(() => void checkForUpdate(), 4000);
-    // Which gate to draw: unlock, or first-run setup. An older backend without the command
-    // has a vault by definition (it could only have been reached through the old gate), so a
-    // failure falls back to "unlock" rather than offering to found a second identity.
-    invoke<boolean>("vault_exists")
+    // F5/HMR remounts only this webview; the native process and unlocked actors are still alive.
+    // Resume that session unless the user explicitly pressed Ctrl+L. A cold launch still draws
+    // the ordinary vault gate.
+    let explicitlyLocked = false;
+    try { explicitlyLocked = sessionStorage.getItem("catcoms.explicit-lock") === "1"; } catch { /* best effort */ }
+    const chooseGate = () => invoke<boolean>("vault_exists")
       .then((v) => (vaultExists = v))
       .catch(() => (vaultExists = true));
+    if (explicitlyLocked) chooseGate();
+    else invoke<Reloaded[] | null>("resume_session")
+      .then((running) => {
+        if (running) {
+          vaultExists = true;
+          restoreReloaded(running);
+        } else chooseGate();
+      })
+      .catch(chooseGate);
     const subs: Promise<UnlistenFn>[] = [
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
+      listen<{ server: number }>("channels-changed", (e) => {
+        void refreshChannels(e.payload.server);
+      }),
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
         // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
@@ -7805,9 +7958,13 @@
       }),
       listen<{ server: number }>("status-updated", (e) => {
         if (e.payload.server === activeServerId) refreshStatuses();
+        if (!(e.payload.server === activeServerId && view === "status" && document.hasFocus())) {
+          newsUnseen = true;
+        }
+        if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
       }),
       listen<{ server: number }>("wiki-updated", (e) => {
-        if (e.payload.server === activeServerId && view === "wiki") refreshWiki();
+        if (e.payload.server === activeServerId) refreshWiki();
       }),
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
@@ -7825,6 +7982,10 @@
       }),
       listen<{ server: number }>("events-changed", (e) => {
         if (e.payload.server === activeServerId) refreshEvents();
+        if (!(e.payload.server === activeServerId && view === "events" && document.hasFocus())) {
+          newsUnseen = true;
+        }
+        if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
       }),
       listen<{ server: number }>("devices-changed", (e) => {
         if (e.payload.server === activeServerId) refreshDevices();
@@ -9166,7 +9327,7 @@
     </ul>
     <label class="upload-btn">
       {uploading ? "Uploading…" : "＋ Share a file here"}
-      <input type="file" disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
     </label>
     <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
       <input bind:value={newFolder} placeholder="＋ new folder…" />
@@ -9937,12 +10098,12 @@
           <button
             class="server-icon inbox-circle"
             class:active={inboxView}
-            title="Inbox: mentions & replies"
+            title="Inbox: mentions, replies & server news"
             onclick={openInbox}
           >
             {@render icoInbox()}
-            {#if inboxUnseenCount}
-              <span class="rail-badge">{inboxUnseenCount}</span>
+            {#if inboxUnseenCount || newsUnseen}
+              <span class="rail-badge">{inboxUnseenCount + (newsUnseen ? 1 : 0)}</span>
             {/if}
           </button>
           <div class="rail-sep"></div>
@@ -9984,7 +10145,7 @@
             <h2>Inbox</h2>
             <div class="inbox-mode">
               <button class:active={inboxMode === "mentions"} onclick={() => (inboxMode = "mentions")}>Mentions</button>
-              <button class:active={inboxMode === "news"} onclick={() => { inboxMode = "news"; loadNews(); }}>News</button>
+              <button class:active={inboxMode === "news"} onclick={() => { inboxMode = "news"; newsUnseen = false; loadNews(); }}>News</button>
             </div>
             <span class="muted small">
               {inboxMode === "mentions" ? "Mentions & replies, across every server & DM" : "Status posts & upcoming events, across your servers"}
@@ -10134,7 +10295,7 @@
             <div class="dm-code">
               <span class="muted small">Friend code for {cur.name}: share it to connect:</span>
               <textarea class="invite-code" readonly rows="2" value={cur.invite}></textarea>
-              <button class="ghost small" onclick={copyInvite}>Copy code</button>
+              <button class="ghost small" onclick={copyInvite}>{copied ? "Copied!" : "Copy code"}</button>
             </div>
           {/if}
           {#if cur?.isDm}
@@ -10396,7 +10557,16 @@
               {/if}
             </div>
           {/if}
-          <ul class="messages" bind:this={messagesEl} use:richClicks>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <ul
+            class="messages"
+            class:drag-over={dragOver}
+            bind:this={messagesEl}
+            use:richClicks
+            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={(e) => onComposerDrop("chat", e)}
+          >
             {#each messages as m, mi}
               {@const newDay = mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
               {#if newDay}
@@ -10413,7 +10583,7 @@
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
               {@const bubble = appearance.flat ? "" : bubbleStyle(m.author)}
-              {@const tick = deliveryTick(m)}
+              {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
               {@const ident = identityOf(m.author)}
               <li
                 data-mi={mi}
@@ -10645,14 +10815,14 @@
                 bind:value={draft}
                 rows="1"
                 class="composer-input"
-                placeholder={uploading ? "Uploading…" : sending ? "Sending…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
                 oninput={onComposerInput}
                 onkeydown={onComposerKeydown}
                 onblur={() => queueMicrotask(() => (mentionQuery = null))}
               ></textarea>
               <span class="c-hint">enter to send · shift+enter newline</span>
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
-              <button type="submit" disabled={uploading || sending}>{sending ? "Sending…" : "Send"}</button>
+              <button type="submit" disabled={uploading || sending}>Send</button>
             </form>
           </div>
         {:else if view === "files"}
@@ -10666,7 +10836,14 @@
               {/each}
             </nav>
           </div>
-          <ul class="file-list tab-pane">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <ul
+            class="file-list tab-pane"
+            class:drag-over={dragOver}
+            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={onFilesDrop}
+          >
             {#each folderView.subs as sub}
               <li>
                 <button class="folder-name" onclick={() => enterFolder(sub)}>📁 {sub}</button>
@@ -10728,7 +10905,14 @@
             {/each}
           </ul>
         {:else if view === "wiki"}
-          <div class="wiki">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="wiki"
+            class:drag-over={dragOver}
+            ondragover={(e) => { if (activeWikiPage) { e.preventDefault(); dragOver = true; } }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={onWikiDrop}
+          >
             {#if wikiReviewOpen && canModerate}
               <!-- The admin review surface replaces the article area: every pending member
                    edit on this server, oldest first, each diffed against the live page. -->
@@ -10970,7 +11154,15 @@
         {:else if view === "events"}
           <h2>Events</h2>
           <div class="events-tab tab-pane">
-            <form class="event-form" onsubmit={(e) => { e.preventDefault(); createEvent(); }}>
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <form
+              class="event-form"
+              class:drag-over={dragOver}
+              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragleave={() => (dragOver = false)}
+              ondrop={onEventDrop}
+              onsubmit={(e) => { e.preventDefault(); createEvent(); }}
+            >
               <input bind:value={evTitle} maxlength="120" placeholder="Event title" />
               <div class="event-times">
                 <label><span class="muted small">Starts</span><input type="datetime-local" bind:value={evStart} /></label>
@@ -11927,11 +12119,11 @@
                 <h3>Text</h3>
                 <div class="stx-duo">
                   <label class="field">
-                    <span class="muted small">Chat text size: {appearance.scale || 100}%</span>
+                    <span class="muted small">Interface text size: {appearance.scale || 100}%</span>
                     <input
                       type="range"
                       min="70"
-                      max="140"
+                      max="200"
                       step="2"
                       value={appearance.scale || 100}
                       oninput={(e) => (appearance = { ...appearance, scale: +e.currentTarget.value })}
