@@ -190,6 +190,34 @@ const PEX_FAILURE_BACKOFF_MS: u64 = 300_000;
 /// eclipse. Ten minutes is roughly ten discovery periods: several consecutive misses are absorbed,
 /// while a root that has genuinely dropped out of the picture stops counting within minutes.
 const ROOT_FRESHNESS_MS: u64 = 600_000;
+
+/// Which root an entry is about: its class, and the class-specific id (a rendezvous node's
+/// transport bytes, or a vouching member's device id).
+type DiscoveryRootKey = (DiscoveryRootClass, Vec<u8>);
+/// What one root has been seen to do: when it was last heard from, and the distinct peers it
+/// named. Raw transport bytes for a rendezvous, device ids for a member.
+type DiscoveryRootSightings = (u64, BTreeSet<Vec<u8>>);
+
+/// What kind of thing vouched for a peer, for the eclipse detector's corroboration count.
+///
+/// The distinction is the whole of P8. The two classes are not equally trustworthy and they are
+/// not equally *countable*, because they differ in who chooses how many of them there are:
+///
+/// - **`Rendezvous`**: the set comes from the `rendezvous` vector in the invite, so it is chosen
+///   by one party, the inviter. Two entries in it are one trust decision, not two, and nothing
+///   observable from inside this node distinguishes two independent operators from two hosts one
+///   party rents. So the whole class is worth **at most one** root, however many nodes are in it.
+/// - **`Member`**: a member that answered a PEX request, keyed on the device id its response was
+///   signed with. To be two member roots an attacker needs two devices on the MLS roster, and
+///   admission is the group's own owner-serialized decision, not the inviter's. This is the only
+///   root class whose multiplicity an attacker does not simply get to pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DiscoveryRootClass {
+    /// A rendezvous node that answered a Discover with a record.
+    Rendezvous,
+    /// A current member that answered a PEX request with a record for another member.
+    Member,
+}
 /// Cap on a single dialable address string in a peer record. Any real multiaddr is
 /// far shorter; rejecting longer ones bounds the bytes a record can carry.
 const MAX_PEX_ADDR_LEN: usize = 256;
@@ -1631,8 +1659,26 @@ const RZ_TAG_DOMAIN: &str = "catcoms/rz-tag/v1";
 /// - a **removed** member's `L-1` tag is rejected by a discoverer who has applied the
 ///   removal (it derives the tag under the new `ns_secret_L`).
 ///
-/// It rides as a registrant-signed synthetic address in the libp2p `PeerRecord`
-/// (carried + verified end-to-end in 6e-3d-9; this is the cryptographic primitive).
+/// **It is not carried on the wire, and the decision (2026-08-19) is that it stays that way.**
+/// The plan was to ride it as a synthetic address inside the registrant's libp2p `PeerRecord`.
+/// That plan does not survive contact with the API: `rendezvous::client::register` builds the
+/// record from the swarm's *global* external-address set and mints `seq` inside
+/// `PeerRecord::new` from the wall clock, so the registrant cannot know the `seq` this preimage
+/// binds, and a per-namespace address cannot be scoped to one registration. Carrying it anyway
+/// would put every namespace's tag into every other namespace's record **and** into `identify`,
+/// handing every peer this node ever connects to a stable group-linked token; a new disclosure,
+/// not a hardening. And nothing above could use it: the pre-join discovery path (the only one
+/// that ranks several candidates against each other) holds no group secret and so cannot verify
+/// a tag at all, while the post-join path feeds `DiscoveryPolicy::plan` one candidate at a time,
+/// where a score orders nothing.
+///
+/// Kept, unwired, because the primitive is correct and the attacker it names is real: it is the
+/// only thing here that would separate a **rendezvous operator** (who necessarily learns the
+/// namespace, because it is presented to them) from a **member** (who holds the secret the
+/// namespace is derived from). It defends no other attacker, since the tag's MAC key and the
+/// namespace's derivation key are the same `ns_secret_L`. What the eclipse detector needed from
+/// it is served instead by [`ChannelSync::is_confirmed_member_peer`], on the MLS roster rather
+/// than a group-shared secret. Full reasoning: P9 in `docs/design-zeroconf-reachability.md` § 1c.
 fn routing_membership_tag(
     ns_secret: &[u8; 32],
     group_id: &[u8],
@@ -1655,6 +1701,22 @@ fn routing_membership_tag(
     let mut tag = [0u8; 16];
     tag.copy_from_slice(&hash.as_bytes()[..16]);
     tag
+}
+
+/// The phase-0 [`PeerId`] for a peer named by its **raw transport bytes**.
+///
+/// A [`DiscoveredPeer`] carries the transport's own encoding of a peer (for libp2p, the peer id's
+/// multihash bytes), while everything above the transport addresses a peer by the phase-0 id, and
+/// that is what a [`PeerDescriptor`] stores in `peer_id`. Comparing the two therefore needs the
+/// transport's own forward hash.
+///
+/// This duplicates `catcoms_net::phase0_peer_id`, and it has to: this crate is generic over
+/// `MeshTransport` and must not depend on libp2p. The duplication is the kind that rots quietly,
+/// so `the_phase0_mapping_matches_the_transports` pins the two against each other directly (the
+/// test module has `catcoms-net` as a dev-dependency). If that test fails, the mapping moved:
+/// follow `catcoms_net::phase0_peer_id`, do not "fix" the test.
+fn transport_peer_from_raw(raw: &[u8]) -> PeerId {
+    PeerId::new(*blake3::hash(raw).as_bytes())
 }
 
 /// Constant-time equality for a 16-byte tag (no early-out on the first differing byte,
@@ -2220,8 +2282,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// all, so one member could evict every other member's SDP and ICE before the actor drained
     /// the queue. Same keying and bounding as `pex_served_at`. Transient.
     call_signal_budget: HashMap<DeviceId, (u64, u32)>,
-    /// Which discovery roots actually **returned a distinct peer** this session: rendezvous node
-    /// id (or PEX voucher device id, encoded the same way) → the set of peers it surfaced.
+    /// Which discovery roots actually **returned a distinct peer** this session:
+    /// `(class, root id)` → (last heard from, the set of peers it surfaced).
     ///
     /// This is the eclipse detector's `S`, and it exists because the old input was
     /// `rendezvous_nodes.len()`: a count of *configured strings*, which arrive from the
@@ -2232,7 +2294,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// could never *drop*, and the source-collapse alarm is defined on a drop; a root that has
     /// gone quiet for `ROOT_FRESHNESS_MS` stops counting. Transient (a fresh session re-earns
     /// its roots), bounded by `max_known_peers`.
-    discovery_roots: BTreeMap<Vec<u8>, (u64, BTreeSet<Vec<u8>>)>,
+    ///
+    /// The class is part of the key because the two kinds are neither interchangeable nor
+    /// even the same encoding: a rendezvous root is keyed on the rendezvous node's transport
+    /// bytes and surfaces raw transport peer ids, a member root is keyed on the vouching
+    /// device id and surfaces device ids. Sharing one keyspace let a rendezvous node id and a
+    /// device id collide into one entry, and left `effective_discovery_roots` unable to apply
+    /// the different rules the two kinds earn.
+    discovery_roots: BTreeMap<DiscoveryRootKey, DiscoveryRootSightings>,
     /// The cross-session address cache: the **proven members** this node reached in earlier
     /// sessions, offered as `Source::Cache` dial candidates the moment the app opens.
     ///
@@ -3872,8 +3941,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Rank a discovered peer through the [`DiscoveryPolicy`] (which alone decides dials; the
     /// transport never auto-dials) and dial the chosen addresses if not already dialed. The
     /// namespace must be one of ours (member-only); membership is re-proven post-dial by the
-    /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false` (the pre-dial membership
-    /// tag isn't surfaced by the transport yet; a documented hardening follow-up).
+    /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false`, permanently: see
+    /// [`routing_membership_tag`] for why the tag is not carried and why nothing above could use
+    /// it if it were.
     ///
     /// Addresses are validated by [`peer_addr_is_routable`] exactly as a PEX record's are, and
     /// **this** is the path that dials in the shipping app. Without it, anyone who can register
@@ -3912,19 +3982,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::trace!("discovered record had no routable address; dropped");
             return;
         }
-        // This rendezvous just named a peer, so it is an **effective** discovery root, and one
-        // root no matter how many records it returns (two colluding rendezvous cannot manufacture
-        // independent corroboration). Recorded before the already-dialed dedup below:
+        // This rendezvous just named a peer. Recorded before the already-dialed dedup below:
         // corroboration is about a root independently surfacing a peer, and a root that keeps
-        // naming a peer we happen to have dialed already is still corroborating.
+        // naming a peer we happen to have dialed already is still corroborating. Whether the
+        // naming is worth anything is decided later, by `effective_discovery_roots`: serving a
+        // record is free and unauthenticated, so the peer has to turn out to be a real member
+        // before the root counts, and the rendezvous class counts at most once in total.
         //
-        // RESIDUAL: the `MeshTransport` seam does not surface this node's own libp2p peer id
-        // (`local_peer` is the hashed 32-byte form, `d.peer` the raw libp2p bytes), so a
-        // rendezvous echoing our *own* registration back counts as one effective root. That is
-        // weaker than corroboration but strictly stronger than the count it replaces, which was
-        // the number of configured strings; closing it means self-filtering discovery in
-        // `catcoms-net`.
-        self.note_discovery_root(rz_root.clone(), d.peer.clone());
+        // The residual this used to carry (a rendezvous echoing our own registration back to us
+        // counted as a root, because the seam surfaces `d.peer` as raw transport bytes while
+        // `local_peer` is the hashed form) is closed there too: the comparison hashes the raw
+        // bytes through `transport_peer_from_raw`, and `confirmed_member_peers` excludes our own
+        // device.
+        self.note_discovery_root(
+            DiscoveryRootClass::Rendezvous,
+            rz_root.clone(),
+            d.peer.clone(),
+        );
         if self.dialed_peers.contains(&d.peer) {
             return;
         }
@@ -3936,9 +4010,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer: d.peer,
             addresses,
             source: Source::Rendezvous(rz_root),
-            // The record's own signed seq gives the policy real anti-replay freshness; tag_verified
-            // stays false (the pre-dial membership tag isn't carried by the transport yet; a
-            // documented follow-up; the member-only namespace + MLS/PEX are the gates meanwhile).
+            // The record's own signed seq gives the policy real anti-replay freshness.
+            // `tag_verified` stays false by decision, not by omission (see
+            // `routing_membership_tag`); and it would change nothing here even if it were set,
+            // because this plan holds exactly one candidate and a score only ever orders a list.
+            // The gates are the member-only namespace before the dial and MLS/PEX after it.
             seq: d.seq,
             tag_verified: false,
         };
@@ -4590,7 +4666,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Note the vouch whether or not the record was *new*: corroboration is about the
             // root having independently named a peer, not about us having learned something.
             if vouched != self.device.device_id() && self.group.contains_device(&vouched) {
-                self.note_discovery_root(root.clone(), vouched.as_bytes().to_vec());
+                self.note_discovery_root(
+                    DiscoveryRootClass::Member,
+                    root.clone(),
+                    vouched.as_bytes().to_vec(),
+                );
             }
         }
         tracing::debug!(learned, "applied PEX response");
@@ -4707,14 +4787,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Note that discovery root `root` surfaced peer `peer`, for the eclipse detector's
-    /// corroboration count (`S`). Bounded on both axes so a chatty root cannot grow memory.
-    fn note_discovery_root(&mut self, root: Vec<u8>, peer: Vec<u8>) {
+    /// Note that discovery root `root` (of class `class`) surfaced peer `peer`, for the eclipse
+    /// detector's corroboration count (`S`). Bounded on both axes so a chatty root cannot grow
+    /// memory.
+    ///
+    /// This records only that a root *named* something. Whether the naming is worth counting is
+    /// decided at read time by [`Self::effective_discovery_roots`], because the evidence that
+    /// confirms a rendezvous-named peer (a roster-verified record for it) usually arrives after
+    /// the naming does, over PEX on the connection the naming led to.
+    fn note_discovery_root(&mut self, class: DiscoveryRootClass, root: Vec<u8>, peer: Vec<u8>) {
         let now = self.clock.now_ms();
         let cap = self.config.max_known_peers;
         let entry = self
             .discovery_roots
-            .entry(root)
+            .entry((class, root))
             .or_insert((now, BTreeSet::new()));
         entry.0 = now;
         if entry.1.len() < cap {
@@ -4740,17 +4826,80 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// The number of **effective** discovery roots: roots that returned at least one distinct
-    /// peer and have been heard from within `ROOT_FRESHNESS_MS`. The eclipse detector's `S`.
-    /// See [`Self::discovery_roots`].
+    /// The number of **effective** discovery roots: the eclipse detector's `S`. A root counts
+    /// only if it was heard from within `ROOT_FRESHNESS_MS` *and* what it said survives the rule
+    /// its class earns. See [`DiscoveryRootClass`] for why the classes differ.
+    ///
+    /// - A **member** root counts on having vouched for at least one peer. The vouch arrived
+    ///   inside a response signed by a current member and bound to our request, and only records
+    ///   naming a current roster member are noted, so the corroboration is already proven at the
+    ///   point it is recorded.
+    /// - A **rendezvous** root counts only if at least one peer it named is
+    ///   [confirmed](Self::confirmed_member_peers): some roster member has signed a record
+    ///   claiming that transport peer. Serving records is free and unauthenticated, so "answered
+    ///   with something" is not corroboration; "named somebody who turns out to be real" is. And
+    ///   **all rendezvous roots together count at most one**, because the set of them is a single
+    ///   inviter-chosen trust decision.
+    ///
+    /// The rendezvous rules are what P8 needed and what P9's membership tag was going to supply.
+    /// The confirmation test replaces it with better evidence: the tag is a MAC under the
+    /// group-shared `ns_secret_L`, so it proves only that *a* member registered the record, and
+    /// any member (the hostile inviter of P8's own scenario included) can mint one for any
+    /// transport peer it likes. Confirmation is keyed on a *device* signature checked against the
+    /// MLS roster, which no member can forge for a peer that does not exist. See the P8/P9 rows
+    /// in `docs/design-zeroconf-reachability.md` § 1c.
+    ///
+    /// What this still cannot claim, stated plainly: a hostile inviter that is itself a member can
+    /// serve records naming its own genuine transport peer from each rendezvous it controls, and
+    /// each of those confirms. The one-root cap is what stops that inflating `S`, not the
+    /// confirmation test. Nothing at this layer can measure whether two rendezvous are
+    /// independently operated; the invite chooses them both.
     pub fn effective_discovery_roots(&self) -> usize {
         let now = self.clock.now_ms();
-        self.discovery_roots
-            .values()
-            .filter(|(seen, peers)| {
-                !peers.is_empty() && now.saturating_sub(*seen) <= ROOT_FRESHNESS_MS
-            })
-            .count()
+        let fresh = |seen: u64| now.saturating_sub(seen) <= ROOT_FRESHNESS_MS;
+        // Built once per call rather than per named peer: the scan is over `peer_records` (512)
+        // and the roots are bounded by `max_known_peers` on both axes, so the nested form was a
+        // needless multiply on a path that runs every discovery tick.
+        let confirmed = self.confirmed_member_peers();
+        let mut members = 0usize;
+        let mut any_rendezvous = false;
+        for ((class, _), (seen, peers)) in &self.discovery_roots {
+            if !fresh(*seen) || peers.is_empty() {
+                continue;
+            }
+            match class {
+                DiscoveryRootClass::Member => members += 1,
+                DiscoveryRootClass::Rendezvous => {
+                    any_rendezvous |= peers
+                        .iter()
+                        .any(|p| confirmed.contains(transport_peer_from_raw(p).as_bytes()));
+                }
+            }
+        }
+        members + usize::from(any_rendezvous)
+    }
+
+    /// The transport peers claimed by a signed record from a current member **other than us**;
+    /// what it takes for a discovered peer to count as confirmed.
+    ///
+    /// Own-device exclusion is not tidiness. A rendezvous echoing this node's *own* registration
+    /// back to it used to count as an effective root, which is the residual `ingest_discovered`
+    /// documents; a self-echo is the one answer a rendezvous can always produce and it
+    /// corroborates nothing, so it is now worth nothing.
+    ///
+    /// A claim is self-asserted (`PeerDescriptor.peer_id` is bound *to* its signer, not to
+    /// *naming* its signer; see `ingest_peer_record`), so a match is not proof that the discovered
+    /// host is that member. It does not have to be: `S` is an advisory count of who vouched for
+    /// what, and the property that matters is that the value cannot be conjured. A member can
+    /// claim a transport peer, and `ingest_peer_record`'s first-claim-wins rule bounds that; a
+    /// non-member cannot get a record into `peer_records` at all.
+    fn confirmed_member_peers(&self) -> BTreeSet<[u8; 32]> {
+        let own = self.device.device_id();
+        self.peer_records
+            .iter()
+            .filter(|(device, _)| **device != own && self.group.contains_device(device))
+            .map(|(_, desc)| desc.peer_id)
+            .collect()
     }
 
     // --- cross-session address cache -----------------------------------------
@@ -9767,20 +9916,175 @@ mod tests {
             Box::new(clock.clone()),
         );
 
-        node.note_discovery_root(b"rendezvous-a".to_vec(), b"peer-1".to_vec());
-        node.note_discovery_root(b"rendezvous-b".to_vec(), b"peer-2".to_vec());
+        // Member roots, because they are the class that counts one apiece: the rendezvous class
+        // is capped at one in total (see `colluding_rendezvous_cannot_corroborate_each_other`),
+        // so it cannot exhibit a fall from two to one at all. The property under test here is
+        // freshness, nothing else.
+        node.note_discovery_root(
+            DiscoveryRootClass::Member,
+            b"member-a".to_vec(),
+            b"peer-1".to_vec(),
+        );
+        node.note_discovery_root(
+            DiscoveryRootClass::Member,
+            b"member-b".to_vec(),
+            b"peer-2".to_vec(),
+        );
         assert_eq!(node.effective_discovery_roots(), 2);
 
         // Root A keeps answering; root B goes quiet. Several missed ticks are absorbed...
         clock.advance_ms(ROOT_FRESHNESS_MS / 2);
-        node.note_discovery_root(b"rendezvous-a".to_vec(), b"peer-1".to_vec());
+        node.note_discovery_root(
+            DiscoveryRootClass::Member,
+            b"member-a".to_vec(),
+            b"peer-1".to_vec(),
+        );
         assert_eq!(node.effective_discovery_roots(), 2, "not twitchy");
 
         // ...but a root that has genuinely dropped out stops counting, and corroboration falls to
         // the single surviving root, which is exactly the signal the detector alarms on.
         clock.advance_ms(ROOT_FRESHNESS_MS);
-        node.note_discovery_root(b"rendezvous-a".to_vec(), b"peer-1".to_vec());
+        node.note_discovery_root(
+            DiscoveryRootClass::Member,
+            b"member-a".to_vec(),
+            b"peer-1".to_vec(),
+        );
         assert_eq!(node.effective_discovery_roots(), 1);
+    }
+
+    /// Sign a `PeerDescriptor` for `member`'s own device claiming transport peer `peer_id`.
+    ///
+    /// The same object `publish_self_record` builds, with the claimed transport peer chosen by
+    /// the test rather than read off the transport; the signature is the member's real one, so
+    /// the record passes `ingest_peer_record` exactly as a genuine one does.
+    fn signed_record_claiming(member: &Member, peer_id: [u8; 32], seq: u64) -> PeerDescriptor {
+        let device_pubkey = member.device.public_key_bytes();
+        let addresses = vec!["/ip4/203.0.113.77/tcp/9".to_string()];
+        let payload = peer_record_signing_payload(&device_pubkey, &peer_id, &addresses, seq);
+        let signature = member.device.sign(&payload).unwrap();
+        PeerDescriptor {
+            device_pubkey,
+            peer_id,
+            addresses,
+            seq,
+            signature,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rendezvous_corroborates_nothing_until_a_peer_it_named_is_confirmed() {
+        // P8. `effective_discovery_roots` used to count a rendezvous that returned *any* record,
+        // so serving one fabricated registration was enough to look like corroboration. Serving a
+        // record is free and unauthenticated; the rendezvous has to have named somebody who turns
+        // out to be real.
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let bob = it.next().unwrap();
+
+        // Raw transport bytes, the encoding a `DiscoveredPeer` carries.
+        let raw = b"a-transport-peer-id".to_vec();
+        alice.note_discovery_root(
+            DiscoveryRootClass::Rendezvous,
+            b"rendezvous-a".to_vec(),
+            raw.clone(),
+        );
+        assert_eq!(
+            alice.effective_discovery_roots(),
+            0,
+            "named a peer nothing vouches for; that is not corroboration"
+        );
+
+        // Bob (a current member) signs a record claiming that transport peer. Now the rendezvous
+        // named somebody real, and only now does it count.
+        let claimed = *transport_peer_from_raw(&raw).as_bytes();
+        assert!(alice.ingest_peer_record(signed_record_claiming(&bob, claimed, 1)));
+        assert_eq!(alice.effective_discovery_roots(), 1);
+    }
+
+    #[tokio::test]
+    async fn colluding_rendezvous_cannot_corroborate_each_other() {
+        // The rest of P8, and the part the membership tag would NOT have fixed: the rendezvous set
+        // comes from the inviter-chosen `rendezvous` vector, so two entries in it are one trust
+        // decision. A member (a hostile inviter included) holds `ns_secret_L` and could mint a
+        // valid membership tag for either record, so tag verification would have left this attack
+        // exactly where it was. The cap is what closes it.
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let bob = it.next().unwrap();
+
+        let raw = b"bobs-transport-peer".to_vec();
+        let claimed = *transport_peer_from_raw(&raw).as_bytes();
+        assert!(alice.ingest_peer_record(signed_record_claiming(&bob, claimed, 1)));
+
+        // Two rendezvous, both naming a confirmed member. Both answers are genuine; they are
+        // still one source.
+        alice.note_discovery_root(
+            DiscoveryRootClass::Rendezvous,
+            b"rendezvous-a".to_vec(),
+            raw.clone(),
+        );
+        alice.note_discovery_root(
+            DiscoveryRootClass::Rendezvous,
+            b"rendezvous-b".to_vec(),
+            raw.clone(),
+        );
+        assert_eq!(
+            alice.effective_discovery_roots(),
+            1,
+            "however many rendezvous the invite names, they are one trust decision"
+        );
+
+        // A member that answered PEX is a separate root, because being two members takes two
+        // admissions through the group's own owner-serialized gate, which the inviter does not own.
+        // Deliberately reusing `rendezvous-a` as the *member* id: the class is part of the key, so
+        // a rendezvous node id and a device id cannot collide into one entry the way they could
+        // when the two shared a keyspace.
+        alice.note_discovery_root(
+            DiscoveryRootClass::Member,
+            b"rendezvous-a".to_vec(),
+            b"some-device".to_vec(),
+        );
+        assert_eq!(alice.effective_discovery_roots(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_rendezvous_echoing_our_own_registration_corroborates_nothing() {
+        // Closes the residual `ingest_discovered` used to document. Every member registers its own
+        // record under the same namespace it discovers under, so handing that record straight back
+        // is the one answer a rendezvous can always produce, and it tells us nothing about anyone.
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut alice = members.into_iter().next().unwrap();
+
+        let raw = b"alices-own-transport-peer".to_vec();
+        let claimed = *transport_peer_from_raw(&raw).as_bytes();
+        let own = alice.device.device_id();
+        let record = signed_record_claiming(&alice, claimed, 1);
+        alice.store_peer_record(own, record);
+
+        alice.note_discovery_root(
+            DiscoveryRootClass::Rendezvous,
+            b"rendezvous-a".to_vec(),
+            raw,
+        );
+        assert_eq!(alice.effective_discovery_roots(), 0);
+    }
+
+    #[test]
+    fn the_phase0_mapping_matches_the_transports() {
+        // `transport_peer_from_raw` re-derives, in a libp2p-free crate, the mapping
+        // `catcoms-net` applies to every peer it surfaces. Two copies of one rule is a drift
+        // hazard, so pin them against each other rather than against a constant.
+        for _ in 0..4 {
+            let key = libp2p::identity::Keypair::generate_ed25519();
+            let id = key.public().to_peer_id();
+            assert_eq!(
+                transport_peer_from_raw(&id.to_bytes()),
+                catcoms_net::phase0_peer_id(&id),
+                "the phase-0 mapping diverged from the transport's"
+            );
+        }
     }
 
     #[test]
@@ -10006,7 +10310,11 @@ mod tests {
         };
         alice.ingest_discovered(mixed).await;
         assert!(alice.dialed_peers.contains(b"honest-peer".as_slice()));
-        assert_eq!(alice.effective_discovery_roots(), 1);
+        // Still not corroboration: a routable address is a dialable answer, not evidence that the
+        // peer named is real. The root counts only once a roster member's signed record claims
+        // that transport peer (see
+        // `a_rendezvous_corroborates_nothing_until_a_peer_it_named_is_confirmed`).
+        assert_eq!(alice.effective_discovery_roots(), 0);
     }
 
     #[tokio::test]

@@ -186,8 +186,8 @@ block in `HANDOVER.md` for what happens otherwise).
 | **[~]** | P5 connection limits | `0af1583`, `0ec438a` | Both missing caps are now set. Inbound was already capped (64 pending / 256 established / 8 per peer); added `max_pending_outgoing(32)` (the bound on being made to dial a large address set, from an invite's bootstrap list, a PEX record or a rendezvous response) and `max_established(320)` (a *total* cap, inbound and outbound together; the inbound cap bounded none of this node's own dials, relay circuits or rendezvous links). Each carries a doc comment saying what it buys and what it costs, in the `relay_node.rs` style. **Left:** neither limit is proven to bind. The mesh swarm's limits are constants inside `MeshBehaviour::new` with no config seam to turn down, and `connection_limits::ConnectionLimits` exposes no getters, so the `infra_limits.rs` discipline (turn a limit down until the operation fails) needs a knob that does not exist yet. Stays `[~]` until it does: an unexercised limit is a limit nobody knows the units of |
 | **[~]** | P6 no eviction primitive | `0ec438a` | Built, then reworked twice after hostile reviews. `MeshTransport::evict_peer`/`unevict_peer` (default-inert, so the memory transport is unaffected) → `Command::Evict`/`Unevict` → an `Eviction` gate behaviour keyed on the **phase-0** peer id, declared **first** in `MeshBehaviour` so it refuses before `gossipsub` allocates anything (`to_peer` is a forward hash, so the deny is computable at connection time), plus `allow_block_list` to close connections that were already live and a `ConnectionEstablished` check to close one that raced past the gate before the deny landed. Driven from every path that merges a removal via `note_removal_applied`: `commit_remove_now`, `note_commit_applied` (roster diff around `process_incoming`) and the fork-contest winner branch. Deny entries do not expire on a timer; they are bounded at 256, oldest-first, and are lifted only by an **explicit** owner/admin action (`Server::readmit_evicted_peers`, wired to the desktop's "Generate new invite" and nothing else). Readmission alone cannot drive it: at the inviter the roster cannot change until the joiner's request is served, and that request needs the very connection the eviction refuses. Minting deliberately does **not** lift, because minting is also automatic; `get_invite` re-mints whenever the node has gained an address the stored invite lacks, so tying the lift to minting re-admitted every removed member the next time anybody opened the invite panel. **Left, and why it is `[~]`:** (a) the `DeviceId → transport peer` link is still the self-asserted `PeerDescriptor.peer_id`, and the signature binds that value to its signer without binding it to *naming* its signer, so it is attacker-chosen; three checks bound the damage but do not close it (see the section 11 entry for the honest reading of the residual, which is worse than a race). (b) Infrastructure is out of reach only where **this node's own configuration names it**: relays and rendezvous it dials, reserves on, registers at or routes through. An infra node this process has never been told about is not protected. (c) The lift cannot be narrower than "everyone currently evicted", because an `InviteToken` is not bound to an invitee device, so one deliberate re-invite re-admits every outstanding eviction at once. (d) The deny list is process-local and not persisted, each member evicts only when *it* applies the removal (so a lagging member stays attached), and no member grants circuit reservations today (`relay_client` only), so that half is closed by construction rather than tested |
 | **[x]** | P7 invite bootstrap addresses unvalidated | `32dab2a` | |
-| **[~]** | P8 eclipse source count attacker-supplied | `32dab2a` | Counts roots that returned a peer, with decay. Cannot be finished without P9: without `tag_verified`, a hostile inviter naming two rendezvous it controls still pins the count by serving one fabricated record from each |
-| **[ ]** | P9 membership tag never carried on the wire | | `tag_verified` is hardcoded `false` at two sites, so the "member-tag-verified" ranking tier does not exist. Blocks finishing P8 |
+| **[x]** | P8 eclipse source count attacker-supplied | `32dab2a`, *(uncommitted)* | Closed, and **not** the way the P9 row used to promise. `32dab2a` made `S` count roots that actually returned a peer (with decay) and added the source-collapse alarm that fires independently of reach. What was left was the fabricated record, and it turned out the membership tag would not have fixed it (see the P9 row). Two rules finish it, both in `effective_discovery_roots`. **(a) A rendezvous root counts only once a peer it named is *confirmed*:** some device still on the roster has signed a `PeerDescriptor` claiming that transport peer. Serving a registration is free and unauthenticated, so "answered with something" is not corroboration; the evidence is a *device* signature checked against the MLS roster, which is a stronger key than the tag's group-shared `ns_secret_L` and needs nothing new on the wire. This also closes the self-echo residual `ingest_discovered` documented (own device excluded), so a rendezvous handing our own registration back is worth nothing. **(b) All rendezvous roots together count at most one**, because the set of them comes from the inviter-chosen `rendezvous` vector: two entries in it are one trust decision, and nothing observable from inside distinguishes two independent operators from two hosts one party rents. That is what actually kills "a hostile inviter naming two rendezvous it controls". Member roots (a roster member that answered PEX, keyed on the device its response was signed with) still count one apiece, because being two of those takes two admissions through the group's own owner-serialized gate, which the inviter does not own. **Residuals, named:** confirmation reads `PeerDescriptor.peer_id`, which is self-asserted (the section 11 entry), so a member could claim a fabricated transport peer and let a colluding rendezvous "confirm" it; that buys the attacker the single root one honest rendezvous would have given anyway, since the class is capped. And no measurement at this layer can establish that two rendezvous are *independently operated*; refusing to count more than one is the honest response to that, not a proxy for it |
+| **[~]** | P9 membership tag never carried on the wire | *(uncommitted)* | **CLOSED AS A DECISION (2026-08-19): not built, and not to be built. It does not block P8, and the claim that it did was wrong.** Three findings, any one of which is sufficient. **1. It defends the wrong attacker for P8.** The tag is a MAC keyed on `ns_secret_L`; the namespace is *derived* from `ns_secret_L`. Same secret, so the only party the tag separates from a member is one that learned the namespace *string* without the secret, which means the rendezvous operator (it is presented to them by construction) and anyone they tell. P8's own attacker is a hostile **inviter**, which is a member, holds the secret, and can mint a valid tag for any `peer_id` at any of its rendezvous. Verifying tags would have left P8 exactly where it was. **2. The libp2p API cannot carry it, and forcing it through would be a new disclosure.** `rendezvous::client::register` builds the `PeerRecord` from the swarm's *global* external-address set and mints `seq` inside `PeerRecord::new` from the wall clock, so a registrant cannot know the `seq` the tag preimage binds and cannot scope an address to one registration. Getting a synthetic component in means `add_external_address`, which feeds **identify**: every namespace's tag would ride in every other namespace's record *and* be broadcast to every peer this node connects to, handing strangers a stable group-linked token. Fixing that means vendoring `register`, the same fork-in-a-security-critical-path objection that deferred P3's census fix. And the component itself has nowhere safe to live: multiaddr rejects unregistered protocol codes, so it would have to masquerade as `/dns*` (exactly what P13 hardened against) or as an address something will try to dial. **3. No call site could act on it.** `SCORE_TAG_VERIFIED` only orders a list. The one shipping path that ranks several candidates together is the **pre-join** discovery in `apps/desktop` and `catcomsctl`, which holds no group secret and so cannot verify a tag at all; the **post-join** path (`ChannelSync::ingest_discovered`, the one with the secret) calls `plan` with a one-element vector, where a score orders nothing; and `dial_cached_peers`, which does batch, is all `Source::Cache`, where no tag exists. So even a perfect carrier would change no behaviour, unless the policy started *dropping* on it, and the standing property is that `DiscoveryPolicy` only ranks and never drops. **The PEX `PeerDescriptor` was considered as an alternative carrier and is not one.** It is signed, extensible and already exchanged between members, but it travels between peers that are *already connected and already roster-verified*, so it cannot pre-authenticate a rendezvous record it does not contain. What it can answer is the question the tag was a proxy for; "is this transport peer a real member's"; and it already answers it, under a device key bound to the MLS roster rather than a secret every member shares. That is why the P8 fix lands there instead. **What was left**: the primitive stays (correct, constant-time, and the operator-injection attacker it names is real if a carrier ever appears); its doc comment no longer claims it is carried; `Candidate::tag_verified` and `SCORE_TAG_VERIFIED` are documented as permanently inert rather than as a live tier; and what P8 needed from it is served by the roster-backed confirmation in the P8 row |
 | **[ ]** | P10 no padding or size quantization | | Listed in `ARCHITECTURE.md` as a locked review fix and never built. Exact per-message and per-file sizes are visible to any forwarder, which matters more once rung 2 puts a member on the path |
 | **[x]** | P11 unjittered discovery, unconditional dials | `923a4eb`, `e35b1b2` | |
 | **[x]** | P12 relay advertised private addresses | `e35b1b2` | |
@@ -675,7 +675,7 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 | | Step | Work | Blocking? | Review |
 |---|---:|---|---|---|
 | **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
-| **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Attempts P8; **P9 is NOT included** (it lives in `catcoms-net`), and without `tag_verified` the P8 corroboration count is only partial: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
+| **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Started P8; P8 is now **closed** without P9, which is closed as a decision rather than built: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
 | **[ ]** | 2 | AutoNAT into `MeshBehaviour`; mDNS; pairwise reachability in the model | prerequisite for rungs 1, 2 | light |
 | **[ ]** | 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
 | **[ ]** | 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
@@ -689,13 +689,22 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 
 Independent of the ladder, worth fixing on their own: P4 (voice DoS), P5, P10 (padding).
 
-**Note on P8 and P9.** The design specifies counting roots that returned a **tag-verified** peer.
-`tag_verified` is P9 and is not implemented, so a corroboration count built on unverified
-discovery records is still attacker-influenceable: a hostile inviter naming two rendezvous it
-controls need only serve one fabricated record from each to pin the source count at the
-threshold forever. Counting a root only once a peer it surfaced has survived
-`ingest_peer_record` (roster plus self-signature) is the interim measure; the real fix is P9.
-Do not describe P8 as closed until P9 lands.
+**Note on P8 and P9 (rewritten 2026-08-19; the earlier version of this note was wrong).** It used
+to say that counting a root only once a peer it surfaced had survived `ingest_peer_record` was an
+*interim* measure and that "the real fix is P9". It is the other way round. The membership tag is
+a MAC keyed on `ns_secret_L`, the same secret the namespace is derived from, so it separates a
+rendezvous **operator** from a member and nothing else; the hostile inviter in P8's own scenario
+is a member, holds that secret, and can mint a valid tag for any `peer_id` at any rendezvous it
+controls. Verifying tags would have left P8 exactly where it stood.
+
+What closes P8 is the roster-backed confirmation (a *device* signature, which no member can forge
+for a peer that does not exist) **plus** treating the whole inviter-chosen rendezvous set as **one**
+trust root. The second half is the part that actually answers "two rendezvous it controls": their
+independence is not observable from inside the node, and the invite picks them both, so counting
+more than one of them was the error. P9 is separately closed as a decision (it is unbuildable
+through the libp2p `PeerRecord` as designed, would broadcast a group-linked token over `identify`,
+and no call site could act on it); see its 1c row. P8 may be described as closed; do **not**
+describe the tag as a pending prerequisite for anything.
 
 ## 10. Open questions
 
@@ -746,9 +755,13 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
 - **Per-dial outcomes are not observable.** `MeshService` races a dial set and only the winner
   surfaces, so the panel shows per-address results as unknown rather than inventing them. Needs
   per-dial event plumbing out of the transport.
-- **P9 blocks P8** and is tracked, but note the knock-on: without the membership tag on the wire
-  the `DiscoveryPolicy` "member-tag-verified" ranking tier does not exist at all, so every
-  discovered candidate scores flat.
+- **The `DiscoveryPolicy` "member-tag-verified" ranking tier does not exist and will not.** P9 is
+  closed as a decision, not as a build (see its 1c row for the three reasons), so nothing sets
+  `Candidate::tag_verified` and every discovered candidate scores flat on that axis. This is much
+  less consequential than it reads, because the one shipping path that ranks several rendezvous
+  candidates against each other is the **pre-join** one, which has no group secret and could never
+  have verified a tag; the post-join path plans one candidate at a time. The old note here said
+  "P9 blocks P8"; that was wrong, and P8 is now closed without it.
 
 ### Hardening residuals, deliberately deferred
 
@@ -825,6 +838,32 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
   documented no-op on Windows and macOS, where the default limit is also low.
 - **P3's census prevention** is deferred by decision: rate-limited, not prevented. Revisit before
   any public deployment.
+- **Corroboration cannot measure operator independence, and the eclipse count no longer pretends
+  to.** `S` now credits the whole inviter-chosen rendezvous set with **one** root, because nothing
+  observable from inside this node distinguishes two independent operators from two hosts one
+  party rents, and the invite chooses them both.
+
+  The consequence, stated so nobody re-derives it as a surprise: `S >= min_sources` now requires
+  at least one **member** root, and a member root requires having reached a member. So in suspicion
+  term 1 (`reach < min_reach && S < min_sources`) the two conjuncts have become close to the same
+  measurement, and the term is carried by reach. The corroboration signal does its independent
+  work in term 2, the source **collapse**, which is where it was always meant to live: a group that
+  once had a member vouching and now has only infrastructure, while still reaching several members,
+  is the eclipse shape.
+
+  This is not a new false-positive class. A group with a **single** rendezvous already sat at
+  `S = 1` and already tripped term 1 whenever reach fell near zero (an ordinary quiet night in a
+  group of five or more). What changed is that adding a *second* rendezvous no longer silences it,
+  which is precisely the silencing P8 was filed about. If quiet-night noise proves to be the
+  practical problem, the honest lever is `roster_floor` / `min_reach` / `grace_ms` tuning against a
+  real deployment, not re-inflating `S` with roots nobody verified.
+- **Rendezvous confirmation rests on the same self-asserted `peer_id` that eviction does.** A root
+  counts once a roster member's signed record claims the transport peer it named, and that claim
+  is bound *to* its signer rather than to *naming* its signer (the entry above). So a member can
+  manufacture a confirmation for a peer that does not exist. It is bounded by the one-root cap
+  (the attacker gains at most the root a single honest rendezvous would have supplied) and by
+  `ingest_peer_record`'s first-claim-wins rule, and it is closed by the same missing
+  device-key-to-transport-identity binding that would close eviction.
 - **P14's third refinement** (prefer a peer known present at the target epoch) was declined with
   reasoning. Revisit only if a real deployment shows repeated misses.
 

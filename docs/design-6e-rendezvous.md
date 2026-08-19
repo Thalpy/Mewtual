@@ -139,10 +139,16 @@ per the project convention.
 2. **libp2p 0.56 circuit reservation → external address:** confirm whether a granted reservation
    auto-populates the swarm external-address set or the Actor must `add_external_address(circuit)`
    explicitly (contract assumes explicit; safe either way).
-3. **Where the registration membership tag physically rides:** `libp2p_core::PeerRecord` is a
-   fixed signed envelope with no free slot. Confirm the rendezvous `Registration` can carry the
-   tag without breaking signature verification; else encode it into a derived **sub-namespace**
-   the discoverer recomputes.
+3. **Where the registration membership tag physically rides: ANSWERED (2026-08-19); nowhere, and
+   the tag is not carried at all.** `libp2p_core::PeerRecord` has no free slot, and the synthetic
+   fallback does not work either: `rendezvous::client::register` builds the record from the
+   swarm's *global* external-address set and mints `seq` inside `PeerRecord::new` from the wall
+   clock, so a registrant can neither scope an address to one registration nor know the `seq` the
+   tag preimage binds. Routing it through `add_external_address` would put every namespace's tag
+   into every other namespace's record and into `identify`. The sub-namespace alternative was not
+   pursued because the tag turned out to defend only the rendezvous **operator** (its MAC key is
+   the same `ns_secret_L` the namespace is derived from), which is not the attacker P8 needed
+   answering. Closed as a decision: P9 in `design-zeroconf-reachability.md` § 1c.
 4. **Inbound Remove classification**; confirmed feasible (`staged.remove_proposals()`); slice 1
    must advance `L` identically on the inbound apply path, not just the local committer.
 5. **Detector defaults** (grace 30s / `min_reach` 0.20) are guesses; tune against memory-transport

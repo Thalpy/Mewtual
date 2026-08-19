@@ -77,9 +77,10 @@ nodes, a product-layer integration test suite, and the joiner control-topic bug 
 later members invisible to earlier ones.
 
 **Open defects, all tracked in section 1c:** P3 (census is rate-limited, not prevented; needs
-upstream vendored), P6 (no eviction primitive), P9 (membership tag never on the wire, which
-also blocks finishing P8), P10 (no padding), P13 (invite-supplied address validator), P14's
-recovery half. P5 and P8 partial.
+upstream vendored), P6 (no eviction primitive), P10 (no padding), P13 (invite-supplied address validator), P14's
+recovery half. P5 partial. **P8 is closed** and **P9 is closed as a decision** (the tag is not
+carried and will not be; it defends the rendezvous operator, not P8's hostile inviter, and no
+call site could act on it): see their 1c rows.
 
 **Not built: most of the ladder.** AutoNAT and mDNS, racing the rungs concurrently, failure
 messaging, the two-way invite code, switchboard members, the port-forwarding wizard, hosted

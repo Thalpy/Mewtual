@@ -37,7 +37,13 @@ tag. So `Candidate.tag_verified` is **`false`** here. That is **safe**:
 - The **real gates are post-dial**: MLS group membership (a dialed non-member can't decrypt the
   channel), and `ingest_peer_record`/`request_pex` (membership-verified). A wrongly-dialed peer just
   wastes one dial (bounded by the policy budget).
-Wiring the synthetic-address tag (for pre-dial eclipse hardening) is a documented follow-up.
+**Update (2026-08-19): the synthetic-address wiring is now closed as a decision, not a follow-up.**
+The libp2p `PeerRecord` cannot carry it (`register` takes addresses from the swarm-global external
+set and mints `seq` itself), forcing it through `add_external_address` would broadcast a
+group-linked token over `identify`, and no call site could act on it anyway; the pre-join path
+that ranks several candidates holds no group secret, and the post-join path plans one candidate at
+a time. Reasoning in full: the P9 row of `design-zeroconf-reachability.md` § 1c. What the eclipse
+detector needed from it is served by roster-backed confirmation instead (the P8 row).
 
 ## State + flow
 
@@ -85,11 +91,12 @@ the invite); steady-state adds the rotation-aware namespaces on top.
   hysteretic detector (R = roster, D = reachable member peers + self, S = distinct rendezvous roots);
   the actor emits `EclipseChanged{caution}` on a change and the UI shows an advisory banner. Strictly
   advisory; never gates dialing/messaging/membership.
-- **Pre-dial membership-tag verification; still deferred:** carrying the per-namespace
-  `routing_membership_tag` as a synthetic address in the libp2p PeerRecord (the only libp2p-level
-  path) is invasive across 5 layers for marginal value; `tag_verified=false` is safe (the
-  `DiscoveryPolicy` never *drops* an unverified candidate, only ranks it; the member-only namespace +
-  MLS + PEX are the gates). `AddressCache` cross-session persistence: deferred.
+- **Pre-dial membership-tag verification; closed as a decision (2026-08-19), not deferred:**
+  carrying the per-namespace `routing_membership_tag` as a synthetic address in the libp2p
+  PeerRecord is not merely invasive, it is unbuildable as designed and would be a new disclosure,
+  and nothing above could use it (P9 in `design-zeroconf-reachability.md` § 1c).
+  `tag_verified=false` is safe and permanent (the `DiscoveryPolicy` never *drops* an unverified
+  candidate, only ranks it; the member-only namespace + MLS + PEX are the gates). `AddressCache` cross-session persistence: deferred.
 - **Re-registration cadence:** a fixed interval (re-register every tick) rather than TTL-driven; a
   TTL-aware schedule is a refinement.
 

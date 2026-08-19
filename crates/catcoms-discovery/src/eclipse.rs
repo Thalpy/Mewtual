@@ -14,11 +14,20 @@
 //!   - **D** = distinct roster devices reached with a **live handshake** this session
 //!     (including self). `(D-1)/(R-1)` is the *reach*; what fraction of the other
 //!     members we can actually talk to.
-//!   - **S** = distinct **trust roots** that actually **returned a peer**: every rendezvous
-//!     counts ≤ 1 (colluding rendezvous can't fake independence), each PEX-vouching
-//!     member = 1, a cache hit counts only once a live re-proof confirms it. A
-//!     *configured* root that never answered is worth nothing; corroboration has to be
-//!     something the root did, not something the inviter wrote in the invite.
+//!   - **S** = distinct **trust roots** that actually **returned a peer**, and returned one
+//!     worth counting. Each PEX-vouching member is one root. **The whole rendezvous set is one
+//!     root between them**, not one apiece: the set comes from the inviter, so two entries in it
+//!     are one trust decision, and nothing a node can observe distinguishes two independent
+//!     operators from two hosts one party rents. A cache hit counts only once a live re-proof
+//!     confirms it. A *configured* root that never answered is worth nothing, and neither is one
+//!     that answered with a peer nobody else can vouch for; corroboration has to be something
+//!     the root did, not something the inviter wrote in the invite.
+//!
+//!     A consequence to keep in view when reading term 1 below: `S >= min_sources` now takes at
+//!     least one **member** root, and a member root takes having reached a member, so term 1's
+//!     two conjuncts largely measure the same thing and the term is carried by reach. The
+//!     corroboration signal does its independent work in term 2. See the P8 row of
+//!     `docs/design-zeroconf-reachability.md` § 1c for the counting rules and why they are these.
 //! - It is **hysteretic and Clock-paced**: a node must look suspect for a continuous
 //!   `grace_ms` before CAUTION is raised, and look healthy for `clear_ms` before it
 //!   clears; so a transient partition doesn't flap the warning.
@@ -107,9 +116,11 @@ pub struct EclipseObservation {
     /// `D`; distinct roster devices reached with a live handshake this session,
     /// **including self** (so a fully-reachable node has `D == R`).
     pub reachable_devices: usize,
-    /// `S`; distinct trust roots that **returned a peer** (rendezvous ≤ 1 each). The caller
-    /// must count roots that actually answered, never roots it merely has configured: the
-    /// configured set is inviter-chosen and so attacker-supplied.
+    /// `S`; distinct trust roots that **returned a peer worth counting**. The caller must count
+    /// roots that actually answered, never roots it merely has configured (the configured set is
+    /// inviter-chosen and so attacker-supplied), and must credit the **whole rendezvous set with
+    /// at most one** root, for the same reason. See `ChannelSync::effective_discovery_roots` for
+    /// the implementation of those rules and what each class has to prove.
     pub trust_roots: usize,
 }
 
