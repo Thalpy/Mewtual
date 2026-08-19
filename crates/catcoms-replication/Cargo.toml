@@ -10,6 +10,10 @@ catcoms-wire = { path = "../catcoms-wire" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 catcoms-mls = { path = "../catcoms-mls" }
 catcoms-rt = { path = "../catcoms-rt" }
+# For the shared padded-frame codec (`catcoms_storage::pad`) that quantizes a sealed op's size.
+# Storage is the lowest crate this crate and `filecrypto` have in common; one implementation of
+# the unpadder is worth more than a tidier module tree. See that module's header.
+catcoms-storage = { path = "../catcoms-storage" }
 thiserror.workspace = true
 automerge = "0.10"
 blake3 = "1"

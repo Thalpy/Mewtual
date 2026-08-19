@@ -8,6 +8,9 @@
 //! - [`filecrypto`]; per-file content keys with a **per-file wrap nonce** (the
 //!   review fix against nonce reuse), and a [`FileRef`] carrying the addresses and
 //!   the wrapped content key.
+//! - [`pad`]; deterministic size quantization (P10): a padded frame that goes **inside** the
+//!   AEAD, so a forwarder measuring ciphertext lengths sees a bucket instead of the payload's
+//!   exact size. Shared by [`filecrypto`] and by `catcoms-replication`'s sealed ops.
 //! - [`retention`]; the adjustable expiry model (global → server → file,
 //!   most-specific wins), and a GC engine with **decorrelated eviction** (per-file
 //!   jitter so the whole group doesn't drop a blob at once) and a **holder probe**
@@ -21,6 +24,7 @@
 pub mod blob;
 pub mod cid;
 pub mod filecrypto;
+pub mod pad;
 pub mod retention;
 pub mod vault;
 
@@ -29,6 +33,10 @@ use thiserror::Error;
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
 pub use cid::Cid;
 pub use filecrypto::{open_file, seal_file, FileManifest, FileRef};
+pub use pad::{
+    pad, padded_len, unpad, CHUNK_PAD_CEILING, CHUNK_PAD_FLOOR, OP_PAD_CEILING, OP_PAD_FLOOR,
+    PAD_FOOTER_BYTES,
+};
 pub use retention::{
     BlobEntry, BlobKind, BlobState, Expiry, ExpiryPolicy, GcReport, HolderOracle, RetentionIndex,
     ServerId, ONE_MONTH_MS,

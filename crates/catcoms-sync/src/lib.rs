@@ -7896,6 +7896,10 @@ mod tests {
         /// removed peer's connection, and the inviter's roster cannot change until that
         /// connection is allowed, so recording alone hides a deadlock instead of exposing it.
         denied: std::sync::Mutex<HashSet<PeerId>>,
+        /// Every gossip payload published through this transport. Its byte length is the number
+        /// a forwarding switchboard measures, so this is the only place the size-quantization
+        /// property (P10) can be asserted against reality rather than against an intermediate.
+        published: std::sync::Mutex<Vec<Vec<u8>>>,
     }
 
     impl RecordingNet {
@@ -7905,7 +7909,11 @@ mod tests {
                 evicted: std::sync::Mutex::new(Vec::new()),
                 unevicted: std::sync::Mutex::new(Vec::new()),
                 denied: std::sync::Mutex::new(HashSet::new()),
+                published: std::sync::Mutex::new(Vec::new()),
             }
+        }
+        fn published(&self) -> Vec<Vec<u8>> {
+            self.published.lock().expect("mutex").clone()
         }
         fn is_denied(&self, peer: &PeerId) -> bool {
             self.denied.lock().expect("mutex").contains(peer)
@@ -7924,6 +7932,7 @@ mod tests {
             self.inner.unsubscribe(topic).await
         }
         async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            self.published.lock().expect("mutex").push(data.to_vec());
             self.inner.publish(topic, data).await
         }
         async fn request(
@@ -8002,6 +8011,55 @@ mod tests {
     /// P6, the identity gap in isolation: a `DeviceId` resolves to the transport peer the device
     /// **asserted about itself**, and to nothing at all when no record was ever learned.
     ///
+    /// Size quantization (P10), asserted where a switchboard would measure it: the byte length
+    /// this node hands the transport for a gossiped op.
+    ///
+    /// Gossipsub is signed, so a forwarding member sees publisher, topic, sequence, timestamp and
+    /// size for every message it carries. Before padding, that size was `~250 + text_len`, i.e.
+    /// the message length in the clear. This asserts the published sizes are ladder values, not
+    /// merely larger, and that a two-character message and a 150-character one are one number.
+    #[tokio::test]
+    async fn a_gossiped_op_is_published_at_its_bucket_size_not_its_real_size() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let mut node = recording_node();
+        node.open_channel(DocType::Channel, 1).await.unwrap();
+        for (key, text) in [
+            ("m0", "ok".to_string()),
+            ("m1", "x".repeat(150)),
+            ("m2", "y".repeat(400)),
+        ] {
+            node.post(DocType::Channel, 1, |d| d.put(ROOT, key, text.as_str()))
+                .await
+                .unwrap();
+        }
+
+        let wire = node.transport.published();
+        assert_eq!(wire.len(), 3, "one publish per posted op");
+        assert_eq!(
+            wire[0].len(),
+            wire[1].len(),
+            "a 2-character and a 150-character message must be indistinguishable on the wire"
+        );
+        assert!(
+            wire[2].len() > wire[1].len(),
+            "a message that genuinely does not fit the bucket steps up to the next one"
+        );
+        for payload in &wire {
+            // Peel the SealedOp framing, the Poly1305 tag and the 4-byte pad footer back off.
+            // What is left must be a ladder value; "bigger than it used to be" is not the
+            // property, and a scheme that merely inflated would pass without this.
+            let sealed = SealedOp::decode(payload).expect("a published op decodes");
+            let bucket = sealed.blob.ciphertext.len() - 16 - catcoms_storage::PAD_FOOTER_BYTES;
+            assert!(
+                bucket.is_power_of_two() && bucket >= catcoms_storage::OP_PAD_FLOOR,
+                "published {} bytes, whose padded plaintext is {bucket}: not a ladder value",
+                payload.len()
+            );
+        }
+    }
+
     /// This is the whole reason eviction is best-effort, so it is pinned on its own: a removed
     /// member whose record we never saw, or one that published a peer id that is not its own,
     /// simply is not evicted. Getting `None` here must stay a survivable outcome, never a panic

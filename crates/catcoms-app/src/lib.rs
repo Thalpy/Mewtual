@@ -1935,8 +1935,16 @@ impl FileExpiry {
 pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Plaintext chunk size for large-file transfer. Chosen well under the blob-fetch response cap
-/// (`MAX_BLOB_RESPONSE` = 16 MiB) so each *sealed* chunk (≈ chunk + ~40 B) fits one response.
-const CHUNK_BYTES: usize = 8 * 1024 * 1024;
+/// (`MAX_BLOB_RESPONSE` = 16 MiB) so each *sealed* chunk (≈ chunk + ~44 B) fits one response.
+///
+/// It is **the same number** as the size-quantization ladder's ceiling
+/// ([`catcoms_storage::CHUNK_PAD_CEILING`]), and the equality is load-bearing rather than
+/// coincidental: it is what makes a full chunk a fixed point of the padding (cost: the 4-byte
+/// length footer, nothing else) while every short tail chunk pads up to it, so a large file's
+/// exact size stops leaking through its tail. Pinned by
+/// `the_chunk_size_is_the_padding_ladders_ceiling`; if the two ever drift, a full chunk starts
+/// paying a whole bucket step and the product's bulk traffic doubles.
+const CHUNK_BYTES: usize = catcoms_storage::CHUNK_PAD_CEILING;
 
 /// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
 /// bytes); the file's stable identity / download+embed handle (a chunked file has no single
@@ -8066,6 +8074,55 @@ mod tests {
                 .await,
             Err(AppError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn the_chunk_size_is_the_padding_ladders_ceiling() {
+        // Load-bearing equality (P10). If the chunk size drifts above the ladder ceiling, every
+        // full chunk stops being padded and short tails stop hiding among them; if it drifts
+        // below, every full chunk pays a whole bucket step and the product's bulk traffic
+        // roughly doubles.
+        assert_eq!(CHUNK_BYTES, catcoms_storage::CHUNK_PAD_CEILING);
+        assert!(CHUNK_BYTES.is_power_of_two());
+    }
+
+    #[tokio::test]
+    async fn a_small_shared_file_is_stored_at_its_bucket_size() {
+        // End to end at the product layer: what a peer fetches for a small file is the ladder
+        // bucket, not the file size. A 200 KB image and a 150 KB image are the same fetch.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let mut sizes = Vec::new();
+        for (i, n) in [150_000usize, 200_000, 300_000].into_iter().enumerate() {
+            let data: Vec<u8> = (0..n).map(|k| ((k + i) % 251) as u8).collect();
+            let cid = alice
+                .add_file(&format!("img{i}.bin"), "image/png", "", &data)
+                .await
+                .unwrap();
+            let entry = alice
+                .files()
+                .into_iter()
+                .find(|e| e.cid == cid.as_bytes().to_vec())
+                .expect("listed");
+            let manifest = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+            assert_eq!(manifest.chunks.len(), 1, "a sub-chunk file is one blob");
+            let blob = alice
+                .sync
+                .get_blob(&manifest.chunks[0].ciphertext_cid)
+                .expect("held locally");
+            // The declared size still describes the true plaintext, so the UI and the whole-file
+            // address are unaffected.
+            assert_eq!(entry.size, n as u64);
+            sizes.push(blob.len());
+            // ...and the file still reassembles to exactly the original bytes.
+            assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+        }
+        assert_eq!(
+            sizes[0], sizes[1],
+            "150 KB and 200 KB must be indistinguishable on the wire"
+        );
+        assert_ne!(sizes[1], sizes[2], "the next bucket up is a distinct class");
+        assert_eq!(sizes[0], 256 * 1024 + 24 + 4 + 16);
     }
 
     #[tokio::test]

@@ -1198,10 +1198,17 @@ async fn wiki_status_and_events_written_on_one_node_reach_the_other() {
     assert_eq!(posts[0].text, "the new grinder arrived");
     assert_eq!(posts[0].author, alice.fp);
 
-    let events = until("the event reaches the other member", &mut bob.events, || async {
-        let events = bob.actor.events().await;
-        events.iter().any(|event| event.id == event_id).then_some(events)
-    })
+    let events = until(
+        "the event reaches the other member",
+        &mut bob.events,
+        || async {
+            let events = bob.actor.events().await;
+            events
+                .iter()
+                .any(|event| event.id == event_id)
+                .then_some(events)
+        },
+    )
     .await;
     let launch = events
         .iter()

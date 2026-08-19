@@ -650,6 +650,7 @@ dependencies = [
  "catcoms-crypto",
  "catcoms-mls",
  "catcoms-rt",
+ "catcoms-storage",
  "catcoms-wire",
  "thiserror 2.0.18",
 ]

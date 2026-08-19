@@ -11,6 +11,7 @@ use catcoms_rt::CryptoRngCore;
 use catcoms_wire::{Decoder, Encoder};
 
 use crate::cid::Cid;
+use crate::pad::{self, CHUNK_PAD_CEILING, CHUNK_PAD_FLOOR};
 use crate::StorageError;
 
 /// Metadata describing an encrypted file: its content addresses, its wrapped
@@ -52,6 +53,12 @@ fn decode_blob(bytes: &[u8]) -> Result<SealedBlob, StorageError> {
 /// Encrypt `plaintext` for storage. Returns its [`FileRef`] and the ciphertext
 /// blob to store (named by `ciphertext_cid`). `wrap_key` is the channel's
 /// file-wrap key for the current epoch.
+///
+/// The plaintext is **size-quantized before it is sealed** ([`crate::pad`], the chunk ladder),
+/// so the blob a forwarder measures is one of a dozen sizes rather than the file's exact length.
+/// The padding is inside the AEAD, so it cannot be stripped; `plaintext_cid` and `size` still
+/// describe the **true** plaintext, so the file's identity, whole-file reassembly and the index's
+/// dedup are all untouched.
 pub fn seal_file(
     plaintext: &[u8],
     mime: &str,
@@ -61,7 +68,8 @@ pub fn seal_file(
     let mut content_key = [0u8; 32];
     rng.fill_bytes(&mut content_key);
 
-    let content = seal(&content_key, plaintext, rng)?; // random per-file content nonce
+    let padded = pad::pad(plaintext, CHUNK_PAD_FLOOR, CHUNK_PAD_CEILING)?;
+    let content = seal(&content_key, &padded, rng)?; // random per-file content nonce
     let stored = encode_blob(&content);
     let ciphertext_cid = Cid::of(&stored);
     let plaintext_cid = Cid::of(plaintext);
@@ -82,6 +90,12 @@ pub fn seal_file(
 
 /// Decrypt a stored ciphertext blob given its [`FileRef`] and the channel wrap
 /// key. Verifies both content addresses.
+///
+/// The sealed payload is a padded frame ([`seal_file`]); a blob sealed **before** padding was
+/// introduced is not, so the frame is peeled only when peeling it yields the plaintext the
+/// `FileRef` names. `plaintext_cid` is the arbiter, which is what makes that fallback safe: a
+/// frame that unpads to the wrong bytes, and raw bytes that are not the right file, both end at
+/// the same `CidMismatch` rather than at a silently truncated payload.
 pub fn open_file(
     stored: &[u8],
     file_ref: &FileRef,
@@ -97,11 +111,18 @@ pub fn open_file(
         .map_err(|_| StorageError::Malformed)?;
 
     let content = decode_blob(stored)?;
-    let plaintext = unseal(&content_key, &content)?;
-    if Cid::of(&plaintext) != file_ref.plaintext_cid {
+    let sealed_payload = unseal(&content_key, &content)?;
+    if let Ok(body) = pad::unpad(&sealed_payload, CHUNK_PAD_FLOOR, CHUNK_PAD_CEILING) {
+        if Cid::of(body) == file_ref.plaintext_cid {
+            return Ok(body.to_vec());
+        }
+    }
+    // Pre-padding blob (or a frame that does not describe this file). The address check below is
+    // the only thing that decides.
+    if Cid::of(&sealed_payload) != file_ref.plaintext_cid {
         return Err(StorageError::CidMismatch);
     }
-    Ok(plaintext)
+    Ok(sealed_payload)
 }
 
 impl FileRef {
@@ -257,7 +278,7 @@ impl FileManifest {
 mod tests {
     use super::*;
     use rand_chacha::ChaCha20Rng;
-    use rand_core::SeedableRng;
+    use rand_core::{RngCore, SeedableRng};
 
     fn rng(seed: u64) -> ChaCha20Rng {
         ChaCha20Rng::seed_from_u64(seed)
@@ -378,6 +399,139 @@ mod tests {
         assert_ne!(s1, s2);
         // Plaintext address is still stable across both.
         assert_eq!(ref1.plaintext_cid, ref2.plaintext_cid);
+    }
+
+    // --- size quantization (P10) ---------------------------------------------------------
+
+    /// The sealed blob a peer fetches, given a plaintext of `n` bytes.
+    fn stored_len(n: usize) -> usize {
+        let mut r = rng(11);
+        let (_, stored) = seal_file(
+            &vec![0u8; n],
+            "application/octet-stream",
+            &[1u8; 32],
+            &mut r,
+        )
+        .unwrap();
+        stored.len()
+    }
+
+    #[test]
+    fn a_sub_chunk_file_is_stored_at_its_bucket_not_its_size() {
+        // The leak this closes: a file smaller than one chunk has exactly one blob, so its blob
+        // size WAS its file size. Now the blob size is the ladder value plus a fixed 44 bytes
+        // (24-byte nonce + 4-byte pad footer + 16-byte Poly1305 tag).
+        const OVERHEAD: usize = 24 + 4 + 16;
+        assert_eq!(stored_len(0), 4 * 1024 + OVERHEAD);
+        assert_eq!(stored_len(1), 4 * 1024 + OVERHEAD);
+        assert_eq!(stored_len(4 * 1024), 4 * 1024 + OVERHEAD);
+        assert_eq!(stored_len(4 * 1024 + 1), 8 * 1024 + OVERHEAD);
+        assert_eq!(stored_len(200_000), 256 * 1024 + OVERHEAD);
+    }
+
+    #[test]
+    fn two_different_files_in_one_bucket_are_the_same_size_on_the_wire() {
+        // The property padding has to have, and the one a round-trip test would not catch.
+        assert_eq!(stored_len(5_000), stored_len(8_000));
+        assert_ne!(stored_len(5_000), stored_len(9_000));
+    }
+
+    #[test]
+    fn a_full_chunk_is_not_inflated() {
+        // A full chunk is already uniform with every other full chunk, so padding it would cost
+        // 100% for nothing. The ladder ceiling is exactly the chunk size, so it is a fixed point
+        // and pays only the 4-byte footer.
+        let full = crate::pad::CHUNK_PAD_CEILING;
+        assert_eq!(stored_len(full), full + 24 + 4 + 16);
+        // ...and a short tail chunk pads UP to it, so it stops being an exact-size fingerprint.
+        assert_eq!(stored_len(full - 1), stored_len(full));
+    }
+
+    #[test]
+    fn a_padded_file_round_trips_to_exactly_the_original_bytes() {
+        let mut r = rng(21);
+        let wrap = [2u8; 32];
+        for n in [0usize, 1, 4_095, 4_096, 4_097, 100_000] {
+            let body: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+            let (file_ref, stored) =
+                seal_file(&body, "application/octet-stream", &wrap, &mut r).unwrap();
+            // The identity and the size still describe the TRUE plaintext, so the whole-file
+            // content address, the index's dedup and the UI's byte count are unaffected.
+            assert_eq!(file_ref.plaintext_cid, Cid::of(&body));
+            assert_eq!(file_ref.size, n as u64);
+            assert_eq!(open_file(&stored, &file_ref, &wrap).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn a_blob_sealed_before_padding_existed_still_opens() {
+        // Blobs are at rest on disk from before this change. `open_file` peels the frame only
+        // when peeling yields the plaintext the ref names, and `plaintext_cid` is the arbiter.
+        let mut r = rng(31);
+        let wrap = [3u8; 32];
+        let body = b"a pre-padding file body".to_vec();
+        let mut content_key = [0u8; 32];
+        r.fill_bytes(&mut content_key);
+        let content = seal(&content_key, &body, &mut r).unwrap();
+        let stored = encode_blob(&content);
+        let legacy = FileRef {
+            plaintext_cid: Cid::of(&body),
+            ciphertext_cid: Cid::of(&stored),
+            wrapped_key: seal(&wrap, &content_key, &mut r).unwrap(),
+            size: body.len() as u64,
+            mime: "text/plain".into(),
+        };
+        assert_eq!(open_file(&stored, &legacy, &wrap).unwrap(), body);
+    }
+
+    #[test]
+    fn a_hostile_pad_inside_the_aead_fails_closed() {
+        // The AEAD only proves the sender held the key. A member abusing that to seal a
+        // non-canonical frame must get an error, never a truncated payload and never a panic.
+        let mut r = rng(41);
+        let wrap = [4u8; 32];
+        let body = b"the real body".to_vec();
+        let mut content_key = [0u8; 32];
+        r.fill_bytes(&mut content_key);
+
+        // A frame whose declared length runs past the frame.
+        let mut hostile = vec![0u8; 4 * 1024 + 4];
+        hostile[..body.len()].copy_from_slice(&body);
+        hostile[4 * 1024..].copy_from_slice(&u32::MAX.to_be_bytes());
+        for frame in [
+            hostile.clone(),
+            {
+                // A frame padded to a bucket it does not belong in (the covert channel).
+                let mut over = vec![0u8; 64 * 1024 + 4];
+                over[..body.len()].copy_from_slice(&body);
+                let n = body.len() as u32;
+                over[64 * 1024..].copy_from_slice(&n.to_be_bytes());
+                over
+            },
+            {
+                // A frame with bits hidden in the fill.
+                let mut noisy = crate::pad::pad(&body, 4 * 1024, 8 * 1024 * 1024).unwrap();
+                noisy[3_000] = 0xAA;
+                noisy
+            },
+        ] {
+            let content = seal(&content_key, &frame, &mut r).unwrap();
+            let stored = encode_blob(&content);
+            let file_ref = FileRef {
+                plaintext_cid: Cid::of(&body),
+                ciphertext_cid: Cid::of(&stored),
+                wrapped_key: seal(&wrap, &content_key, &mut r).unwrap(),
+                size: body.len() as u64,
+                mime: "text/plain".into(),
+            };
+            assert!(
+                matches!(
+                    open_file(&stored, &file_ref, &wrap),
+                    Err(StorageError::CidMismatch)
+                ),
+                "a hostile frame must fail closed"
+            );
+        }
     }
 
     #[test]
