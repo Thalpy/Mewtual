@@ -2841,6 +2841,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Process one inbound transport event (gossiped op, membership commit, or a
     /// catch-up / join request), after first draining queued broadcasts and any
     /// pending recovery work. Returns `false` when the transport has closed.
+    /// Queue a catch-up for every open document when a **proven member** reconnects.
+    ///
+    /// Gossip only carries live edits and replays nothing written while this node was offline, so
+    /// without this a user has to visit each surface (or send a sacrificial message) before it
+    /// converges.
+    ///
+    /// The membership gate is load-bearing rather than tidiness, and its absence deadlocked every
+    /// real-network join. `remember_peer` runs on every inbound request *before* authentication, so
+    /// a peer that is merely mid-join is already in `known_peers` and is the most recently seen
+    /// live peer, which is exactly what `pick_catchup_peer` prefers. Sweeping on any connection
+    /// therefore aimed catch-up requests at the joiner, whose membership check had not run and
+    /// which cannot serve a members-only catch-up; this loop then blocked awaiting a reply that
+    /// could never come, so the join it was racing went unserved and surfaced on the joiner as
+    /// `Transport(Closed)`. `member_peers` is written only by `promote_member_peer`, off a
+    /// roster-verified signed catch-up, so it means precisely "has proved it can answer".
+    ///
+    /// Accepted cost: a freshly restored node has an empty `member_peers` and so does not sweep on
+    /// its first reconnect. It proves a member on the first successful catch-up and sweeps after.
+    fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
+        if !self.member_peers.contains(&peer) {
+            return;
+        }
+        for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
+            self.enqueue_doc_catchup(doc_type, doc_id);
+        }
+    }
+
     pub async fn run_once(&mut self) -> Result<bool, SyncError> {
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
         // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
@@ -2926,13 +2953,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // and skipped on the committer (it never lags and must keep serving).
                 self.maybe_probe_for_missed_commits();
                 // Gossip only carries live edits; it does not replay anything written while this
-                // member was offline. Pull every document we already have open whenever a peer
-                // reconnects so chat, wiki, calendar, status and the channel directory converge
-                // without requiring the user to visit each surface or send a sacrificial message.
-                // `enqueue_doc_catchup` deduplicates and bounds this work.
-                for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
-                    self.enqueue_doc_catchup(doc_type, doc_id);
-                }
+                // member was offline. Pull every document we already have open whenever a *proven
+                // member* reconnects so chat, wiki, calendar, status and the channel directory
+                // converge without requiring the user to visit each surface or send a sacrificial
+                // message. `enqueue_doc_catchup` deduplicates and bounds this work.
+                //
+                // The membership gate is load-bearing, not tidiness. `remember_peer` above runs on
+                // every inbound request *before* authentication, so a peer that is merely mid-join
+                // is already in `known_peers`, and `pick_catchup_peer` prefers the most recently
+                // seen live peer. Sweeping unconditionally therefore aimed a catch-up request at
+                // the joiner, whose membership check has not run yet and which cannot serve a
+                // members-only catch-up. This loop then blocked awaiting a reply that could not
+                // come, so the join it was racing was never served and surfaced on the joiner as
+                // `Transport(Closed)`: a mutual deadlock that broke every real-network join.
+                // `member_peers` is written only by `promote_member_peer`, off a roster-verified
+                // signed catch-up, so it is exactly "somebody who has proved they can answer".
+                //
+                // Cost, accepted deliberately: a node whose `member_peers` is empty (a fresh
+                // restore) does not sweep on its first reconnect. It proves a member on the first
+                // successful catch-up and sweeps from then on.
+                self.sweep_docs_on_reconnect(peer);
                 Ok(true)
             }
             Some(TransportEvent::PeerDisconnected(peer)) => {
@@ -6027,7 +6067,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&KIND_DM_INVITE, rest)) => {
                 // A member delivered a DM (friend) invite. An explicit one-byte ack is the only
                 // result the sender treats as delivered.
-                if self.serve_dm_invite(rest) { vec![1] } else { Vec::new() }
+                if self.serve_dm_invite(rest) {
+                    vec![1]
+                } else {
+                    Vec::new()
+                }
             }
             Some((&KIND_CALL_SIGNAL, rest)) => {
                 // A member sent a call-signalling message; queue it for the actor to drain. Empty ack.
@@ -8963,6 +9007,39 @@ mod tests {
     /// (full roster), each subsequent member joins in turn (so the **last** joiner's
     /// Welcome carries the full roster). Returns the members and their device ids,
     /// aligned by index.
+    /// A peer that has not proved it can serve a catch-up must not trigger the reconnect sweep.
+    ///
+    /// `remember_peer` runs on every inbound request *before* authentication, so a peer that is
+    /// only mid-join is already in `known_peers` and is the most recently seen live peer, which is
+    /// what `pick_catchup_peer` prefers. Sweeping on any connect therefore aimed catch-up requests
+    /// at the joiner, blocked this loop awaiting replies it could not give, and left the join it
+    /// was racing unserved: every real-network join failed with `Transport(Closed)`. The
+    /// real-socket suites caught that, at ten seconds a go; this pins it in milliseconds.
+    #[tokio::test]
+    async fn an_unproven_peer_connecting_does_not_trigger_the_reconnect_sweep() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut alice = members.into_iter().next().unwrap();
+        alice.open_channel(DocType::Channel, 1).await.unwrap();
+        alice.catchup_queue.clear();
+
+        // A stranger (or a joiner whose membership check has not run yet) connects.
+        let stranger = PeerId::from_u64(9_999);
+        assert!(!alice.member_peers.contains(&stranger));
+        alice.sweep_docs_on_reconnect(stranger);
+        assert!(
+            alice.catchup_queue.is_empty(),
+            "an unproven peer must not make us queue work aimed at it: that is the deadlock"
+        );
+
+        // A peer proven by a roster-verified signed catch-up is exactly who the sweep is for.
+        alice.promote_member_peer(stranger);
+        alice.sweep_docs_on_reconnect(stranger);
+        assert!(
+            !alice.catchup_queue.is_empty(),
+            "a proven member reconnecting must still pull the documents it may have missed"
+        );
+    }
+
     async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
         assert!(n >= 1);
         let hub = Hub::new();
