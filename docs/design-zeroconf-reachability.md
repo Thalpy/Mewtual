@@ -158,7 +158,7 @@ block in `HANDOVER.md` for what happens otherwise).
 | **[x]** | 1a.7 `seq` not persisted across restart | `0af1583` | |
 | **[x]** | P1 PEX and `AddressCache` dead code | `32dab2a` | |
 | **[x]** | P2 relay sized for a lab | `e35b1b2` | |
-| **[~]** | P3 rendezvous fillable / census / cookies | `e35b1b2` | Occupancy, TTL, cookies and per-prefix quotas done. The census is **rate-limited, not prevented**: rejecting a namespace-less `Discover`, clamping the caller's `limit`, and evicting a registration all need the upstream `Registrations` store vendored (~600 lines) |
+| **[~]** | P3 rendezvous fillable / census / cookies | `e35b1b2` | **DEFERRED by decision (2026-08-19), documented not fixed.** Occupancy, TTL, cookies and per-prefix quotas done. The census is **rate-limited, not prevented**: rejecting a namespace-less `Discover`, clamping the caller's `limit`, and evicting a registration all need the upstream `Registrations` store vendored (~600 lines), which is a fork in a security-critical path. Revisit before any public deployment; see the note below |
 | **[x]** | P4 call-signal FIFO kills voice group-wide | `32dab2a` | |
 | **[~]** | P5 connection limits | `0af1583` | Inbound capped at 256, which closes the attack. No total cap and no pending-outgoing cap |
 | **[ ]** | P6 no eviction primitive | | No `Command::Disconnect`, no block list. A removed member's established connections and granted circuit reservations survive removal indefinitely. Needed before switchboards (rung 2) ship |
@@ -170,6 +170,20 @@ block in `HANDOVER.md` for what happens otherwise).
 | **[x]** | P12 relay advertised private addresses | `e35b1b2` | |
 | **[ ]** | P13 invite-supplied rendezvous addresses unvalidated | | Split the validator by trust: operator-configured may be a DNS name (rung 4 needs one), invite-supplied must be a routable IP literal. Same loopback rule the bootstrap path uses |
 | **[~]** | P14 a joiner never saw later members | `36ca2df` | Control-topic cause fixed. The **recovery** cause is open: a genuinely missed commit still asks the newcomer who caused the gap, and an empty bundle counts as success |
+
+**Note on P3, and why invite limits do not apply.** The instinct to charge for registration is
+right; the mechanism has to sit where the attacker actually is. The rendezvous is public
+infrastructure *below* any group: a squatter is an anonymous host that has never held an invite
+and is registering namespace strings it made up. The node cannot distinguish a real blinded
+namespace from a fabricated one, and that inability is the zero-knowledge property, not a bug.
+So there is no membership to gate on, and the existing owner/admin gate on minting invites
+operates at a layer the attacker never reaches.
+
+Levers that work without giving the node what the design withholds: **source addresses** (built:
+the per-prefix quota) and **proof-of-work per registration**, which is superlinear for a squatter
+and a few milliseconds once for an honest client. The lever that would work but should not be
+used: requiring proof of group membership, which hands the node exactly the membership knowledge
+blinded namespaces exist to deny it.
 
 ## 2. The constraint, stated plainly
 
