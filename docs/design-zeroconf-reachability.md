@@ -516,6 +516,47 @@ their own machine. The app should confirm its own advertised address is reachabl
 before offering the invite, and escalate silently if not, rather than minting a known-dead
 invite.
 
+### 5a. Built (2026-08-19): the operator's join log, real logging, the connectivity panel
+
+Prompted by a live session where a founder sent an invite, the joiner got "join request
+rejected", and **neither party could find out why**. Three causes, all closed:
+
+1. **`serve_join` discarded its own reason.** Five distinct rejections all returned a bare `None`.
+   It now classifies every exit into a `JoinOutcome` (`catcoms-sync`): `admitted` / `relayed` /
+   `staged`, and `undecodable` / `wrong-group` / `not-this-inviter` / `bad-signature` / `expired`
+   / `revoked` / `already-used` / `not-authorized` / `admission-failed`. Each attempt lands in a
+   bounded (32) ring of `JoinAttempt { at_ms, outcome, peer_prefix, nonce_prefix }`, stamped from
+   the injected `Clock` and **transient** (never persisted: it is a live diagnostic, not a record
+   of who tried to reach this node). Surfaced `Server::join_attempts` → `AppCommand::JoinAttempts`
+   → `get_join_attempts` → **Server settings / Join Log**, with copy-as-text.
+   **The wire protocol is unchanged**: the joiner still receives an opaque rejection, because
+   telling an unauthenticated caller which of the causes applied turns any stale token into an
+   invite-ledger oracle. This is the *operator's* half only.
+2. **The desktop app installed no tracing subscriber at all**, so every `tracing::warn!` in the
+   whole stack was discarded and no log file existed anywhere. `run()` now calls
+   `catcoms_log::init_debug_with` in `setup`, gated on a flag file under the app data dir,
+   **off by default**, toggled in Settings / Diagnostics which also states the folder. The file
+   filter is `APP_FILE_FILTER`, narrower than the CLI's blanket `debug`: the transport crates
+   stay at `info`, because at `debug` they narrate every address and connection the node sees.
+   `catcoms-log`'s module docs now say plainly what a debug log may contain (addresses, peer and
+   device ids, activity metadata) and what it never contains (message text, file contents, names,
+   key material), because the file exists to be shared.
+3. **Nothing surfaced what an attempt actually did.** A `Connectivity` record in the bridge
+   captures, per found/join: the advertised addresses, the UPnP result (distinguishing
+   no-gateway from timed-out from an address), an ordered step log (`listen`/`advertise`/`relay`/
+   `rendezvous`/`discover`/`dial`/`connect`/`join`/`invite`) each `ok`/`failed`/`unknown`, and the
+   last error **verbatim**. Read by `get_connectivity`, rendered on the create/join screen and in
+   Settings / Diagnostics, copyable as text.
+
+   **It does not answer "am I reachable from the internet".** AutoNAT is rung 0c and does not
+   exist, so nothing can dial this node back; `reachabilitySummary` reports `unknown` unless a
+   relay circuit is reserved or UPnP returned a public address, and even then says "evidence, not
+   proof". Per-address dial outcomes are also reported as `unknown` rather than invented: libp2p
+   dials the set concurrently and only the first connection surfaces.
+
+Still open here: the pre-flight self-test above, the last-seen rendezvous query on a failed dial,
+symmetric-NAT detection, and the invite declaring which rungs it depends on.
+
 ## 6. Where this appears in the UI
 
 Rungs 0 to 2 need no interface beyond a status line. The rest live in an **Advanced** section,

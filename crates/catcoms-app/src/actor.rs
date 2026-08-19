@@ -22,9 +22,9 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem, JukeEntry,
-    Livery, MemberBadge, MemberView, MessageStats, Profile, Server, ServerEvent, WikiPendingEdit,
-    WikiRevision,
+    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem,
+    JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats, Profile, Server,
+    ServerEvent, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -204,6 +204,11 @@ pub enum AppCommand {
     FilesView { reply: oneshot::Sender<FilesView> },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    /// Query the recent inbound join attempts this node served, newest first (operator
+    /// diagnostics; see `Server::join_attempts`).
+    JoinAttempts {
+        reply: oneshot::Sender<Vec<JoinAttempt>>,
+    },
     /// Query delivery state for this device's recent messages in a channel, so a UI can paint it
     /// on open instead of waiting for the next throttled `DeliveryChanged`.
     DeliverySnapshot {
@@ -1146,6 +1151,20 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::OnlineMembers { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch the recent inbound join attempts this node served, newest first.
+    pub async fn join_attempts(&self) -> Vec<JoinAttempt> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::JoinAttempts { reply })
             .await
             .is_err()
         {
@@ -2157,6 +2176,9 @@ where
                     }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
+                    }
+                    Some(AppCommand::JoinAttempts { reply }) => {
+                        let _ = reply.send(server.join_attempts());
                     }
                     Some(AppCommand::DeliverySnapshot { channel, reply }) => {
                         let _ = reply.send(server.delivery_snapshot(channel));

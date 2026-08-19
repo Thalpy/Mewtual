@@ -37,8 +37,8 @@ use catcoms_discovery::{
     EclipseDetector, EclipseLevel, EclipseObservation, PolicyConfig, Source,
 };
 use catcoms_mls::{
-    restore_server, serialize_key_package, snapshot_server, Incoming, InviteLedger, InviteToken,
-    MlsDevice, ServerGroup,
+    restore_server, serialize_key_package, snapshot_server, Incoming, InviteError, InviteLedger,
+    InviteToken, MlsDevice, ServerGroup,
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{
@@ -340,6 +340,129 @@ struct PendingResolve {
     /// whether we won (merge our pending commit) or lost (abort it and apply the
     /// winner). `None` for a pure applier.
     mine: Option<MyStaged>,
+}
+
+/// How many inbound join attempts a serving node remembers for its operator.
+///
+/// Small on purpose. This is a "what just happened when my friend pasted the invite" surface,
+/// not an audit log: an operator matches an attempt against an invite they sent minutes ago, and
+/// the entries hold a requesting peer id, so keeping more of them is a growing record of who
+/// tried to reach this node for no diagnostic gain.
+const MAX_JOIN_ATTEMPTS: usize = 32;
+
+/// How an inbound join request was resolved, from the **serving** node's point of view.
+///
+/// Deliberately one variant per distinct cause, because the operator's next action differs per
+/// cause and a collapsed "rejected" is exactly the unactionable error this exists to replace:
+/// [`JoinOutcome::AlreadyUsed`] means mint a second invite, [`JoinOutcome::Expired`] means mint a
+/// fresher one, and [`JoinOutcome::NotThisInviter`] means the joiner reached the wrong member and
+/// should be pointed at the inviting device.
+///
+/// **Not** on the wire. The rejection the joiner receives stays a bare, opaque `None`; telling an
+/// unauthenticated caller which of these applied would let anyone holding a stale token probe an
+/// invite ledger, and nothing needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinOutcome {
+    /// Admitted here: the MLS Add ran on this node and the signed Welcome went back.
+    Admitted,
+    /// This device minted the invite but is not the committer, so the Add was relayed to the
+    /// owner (the Option C admin-invite path); the joiner waits for a pushed Welcome. Not yet a
+    /// success: an offline owner leaves it queued.
+    Relayed,
+    /// Concurrent-committer mode only: the Add was staged into a fork-resolution contest, and
+    /// the Welcome is pushed if it wins.
+    Staged,
+    /// The request bytes did not decode as a join request at all.
+    Undecodable,
+    /// The invite names a different group than the one this node serves.
+    WrongGroup,
+    /// The invite names a different inviter device. Only the named inviter admits over the wire,
+    /// so the joiner has reached a member that structurally cannot help it.
+    NotThisInviter,
+    /// The invite's own signature did not verify: forged, or edited after signing.
+    BadSignature,
+    /// The invite's validity window had passed when the request arrived.
+    Expired,
+    /// The invite was revoked before it was redeemed.
+    Revoked,
+    /// The invite is single-use and had already been redeemed.
+    AlreadyUsed,
+    /// This device minted the invite, is not the committer, and its own published roster says it
+    /// is not an admin; so it refused to relay rather than park the joiner on a Welcome the
+    /// owner would never send.
+    NotAuthorized,
+    /// Every check passed and the admission itself still failed: a malformed KeyPackage, an
+    /// invite binding the KeyPackage does not satisfy, a concurrent staged commit, or an MLS
+    /// error. The one outcome that means "look at the debug log".
+    AdmissionFailed,
+}
+
+impl JoinOutcome {
+    /// A stable machine id for this outcome (the string the UI keys its copy off). Stable across
+    /// releases: the frontend maps these to user-facing sentences.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JoinOutcome::Admitted => "admitted",
+            JoinOutcome::Relayed => "relayed",
+            JoinOutcome::Staged => "staged",
+            JoinOutcome::Undecodable => "undecodable",
+            JoinOutcome::WrongGroup => "wrong-group",
+            JoinOutcome::NotThisInviter => "not-this-inviter",
+            JoinOutcome::BadSignature => "bad-signature",
+            JoinOutcome::Expired => "expired",
+            JoinOutcome::Revoked => "revoked",
+            JoinOutcome::AlreadyUsed => "already-used",
+            JoinOutcome::NotAuthorized => "not-authorized",
+            JoinOutcome::AdmissionFailed => "admission-failed",
+        }
+    }
+
+    /// Whether the joiner got (or is getting) in. `Relayed`/`Staged` count: neither is a
+    /// rejection, and an operator seeing one knows to look at whether the owner is online rather
+    /// than at the invite.
+    pub fn admitted(&self) -> bool {
+        matches!(
+            self,
+            JoinOutcome::Admitted | JoinOutcome::Relayed | JoinOutcome::Staged
+        )
+    }
+}
+
+/// One inbound join attempt as recorded on the serving node.
+///
+/// The identifying detail is chosen to be the minimum an operator can *act* on: the invite nonce
+/// prefix is what matches an entry against the specific invite they sent, and the peer prefix
+/// tells two simultaneous attempts apart. Neither is a wire-visible secret (the nonce travels in
+/// the invite itself), but both are still identifying, which is why the ring is small and why
+/// nothing here is persisted across a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinAttempt {
+    /// When the attempt was served, on the injected [`Clock`] (ms since the epoch).
+    pub at_ms: u64,
+    /// What happened.
+    pub outcome: JoinOutcome,
+    /// The requesting transport peer, as the first 8 bytes of its id in hex. A prefix, because
+    /// the whole id is not needed to tell attempts apart and the operator cannot act on it.
+    pub peer_prefix: String,
+    /// The first 8 bytes of the invite nonce in hex; the field an operator matches against the
+    /// invite they sent. Empty when the request never decoded far enough to have one.
+    pub nonce_prefix: String,
+}
+
+/// Format the leading bytes of an identifier as lowercase hex, for a [`JoinAttempt`].
+///
+/// Pulled out as a free function because it is the one piece of this surface with a shape worth
+/// pinning in a test: a short input must not panic, and the prefix length must not drift (the
+/// operator matches these by eye against an invite).
+fn id_prefix(bytes: &[u8]) -> String {
+    const PREFIX_BYTES: usize = 8;
+    let take = bytes.len().min(PREFIX_BYTES);
+    let mut s = String::with_capacity(take * 2);
+    for b in &bytes[..take] {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// A snapshot of a [`ChannelSync`]'s internal counters and gauges. Returned by
@@ -2097,6 +2220,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     blobs: Box<dyn BlobStore + Send>,
     /// Diagnostic counters (see [`SyncStats`]).
     stats: SyncStats,
+    /// The last [`MAX_JOIN_ATTEMPTS`] inbound join attempts this node served, oldest first, with
+    /// why each was refused. The **operator's** view of a failed join: the wire answer stays an
+    /// opaque rejection, so without this nobody on either side can tell an expired invite from an
+    /// already-redeemed one, which was the whole of the reported field failure.
+    ///
+    /// Transient by design. It is a live-session diagnostic, and persisting it would put a
+    /// growing list of who tried to reach this node into the sealed snapshot for no gain.
+    join_attempts: VecDeque<JoinAttempt>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
@@ -2171,6 +2302,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             blob_budget: HashMap::new(),
             blobs: Box::new(MemoryBlobStore::new()),
             stats: SyncStats::default(),
+            join_attempts: VecDeque::new(),
         };
         // Seed the L=0 routing secret from the current epoch. Correct for the
         // founder; a member that joined an existing group instead adopts the
@@ -2553,6 +2685,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         s.known_peers = self.known_peers.len();
         s.member_peers = self.member_peers.len();
         s
+    }
+
+    /// The inbound join attempts this node has served this session, **newest first** (the order
+    /// an operator reads them in: the attempt they are debugging is the one that just happened).
+    pub fn join_attempts(&self) -> Vec<JoinAttempt> {
+        self.join_attempts.iter().rev().cloned().collect()
+    }
+
+    /// Record one inbound join attempt, evicting the oldest past [`MAX_JOIN_ATTEMPTS`]. The
+    /// timestamp comes from the injected [`Clock`], like every other stamp in this crate.
+    fn record_join_attempt(
+        &mut self,
+        from: &PeerId,
+        nonce: Option<&[u8; 16]>,
+        outcome: JoinOutcome,
+    ) {
+        let attempt = JoinAttempt {
+            at_ms: self.clock.now_ms(),
+            outcome,
+            peer_prefix: id_prefix(from.as_bytes()),
+            nonce_prefix: nonce.map(|n| id_prefix(n)).unwrap_or_default(),
+        };
+        // Push then trim, so the ring is bounded even if the cap is ever lowered under a
+        // restored-longer list; a plain "trim before push" would leave one entry over.
+        self.join_attempts.push_back(attempt);
+        while self.join_attempts.len() > MAX_JOIN_ATTEMPTS {
+            self.join_attempts.pop_front();
+        }
     }
 
     /// Mint a single-use, device-bound invite to this server (the inviting device
@@ -5609,25 +5769,63 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// **staged** into a fork-resolution contest and a `JOIN_PENDING` ack is
     /// returned; the signed Welcome is **pushed** to the joiner only once the staged
     /// commit wins and merges (so a losing committer never strands the joiner).
+    ///
+    /// Every exit is recorded in the operator-visible join-attempt ring
+    /// ([`ChannelSync::join_attempts`]) with its distinct cause; the bytes returned to the
+    /// joiner are unchanged (an opaque `None` for every rejection).
     fn serve_join(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
-        let (invite, kp_bytes) = decode_join_req(data).ok()?;
+        // The nonce is filled in as soon as the request decodes, so a rejection *after* that
+        // point still tells the operator which invite it was about; which is the whole point.
+        let mut nonce = None;
+        let served = self.serve_join_inner(from, data, &mut nonce);
+        let (outcome, resp) = match served {
+            Ok((outcome, resp)) => (outcome, Some(resp)),
+            Err(outcome) => (outcome, None),
+        };
+        self.record_join_attempt(&from, nonce.as_ref(), outcome);
+        resp
+    }
+
+    /// The body of [`ChannelSync::serve_join`], written to name its failure causes instead of
+    /// discarding them: `Err(outcome)` is a rejection (the caller answers the joiner with
+    /// nothing at all), `Ok((outcome, bytes))` is the response to send.
+    fn serve_join_inner(
+        &mut self,
+        from: PeerId,
+        data: &[u8],
+        nonce: &mut Option<[u8; 16]>,
+    ) -> Result<(JoinOutcome, Vec<u8>), JoinOutcome> {
+        let (invite, kp_bytes) = decode_join_req(data).map_err(|_| JoinOutcome::Undecodable)?;
+        *nonce = Some(invite.invite_nonce);
 
         // --- cheap checks first (no asymmetric crypto on the KeyPackage) ---
         if invite.group_id != self.group.group_id() {
-            return None;
+            return Err(JoinOutcome::WrongGroup);
         }
         // Only the inviter named in the invite admits over the wire.
         if self.device.device_id() != invite.inviter_device_id {
             tracing::warn!("join request for an invite this device did not issue");
-            return None;
+            return Err(JoinOutcome::NotThisInviter);
         }
         if !invite.verify_self() {
             tracing::warn!("join request with an inauthentic invite");
-            return None;
+            return Err(JoinOutcome::BadSignature);
         }
         let now = self.clock.now_ms();
-        if self.ledger.check(&invite, now).is_err() {
-            return None; // expired / revoked / already used
+        // The ledger's own reason is kept rather than flattened: "already used" and "expired"
+        // lead the operator to completely different actions (mint a second invite vs mint a
+        // fresher one), and collapsing them is how a user ends up with no next step.
+        if let Err(e) = self.ledger.check(&invite, now) {
+            tracing::warn!(reason = %e, "join request refused by the invite ledger");
+            return Err(match e {
+                InviteError::Expired => JoinOutcome::Expired,
+                InviteError::Revoked => JoinOutcome::Revoked,
+                InviteError::AlreadyUsed => JoinOutcome::AlreadyUsed,
+                // `check` returns only the three above today; anything else is a code change
+                // here, and reporting it as an admission failure points at the log rather than
+                // at an invite the operator would then wrongly re-mint.
+                _ => JoinOutcome::AdmissionFailed,
+            });
         }
 
         // Where this node sits relative to the designated committer. At rank 0 this is exactly
@@ -5637,7 +5835,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.group.designated_committer_index(),
         ) {
             (Some(idx), Some(base)) => idx.saturating_sub(base),
-            _ => return None,
+            _ => return Err(JoinOutcome::AdmissionFailed),
         };
 
         // A non-committer (an Admin, in the single-committer model) cannot run the Add itself;
@@ -5662,31 +5860,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // finding). This never admits anyone; only the owner commits.
             if self.published_roster_omits(&self.device.device_id()) {
                 tracing::warn!("refusing to relay a join for an invite this non-admin minted");
-                return None;
+                return Err(JoinOutcome::NotAuthorized);
             }
             self.request_add(invite, kp_bytes, from, now);
-            return Some(vec![JOIN_PENDING]);
+            return Ok((JoinOutcome::Relayed, vec![JOIN_PENDING]));
         }
 
         if self.config.max_committer_rank == 0 {
             // --- synchronous single-committer path (6d-1 behavior) ---
-            let (welcome, sealed_routing, signature) = self.admit_now(&invite, &kp_bytes, now)?;
+            let (welcome, sealed_routing, signature) = self
+                .admit_now(&invite, &kp_bytes, now)
+                .ok_or(JoinOutcome::AdmissionFailed)?;
             let mut resp = vec![JOIN_READY];
             resp.extend_from_slice(&encode_join_resp(&welcome, &signature, &sealed_routing));
-            return Some(resp);
+            return Ok((JoinOutcome::Admitted, resp));
         }
 
         // --- staged two-phase path (fork-resolvable; provisional Welcome) ---
         if self.pending.is_some() {
             tracing::warn!("a commit is already staged here; rejecting concurrent join (retry)");
-            return None; // joiner retries against the (now-known) committer
+            // The joiner retries against the (now-known) committer.
+            return Err(JoinOutcome::AdmissionFailed);
         }
-        let key_package = self.device.parse_key_package(&kp_bytes).ok()?;
+        let key_package = self
+            .device
+            .parse_key_package(&kp_bytes)
+            .map_err(|_| JoinOutcome::AdmissionFailed)?;
         self.group
             .validate_invite_binding(&key_package, &invite)
-            .ok()?;
-        let staged = self.group.stage_add(&self.device, key_package).ok()?;
-        let welcome = staged.welcome.clone()?; // an Add always carries a Welcome
+            .map_err(|_| JoinOutcome::AdmissionFailed)?;
+        let staged = self
+            .group
+            .stage_add(&self.device, key_package)
+            .map_err(|_| JoinOutcome::AdmissionFailed)?;
+        // An Add always carries a Welcome.
+        let welcome = staged.welcome.clone().ok_or(JoinOutcome::AdmissionFailed)?;
         let record = self.sign_staged_record(&staged);
         self.pending = Some(PendingResolve {
             epoch: staged.commit_epoch,
@@ -5706,7 +5914,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         framed.extend_from_slice(&record.encode());
         self.outbox.push((self.control_topic.clone(), framed));
         tracing::info!("staged an admission; awaiting the fork-resolution window");
-        Some(vec![JOIN_PENDING])
+        Ok((JoinOutcome::Staged, vec![JOIN_PENDING]))
     }
 
     /// Run the synchronous single-committer admission: produce + locally apply the MLS Add,
@@ -9007,5 +9215,194 @@ mod tests {
             Some(Vec::new()),
             "a second PEX within the interval is rate-limited to an empty reply"
         );
+    }
+    #[test]
+    fn a_join_attempt_prefix_is_short_lowercase_hex_and_survives_a_short_input() {
+        // The operator matches these by eye against the invite they sent, so the width has to
+        // stay put; and a short slice must truncate rather than index out of bounds.
+        assert_eq!(id_prefix(&[0x00, 0xff, 0x0a, 0xb3]), "00ff0ab3");
+        assert_eq!(id_prefix(&[]), "");
+        let long = [0xabu8; 32];
+        assert_eq!(
+            id_prefix(&long),
+            "abababababababab",
+            "8 bytes, 16 hex chars"
+        );
+        assert_eq!(id_prefix(&long).len(), 16);
+    }
+
+    #[test]
+    fn every_join_outcome_has_a_distinct_stable_id_and_knows_if_it_admitted() {
+        use std::collections::HashSet;
+        let all = [
+            JoinOutcome::Admitted,
+            JoinOutcome::Relayed,
+            JoinOutcome::Staged,
+            JoinOutcome::Undecodable,
+            JoinOutcome::WrongGroup,
+            JoinOutcome::NotThisInviter,
+            JoinOutcome::BadSignature,
+            JoinOutcome::Expired,
+            JoinOutcome::Revoked,
+            JoinOutcome::AlreadyUsed,
+            JoinOutcome::NotAuthorized,
+            JoinOutcome::AdmissionFailed,
+        ];
+        let ids: HashSet<&str> = all.iter().map(|o| o.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            all.len(),
+            "collapsing two causes onto one id is the failure this surface exists to prevent"
+        );
+        // The three that mean "the joiner is in, or on their way in".
+        assert!(JoinOutcome::Admitted.admitted());
+        assert!(JoinOutcome::Relayed.admitted());
+        assert!(JoinOutcome::Staged.admitted());
+        assert_eq!(
+            all.iter().filter(|o| o.admitted()).count(),
+            3,
+            "every other outcome is a rejection the operator has to act on"
+        );
+    }
+
+    #[test]
+    fn the_join_attempt_ring_is_bounded_and_reads_newest_first() {
+        let mut node = solo_node();
+        // One more than the ring holds, so eviction order and read order are both observable.
+        let total = MAX_JOIN_ATTEMPTS + 8;
+        for i in 0..total {
+            let mut nonce = [0u8; 16];
+            nonce[0] = i as u8;
+            node.record_join_attempt(
+                &PeerId::from_u64(i as u64),
+                Some(&nonce),
+                JoinOutcome::Expired,
+            );
+        }
+        let seen = node.join_attempts();
+        assert_eq!(seen.len(), MAX_JOIN_ATTEMPTS, "the ring is bounded");
+        let nonce_of = |i: usize| {
+            let mut n = [0u8; 16];
+            n[0] = i as u8;
+            id_prefix(&n)
+        };
+        // Newest first: entry 0 is the last one recorded.
+        assert_eq!(seen[0].nonce_prefix, nonce_of(total - 1));
+        assert_eq!(
+            seen[MAX_JOIN_ATTEMPTS - 1].nonce_prefix,
+            nonce_of(total - MAX_JOIN_ATTEMPTS),
+            "the oldest survivor is exactly MAX_JOIN_ATTEMPTS back; the rest were evicted"
+        );
+        // The timestamp is the injected clock's, not an ambient one.
+        assert!(seen.iter().all(|a| a.at_ms == 1_000));
+        // An attempt that never decoded far enough to have a nonce records an empty one rather
+        // than a fake, so the operator is never invited to match against a value we made up.
+        node.record_join_attempt(&PeerId::from_u64(7), None, JoinOutcome::Undecodable);
+        assert_eq!(node.join_attempts()[0].nonce_prefix, "");
+        assert_eq!(node.join_attempts()[0].peer_prefix.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn serve_join_records_a_distinct_outcome_per_rejection_cause() {
+        // The reported field failure: five different reasons all produced one bare rejection, so
+        // neither party could tell "mint another invite" from "your invite already got used".
+        let clock = ManualClock::new(10_000);
+        let alice = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&alice).unwrap();
+        let hub = Hub::new();
+        let mut node = ChannelSync::new(
+            hub.join(PeerId::from_u64(1)),
+            group,
+            alice,
+            ChaCha20Rng::seed_from_u64(3),
+            Box::new(clock.clone()),
+        );
+        let joiner = PeerId::from_u64(2);
+
+        // Mint an invite and build the exact bytes a joiner would send for it.
+        fn req_for(
+            node: &ChannelSync<MemNetwork, ChaCha20Rng>,
+            nonce: [u8; 16],
+            expires: u64,
+        ) -> (InviteToken, Vec<u8>) {
+            let invite = node.mint_invite(nonce, expires, vec![]).unwrap();
+            let dev = MlsDevice::generate().unwrap();
+            let kp = dev
+                .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+                .unwrap();
+            let kp_bytes = serialize_key_package(&kp).unwrap();
+            let req = encode_join_req(&invite, &kp_bytes);
+            (invite, req)
+        }
+        // A KeyPackage to hang the hand-edited tokens off; the edits are all rejected before
+        // anything looks at it, which is the point of ordering the cheap checks first.
+        let spare = MlsDevice::generate().unwrap();
+        let spare_kp = serialize_key_package(
+            &spare
+                .key_package_for_invite(&node.group.group_id(), [9u8; 16])
+                .unwrap(),
+        )
+        .unwrap();
+
+        // Junk that is not a join request at all.
+        assert!(node.serve_join(joiner, b"not a join request").is_none());
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Undecodable);
+
+        // A structurally fine invite for someone else's group.
+        let (mut wrong, _) = req_for(&node, [1u8; 16], u64::MAX);
+        wrong.group_id = b"some other group".to_vec();
+        assert!(node
+            .serve_join(joiner, &encode_join_req(&wrong, &spare_kp))
+            .is_none());
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::WrongGroup);
+
+        // An invite naming a different inviter device: this member structurally cannot admit.
+        let (mut elsewhere, _) = req_for(&node, [2u8; 16], u64::MAX);
+        elsewhere.inviter_device_id = MlsDevice::generate().unwrap().device_id();
+        assert!(node
+            .serve_join(joiner, &encode_join_req(&elsewhere, &spare_kp))
+            .is_none());
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::NotThisInviter);
+        assert_eq!(
+            node.join_attempts()[0].nonce_prefix,
+            id_prefix(&[2u8; 16]),
+            "a rejection after the decode still names the invite it was about"
+        );
+
+        // Edited after signing: the inviter is still us, so this is the signature check firing.
+        let (mut forged, _) = req_for(&node, [3u8; 16], u64::MAX);
+        forged.expires_at_ms = u64::MAX - 1;
+        assert!(node
+            .serve_join(joiner, &encode_join_req(&forged, &spare_kp))
+            .is_none());
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::BadSignature);
+
+        // The three ledger causes, which are the ones that must never collapse together.
+        let (_, expired) = req_for(&node, [4u8; 16], 9_000);
+        assert!(node.serve_join(joiner, &expired).is_none());
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Expired);
+
+        let (_, revoked) = req_for(&node, [5u8; 16], u64::MAX);
+        node.ledger.revoke([5u8; 16]);
+        assert!(node.serve_join(joiner, &revoked).is_none());
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Revoked);
+
+        // A genuine admission, then the very same request replayed.
+        let (_, good) = req_for(&node, [6u8; 16], u64::MAX);
+        let resp = node.serve_join(joiner, &good).expect("admitted");
+        assert_eq!(resp.first(), Some(&JOIN_READY));
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Admitted);
+        assert_eq!(node.join_attempts()[0].nonce_prefix, id_prefix(&[6u8; 16]));
+
+        assert!(
+            node.serve_join(joiner, &good).is_none(),
+            "single use: the replay is refused"
+        );
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::AlreadyUsed);
+
+        // Time advances on the injected clock only, and the stamp follows it.
+        clock.advance_ms(500);
+        node.record_join_attempt(&joiner, None, JoinOutcome::Undecodable);
+        assert_eq!(node.join_attempts()[0].at_ms, 10_500);
     }
 }

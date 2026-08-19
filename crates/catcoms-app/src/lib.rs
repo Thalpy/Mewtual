@@ -34,11 +34,11 @@ use catcoms_storage::{BlobStore, FileManifest, FileRef};
 // Re-export the content-address type: it's part of the app's public file surface, and the bridge
 // verifies a reassembled download against it.
 pub use catcoms_storage::Cid;
-pub use catcoms_sync::peer_addrs_from_snapshot;
 use catcoms_sync::{
     fingerprint, read_published_roster, request_device_join, request_join, ChannelSync, SyncError,
     ROLES_DOC,
 };
+pub use catcoms_sync::{peer_addrs_from_snapshot, JoinAttempt, JoinOutcome};
 use catcoms_wire::DocType;
 use thiserror::Error;
 
@@ -3092,6 +3092,16 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// [`ChannelSync::connected_member_fingerprints`].
     pub fn online_members(&self) -> Vec<String> {
         self.sync.connected_member_fingerprints()
+    }
+
+    /// Every inbound join attempt this node served this session, newest first, with why each was
+    /// refused (the **operator's** view; see [`JoinAttempt`]).
+    ///
+    /// The joiner still receives an opaque rejection over the wire. This is the other half of it:
+    /// without it, an expired invite, a revoked one and one that was already redeemed are the
+    /// same silent failure to everyone involved.
+    pub fn join_attempts(&self) -> Vec<JoinAttempt> {
+        self.sync.join_attempts()
     }
 
     /// Milliseconds since the Unix epoch on this server's injected clock; the same seam message

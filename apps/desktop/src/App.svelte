@@ -10,6 +10,10 @@
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
   import { buildWikiTree, visibleRows, ancestorsOf } from "./wikitree";
   import { extractInfobox, infoboxTemplate } from "./infobox";
+  import {
+    type Connectivity, type JoinAttempt, describeOutcome, formatConnectivity, formatJoinLog,
+    reachabilitySummary,
+  } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
     type Placement, type SpaceState, angularOffsets, applyOffsets, clampPitch, defaultSpace,
@@ -138,6 +142,7 @@
     { id: "chatmedia", label: "Chat & Media", cat: "App" },
     { id: "keybinds", label: "Keybinds", cat: "App" },
     { id: "network", label: "Network", cat: "Connection" },
+    { id: "diagnostics", label: "Diagnostics", cat: "Connection" },
     { id: "updates", label: "Updates", cat: "Connection" },
   ];
   const SRV_SET_PAGES: SetPage[] = [
@@ -147,6 +152,7 @@
     { id: "badges", label: "Badges", cat: "People" },
     { id: "sdevices", label: "Devices", cat: "People" },
     { id: "invites", label: "Invites", cat: "People" },
+    { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
@@ -3377,6 +3383,94 @@
       error = String(e);
     }
   }
+  // --- Diagnostics: the join log, the connectivity report, and the debug log ---------------
+  //
+  // Three surfaces for one problem: a join that fails tells nobody anything. The join log is the
+  // OPERATOR's view of why this node refused an inbound join (the wire answer to the joiner
+  // stays opaque on purpose); the connectivity report is the JOINER's view of what their own app
+  // tried; the debug log is the fallback for everything neither explains.
+  let joinAttempts = $state<JoinAttempt[]>([]);
+  let joinLogCopied = $state(false);
+  let connectivity = $state<Connectivity | null>(null);
+  let connCopied = $state(false);
+  let debugLog = $state<{ enabled: boolean; active: boolean; dir: string; file: string } | null>(null);
+  let debugLogBusy = $state(false);
+
+  async function refreshJoinAttempts() {
+    if (activeServerId === null) return;
+    try {
+      joinAttempts = await invoke<JoinAttempt[]>("get_join_attempts", { server: activeServerId });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function refreshConnectivity() {
+    try {
+      connectivity = await invoke<Connectivity>("get_connectivity");
+    } catch {
+      // A build without the command (or a locked app) simply has nothing to show; the panel
+      // says so rather than raising an error over a diagnostic.
+      connectivity = null;
+    }
+  }
+  async function refreshDebugLog() {
+    try {
+      debugLog = await invoke("get_debug_logging");
+    } catch {
+      debugLog = null;
+    }
+  }
+  async function toggleDebugLog(on: boolean) {
+    debugLogBusy = true;
+    try {
+      debugLog = await invoke("set_debug_logging", { enabled: on });
+    } catch (e) {
+      error = String(e);
+    } finally {
+      debugLogBusy = false;
+    }
+  }
+  async function copyJoinLog() {
+    await copyText(formatJoinLog(joinAttempts));
+    joinLogCopied = true;
+    setTimeout(() => (joinLogCopied = false), 1500);
+  }
+  async function copyConnectivity() {
+    await copyText(formatConnectivity(connectivity));
+    connCopied = true;
+    setTimeout(() => (connCopied = false), 1500);
+  }
+  // Local time on screen (the operator is looking at their own clock); the copied text uses UTC,
+  // because whoever they paste it to usually is not in this timezone.
+  function fmtLocal(ms: number): string {
+    if (!Number.isFinite(ms) || ms <= 0) return "";
+    return new Date(ms).toLocaleString();
+  }
+
+  // Load each diagnostic when its page is actually opened: none of them is cheap enough to poll
+  // and none is interesting until someone is looking at it.
+  $effect(() => {
+    if (showServerSettings && serverSettingsPage === "joinlog") {
+      void activeServerId;
+      refreshJoinAttempts();
+    }
+  });
+  $effect(() => {
+    if (showSettings && settingsPage === "diagnostics") {
+      refreshDebugLog();
+      refreshConnectivity();
+    }
+  });
+  // The onboarding panel: refresh whenever the create/join screen is showing and an attempt has
+  // just finished (`busy` falling back to false is exactly that moment).
+  $effect(() => {
+    if (servers.length === 0 || showAdd) {
+      void busy;
+      refreshConnectivity();
+      refreshDebugLog();
+    }
+  });
+
   async function refreshRoles() {
     if (activeServerId === null) return;
     try {
@@ -7908,6 +8002,47 @@
   <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color) + fxStyle(effect)}>{name}</span>
 {/snippet}
 
+<!-- The connectivity detail, rendered by BOTH the create/join screen and Settings ->
+     Diagnostics: one panel, two doors. It reports what was TRIED, never a verdict the code
+     cannot support (see `reachabilitySummary`: AutoNAT does not exist, so "can the internet
+     reach me" is honestly unknown). -->
+{#snippet connDetail(c: Connectivity)}
+  <div class="conn-detail">
+    <h4>Router port mapping (UPnP)</h4>
+    <p class="muted small">{c.upnp || "not attempted"}</p>
+    <h4>Addresses this device offers ({c.advertised.length})</h4>
+    {#if c.advertised.length}
+      <ul class="conn-addrs">
+        {#each c.advertised as a, i (i)}<li class="fp">{a}</li>{/each}
+      </ul>
+    {:else}
+      <p class="muted small">None yet. Without one, someone on another network has nothing to dial.</p>
+    {/if}
+    <h4>What the attempt did ({c.steps.length})</h4>
+    {#if c.steps.length}
+      <ul class="conn-steps">
+        {#each c.steps as st, i (i)}
+          <li class={st.status}>
+            <span class="cs-kind">{st.kind}</span>
+            {#if st.target}<span class="fp cs-target">{st.target}</span>{/if}
+            <span class="cs-detail">{st.detail}</span>
+          </li>
+        {/each}
+      </ul>
+      <p class="muted small">
+        Addresses marked <b>unknown</b> were dialled and nothing more is known about them
+        individually: they are attempted at once and only the first to answer is reported.
+      </p>
+    {:else}
+      <p class="muted small">Nothing recorded.</p>
+    {/if}
+    {#if c.last_error}
+      <h4>Last error</h4>
+      <textarea class="invite-code" readonly rows="2" value={c.last_error}></textarea>
+    {/if}
+  </div>
+{/snippet}
+
 {#snippet nameTag(fp: string)}
   {@const p = profiles[fp]}
   {@render styledName(nameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
@@ -9655,6 +9790,43 @@
               {/if}
             {/if}
           {/if}
+        {/if}
+      </details>
+      <details class="conn-panel">
+        <summary>Connection check</summary>
+        <p class="muted small">
+          What this app knows about reaching, and being reached by, other people. Open it when a
+          server you founded cannot be joined, or when an invite you pasted times out.
+        </p>
+        {#if connectivity && connectivity.action}
+          {@const reach = reachabilitySummary(connectivity)}
+          <p class="muted small">
+            Last attempt: <b>{connectivity.action === "found" ? "founding a server" : "joining"}</b>
+            {connectivity.subject ? ` (${connectivity.subject})` : ""} at {fmtLocal(connectivity.at)}.
+          </p>
+          <p class="muted small">Reachable from the internet: <b>{reach.verdict}</b>. {reach.detail}</p>
+          {@render connDetail(connectivity)}
+          <div class="pc-actions">
+            <button class="ghost small" onclick={refreshConnectivity}>Refresh</button>
+            <button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied!" : "Copy report"}</button>
+          </div>
+        {:else}
+          <p class="muted small">
+            Nothing has been tried yet this session. Found or join a server and this fills in with
+            the addresses used and what happened to each.
+          </p>
+        {/if}
+        <p class="muted small">
+          If the person who invited you says their end shows nothing at all, your app never
+          reached them. If their end shows a refusal, ask them to open
+          <b>Server settings &rarr; Join Log</b>: it records the reason, which is deliberately not
+          sent back to you.
+        </p>
+        {#if debugLog}
+          <p class="muted small">
+            Deeper detail goes in a debug log ({debugLog.enabled ? "on" : "off"}), switched on in
+            Settings &rarr; Diagnostics, where its folder is also shown.
+          </p>
         {/if}
       </details>
       {#if error}<p class="muted" style="color:#ff6b6b">{error}</p>{/if}
@@ -11841,6 +12013,67 @@
                   <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
                 </label>
               </section>
+            {:else if settingsPage === "diagnostics"}
+              <div class="stx-crumb">SETTINGS // CONNECTION // DIAGNOSTICS</div>
+              <h1>Diagnostics</h1>
+              <section class="set-section">
+                <h3>Connection report</h3>
+                {#if connectivity && connectivity.action}
+                  {@const reach = reachabilitySummary(connectivity)}
+                  <p class="muted small">
+                    The last thing this app tried: <b>{connectivity.action === "found" ? "founding" : "joining"}</b>
+                    {connectivity.subject ? ` (${connectivity.subject})` : ""}, {fmtLocal(connectivity.at)}.
+                  </p>
+                  <p class="muted small">Reachable from the internet: <b>{reach.verdict}</b>. {reach.detail}</p>
+                  <div class="invite-actions">
+                    <button class="ghost small" onclick={refreshConnectivity}>Refresh</button>
+                    <button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied!" : "Copy report"}</button>
+                  </div>
+                  {@render connDetail(connectivity)}
+                {:else}
+                  <p class="muted small">Nothing has been founded or joined since the app started, so there is nothing to report yet.</p>
+                {/if}
+              </section>
+              <section class="set-section">
+                <h3>Debug log</h3>
+                <p class="muted small">
+                  Off by default. When on, Mewtual writes a text log next to its data so you can
+                  reproduce a problem and send the file to someone who can read it.
+                </p>
+                {#if debugLog}
+                  <label class="toggle">
+                    <input type="checkbox" checked={debugLog.enabled} disabled={debugLogBusy}
+                      onchange={(e) => toggleDebugLog(e.currentTarget.checked)} />
+                    <span>Keep a debug log</span>
+                  </label>
+                  {#if debugLog.enabled && !debugLog.active}
+                    <p class="muted small">Restart Mewtual to start writing: a log can only be opened when the app starts.</p>
+                  {:else if !debugLog.enabled && debugLog.active}
+                    <p class="muted small">Still writing this session's log. It stops at the next restart.</p>
+                  {/if}
+                  <div class="field">
+                    <span class="muted small">Log folder</span>
+                    <input readonly value={debugLog.dir} />
+                  </div>
+                  {#if debugLog.file}
+                    <p class="muted small">This session's file: <span class="fp">{debugLog.file}</span></p>
+                  {:else}
+                    <p class="muted small">Files are named <code>debug_log_&lt;date&gt;_&lt;time&gt;.txt</code>.</p>
+                  {/if}
+                  <div class="invite-actions">
+                    <button class="ghost small" onclick={() => copyText(debugLog?.dir ?? "")}>Copy folder path</button>
+                  </div>
+                {:else}
+                  <p class="muted small">This build cannot report the log setting.</p>
+                {/if}
+                <p class="muted small">
+                  <b>Before you share one:</b> a debug log can contain your LAN and public IP
+                  addresses and port, the addresses of peers you connected to, peer and device
+                  identifiers, and when you were online and how much you transferred. It does
+                  <b>not</b> contain message text, file contents, names or any key material.
+                  Treat it as "who I talked to and when".
+                </p>
+              </section>
             {:else if settingsPage === "updates"}
               <div class="stx-crumb">SETTINGS // CONNECTION // UPDATES</div>
               <h1>Updates</h1>
@@ -12282,6 +12515,53 @@
               {:else}
                 <p class="muted small">Nothing to mint right now: invites appear here once you can create one.</p>
               {/if}
+            {:else if serverSettingsPage === "joinlog"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // JOIN LOG</div>
+              <h1>Join Log</h1>
+              <section class="set-section">
+                <p class="muted small">
+                  Every join request this device answered since it started, newest first, and why
+                  each one was refused. Match an entry to the invite you sent by its invite code:
+                  the first bytes of the invite's one-time nonce.
+                </p>
+                <p class="muted small">
+                  The person joining only ever sees "rejected": the reason is deliberately not
+                  put on the wire, so nobody can probe your invites. This is the other half of it.
+                  Nothing here is kept after you close the app.
+                </p>
+                <div class="invite-actions">
+                  <button class="ghost small" onclick={refreshJoinAttempts}>Refresh</button>
+                  <button class="ghost small" disabled={!joinAttempts.length} onclick={copyJoinLog}>
+                    {joinLogCopied ? "Copied!" : "Copy as text"}
+                  </button>
+                </div>
+              </section>
+              <section class="set-section">
+                {#if !joinAttempts.length}
+                  <p class="muted small">
+                    No join requests have reached this device yet. If someone says their invite was
+                    rejected and nothing appears here, their app never reached you at all: that is a
+                    connectivity problem, not an invite problem.
+                  </p>
+                {:else}
+                  <ul class="join-log">
+                    {#each joinAttempts as a, i (i)}
+                      {@const c = describeOutcome(a.outcome)}
+                      <li class={c.tone}>
+                        <div class="jl-head">
+                          <span class="jl-when">{fmtLocal(a.at)}</span>
+                          <span class="jl-what">{c.label}</span>
+                          <span class="jl-ids">
+                            invite <span class="fp">{a.nonce || "unknown"}</span>
+                            · peer <span class="fp">{a.peer || "unknown"}</span>
+                          </span>
+                        </div>
+                        <p class="muted small jl-note">{c.note}</p>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </section>
             {:else if serverSettingsPage === "emoji"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // EMOJI &amp; STICKERS</div>
               <h1>Emoji &amp; Stickers</h1>

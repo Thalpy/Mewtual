@@ -93,6 +93,95 @@ struct AppState {
     /// ceremony (`pairing_begin`) replaces the lot, and the ceremony secrets are dropped once the
     /// last grant has been redeemed.
     pairing_grants: Mutex<Vec<PerServerGrant>>,
+    /// What the most recent founding or joining attempt actually did, for the onboarding
+    /// connectivity panel. One slot: the panel exists to explain the attempt the user is looking
+    /// at, and keeping a history of every address every invite ever named is a worse trade than
+    /// it sounds.
+    diag: Mutex<Connectivity>,
+    /// Per-server UPnP result, kept out of [`Connectivity`] because it lands *after* the attempt
+    /// that started it returns (and possibly after the user has started another one). Keyed by
+    /// server id so a late answer can never be reported against a different server's attempt.
+    upnp: Mutex<HashMap<u64, String>>,
+}
+
+/// UPnP has not been asked yet (no transport window was taken).
+const UPNP_NOT_ATTEMPTED: &str = "not attempted";
+/// The mapping request is out and the router has not answered yet.
+const UPNP_WAITING: &str = "waiting for the router";
+/// The transport reported no usable IGD gateway (no UPnP, or a CGNAT'd one).
+const UPNP_NO_GATEWAY: &str = "no usable gateway (no UPnP, or your ISP uses CGNAT)";
+/// The router never answered inside [`UPNP_WINDOW_SECS`].
+const UPNP_TIMED_OUT: &str = "the router did not answer in time";
+
+/// One thing a founding or joining attempt did, in the order it did it.
+///
+/// This is a *record of actions*, not a verdict. Several of these start work libp2p finishes
+/// asynchronously, so the status is three-valued rather than a boolean; claiming success for a
+/// dial that has merely been issued is precisely the overconfident status
+/// `docs/design-zeroconf-reachability.md` section 5 warns about.
+#[derive(Serialize, Clone)]
+struct DiagStep {
+    /// Milliseconds since the epoch, from the same `SystemClock` seam the rest of the bridge
+    /// stamps with.
+    at: u64,
+    /// A short machine label the UI groups on: `listen`, `advertise`, `relay`, `rendezvous`,
+    /// `discover`, `dial`, `connect`, `invite`.
+    kind: String,
+    /// The address (or other subject) this step concerned. May be empty.
+    target: String,
+    /// What happened, verbatim where it came from an error.
+    detail: String,
+    /// `ok` (it demonstrably worked), `failed` (it demonstrably did not), or `unknown` (it was
+    /// started and the answer arrives, or does not, later).
+    status: String,
+}
+
+impl DiagStep {
+    fn new(kind: &str, target: impl Into<String>, detail: impl Into<String>, status: &str) -> Self {
+        Self {
+            at: SystemClock.now_ms(),
+            kind: kind.to_string(),
+            target: target.into(),
+            detail: detail.into(),
+            status: status.to_string(),
+        }
+    }
+    fn ok(kind: &str, target: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(kind, target, detail, "ok")
+    }
+    fn failed(kind: &str, target: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(kind, target, detail, "failed")
+    }
+    fn unknown(kind: &str, target: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self::new(kind, target, detail, "unknown")
+    }
+}
+
+/// Everything the app can honestly say about its own reachability and about the last thing it
+/// tried, for the connectivity panel on the create/join screens.
+///
+/// Deliberately says nothing about "am I reachable from the internet". AutoNAT is not
+/// implemented (`docs/design-zeroconf-reachability.md` rung 0c), so nothing here can dial this
+/// node back, and a public address obtained from UPnP or a relay circuit is evidence, not proof.
+/// The UI states that rather than showing a green tick the code cannot support.
+#[derive(Serialize, Clone, Default)]
+struct Connectivity {
+    /// `found`, `join`, or empty when nothing has been attempted this session.
+    action: String,
+    /// Human context for the attempt: the server name, or the inviter's peer id.
+    subject: String,
+    /// When the attempt ran (ms since the epoch), or 0.
+    at: u64,
+    /// The server id the attempt produced, so a late UPnP answer can be matched to it. 0 = none.
+    server: u64,
+    /// The addresses this node offers other peers, as folded into the invite.
+    advertised: Vec<String>,
+    /// The UPnP result for `server` (filled in by `get_connectivity` from the per-server map).
+    upnp: String,
+    /// What the attempt did, oldest first.
+    steps: Vec<DiagStep>,
+    /// The last error, verbatim, so the user can copy exactly what the code said.
+    last_error: String,
 }
 
 /// The origin-side pending ceremony: what `pairing_read` decoded and anchored, held so
@@ -1089,20 +1178,43 @@ struct Reachability {
 /// Best-effort by construction: it returns whatever reachability it managed plus the list of
 /// things that went wrong, and lets the caller decide. Founding surfaces the problems to the user
 /// (they just typed those addresses); a reload logs them and carries on with what worked.
+///
+/// `steps` collects a copyable record of what was tried for the connectivity panel; a reload
+/// passes a throwaway vector, since only an attempt the user is watching has a panel to fill.
 async fn establish_reachability(
     mesh: &MeshService,
     peer_id: &str,
     port: u16,
     net: &ServerNet,
+    steps: &mut Vec<DiagStep>,
 ) -> (Reachability, Vec<String>) {
     let mut problems = Vec::new();
     let mut bootstrap = auto_bootstrap(port, peer_id);
+    steps.push(DiagStep::ok(
+        "listen",
+        format!("port {port}"),
+        format!(
+            "bound IPv4 + IPv6 over TCP + QUIC; {} address(es) auto-detected",
+            bootstrap.len()
+        ),
+    ));
 
     let advertise = net.advertise.trim();
     if !advertise.is_empty() {
         match build_advertised(advertise, port, peer_id) {
-            Ok(a) => bootstrap.insert(0, a), // the user's own address is the authoritative one
-            Err(e) => problems.push(e),
+            // The user's own address is the authoritative one.
+            Ok(a) => {
+                steps.push(DiagStep::unknown(
+                    "advertise",
+                    a.clone(),
+                    "the address you supplied; nothing here can test it from outside",
+                ));
+                bootstrap.insert(0, a)
+            }
+            Err(e) => {
+                steps.push(DiagStep::failed("advertise", advertise, e.clone()));
+                problems.push(e)
+            }
         }
     }
 
@@ -1110,8 +1222,18 @@ async fn establish_reachability(
     let relay = net.relay.trim();
     if !relay.is_empty() {
         match reserve_relay_circuit(mesh, relay).await {
-            Ok(addr) => bootstrap.insert(0, addr),
-            Err(e) => problems.push(e),
+            Ok(addr) => {
+                steps.push(DiagStep::ok(
+                    "relay",
+                    addr.clone(),
+                    "circuit reserved; joiners can reach this node through the relay",
+                ));
+                bootstrap.insert(0, addr)
+            }
+            Err(e) => {
+                steps.push(DiagStep::failed("relay", relay, e.clone()));
+                problems.push(e)
+            }
         }
     }
 
@@ -1125,10 +1247,18 @@ async fn establish_reachability(
     if !rendezvous.is_empty() {
         match connect_rendezvous(mesh, rendezvous, &bootstrap).await {
             Ok(rz) => {
+                steps.push(DiagStep::ok(
+                    "rendezvous",
+                    rz.addr.to_string(),
+                    "connected and advertised; joiners can find this node with the invite alone",
+                ));
                 rz_target = Some(rz);
                 rz_handle = Some(mesh.handle());
             }
-            Err(e) => problems.push(e),
+            Err(e) => {
+                steps.push(DiagStep::failed("rendezvous", rendezvous, e.clone()));
+                problems.push(e)
+            }
         }
     }
 
@@ -1350,9 +1480,24 @@ fn spawn_upnp_fold(
         let found = timeout(Duration::from_secs(UPNP_WINDOW_SECS), rx.recv()).await;
         // Nested Options: the outer is the timeout, the middle the channel, the inner the actor's
         // "no usable gateway" signal (sent promptly so we are not just waiting out the window).
+        // Each of the three means something different to a user staring at a failed invite, so
+        // the connectivity panel gets the distinction rather than a shrug.
+        let state = app.state::<AppState>();
+        let outcome = match &found {
+            Ok(Some(Some(addr))) => addr.to_string(),
+            Ok(Some(None)) => UPNP_NO_GATEWAY.to_string(),
+            // The channel closed with the transport (the server was dropped mid-window).
+            Ok(None) => UPNP_NOT_ATTEMPTED.to_string(),
+            Err(_) => UPNP_TIMED_OUT.to_string(),
+        };
+        state
+            .inner()
+            .upnp
+            .lock()
+            .await
+            .insert(server, outcome.clone());
         let Ok(Some(Some(addr))) = found else { return };
         let entry = format!("{addr}/p2p/{peer_id}");
-        let state = app.state::<AppState>();
         let (actor, bootstrap) = {
             let mut servers = state.inner().servers.lock().await;
             let Some(e) = servers.get_mut(&server) else {
@@ -1404,6 +1549,7 @@ fn decode_and_verify_invite(invite_hex: &str) -> Result<InviteToken, String> {
 async fn discover_and_connect(
     invite: &InviteToken,
     net: &ServerNet,
+    steps: &mut Vec<DiagStep>,
 ) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
     let targets = validate_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
     if targets.is_empty() {
@@ -1432,7 +1578,27 @@ async fn discover_and_connect(
         }
     })
     .await
-    .map_err(|_| "timed out connecting to the rendezvous".to_string())?;
+    .map_err(|_| {
+        steps.push(DiagStep::failed(
+            "rendezvous",
+            rz_addrs
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            "timed out connecting to the rendezvous",
+        ));
+        "timed out connecting to the rendezvous".to_string()
+    })?;
+    steps.push(DiagStep::ok(
+        "rendezvous",
+        rz_addrs
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        "connected",
+    ));
 
     // Discover the inviter under each rendezvous's pre-join namespace.
     for t in &targets {
@@ -1465,8 +1631,18 @@ async fn discover_and_connect(
     })
     .await;
     if candidates.is_empty() {
+        steps.push(DiagStep::failed(
+            "discover",
+            "",
+            "the rendezvous knows nothing under this invite's namespace; the server has not              registered there, or has not been online since it was minted",
+        ));
         return Err("could not discover the server at the rendezvous".into());
     }
+    steps.push(DiagStep::ok(
+        "discover",
+        "",
+        format!("{} record(s) found at the rendezvous", candidates.len()),
+    ));
 
     // The DiscoveryPolicy alone decides what to dial (eclipse-resistance; never auto-dial).
     let mut policy = DiscoveryPolicy::with_config(PolicyConfig::default());
@@ -1489,8 +1665,14 @@ async fn discover_and_connect(
         .map(|m| m.to_string())
         .collect();
     for a in dialed.addresses.iter().chain(fallbacks.iter()) {
-        if let Ok(m) = a.parse::<Multiaddr>() {
-            let _ = mesh.dial(m).await;
+        match a.parse::<Multiaddr>() {
+            Ok(m) => match mesh.dial(m).await {
+                // libp2p dials these concurrently and only the *first* one to complete surfaces
+                // as a connection, so "dialled" is all this layer honestly knows per address.
+                Ok(()) => steps.push(DiagStep::unknown("dial", a.clone(), "dialled")),
+                Err(e) => steps.push(DiagStep::failed("dial", a.clone(), e.to_string())),
+            },
+            Err(e) => steps.push(DiagStep::failed("dial", a.clone(), e.to_string())),
         }
     }
     timeout(Duration::from_secs(20), async {
@@ -1503,7 +1685,15 @@ async fn discover_and_connect(
         }
     })
     .await
-    .map_err(|_| "timed out connecting to the discovered server".to_string())?;
+    .map_err(|_| {
+        steps.push(DiagStep::failed(
+            "connect",
+            "",
+            "none of the dialled addresses answered within 20s",
+        ));
+        "timed out connecting to the discovered server".to_string()
+    })?;
+    steps.push(DiagStep::ok("connect", "", "connected to the server"));
     // The rendezvous config the joiner keeps for steady-state discovery (re-finding the group).
     let rz_config: Vec<(String, Vec<u8>)> = targets
         .iter()
@@ -1530,6 +1720,45 @@ async fn found_server(
     rendezvous: String,
     is_dm: bool,
 ) -> Result<FoundResult, String> {
+    let mut diag = Connectivity {
+        action: "found".into(),
+        subject: display_name.clone(),
+        at: SystemClock.now_ms(),
+        ..Default::default()
+    };
+    let out = found_server_inner(
+        &app,
+        &state,
+        display_name,
+        advertise,
+        relay,
+        rendezvous,
+        is_dm,
+        &mut diag,
+    )
+    .await;
+    // The verbatim error is the point: the connectivity panel shows exactly what the code said,
+    // so a user can paste it rather than paraphrase it.
+    if let Err(e) = &out {
+        diag.last_error.clone_from(e);
+    }
+    *state.diag.lock().await = diag;
+    out
+}
+
+/// The body of [`found_server`], split out so every exit (including the early `Err`s) lands in
+/// one place that records the attempt for the connectivity panel.
+#[allow(clippy::too_many_arguments)]
+async fn found_server_inner(
+    app: &AppHandle,
+    state: &AppState,
+    display_name: String,
+    advertise: String,
+    relay: String,
+    rendezvous: String,
+    is_dm: bool,
+    diag: &mut Connectivity,
+) -> Result<FoundResult, String> {
     // This server's own network identity + stable port, minted once here and sealed to disk, so
     // every later launch keeps the same PeerId and port and the invites minted today still resolve
     // tomorrow. Per server, never per device (see `ServerNet`).
@@ -1548,7 +1777,7 @@ async fn found_server(
 
     // Everything that makes us reachable from off this machine. `reload_one` runs the very same
     // helper, so a restart reproduces this reachability instead of collapsing to loopback.
-    let (reach, problems) = establish_reachability(&mesh, &id, port, &net).await;
+    let (reach, problems) = establish_reachability(&mesh, &id, port, &net, &mut diag.steps).await;
     if !problems.is_empty() {
         // The user typed these addresses moments ago; tell them rather than founding a server that
         // silently nobody can reach.
@@ -1562,6 +1791,7 @@ async fn found_server(
     // Take the UPnP channel before the transport disappears into the server, so a background task
     // can wait out a realistic router-discovery window without holding up the UI.
     let upnp_rx = mesh.take_external_addrs().await;
+    diag.advertised = bootstrap.clone();
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
@@ -1577,7 +1807,7 @@ async fn found_server(
         .subscribe_control()
         .await
         .map_err(|e| e.to_string())?;
-    attach_blob_store(&state, &mut server).await;
+    attach_blob_store(state, &mut server).await;
     // Steady-state discovery: tell the server which rendezvous to re-register/discover at, so the
     // actor re-finds the group after a restart. (The founder already advertised + connected above.)
     if let Some(rz) = &rz_target {
@@ -1620,8 +1850,8 @@ async fn found_server(
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
     let server_id = register_server(
-        &app,
-        &state,
+        app,
+        state,
         actor,
         events,
         Some(invite_hex),
@@ -1636,10 +1866,26 @@ async fn found_server(
     // Seal the new server, its network identity and the registry to disk (if the store is
     // unlocked). The identity has to land before the first restart or the invite just minted dies
     // with the process that made it.
-    persist_server(&state, server_id).await;
-    persist_server_net(&state, server_id, &net).await;
-    persist_registry(&state).await;
+    persist_server(state, server_id).await;
+    persist_server_net(state, server_id, &net).await;
+    persist_registry(state).await;
+    diag.server = server_id;
+    diag.advertised.clone_from(&invite.bootstrap);
+    diag.steps.push(DiagStep::ok(
+        "invite",
+        "",
+        format!(
+            "invite minted carrying {} address(es) and {} rendezvous entr(ies)",
+            invite.bootstrap.len(),
+            invite.rendezvous.len()
+        ),
+    ));
     if let Some(rx) = upnp_rx {
+        state
+            .upnp
+            .lock()
+            .await
+            .insert(server_id, UPNP_WAITING.to_string());
         spawn_upnp_fold(app.clone(), server_id, rx, id);
     }
     Ok(FoundResult {
@@ -1659,7 +1905,42 @@ async fn join_server(
     display_name: String,
     is_dm: bool,
 ) -> Result<FoundResult, String> {
-    let invite = decode_and_verify_invite(&invite_hex)?;
+    let mut diag = Connectivity {
+        action: "join".into(),
+        at: SystemClock.now_ms(),
+        ..Default::default()
+    };
+    let out = join_server_inner(&app, &state, invite_hex, display_name, is_dm, &mut diag).await;
+    if let Err(e) = &out {
+        diag.last_error.clone_from(e);
+    }
+    *state.diag.lock().await = diag;
+    out
+}
+
+/// The body of [`join_server`], split out so every exit records the attempt for the connectivity
+/// panel (the exits that used to say nothing are the whole reason that panel exists).
+async fn join_server_inner(
+    app: &AppHandle,
+    state: &AppState,
+    invite_hex: String,
+    display_name: String,
+    is_dm: bool,
+    diag: &mut Connectivity,
+) -> Result<FoundResult, String> {
+    let invite = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
+        diag.steps.push(DiagStep::failed("invite", "", e.clone()));
+    })?;
+    diag.subject = hex::encode(&invite.inviter_device_id.as_bytes()[..8]);
+    diag.steps.push(DiagStep::ok(
+        "invite",
+        "",
+        format!(
+            "signature verified; {} bootstrap address(es), {} rendezvous entr(ies)",
+            invite.bootstrap.len(),
+            invite.rendezvous.len()
+        ),
+    ));
 
     // A joiner gets its own per-server identity + stable port too: it is a full member afterwards,
     // so its peer record has to keep resolving across restarts exactly like the founder's.
@@ -1668,13 +1949,24 @@ async fn join_server(
     // If the invite points at a rendezvous, discover the inviter there (no hard-coded address);
     // otherwise dial the invite's bootstrap addresses directly (loopback / LAN / relayed).
     let (mesh, inviter, rz_config) = if !invite.rendezvous.is_empty() {
-        let (mesh, inviter, rz_config, port) = discover_and_connect(&invite, &net).await?;
+        let (mesh, inviter, rz_config, port) =
+            discover_and_connect(&invite, &net, &mut diag.steps).await?;
         net.port = port;
         (mesh, inviter, rz_config)
     } else {
         // Validated + capped before a single socket is opened (defect P7): an unvalidated list of
         // up to 64 author-chosen addresses is a connect flood with a paste for a trigger.
         let addrs = dialable_bootstrap(&invite.bootstrap);
+        // The dropped entries are worth naming: "the invite listed three addresses and every one
+        // was loopback or otherwise undialable" is a diagnosis; a bare empty list is not.
+        let dropped = invite.bootstrap.len().saturating_sub(addrs.len());
+        if dropped > 0 {
+            diag.steps.push(DiagStep::failed(
+                "dial",
+                "",
+                format!("{dropped} address(es) in the invite were unusable and were not dialled"),
+            ));
+        }
         if addrs.is_empty() {
             return Err("invite carries no usable bootstrap address".to_string());
         }
@@ -1685,6 +1977,12 @@ async fn join_server(
         let inviter = phase0_peer_id(&inviter_lp);
         let (mesh, _id, port) = build_transport(&net, &addrs)?;
         net.port = port;
+        // The transport dials these itself, concurrently, so a per-address outcome is not
+        // observable here; what IS observable is which were tried and whether any answered.
+        for a in &addrs {
+            diag.steps
+                .push(DiagStep::unknown("dial", a.to_string(), "dialled"));
+        }
         // Wait for the connection to the inviter before requesting the join.
         timeout(Duration::from_secs(20), async {
             loop {
@@ -1696,12 +1994,23 @@ async fn join_server(
             }
         })
         .await
-        .map_err(|_| "timed out connecting to the server".to_string())?;
+        .map_err(|_| {
+            diag.steps.push(DiagStep::failed(
+                "connect",
+                "",
+                "none of the dialled addresses answered within 20s",
+            ));
+            "timed out connecting to the server".to_string()
+        })?;
+        diag.steps
+            .push(DiagStep::ok("connect", "", "connected to the server"));
         (mesh, inviter, Vec::new())
     };
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
+    // Past this point the transport is up, so a failure here is the MLS admission itself: the
+    // one the serving node's join log explains and this side cannot.
     let mut server = Server::join(
         mesh,
         device,
@@ -1712,7 +2021,17 @@ async fn join_server(
         &invite,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        let msg = e.to_string();
+        diag.steps.push(DiagStep::failed(
+            "join",
+            "",
+            format!("{msg}; the server refused the join, and only the serving node knows why: ask its operator to read Server settings / Join log"),
+        ));
+        msg
+    })?;
+    diag.steps
+        .push(DiagStep::ok("join", "", "admitted to the group"));
     // A joiner has to subscribe the control topic like the founder does. Without this,
     // `control_subscribed` stays false, `desired_routing_topics()` omits the control topics, and
     // this member never receives another membership commit for as long as it runs: a third person
@@ -1722,7 +2041,7 @@ async fn join_server(
         .subscribe_control()
         .await
         .map_err(|e| e.to_string())?;
-    attach_blob_store(&state, &mut server).await;
+    attach_blob_store(state, &mut server).await;
     // Steady-state discovery: the joiner keeps the invite's rendezvous so the actor re-registers/
     // re-discovers there (re-finding the group after a restart, no fresh invite).
     if !rz_config.is_empty() {
@@ -1739,6 +2058,7 @@ async fn join_server(
             Vec::new()
         }
     };
+    diag.advertised.clone_from(&joiner_addrs);
     if let Err(e) = server.publish_self_record(joiner_addrs, net.record_seq) {
         eprintln!("join: publishing the peer record failed: {e}");
     }
@@ -1757,8 +2077,8 @@ async fn join_server(
     actor.catch_up_roles(inviter).await;
     // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
     let server_id = register_server(
-        &app,
-        &state,
+        app,
+        state,
         actor,
         events,
         None,
@@ -1771,9 +2091,10 @@ async fn join_server(
     )
     .await;
     // Seal the joined server, its network identity and the registry to disk (if unlocked).
-    persist_server(&state, server_id).await;
-    persist_server_net(&state, server_id, &net).await;
-    persist_registry(&state).await;
+    persist_server(state, server_id).await;
+    persist_server_net(state, server_id, &net).await;
+    persist_registry(state).await;
+    diag.server = server_id;
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -2606,6 +2927,62 @@ async fn get_wiki_map(
     Ok(actor.wiki_map().await)
 }
 
+/// One inbound join attempt as shown to the server operator.
+#[derive(Serialize, Clone)]
+struct UiJoinAttempt {
+    /// Milliseconds since the epoch, on the serving node's clock.
+    at: u64,
+    /// The stable outcome id (`admitted`, `expired`, `already-used`, ...). The user-facing
+    /// sentence lives in the frontend, with the rest of the app's copy.
+    outcome: String,
+    /// Whether the joiner got in (or is on their way in).
+    admitted: bool,
+    /// The requesting peer, as a short hex prefix.
+    peer: String,
+    /// The invite nonce prefix: what an operator matches against the invite they sent.
+    nonce: String,
+}
+
+/// The recent inbound join attempts this server served, newest first.
+///
+/// The operator's half of a failed join. The joiner still gets an opaque rejection over the
+/// wire, by design; without this nobody on either side could tell an expired invite from one
+/// that had already been redeemed, which is the reported field failure verbatim.
+#[tauri::command]
+async fn get_join_attempts(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<UiJoinAttempt>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .join_attempts()
+        .await
+        .into_iter()
+        .map(|a| UiJoinAttempt {
+            at: a.at_ms,
+            outcome: a.outcome.as_str().to_string(),
+            admitted: a.outcome.admitted(),
+            peer: a.peer_prefix,
+            nonce: a.nonce_prefix,
+        })
+        .collect())
+}
+
+/// What the last founding/joining attempt did, plus what this node knows about its own
+/// reachability. Feeds the connectivity panel on the create/join screens.
+#[tauri::command]
+async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, String> {
+    let mut diag = state.diag.lock().await.clone();
+    diag.upnp = state
+        .upnp
+        .lock()
+        .await
+        .get(&diag.server)
+        .cloned()
+        .unwrap_or_else(|| UPNP_NOT_ATTEMPTED.to_string());
+    Ok(diag)
+}
+
 /// Every member's role (fingerprint -> owner/admin/member).
 #[tauri::command]
 async fn get_roles(
@@ -3141,7 +3518,7 @@ async fn reload_one(
     // relay-circuit reservation and the rendezvous registration. Before this, a reload rebuilt a
     // loopback-only bootstrap and every invite minted afterwards was same-machine only.
     let id = libp2p_id.to_string();
-    let (reach, problems) = establish_reachability(&mesh, &id, port, &net).await;
+    let (reach, problems) = establish_reachability(&mesh, &id, port, &net, &mut Vec::new()).await;
     for p in &problems {
         // Unlike founding, a reload never fails over this: the user is not standing at a form, and
         // a server that loads with reduced reach still reads its history and re-dials its peers.
@@ -3946,6 +4323,115 @@ async fn join_one_grant(
     Ok(server_id)
 }
 
+/// Where the debug log is written, and where the "keep a debug log" preference is remembered.
+///
+/// Both live under the app data directory beside the vault, so a user told "your log is in this
+/// folder" can actually find it; a log the user cannot locate is not a log.
+fn log_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("logs"))
+}
+
+/// The preference file. Its **presence** is the setting: a flag with no parser cannot be
+/// corrupted into an unreadable state that silently turns logging on.
+fn debug_flag_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    Ok(log_dir(app)?.join("debug-logging-enabled"))
+}
+
+/// The state of the debug log, as shown in Settings.
+#[derive(Serialize, Clone)]
+struct DebugLogging {
+    /// Whether the preference is on right now.
+    enabled: bool,
+    /// Whether *this running process* is actually writing a file. A subscriber can only be
+    /// installed once per process, so a toggle applies at the next launch, and saying so is the
+    /// difference between a working setting and a user who thinks they captured a log.
+    active: bool,
+    /// The folder the log is written to, always shown so the user can go and get it.
+    dir: String,
+    /// The current session's file, when there is one.
+    file: String,
+}
+
+/// Read the debug-logging preference. Never fails the caller: an unreadable app data directory
+/// means "off", which is the safe answer for a privacy tool.
+fn debug_logging_enabled(app: &AppHandle) -> bool {
+    debug_flag_path(app).map(|p| p.exists()).unwrap_or(false)
+}
+
+/// Whether this process installed a debug-log file layer, and which file it is writing. Set once
+/// in `setup`; read by `get_debug_logging` so the UI can distinguish "on" from "on since the
+/// last restart".
+struct LogState {
+    /// Dropping this flushes the file, so it is held for the life of the process.
+    _guard: catcoms_log::LogGuard,
+    active: bool,
+    dir: std::path::PathBuf,
+}
+
+/// The newest `debug_log_*.txt` in `dir`, so Settings can name the file this session is writing
+/// rather than making the user guess which timestamp is theirs.
+fn newest_log_file(dir: &std::path::Path) -> String {
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if !name.starts_with("debug_log_") {
+            continue;
+        }
+        let Ok(modified) = e.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(t, _)| modified > *t) {
+            best = Some((modified, name));
+        }
+    }
+    best.map(|(_, n)| n).unwrap_or_default()
+}
+
+/// The debug log's current state, for Settings.
+#[tauri::command]
+async fn get_debug_logging(app: AppHandle) -> Result<DebugLogging, String> {
+    let log = app.try_state::<LogState>();
+    let active = log.as_ref().is_some_and(|l| l.active);
+    // Prefer the directory this process actually opened, so the path shown is the path being
+    // written to even if the app data directory moved under us.
+    let dir = match log.as_ref() {
+        Some(l) => l.dir.clone(),
+        None => log_dir(&app)?,
+    };
+    Ok(DebugLogging {
+        enabled: debug_logging_enabled(&app),
+        active,
+        dir: dir.display().to_string(),
+        file: if active {
+            newest_log_file(&dir)
+        } else {
+            String::new()
+        },
+    })
+}
+
+/// Turn the debug log on or off for the **next** launch (a tracing subscriber is install-once
+/// per process, so nothing can be attached to this one after the fact).
+#[tauri::command]
+async fn set_debug_logging(app: AppHandle, enabled: bool) -> Result<DebugLogging, String> {
+    let dir = log_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let flag = debug_flag_path(&app)?;
+    if enabled {
+        std::fs::write(&flag, b"on").map_err(|e| e.to_string())?;
+    } else if flag.exists() {
+        std::fs::remove_file(&flag).map_err(|e| e.to_string())?;
+    }
+    get_debug_logging(app).await
+}
+
 /// Build and run the Tauri application.
 pub fn run() {
     tauri::Builder::default()
@@ -3954,6 +4440,23 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
+        // Install the tracing subscriber before anything interesting happens. Until this landed
+        // the desktop app had **no** subscriber at all, so every `tracing::warn!` in the whole
+        // protocol stack (including the five distinct reasons a join can be refused) was
+        // discarded and there was no log file anywhere. Off by default: see `DebugLogging`, and
+        // `catcoms_log`'s module docs for what an enabled log may contain.
+        .setup(|app| {
+            let handle = app.handle().clone();
+            let enabled = debug_logging_enabled(&handle);
+            let dir = log_dir(&handle).unwrap_or_else(|_| std::path::PathBuf::from("logs"));
+            let guard = catcoms_log::init_debug_with(enabled, &dir, catcoms_log::APP_FILE_FILTER);
+            app.manage(LogState {
+                _guard: guard,
+                active: enabled,
+                dir,
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             vault_exists,
             unlock,
@@ -4011,6 +4514,10 @@ pub fn run() {
             reject_wiki_edit,
             restore_wiki_page,
             get_roles,
+            get_join_attempts,
+            get_connectivity,
+            get_debug_logging,
+            set_debug_logging,
             set_admin,
             remove_member,
             revoke_device,
@@ -4079,6 +4586,33 @@ mod tests {
         assert!(!invite_missing_addresses(&[], &[]));
         assert!(!invite_missing_addresses(&[public.clone()], &[]));
         assert!(invite_missing_addresses(&[], &[public]));
+    }
+
+    /// Settings promises the user "this session's file is X". If that name is wrong they open
+    /// somebody else's capture (or yesterday's) and send the wrong thing, so the newest-wins rule
+    /// and the "only debug_log_* counts" rule are both pinned.
+    #[test]
+    fn the_named_log_file_is_the_newest_debug_log_in_the_folder() {
+        let dir = std::env::temp_dir().join(format!("mewtual-logtest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Nothing yet: an empty answer, never a guessed filename.
+        assert_eq!(newest_log_file(&dir), "");
+        // A missing folder is the same "nothing to name", not a panic.
+        assert_eq!(newest_log_file(&dir.join("absent")), "");
+
+        std::fs::write(dir.join("debug_log_20260819_100000.txt"), b"old").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"not a log").unwrap();
+        assert_eq!(newest_log_file(&dir), "debug_log_20260819_100000.txt");
+
+        // Written second, so it is the newer file whatever the timestamps in the names say; the
+        // rule is modification time, because that is what "this session's" actually means.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("debug_log_20260101_000000.txt"), b"new").unwrap();
+        assert_eq!(newest_log_file(&dir), "debug_log_20260101_000000.txt");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

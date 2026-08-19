@@ -27,6 +27,7 @@ catcoms-net = { path = "../../../crates/catcoms-net" }
 catcoms-rt = { path = "../../../crates/catcoms-rt" }
 catcoms-sync = { path = "../../../crates/catcoms-sync" }
 catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
+catcoms-log = { path = "../../../crates/catcoms-log" }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
