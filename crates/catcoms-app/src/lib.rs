@@ -2490,10 +2490,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     /// Pull the shared channel directory from one known member.
-    pub async fn request_channel_index_catchup(
-        &mut self,
-        peer: PeerId,
-    ) -> Result<usize, AppError> {
+    pub async fn request_channel_index_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
         Ok(self
             .sync
             .request_catchup(peer, DocType::ChannelIndex, CHANNEL_INDEX_DOC)
