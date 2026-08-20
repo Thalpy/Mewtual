@@ -16,12 +16,17 @@ export function dismissTextEffectPalette(catalogOpen: boolean, region: TextEffec
   return !catalogOpen && region === "outside";
 }
 
+/** Petals fire once on entry; pointer motion within the same rendered effect never re-arms them. */
+export function cherryBlossomShouldBurst(entered: boolean, effectId: string | undefined): boolean {
+  return entered && effectId === "perfect-cherry-blossom";
+}
+
 const BASE_EFFECTS: TextEffectDefinition[] = [
   { id: "shake", label: "Shaky", description: "Nervous, excited, or unstable lettering.", group: "Motion", preview: "systems unstable", animated: true },
   { id: "wave", label: "Wavy", description: "Letters rise and fall in sequence.", group: "Motion", preview: "signal rolling", animated: true },
   { id: "sparkle", label: "Rainbow sparkles", description: "A bright spectrum with small starbursts.", group: "Motion", preview: "critical success!", animated: true },
   { id: "speakese", label: "Speakese", description: "Pops in letter by letter with a distinct, phoneme-coloured voice blip.", group: "Motion", preview: "hello operator", animated: true },
-  { id: "perfect-cherry-blossom", label: "Perfect Cherry Blossom", description: "Petal-pink lettering with drifting sakura; cursor movement shakes loose a fresh bloom.", group: "Motion", preview: "petals on the signal", animated: true },
+  { id: "perfect-cherry-blossom", label: "Perfect Cherry Blossom", description: "Petal-pink lettering with drifting sakura; entering the text shakes loose one fresh bloom.", group: "Motion", preview: "petals on the signal", animated: true },
   { id: "red-truth", label: "The Red Truth", description: "A declarative crimson entrance: opening seal, synthesized sting, then a clean letter reveal.", group: "Mood", preview: "This statement is absolute.", animated: true },
   { id: "flame", label: "Angry flame", description: "Hot, forceful text with an ember edge.", group: "Mood", preview: "I am FURIOUS", animated: true },
   { id: "gloom", label: "Gloom", description: "Heavy, drained text that seems to sink.", group: "Mood", preview: "not my day", animated: true },

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   TEXT_EFFECTS,
   PERFECT_CHERRY_BLOSSOM_PETALS,
+  cherryBlossomShouldBurst,
   dismissTextEffectPalette,
   formatTextEffect,
   insertTextEffect,
@@ -44,6 +45,13 @@ test("Perfect Cherry Blossom renders fixed safe petals outside its accessible te
   assert.match(html, /aria-label="petal &lt;signal&gt;"/);
   assert.equal((html.match(/class="fx-blossom-petal /g) ?? []).length, PERFECT_CHERRY_BLOSSOM_PETALS);
   assert.doesNotMatch(html, /<signal>/);
+});
+
+test("Perfect Cherry Blossom sheds once on entry, not while moving inside", () => {
+  assert.equal(cherryBlossomShouldBurst(true, "perfect-cherry-blossom"), true);
+  assert.equal(cherryBlossomShouldBurst(false, "perfect-cherry-blossom"), false);
+  assert.equal(cherryBlossomShouldBurst(true, "wave"), false);
+  assert.equal(cherryBlossomShouldBurst(true, undefined), false);
 });
 
 test("effect tokens are bounded, catalogued and preserve literal text", () => {

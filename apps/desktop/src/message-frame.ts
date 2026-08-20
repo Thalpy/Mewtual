@@ -53,6 +53,15 @@ export type MessageFramePosition = "single" | "start" | "middle" | "end";
 
 export type MessageFrameScanGeometry = { offset: number; height: number };
 
+/**
+ * Temporary rollout gate for custom message backgrounds in the live chat log.
+ *
+ * Keep the frame codec, profile data, editor, and preview intact while this is false: existing
+ * choices continue to round-trip and the feature can be restored without a migration. The chat
+ * renderer also uses this gate to avoid installing the frame scan observers while frames are off.
+ */
+export const CHAT_MESSAGE_FRAMES_ENABLED = false;
+
 export const DEFAULT_MESSAGE_FRAME: MessageFrame = {
   surface: "",
   opacity: 56,
@@ -278,8 +287,14 @@ export function messageFrameStyle(raw: unknown): string {
   return `--message-surface:${frame.surface};--message-opacity:${frame.opacity / 100};--message-edge:${frame.edge}%`;
 }
 
-/** A local viewer preference suppresses peer frames while preserving the operator's own draft. */
-export function visibleMessageFrameStyle(raw: unknown, framesDisabled: boolean, isOwn = false): string {
+/** A rollout gate or local viewer preference suppresses peer frames without changing stored data. */
+export function visibleMessageFrameStyle(
+  raw: unknown,
+  framesDisabled: boolean,
+  isOwn = false,
+  featureEnabled = true,
+): string {
+  if (!featureEnabled) return "";
   return framesDisabled && !isOwn ? "" : messageFrameStyle(raw);
 }
 

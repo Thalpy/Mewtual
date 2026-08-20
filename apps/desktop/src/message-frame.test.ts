@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CHAT_MESSAGE_FRAMES_ENABLED,
   DEFAULT_MESSAGE_FRAME,
   defaultMessageFrameLayer,
   encodeMessageFrame,
@@ -132,6 +133,14 @@ test("disabling peer frames still leaves the operator's own frame visible", () =
     visibleMessageFrameStyle(surface, false),
     "--message-surface:linear-gradient(135deg,#41295a,#5d2a6e);--message-opacity:0.56;--message-edge:68%",
   );
+});
+
+test("the rollout gate suppresses every live-chat frame without changing its stored value", () => {
+  const surface = "linear-gradient(135deg,#41295a,#5d2a6e)";
+  assert.equal(CHAT_MESSAGE_FRAMES_ENABLED, false);
+  assert.equal(visibleMessageFrameStyle(surface, false, false, false), "");
+  assert.equal(visibleMessageFrameStyle(surface, false, true, false), "");
+  assert.match(visibleMessageFrameStyle(surface, false, false, true), /--message-surface:/);
 });
 
 test("arrival motion comes from the author of that message only", () => {
