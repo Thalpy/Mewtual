@@ -1,5 +1,3 @@
-export type VoiceSignalType = "hello" | "voice-ping" | "offer" | "answer" | "ice" | "bye" | string;
-
 export type PeerRecovery = "create" | "resend-offer" | "resend-answer" | "restart-ice" | null;
 
 /** A channel id is not globally unique: every server can have (for example) `general`. */

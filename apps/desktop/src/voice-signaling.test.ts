@@ -63,6 +63,8 @@ test("heartbeats retry SDP that can otherwise be lost forever", () => {
 });
 
 test("early ICE buffering is bounded and keeps the newest candidates", () => {
+  assert.deepEqual(bufferIce(bufferIce([], "host"), "relay"), ["host", "relay"]);
+
   let queued: number[] = [];
   for (let i = 0; i < MAX_BUFFERED_ICE_PER_PEER + 9; i += 1) queued = bufferIce(queued, i);
   assert.equal(queued.length, MAX_BUFFERED_ICE_PER_PEER);
