@@ -8,6 +8,7 @@ import {
   formatTextEffect,
   insertTextEffect,
   parseTextEffect,
+  redTruthNoiseSample,
   redTruthSoundPlan,
   speakeseSoundPlan,
   stripTextEffects,
@@ -32,11 +33,18 @@ test("the Red Truth has a sealed first-letter flourish and a bounded original st
   assert.doesNotMatch(html, /<certain>/);
 
   const plan = redTruthSoundPlan(2);
-  assert.equal(plan.length, 3);
-  assert.equal(plan[0].at, 2);
-  assert.ok(plan.every((note) => note.stop > note.at && note.peak > 0 && note.peak < 0.06));
-  assert.equal(new Set(plan.map((note) => note.frequency)).size, 3);
-  assert.ok(plan.at(-1)!.stop < 2.5, "the opening sting stays brief");
+  assert.equal(plan.strike.length, 3);
+  assert.equal(plan.strike[0].at, 2);
+  assert.ok(plan.strike.every((note) => note.stop > note.at && note.peak > 0 && note.peak < 0.06));
+  assert.equal(new Set(plan.strike.map((note) => note.frequency)).size, 3);
+  assert.ok(plan.strike.every((note) => note.stop < plan.sweep.crest), "the ting lands before the wash crests");
+  assert.ok(plan.sweep.at > plan.strike[0].at, "the background wash follows the initial ting");
+  assert.ok(plan.sweep.crestFrequency > plan.sweep.startFrequency);
+  assert.ok(plan.sweep.crestFrequency > plan.sweep.endFrequency);
+  assert.ok(plan.sweep.stop - plan.sweep.at > 1.5, "the shaa tail has room to rise and fall");
+  assert.equal(redTruthNoiseSample(42), redTruthNoiseSample(42));
+  assert.notEqual(redTruthNoiseSample(42), redTruthNoiseSample(43));
+  assert.ok(Math.abs(redTruthNoiseSample(42)) <= 1);
 });
 
 test("Perfect Cherry Blossom renders fixed safe petals outside its accessible text", () => {

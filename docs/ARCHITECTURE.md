@@ -8,13 +8,15 @@ code was written), the honest residual risks, and the phased build plan.
 
 | Area | Decision |
 |------|----------|
-| Stack | Rust core (shared `rlib`+`cdylib`) + React UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
+| Stack | Rust core (shared `rlib`+`cdylib`) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
-| Channels | NOT separate groups; each channel/wiki/status/calendar derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
-| Delivery | Encrypted append-only **CRDT logs** (`automerge`) synced P2P. Channels, wiki, status, calendar are all CRDT documents. |
+| Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
+| Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. |
 | Networking | **rust-libp2p** (QUIC + TCP + WSS; *no WebRTC in v1*). Zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and an authenticated rendezvous. Invites embed bootstrap multiaddrs. |
 | Invites | Strictly **single-use, device-bound** (one device per invite); revocable/expirable. |
-| Files | Content-addressed over **ciphertext**. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. |
+| Files | Content-addressed over **ciphertext**. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
+| Moderation | One group-bound, independently signed moderation document per server. Warnings attest to bounded snapshots; kick votes are advisory; only the owner-only MLS removal path changes membership. The log is not yet protocol-enforced append-only (threat-model R7). |
+| Local continuity & backup | Drafts/read positions are bounded and vault-sealed. Backup is an opaque, non-overwriting copy of a freshly snapshotted sealed vault. Secret changes atomically rewrap the same DEK; automated restore is not implied. |
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
 
@@ -137,6 +139,36 @@ recovery buffer/queue.
   plus the replicated InviteLedger (single-use across members) and joiner-bound
   nonces. Until then network admission is single-committer only.
 - Per-peer rate limiting / off-actor offload of join work.
+
+## 4d. Product operations and moderation plane
+
+The desktop keeps operational observations separate from protocol claims. **Storage health** walks
+the current file index and validates every manifest and referenced chunk through the storage seal,
+CID and file-layer key. One report per server is cached for the process session and augmented with a
+deduplicated category/pin/largest-file inventory; category local-byte totals remain estimates, while
+the verified ciphertext total is exact. **Repair** is an explicit network action: it re-fetches only
+missing or unreadable content from authenticated members, re-runs verification, and replaces that
+cache. **Connectivity assistant**
+reports the live peer/path evidence already available to the node; it is diagnostic and never a
+proof that every remote member or future network path is reachable.
+
+Moderation history lives in `DocType::Moderation` (stable tag 14, document id 0), not in a chat
+channel. Each event/vote has a canonical Ed25519 signature binding its semantic fields and group id.
+The app also binds the signer device to its certified member origin and interprets authority through
+the current owner-signed role state. Warning evidence therefore survives a live message edit/delete
+and is attributable to the moderator who observed it. It does not retroactively authenticate the
+message author, prove historical role state, or prevent a modified member from deleting a CRDT root
+entry; those are the explicit R7 residual. A vote can never invoke membership mutation. The owner
+must resolve a case, and removal reuses the protocol-enforced MLS Remove flow.
+
+Frontend continuity state (currently composer drafts and per-channel read marks) is stored as a
+bounded vault-sealed record rather than browser plaintext. An offline backup first snapshots live
+actors and persists the registry, then copies the already-sealed vault tree to a new destination
+without following links or overwriting an existing backup. Restore remains deliberately staged work:
+it needs a locked-vault import path, full verification, atomic swap and rollback before it can be
+safe to expose. Export creates another permanent offline guessing surface and leaves filesystem
+metadata visible. Changing the live secret atomically rewrites only the DEK wrapper; it cannot revoke
+an older export and never rotates the server/blob encryption keys.
 
 ## 5. Roadmap (test-gated, block by block)
 

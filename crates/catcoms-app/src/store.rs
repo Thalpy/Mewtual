@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 
 use catcoms_crypto::{seal, unseal, KeyHierarchy, SealedBlob};
 use catcoms_rt::{CryptoRngCore, OsCryptoRng};
-use catcoms_storage::{open_or_create_vault, vault_exists, BlobStore, SealingBlobStore};
+use catcoms_storage::{
+    change_vault_passphrase, open_or_create_vault, vault_exists, BlobStore, SealingBlobStore,
+};
 use catcoms_wire::{Decoder, Encoder};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -81,6 +83,9 @@ const PORT_DOMAIN: &[u8] = b"catcoms/server-port/v1";
 /// Domain separator for the address cache's keyed integrity tag, derived off the vault's
 /// `db_key` (see [`ServerStore::address_cache_key`]).
 const ADDRESS_CACHE_TAG_DOMAIN: &[u8] = b"catcoms/addr-cache-tag/v1";
+/// Maximum sealed UI-continuity payload. This is intentionally small: drafts/read markers are
+/// convenience state, not an alternate attachment or message store.
+pub const MAX_UI_STATE_BYTES: usize = 1024 * 1024;
 /// The band [`ServerNet::derived_port`] draws from: above the well-known/registered clutter and
 /// below the ephemeral ranges the OS hands out on its own (Linux from 32768, Windows from 49152),
 /// so the number is unlikely to already be lent to something else.
@@ -213,6 +218,58 @@ impl ServerStore {
 
     fn registry_path(&self) -> PathBuf {
         self.dir.join("registry.bin")
+    }
+
+    fn ui_state_path(&self) -> PathBuf {
+        self.dir.join("ui-state.bin")
+    }
+
+    /// The vault directory to copy into an offline backup. Everything below it is already sealed
+    /// at rest; callers must copy the directory as opaque bytes and must never follow symlinks.
+    pub fn backup_source_dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Authenticate the current vault secret and atomically rewrap the same root DEK under a new
+    /// one. Derived database/blob/MLS keys do not change, so every existing record remains sealed
+    /// and no partially-rekeyed tree can be produced. Callers must serialize this with all other
+    /// store writes (the desktop bridge does so with its store mutex).
+    pub fn change_passphrase(
+        &self,
+        current_passphrase: &[u8],
+        new_passphrase: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        change_vault_passphrase(&self.dir, current_passphrase, new_passphrase, rng)?;
+        Ok(())
+    }
+
+    /// Seal + atomically save bounded frontend continuity state (drafts, read markers and the
+    /// last open location). It uses the vault DB key so sensitive draft text never falls back to
+    /// plaintext browser storage.
+    pub fn save_ui_state(
+        &self,
+        bytes: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if bytes.len() > MAX_UI_STATE_BYTES {
+            return Err(AppError::Invalid("UI state is too large".into()));
+        }
+        let sealed = seal(&self.keys.db_key()?, bytes, rng)?;
+        atomic_write(&self.ui_state_path(), &frame(&sealed))
+    }
+
+    /// Load and authenticate frontend continuity state. An absent file is an empty first-run
+    /// state; malformed/tampered ciphertext is an error so the UI can disclose that recovery is
+    /// needed instead of silently discarding drafts.
+    pub fn load_ui_state(&self) -> Result<Vec<u8>, AppError> {
+        let path = self.ui_state_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(path).map_err(|e| AppError::Io(e.to_string()))?;
+        let sealed = unframe(&bytes)?;
+        unseal(&self.keys.db_key()?, &sealed).map_err(Into::into)
     }
 
     /// Seal + atomically write a server's [`ServerNet`] (its libp2p identity seed, listen port and
@@ -519,6 +576,41 @@ mod tests {
 
         // A WRONG passphrase cannot open the existing vault (and never re-inits it).
         assert!(ServerStore::open(dir.path(), b"wrong passphrase", &mut rng).is_err());
+    }
+
+    #[test]
+    fn ui_state_is_bounded_sealed_and_tamper_evident() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(11);
+        let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
+        let state = br#"{"version":1,"drafts":{"1:2":"private draft"}}"#;
+
+        assert!(store.load_ui_state().unwrap().is_empty());
+        store.save_ui_state(state, &mut rng).unwrap();
+        assert_eq!(store.load_ui_state().unwrap(), state);
+        let replacement = br#"{"version":1,"drafts":{"1:2":"updated draft"}}"#;
+        store.save_ui_state(replacement, &mut rng).unwrap();
+        assert_eq!(store.load_ui_state().unwrap(), replacement);
+        // Continue the rejection/tamper checks from the replacement to pin repeated saves too.
+        let state = replacement;
+        let path = dir.path().join("ui-state.bin");
+        let mut raw = fs::read(&path).unwrap();
+        assert!(
+            !raw.windows(b"private draft".len())
+                .any(|window| window == b"private draft"),
+            "draft text must be sealed at rest"
+        );
+
+        // An oversized update is rejected before writing and leaves the last valid state intact.
+        assert!(store
+            .save_ui_state(&vec![0; MAX_UI_STATE_BYTES + 1], &mut rng)
+            .is_err());
+        assert_eq!(store.load_ui_state().unwrap(), state);
+
+        let last = raw.len() - 1;
+        raw[last] ^= 1;
+        fs::write(path, raw).unwrap();
+        assert!(store.load_ui_state().is_err());
     }
 
     #[test]

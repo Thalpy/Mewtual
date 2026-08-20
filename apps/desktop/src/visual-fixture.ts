@@ -1,0 +1,301 @@
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import type { InvokeArgs } from "@tauri-apps/api/core";
+
+export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
+
+const ME = "a4f29c110b7d8365a4f29c110b7d8365";
+const JUNIPER = "62e80f475ac4931162e80f475ac49311";
+const MOSS = "9b31d5a277c04efa9b31d5a277c04efa";
+
+type Message = {
+  id: string;
+  author: string;
+  text: string;
+  ts: number;
+  edited: number;
+  reactions: Array<{ emoji: string; by: string[] }>;
+  reply_to: string;
+  pinned: boolean;
+};
+
+const message = (
+  id: string,
+  author: string,
+  text: string,
+  minutesAgo: number,
+  extra: Partial<Message> = {},
+): Message => ({
+  id,
+  author,
+  text,
+  ts: VISUAL_FIXTURE_NOW - minutesAgo * 60_000,
+  edited: 0,
+  reactions: [],
+  reply_to: "",
+  pinned: false,
+  ...extra,
+});
+
+const CHANNEL_MESSAGES: Record<string, Message[]> = {
+  general: [
+    message("msg-1", JUNIPER, "Morning! The visual review build is ready.", 74),
+    message("msg-2", ME, "Nice. I tightened the spacing around the channel header.", 69, {
+      reactions: [{ emoji: "👍", by: [JUNIPER, MOSS] }],
+    }),
+    message("msg-3", MOSS, "The new layout holds up at 900 × 640 too.", 42),
+    message("msg-4", JUNIPER, "@[Rowan] could you check the unread divider and composer next?", 18, {
+      reply_to: "msg-2",
+      pinned: true,
+    }),
+    message("msg-5", ME, "On it — this screenshot is coming from deterministic fixture data.", 7),
+  ],
+  design: [
+    message("design-1", MOSS, "I left two options in the mockups: quiet borders and soft glow.", 55),
+    message("design-2", JUNIPER, "Quiet borders feel more like the rest of Mewtual.", 48),
+  ],
+  notes: [message("notes-1", ME, "Remember to verify the compact window before handoff.", 31)],
+  dm: [
+    message("dm-1", JUNIPER, "The fixture can cover DMs as well as server channels.", 26),
+    message("dm-2", ME, "Perfect — one stable URL per state is the goal.", 22),
+  ],
+};
+
+const PROFILES = [
+  {
+    fingerprint: ME,
+    name: "Rowan",
+    color: "#8d7cf5",
+    font: "rounded",
+    effect: "",
+    description: "Building small, understandable tools for private communities.",
+    bubble: "",
+    avatar: "",
+    banner: "",
+  },
+  {
+    fingerprint: JUNIPER,
+    name: "Juniper",
+    color: "#5fc7a1",
+    font: "",
+    effect: "",
+    description: "Design systems, field notes, and very strong tea.",
+    bubble: "",
+    avatar: "",
+    banner: "",
+  },
+  {
+    fingerprint: MOSS,
+    name: "Moss",
+    color: "#e6a85c",
+    font: "mono",
+    effect: "",
+    description: "Keeps the release checklist honest.",
+    bubble: "",
+    avatar: "",
+    banner: "",
+  },
+];
+
+const clone = <T>(value: T): T => structuredClone(value);
+
+/**
+ * Return deterministic native-command data for the browser-rendered visual fixture.
+ *
+ * Keeping this as a pure function makes the contract unit-testable and makes an unsupported IPC
+ * call fail loudly. That is preferable to a screenshot which looks plausible while silently
+ * omitting a newly-added backend dependency.
+ */
+export function visualFixtureResponse(command: string, payload: InvokeArgs = {}): unknown {
+  const args: Record<string, unknown> =
+    Array.isArray(payload) || payload instanceof ArrayBuffer || payload instanceof Uint8Array
+      ? {}
+      : payload;
+  const server = Number(args.server ?? 1);
+  const channel = String(args.channel ?? "general");
+
+  switch (command) {
+    case "resume_session":
+      return clone([
+        {
+          server: 1,
+          name: "Lantern Room",
+          invite: "fixture-invite-not-for-pairing",
+          channel: "general",
+          channels: [
+            { id: "general", name: "general" },
+            { id: "design", name: "design" },
+            { id: "notes", name: "field-notes" },
+          ],
+          is_dm: false,
+        },
+        {
+          server: 2,
+          name: "Juniper",
+          invite: "",
+          channel: "dm",
+          channels: [{ id: "dm", name: "Juniper" }],
+          is_dm: true,
+        },
+      ]);
+    case "vault_exists":
+      return true;
+    case "get_ui_state":
+      return JSON.stringify({
+        version: 1,
+        drafts: { "1:general": "A deterministic composer draft" },
+        readMarks: { "1:general": VISUAL_FIXTURE_NOW - 25 * 60_000 },
+      });
+    case "save_ui_state":
+      return null;
+    case "get_inbox":
+      return clone([
+        {
+          server: 1,
+          server_name: "Lantern Room",
+          is_dm: false,
+          channel: "general",
+          message_id: "msg-4",
+          author: JUNIPER,
+          author_name: "Juniper",
+          text: "@[Rowan] could you check the unread divider and composer next?",
+          ts: VISUAL_FIXTURE_NOW - 18 * 60_000,
+          mention: true,
+          reply: true,
+        },
+      ]);
+    case "get_messages":
+      return clone(CHANNEL_MESSAGES[server === 2 ? "dm" : channel] ?? []);
+    case "get_members":
+      return clone(
+        server === 2
+          ? [
+              { fingerprint: ME, you: true },
+              { fingerprint: JUNIPER, you: false },
+            ]
+          : [
+              { fingerprint: ME, you: true },
+              { fingerprint: JUNIPER, you: false },
+              { fingerprint: MOSS, you: false },
+            ],
+      );
+    case "get_online_members":
+      return server === 2 ? [JUNIPER] : [JUNIPER];
+    case "get_profiles":
+      return clone(server === 2 ? PROFILES.slice(0, 2) : PROFILES);
+    case "get_files":
+      return clone({
+        has_peers: true,
+        files: [
+          {
+            name: "visual-review-notes.md",
+            size: 4182,
+            mime: "text/markdown",
+            cid: "55aabbeeff0011223344556677889900",
+            author: JUNIPER,
+            path: "reviews/visual-review-notes.md",
+            held: 1,
+            total: 1,
+            expires: null,
+            expires_known: true,
+          },
+        ],
+      });
+    case "get_wiki_pinned_cids":
+      return [];
+    case "get_statuses":
+      return clone([
+        message("status-1", JUNIPER, "Visual review at 14:00 — bring compact-window notes.", 90),
+      ]);
+    case "get_invite":
+      return server === 1 ? "fixture-invite-not-for-pairing" : null;
+    case "get_roles":
+      return server === 1 ? { [ME]: "owner", [JUNIPER]: "admin", [MOSS]: "member" } : {};
+    case "get_livery":
+      return { preset: "", accent: "", tokens: {}, icon: "", cursor: "" };
+    case "get_channel_topic":
+      return channel === "general" ? "A calm place to build and review Mewtual together" : "";
+    case "get_delivery":
+      return clone([
+        { id: "msg-2", delivered: 2, reachable: 2 },
+        { id: "msg-5", delivered: 1, reachable: 1 },
+      ]);
+    case "get_badges":
+      return server === 1 ? { [MOSS]: { label: "release", color: "#e6a85c" } } : {};
+    case "get_events":
+      return clone([
+        {
+          id: "event-1",
+          title: "Compact-window visual review",
+          body: "Walk through chat, settings, files, and the server space at the native window size.",
+          start_ts: VISUAL_FIXTURE_NOW + 2 * 60 * 60_000,
+          end_ts: VISUAL_FIXTURE_NOW + 3 * 60 * 60_000,
+          author: ME,
+          image: "",
+        },
+      ]);
+    case "get_devices":
+      return {};
+    case "get_dm_requests":
+      return [];
+    case "get_moderation":
+      return { events: [], votes: [] };
+    case "get_channels":
+      return server === 1
+        ? clone([
+            { id: "general", name: "general" },
+            { id: "design", name: "design" },
+            { id: "notes", name: "field-notes" },
+          ])
+        : clone([{ id: "dm", name: "Juniper" }]);
+    case "plugin:window|is_maximized":
+      return false;
+    case "plugin:updater|check":
+      return null;
+    default:
+      throw new Error(`Visual fixture does not implement Tauri command: ${command}`);
+  }
+}
+
+/** Install a browser-safe Tauri bridge before App.svelte is evaluated. */
+export function installVisualFixture(name: string): void {
+  if (name !== "chat") {
+    throw new Error(`Unknown visual fixture "${name}". Available fixtures: chat`);
+  }
+
+  mockWindows("main");
+  mockIPC(
+    (command, payload) => {
+      const response = visualFixtureResponse(command, payload);
+      // `get_moderation` is the final awaited load in switchServer. Once it has returned, wait for
+      // fonts and the next task so Svelte can flush its pending microtasks. Do not use
+      // requestAnimationFrame here: screenshot browsers intentionally run in the background and
+      // Chromium may throttle background frames indefinitely.
+      if (command === "get_moderation") {
+        void document.fonts.ready.then(() => {
+          setTimeout(() => {
+            document.documentElement.dataset.visualReady = name;
+          }, 0);
+        });
+      }
+      return response;
+    },
+    { shouldMockEvents: true },
+  );
+
+  // Freeze application wall-clock reads so relative presence, event grouping, and unread state do
+  // not drift between captures. CSS motion is disabled separately so the screenshot never lands
+  // on an arbitrary transition frame.
+  Date.now = () => VISUAL_FIXTURE_NOW;
+  document.documentElement.dataset.visualFixture = name;
+  const style = document.createElement("style");
+  style.dataset.visualFixture = name;
+  style.textContent = `
+    *, *::before, *::after {
+      animation: none !important;
+      caret-color: transparent !important;
+      scroll-behavior: auto !important;
+      transition: none !important;
+    }
+  `;
+  document.head.append(style);
+}

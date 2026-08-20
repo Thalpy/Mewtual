@@ -27,7 +27,7 @@ const BASE_EFFECTS: TextEffectDefinition[] = [
   { id: "sparkle", label: "Rainbow sparkles", description: "A bright spectrum with small starbursts.", group: "Motion", preview: "critical success!", animated: true },
   { id: "speakese", label: "Speakese", description: "Pops in letter by letter with a distinct, phoneme-coloured voice blip.", group: "Motion", preview: "hello operator", animated: true },
   { id: "perfect-cherry-blossom", label: "Perfect Cherry Blossom", description: "Petal-pink lettering with drifting sakura; entering the text shakes loose one fresh bloom.", group: "Motion", preview: "petals on the signal", animated: true },
-  { id: "red-truth", label: "The Red Truth", description: "A declarative crimson entrance: opening seal, synthesized sting, then a clean letter reveal.", group: "Mood", preview: "This statement is absolute.", animated: true },
+  { id: "red-truth", label: "The Red Truth", description: "A declarative crimson entrance: sharp metallic strike, rising noise wash, then a clean letter reveal.", group: "Mood", preview: "This statement is absolute.", animated: true },
   { id: "flame", label: "Angry flame", description: "Hot, forceful text with an ember edge.", group: "Mood", preview: "I am FURIOUS", animated: true },
   { id: "gloom", label: "Gloom", description: "Heavy, drained text that seems to sink.", group: "Mood", preview: "not my day", animated: true },
   { id: "cyber", label: "Cyber", description: "Cyan/magenta terminal interference.", group: "Signal", preview: "BREACH READY", animated: true },
@@ -97,13 +97,49 @@ export function speakeseSoundPlan(tones: number[], start: number): SpeakeseBlip[
   });
 }
 
-/** An original three-voice flourish: a low declaration, rising edge, and glassy seal. */
-export function redTruthSoundPlan(start: number): SpeakeseBlip[] {
-  return [
-    { at: start, stop: start + 0.24, frequency: 196, endFrequency: 123, waveform: "triangle", peak: 0.047 },
-    { at: start + 0.055, stop: start + 0.31, frequency: 523.25, endFrequency: 783.99, waveform: "sine", peak: 0.034 },
-    { at: start + 0.135, stop: start + 0.39, frequency: 987.77, endFrequency: 1318.51, waveform: "sine", peak: 0.025 },
-  ];
+export type RedTruthNoiseSweep = {
+  at: number;
+  crest: number;
+  stop: number;
+  startFrequency: number;
+  crestFrequency: number;
+  endFrequency: number;
+  highpassFrequency: number;
+  peak: number;
+};
+
+export type RedTruthSoundPlan = {
+  strike: SpeakeseBlip[];
+  sweep: RedTruthNoiseSweep;
+};
+
+/** An original two-layer cue: an inharmonic metal strike, then a delayed rising/falling wash. */
+export function redTruthSoundPlan(start: number): RedTruthSoundPlan {
+  return {
+    strike: [
+      { at: start, stop: start + 0.058, frequency: 5_700, endFrequency: 2_450, waveform: "sawtooth", peak: 0.024 },
+      { at: start + 0.004, stop: start + 0.29, frequency: 1_810, endFrequency: 1_420, waveform: "sine", peak: 0.052 },
+      { at: start + 0.007, stop: start + 0.23, frequency: 3_610, endFrequency: 2_760, waveform: "triangle", peak: 0.027 },
+    ],
+    sweep: {
+      at: start + 0.075,
+      crest: start + 0.92,
+      stop: start + 1.85,
+      startFrequency: 820,
+      crestFrequency: 5_200,
+      endFrequency: 1_300,
+      highpassFrequency: 380,
+      peak: 0.027,
+    },
+  };
+}
+
+/** Stateless white noise keeps the authored cue repeatable and avoids ambient randomness. */
+export function redTruthNoiseSample(index: number): number {
+  let value = (Math.max(0, Math.floor(index)) + 0x6d2b79f5) | 0;
+  value = Math.imul(value ^ (value >>> 15), value | 1);
+  value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+  return (((value ^ (value >>> 14)) >>> 0) / 0xffff_ffff) * 2 - 1;
 }
 
 const EFFECT_IDS = new Set(TEXT_EFFECTS.map((effect) => effect.id));

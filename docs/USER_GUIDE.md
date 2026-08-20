@@ -57,6 +57,11 @@ Everything on disk (group state, messages, files, avatars) is sealed under this 
 (Argon2id + XChaCha20-Poly1305). A stolen laptop or a copied app-data folder is opaque
 without it.
 
+Use **Settings → Vault & Lock → Change vault secret** to authenticate with the current passphrase,
+sigil or melody and choose any new method. The change atomically rewraps the same random root key
+under a fresh Argon2 salt; it does not decrypt or bulk-rewrite server data. Older backups are not
+revoked and continue to require the secret they had when they were exported.
+
 To add another computer or device without pretending both are the same cryptographic device,
 open **Settings → Devices → Link a new device**. The two devices compare a short code; the grant
 can travel by paste, QR or sound. The new device receives its own key and joins each granted
@@ -65,9 +70,11 @@ linked devices under **Server settings → Devices**, and you can revoke your ow
 
 Use **Settings → Backup & Recovery** to create a coherent encrypted copy of the unlocked vault in
 your Downloads folder. The copy remains protected by the same vault secret, so keep that secret
-separately. One-click restore is deliberately not offered yet: replacing a live vault safely needs
-a locked-screen, staged verification and rollback flow. Keep the exported folder intact until that
-flow lands.
+separately. No plaintext is exported, but the new copy is an additional offline guessing target and
+exposes filesystem metadata such as names, sizes, timestamps and layout; it also preserves old state
+and keys even if they are later deleted from the live vault. One-click restore is deliberately not
+offered yet: replacing a live vault safely needs a locked-screen, staged verification and rollback
+flow. Keep the exported folder intact until that flow lands.
 
 ---
 
@@ -96,9 +103,9 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   restart**, **Later** (it asks again next launch), or **Skip this version** (it never asks about
   that one again). Nothing installs unless you press Update, and **Settings → Updates** can check
   on demand, including for a version you skipped.
-- **Sidebar**; the server's channels and its member list (with role badges). Servers also have a
-  dedicated **Moderation** button and compact **Storage** / **Connectivity** controls immediately
-  above your profile; DMs omit the server-governance controls.
+- **Sidebar**; the server's channels and its member list (with role badges). Owners/admins also have
+  a dedicated **Moderation** button. Compact **Storage** / **Connectivity** controls form one bottom
+  stack immediately above your profile; DMs omit the server-governance controls.
 - **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Profile · Transfers · Events**,
   plus the operations surfaces opened from the sidebar.
   Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
@@ -169,6 +176,9 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   storage. This continuity is local to this device; it is not synced to other members.
 
 ### Profile message studios
+- Custom message frame backgrounds are temporarily disabled in live chats while their rendering
+  cost is investigated. The studio, preview, and saved profile choice remain available, so no
+  configuration is lost; message arrival choices are unaffected.
 - Open **Profile** (or **Settings → My Profile**) for the **Message Frame Studio**. Pick a
   surface and one of five chassis, then build an ordered stack of scan, pulse, trace, and flicker
   layers. Each layer can be tuned, reordered, temporarily disabled, reset, or removed. Scan uses
@@ -226,9 +236,10 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   each editor opens that catalog even when nothing is selected.
 - The copyable form is `[fx:cyber]signal online[/fx]`. The catalog includes shaky and wavy
   motion, rainbow sparkles, one-shot Speakese that pops in letter by letter with phoneme-varied
-  voice blips, The Red Truth's synthesized seal-and-letter entrance, cursor-shed petals on Perfect
-  Cherry Blossom, angry flame, gloom, cyber and CRT signals, click-to-reveal censorship, and a
-  broad set of named pride flags. The catalog's copy button makes markup easy to move between
+  voice blips, The Red Truth's sharp metal strike and rising/falling noise-wash entrance,
+  entry-shed petals on Perfect Cherry Blossom, angry flame, gloom, cyber and CRT signals,
+  click-to-reveal censorship, and a broad set of named pride flags. The catalog's copy button
+  makes markup easy to move between
   surfaces without memorising it. Existing `[fx:animalese]...[/fx]` posts still render as Speakese.
 - Under **Settings → Appearance → Message text effects**, choose **Full**, **Low**, or **Plain**.
   Full effects can animate, respond to the pointer, and play quiet effect audio. Low keeps static
@@ -384,7 +395,11 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
 
 ## 8. Moderation, operations & server settings
 
-Open **Moderation** in a server's sidebar for its chronological user-event plane:
+Owners and admins can open **Moderation** in a server's sidebar. A lane-based activity graph shows
+the flow between moderators and members; **View user** narrows both it and the chronological detail
+scroll below to messages/events involving one person. Ordinary members do not see or navigate to
+the moderation plane; when a kick case needs community input they receive a focused vote card in
+chat instead.
 
 - Owners and admins can select individual messages or **Shift-click a range**, enter a public
   reason, and **Warn & collapse** them. Other members see a compact warning marker and can expand
@@ -400,11 +415,14 @@ Open **Moderation** in a server's sidebar for its chronological user-event plane
 
 The two compact operations buttons above your profile provide local, evidence-based diagnostics:
 
-- **Storage** verifies every file manifest and referenced encrypted chunk on this device. Missing,
-  unreadable and invalid items are reported separately. **Repair from peers** fetches missing or
-  corrupt chunks through the authenticated, content-address-checked member path, then verifies
-  again; it cannot invent bytes when no reachable member holds them or repair an invalid manifest.
-  The same health summary is explicitly available in **Transfers**.
+- **Storage** verifies every file manifest and referenced encrypted chunk on this device. The first
+  visit per server runs once per app process and saves that point-in-time report; revisiting it or
+  receiving a file event does not quietly rescan. It breaks the inventory down by media type,
+  wiki-pinned content and largest files, clearly separating exact verified ciphertext bytes from
+  local/logical size estimates. **Repair from peers** is the explicit exception: it fetches missing
+  or corrupt chunks through the authenticated, content-address-checked member path and replaces the
+  cached report after verifying again. It cannot invent bytes when no reachable member holds them
+  or repair an invalid manifest. The same health summary is explicitly available in **Transfers**.
 - **Connectivity** explains what this device can actually observe: connected members, the current
   path evidence and existing network settings. It does not promise global reachability from a
   local observation. **Copy diagnostic** provides the same bounded report for troubleshooting.

@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 libp2p = { version = "0.56", features = ["tokio"] }
 hex = "0.4"
 base64 = "0.22"
+zeroize = "1"
 catcoms-app = { path = "../../../crates/catcoms-app" }
 catcoms-mls = { path = "../../../crates/catcoms-mls" }
 catcoms-net = { path = "../../../crates/catcoms-net" }
@@ -30,6 +31,9 @@ catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
 catcoms-log = { path = "../../../crates/catcoms-log" }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]

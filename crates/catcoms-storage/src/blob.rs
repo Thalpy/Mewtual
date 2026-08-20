@@ -151,7 +151,12 @@ impl BlobStore for FsBlobStore {
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
         let path = self.path(&cid);
-        if !path.exists() {
+        // Content addressing makes a healthy existing record safely deduplicable, but mere path
+        // existence is not health: a truncated/tampered record must be replaceable after a peer
+        // has served the CID-verified bytes again. We only overwrite after `get` has proved that
+        // the existing record is absent or invalid, so the repair path never discards a valid
+        // local copy.
+        if !matches!(self.get(&cid), Ok(Some(_))) {
             std::fs::write(&path, bytes).map_err(|e| StorageError::Io(e.to_string()))?;
         }
         Ok(cid)
@@ -254,7 +259,9 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
     fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError> {
         let cid = Cid::of(bytes);
         let path = self.path(&cid);
-        if !path.exists() {
+        // A corrupt sealed file still has the expected CID filename. Validate the record before
+        // deduplicating so an authenticated peer fetch can replace it with freshly sealed bytes.
+        if !matches!(self.get(&cid), Ok(Some(_))) {
             let sealed = seal(&self.key, bytes, &mut self.rng)?;
             std::fs::write(&path, encode_sealed(&sealed))
                 .map_err(|e| StorageError::Io(e.to_string()))?;
@@ -360,6 +367,17 @@ mod tests {
     }
 
     #[test]
+    fn fs_store_put_repairs_a_corrupt_existing_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = FsBlobStore::open(dir.path()).unwrap();
+        let cid = store.put(b"original").unwrap();
+        std::fs::write(dir.path().join(cid.to_hex()), b"tampered!").unwrap();
+
+        assert_eq!(store.put(b"original").unwrap(), cid);
+        assert_eq!(store.get(&cid).unwrap().as_deref(), Some(&b"original"[..]));
+    }
+
+    #[test]
     fn sealing_store_roundtrips() {
         let dir = tempfile::tempdir().unwrap();
         store_roundtrip(
@@ -397,5 +415,18 @@ mod tests {
         let store3 =
             SealingBlobStore::open(dir.path(), [9u8; 32], ChaCha20Rng::seed_from_u64(2)).unwrap();
         assert!(store3.get(&cid).is_err());
+    }
+
+    #[test]
+    fn sealing_store_put_repairs_a_corrupt_existing_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = [7u8; 32];
+        let mut store =
+            SealingBlobStore::open(dir.path(), key, ChaCha20Rng::seed_from_u64(1)).unwrap();
+        let cid = store.put(b"original").unwrap();
+        std::fs::write(dir.path().join(cid.to_hex()), b"truncated").unwrap();
+
+        assert_eq!(store.put(b"original").unwrap(), cid);
+        assert_eq!(store.get(&cid).unwrap().as_deref(), Some(&b"original"[..]));
     }
 }

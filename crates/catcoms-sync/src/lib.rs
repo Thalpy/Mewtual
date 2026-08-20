@@ -5849,7 +5849,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
-        if self.blobs.has(cid) {
+        // A filename alone is not availability: a corrupt record must fall through to the
+        // authenticated fetch path, whose CID check plus BlobStore::put repairs it in place.
+        if matches!(self.blobs.get(cid), Ok(Some(_))) {
             return Ok((true, None));
         }
         let (req, auth) =
@@ -5907,7 +5909,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Fetch a blob from the **best known peer** (a proven member, else any known peer).
     /// `Ok(false)` if there is no peer to ask, or the peer did not have it.
     pub async fn request_blob_best(&mut self, cid: &Cid) -> Result<bool, SyncError> {
-        if self.blobs.has(cid) {
+        if matches!(self.blobs.get(cid), Ok(Some(_))) {
             return Ok(true);
         }
         match self.pick_catchup_peer() {
@@ -5924,7 +5926,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         &mut self,
         cid: &Cid,
     ) -> Result<Option<String>, SyncError> {
-        if self.blobs.has(cid) {
+        if matches!(self.blobs.get(cid), Ok(Some(_))) {
             return Ok(None);
         }
         match self.pick_catchup_peer() {

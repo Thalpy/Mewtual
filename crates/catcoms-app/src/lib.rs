@@ -43,9 +43,14 @@ use catcoms_wire::DocType;
 use thiserror::Error;
 
 mod actor;
+mod moderation;
 pub mod pairing;
 pub mod store;
 pub use actor::{spawn, AppCommand, AppEvent, ServerActor};
+pub use moderation::{
+    ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
+    MAX_MOD_REASON_BYTES,
+};
 pub use pairing::{
     begin_pairing, decode_pairing_blob, mint_grant_bundle, open_grant_bundle, read_pairing_blob,
     OpenedGrantBundle, PairingLedger, PairingRequestView, PairingSecrets, PerServerGrant,
@@ -1998,6 +2003,34 @@ pub struct FilesView {
     pub has_peers: bool,
 }
 
+/// Verified local storage facts for the file chunks referenced by one server.
+///
+/// A filename existing on disk is not enough: `verified_chunks` counts only sealed records that
+/// authenticate, match their content address, and decrypt through the listed file reference.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageHealth {
+    pub listed_files: usize,
+    pub referenced_chunks: usize,
+    pub verified_chunks: usize,
+    pub missing_chunks: usize,
+    pub unreadable_chunks: usize,
+    pub invalid_manifests: usize,
+    /// Bytes of verified encrypted file-chunk content (not filesystem allocation or unrelated
+    /// avatar/banner blobs).
+    pub verified_bytes: u64,
+    /// A live authenticated member connection exists. This means repair can be attempted, not
+    /// that the peer necessarily holds every missing chunk.
+    pub has_peers: bool,
+}
+
+/// Result of one explicit storage repair pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageRepair {
+    pub attempted_chunks: usize,
+    pub recovered_chunks: usize,
+    pub health: StorageHealth,
+}
+
 /// Normalize a virtual folder path: trim whitespace + surrounding slashes and drop empty,
 /// `.` and `..` segments, so `""` is the root and a path can never escape it.
 fn normalize_path(path: &str) -> String {
@@ -3106,7 +3139,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(out)
     }
 
-    /// Fetch (if not held) + decrypt one chunk, returning its plaintext bytes and the signed
+    /// Fetch (if not readable) + decrypt one chunk, returning its plaintext bytes and the signed
     /// provider that served it. The single exclusive-state need on the fetch path is `blobs.put`;
     /// everything else is read-only. Shared by the all-in-one download and the per-chunk path.
     async fn fetch_and_open_chunk(
@@ -3115,9 +3148,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         idx: usize,
     ) -> Result<(Vec<u8>, Option<String>), AppError> {
         let ccid = chunk_ref.ciphertext_cid;
-        // Only reach out to a peer if we don't already hold this chunk; capture the signed responder
-        // that served it so the UI can show who the bytes came from.
-        let provider = if !self.sync.has_blob(&ccid) {
+        // Path existence is not enough: a corrupt sealed record must be fetched again. Capture
+        // the signed responder so repair remains attributable in the transfer UI.
+        let provider = if self.sync.get_blob(&ccid).is_none() {
             self.sync.request_blob_best_provider(&ccid).await?
         } else {
             None
@@ -3236,6 +3269,86 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             files,
             has_peers: self.has_fetch_peers(),
         }
+    }
+
+    /// Verify every unique file chunk referenced by the shared index. This performs local I/O and
+    /// cryptographic checks but no network requests and no mutation.
+    pub fn storage_health(&self) -> StorageHealth {
+        let files = self.files();
+        let mut refs: HashMap<Cid, FileRef> = HashMap::new();
+        let mut invalid_manifests = 0;
+        for entry in &files {
+            match FileManifest::decode_or_legacy(&entry.file_ref) {
+                Ok(manifest) if manifest.total_size <= MAX_FILE_BYTES as u64 => {
+                    for chunk in manifest.chunks {
+                        refs.entry(chunk.ciphertext_cid).or_insert(chunk);
+                    }
+                }
+                _ => invalid_manifests += 1,
+            }
+        }
+
+        let mut health = StorageHealth {
+            listed_files: files.len(),
+            referenced_chunks: refs.len(),
+            invalid_manifests,
+            has_peers: self.has_fetch_peers(),
+            ..StorageHealth::default()
+        };
+        for (cid, file_ref) in refs {
+            match self.sync.get_blob(&cid) {
+                Some(ciphertext) => match self.sync.open_file(&ciphertext, &file_ref) {
+                    Ok(_) => {
+                        health.verified_chunks += 1;
+                        health.verified_bytes = health
+                            .verified_bytes
+                            .saturating_add(ciphertext.len() as u64);
+                    }
+                    Err(_) => health.unreadable_chunks += 1,
+                },
+                None if self.sync.has_blob(&cid) => health.unreadable_chunks += 1,
+                None => health.missing_chunks += 1,
+            }
+        }
+        health
+    }
+
+    /// Re-fetch every missing or unreadable referenced chunk from the best connected member, then
+    /// verify the whole set again. The sync/storage path authenticates the responder and CID before
+    /// replacing an unreadable record; no unreferenced blob is garbage-collected here.
+    pub async fn repair_storage(&mut self) -> Result<StorageRepair, AppError> {
+        let before = self.storage_health();
+        let mut candidates = HashSet::new();
+        for entry in self.files() {
+            let Ok(manifest) = FileManifest::decode_or_legacy(&entry.file_ref) else {
+                continue;
+            };
+            if manifest.total_size > MAX_FILE_BYTES as u64 {
+                continue;
+            }
+            for chunk in manifest.chunks {
+                let cid = chunk.ciphertext_cid;
+                let readable = self
+                    .sync
+                    .get_blob(&cid)
+                    .and_then(|bytes| self.sync.open_file(&bytes, &chunk).ok())
+                    .is_some();
+                if !readable {
+                    candidates.insert(cid);
+                }
+            }
+        }
+        for cid in &candidates {
+            let _ = self.sync.request_blob_best(cid).await?;
+        }
+        let health = self.storage_health();
+        let bad_before = before.missing_chunks + before.unreadable_chunks;
+        let bad_after = health.missing_chunks + health.unreadable_chunks;
+        Ok(StorageRepair {
+            attempted_chunks: candidates.len(),
+            recovered_chunks: bad_before.saturating_sub(bad_after),
+            health,
+        })
     }
 
     /// Whether ≥1 transport peer is connected **right now**; a cheap, accurate proxy for "a
@@ -4588,6 +4701,278 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync
             .open_channel(DocType::MemberRoles, ROLES_DOC)
             .await?;
+        Ok(())
+    }
+
+    // --- moderation plane ---------------------------------------------------
+
+    /// Subscribe to the server's signed moderation evidence/cases/votes document.
+    pub async fn open_moderation(&mut self) -> Result<(), AppError> {
+        self.sync
+            .open_channel(DocType::Moderation, moderation::MODERATION_DOC)
+            .await?;
+        Ok(())
+    }
+
+    /// Pull moderation history from a known current member.
+    pub async fn request_moderation_catchup(&mut self, peer: PeerId) -> Result<usize, AppError> {
+        Ok(self
+            .sync
+            .request_catchup(peer, DocType::Moderation, moderation::MODERATION_DOC)
+            .await?)
+    }
+
+    /// Materialize signed moderation records. Signature validity and current authority are
+    /// separate by design: current role state cannot prove what role a signer held historically.
+    pub fn moderation_state(&self) -> ModerationState {
+        let Some(doc) = self
+            .sync
+            .doc(DocType::Moderation, moderation::MODERATION_DOC)
+        else {
+            return ModerationState::default();
+        };
+        let mut state = moderation::read_state(doc.doc(), &self.group_id());
+        for event in &mut state.events {
+            event.signature_valid &= self.origin_of(&event.signer) == event.actor;
+            event.authorized = event.signature_valid
+                && match event.kind.as_str() {
+                    "warning" | "kick_case" => {
+                        matches!(self.role_of(&event.actor), Role::Owner | Role::Admin)
+                    }
+                    "case_resolution" => self.role_of(&event.actor) == Role::Owner,
+                    _ => false,
+                };
+        }
+        let current_identities: HashSet<String> = self
+            .members_view()
+            .into_iter()
+            .map(|member| self.origin_of(&member.fingerprint))
+            .collect();
+        for vote in &mut state.votes {
+            vote.signature_valid &= self.origin_of(&vote.signer) == vote.voter;
+            vote.eligible = vote.signature_valid && current_identities.contains(&vote.voter);
+        }
+        state
+    }
+
+    fn moderation_identity(&self) -> (String, String, Vec<u8>) {
+        let signer = self.my_fingerprint();
+        (self.origin_of(&signer), signer, self.sync.my_public_key())
+    }
+
+    async fn post_moderation_event(&mut self, event: ModerationEvent) -> Result<(), AppError> {
+        let group = self.group_id();
+        let event = moderation::sign_event(&group, event, |payload| {
+            self.sync.sign_blob(payload).map_err(AppError::from)
+        })?;
+        self.sync
+            .post(
+                DocType::Moderation,
+                moderation::MODERATION_DOC,
+                move |doc| moderation::write_event(doc, &event),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Warn one currently-visible message, preserving the observed text as immutable evidence.
+    pub async fn warn_message(
+        &mut self,
+        channel: u128,
+        message_id: &str,
+        reason: &str,
+    ) -> Result<String, AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner/admin can warn a message".into(),
+            ));
+        }
+        let reason = reason.trim();
+        if reason.is_empty() || reason.len() > MAX_MOD_REASON_BYTES {
+            return Err(AppError::Invalid(format!(
+                "warning reason must be 1..={MAX_MOD_REASON_BYTES} bytes"
+            )));
+        }
+        let message = self
+            .messages(channel)
+            .into_iter()
+            .find(|message| message.id == message_id)
+            .ok_or_else(|| AppError::Invalid("no such message".into()))?;
+        if message.text.len() > MAX_MOD_EVIDENCE_BYTES {
+            return Err(AppError::Invalid(
+                "message is too large to preserve as warning evidence".into(),
+            ));
+        }
+        let (actor, signer, public_key) = self.moderation_identity();
+        let id = self.sync.random_id();
+        let event = ModerationEvent {
+            id: id.clone(),
+            kind: "warning".into(),
+            actor,
+            signer,
+            target: self.origin_of(&message.author),
+            channel: channel.to_string(),
+            message_id: message.id,
+            message_text: message.text,
+            message_ts: message.ts,
+            reason: reason.to_string(),
+            ts: self.now_ms(),
+            public_key,
+            ..ModerationEvent::default()
+        };
+        self.post_moderation_event(event).await?;
+        Ok(id)
+    }
+
+    /// Open a public, advisory kick case backed by warnings for the same target.
+    pub async fn create_kick_case(
+        &mut self,
+        target: &str,
+        reason: &str,
+        evidence_ids: &[String],
+    ) -> Result<String, AppError> {
+        if !matches!(self.my_role(), Role::Owner | Role::Admin) {
+            return Err(AppError::Invalid(
+                "only an owner/admin can open a kick case".into(),
+            ));
+        }
+        let target = self.origin_of(target);
+        let reason = reason.trim();
+        if reason.is_empty() || reason.len() > MAX_MOD_REASON_BYTES {
+            return Err(AppError::Invalid(format!(
+                "case reason must be 1..={MAX_MOD_REASON_BYTES} bytes"
+            )));
+        }
+        if evidence_ids.len() > MAX_MOD_EVIDENCE_IDS {
+            return Err(AppError::Invalid("too many evidence items".into()));
+        }
+        let identities: HashSet<String> = self
+            .members_view()
+            .into_iter()
+            .map(|member| self.origin_of(&member.fingerprint))
+            .collect();
+        if !identities.contains(&target) {
+            return Err(AppError::Invalid(
+                "case target is not a current member".into(),
+            ));
+        }
+        if self.owner_fingerprint().as_deref() == Some(target.as_str()) {
+            return Err(AppError::Invalid(
+                "the owner cannot be a kick target".into(),
+            ));
+        }
+        let current = self.moderation_state();
+        for evidence_id in evidence_ids {
+            let valid = current.events.iter().any(|event| {
+                event.id == *evidence_id
+                    && event.kind == "warning"
+                    && event.target == target
+                    && event.authorized
+            });
+            if !valid {
+                return Err(AppError::Invalid(
+                    "case evidence must be an authorized warning for the target".into(),
+                ));
+            }
+        }
+        let (actor, signer, public_key) = self.moderation_identity();
+        let id = self.sync.random_id();
+        let event = ModerationEvent {
+            id: id.clone(),
+            kind: "kick_case".into(),
+            actor,
+            signer,
+            target,
+            reason: reason.to_string(),
+            evidence_ids: evidence_ids.to_vec(),
+            ts: self.now_ms(),
+            public_key,
+            ..ModerationEvent::default()
+        };
+        self.post_moderation_event(event).await?;
+        Ok(id)
+    }
+
+    /// Cast or replace this member identity's advisory vote. A linked device writes under its
+    /// origin identity's key, so it cannot add a second vote.
+    pub async fn cast_kick_vote(&mut self, case_id: &str, yes: bool) -> Result<(), AppError> {
+        let state = self.moderation_state();
+        if !moderation::case_is_open(&state.events, case_id) {
+            return Err(AppError::Invalid("kick case is not open".into()));
+        }
+        let (voter, signer, public_key) = self.moderation_identity();
+        let group = self.group_id();
+        let vote = moderation::sign_vote(
+            &group,
+            ModerationVote {
+                case_id: case_id.to_string(),
+                voter,
+                signer,
+                yes,
+                ts: self.now_ms(),
+                public_key,
+                ..ModerationVote::default()
+            },
+            |payload| self.sync.sign_blob(payload).map_err(AppError::from),
+        )?;
+        self.sync
+            .post(
+                DocType::Moderation,
+                moderation::MODERATION_DOC,
+                move |doc| moderation::write_vote(doc, &vote),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Owner decision on a kick case. `remove=true` invokes the existing protocol-enforced MLS
+    /// removal; the signed resolution records success or failure afterward. Votes remain advisory.
+    pub async fn resolve_kick_case(&mut self, case_id: &str, remove: bool) -> Result<(), AppError> {
+        if !self.is_owner() {
+            return Err(AppError::Invalid(
+                "only the owner can resolve a kick case".into(),
+            ));
+        }
+        let state = self.moderation_state();
+        if !moderation::case_is_open(&state.events, case_id) {
+            return Err(AppError::Invalid("kick case is not open".into()));
+        }
+        let case = state
+            .events
+            .iter()
+            .find(|event| event.id == case_id && event.kind == "kick_case" && event.authorized)
+            .cloned()
+            .ok_or_else(|| AppError::Invalid("kick case is not authorized".into()))?;
+
+        let removal_error = if remove {
+            self.remove_member(&case.target).await.err()
+        } else {
+            None
+        };
+        let outcome = if !remove {
+            "dismissed"
+        } else if removal_error.is_none() {
+            "removed"
+        } else {
+            "remove_failed"
+        };
+        let (actor, signer, public_key) = self.moderation_identity();
+        let event = ModerationEvent {
+            id: self.sync.random_id(),
+            kind: "case_resolution".into(),
+            actor,
+            signer,
+            target: case.target,
+            case_id: case_id.to_string(),
+            outcome: outcome.into(),
+            ts: self.now_ms(),
+            public_key,
+            ..ModerationEvent::default()
+        };
+        self.post_moderation_event(event).await?;
+        if let Some(error) = removal_error {
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -6231,6 +6616,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_warning_evidence_and_advisory_kick_vote_converge() {
+        let clock = ManualClock::new(T0);
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 1);
+        alice.subscribe_control().await.unwrap();
+        alice.open_channel(GENERAL).await.unwrap();
+        alice.open_moderation().await.unwrap();
+        let invite = alice.mint_invite([8u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(2),
+                Box::new(clock.clone()),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        bob.open_channel(GENERAL).await.unwrap();
+        bob.open_moderation().await.unwrap();
+
+        bob.send_message(GENERAL, "a message retained as evidence")
+            .await
+            .unwrap();
+        alice.sync_once().await.unwrap();
+        let message = alice.messages(GENERAL).pop().unwrap();
+        assert_eq!(message.author, bob.my_fingerprint());
+        assert!(bob
+            .warn_message(GENERAL, &message.id, "members cannot warn")
+            .await
+            .is_err());
+
+        let warning_id = alice
+            .warn_message(GENERAL, &message.id, "breaks the posted rules")
+            .await
+            .unwrap();
+        bob.sync_once().await.unwrap();
+        let warning = bob
+            .moderation_state()
+            .events
+            .into_iter()
+            .find(|event| event.id == warning_id)
+            .unwrap();
+        assert!(warning.signature_valid && warning.authorized);
+        assert_eq!(warning.message_text, "a message retained as evidence");
+        assert_eq!(warning.target, bob.my_fingerprint());
+
+        let case_id = alice
+            .create_kick_case(
+                &bob.my_fingerprint(),
+                "repeated disruption",
+                std::slice::from_ref(&warning_id),
+            )
+            .await
+            .unwrap();
+        bob.sync_once().await.unwrap();
+        bob.cast_kick_vote(&case_id, true).await.unwrap();
+        alice.sync_once().await.unwrap();
+        let state = alice.moderation_state();
+        assert!(state.votes.iter().any(|vote| {
+            vote.case_id == case_id
+                && vote.voter == bob.my_fingerprint()
+                && vote.yes
+                && vote.signature_valid
+        }));
+        assert_eq!(alice.member_count(), 2, "a yes vote cannot remove a member");
+
+        alice.resolve_kick_case(&case_id, false).await.unwrap();
+        bob.sync_once().await.unwrap();
+        assert!(bob.moderation_state().events.iter().any(|event| {
+            event.kind == "case_resolution"
+                && event.case_id == case_id
+                && event.outcome == "dismissed"
+                && event.signature_valid
+                && event.authorized
+        }));
+        assert_eq!(alice.member_count(), 2, "dismissal preserves membership");
+    }
+
+    #[tokio::test]
     async fn an_owner_pins_and_unpins_a_message() {
         let mut alice = founder();
         alice.open_channel(GENERAL).await.unwrap();
@@ -7270,6 +7739,51 @@ mod tests {
 
         // The uploader already holds the bytes.
         assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn storage_health_detects_missing_chunks_and_authenticated_repair_recovers_them() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let clock = ManualClock::new(T0);
+        let mut alice = founder_on(&hub, alice_peer, &clock, 41);
+        alice.subscribe_control().await.unwrap();
+        alice.open_files().await.unwrap();
+        let invite = alice.mint_invite([4u8; 16], u64::MAX, vec![]).unwrap();
+        let (bob, _) = tokio::join!(
+            Server::join(
+                hub.join(PeerId::from_u64(2)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(42),
+                Box::new(clock.clone()),
+                "bob",
+                alice_peer,
+                &invite,
+            ),
+            alice.sync_once(),
+        );
+        let mut bob = bob.unwrap();
+        bob.open_files().await.unwrap();
+
+        alice
+            .add_file("repair.txt", "text/plain", "", b"recoverable bytes")
+            .await
+            .unwrap();
+        let _ = tokio::join!(bob.request_files_catchup(alice_peer), alice.sync_once());
+
+        let missing = bob.storage_health();
+        assert_eq!(missing.listed_files, 1);
+        assert_eq!(missing.referenced_chunks, 1);
+        assert_eq!(missing.missing_chunks, 1);
+        assert_eq!(missing.verified_chunks, 0);
+
+        let (repair, _) = tokio::join!(bob.repair_storage(), alice.sync_once());
+        let repair = repair.unwrap();
+        assert_eq!(repair.attempted_chunks, 1);
+        assert_eq!(repair.recovered_chunks, 1);
+        assert_eq!(repair.health.missing_chunks, 0);
+        assert_eq!(repair.health.unreadable_chunks, 0);
+        assert_eq!(repair.health.verified_chunks, 1);
     }
 
     #[tokio::test]

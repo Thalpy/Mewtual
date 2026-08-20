@@ -35,6 +35,9 @@ table with the commit that closed it.
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
+| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption | `catcoms-app::ServerStore`; desktop `create_backup` |
+| Vault-secret rotation | The current wrapper is authenticated; the same root DEK is atomically rewrapped with a fresh Argon2 salt/nonce, so no half-rekeyed data tree is possible | `catcoms-storage::change_vault_passphrase`; desktop `change_vault_secret` |
+| Moderation-record attribution and field integrity | Each event/vote has a canonical group-bound Ed25519 signature; the reader verifies signer fingerprint and linked-device origin, so records cannot be altered or replayed into another server without detection | `catcoms-app::moderation` |
 | Path traversal | Virtual file paths normalized (drops `.`/`..`/empty) so a path can't escape the share | `catcoms-app::normalize_path` |
 
 ## Honest-client / product-layer only (a modified client CAN bypass); the residual backlog
@@ -47,6 +50,7 @@ table with the commit that closed it.
 | R4 | **Local role display** | `my_role()` drives which controls the UI shows | A modified client can paint itself as "admin/owner" **in its own UI**, but this grants **no real capability**; grants are owner-signed (unforgeable) and admission is rank-gated. Cosmetic only. | **Cosmetic** | Accepted; documented in-app |
 | R5 | **Invite rate-limit / server policy** (planned) | An owner-set server-settings doc, respected by honest clients | A modified admin can ignore a mint rate-limit / expiry policy. It is a guardrail against *accidental* over-sharing by honest admins, **not** a control against a malicious admin. | **Soft guardrail** | Document the limitation in the UI when shipped |
 | R6 | **Message edit / delete / react / pin** | `edit_message`/`delete_message` gate on `author == self` (own messages; delete also allows owner/admin moderation); `set_pin` gates on the owner/admin role; `toggle_reaction` keys the reaction by the caller's own fingerprint | A modified member could post a raw channel op editing/deleting/pinning **any** member's message, or forging a reaction under another member's fingerprint; the per-op inner signature signs the *delta*, not the semantic `author`/reactor/role (the same property that already lets a member forge a message's author on send). Low stakes; message content is not authenticated, by design. | **Low** | **Open**; accept (same posture as R2), or a later per-message author-binding hardening |
+| R7 | **Moderation-log semantic authorization and completeness** | Product APIs gate warning/case creation to current owner/admin, resolution to owner, bind evidence to a currently visible message and same-target warning, and readers ignore invalid/unattributed/currently unauthorized records | A modified member can still submit raw Automerge changes that delete/overwrite moderation keys. A modified current admin can sign an invented evidence snapshot because the original message is not author-signed. Signatures make alteration and attribution failures detectable, but do **not** make the CRDT an append-only audit log or prove the signer's role at the historical instant. Votes never authorize removal; owner-only MLS removal remains enforced. | **Medium** (accountability), **None** for removal authority | **Open and disclosed**; historical role certificates plus a countersigned/hash-chained append-only log are the hardening path |
 
 ### Notes on the key residual (R1) and the "admin invites" entanglement
 
@@ -124,6 +128,10 @@ roadmap:
      lands; so demotion is "current-doc, honest-client," not yet replay-proof.
 5. **Invite rate-limit as server policy (R5)**; owner-set, honest-client-enforced; ship with
    the limitation stated in the UI.
+6. **Moderation-log completeness (R7)**; design a monotonic, hash-linked event log with historical
+   owner-signed role evidence and a protocol-side append/delete policy before calling the timeline
+   a tamper-proof audit trail. Preserve the existing invariant that a tally is never executable
+   authority and only the owner removal path can mutate MLS membership.
 
 ## How to use this document
 

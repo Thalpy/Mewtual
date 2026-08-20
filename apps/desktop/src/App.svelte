@@ -7,14 +7,18 @@
   import { onMount, tick, untrack } from "svelte";
   import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
   import {
-    TEXT_EFFECTS, TEXT_EFFECT_GROUPS, insertTextEffect, textEffectHtml,
+    MAX_SPEAKESE_BLIPS, SPEAKESE_STEP_SECONDS, TEXT_EFFECTS, TEXT_EFFECT_GROUPS,
+    cherryBlossomShouldBurst, dismissTextEffectPalette, insertTextEffect, redTruthNoiseSample,
+    redTruthSoundPlan, speakeseSoundPlan, textEffectHtml,
+    type TextEffectPointerRegion,
   } from "./message-effects";
   import {
     DEFAULT_TEXT_EFFECT_KEYBINDS, effectForKeybind, keybindConflict, keybindFromEvent,
     sanitizeTextEffectKeybinds,
   } from "./text-effect-keybinds";
   import {
-    defaultMessageFrameLayer, encodeMessageFrame, messageFrameArrivalStyle, messageFrameLayerStyle,
+    CHAT_MESSAGE_FRAMES_ENABLED, DEFAULT_MESSAGE_FRAME, defaultMessageFrameLayer, encodeMessageFrame,
+    messageFrameArrivalStyle, messageFrameLayerStyle,
     messageFramePosition, messageFrameScanGeometry, messageFrameStyle, parseMessageFrame, visibleMessageFrameMotion,
     visibleMessageFrameStyle, type MessageFrame, type MessageFrameArrival,
     type MessageFrameEasing, type MessageFrameEffectId, type MessageFrameEffectOptions,
@@ -47,6 +51,12 @@
     reachabilitySummary,
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
+  import {
+    buildModerationGraph, buildModerationTimeline, filterModerationTimeline, openKickCases,
+    selectTimelineRows, timelineIdentities, voteTally, warningMap,
+    type ModerationEvent, type ModerationState, type TimelineMessage,
+  } from "./moderation";
+  import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
   import {
     type NameEffect, type NameEffectId, type NameEffectOptions, animatedEffect,
     decodeNameEffects, defaultNameEffect, effectConfigured, effectEnabled, effectOptions, encodeNameEffects,
@@ -167,12 +177,26 @@
   let settingsPage = $state("appearance");
   let serverSettingsPage = $state("overview");
   let setSearch = $state("");
+  let backupBusy = $state(false);
+  let backupResult = $state<{ path: string; files: number; bytes: number; displayed: boolean; warning?: string } | null>(null);
+  async function createBackup() {
+    backupBusy = true;
+    backupResult = null;
+    try {
+      backupResult = await invoke("create_backup");
+    } catch (e) {
+      error = String(e);
+    } finally {
+      backupBusy = false;
+    }
+  }
   type SetPage = { id: string; label: string; cat: string; danger?: boolean };
   const USER_SET_PAGES: SetPage[] = [
     { id: "guide", label: "Feature Guide", cat: "Help" },
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
+    { id: "backup", label: "Backup & Recovery", cat: "Account" },
     { id: "verify", label: "Verification", cat: "Account" },
     { id: "appearance", label: "Appearance", cat: "App" },
     { id: "space", label: "Server Space", cat: "App" },
@@ -204,7 +228,7 @@
     | "news"
     | "quick"
     | "space"
-    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events"}`
+    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity"}`
     | `settings:${string}`
     | `server:${string}`;
   type FeatureGuideItem = {
@@ -230,6 +254,8 @@
     { group: "Conversation", title: "Inbox", detail: "Mentions and replies gathered across every server and DM, with one-click jumps to the message.", where: "Left rail → Inbox", target: "inbox" },
     { group: "Knowledge & media", title: "Files & folders", detail: "Encrypted sharing, folders, previews, deduplication, circulation controls and usage tracking.", where: "Open a server → Files", shortcut: "Ctrl+2", target: "surface:files" },
     { group: "Knowledge & media", title: "Transfers", detail: "Track uploads and downloads, progress, availability and the peer serving a download.", where: "Open a server → Transfers", shortcut: "Ctrl+6", target: "surface:downloads" },
+    { group: "Knowledge & media", title: "Storage health & repair", detail: "Save one integrity/inventory report per server session, inspect categories, pins and largest files, then explicitly re-fetch missing or unreadable data from authenticated peers.", where: "Server sidebar → Storage, or Transfers", target: "surface:storage" },
+    { group: "Knowledge & media", title: "Durable history UX", detail: "Channel drafts and read positions survive restarts inside the encrypted vault, alongside the server's replicated history.", where: "Chat: automatic after unlock", target: "surface:chat" },
     { group: "Knowledge & media", title: "Wiki", detail: "Markdown or Wikitext pages, nested pages, backlinks, infoboxes, history, rollback and optional edit review.", where: "Open a server → Wiki", shortcut: "Ctrl+4", target: "surface:wiki" },
     { group: "Knowledge & media", title: "Announcements", detail: "Post short server announcements with the same rich text and media embeds as chat.", where: "Open a server → Announcements", shortcut: "Ctrl+3", target: "surface:status" },
     { group: "Knowledge & media", title: "News", detail: "Read recent announcements and upcoming events from every server in one feed.", where: "Left rail → Inbox → News", target: "news" },
@@ -237,10 +263,11 @@
     { group: "People & trust", title: "Profiles", detail: "Per-server names, bios, banners, animated avatars, plus studios for name effects, joined message frames and new-message motion.", where: "Profile, or Settings → My Profile", shortcut: "Ctrl+5", target: "settings:profile" },
     { group: "People & trust", title: "Identity verification", detail: "Compare cryptographic fingerprints out of band and keep a private verified mark.", where: "Settings → Verification", target: "settings:verify" },
     { group: "People & trust", title: "Linked devices", detail: "Grant another device access with a one-time ceremony carried by paste, QR or sound; revoke companions per server.", where: "Settings → Devices", target: "settings:devices" },
-    { group: "People & trust", title: "Vault & lock", detail: "Lock the visible session and use a passphrase, sigil or played melody as the local vault secret.", where: "Settings → Vault & Lock", shortcut: "Ctrl+L", target: "settings:vault" },
+    { group: "People & trust", title: "Vault & lock", detail: "Lock the visible session, use a passphrase, sigil or played melody, and atomically change that local vault secret after authenticating the current one.", where: "Settings → Vault & Lock", shortcut: "Ctrl+L", target: "settings:vault" },
     { group: "Voice & play", title: "Voice, camera & screen share", detail: "Join a channel voice room, switch devices live, share a camera or screen and control each peer locally.", where: "Chat channel header → Join voice", target: "surface:chat" },
     { group: "Voice & play", title: "Instruments & jukebox", detail: "Play the call-stage instrument from screen, keyboard or MIDI and queue shared server audio for the room.", where: "Voice stage → Instruments / Jukebox", target: "surface:chat" },
     { group: "Community", title: "Members, roles & badges", detail: "Inspect presence and devices; owners manage admins and removals, while moderators assign display badges.", where: "Right-click server → Server settings → Members / Badges", target: "server:members" },
+    { group: "Community", title: "Moderation plane", detail: "Owners/admins inspect a per-user activity graph and signed detail timeline, issue warnings, and build evidence-backed kick cases; members vote from focused chat cards.", where: "Owner/admin: server sidebar → Moderation", target: "surface:moderation" },
     { group: "Community", title: "Invites", detail: "Generate single-use, device-bound invites; admin admissions are serialized by the owner to avoid group forks.", where: "Right-click server → Server settings → Invites", target: "server:invites" },
     { group: "Community", title: "Emoji & stickers", detail: "Upload server emoji at emoji, medium, large or sticker size and use them in messages or reactions.", where: "Server settings → Emoji & Stickers", target: "server:emoji" },
     { group: "Community", title: "Server livery", detail: "Publish a safe shared palette, icon, cursor, typography and background treatment; every member can opt out.", where: "Server settings → Livery", target: "server:livery" },
@@ -248,6 +275,8 @@
     { group: "App & network", title: "Server Space", detail: "Arrange servers in a navigable 360-degree room; group them into interactive neighbourhoods, search, auto-arrange, or use a custom backdrop.", where: "Left rail → Orbit", shortcut: "Ctrl+O", target: "space" },
     { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion, and local opt-outs for shared livery, message frames and arrivals.", where: "Settings → Appearance", target: "settings:appearance" },
     { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and opt into a privacy-labelled debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
+    { group: "App & network", title: "Connectivity assistant", detail: "See honest three-state connection evidence, live peer counts and concrete recovery suggestions without claiming unproven internet reachability.", where: "Server sidebar → Connectivity", target: "surface:connectivity" },
+    { group: "App & network", title: "Backup & recovery", detail: "Export a coherent sealed vault copy while seeing the offline-guessing, metadata and old-secret exposure tradeoffs. Automated restore remains staged follow-up work.", where: "Settings → Backup & Recovery", target: "settings:backup" },
     { group: "App & network", title: "Signed updates", detail: "Check for a newer signed release and choose whether to install, defer or skip it.", where: "Settings → Updates", target: "settings:updates" },
     { group: "App & network", title: "Feedback", detail: "Open a pre-filled bug report or feature request for review before submitting, or copy it to send another way.", where: "Left rail → Feedback", target: "feedback" },
   ];
@@ -278,6 +307,10 @@
     if (target.startsWith("surface:")) {
       if (activeServerId === null) {
         toast("Open a server or DM first", "info", 3000);
+        return;
+      }
+      if (target === "surface:moderation" && !canModerate) {
+        toast("Moderation is available to this server's owner and admins", "info", 3500);
         return;
       }
       showSettings = false;
@@ -758,6 +791,14 @@
   let locked = $state(true);
   let passphrase = $state("");
   let unlocking = $state(false);
+  type VaultChangeStep = "" | "current" | "new" | "confirm";
+  let vaultChangeStep = $state<VaultChangeStep>("");
+  let vaultChangeCurrent = $state("");
+  let vaultChangeFirst = $state("");
+  let vaultChangeMismatch = $state(false);
+  let vaultChangeBusy = $state(false);
+  let vaultChangeError = $state("");
+  let changingVaultSecret = $derived(vaultChangeStep !== "");
 
   // --- First run --------------------------------------------------------------------------
   // `unlock` CREATES the vault when there isn't one, so the gate cannot be one screen: on a
@@ -779,7 +820,7 @@
   let inSetup = $derived(vaultExists === false);
   // Is a secret-entry panel actually on screen? The melody game turns the whole keyboard into a
   // piano, so it must not be armed while the wizard is showing the welcome or appearance step.
-  let gateEntry = $derived(locked && (!inSetup || setupStep === "secret" || setupStep === "confirm"));
+  let gateEntry = $derived((locked || changingVaultSecret) && (!inSetup || setupStep === "secret" || setupStep === "confirm"));
 
   // Clear whichever entry surface the chosen method uses, so "enter it again" starts blank.
   function clearUnlockEntry() {
@@ -792,6 +833,81 @@
     sigilEmojis = [];
     sigilWord = "";
     melodySeq = [];
+  }
+  function beginVaultSecretChange() {
+    showSettings = false;
+    error = "";
+    vaultChangeCurrent = "";
+    vaultChangeFirst = "";
+    vaultChangeMismatch = false;
+    vaultChangeError = "";
+    vaultChangeStep = "current";
+    clearUnlockEntry();
+  }
+  function cancelVaultSecretChange() {
+    vaultChangeCurrent = "";
+    vaultChangeFirst = "";
+    vaultChangeMismatch = false;
+    vaultChangeError = "";
+    vaultChangeStep = "";
+    clearUnlockEntry();
+    settingsPage = "vault";
+    showSettings = true;
+  }
+  async function submitVaultSecretChange() {
+    const secret = unlockSecret();
+    if (!secret || vaultChangeBusy) return;
+    vaultChangeError = "";
+    if (vaultChangeStep === "current") {
+      vaultChangeCurrent = secret;
+      vaultChangeStep = "new";
+      clearUnlockEntry();
+      return;
+    }
+    if (vaultChangeStep === "new") {
+      if (secret === vaultChangeCurrent) {
+        vaultChangeError = "Choose a different secret from the current one.";
+        clearUnlockEntry();
+        return;
+      }
+      vaultChangeFirst = secret;
+      vaultChangeMismatch = false;
+      vaultChangeStep = "confirm";
+      clearUnlockEntry();
+      return;
+    }
+    if (vaultChangeStep !== "confirm") return;
+    if (secret !== vaultChangeFirst) {
+      vaultChangeMismatch = true;
+      clearUnlockEntry();
+      return;
+    }
+    vaultChangeBusy = true;
+    try {
+      await invoke("change_vault_secret", {
+        currentSecret: vaultChangeCurrent,
+        newSecret: vaultChangeFirst,
+      });
+      vaultChangeCurrent = "";
+      vaultChangeFirst = "";
+      vaultChangeMismatch = false;
+      vaultChangeStep = "";
+      clearUnlockEntry();
+      settingsPage = "vault";
+      showSettings = true;
+      toast("Vault secret changed. Existing backups still use their old secret.", "ok", 6500);
+    } catch (e) {
+      // A wrong current secret is intentionally indistinguishable from a damaged wrapper here.
+      // Drop both transient strings and restart authentication; never leave them in the form.
+      vaultChangeCurrent = "";
+      vaultChangeFirst = "";
+      vaultChangeMismatch = false;
+      vaultChangeError = `The vault secret was not changed: ${e}`;
+      vaultChangeStep = "current";
+      clearUnlockEntry();
+    } finally {
+      vaultChangeBusy = false;
+    }
   }
   // Step 1 → 2: hold what was entered and blank the surface, so the confirmation is a real
   // second performance rather than a second look at the same drawing.
@@ -1927,23 +2043,61 @@
     }
   }
 
-  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen, persisted
-  // to localStorage. Entering a channel snapshots the PRIOR mark as `dividerTs` (so a "New" divider
-  // renders before the first message past it), then the mark advances to the latest once loaded.
-  let readMarks = $state<Record<string, number>>(loadReadMarks());
+  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen. It and
+  // composer drafts are sealed into the unlocked vault: neither sensitive text nor reading habits
+  // fall back to plaintext browser storage.
+  let readMarks = $state<Record<string, number>>({});
   let dividerTs = $state(Number.POSITIVE_INFINITY);
-  function loadReadMarks(): Record<string, number> {
-    try {
-      return JSON.parse(localStorage.getItem("catcoms.readmarks") ?? "{}") as Record<string, number>;
-    } catch {
-      return {};
-    }
+  let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let uiStateReady = false;
+  let uiStateSaveFailed = false;
+  let uiStateLoadGeneration = 0;
+  function scheduleUiStateSave() {
+    if (!uiStateReady || locked) return;
+    clearTimeout(uiStateSaveTimer);
+    uiStateSaveTimer = setTimeout(() => {
+      const json = JSON.stringify({ version: 1, drafts, readMarks });
+      void invoke("save_ui_state", { json }).then(() => {
+        uiStateSaveFailed = false;
+      }).catch((e) => {
+        console.warn("UI continuity save failed", e);
+        if (!uiStateSaveFailed) toast("Draft/read-position save failed; this session is still usable", "err", 8000);
+        uiStateSaveFailed = true;
+      });
+    }, 250);
   }
-  function persistReadMarks() {
+  async function loadUiContinuity(generation: number) {
     try {
-      localStorage.setItem("catcoms.readmarks", JSON.stringify(readMarks));
-    } catch {
-      /* storage unavailable: read marks are best-effort */
+      let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
+      if (generation !== uiStateLoadGeneration || locked) return;
+      // Older builds kept read positions in plaintext localStorage. Migrate that one app-owned
+      // key only when the sealed record has none, and erase it only after the native save succeeds.
+      // A failed save leaves the legacy copy recoverable for the next launch.
+      try {
+        const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
+        if (migration.saveBeforeRemoval) {
+          await invoke("save_ui_state", {
+            json: JSON.stringify(migration.state),
+          });
+        }
+        if (migration.removeLegacy) {
+          localStorage.removeItem("catcoms.readmarks");
+        }
+        next = migration.state;
+      } catch (migrationError) {
+        console.warn("Legacy read-mark migration failed", migrationError);
+      }
+      if (generation !== uiStateLoadGeneration || locked) return;
+      drafts = next.drafts;
+      readMarks = next.readMarks;
+    } catch (e) {
+      if (generation !== uiStateLoadGeneration || locked) return;
+      console.warn("UI continuity load failed", e);
+      drafts = {};
+      readMarks = {};
+      error = `Durable history could not be authenticated and was not loaded: ${e}`;
+    } finally {
+      if (generation === uiStateLoadGeneration && !locked) uiStateReady = true;
     }
   }
   function chanKey(): string | null {
@@ -1960,7 +2114,7 @@
     const latest = messages.reduce((a, m) => Math.max(a, m.ts), 0);
     if ((readMarks[k] ?? 0) < latest) {
       readMarks[k] = latest;
-      persistReadMarks();
+      scheduleUiStateSave();
     }
   }
   // Index of the first message newer than the read boundary (-1 if all read).
@@ -1985,6 +2139,7 @@
   }
   let messageFrameBreaks = $derived.by(() => {
     const breaks = new Set<number>();
+    if (!CHAT_MESSAGE_FRAMES_ENABLED) return breaks;
     if (firstUnreadIdx >= 0) breaks.add(firstUnreadIdx);
     for (let i = 1; i < messages.length; i++) {
       if (!sameDay(messages[i - 1].ts, messages[i].ts)) breaks.add(i);
@@ -2087,7 +2242,10 @@
   let recordingTextEffect = $state("");
   let textEffectKeyError = $state("");
   let suppressTextEffectSelection = false;
-  const QUICK_TEXT_EFFECT_IDS = ["shake", "wave", "sparkle", "animalese", "flame", "gloom", "cyber", "crt", "censor", "pride/rainbow"];
+  const QUICK_TEXT_EFFECT_IDS = [
+    "shake", "wave", "sparkle", "speakese", "perfect-cherry-blossom", "red-truth",
+    "flame", "gloom", "cyber", "crt", "censor", "pride/rainbow",
+  ];
   let quickTextEffects = $derived(TEXT_EFFECTS.filter((effect) => QUICK_TEXT_EFFECT_IDS.includes(effect.id)));
   let filteredTextEffects = $derived.by(() => {
     const q = textEffectQuery.trim().toLowerCase();
@@ -2300,8 +2458,174 @@
   });
 
   // The main pane shows one tab at a time.
-  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events";
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity";
   let view = $state<Tab>("chat");
+  type StorageHealth = {
+    listed_files: number; referenced_chunks: number; verified_chunks: number;
+    missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
+    verified_bytes: number; has_peers: boolean;
+    checked_at_ms: number; unique_files: number; logical_bytes: number;
+    local_estimated_bytes: number; pinned_files: number; pinned_logical_bytes: number;
+    pinned_local_estimated_bytes: number;
+    categories: Array<{ name: string; files: number; logical_bytes: number; local_estimated_bytes: number; pinned_files: number }>;
+    largest_files: Array<{ name: string; path: string; cid: string; mime: string; logical_bytes: number; local_estimated_bytes: number; pinned: boolean; held: number; total: number }>;
+  };
+  let storageHealth = $state<StorageHealth | null>(null);
+  // The Rust bridge is the authoritative once-per-process cache (and survives frontend HMR).
+  // This mirror avoids even an IPC round-trip when revisiting a server in this frontend mount.
+  const storageHealthCache = new Map<number, StorageHealth>();
+  let storageChecking = $state(false);
+  let storageRepairing = $state(false);
+  let storageRepairNote = $state("");
+  let storageCategoryMax = $derived(Math.max(1, ...(storageHealth?.categories ?? []).map((row) => row.local_estimated_bytes)));
+  let moderation = $state<ModerationState>({ events: [], votes: [] });
+  let moderationMessages = $state<TimelineMessage[]>([]);
+  let moderationLoading = $state(false);
+  let moderationReason = $state("");
+  let moderationSelected = $state<Set<string>>(new Set());
+  let moderationAnchor = $state("");
+  // Batch deletion is irreversible at the product layer, so require a deliberate second click.
+  // Any selection change disarms it, preventing a confirmation for one range applying to another.
+  let moderationDeleteArmed = $state(false);
+  let expandedWarnings = $state<Set<string>>(new Set());
+  let caseTarget = $state("");
+  let caseReason = $state("");
+  let caseEvidence = $state<Set<string>>(new Set());
+  let moderationUserFilter = $state("");
+  let moderationTimeline = $derived(buildModerationTimeline(moderationMessages, moderation.events));
+  let filteredModerationTimeline = $derived(filterModerationTimeline(moderationTimeline, moderationUserFilter));
+  let moderationGraph = $derived(buildModerationGraph(filteredModerationTimeline));
+  let moderationUsers = $derived.by(() => [...new Set(moderationTimeline.flatMap(timelineIdentities))]
+    .sort((a, b) => nameOf(a).localeCompare(nameOf(b))));
+  let moderationWarnings = $derived(warningMap(moderation.events));
+  let moderationCases = $derived(openKickCases(moderation.events));
+  let signedWarnings = $derived(moderation.events.filter((event) => event.kind === "warning" && event.signature_valid && event.authorized));
+
+  function warningFor(channel: string, messageId: string): ModerationEvent | undefined {
+    return moderationWarnings.get(`${channel}:${messageId}`);
+  }
+  function toggleWarning(id: string) {
+    const next = new Set(expandedWarnings);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    expandedWarnings = next;
+  }
+  function selectModerationRow(key: string, extend: boolean) {
+    const result = selectTimelineRows(
+      filteredModerationTimeline.map((row) => row.key), moderationSelected, key, moderationAnchor, extend,
+    );
+    moderationSelected = result.selected;
+    moderationAnchor = result.anchor;
+    moderationDeleteArmed = false;
+  }
+  function selectedModerationMessages(): TimelineMessage[] {
+    return filteredModerationTimeline
+      .filter((row) => row.kind === "message" && moderationSelected.has(row.key))
+      .map((row) => (row as Extract<typeof row, { kind: "message" }>).message);
+  }
+  function setModerationUserFilter(identity: string) {
+    moderationUserFilter = identity;
+    moderationSelected = new Set();
+    moderationAnchor = "";
+    moderationDeleteArmed = false;
+  }
+  async function refreshModeration() {
+    if (activeServerId === null || cur?.isDm) {
+      moderation = { events: [], votes: [] };
+      moderationMessages = [];
+      return;
+    }
+    moderationLoading = true;
+    try {
+      const server = activeServerId;
+      const [state, channelRows] = await Promise.all([
+        invoke<ModerationState>("get_moderation", { server }),
+        canModerate
+          ? Promise.all((cur?.channels ?? []).map(async (channel) => {
+              const rows = await invoke<Msg[]>("get_messages", { server, channel: channel.id });
+              return rows.map((message): TimelineMessage => ({
+                id: message.id, author: message.author, text: message.text, ts: message.ts,
+                channel: channel.id, channelName: channel.name,
+              }));
+            }))
+          : Promise.resolve([] as TimelineMessage[][]),
+      ]);
+      moderation = state;
+      moderationMessages = channelRows.flat();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      moderationLoading = false;
+    }
+  }
+  async function warnModerationSelection() {
+    if (activeServerId === null || !moderationReason.trim()) return;
+    const selected = selectedModerationMessages();
+    if (!selected.length) return;
+    try {
+      for (const message of selected) {
+        await invoke("warn_message", {
+          server: activeServerId, channel: message.channel,
+          messageId: message.id, reason: moderationReason.trim(),
+        });
+      }
+      moderationReason = "";
+      moderationSelected = new Set();
+      moderationDeleteArmed = false;
+      await refreshModeration();
+      if (view === "chat") await refresh();
+    } catch (e) { error = String(e); }
+  }
+  async function deleteModerationSelection() {
+    if (activeServerId === null) return;
+    const selected = selectedModerationMessages();
+    if (!selected.length) return;
+    if (!moderationDeleteArmed) {
+      moderationDeleteArmed = true;
+      return;
+    }
+    try {
+      for (const message of selected) {
+        await invoke("delete_message", {
+          server: activeServerId, channel: message.channel, msgId: message.id,
+        });
+      }
+      moderationSelected = new Set();
+      moderationDeleteArmed = false;
+      await refreshModeration();
+      if (view === "chat") await refresh();
+    } catch (e) { error = String(e); }
+  }
+  function toggleCaseEvidence(id: string) {
+    const next = new Set(caseEvidence);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    caseEvidence = next;
+  }
+  async function openKickCase() {
+    if (activeServerId === null || !caseTarget || !caseReason.trim()) return;
+    try {
+      await invoke("create_kick_case", {
+        server: activeServerId, target: caseTarget, reason: caseReason.trim(),
+        evidenceIds: [...caseEvidence],
+      });
+      caseReason = "";
+      caseEvidence = new Set();
+      await refreshModeration();
+    } catch (e) { error = String(e); }
+  }
+  async function voteKick(caseId: string, yes: boolean) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("cast_kick_vote", { server: activeServerId, caseId, yes });
+      await refreshModeration();
+    } catch (e) { error = String(e); }
+  }
+  async function resolveKick(caseId: string, remove: boolean) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("resolve_kick_case", { server: activeServerId, caseId, remove });
+      await Promise.all([refreshModeration(), refreshMembers(), refreshRoles()]);
+    } catch (e) { error = String(e); }
+  }
   let wikiPages = $state<string[]>([]);
   let wikiFilter = $state("");
   let filteredWikiPages = $derived.by(() => {
@@ -2919,8 +3243,15 @@
     return profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
   }
   function bubbleStyle(fp: string): string {
+    // Avoid profile/device identity work for every row while live-chat frames are rolled back.
+    if (!CHAT_MESSAGE_FRAMES_ENABLED) return "";
     const isOwn = fp === myFp || (!!myFp && identityOf(fp).fp === identityOf(myFp).fp);
-    return visibleMessageFrameStyle(profileFor(fp)?.bubble, appearance.flat, isOwn);
+    return visibleMessageFrameStyle(
+      profileFor(fp)?.bubble,
+      appearance.flat,
+      isOwn,
+      CHAT_MESSAGE_FRAMES_ENABLED,
+    );
   }
   function arrivalMotion(fp: string, id: string): MessageFrameMotion {
     return visibleMessageFrameMotion(
@@ -3620,7 +3951,12 @@
     locked = false;
     try { sessionStorage.removeItem("catcoms.explicit-lock"); } catch { /* best effort */ }
     const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
-    if (firstServer) void switchServer(firstServer.id);
+    // Drafts/read boundaries must land before switchServer restores the active composer and
+    // snapshots its divider. The native actors are already running, so this is only local UI state.
+    const continuityGeneration = ++uiStateLoadGeneration;
+    void loadUiContinuity(continuityGeneration).finally(() => {
+      if (continuityGeneration === uiStateLoadGeneration && !locked && firstServer) void switchServer(firstServer.id);
+    });
     loadInbox();
     refreshAllServerIcons();
   }
@@ -3658,6 +3994,26 @@
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen() {
     if (locked) return;
+    // Lock wins over an in-progress secret change and drops every transient secret first.
+    vaultChangeCurrent = "";
+    vaultChangeFirst = "";
+    vaultChangeMismatch = false;
+    vaultChangeError = "";
+    vaultChangeStep = "";
+    clearUnlockEntry();
+    // Capture the very latest composer value before clearing the screen. Send the immutable JSON
+    // argument immediately (without awaiting it) so locking stays visually instant while the
+    // native vault writer can finish after the sensitive JS state has been dropped.
+    const key = chanKey();
+    if (key) {
+      if (draft.trim()) drafts[key] = draft;
+      else delete drafts[key];
+    }
+    clearTimeout(uiStateSaveTimer);
+    if (uiStateReady) {
+      const continuityJson = JSON.stringify({ version: 1, drafts, readMarks });
+      void invoke("save_ui_state", { json: continuityJson }).catch((e) => console.warn("Final UI continuity save failed", e));
+    }
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     void invoke("lock_session");
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
@@ -3689,6 +4045,9 @@
     profiles = {};
     files = [];
     statuses = [];
+    moderation = { events: [], votes: [] };
+    moderationMessages = [];
+    storageHealth = null;
     events = [];
     wikiPages = [];
     inboxItems = [];
@@ -3696,6 +4055,12 @@
     serverIcons = {};
     delivery = {};
     draft = "";
+    drafts = {};
+    readMarks = {};
+    uiStateReady = false;
+    uiStateSaveFailed = false;
+    uiStateLoadGeneration += 1;
+    clearTimeout(uiStateSaveTimer);
     passphrase = "";
     error = "";
     syncIntent = false;
@@ -3880,11 +4245,20 @@
   // previously-active server lingers behind the empty DM-home placeholder).
   function clearServerView() {
     view = "chat";
+    moderationSelected = new Set();
+    moderationDeleteArmed = false;
+    moderationAnchor = "";
+    caseEvidence = new Set();
+    moderationUserFilter = "";
+    storageHealth = null;
+    storageRepairNote = "";
     messages = [];
     roster = [];
     members = 0;
     files = [];
     statuses = [];
+    moderation = { events: [], votes: [] };
+    moderationMessages = [];
     onlineMembers = new Set();
   }
   function openNewDm() {
@@ -3914,6 +4288,13 @@
     refreshDmRequests(id); // pick up any friend request that arrived over this server
     // Each server has its own wiki + fileshare; reset per-server view state.
     view = "chat";
+    moderationSelected = new Set();
+    moderationDeleteArmed = false;
+    moderationAnchor = "";
+    caseEvidence = new Set();
+    moderationUserFilter = "";
+    storageHealth = storageHealthCache.get(id) ?? null;
+    storageRepairNote = "";
     activeWikiPage = "";
     wikiBody = "";
     wikiDirty = false;
@@ -3954,6 +4335,11 @@
       refreshEvents(),
       refreshDevices(),
     ]);
+    // Roles are server-scoped. Resolve them before touching moderation so a member never loads
+    // the privileged plane using the role left over from the server they just left.
+    // Everyone receives case/vote state so a community vote can appear in chat, but only a
+    // moderator loads the server-wide message corpus needed by the privileged timeline plane.
+    await refreshModeration();
     syncProfileEditor();
   }
 
@@ -4200,6 +4586,46 @@
       error = String(e);
     }
   }
+  async function refreshStorageHealth() {
+    if (activeServerId === null) return;
+    const server = activeServerId;
+    const cached = storageHealthCache.get(server);
+    if (cached) {
+      storageHealth = cached;
+      return;
+    }
+    storageChecking = true;
+    try {
+      const report = await invoke<StorageHealth>("get_storage_health", { server });
+      storageHealthCache.set(server, report);
+      if (activeServerId === server) storageHealth = report;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      storageChecking = false;
+    }
+  }
+  async function repairStorage() {
+    if (activeServerId === null || storageRepairing) return;
+    storageRepairing = true;
+    storageRepairNote = "";
+    try {
+      const server = activeServerId;
+      const result = await invoke<{ attempted_chunks: number; recovered_chunks: number; health: StorageHealth }>(
+        "repair_storage", { server },
+      );
+      storageHealthCache.set(server, result.health);
+      if (activeServerId === server) storageHealth = result.health;
+      storageRepairNote = result.attempted_chunks
+        ? `Checked ${result.attempted_chunks} damaged or missing chunks; recovered ${result.recovered_chunks}.`
+        : "Everything referenced by this server already verifies.";
+      await refreshFiles();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      storageRepairing = false;
+    }
+  }
   // Lowercase-hex cids embedded in a live wiki page (the never-decay set).
   let wikiPinned = $state<Set<string>>(new Set());
   const isPinned = (cid: string) => wikiPinned.has(cid.toLowerCase());
@@ -4335,6 +4761,9 @@
     if (activeServerId === null) return;
     try {
       roles = await invoke<Record<string, string>>("get_roles", { server: activeServerId });
+      // A demotion closes the privileged surface immediately; hiding only the sidebar entry
+      // would leave a stale moderation page reachable through history/navigation.
+      if (!canModerate && view === "moderation") switchView("chat");
     } catch (e) {
       error = String(e);
     }
@@ -4371,9 +4800,16 @@
 
   function switchView(v: Tab) {
     menu = null;
+    if (v === "moderation" && !canModerate) {
+      toast("Moderation is available to this server's owner and admins", "info", 3500);
+      v = "chat";
+    }
     view = v;
     if (v === "wiki") refreshWiki();
     if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "moderation") refreshModeration();
+    if (v === "storage" || v === "downloads") refreshStorageHealth();
+    if (v === "connectivity") refreshConnectivity();
   }
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
@@ -4467,44 +4903,164 @@
   }
 
   // Text effects are rendered in several independent surfaces, so their viewport/pointer
-  // behaviour is delegated once at the document. Animalese is armed the first time each rendered
-  // instance becomes visible; a WeakSet prevents scroll-jiggling from replaying it. Sound uses the
-  // shared app preference and is deliberately quiet, short, deterministic, and Full-mode only.
+  // behaviour is delegated once at the document. One-shot entrances are armed the first time each
+  // rendered instance becomes visible; a WeakSet prevents scroll-jiggling from replaying them.
+  // Effect audio uses the shared app preference and is short, deterministic, and Full-mode only.
   function mountTextEffectRuntime() {
     const played = new WeakSet<HTMLElement>();
     const observed = new WeakSet<HTMLElement>();
+    const pendingSpeakese = new Set<HTMLElement>();
+    const speakeseRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+    const pendingRedTruth = new Set<HTMLElement>();
+    const redTruthRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
     let pointerFx: HTMLElement | null = null;
-    let animaleseAudioUntil = 0;
+    let speakeseAudioUntil = 0;
+    let redTruthAudioUntil = 0;
 
-    function playAnimalese(el: HTMLElement) {
+    function effectVisible(el: HTMLElement) {
+      const rect = el.getBoundingClientRect();
+      return el.isConnected && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+    }
+
+    function scheduleSpeakese(el: HTMLElement) {
       if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
-      const units = [...el.querySelectorAll<HTMLElement>(".fx-animalese-unit")]
+      const units = [...el.querySelectorAll<HTMLElement>(".fx-speakese-unit")]
         .filter((unit) => (unit.textContent ?? "").trim())
-        .slice(0, 48);
+        .slice(0, MAX_SPEAKESE_BLIPS);
       if (!units.length) return;
       try {
-        audioCtx ??= new AudioContext();
-        void audioCtx.resume();
-        if (audioCtx.currentTime < animaleseAudioUntil) return;
-        const start = audioCtx.currentTime + 0.025;
-        animaleseAudioUntil = start + units.length * 0.052;
-        units.forEach((unit, index) => {
-          const tone = Number(unit.dataset.fxTone ?? 0);
-          const at = start + index * 0.052;
-          const osc = audioCtx!.createOscillator();
-          const gain = audioCtx!.createGain();
-          osc.type = index % 3 === 0 ? "triangle" : "sine";
-          osc.frequency.setValueAtTime(210 + tone * 19 + (index % 4) * 7, at);
-          gain.gain.setValueAtTime(0.0001, at);
-          gain.gain.exponentialRampToValueAtTime(0.018, at + 0.006);
-          gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.043);
-          osc.connect(gain).connect(audioCtx!.destination);
-          osc.start(at);
-          osc.stop(at + 0.05);
+        const ctx = audioCtx;
+        if (!ctx || ctx.state !== "running") { pendingSpeakese.add(el); return; }
+        if (ctx.currentTime < speakeseAudioUntil) return;
+        const start = ctx.currentTime + 0.025;
+        const plan = speakeseSoundPlan(units.map((unit) => Number(unit.dataset.fxTone ?? 0)), start);
+        speakeseAudioUntil = start + units.length * SPEAKESE_STEP_SECONDS;
+        plan.forEach((blip) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = blip.waveform;
+          osc.frequency.setValueAtTime(blip.frequency, blip.at);
+          osc.frequency.exponentialRampToValueAtTime(blip.endFrequency, blip.at + 0.055);
+          gain.gain.setValueAtTime(0.0001, blip.at);
+          gain.gain.exponentialRampToValueAtTime(blip.peak, blip.at + 0.007);
+          gain.gain.exponentialRampToValueAtTime(0.0001, blip.at + 0.061);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(blip.at);
+          osc.stop(blip.stop);
         });
       } catch {
         // Visual reveal remains useful where Web Audio is unavailable or gesture-gated.
       }
+    }
+
+    function scheduleRedTruth(el: HTMLElement) {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
+      try {
+        const ctx = audioCtx;
+        if (!ctx || ctx.state !== "running") { pendingRedTruth.add(el); return; }
+        if (ctx.currentTime < redTruthAudioUntil) return;
+        const plan = redTruthSoundPlan(ctx.currentTime + 0.025);
+        redTruthAudioUntil = plan.sweep.stop;
+        plan.strike.forEach((note) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = note.waveform;
+          osc.frequency.setValueAtTime(note.frequency, note.at);
+          osc.frequency.exponentialRampToValueAtTime(note.endFrequency, note.stop - 0.01);
+          gain.gain.setValueAtTime(0.0001, note.at);
+          gain.gain.exponentialRampToValueAtTime(note.peak, note.at + 0.003);
+          gain.gain.exponentialRampToValueAtTime(0.0001, note.stop - 0.006);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(note.at);
+          osc.stop(note.stop);
+        });
+
+        const sweep = plan.sweep;
+        const duration = sweep.stop - sweep.at;
+        const buffer = ctx.createBuffer(1, Math.ceil(duration * ctx.sampleRate), ctx.sampleRate);
+        const samples = buffer.getChannelData(0);
+        for (let index = 0; index < samples.length; index += 1) samples[index] = redTruthNoiseSample(index);
+        const noise = ctx.createBufferSource();
+        const highpass = ctx.createBiquadFilter();
+        const bandpass = ctx.createBiquadFilter();
+        const washGain = ctx.createGain();
+        noise.buffer = buffer;
+        highpass.type = "highpass";
+        highpass.frequency.setValueAtTime(sweep.highpassFrequency, sweep.at);
+        bandpass.type = "bandpass";
+        bandpass.Q.setValueAtTime(0.58, sweep.at);
+        bandpass.frequency.setValueAtTime(sweep.startFrequency, sweep.at);
+        bandpass.frequency.exponentialRampToValueAtTime(sweep.crestFrequency, sweep.crest);
+        bandpass.frequency.exponentialRampToValueAtTime(sweep.endFrequency, sweep.stop);
+        washGain.gain.setValueAtTime(0.0001, sweep.at);
+        washGain.gain.exponentialRampToValueAtTime(sweep.peak * 0.3, sweep.at + 0.13);
+        washGain.gain.exponentialRampToValueAtTime(sweep.peak, sweep.crest);
+        washGain.gain.exponentialRampToValueAtTime(0.0001, sweep.stop);
+        noise.connect(highpass).connect(bandpass).connect(washGain).connect(ctx.destination);
+        noise.start(sweep.at);
+        noise.stop(sweep.stop);
+      } catch {
+        // The visual seal and reveal do not depend on Web Audio support.
+      }
+    }
+
+    function revealPending(
+      pending: Set<HTMLElement>,
+      timers: Map<HTMLElement, ReturnType<typeof setTimeout>>,
+      schedule: ((effect: HTMLElement) => void) | undefined = undefined,
+    ) {
+      const waiting = [...pending];
+      const visible = waiting.filter(effectVisible);
+      pending.clear(); // never pile several authored voices of the same kind on top of one another
+      for (const effect of waiting) {
+        const timer = timers.get(effect);
+        if (timer) clearTimeout(timer);
+        timers.delete(effect);
+        effect.classList.add("fx-play");
+      }
+      if (schedule && visible[0]) schedule(visible[0]);
+    }
+
+    function flushTextEffectAudio() {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) {
+        revealPending(pendingSpeakese, speakeseRevealTimers);
+        revealPending(pendingRedTruth, redTruthRevealTimers);
+        return;
+      }
+      try {
+        audioCtx ??= new AudioContext();
+        const playPending = () => {
+          if (!audioCtx || audioCtx.state !== "running") return;
+          revealPending(pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
+          revealPending(pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+        };
+        if (audioCtx.state === "running") playPending();
+        else void audioCtx.resume().then(playPending).catch(() => { /* retry on the next gesture */ });
+      } catch {
+        /* Web Audio is optional; letter playback still runs. */
+      }
+    }
+
+    function startOneShot(
+      el: HTMLElement,
+      pending: Set<HTMLElement>,
+      timers: Map<HTMLElement, ReturnType<typeof setTimeout>>,
+      schedule: (effect: HTMLElement) => void,
+    ) {
+      const wantsSound = document.documentElement.dataset.textEffects === "full" && soundOn;
+      if (!wantsSound || audioCtx?.state === "running") {
+        el.classList.add("fx-play");
+        if (wantsSound) schedule(el);
+        return;
+      }
+      // Keep sound and letters together when the webview is waiting for a trusted gesture. If no
+      // gesture comes promptly, reveal silently so authored text can never remain inaccessible.
+      pending.add(el);
+      const timer = setTimeout(() => {
+        timers.delete(el);
+        if (pending.delete(el)) el.classList.add("fx-play");
+      }, 420);
+      timers.set(el, timer);
     }
 
     const intersection = new IntersectionObserver((entries) => {
@@ -4514,8 +5070,11 @@
         intersection.unobserve(el);
         if (played.has(el)) continue;
         played.add(el);
-        el.classList.add("fx-play");
-        playAnimalese(el);
+        if (el.dataset.textFx === "speakese") {
+          startOneShot(el, pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
+        } else if (el.dataset.textFx === "red-truth") {
+          startOneShot(el, pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+        }
       }
     }, { threshold: 0.18 });
 
@@ -4526,9 +5085,15 @@
       for (const effect of effects) {
         effect.querySelectorAll<HTMLElement>(".text-fx-unit").forEach((unit, index) =>
           unit.style.setProperty("--fx-i", String(index)));
-        if (effect.dataset.textFx === "animalese" && !observed.has(effect)) {
+        if (["speakese", "red-truth"].includes(effect.dataset.textFx ?? "") && !observed.has(effect)) {
           observed.add(effect);
-          intersection.observe(effect);
+          // Picker/settings previews demonstrate the entrance, but selecting or browsing effects
+          // must never make sound. Authored content is the only observer-driven audio source.
+          if (effect.closest(".text-fx-selection-bar, .text-fx-catalog, .text-fx-key-preview")) {
+            effect.classList.add("fx-play");
+          } else {
+            intersection.observe(effect);
+          }
         }
       }
     }
@@ -4545,8 +5110,10 @@
       const next = document.documentElement.dataset.textEffects === "full"
         ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-text-fx='censor'])") ?? null
         : null;
+      const entered = next !== pointerFx;
       if (pointerFx && pointerFx !== next) {
         pointerFx.classList.remove("fx-pointer");
+        pointerFx.classList.remove("fx-petal-burst");
         pointerFx.style.removeProperty("--fx-px");
         pointerFx.style.removeProperty("--fx-py");
       }
@@ -4558,12 +5125,50 @@
       next.style.setProperty("--fx-px", x.toFixed(3));
       next.style.setProperty("--fx-py", y.toFixed(3));
       next.classList.add("fx-pointer");
+      if (cherryBlossomShouldBurst(entered, next.dataset.textFx)) {
+        // One bloom per visit: movement within the same words may shift them, but only leaving and
+        // entering again re-arms their petal burst.
+        next.classList.add("fx-petal-burst");
+      }
+    };
+    // Web Audio must be resumed from a trusted interaction in Chromium/WebView. Warm the shared
+    // context on normal app input, then flush any visible one-shot effect waiting for it.
+    const onSoundGesture = () => flushTextEffectAudio();
+    // A textarea keeps its old selection after losing focus. Close the Aa palette when the user
+    // goes elsewhere, while allowing its own buttons and the source editor to keep it alive.
+    const onPalettePointerDown = (event: PointerEvent) => {
+      if (!textEffectTarget) return;
+      const target = event.target as HTMLElement | null;
+      const region: TextEffectPointerRegion = target?.closest(".text-fx-selection-bar")
+        ? "palette"
+        : target?.closest(".text-fx-trigger")
+          ? "trigger"
+          : target === textEffectElement(textEffectTarget)
+            ? "editor"
+            : "outside";
+      if (dismissTextEffectPalette(showTextEffectCatalog, region)) textEffectTarget = null;
+    };
+    // `select` is not emitted consistently when typing replaces a selection. The document-level
+    // event follows caret changes too, so a collapsed selection cannot leave the Aa bar behind.
+    const onDocumentSelectionChange = () => {
+      const target = activeTextEffectTarget();
+      if (target) onTextEffectSelection(target);
     };
     document.addEventListener("pointermove", onPointerMove, { passive: true });
+    document.addEventListener("pointerdown", onSoundGesture, true);
+    document.addEventListener("keydown", onSoundGesture, true);
+    document.addEventListener("pointerdown", onPalettePointerDown, true);
+    document.addEventListener("selectionchange", onDocumentSelectionChange);
     return () => {
       intersection.disconnect();
       mutations.disconnect();
+      for (const timer of speakeseRevealTimers.values()) clearTimeout(timer);
+      for (const timer of redTruthRevealTimers.values()) clearTimeout(timer);
       document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerdown", onSoundGesture, true);
+      document.removeEventListener("keydown", onSoundGesture, true);
+      document.removeEventListener("pointerdown", onPalettePointerDown, true);
+      document.removeEventListener("selectionchange", onDocumentSelectionChange);
     };
   }
 
@@ -4571,6 +5176,10 @@
   // message viewport's coordinates and animation phase. The result is one channel-wide beam,
   // revealed only while it crosses frames whose authors opted into the layer.
   function channelScan(node: HTMLUListElement) {
+    // Do not attach a ResizeObserver, MutationObserver, scroll listener, or animation-sync work
+    // while the live-chat frame rollout is paused. The editor preview remains available and saved
+    // frame values remain untouched.
+    if (!CHAT_MESSAGE_FRAMES_ENABLED) return;
     let raf = 0;
     const observedBodies = new Set<HTMLElement>();
 
@@ -6699,6 +7308,7 @@
       .slice(0, 6);
   });
   function onComposerInput(e: Event & { currentTarget: HTMLTextAreaElement }) {
+    saveDraftFor(chanKey());
     const caret = e.currentTarget.selectionStart ?? draft.length;
     const m = /@([^\s@[\]]{0,30})$/.exec(draft.slice(0, caret));
     if (m) {
@@ -8572,6 +9182,10 @@
     myVideo = "";
     pushInstState();
   }
+  function toggleVideo(kind: "cam" | "screen") {
+    if (myVideo === kind) stopVideo();
+    else void startVideo(kind);
+  }
   // Feeding a MediaStream to a <video> is the one thing markup cannot do: srcObject is a property,
   // never an attribute. Update swaps the stream in place (a replaceTrack keeps the same object,
   // so the guard makes that a no-op and never restarts playback).
@@ -9103,12 +9717,14 @@
     }
   }
 
-  // Per-channel composer drafts (in-memory): switching channels/servers preserves what you'd typed.
+  // Per-channel composer drafts: switching channels/servers preserves what you typed, and the
+  // bounded map is vault-sealed through scheduleUiStateSave for restart durability.
   let drafts = $state<Record<string, string>>({});
   function saveDraftFor(key: string | null) {
     if (!key) return;
     if (draft.trim()) drafts[key] = draft;
     else delete drafts[key];
+    scheduleUiStateSave();
   }
   function loadDraftFor(key: string | null) {
     draft = (key && drafts[key]) || "";
@@ -9143,6 +9759,7 @@
     replyingTo = "";
     mentionQuery = null;
     if (key) delete drafts[key];
+    scheduleUiStateSave();
     sending = true;
     const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
     messages = [...messages, {
@@ -9174,6 +9791,7 @@
       if (activeServerId === server && cur?.active === channel && !draft.trim()) {
         draft = text;
         if (key) drafts[key] = text;
+        scheduleUiStateSave();
         replyingTo = reply_to;
       }
     } finally {
@@ -10015,6 +10633,7 @@
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
         spaceActivityAt[server] = Date.now();
+        if (server === activeServerId && view === "moderation") void refreshModeration();
         // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
         scheduleInboxReload();
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
@@ -10065,7 +10684,10 @@
       }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
-        if (e.payload.server === activeServerId) refreshFiles();
+        if (e.payload.server === activeServerId) {
+          refreshFiles();
+          if (view === "storage" || view === "downloads") refreshStorageHealth();
+        }
       }),
       listen<{
         server: number;
@@ -10130,6 +10752,9 @@
       }),
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
+      }),
+      listen<{ server: number }>("moderation-updated", (e) => {
+        if (e.payload.server === activeServerId) refreshModeration();
       }),
       listen<{ server: number }>("livery-changed", (e) => {
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
@@ -10375,6 +11000,8 @@
     };
     // Losing focus mid-hold would otherwise strand a sounding note and an open chord group.
     const onBlur = () => {
+      textEffectTarget = null;
+      showTextEffectCatalog = false;
       keyNotes.clear();
       releaseAll();
       stopPlayback();
@@ -11341,6 +11968,25 @@
   </svg>
 {/snippet}
 
+{#snippet icoShield()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 2.8 20 6v5.6c0 5-3.2 8.2-8 9.7-4.8-1.5-8-4.7-8-9.7V6z" />
+    <path d="m8.5 12 2.2 2.2 4.8-5" />
+  </svg>
+{/snippet}
+
+{#snippet icoStorage()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <ellipse cx="12" cy="5.5" rx="8" ry="3" /><path d="M4 5.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="M4 11.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="m9 17.2 1.8 1.8 4-4" />
+  </svg>
+{/snippet}
+
+{#snippet icoConnectivity()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4.2 9.4a11 11 0 0 1 15.6 0M7.2 12.5a6.8 6.8 0 0 1 9.6 0M10.2 15.6a2.6 2.6 0 0 1 3.6 0" /><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+  </svg>
+{/snippet}
+
 {#snippet icoPin()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M20 10c0 5.6-8 12-8 12s-8-6.4-8-12a8 8 0 0 1 16 0z" />
@@ -12032,6 +12678,16 @@
     <form class="new-page" onsubmit={(e) => { e.preventDefault(); createWikiPage(); }}>
       <input bind:value={newWikiPage} placeholder="+ new page (use / to nest)" />
     </form>
+  {:else if view === "moderation"}
+    <h3><span>Moderation plane</span></h3>
+    <p class="muted small">Signed warnings, evidence-backed cases and the server-wide event timeline.</p>
+    <p class="muted small">Votes advise the owner; they never remove a member by themselves.</p>
+  {:else if view === "storage"}
+    <h3><span>Storage health</span></h3>
+    <p class="muted small">Verifies seals, content addresses and file references. Repair only fetches from authenticated members.</p>
+  {:else if view === "connectivity"}
+    <h3><span>Connectivity</span></h3>
+    <p class="muted small">Evidence from the last connection attempt, plus the live member count. “Started” is not presented as “reachable”.</p>
   {:else if view === "files"}
     <h3><span>Folders</span></h3>
     <ul class="channel-list folder-nav">
@@ -12161,7 +12817,7 @@
   <!-- One thing at a time, by priority: a shut vault shows nothing here at all, since this strip
        is in every screenshot of the lock screen. -->
   <div class="tb-slot" data-tauri-drag-region>
-    {#if locked}
+    {#if locked || changingVaultSecret}
       <!-- Deliberately empty: the wordmark is the whole bar while the vault is shut. -->
     {:else if inCall}
       <span class="tb-call" data-tauri-drag-region title="Your mic, live in this room">
@@ -12218,12 +12874,12 @@
 </div>
 
 <main>
-  {#if eclipseCaution && activeServerId !== null && !locked}
+  {#if eclipseCaution && activeServerId !== null && !locked && !changingVaultSecret}
     <div class="eclipse-banner" role="status">
       ⚠ You may be isolated from this server: few members are reachable. Verify a member out of band.
     </div>
   {/if}
-  {#if locked}
+  {#if locked || changingVaultSecret}
     <div class="start gate" class:setup={inSetup}>
       {#if vaultExists === null}
         <!-- One frame of nothing beats guessing: showing "unlock" to a new user, or "set up" to
@@ -12351,6 +13007,17 @@
             passphrase is the strongest.
           </p>
         {/if}
+      {:else if changingVaultSecret}
+        {@render brandMark(`vault secret · ${vaultChangeStep === "current" ? "verify" : vaultChangeStep === "new" ? "choose" : "confirm"}`)}
+        <p class="muted">
+          {vaultChangeStep === "current"
+            ? "Enter your current vault secret. It is checked only when the replacement is ready, so a failed change cannot leave the vault half-updated."
+            : vaultChangeStep === "new"
+              ? "Choose a new passphrase, sigil, or tune. This rewraps the same random vault key; it does not expose or rewrite your server data."
+              : "Enter the new secret again. After this succeeds, the old secret opens only backups that were exported before the change."}
+        </p>
+        {#if vaultChangeMismatch}<p class="error">That did not match the new secret. Cleared: try the confirmation again.</p>{/if}
+        {#if vaultChangeError}<p class="error">{vaultChangeError}</p>{/if}
       {:else}
         {@render brandMark("")}
         <p class="muted">
@@ -12360,7 +13027,7 @@
       {/if}
       <!-- Locked while confirming: the two performances are compared as encoded strings, so
            switching method between them could only ever mismatch. -->
-      {@const tabsLocked = inSetup && setupStep === "confirm"}
+      {@const tabsLocked = (inSetup && setupStep === "confirm") || vaultChangeStep === "confirm"}
       <div class="ul-tabs" role="tablist">
         <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "pass"} aria-selected={unlockMethod === "pass"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "pass"; }}>
           Passphrase <span class="ul-rec">recommended</span>
@@ -12375,7 +13042,7 @@
           <input
             type="password"
             bind:value={passphrase}
-            onkeydown={(e) => e.key === "Enter" && passphrase && gateSubmit()}
+            onkeydown={(e) => e.key === "Enter" && passphrase && (changingVaultSecret ? submitVaultSecretChange() : gateSubmit())}
             placeholder="passphrase"
             autofocus
           />
@@ -12643,6 +13310,13 @@
           <button class="ghost" onclick={() => (setupStep === "confirm" ? setupRestart() : (setupStep = "welcome"))}>← back</button>
           <button onclick={gateSubmit} disabled={!unlockSecret()}>
             {setupStep === "confirm" ? "Confirm" : "Continue"}
+          </button>
+        </div>
+      {:else if changingVaultSecret}
+        <div class="setup-actions">
+          <button class="ghost" disabled={vaultChangeBusy} onclick={cancelVaultSecretChange}>Cancel</button>
+          <button disabled={vaultChangeBusy || !unlockSecret()} onclick={submitVaultSecretChange}>
+            {vaultChangeBusy ? "Rewrapping vault…" : vaultChangeStep === "confirm" ? "Change vault secret" : "Continue"}
           </button>
         </div>
       {:else}
@@ -13029,6 +13703,18 @@
         {#if canInvite || cur?.invite}
           <button class="ghost invite-quick" onclick={() => openServerSettings(null, "invites")}>＋ Invite someone</button>
         {/if}
+        <div class="sidebar-utility" aria-label="Server safety and operations">
+          {#if canModerate}
+            <button type="button" class="sidebar-mod" class:active={view === "moderation"} onclick={() => switchView("moderation")}>
+              {@render icoShield()}<span>Moderation</span>
+              {#if moderationCases.length}<b>{moderationCases.length}</b>{/if}
+            </button>
+          {/if}
+          <div class="sidebar-ops">
+            <button type="button" class:active={view === "storage"} title="Storage health & repair" aria-label="Storage health and repair" onclick={() => switchView("storage")}>{@render icoStorage()}<span>Storage</span></button>
+            <button type="button" class:active={view === "connectivity"} title="Connectivity assistant" aria-label="Connectivity assistant" onclick={() => switchView("connectivity")}>{@render icoConnectivity()}<span>Connect</span></button>
+          </div>
+        </div>
         {@render youPanel()}
         {/if}
       </aside>
@@ -13135,6 +13821,24 @@
                 {/each}
               </ul>
             </div>
+          {/if}
+          {#if !canModerate && !cur?.isDm && moderationCases.length}
+            <section class="community-votes" aria-label="Community kick votes">
+              {#each moderationCases as kick (kick.id)}
+                {@const tally = voteTally(moderation.votes, kick.id)}
+                {@const evidence = signedWarnings.filter((warning) => kick.evidence_ids.includes(warning.id))}
+                <article>
+                  <span class="community-vote-mark">?</span>
+                  <div>
+                    <strong>Community vote: remove {nameOf(kick.target)}?</strong>
+                    <p>{kick.reason}</p>
+                    {#if evidence.length}<details><summary>{evidence.length} warned post{evidence.length === 1 ? "" : "s"} attached as evidence</summary>{#each evidence as warning (warning.id)}<blockquote><b>{warning.reason}</b><span>{msgSnippet(warning.message_text, 180)}</span></blockquote>{/each}</details>{/if}
+                    <span class="muted small">{tally.yes} yes · {tally.no} no · advisory only; the owner makes the final MLS removal decision</span>
+                  </div>
+                  <div class="community-vote-actions"><button class="ghost small" onclick={() => voteKick(kick.id, true)}>Vote yes</button><button class="ghost small" onclick={() => voteKick(kick.id, false)}>Vote no</button></div>
+                </article>
+              {/each}
+            </section>
           {/if}
           {#if showSearch}
             <div class="msg-search">
@@ -13300,13 +14004,18 @@
                 !m.reply_to &&
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
-              {@const framePosition = messageFramePosition(messages, mi, messageFrameBreaks)}
+              {@const framePosition = CHAT_MESSAGE_FRAMES_ENABLED
+                ? messageFramePosition(messages, mi, messageFrameBreaks)
+                : "single"}
               {@const bubble = bubbleStyle(m.author)}
-              {@const messageFrame = parseMessageFrame(profileFor(m.author)?.bubble)}
+              {@const messageFrame = CHAT_MESSAGE_FRAMES_ENABLED
+                ? parseMessageFrame(profileFor(m.author)?.bubble)
+                : DEFAULT_MESSAGE_FRAME}
               {@const arrival = arrivalMotion(m.author, m.id)}
               {@const arrivalVars = arrivalStyle(m.author)}
               {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
               {@const ident = identityOf(m.author)}
+              {@const warning = warningFor(cur?.active ?? "", m.id)}
               <li
                 class="frame-{messageFrame.shape}"
                 data-mi={mi}
@@ -13408,7 +14117,15 @@
                       <span class="muted small">Enter to save · Esc to cancel</span>
                     </div>
                   </div>
+                {:else if warning && !expandedWarnings.has(warning.id)}
+                  <button type="button" class="warned-collapse" onclick={() => toggleWarning(warning.id)}>
+                    <span class="warned-mark">!</span>
+                    <span><b>A moderator warned this post</b><small>{warning.reason} · expand for context</small></span>
+                  </button>
                 {:else}
+                  {#if warning}
+                    <button type="button" class="warning-banner" onclick={() => toggleWarning(warning.id)} title="Collapse this warned post"><b>Warning:</b> {warning.reason}<span>collapse</span></button>
+                  {/if}
                   <span class="text">{@html renderMessage(m.text, myMentionName)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
                 {/if}
                 {#if m.id && replyCounts.get(m.id)}
@@ -13561,6 +14278,195 @@
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
               <button type="submit" disabled={uploading || sending}>Send</button>
             </form>
+          </div>
+        {:else if view === "moderation"}
+          <div class="moderation-pane tab-pane">
+            <header class="ops-head">
+              <div>
+                <span class="stx-crumb">SERVER // SAFETY // MODERATION</span>
+                <h2>Moderation plane</h2>
+                <p class="muted small">A public, signed history. Warnings preserve what was seen; kick votes advise the owner and never bypass MLS authorization.</p>
+              </div>
+              <button class="ghost small" disabled={moderationLoading} onclick={refreshModeration}>{moderationLoading ? "Loading…" : "Refresh"}</button>
+            </header>
+            {#if canModerate}
+              <section class="mod-batch">
+                <div><strong>{selectedModerationMessages().length} message{selectedModerationMessages().length === 1 ? "" : "s"} selected</strong><span class="muted small">Click a box; Shift-click extends the range.</span></div>
+                <input bind:value={moderationReason} maxlength="2048" placeholder="Public warning reason…" />
+                <button disabled={!selectedModerationMessages().length || !moderationReason.trim()} onclick={warnModerationSelection}>Warn &amp; collapse</button>
+                <button class="danger-btn" disabled={!selectedModerationMessages().length} onclick={deleteModerationSelection}>{moderationDeleteArmed ? `Confirm delete ${selectedModerationMessages().length}` : "Delete selected"}</button>
+              </section>
+            {/if}
+            <section class="mod-visual">
+              <header>
+                <div>
+                  <h3>ACTIVITY FLOW <span>{filteredModerationTimeline.length}</span></h3>
+                  <p class="muted small">Each rail is a member. Lines connect a moderator action to the person it concerns; the detailed evidence remains in the scroll below.</p>
+                </div>
+                <label class="mod-user-filter">
+                  <span>View user</span>
+                  <select value={moderationUserFilter} onchange={(event) => setModerationUserFilter(event.currentTarget.value)}>
+                    <option value="">All users</option>
+                    {#each moderationUsers as identity (identity)}
+                      <option value={identity}>{nameOf(identity)}</option>
+                    {/each}
+                  </select>
+                </label>
+              </header>
+              <div class="mod-graph-scroll">
+                <svg
+                  class="mod-graph"
+                  viewBox={`0 0 ${moderationGraph.width} ${moderationGraph.height}`}
+                  style={`min-width:${Math.max(760, moderationGraph.nodes.length * 14)}px`}
+                  role="img"
+                  aria-label={`Moderation activity flow across ${moderationGraph.lanes.length} user lanes`}
+                >
+                  {#each moderationGraph.lanes as lane (lane.identity)}
+                    <g class="mod-lane">
+                      <text x="8" y={lane.y + 4}>{nameOf(lane.identity)}</text>
+                      <line x1="150" y1={lane.y} x2={moderationGraph.width - 24} y2={lane.y}></line>
+                    </g>
+                  {/each}
+                  {#each moderationGraph.nodes as node (node.key)}
+                    {#if node.fromY !== node.y}
+                      <path class="mod-branch" d={`M ${node.x - 10} ${node.fromY} C ${node.x - 3} ${node.fromY}, ${node.x - 3} ${node.y}, ${node.x} ${node.y}`}></path>
+                    {/if}
+                    <a href={`#mod-row-${node.key}`} aria-label={`${node.kind} at ${new Date(node.ts).toLocaleString()}`}>
+                      <circle class="mod-node" class:message={node.kind === "message"} class:warning={node.kind === "warning"} class:case={node.kind === "kick_case"} class:resolution={node.kind === "case_resolution"} cx={node.x} cy={node.y} r={node.kind === "message" ? 4 : 6}></circle>
+                      <title>{node.kind.replace("_", " ")} · {new Date(node.ts).toLocaleString()}</title>
+                    </a>
+                  {/each}
+                </svg>
+              </div>
+              <div class="mod-legend muted small"><span><i class="message"></i>message</span><span><i class="warning"></i>warning</span><span><i class="case"></i>kick case</span><span><i class="resolution"></i>resolution</span></div>
+            </section>
+            <div class="mod-grid">
+              <section class="mod-timeline">
+                <h3>EVENT DETAIL <span>{filteredModerationTimeline.length}</span></h3>
+                <ol>
+                  {#each [...filteredModerationTimeline].reverse() as row (row.key)}
+                    <li id={`mod-row-${row.key}`} class:mod-event={row.kind === "event"} class:selected={moderationSelected.has(row.key)}>
+                      {#if row.kind === "message"}
+                        <label class="mod-check" title="Select this message">
+                          <input type="checkbox" checked={moderationSelected.has(row.key)} onclick={(e) => selectModerationRow(row.key, e.shiftKey)} />
+                        </label>
+                        <div class="mod-row-copy">
+                          <div class="mod-row-meta"><b>#{row.message.channelName}</b><span>{nameOf(row.message.author)}</span><time>{new Date(row.ts).toLocaleString()}</time></div>
+                          <p>{msgSnippet(row.message.text, 220)}</p>
+                        </div>
+                      {:else}
+                        <span class="mod-glyph">{row.event.kind === "warning" ? "!" : row.event.kind === "kick_case" ? "?" : "✓"}</span>
+                        <div class="mod-row-copy">
+                          <div class="mod-row-meta"><b>{row.event.kind.replace("_", " ")}</b><span>by {nameOf(row.event.actor)}</span><time>{new Date(row.ts).toLocaleString()}</time></div>
+                          <p>{row.event.reason || row.event.outcome}</p>
+                          {#if !row.event.signature_valid}<span class="mod-proof bad">invalid signature · ignored</span>{:else if !row.event.authorized}<span class="mod-proof warn">signer lacks current authority · ignored</span>{:else}<span class="mod-proof ok">signed · attributed</span>{/if}
+                        </div>
+                      {/if}
+                    </li>
+                  {:else}
+                    <li class="muted">No user events yet.</li>
+                  {/each}
+                </ol>
+              </section>
+              <aside class="mod-cases">
+                <section>
+                  <h3>OPEN KICK CASES <span>{moderationCases.length}</span></h3>
+                  {#each moderationCases as kick (kick.id)}
+                    {@const tally = voteTally(moderation.votes, kick.id)}
+                    <article class="kick-case">
+                      <div class="kick-case-head"><strong>{nameOf(kick.target)}</strong><span>{tally.yes} yes · {tally.no} no</span></div>
+                      <p>{kick.reason}</p>
+                      {#if kick.evidence_ids.length}<span class="muted small">{kick.evidence_ids.length} signed warning{kick.evidence_ids.length === 1 ? "" : "s"} attached</span>{/if}
+                      <div class="kick-actions">
+                        <button class="ghost small" onclick={() => voteKick(kick.id, true)}>Vote yes</button>
+                        <button class="ghost small" onclick={() => voteKick(kick.id, false)}>Vote no</button>
+                        {#if myRole === "owner"}
+                          <button class="ghost small" onclick={() => resolveKick(kick.id, false)}>Dismiss</button>
+                          <button class="danger-btn small" onclick={() => resolveKick(kick.id, true)}>Remove member</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {:else}<p class="muted small">No case is awaiting an owner decision.</p>{/each}
+                </section>
+                {#if canModerate}
+                  <section class="case-builder">
+                    <h3>MAKE A CASE</h3>
+                    <label><span>Member</span><select bind:value={caseTarget}><option value="">Choose…</option>{#each roster.filter((member) => !member.you) as member (member.fingerprint)}<option value={member.fingerprint}>{nameOf(member.fingerprint)}</option>{/each}</select></label>
+                    <label><span>Public reason</span><textarea bind:value={caseReason} maxlength="2048" rows="3" placeholder="Explain why removal is being proposed…"></textarea></label>
+                    <div class="evidence-list">
+                      <span class="muted small">Evidence: signed warnings for this member</span>
+                      {#each signedWarnings.filter((warning) => !caseTarget || warning.target === caseTarget) as warning (warning.id)}
+                        <label><input type="checkbox" checked={caseEvidence.has(warning.id)} onchange={() => toggleCaseEvidence(warning.id)} /><span><b>{warning.reason}</b><small>{msgSnippet(warning.message_text, 100)}</small></span></label>
+                      {:else}<p class="muted small">Warn a relevant message first, then attach it here.</p>{/each}
+                    </div>
+                    <button disabled={!caseTarget || !caseReason.trim()} onclick={openKickCase}>Publish case for a vote</button>
+                  </section>
+                {/if}
+              </aside>
+            </div>
+          </div>
+        {:else if view === "storage"}
+          <div class="operations-pane tab-pane">
+            <header class="ops-head">
+              <div><span class="stx-crumb">SERVER // OPERATIONS // STORAGE</span><h2>Storage health &amp; repair</h2><p class="muted small">The first visit verifies every referenced chunk once and saves a session snapshot. Revisiting this page never starts another scan; Repair explicitly verifies again after recovery.</p></div>
+              <span class="storage-snapshot">{storageChecking ? "Checking once…" : storageHealth ? `Saved · ${new Date(storageHealth.checked_at_ms).toLocaleTimeString()}` : "Waiting"}</span>
+            </header>
+            {#if storageHealth}
+              <div class="health-score" class:healthy={!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests}>
+                <div class="health-ring"><b>{storageHealth.referenced_chunks ? Math.round(storageHealth.verified_chunks / storageHealth.referenced_chunks * 100) : 100}%</b><span>verified</span></div>
+                <div><h3>{!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests ? "Storage is healthy" : "Storage needs attention"}</h3><p>{storageHealth.verified_chunks} of {storageHealth.referenced_chunks} unique chunks verified · {fmtSize(storageHealth.verified_bytes)} encrypted content</p></div>
+              </div>
+              <div class="health-cards">
+                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing chunks</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
+              </div>
+              <div class="storage-breakdown">
+                <section class="storage-categories">
+                  <h3>SPACE BY TYPE <span>local estimate</span></h3>
+                  <p class="muted small">The integrity total above is exact ciphertext bytes. These bars estimate locally held plaintext from chunk availability, while “logical” is the full deduplicated share size.</p>
+                  {#each storageHealth.categories as category (category.name)}
+                    <div class="storage-category-row">
+                      <div><b>{category.name}</b><span>{category.files} file{category.files === 1 ? "" : "s"}{category.pinned_files ? ` · ${category.pinned_files} pinned` : ""}</span></div>
+                      <div class="storage-bar"><i style={`width:${Math.max(2, category.local_estimated_bytes / storageCategoryMax * 100)}%`}></i></div>
+                      <strong>{fmtSize(category.local_estimated_bytes)} <small>/ {fmtSize(category.logical_bytes)} logical</small></strong>
+                    </div>
+                  {:else}<p class="muted small">No shared file content is listed.</p>{/each}
+                </section>
+                <section class="storage-largest">
+                  <h3>LARGEST FILES <span>top {storageHealth.largest_files.length}</span></h3>
+                  <ol>
+                    {#each storageHealth.largest_files as file (file.cid)}
+                      <li>
+                        <span class="storage-rank">{file.pinned ? "📌" : "·"}</span>
+                        <div><b>{file.name}</b><small>{file.path || "root"} · {file.held}/{file.total} chunks local</small></div>
+                        <strong>{fmtSize(file.local_estimated_bytes)}<small>{fmtSize(file.logical_bytes)} logical</small></strong>
+                      </li>
+                    {:else}<li class="muted small">No files to rank.</li>{/each}
+                  </ol>
+                </section>
+              </div>
+              <section class="storage-pinned">
+                <span class="storage-pin-icon">📌</span>
+                <div><h3>Pinned by the wiki</h3><p class="muted small">{storageHealth.pinned_files} unique file{storageHealth.pinned_files === 1 ? "" : "s"} · {fmtSize(storageHealth.pinned_local_estimated_bytes)} local estimate · {fmtSize(storageHealth.pinned_logical_bytes)} logical. Wiki embeds are retained regardless of their circulation date.</p></div>
+              </section>
+              <section class="repair-card">
+                <div><h3>Authenticated repair</h3><p class="muted small">Re-fetches only missing or unreadable CIDs. A peer signs the response and the bytes must hash to the requested address before they replace a corrupt local record.</p><span class:ok-t={storageHealth.has_peers} class:fail-t={!storageHealth.has_peers}>{storageHealth.has_peers ? "A member was connected at check time" : "No member was connected at check time"}</span></div>
+                <button disabled={storageRepairing || (!storageHealth.missing_chunks && !storageHealth.unreadable_chunks)} onclick={repairStorage}>{storageRepairing ? "Repairing…" : "Repair now"}</button>
+              </section>
+              {#if storageRepairNote}<p class="storage-note">{storageRepairNote}</p>{/if}
+            {:else if storageChecking}<p class="muted">Reading and authenticating this server's local file records…</p>{:else}<p class="muted">The storage snapshot could not be loaded.</p>{/if}
+          </div>
+        {:else if view === "connectivity"}
+          {@const reach = reachabilitySummary(connectivity)}
+          <div class="operations-pane tab-pane">
+            <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={refreshConnectivity}>Refresh</button></header>
+            <section class="connect-summary">
+              <span class="connect-orb" data-state={reach.verdict.includes("unknown") ? "unknown" : "evidence"}>{Math.max(onlineCount - 1, 0)}</span>
+              <div><h3>{reach.verdict}</h3><p>{reach.detail}</p><span class="muted small">{Math.max(onlineCount - 1, 0)} of {Math.max(members - 1, 0)} other members connected now.</span></div>
+            </section>
+            {#if connectivity?.action}
+              {@render connDetail(connectivity)}
+              <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
+            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
           </div>
         {:else if view === "files"}
           <div class="files-head">
@@ -13989,6 +14895,15 @@
         {:else if view === "downloads"}
           <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
+            <button class="transfer-health" onclick={() => switchView("storage")}>
+              {@render icoStorage()}
+              {#if storageHealth}
+                <span><b>{storageHealth.missing_chunks || storageHealth.unreadable_chunks || storageHealth.invalid_manifests ? "Storage needs attention" : "Storage verified"}</b><small>{storageHealth.verified_chunks}/{storageHealth.referenced_chunks} chunks · {storageHealth.missing_chunks + storageHealth.unreadable_chunks} need repair</small></span>
+              {:else}
+                <span><b>Storage health</b><small>Verify seals, addresses and file keys</small></span>
+              {/if}
+              <i>Open →</i>
+            </button>
             {#if transferList.length === 0}
               <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
             {:else}
@@ -14242,11 +15157,11 @@
               <span class="stage-act-lbl">{callDeafened ? "Deafened" : "Deafen"}</span>
             </button>
             <!-- Camera and share share one video slot, so lighting one always dims the other. -->
-            <button class="ghost stage-act" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} onclick={() => (myVideo === "cam" ? stopVideo() : void startVideo("cam"))}>
+            <button class="ghost stage-act" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} onclick={() => toggleVideo("cam")}>
               {@render icoCam()}
               <span class="stage-act-lbl">Cam</span>
             </button>
-            <button class="ghost stage-act" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} onclick={() => (myVideo === "screen" ? stopVideo() : void startVideo("screen"))}>
+            <button class="ghost stage-act" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} onclick={() => toggleVideo("screen")}>
               {@render icoScreen()}
               <span class="stage-act-lbl">Share</span>
             </button>
@@ -14360,10 +15275,10 @@
           <button class="ghost focus-btn" class:muted={callDeafened} title={callDeafened ? "Hear the room again" : "Deafen: stop hearing everyone"} aria-label="Deafen" onclick={toggleDeafen}>
             {@render icoSpeaker()}
           </button>
-          <button class="ghost focus-btn" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} aria-label="Camera" onclick={() => (myVideo === "cam" ? stopVideo() : void startVideo("cam"))}>
+          <button class="ghost focus-btn" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} aria-label="Camera" onclick={() => toggleVideo("cam")}>
             {@render icoCam()}
           </button>
-          <button class="ghost focus-btn" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} aria-label="Share your screen" onclick={() => (myVideo === "screen" ? stopVideo() : void startVideo("screen"))}>
+          <button class="ghost focus-btn" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} aria-label="Share your screen" onclick={() => toggleVideo("screen")}>
             {@render icoScreen()}
           </button>
           <button class="ghost focus-btn" class:on={instOpen} aria-expanded={instOpen} title="Instrument drawer" aria-label="Instruments" onclick={toggleInstDrawer}>
@@ -15074,7 +15989,43 @@
                 <button class="ghost" onclick={lockScreen}>Lock now [Ctrl+L]</button>
               </section>
               <section class="set-section">
-                <p class="muted small">Changing the secret re-seals the vault, which is not wired up yet: it is on the list.</p>
+                <h3>Change vault secret</h3>
+                <p class="muted small">Authenticate with the current passphrase, sigil or tune, then choose and confirm any new method. Mewtual atomically rewraps the same random root key under a fresh Argon2 salt: server history and files never become plaintext and do not need a risky bulk rewrite.</p>
+                <button onclick={beginVaultSecretChange}>Change vault secret…</button>
+                <p class="muted small">This changes the live vault only. Every backup made earlier remains protected by—and openable with—the secret it had when exported.</p>
+              </section>
+            {:else if settingsPage === "backup"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // BACKUP &amp; RECOVERY</div>
+              <h1>Backup &amp; Recovery</h1>
+              <section class="set-section backup-hero">
+                <div class="backup-lock">{@render icoLock()}</div>
+                <div>
+                  <h3>Encrypted offline backup</h3>
+                  <p class="muted small">Creates a coherent copy of the entire sealed vault in Downloads: identities, server history, files, drafts and read positions. The export remains encrypted by your current vault secret.</p>
+                </div>
+                <button disabled={backupBusy} onclick={createBackup}>{backupBusy ? "Creating…" : "Create backup"}</button>
+              </section>
+              {#if backupResult}
+                <section class="set-section backup-result">
+                  <span class="ok-t">✓ Backup created</span>
+                  <strong>{backupResult.files} files · {fmtSize(backupResult.bytes)}</strong>
+                  <code>{backupResult.path}</code>
+                  {#if backupResult.warning}<p class="fail-t small">{backupResult.warning}</p>{/if}
+                </section>
+              {/if}
+              <section class="set-section">
+                <h3>Recovery contract</h3>
+                <p class="muted small">Keep the vault secret somewhere separate: the backup cannot reset or bypass it. Automated restore is intentionally unavailable while the app is unlocked; safe restore needs a locked-screen, staged verification and rollback flow. For now, keep this folder intact as the recoverable source copy.</p>
+              </section>
+              <section class="set-section backup-risk">
+                <h3>What exporting changes</h3>
+                <p class="muted small"><strong>No plaintext is exported</strong>, so the cryptographic confidentiality of each record is unchanged. The tradeoff is exposure: Downloads now holds another offline target that can be copied and guessed indefinitely, plus visible folder names, file sizes, timestamps and blob layout.</p>
+                <ul class="muted small">
+                  <li>It preserves the state and key material present at backup time, including material later deleted from the live vault.</li>
+                  <li>Changing the live vault secret does not revoke an older copy; that copy continues to use its old secret.</li>
+                  <li>Record authentication detects tampering when opened, but this export does not yet include a separately verified whole-backup manifest.</li>
+                  <li>A compromised unlocked process, malware or keylogger remains outside at-rest encryption's protection.</li>
+                </ul>
               </section>
             {:else if settingsPage === "verify"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VERIFICATION</div>
@@ -15194,7 +16145,7 @@
                   </div>
                 </div>
                 <p class="muted small">
-                  Full includes animation, pointer reactions, and Animalese voice blips. Low keeps
+                  Full includes animation, pointer reactions, and authored effect audio. Low keeps
                   a static visual identity and stays silent. Plain shows ordinary readable text.
                 </p>
               </section>
@@ -15254,11 +16205,14 @@
                   <input
                     type="checkbox"
                     checked={appearance.flat}
+                    disabled={!CHAT_MESSAGE_FRAMES_ENABLED}
                     onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
                   />
-                  <span>Flatten other members' custom message frames (mine stays visible)</span>
+                  <span>{CHAT_MESSAGE_FRAMES_ENABLED
+                    ? "Flatten other members' custom message frames (mine stays visible)"
+                    : "Custom message frames are temporarily disabled in live chats"}</span>
                 </label>
-                <p class="muted small">These are local viewing controls. Arrival motion is resolved per message author; flattening only hides peer frames.</p>
+                <p class="muted small">Arrival motion remains available. Frame choices and previews are preserved while live-chat backgrounds are paused.</p>
                 <label class="toggle">
                   <input
                     type="checkbox"

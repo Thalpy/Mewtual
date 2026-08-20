@@ -90,9 +90,9 @@ Injected into GC so it never evicts the last copy. (Network-backed impl is later
 ### `BlobStore`; content-addressed bytes  *(catcoms-storage)*
 ```rust
 pub trait BlobStore {
-    fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;       // cid = Cid::of(bytes)
+    fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;       // cid = Cid::of(bytes); replaces a corrupt record at that cid
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StorageError>;  // integrity-checked
-    fn has(&self, cid: &Cid) -> bool;
+    fn has(&self, cid: &Cid) -> bool;                                  // cheap existence hint only; NOT proof of integrity
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError>;
     fn cids(&self) -> Vec<Cid>;
 }
@@ -342,6 +342,68 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
 - **`InviteToken`** signed payload (v2): `"catcoms/invite/v2" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str ‖ u32 m ‖ m×rendezvous_str`, then `signature(64)`.
 
 ## 8. `DocType` tags (stable; only append)
-`Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8`.
+`Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8,
+Profile=9, Livery=10, Badges=11, Devices=12, ChannelIndex=13, Moderation=14`.
 Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
 doc; it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.
+
+---
+
+## 9. Moderation, storage health and desktop continuity  *(catcoms-app / Tauri bridge)*
+
+```rust
+pub struct StorageHealth {
+    listed_files:usize, referenced_chunks:usize, verified_chunks:usize,
+    missing_chunks:usize, unreadable_chunks:usize, invalid_manifests:usize,
+    verified_bytes:u64, has_peers:bool,
+}
+pub struct StorageRepair { attempted_chunks:usize, recovered_chunks:usize, health:StorageHealth }
+impl Server {
+    fn storage_health(&self) -> StorageHealth;
+    async fn repair_storage(&mut self) -> Result<StorageRepair,AppError>;
+
+    async fn open_moderation(&mut self) -> Result<(),AppError>;
+    async fn request_moderation_catchup(&mut self, peer:PeerId) -> Result<usize,AppError>;
+    fn moderation_state(&self) -> ModerationState;
+    async fn warn_message(&mut self, channel:u128, message_id:&str, reason:&str) -> Result<String,AppError>;
+    async fn create_kick_case(&mut self, target:&str, reason:&str, evidence_ids:&[String]) -> Result<String,AppError>;
+    async fn cast_kick_vote(&mut self, case_id:&str, yes:bool) -> Result<(),AppError>;
+    async fn resolve_kick_case(&mut self, case_id:&str, remove:bool) -> Result<(),AppError>;
+}
+impl ServerStore {
+    fn save_ui_state(&self, json:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>; // ≤1 MiB, vault-sealed + atomic
+    fn load_ui_state(&self) -> Result<Vec<u8>,AppError>;
+    fn backup_source_dir(&self) -> &Path;
+    fn change_passphrase(&self, current:&[u8], new:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>;
+}
+```
+
+`storage_health` counts a chunk as verified only after its storage seal/content address and the
+file-layer decryption both succeed. `repair_storage` explicitly fetches only missing or unreadable
+referenced chunks over the authenticated blob path and verifies again; `has()` alone must never
+short-circuit repair.
+
+The Tauri `get_storage_health(server)` command adds a cached, deduplicated inventory projection:
+`checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, and the ten largest
+files. It performs at most one ordinary scan per server per process session. Only
+`repair_storage(server)` replaces that cache after its mandatory post-repair verification.
+
+Moderation uses one server-wide `DocType::Moderation` document (`doc_id=0`). Events and votes have
+their own canonical, group-bound Ed25519 signatures in addition to the replicated-op envelope.
+Warning evidence is a bounded immutable message snapshot. Readers separately expose signature
+validity and authorization; signer→origin attribution and the current owner-signed role state are
+checked before an event can affect the honest UI. Votes are one current origin identity per case;
+departed identities remain attributable but are ineligible for the live tally. Votes are advisory.
+Only `resolve_kick_case(remove=true)` by the owner reaches the existing
+protocol-enforced MLS removal path.
+
+The bridge's `create_backup` snapshots every actor, persists the registry/snapshots, then copies
+the sealed store into a fresh non-overwriting directory under Downloads while holding the store
+lock. It refuses symbolic links and special files. This is an encrypted export under the existing
+vault secret, not a secret-reset mechanism; automated restore is deferred until it can run while
+locked with staged verification and rollback.
+
+The bridge's `change_vault_secret(current_secret,new_secret)` holds the store mutex and calls
+`ServerStore::change_passphrase`. The storage layer authenticates the current wrapper and atomically
+rewraps the unchanged root DEK under a fresh salt/nonce. Existing derived data keys do not rotate;
+older exported vaults remain bound to their old secret.

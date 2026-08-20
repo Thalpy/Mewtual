@@ -41,7 +41,9 @@ pub use retention::{
     BlobEntry, BlobKind, BlobState, Expiry, ExpiryPolicy, GcReport, HolderOracle, RetentionIndex,
     ServerId, ONE_MONTH_MS,
 };
-pub use vault::{open_or_create_vault, vault_exists};
+pub use vault::{
+    change_vault_passphrase, open_or_create_vault, vault_exists, MAX_VAULT_SECRET_BYTES,
+};
 
 /// Errors from the storage layer.
 #[derive(Debug, Error)]
@@ -58,4 +60,7 @@ pub enum StorageError {
     /// A blob or file reference was malformed.
     #[error("malformed data")]
     Malformed,
+    /// A proposed vault secret was empty, unreasonably large, or identical to the old secret.
+    #[error("the new vault secret must be non-empty, reasonably sized, and different")]
+    InvalidVaultSecret,
 }

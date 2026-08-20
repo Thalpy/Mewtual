@@ -22,6 +22,8 @@ const VAULT_VERSION: u8 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const VAULT_FILE: &str = "vault.bin";
+/// Bound KDF inputs before Argon2 work and before a bridge accepts an attacker-sized allocation.
+pub const MAX_VAULT_SECRET_BYTES: usize = 4096;
 
 /// Open the key vault under `dir`, creating it (a fresh random DEK) on first use, and
 /// returning the [`KeyHierarchy`] unsealed with `passphrase`. A wrong passphrase fails with
@@ -53,6 +55,35 @@ pub fn open_or_create_vault(
 /// nothing about whether any given passphrase opens it.
 pub fn vault_exists(dir: impl AsRef<Path>) -> bool {
     dir.as_ref().join(VAULT_FILE).exists()
+}
+
+/// Rewrap the existing root DEK under `new_passphrase`, preserving every derived data key.
+///
+/// This is intentionally a small atomic rewrite of `vault.bin`, not a decrypt/re-encrypt pass over
+/// server snapshots and blobs: the passphrase protects the random DEK, while those records are
+/// protected by keys derived from that DEK. The current passphrase is authenticated before any
+/// write, a fresh salt and nonce are generated, and a failure leaves the previous vault in place.
+pub fn change_vault_passphrase(
+    dir: impl AsRef<Path>,
+    current_passphrase: &[u8],
+    new_passphrase: &[u8],
+    rng: &mut impl CryptoRngCore,
+) -> Result<(), StorageError> {
+    if current_passphrase.is_empty()
+        || new_passphrase.is_empty()
+        || current_passphrase.len() > MAX_VAULT_SECRET_BYTES
+        || new_passphrase.len() > MAX_VAULT_SECRET_BYTES
+        || current_passphrase == new_passphrase
+    {
+        return Err(StorageError::InvalidVaultSecret);
+    }
+    let path = dir.as_ref().join(VAULT_FILE);
+    let old = std::fs::read(&path).map_err(|e| StorageError::Io(e.to_string()))?;
+    let dek = decode_and_unseal(&old, current_passphrase)?;
+    let replacement = seal_and_encode(&dek, new_passphrase, rng)?;
+    // Authenticate the generated wrapper before it can replace the user's only live vault file.
+    let _ = decode_and_unseal(&replacement, new_passphrase)?;
+    write_atomic(&path, &replacement)
 }
 
 /// Seal a DEK under a fresh-salt passphrase store and encode the vault file bytes.
@@ -150,5 +181,43 @@ mod tests {
             !file.windows(32).any(|w| w == db),
             "the on-disk vault must not contain any derived key (the DEK is sealed)"
         );
+    }
+
+    #[test]
+    fn changing_the_passphrase_rewraps_the_same_dek_and_retires_the_old_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(9);
+        let before = open_or_create_vault(dir.path(), b"old secret", &mut rng).unwrap();
+        let db = before.db_key().unwrap();
+        let blob = before.blob_key().unwrap();
+
+        change_vault_passphrase(dir.path(), b"old secret", b"new secret", &mut rng).unwrap();
+        assert!(open_or_create_vault(dir.path(), b"old secret", &mut rng).is_err());
+        let after = open_or_create_vault(dir.path(), b"new secret", &mut rng).unwrap();
+        assert_eq!(after.db_key().unwrap(), db, "data keys must not rotate");
+        assert_eq!(
+            after.blob_key().unwrap(),
+            blob,
+            "existing blobs must remain openable"
+        );
+    }
+
+    #[test]
+    fn a_failed_passphrase_change_never_replaces_the_working_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = ChaCha20Rng::seed_from_u64(10);
+        open_or_create_vault(dir.path(), b"right", &mut rng).unwrap();
+        let original = std::fs::read(dir.path().join(VAULT_FILE)).unwrap();
+
+        assert!(change_vault_passphrase(dir.path(), b"wrong", b"new", &mut rng).is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join(VAULT_FILE)).unwrap(),
+            original
+        );
+        assert!(open_or_create_vault(dir.path(), b"right", &mut rng).is_ok());
+        assert!(matches!(
+            change_vault_passphrase(dir.path(), b"right", b"right", &mut rng),
+            Err(StorageError::InvalidVaultSecret)
+        ));
     }
 }

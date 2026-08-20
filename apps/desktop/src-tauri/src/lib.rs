@@ -8,17 +8,18 @@
 //! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use catcoms_app::store::MAX_UI_STATE_BYTES;
 use catcoms_app::{
-    channel_id, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger, PairingSecrets,
+    channel_id, spawn, AppEvent, Cid, DeviceId, FileListing, Livery, PairingLedger, PairingSecrets,
     PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord, ServerStore,
-    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES,
+    StorageHealth, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES,
     MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
@@ -36,6 +37,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
+use zeroize::Zeroizing;
 
 /// One running server: its actor handle, the single-use invite to share (founder only), and
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
@@ -109,6 +111,10 @@ struct AppState {
     /// that started it returns (and possibly after the user has started another one). Keyed by
     /// server id so a late answer can never be reported against a different server's attempt.
     upnp: Mutex<HashMap<u64, String>>,
+    /// One integrity/inventory scan per server per process session. Health is a point-in-time
+    /// observation, so file events deliberately do not invalidate it behind the user's back;
+    /// explicit authenticated repair is the only operation that replaces a cached report.
+    storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
 }
 
 /// UPnP has not been asked yet (no transport window was taken).
@@ -207,6 +213,20 @@ async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> 
         .get(&server)
         .map(|e| e.actor.clone())
         .ok_or_else(|| "unknown server".to_string())
+}
+
+/// Clone the actor and DM marker together. Moderation is server-wide and intentionally absent
+/// from 1:1 DM spaces, so its bridge commands use this helper to enforce that boundary before
+/// invoking the actor.
+async fn server_actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+    let servers = state.servers.lock().await;
+    let entry = servers
+        .get(&server)
+        .ok_or_else(|| "unknown server".to_string())?;
+    if entry.is_dm {
+        return Err("moderation is only available in server spaces".into());
+    }
+    Ok(entry.actor.clone())
 }
 
 /// Result of founding/joining: the new server's id plus its `#general` channel id.
@@ -427,6 +447,256 @@ struct FilesPayload {
     has_peers: bool,
 }
 
+/// Integrity-verified storage facts. Counts are scoped to file chunks referenced by this server;
+/// the peer flag only means a repair attempt has somewhere authenticated to ask.
+#[derive(Serialize, Clone)]
+struct UiStorageHealth {
+    listed_files: usize,
+    referenced_chunks: usize,
+    verified_chunks: usize,
+    missing_chunks: usize,
+    unreadable_chunks: usize,
+    invalid_manifests: usize,
+    verified_bytes: u64,
+    has_peers: bool,
+    checked_at_ms: u64,
+    unique_files: usize,
+    logical_bytes: u64,
+    local_estimated_bytes: u64,
+    pinned_files: usize,
+    pinned_logical_bytes: u64,
+    pinned_local_estimated_bytes: u64,
+    categories: Vec<UiStorageCategory>,
+    largest_files: Vec<UiStorageFile>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct UiStorageCategory {
+    name: String,
+    files: usize,
+    logical_bytes: u64,
+    local_estimated_bytes: u64,
+    pinned_files: usize,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct UiStorageFile {
+    name: String,
+    path: String,
+    cid: String,
+    mime: String,
+    logical_bytes: u64,
+    local_estimated_bytes: u64,
+    pinned: bool,
+    held: u32,
+    total: u32,
+}
+
+#[derive(Serialize, Clone)]
+struct UiStorageRepair {
+    attempted_chunks: usize,
+    recovered_chunks: usize,
+    health: UiStorageHealth,
+}
+
+fn ui_file(listing: FileListing) -> UiFile {
+    UiFile {
+        name: listing.entry.name,
+        size: listing.entry.size,
+        mime: listing.entry.mime,
+        cid: hex::encode(&listing.entry.cid),
+        author: listing.entry.author,
+        path: listing.entry.path,
+        held: listing.held_chunks,
+        total: listing.total_chunks,
+        expires: listing.entry.expires.deadline_ms(),
+        expires_known: listing.entry.expires.is_recorded(),
+    }
+}
+
+fn storage_category(mime: &str) -> &'static str {
+    let mime = mime.to_ascii_lowercase();
+    if mime.starts_with("image/") {
+        "Images"
+    } else if mime.starts_with("video/") {
+        "Video"
+    } else if mime.starts_with("audio/") {
+        "Audio"
+    } else if mime.starts_with("text/")
+        || mime.contains("pdf")
+        || mime.contains("document")
+        || mime.contains("sheet")
+        || mime.contains("presentation")
+    {
+        "Documents"
+    } else if mime.contains("zip")
+        || mime.contains("tar")
+        || mime.contains("gzip")
+        || mime.contains("compressed")
+        || mime.contains("archive")
+    {
+        "Archives"
+    } else {
+        "Other"
+    }
+}
+
+fn estimated_local_bytes(file: &UiFile) -> u64 {
+    if file.total == 0 {
+        return 0;
+    }
+    file.size
+        .saturating_mul(u64::from(file.held.min(file.total)))
+        / u64::from(file.total)
+}
+
+/// Add a deterministic, deduplicated content inventory to the cryptographic chunk verdict.
+/// Category/local totals are explicitly estimates based on held-chunk ratios; `verified_bytes`
+/// above remains the exact count of ciphertext bytes that passed every integrity check.
+fn build_storage_report(
+    health: StorageHealth,
+    files: Vec<UiFile>,
+    pinned: &HashSet<String>,
+    checked_at_ms: u64,
+) -> UiStorageHealth {
+    let mut unique = HashMap::<String, UiFile>::new();
+    for file in files {
+        unique.entry(file.cid.clone()).or_insert(file);
+    }
+    let mut category_map = HashMap::<String, UiStorageCategory>::new();
+    let mut largest_files = Vec::with_capacity(unique.len());
+    let mut logical_bytes = 0u64;
+    let mut local_estimated_bytes = 0u64;
+    let mut pinned_files = 0usize;
+    let mut pinned_logical_bytes = 0u64;
+    let mut pinned_local_estimated_bytes = 0u64;
+    for file in unique.values() {
+        let local = estimated_local_bytes(file);
+        let is_pinned = pinned.contains(&file.cid);
+        logical_bytes = logical_bytes.saturating_add(file.size);
+        local_estimated_bytes = local_estimated_bytes.saturating_add(local);
+        if is_pinned {
+            pinned_files += 1;
+            pinned_logical_bytes = pinned_logical_bytes.saturating_add(file.size);
+            pinned_local_estimated_bytes = pinned_local_estimated_bytes.saturating_add(local);
+        }
+        let category = storage_category(&file.mime).to_string();
+        let row = category_map
+            .entry(category.clone())
+            .or_insert(UiStorageCategory {
+                name: category,
+                files: 0,
+                logical_bytes: 0,
+                local_estimated_bytes: 0,
+                pinned_files: 0,
+            });
+        row.files += 1;
+        row.logical_bytes = row.logical_bytes.saturating_add(file.size);
+        row.local_estimated_bytes = row.local_estimated_bytes.saturating_add(local);
+        row.pinned_files += usize::from(is_pinned);
+        largest_files.push(UiStorageFile {
+            name: file.name.clone(),
+            path: file.path.clone(),
+            cid: file.cid.clone(),
+            mime: file.mime.clone(),
+            logical_bytes: file.size,
+            local_estimated_bytes: local,
+            pinned: is_pinned,
+            held: file.held,
+            total: file.total,
+        });
+    }
+    let order = ["Images", "Video", "Audio", "Documents", "Archives", "Other"];
+    let mut categories: Vec<_> = category_map.into_values().collect();
+    categories.sort_by_key(|row| {
+        order
+            .iter()
+            .position(|name| *name == row.name)
+            .unwrap_or(order.len())
+    });
+    largest_files.sort_by(|a, b| {
+        b.local_estimated_bytes
+            .cmp(&a.local_estimated_bytes)
+            .then_with(|| b.logical_bytes.cmp(&a.logical_bytes))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.cid.cmp(&b.cid))
+    });
+    largest_files.truncate(10);
+    UiStorageHealth {
+        listed_files: health.listed_files,
+        referenced_chunks: health.referenced_chunks,
+        verified_chunks: health.verified_chunks,
+        missing_chunks: health.missing_chunks,
+        unreadable_chunks: health.unreadable_chunks,
+        invalid_manifests: health.invalid_manifests,
+        verified_bytes: health.verified_bytes,
+        has_peers: health.has_peers,
+        checked_at_ms,
+        unique_files: unique.len(),
+        logical_bytes,
+        local_estimated_bytes,
+        pinned_files,
+        pinned_logical_bytes,
+        pinned_local_estimated_bytes,
+        categories,
+        largest_files,
+    }
+}
+
+async fn storage_report(
+    actor: &ServerActor,
+    health: StorageHealth,
+    checked_at_ms: u64,
+) -> UiStorageHealth {
+    let view = actor.files_view().await;
+    let pins = actor.wiki_pinned_cids().await.into_iter().collect();
+    build_storage_report(
+        health,
+        view.files.into_iter().map(ui_file).collect(),
+        &pins,
+        checked_at_ms,
+    )
+}
+
+/// A public, signed moderation attestation. Evidence is an immutable snapshot so later message
+/// deletion/editing cannot silently rewrite the reason a warning or kick case was based on.
+#[derive(Serialize, Clone)]
+struct UiModerationEvent {
+    id: String,
+    kind: String,
+    actor: String,
+    signer: String,
+    target: String,
+    channel: String,
+    message_id: String,
+    message_text: String,
+    message_ts: u64,
+    reason: String,
+    evidence_ids: Vec<String>,
+    case_id: String,
+    outcome: String,
+    ts: u64,
+    signature_valid: bool,
+    authorized: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct UiModerationVote {
+    case_id: String,
+    voter: String,
+    signer: String,
+    yes: bool,
+    ts: u64,
+    signature_valid: bool,
+    eligible: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct UiModerationState {
+    events: Vec<UiModerationEvent>,
+    votes: Vec<UiModerationVote>,
+}
+
 // Event payloads; every event is tagged with its server id.
 #[derive(Serialize, Clone)]
 struct ChannelEvt {
@@ -608,6 +878,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 }
                 AppEvent::RolesUpdated => {
                     let _ = app.emit("roles-updated", ServerEvt { server });
+                }
+                AppEvent::ModerationUpdated => {
+                    let _ = app.emit("moderation-updated", ServerEvt { server });
                 }
                 AppEvent::EclipseChanged { caution } => {
                     let _ = app.emit("eclipse-changed", EclipseEvt { server, caution });
@@ -2033,6 +2306,7 @@ async fn join_server_inner(
     actor.catch_up_calendar(inviter).await;
     actor.catch_up_wiki(inviter).await;
     actor.catch_up_roles(inviter).await;
+    actor.catch_up_moderation(inviter).await;
     let channels = ui_channels(actor.channels().await);
     // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
     let server_id = register_server(
@@ -2065,6 +2339,7 @@ async fn join_server_inner(
 /// Leave a server: shut down its actor and drop it from the registry.
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
+    state.storage_health.lock().await.remove(&server);
     if let Some(entry) = state.servers.lock().await.remove(&server) {
         entry.actor.shutdown().await;
     }
@@ -2098,11 +2373,10 @@ async fn open_channel(
 
 /// Read the server-wide channel directory.
 #[tauri::command]
-async fn get_channels(
-    state: State<'_, AppState>,
-    server: u64,
-) -> Result<Vec<UiChannel>, String> {
-    Ok(ui_channels(actor_of(&state, server).await?.channels().await))
+async fn get_channels(state: State<'_, AppState>, server: u64) -> Result<Vec<UiChannel>, String> {
+    Ok(ui_channels(
+        actor_of(&state, server).await?.channels().await,
+    ))
 }
 
 /// Does `current` offer a way to reach us that `minted` does not?
@@ -2569,31 +2843,57 @@ async fn add_file(
 async fn get_files(state: State<'_, AppState>, server: u64) -> Result<FilesPayload, String> {
     let actor = actor_of(&state, server).await?;
     let view = actor.files_view().await;
-    let files = view
-        .files
-        .into_iter()
-        .map(|l| UiFile {
-            name: l.entry.name,
-            size: l.entry.size,
-            mime: l.entry.mime,
-            cid: hex::encode(&l.entry.cid),
-            author: l.entry.author,
-            path: l.entry.path,
-            held: l.held_chunks,
-            total: l.total_chunks,
-            expires: l.entry.expires.deadline_ms(),
-            expires_known: l.entry.expires.is_recorded(),
-        })
-        .collect();
+    let files = view.files.into_iter().map(ui_file).collect();
     Ok(FilesPayload {
         files,
         has_peers: view.has_peers,
     })
 }
 
+/// Verify the chunks referenced by this server. This performs no network requests and never
+/// treats a CID-named path as healthy until its seal, address and file reference all verify.
+#[tauri::command]
+async fn get_storage_health(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiStorageHealth, String> {
+    // Hold the dedicated cache lock across the actor round-trip. Simultaneous callers therefore
+    // coalesce into one scan instead of both missing the cache and hammering the blob store.
+    let mut cache = state.storage_health.lock().await;
+    if let Some(report) = cache.get(&server) {
+        return Ok(report.clone());
+    }
+    let actor = actor_of(&state, server).await?;
+    let health = actor.storage_health().await;
+    let report = storage_report(&actor, health, SystemClock.now_ms()).await;
+    cache.insert(server, report.clone());
+    Ok(report)
+}
+
+/// Ask authenticated peers for every missing/unreadable chunk, then verify the complete set.
+#[tauri::command]
+async fn repair_storage(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiStorageRepair, String> {
+    let mut cache = state.storage_health.lock().await;
+    let actor = actor_of(&state, server).await?;
+    let repaired = actor.repair_storage().await?;
+    let health = storage_report(&actor, repaired.health, SystemClock.now_ms()).await;
+    cache.insert(server, health.clone());
+    Ok(UiStorageRepair {
+        attempted_chunks: repaired.attempted_chunks,
+        recovered_chunks: repaired.recovered_chunks,
+        health,
+    })
+}
+
 /// The fingerprints of members reachable right now (presence indicators in the roster).
 #[tauri::command]
-async fn get_online_members(state: State<'_, AppState>, server: u64) -> Result<Vec<String>, String> {
+async fn get_online_members(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<String>, String> {
     let actor = actor_of(&state, server).await?;
     Ok(actor.online_members().await)
 }
@@ -2823,12 +3123,9 @@ async fn download_file(
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
     let actor = actor_of(&state, server).await?;
-    let (total, size) = actor
-        .file_download_plan(raw.clone())
-        .await
-        .ok_or_else(|| {
-            "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
-        })?;
+    let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
+        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
+    })?;
     let _ = app.emit(
         "download-progress",
         DownloadProgressEvt {
@@ -3018,6 +3315,57 @@ async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, St
     Ok(diag)
 }
 
+fn validate_ui_state_json(json: &str) -> Result<(), String> {
+    if json.len() > MAX_UI_STATE_BYTES {
+        return Err("UI continuity state is too large".into());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| "UI continuity state is not valid JSON")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "UI continuity state must be an object".to_string())?;
+    if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || !object
+            .get("drafts")
+            .is_some_and(serde_json::Value::is_object)
+        || !object
+            .get("readMarks")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("unsupported UI continuity state shape".into());
+    }
+    Ok(())
+}
+
+/// Load drafts/read markers only after the vault is unlocked. Returning a canonical empty value
+/// on first run keeps plaintext localStorage out of this path entirely.
+#[tauri::command]
+async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "unlock the vault before loading UI state".to_string())?;
+    let bytes = store.load_ui_state().map_err(|error| error.to_string())?;
+    if bytes.is_empty() {
+        return Ok(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into());
+    }
+    let json = String::from_utf8(bytes).map_err(|_| "UI continuity state is not UTF-8")?;
+    validate_ui_state_json(&json)?;
+    Ok(json)
+}
+
+#[tauri::command]
+async fn save_ui_state(state: State<'_, AppState>, json: String) -> Result<(), String> {
+    validate_ui_state_json(&json)?;
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "unlock the vault before saving UI state".to_string())?;
+    store
+        .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
+        .map_err(|error| error.to_string())
+}
+
 /// Every member's role (fingerprint -> owner/admin/member).
 #[tauri::command]
 async fn get_roles(
@@ -3026,6 +3374,116 @@ async fn get_roles(
 ) -> Result<std::collections::HashMap<String, String>, String> {
     let actor = actor_of(&state, server).await?;
     Ok(actor.roles().await)
+}
+
+/// Signed public moderation history and advisory kick votes for a server space.
+#[tauri::command]
+async fn get_moderation(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiModerationState, String> {
+    let actor = server_actor_of(&state, server).await?;
+    let state = actor.moderation_state().await;
+    Ok(UiModerationState {
+        events: state
+            .events
+            .into_iter()
+            .map(|event| UiModerationEvent {
+                id: event.id,
+                kind: event.kind,
+                actor: event.actor,
+                signer: event.signer,
+                target: event.target,
+                channel: event.channel,
+                message_id: event.message_id,
+                message_text: event.message_text,
+                message_ts: event.message_ts,
+                reason: event.reason,
+                evidence_ids: event.evidence_ids,
+                case_id: event.case_id,
+                outcome: event.outcome,
+                ts: event.ts,
+                signature_valid: event.signature_valid,
+                authorized: event.authorized,
+            })
+            .collect(),
+        votes: state
+            .votes
+            .into_iter()
+            .map(|vote| UiModerationVote {
+                case_id: vote.case_id,
+                voter: vote.voter,
+                signer: vote.signer,
+                yes: vote.yes,
+                ts: vote.ts,
+                signature_valid: vote.signature_valid,
+                eligible: vote.eligible,
+            })
+            .collect(),
+    })
+}
+
+/// Warn one current chat message. The backend snapshots its text/author/time into the signed
+/// record before any optional deletion so evidence cannot turn into a dangling pointer.
+#[tauri::command]
+async fn warn_message(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    message_id: String,
+    reason: String,
+) -> Result<String, String> {
+    let channel = channel
+        .parse::<u128>()
+        .map_err(|_| "bad channel id".to_string())?;
+    let actor = server_actor_of(&state, server).await?;
+    let id = actor.warn_message(channel, message_id, reason).await?;
+    persist_server(&state, server).await;
+    Ok(id)
+}
+
+/// Publish the moderator's case and its selected signed warning evidence. Voting is advisory;
+/// only the owner resolution command can invoke protocol-enforced MLS removal.
+#[tauri::command]
+async fn create_kick_case(
+    state: State<'_, AppState>,
+    server: u64,
+    target: String,
+    reason: String,
+    evidence_ids: Vec<String>,
+) -> Result<String, String> {
+    let actor = server_actor_of(&state, server).await?;
+    let id = actor.create_kick_case(target, reason, evidence_ids).await?;
+    persist_server(&state, server).await;
+    Ok(id)
+}
+
+#[tauri::command]
+async fn cast_kick_vote(
+    state: State<'_, AppState>,
+    server: u64,
+    case_id: String,
+    yes: bool,
+) -> Result<(), String> {
+    let actor = server_actor_of(&state, server).await?;
+    actor.cast_kick_vote(case_id, yes).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Resolve a case. `remove=false` dismisses it; `remove=true` is owner-only in the backend and
+/// performs MLS removal before recording whether removal succeeded.
+#[tauri::command]
+async fn resolve_kick_case(
+    state: State<'_, AppState>,
+    server: u64,
+    case_id: String,
+    remove: bool,
+) -> Result<(), String> {
+    let actor = server_actor_of(&state, server).await?;
+    actor.resolve_kick_case(case_id, remove).await?;
+    persist_server(&state, server).await;
+    Ok(())
 }
 
 /// Grant or revoke admin for a member (owner only); re-seals the server.
@@ -3737,7 +4195,10 @@ fn is_tracker_url(url: &str) -> bool {
 }
 
 fn is_external_http_url(url: &str) -> bool {
-    if url.is_empty() || url.len() > 4096 || url.chars().any(|c| c.is_control() || c.is_whitespace()) {
+    if url.is_empty()
+        || url.len() > 4096
+        || url.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
         return false;
     }
     let rest = url
@@ -3939,6 +4400,157 @@ struct SavedFileResult {
     warning: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupResult {
+    path: String,
+    files: usize,
+    bytes: u64,
+    displayed: bool,
+    warning: Option<String>,
+}
+
+/// Copy one already-sealed vault tree without following links. Refusing links is important for
+/// both directions: an attacker must not smuggle unrelated host files into an exported backup,
+/// and backup semantics must never depend on where a link happens to point at restore time.
+fn copy_backup_tree(source: &Path, destination: &Path) -> Result<(usize, u64), String> {
+    std::fs::create_dir(destination).map_err(|error| error.to_string())?;
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let entries = std::fs::read_dir(source).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        let to = destination.join(entry.file_name());
+        if kind.is_symlink() {
+            return Err(format!(
+                "the vault contains a symbolic link and cannot be backed up safely: {}",
+                entry.path().display()
+            ));
+        }
+        if kind.is_dir() {
+            let (nested_files, nested_bytes) = copy_backup_tree(&entry.path(), &to)?;
+            files = files.saturating_add(nested_files);
+            bytes = bytes.saturating_add(nested_bytes);
+        } else if kind.is_file() {
+            let copied = std::fs::copy(entry.path(), to).map_err(|error| error.to_string())?;
+            files = files.saturating_add(1);
+            bytes = bytes.saturating_add(copied);
+        } else {
+            return Err(format!(
+                "the vault contains an unsupported filesystem entry: {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok((files, bytes))
+}
+
+fn backup_destination(downloads: &Path, stamp: u64) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(downloads).map_err(|error| error.to_string())?;
+    for number in 0..1_000usize {
+        let suffix = if number == 0 {
+            String::new()
+        } else {
+            format!(" ({number})")
+        };
+        let path = downloads.join(format!("Mewtual Backup {stamp}{suffix}"));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err("too many Mewtual backups with this name already exist in Downloads".into())
+}
+
+/// Export an offline copy of the entire sealed vault. It remains protected by the current vault
+/// secret; no plaintext snapshots, drafts, identities or attachments are written to Downloads.
+/// Restore is intentionally a locked-screen operation and is not performed by this command.
+#[tauri::command]
+async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<BackupResult, String> {
+    // Capture every actor first, without holding either state lock across its round trip.
+    let servers: Vec<(u64, ServerActor, ServerRecord)> = {
+        let servers = state.servers.lock().await;
+        servers
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    *id,
+                    entry.actor.clone(),
+                    ServerRecord {
+                        id: *id,
+                        display_name: entry.name.clone(),
+                        invite: entry.invite.clone().unwrap_or_default(),
+                        is_dm: entry.is_dm,
+                    },
+                )
+            })
+            .collect()
+    };
+    let mut snapshots = Vec::with_capacity(servers.len());
+    for (id, actor, _) in &servers {
+        snapshots.push((*id, actor.snapshot().await?));
+    }
+    let records: Vec<ServerRecord> = servers.into_iter().map(|(_, _, record)| record).collect();
+
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| error.to_string())?;
+    let destination = backup_destination(&downloads, SystemClock.now_ms())?;
+    let (files, bytes) = {
+        // Serialize persistence and the filesystem copy with every other vault write so the
+        // exported registry and snapshots form one coherent point-in-time image.
+        let guard = state.store.lock().await;
+        let store = guard
+            .as_ref()
+            .ok_or_else(|| "unlock the vault before creating a backup".to_string())?;
+        let mut rng = OsCryptoRng;
+        for (id, snapshot) in snapshots {
+            store
+                .save_server(id, &snapshot, &mut rng)
+                .map_err(|error| error.to_string())?;
+        }
+        store
+            .save_registry(&records, &mut rng)
+            .map_err(|error| error.to_string())?;
+        copy_backup_tree(store.backup_source_dir(), &destination)?
+    };
+    let warning = reveal_path(&destination)
+        .err()
+        .map(|error| format!("The backup was created, but Downloads could not be opened: {error}"));
+    Ok(BackupResult {
+        path: destination.to_string_lossy().into_owned(),
+        files,
+        bytes,
+        displayed: warning.is_none(),
+        warning,
+    })
+}
+
+/// Change the local vault secret by rewrapping its root DEK. The store mutex serializes the small
+/// atomic vault-file replacement with snapshots and backup export; server actors can keep running
+/// because the DEK and every data-encryption subkey remain unchanged.
+#[tauri::command]
+async fn change_vault_secret(
+    state: State<'_, AppState>,
+    current_secret: String,
+    new_secret: String,
+) -> Result<(), String> {
+    let current_secret = Zeroizing::new(current_secret);
+    let new_secret = Zeroizing::new(new_secret);
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
+    store
+        .change_passphrase(
+            current_secret.as_bytes(),
+            new_secret.as_bytes(),
+            &mut OsCryptoRng,
+        )
+        .map_err(|error| error.to_string())
+}
+
 /// Open a prefilled bug report / feature request on the tracker in the user's default browser.
 /// Mewtual has no service of its own to receive feedback, so filing means handing GitHub a
 /// filled-in form: the app carries no GitHub credentials and posts nothing itself, and the user
@@ -4022,7 +4634,9 @@ async fn save_download(
         .decode(data_base64)
         .map_err(|_| "the downloaded file could not be decoded".to_string())?;
     if bytes.len() > MAX_FILE_BYTES {
-        return Err(format!("file is larger than the {MAX_FILE_BYTES}-byte limit"));
+        return Err(format!(
+            "file is larger than the {MAX_FILE_BYTES}-byte limit"
+        ));
     }
     let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
     let path = write_download(&downloads, &name, &bytes)?;
@@ -4139,9 +4753,7 @@ async fn unlock(
 /// Restore an already-unlocked frontend after F5/HMR without asking for the vault passphrase
 /// again. An explicit UI lock disables this path until `unlock` verifies the passphrase.
 #[tauri::command]
-async fn resume_session(
-    state: State<'_, AppState>,
-) -> Result<Option<Vec<ReloadedServer>>, String> {
+async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<ReloadedServer>>, String> {
     if !*state.session_resumable.lock().await || state.store.lock().await.is_none() {
         return Ok(None);
     }
@@ -4269,17 +4881,27 @@ async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, Strin
 async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<PairingRead, String> {
     let origin = ceremony_origin(&state).await?;
     let view = catcoms_app::read_pairing_blob(&blob, &origin).map_err(|e| e.to_string())?;
-    if state.pairing_ledger.lock().await.is_spent(&view.request.pairing_nonce) {
+    if state
+        .pairing_ledger
+        .lock()
+        .await
+        .is_spent(&view.request.pairing_nonce)
+    {
         return Err("that pairing request has already been used".to_string());
     }
     // The scope the popup must disclose: everything an accept would grant.
     let (servers, dm_count) = {
         let guard = state.servers.lock().await;
-        let mut names: Vec<(u64, String, bool)> =
-            guard.iter().map(|(id, e)| (*id, e.name.clone(), e.is_dm)).collect();
+        let mut names: Vec<(u64, String, bool)> = guard
+            .iter()
+            .map(|(id, e)| (*id, e.name.clone(), e.is_dm))
+            .collect();
         names.sort_by_key(|(id, _, _)| *id);
         let dm_count = names.iter().filter(|(_, _, dm)| *dm).count();
-        (names.into_iter().map(|(_, n, _)| n).collect::<Vec<_>>(), dm_count)
+        (
+            names.into_iter().map(|(_, n, _)| n).collect::<Vec<_>>(),
+            dm_count,
+        )
     };
     let read = PairingRead {
         device_id: view.new_device_id.to_string(),
@@ -4347,7 +4969,12 @@ async fn pairing_mint(
     let view = &pending.view;
 
     // A spent nonce costs zero signatures (and zero actor round-trips).
-    if state.pairing_ledger.lock().await.is_spent(&view.request.pairing_nonce) {
+    if state
+        .pairing_ledger
+        .lock()
+        .await
+        .is_spent(&view.request.pairing_nonce)
+    {
         return Err("that pairing request has already been used".to_string());
     }
 
@@ -4653,6 +5280,7 @@ async fn join_one_grant(
     actor.catch_up_calendar(contact).await;
     actor.catch_up_wiki(contact).await;
     actor.catch_up_roles(contact).await;
+    actor.catch_up_moderation(contact).await;
     // A companion mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its
     // own; the same registry shape a joiner gets. `is_dm` is not in the grant yet, so a DM pairs
     // in as a server on the rail until M4 carries the flag.
@@ -4842,6 +5470,8 @@ pub fn run() {
             get_devices,
             add_file,
             get_files,
+            get_storage_health,
+            repair_storage,
             get_online_members,
             get_delivery,
             dm_stats,
@@ -4877,8 +5507,17 @@ pub fn run() {
             reject_wiki_edit,
             restore_wiki_page,
             get_roles,
+            get_moderation,
+            warn_message,
+            create_kick_case,
+            cast_kick_vote,
+            resolve_kick_case,
             get_join_attempts,
             get_connectivity,
+            get_ui_state,
+            save_ui_state,
+            create_backup,
+            change_vault_secret,
             get_debug_logging,
             set_debug_logging,
             set_admin,
@@ -5330,7 +5969,9 @@ mod tests {
 
         assert!(!is_external_http_url("javascript:alert(1)"));
         assert!(!is_external_http_url("data:text/html,hello"));
-        assert!(!is_external_http_url("file:///c:/windows/system32/calc.exe"));
+        assert!(!is_external_http_url(
+            "file:///c:/windows/system32/calc.exe"
+        ));
         assert!(!is_external_http_url("https:///missing-host"));
         assert!(!is_external_http_url(""));
     }
@@ -5373,5 +6014,95 @@ mod tests {
         assert_eq!(safe_download_name(" . "), "mewtual-download");
         assert_eq!(numbered_download_name("photo.png", 2), "photo (2).png");
         assert_eq!(numbered_download_name("README", 3), "README (3)");
+    }
+
+    #[test]
+    fn ui_state_requires_the_bounded_versioned_shape() {
+        assert!(validate_ui_state_json(
+            r#"{"version":1,"drafts":{"1:2":"hello"},"readMarks":{"1:2":9}}"#
+        )
+        .is_ok());
+        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json("not json").is_err());
+        assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn storage_inventory_deduplicates_content_and_breaks_out_pinned_space() {
+        let file = |name: &str, cid: &str, mime: &str, size: u64, held: u32, total: u32| UiFile {
+            name: name.into(),
+            size,
+            mime: mime.into(),
+            cid: cid.into(),
+            author: "member".into(),
+            path: "shared".into(),
+            held,
+            total,
+            expires: None,
+            expires_known: false,
+        };
+        let report = build_storage_report(
+            StorageHealth {
+                listed_files: 3,
+                referenced_chunks: 3,
+                verified_chunks: 3,
+                verified_bytes: 512,
+                ..StorageHealth::default()
+            },
+            vec![
+                file("cat.png", "aa", "image/png", 100, 1, 2),
+                file("same-cat.png", "aa", "image/png", 100, 1, 2),
+                file("song.ogg", "bb", "audio/ogg", 400, 2, 2),
+            ],
+            &HashSet::from(["aa".to_string()]),
+            42,
+        );
+
+        assert_eq!((report.listed_files, report.unique_files), (3, 2));
+        assert_eq!(
+            (report.logical_bytes, report.local_estimated_bytes),
+            (500, 450)
+        );
+        assert_eq!(
+            (
+                report.pinned_files,
+                report.pinned_logical_bytes,
+                report.pinned_local_estimated_bytes
+            ),
+            (1, 100, 50)
+        );
+        assert_eq!(report.checked_at_ms, 42);
+        assert_eq!(
+            report
+                .categories
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Images", "Audio"]
+        );
+        assert_eq!(report.largest_files[0].name, "song.ogg");
+        assert!(report.largest_files[1].pinned);
+    }
+
+    #[test]
+    fn backup_copy_preserves_sealed_tree_and_never_overwrites_a_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("vault");
+        let nested = source.join("servers");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(source.join("vault.bin"), b"sealed-root").unwrap();
+        std::fs::write(nested.join("1.bin"), b"sealed-snapshot").unwrap();
+        let destination = root.path().join("backup");
+
+        assert_eq!(copy_backup_tree(&source, &destination).unwrap(), (2, 26));
+        assert_eq!(
+            std::fs::read(destination.join("servers").join("1.bin")).unwrap(),
+            b"sealed-snapshot"
+        );
+        assert!(
+            copy_backup_tree(&source, &destination).is_err(),
+            "an existing backup directory must never be merged into or overwritten"
+        );
     }
 }

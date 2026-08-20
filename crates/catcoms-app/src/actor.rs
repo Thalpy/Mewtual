@@ -23,8 +23,9 @@ use catcoms_storage::Cid;
 
 use crate::{
     ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView,
-    InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats, Profile,
-    Server, ServerEvent, WikiPendingEdit, WikiRevision,
+    InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats,
+    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, WikiPendingEdit,
+    WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -215,6 +216,14 @@ pub enum AppCommand {
     },
     /// Query the shared file list with per-file local-availability counts + a reachable-peer flag.
     FilesView { reply: oneshot::Sender<FilesView> },
+    /// Verify every file chunk referenced by this server without network traffic.
+    StorageHealth {
+        reply: oneshot::Sender<StorageHealth>,
+    },
+    /// Re-fetch missing/unreadable file chunks, then return the verified result.
+    RepairStorage {
+        reply: oneshot::Sender<Result<StorageRepair, String>>,
+    },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
     /// Query the recent inbound join attempts this node served, newest first (operator
@@ -403,6 +412,38 @@ pub enum AppCommand {
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
     CatchUpRoles { peer: PeerId },
+    /// Query the public signed moderation history and advisory votes.
+    ModerationState {
+        reply: oneshot::Sender<ModerationState>,
+    },
+    /// Preserve a message snapshot as a signed warning (owner/admin).
+    WarnMessage {
+        channel: u128,
+        message_id: String,
+        reason: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Open an advisory kick case citing warnings for the same target (owner/admin).
+    CreateKickCase {
+        target: String,
+        reason: String,
+        evidence_ids: Vec<String>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Cast/replace this member identity's advisory yes/no vote.
+    CastKickVote {
+        case_id: String,
+        yes: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Owner decision; optionally runs the protocol-enforced member removal.
+    ResolveKickCase {
+        case_id: String,
+        remove: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Pull moderation history from `peer` after joining.
+    CatchUpModeration { peer: PeerId },
     /// Remove a member by fingerprint (owner only).
     RemoveMember {
         fp: String,
@@ -512,6 +553,8 @@ pub enum AppEvent {
     WikiUpdated,
     /// Member roles changed; the UI should re-fetch roles.
     RolesUpdated,
+    /// Signed moderation evidence/cases/votes changed.
+    ModerationUpdated,
     /// The advisory eclipse verdict changed: `true` = the node may be isolated (verify a member
     /// out of band). Surfaced as a UI hint; never gates anything.
     EclipseChanged { caution: bool },
@@ -1232,6 +1275,34 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| empty())
     }
 
+    /// Verify this server's referenced file chunks without network traffic.
+    pub async fn storage_health(&self) -> StorageHealth {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StorageHealth { reply })
+            .await
+            .is_err()
+        {
+            return StorageHealth::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Attempt repair of missing/unreadable referenced chunks.
+    pub async fn repair_storage(&self) -> Result<StorageRepair, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RepairStorage { reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Fetch the fingerprints of members reachable right now (presence).
     pub async fn online_members(&self) -> Vec<String> {
         let (reply, rx) = oneshot::channel();
@@ -1611,6 +1682,107 @@ impl ServerActor {
     /// Pull the roles document from `peer`.
     pub async fn catch_up_roles(&self, peer: PeerId) {
         let _ = self.cmd_tx.send(AppCommand::CatchUpRoles { peer }).await;
+    }
+
+    /// Fetch the signed moderation history and votes.
+    pub async fn moderation_state(&self) -> ModerationState {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ModerationState { reply })
+            .await
+            .is_err()
+        {
+            return ModerationState::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn warn_message(
+        &self,
+        channel: u128,
+        message_id: String,
+        reason: String,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WarnMessage {
+                channel,
+                message_id,
+                reason,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn create_kick_case(
+        &self,
+        target: String,
+        reason: String,
+        evidence_ids: Vec<String>,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::CreateKickCase {
+                target,
+                reason,
+                evidence_ids,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn cast_kick_vote(&self, case_id: String, yes: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::CastKickVote {
+                case_id,
+                yes,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn resolve_kick_case(&self, case_id: String, remove: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ResolveKickCase {
+                case_id,
+                remove,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn catch_up_moderation(&self, peer: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::CatchUpModeration { peer })
+            .await;
     }
 
     /// Remove a member by fingerprint (owner only).
@@ -2008,6 +2180,12 @@ where
             tracing::warn!(error = %e, "open_roles failed");
         }
         let mut last_roles = server.roles();
+        // Moderation evidence is its own signed document so it survives edits/deletes of the live
+        // chat post and so advisory votes never share a membership authorization path.
+        if let Err(e) = server.open_moderation().await {
+            tracing::warn!(error = %e, "open_moderation failed");
+        }
+        let mut last_moderation = server.moderation_state();
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
         let mut last_dm_requests = server.dm_requests();
@@ -2323,6 +2501,13 @@ where
                     Some(AppCommand::FilesView { reply }) => {
                         let _ = reply.send(server.files_view());
                     }
+                    Some(AppCommand::StorageHealth { reply }) => {
+                        let _ = reply.send(server.storage_health());
+                    }
+                    Some(AppCommand::RepairStorage { reply }) => {
+                        let res = server.repair_storage().await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
                     }
@@ -2508,6 +2693,9 @@ where
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
                         }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
                     }
                     Some(AppCommand::CatchUpRoles { peer }) => {
                         if let Err(e) = server.request_roles_catchup(peer).await {
@@ -2515,6 +2703,75 @@ where
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ModerationState { reply }) => {
+                        let _ = reply.send(server.moderation_state());
+                    }
+                    Some(AppCommand::WarnMessage {
+                        channel,
+                        message_id,
+                        reason,
+                        reply,
+                    }) => {
+                        let res = server
+                            .warn_message(channel, &message_id, &reason)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CreateKickCase {
+                        target,
+                        reason,
+                        evidence_ids,
+                        reply,
+                    }) => {
+                        let res = server
+                            .create_kick_case(&target, &reason, &evidence_ids)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CastKickVote { case_id, yes, reply }) => {
+                        let res = server
+                            .cast_kick_vote(&case_id, yes)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ResolveKickCase { case_id, remove, reply }) => {
+                        let res = server
+                            .resolve_kick_case(&case_id, remove)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                        let mc = server.member_count();
+                        if mc != members {
+                            members = mc;
+                            let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
+                        }
+                        if roles_changed(&server, &mut last_roles) {
+                            let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CatchUpModeration { peer }) => {
+                        if let Err(e) = server.request_moderation_catchup(peer).await {
+                            tracing::warn!(error = %e, "moderation catch-up failed");
+                        }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
                     }
                     Some(AppCommand::RevokeDevice { fp, reply }) => {
@@ -2531,6 +2788,9 @@ where
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
                     }
                     Some(AppCommand::ReadWikiPage { name, reply }) => {
@@ -2790,6 +3050,9 @@ where
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
                         // Presence: emit when the set of currently-reachable members changes
                         // (a peer connected or dropped). `online_members` is sorted, so the Vec
@@ -3084,6 +3347,23 @@ where
     R: CryptoRngCore,
 {
     let now = server.roles();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether signed moderation evidence/cases/votes changed since last seen. The document is bounded
+/// per record and returned in deterministic order, so a full comparison also catches a changed vote
+/// without relying on a count.
+fn moderation_changed<T, R>(server: &Server<T, R>, last: &mut ModerationState) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.moderation_state();
     if now != *last {
         *last = now;
         true

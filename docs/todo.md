@@ -50,8 +50,13 @@
 | 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
 | 10 | **desktop UI / product overhaul** — **10a–10h done**: tabbed nav + Settings overlay; a sanitized markdown renderer (`marked`+DOMPurify) with `[[wiki links]]`, `:emoji:`, and `![cid embeds]`; fileshare **folders** + drag-drop **media embeds** in chat/status (built in code from CID-verified blobs); a **wiki** overhaul (markdown, links, backlinks, media, in-app help); **custom emoji**; **notification sounds**; and **owner/admin roles** + a server-settings role manager. 10c & 10h adversarially reviewed; roles enforcement is documented as policy-layer (cryptographic hardening is a named follow-up) | done |
 | 11 | Desktop expansion: discovery UI, chunked transfers, DMs/friends, events/news, search/inbox, delivery states, multi-device, wiki history/review, livery and voice surfaces | done/current |
-| 12 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned |
-| 13 | Hardening: last-copy-safe retention, recovery/export, AutoNAT, voice completion, supply-chain attestation and independent security review | planned |
+| 12a | Signed moderation plane: event timeline, range warn/delete, collapsible warning evidence, kick cases/votes and owner-only resolution | done; full suites + antagonist gates passed 2026-08-20, R7 disclosed |
+| 12b | Durable history UX: vault-sealed composer drafts/read positions plus safe legacy read-mark migration | done; full suites passed 2026-08-20 |
+| 12c | Storage health/repair and connectivity assistant in the server sidebar, with storage repeated in Transfers | done; full suites passed 2026-08-20 |
+| 12d | Backup & Recovery centre: coherent encrypted export now; locked staged verification/import/rollback remains a named security gate | partial; export in tree, restore deferred |
+| 12e–12g | Notification controls (parallel review), voice completion (after user test), channel governance (later design) | queued/deferred |
+| 13 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned |
+| 14 | Hardening: last-copy-safe retention, recovery import, AutoNAT, voice completion, supply-chain attestation and independent security review | planned |
 
 Features/things in stack:
 1. Draw a waveform or shared visualizer for MIDI/instruments in voice chat (fun; decide whether
@@ -60,6 +65,10 @@ Features/things in stack:
    receive controls.
 3. Explicit settings gaps: vault re-key, keybind remapping, notification granularity, and the
    protocol-backed Security / Server Nodes pages.
+4. The agreed experimental queue — **Campfire rooms, Promote conversation to wiki, Memory
+   Keepers, Ciphertext mailboxes, Guardian recovery, Two-way proximity invites, Community time
+   capsules, and Trust constellations** — is tracked with per-feature antagonist questions and
+   test/documentation gates in [`feature-implementation-tracker.md`](feature-implementation-tracker.md).
 
 ---
 
