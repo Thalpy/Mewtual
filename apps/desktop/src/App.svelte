@@ -6,7 +6,11 @@
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onMount, tick, untrack } from "svelte";
   import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
+  import { messageFrameStyle, visibleMessageFrameStyle } from "./message-frame";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
+  import {
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupDownload, saveSpaceGuide,
+  } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
     TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
@@ -22,8 +26,14 @@
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
-    type Placement, type ScreenPoint, type SpaceState, angularOffsets, applyOffsets, clampPitch,
-    defaultSpace, lassoCapturePath, parseSpace, project, separatePlacements, unproject, wrapYaw,
+    type NameEffect, type NameEffectId, type NameEffectOptions, animatedEffect,
+    decodeNameEffects, defaultNameEffect, effectConfigured, effectEnabled, effectOptions, encodeNameEffects,
+    nameEffectClasses, nameEffectStyle,
+  } from "./name-effects";
+  import {
+    type Placement, type ScreenPoint, type SpaceCluster, type SpaceState, angularOffsets,
+    applyOffsets, autoArrangePlacements, clampPitch, defaultSpace, lassoCapturePath, parseSpace,
+    placementCentre, project, separatePlacements, unproject, wrapYaw, yawDelta,
   } from "./space";
   import QRCode from "qrcode";
   import jsQR from "jsqr";
@@ -137,6 +147,7 @@
   let setSearch = $state("");
   type SetPage = { id: string; label: string; cat: string; danger?: boolean };
   const USER_SET_PAGES: SetPage[] = [
+    { id: "guide", label: "Feature Guide", cat: "Help" },
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
@@ -163,6 +174,104 @@
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
   ];
+  type FeatureTarget =
+    | "dms"
+    | "feedback"
+    | "inbox"
+    | "news"
+    | "quick"
+    | "space"
+    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events"}`
+    | `settings:${string}`
+    | `server:${string}`;
+  type FeatureGuideItem = {
+    group: string;
+    title: string;
+    detail: string;
+    where: string;
+    shortcut?: string;
+    target?: FeatureTarget;
+  };
+  const FEATURE_GUIDE_GROUPS = [
+    "Conversation",
+    "Knowledge & media",
+    "People & trust",
+    "Voice & play",
+    "Community",
+    "App & network",
+  ];
+  const FEATURE_GUIDE: FeatureGuideItem[] = [
+    { group: "Conversation", title: "Channels & chat", detail: "Markdown messages, replies, reactions, editing, pins, mentions, unread marks and delivery evidence.", where: "Open a server → Chat", shortcut: "Ctrl+1", target: "surface:chat" },
+    { group: "Conversation", title: "Search", detail: "Search one channel or the whole server; filter by people, dates, media, replies, reactions and more.", where: "Chat → magnifier, or press Ctrl+F", shortcut: "Ctrl+Shift+F", target: "surface:chat" },
+    { group: "Conversation", title: "DMs & friends", detail: "Private 1:1 spaces, friend codes and authenticated in-server friend requests.", where: "Left rail → DMs", target: "dms" },
+    { group: "Conversation", title: "Inbox", detail: "Mentions and replies gathered across every server and DM, with one-click jumps to the message.", where: "Left rail → Inbox", target: "inbox" },
+    { group: "Knowledge & media", title: "Files & folders", detail: "Encrypted sharing, folders, previews, deduplication, circulation controls and usage tracking.", where: "Open a server → Files", shortcut: "Ctrl+2", target: "surface:files" },
+    { group: "Knowledge & media", title: "Transfers", detail: "Track uploads and downloads, progress, availability and the peer serving a download.", where: "Open a server → Transfers", shortcut: "Ctrl+6", target: "surface:downloads" },
+    { group: "Knowledge & media", title: "Wiki", detail: "Markdown or Wikitext pages, nested pages, backlinks, infoboxes, history, rollback and optional edit review.", where: "Open a server → Wiki", shortcut: "Ctrl+4", target: "surface:wiki" },
+    { group: "Knowledge & media", title: "Status", detail: "Post short server updates with the same rich text and media embeds as chat.", where: "Open a server → Status", shortcut: "Ctrl+3", target: "surface:status" },
+    { group: "Knowledge & media", title: "News", detail: "Read recent status posts and upcoming events from every server in one feed.", where: "Left rail → Inbox → News", target: "news" },
+    { group: "Knowledge & media", title: "Events", detail: "Create shared events with times, descriptions and optional artwork.", where: "Open a server → Events", shortcut: "Ctrl+7", target: "surface:events" },
+    { group: "People & trust", title: "Profiles", detail: "Per-server names, bios, banners, animated avatars, message frames and composable name effects.", where: "Profile, or Settings → My Profile", shortcut: "Ctrl+5", target: "settings:profile" },
+    { group: "People & trust", title: "Identity verification", detail: "Compare cryptographic fingerprints out of band and keep a private verified mark.", where: "Settings → Verification", target: "settings:verify" },
+    { group: "People & trust", title: "Linked devices", detail: "Grant another device access with a one-time ceremony carried by paste, QR or sound; revoke companions per server.", where: "Settings → Devices", target: "settings:devices" },
+    { group: "People & trust", title: "Vault & lock", detail: "Lock the visible session and use a passphrase, sigil or played melody as the local vault secret.", where: "Settings → Vault & Lock", shortcut: "Ctrl+L", target: "settings:vault" },
+    { group: "Voice & play", title: "Voice, camera & screen share", detail: "Join a channel voice room, switch devices live, share a camera or screen and control each peer locally.", where: "Chat channel header → Join voice", target: "surface:chat" },
+    { group: "Voice & play", title: "Instruments & jukebox", detail: "Play the call-stage instrument from screen, keyboard or MIDI and queue shared server audio for the room.", where: "Voice stage → Instruments / Jukebox", target: "surface:chat" },
+    { group: "Community", title: "Members, roles & badges", detail: "Inspect presence and devices; owners manage admins and removals, while moderators assign display badges.", where: "Right-click server → Server settings → Members / Badges", target: "server:members" },
+    { group: "Community", title: "Invites", detail: "Generate single-use, device-bound invites; admin admissions are serialized by the owner to avoid group forks.", where: "Right-click server → Server settings → Invites", target: "server:invites" },
+    { group: "Community", title: "Emoji & stickers", detail: "Upload server emoji at emoji, medium, large or sticker size and use them in messages or reactions.", where: "Server settings → Emoji & Stickers", target: "server:emoji" },
+    { group: "Community", title: "Server livery", detail: "Publish a safe shared palette, icon, cursor, typography and background treatment; every member can opt out.", where: "Server settings → Livery", target: "server:livery" },
+    { group: "App & network", title: "Quick switcher", detail: "Jump to channels, surfaces, servers and DMs without hunting through the rails.", where: "Anywhere in the unlocked app", shortcut: "Ctrl+K", target: "quick" },
+    { group: "App & network", title: "Server Space", detail: "Arrange servers in a navigable 360-degree room; group them into interactive neighbourhoods, search, auto-arrange, or use a custom backdrop.", where: "Left rail → Orbit", shortcut: "Ctrl+O", target: "space" },
+    { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion and local livery overrides.", where: "Settings → Appearance", target: "settings:appearance" },
+    { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and opt into a privacy-labelled debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
+    { group: "App & network", title: "Signed updates", detail: "Check for a newer signed release and choose whether to install, defer or skip it.", where: "Settings → Updates", target: "settings:updates" },
+    { group: "App & network", title: "Feedback", detail: "Open a pre-filled bug report or feature request for review before submitting, or copy it to send another way.", where: "Left rail → Feedback", target: "feedback" },
+  ];
+  let featureQuery = $state("");
+  let filteredFeatures = $derived.by(() => {
+    const q = featureQuery.trim().toLowerCase();
+    if (!q) return FEATURE_GUIDE;
+    return FEATURE_GUIDE.filter((item) =>
+      `${item.group} ${item.title} ${item.detail} ${item.where} ${item.shortcut ?? ""}`.toLowerCase().includes(q),
+    );
+  });
+
+  function openFeatureTarget(target: FeatureTarget) {
+    if (target.startsWith("settings:")) {
+      settingsPage = target.slice("settings:".length);
+      setSearch = "";
+      return;
+    }
+    if (target.startsWith("server:")) {
+      if (!cur || cur.isDm || activeServerId === null) {
+        toast("Open a server first to use its settings", "info", 3500);
+        return;
+      }
+      showSettings = false;
+      openServerSettings(null, target.slice("server:".length));
+      return;
+    }
+    if (target.startsWith("surface:")) {
+      if (activeServerId === null) {
+        toast("Open a server or DM first", "info", 3000);
+        return;
+      }
+      showSettings = false;
+      switchView(target.slice("surface:".length) as Tab);
+      return;
+    }
+    showSettings = false;
+    if (target === "dms") enterDmHome();
+    else if (target === "inbox") openInbox();
+    else if (target === "news") {
+      openInbox();
+      inboxMode = "news";
+      loadNews();
+    } else if (target === "quick") openQuickSwitch();
+    else if (target === "space" && !spaceOpen) toggleSpace();
+    else if (target === "feedback") showFeedback = true;
+  }
   // One filter for both sidebars: category headers only survive while a page of theirs does.
   function filterPages(pages: SetPage[], q: string): SetPage[] {
     const n = q.trim().toLowerCase();
@@ -214,7 +323,7 @@
   const APPEARANCE_KEY = "catcoms.appearance";
   // clock: "" = the locale's habit, "12"/"24" force a convention. scale: whole-interface text
   // size in percent; clamped where applied, not where stored.
-  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true, icons: "", motion: "", clock: "", scale: 100 };
+  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: false, icons: "", motion: "", clock: "", scale: 100 };
   function loadAppearance(): Appearance {
     try {
       return { ...APPEARANCE_DEFAULT, ...JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") };
@@ -1996,6 +2105,8 @@
   let pColor = $state("#4f8cff");
   let pFont = $state("system");
   let pEffect = $state("none");
+  let pEffects = $state<NameEffect[]>([]);
+  let collapsedEffects = $state<Record<string, boolean>>({});
   let pDescription = $state("");
   let pBubble = $state("");
   let pAvatar = $state("");
@@ -2009,60 +2120,404 @@
     { id: "script", label: "Script" },
     { id: "caps", label: "Small caps" },
     { id: "rounded", label: "Rounded" },
+    { id: "cute", label: "Cute" },
     { id: "gothic", label: "Gothic" },
   ];
-  // "gradient" (the old accent-mix effect) is deliberately absent from the picker: the
-  // custom creator below covers it. Peers who still wear it keep rendering fine.
-  const NAME_EFFECTS: { id: string; label: string }[] = [
-    { id: "none", label: "Solid" },
-    { id: "neon", label: "Neon" },
-    { id: "rainbow", label: "Rainbow" },
-    { id: "wave", label: "Wave" },
-    { id: "pulse", label: "Pulse" },
-    { id: "outline", label: "Outline" },
-    { id: "retro", label: "Retro" },
-    { id: "glitch", label: "Glitch" },
+  const NAME_FONT_IDS = new Set(NAME_FONTS.map((font) => font.id));
+  const NAME_EFFECTS: { id: NameEffectId; label: string; description: string; group: "Fill" | "Motion" | "Finish" }[] = [
+    { id: "gradient", label: "Gradient", description: "A custom multi-colour fill.", group: "Fill" },
+    { id: "rainbow", label: "Rainbow", description: "A scrolling spectrum fill.", group: "Fill" },
+    { id: "shimmer", label: "Shimmer", description: "A bright sweep across the letters.", group: "Fill" },
+    { id: "candy", label: "Candy stripes", description: "Two-colour striped lettering.", group: "Fill" },
+    { id: "wave", label: "Bounce", description: "The whole name gently bobs.", group: "Motion" },
+    { id: "mexican", label: "Mexican wave", description: "Letters rise one after another.", group: "Motion" },
+    { id: "pulse", label: "Pulse", description: "The name softly fades in and out.", group: "Motion" },
+    { id: "wobble", label: "Wobble", description: "A playful side-to-side tilt.", group: "Motion" },
+    { id: "sparkle", label: "Sparkle", description: "Small highlights twinkle around the name.", group: "Finish" },
+    { id: "neon", label: "Neon", description: "A coloured glow around the letters.", group: "Finish" },
+    { id: "outline", label: "Outline", description: "A coloured edge around each letter.", group: "Finish" },
+    { id: "shadow", label: "Drop shadow", description: "A configurable shadow behind the name.", group: "Finish" },
+    { id: "retro", label: "Retro", description: "A crisp offset copy of the name.", group: "Finish" },
+    { id: "glitch", label: "Glitch", description: "A small red-and-blue colour fringe.", group: "Finish" },
+    { id: "ghost", label: "Ghost", description: "Soft, translucent frosted text.", group: "Finish" },
+    { id: "fire", label: "Fire glow", description: "A warm, flickering ember aura.", group: "Finish" },
+    { id: "extrude", label: "3D extrude", description: "Layered depth behind the letters.", group: "Finish" },
   ];
-  // Rainbow/wave/pulse are ANIMATIONS: with motion off (the Appearance toggle or the
-  // OS's reduced-motion) they freeze and look like Solid, so their tiles say so.
-  const ANIM_FX = new Set(["rainbow", "wave", "pulse"]);
+  const EFFECT_GROUPS = ["Fill", "Motion", "Finish"] as const;
+  const PUBLIC_EFFECT_IDS = new Set(NAME_EFFECTS.map((effect) => effect.id));
+  let appliedEffects = $derived(pEffects.filter((effect) => PUBLIC_EFFECT_IDS.has(effect.id)));
   const prefersStill = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   let fxMotionOff = $derived(appearance.motion === "off" || prefersStill);
   // Curated name colours that stay legible on the dark grounds (content, not theme).
   const NAME_COLORS = ["#977df2", "#6ca0d8", "#57c77a", "#d8a657", "#e0574b", "#e879c0", "#6ee7d8", "#c6c2d6"];
-  // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default. All chosen
-  // dark enough for the white message text (and a text-shadow on custom bubbles backs it up).
-  const BUBBLE_PRESETS: { label: string; value: string }[] = [
-    { label: "Default", value: "" },
-    { label: "Ocean", value: "linear-gradient(135deg,#1a2980,#26415e)" },
-    { label: "Sunset", value: "linear-gradient(135deg,#c31432,#5c1020)" },
-    { label: "Forest", value: "linear-gradient(135deg,#134e5e,#1c7a4d)" },
-    { label: "Grape", value: "linear-gradient(135deg,#41295a,#5d2a6e)" },
-    { label: "Ember", value: "linear-gradient(135deg,#8a3a12,#b34700)" },
-    { label: "Rose", value: "linear-gradient(135deg,#7a1f3d,#3d1020)" },
-    { label: "Slate", value: "#3a3f4b" },
+  // Message frames preserve the existing opaque profile value for wire compatibility; the new
+  // renderer contains that colour inside the content column instead of painting the whole row.
+  const BUBBLE_PRESETS: { code: string; label: string; value: string }[] = [
+    { code: "OFF", label: "Open channel", value: "" },
+    { code: "OCN", label: "Deep sea", value: "linear-gradient(135deg,#1a2980,#26415e)" },
+    { code: "RED", label: "Redshift", value: "linear-gradient(135deg,#c31432,#5c1020)" },
+    { code: "BIO", label: "Canopy", value: "linear-gradient(135deg,#134e5e,#1c7a4d)" },
+    { code: "UV", label: "Ultraviolet", value: "linear-gradient(135deg,#41295a,#5d2a6e)" },
+    { code: "THR", label: "Furnace", value: "linear-gradient(135deg,#8a3a12,#b34700)" },
+    { code: "ROS", label: "Night rose", value: "linear-gradient(135deg,#7a1f3d,#3d1020)" },
+    { code: "GRF", label: "Graphite", value: "#3a3f4b" },
   ];
-  // Custom gradient creator. Name gradients pack 2..8 stops + an angle into the OPAQUE
-  // effect string as `grad2-rrggbb(-rrggbb)+-deg`: the backend never interprets it, and
-  // a build that predates gradients sees an unknown class and falls back to the member's
-  // flat colour (graceful, never garbled). Bubble gradients reuse the bubble channel,
-  // which already carries preset gradient strings.
-  // Optional animation suffix `-a<speed>[r]`: the gradient scrolls along its own angle
-  // (that IS the vector; `r` reverses it), speed 1..10 sets the pace. Encoded in the same
-  // opaque string, so peers on this build animate it and older builds stay flat.
-  const GRAD2_RE = /^grad2-((?:[0-9a-f]{6})(?:-[0-9a-f]{6}){1,7})-(\d{1,3})(?:-a(\d{1,2})(r?))?$/;
   const GRAD_MAX_STOPS = 8;
-  let pGradStops = $state<string[]>(["#e879c0", "#977df2"]);
-  let pGradDeg = $state(90);
-  let pGradSpeed = $state(0);
-  let pGradRev = $state(false);
-  const grad2Id = () =>
-    `grad2-${pGradStops.map((s) => s.slice(1).toLowerCase()).join("-")}-${Math.max(0, Math.min(360, pGradDeg))}` +
-    (pGradSpeed > 0 ? `-a${Math.min(10, pGradSpeed)}${pGradRev ? "r" : ""}` : "");
   const BUB_GRAD_RE = /^linear-gradient\(135deg,(#[0-9a-fA-F]{6}),(#[0-9a-fA-F]{6})\)$/;
   let pBubA = $state("#41295a");
   let pBubB = $state("#1a2980");
   const customBubble = () => `linear-gradient(135deg,${pBubA},${pBubB})`;
+  const FILL_EFFECT_IDS = new Set<NameEffectId>(["gradient", "rainbow", "shimmer", "candy"]);
+  const TRANSFORM_EFFECT_IDS = new Set<NameEffectId>(["wave", "wobble"]);
+
+  type NameStyleSnapshot = { font: string; color: string; effect: string };
+  let styleUndo = $state<NameStyleSnapshot[]>([]);
+  let styleRedo = $state<NameStyleSnapshot[]>([]);
+  let lastStyleHistoryKey = "";
+  let lastStyleHistoryAt = 0;
+
+  const styleSnapshot = (): NameStyleSnapshot => ({ font: pFont, color: pColor, effect: pEffect });
+
+  function rememberNameStyle(key: string) {
+    const now = Date.now();
+    // A slider can emit dozens of input events per drag. One undo step per short, continuous
+    // adjustment is useful; one per pixel is not.
+    if (key !== lastStyleHistoryKey || now - lastStyleHistoryAt > 650) {
+      styleUndo = [...styleUndo.slice(-39), styleSnapshot()];
+      styleRedo = [];
+    }
+    lastStyleHistoryKey = key;
+    lastStyleHistoryAt = now;
+  }
+
+  function restoreNameStyle(snapshot: NameStyleSnapshot) {
+    pFont = snapshot.font;
+    pColor = snapshot.color;
+    pEffect = snapshot.effect;
+    pEffects = decodeNameEffects(snapshot.effect);
+    lastStyleHistoryKey = "";
+  }
+
+  function undoNameStyle() {
+    const previous = styleUndo.at(-1);
+    if (!previous) return;
+    styleRedo = [...styleRedo, styleSnapshot()];
+    styleUndo = styleUndo.slice(0, -1);
+    restoreNameStyle(previous);
+  }
+
+  function redoNameStyle() {
+    const next = styleRedo.at(-1);
+    if (!next) return;
+    styleUndo = [...styleUndo, styleSnapshot()];
+    styleRedo = styleRedo.slice(0, -1);
+    restoreNameStyle(next);
+  }
+
+  function setNameEffects(next: NameEffect[], historyKey = "effects") {
+    rememberNameStyle(historyKey);
+    pEffects = next;
+    pEffect = encodeNameEffects(next);
+  }
+
+  function setNameFont(font: string) {
+    if (font === pFont) return;
+    rememberNameStyle("font");
+    pFont = font;
+  }
+
+  function setNameColor(color: string) {
+    if (color === pColor) return;
+    rememberNameStyle("color");
+    pColor = color;
+  }
+
+  function selectNameEffect(id: NameEffectId) {
+    if (effectConfigured(pEffects, id)) {
+      collapsedEffects[id] = false;
+      return;
+    }
+    // Both fill effects stay configured, but only one can be enabled at a time. Switching
+    // between them therefore keeps every stop, speed and direction setting intact.
+    const exclusive = FILL_EFFECT_IDS.has(id) ? FILL_EFFECT_IDS : TRANSFORM_EFFECT_IDS.has(id) ? TRANSFORM_EFFECT_IDS : null;
+    const prepared = exclusive
+      ? pEffects.map((effect) => exclusive.has(effect.id)
+        ? { ...effect, enabled: false }
+        : effect)
+      : pEffects;
+    setNameEffects([...prepared, defaultNameEffect(id)], `add:${id}`);
+    collapsedEffects[id] = false;
+  }
+
+  function setNameEffectEnabled(id: NameEffectId, enabled: boolean) {
+    const exclusive = FILL_EFFECT_IDS.has(id) ? FILL_EFFECT_IDS : TRANSFORM_EFFECT_IDS.has(id) ? TRANSFORM_EFFECT_IDS : null;
+    setNameEffects(pEffects.map((effect) => {
+      if (effect.id === id) return { ...effect, enabled };
+      if (enabled && exclusive?.has(effect.id)) {
+        return { ...effect, enabled: false };
+      }
+      return effect;
+    }), `enable:${id}`);
+  }
+
+  function removeNameEffect(id: NameEffectId) {
+    setNameEffects(pEffects.filter((effect) => effect.id !== id), `remove:${id}`);
+    delete collapsedEffects[id];
+  }
+
+  function disableAllNameEffects() {
+    setNameEffects(pEffects.map((effect) => PUBLIC_EFFECT_IDS.has(effect.id) ? { ...effect, enabled: false } : effect), "all-off");
+  }
+
+  function updateNameEffect(id: NameEffectId, key: keyof NameEffectOptions, value: NameEffectOptions[keyof NameEffectOptions]) {
+    setNameEffects(pEffects.map((effect) => effect.id === id
+      ? { ...effect, options: { ...effect.options, [key]: value } }
+      : effect), `${id}:${String(key)}`);
+  }
+
+  function updateStudioOption(id: "typography" | "master", key: keyof NameEffectOptions, value: NameEffectOptions[keyof NameEffectOptions]) {
+    const existing = pEffects.find((effect) => effect.id === id);
+    const next = existing
+      ? pEffects.map((effect) => effect.id === id ? { ...effect, enabled: true, options: { ...effect.options, [key]: value } } : effect)
+      : [...pEffects, { ...defaultNameEffect(id), options: { ...defaultNameEffect(id).options, [key]: value } }];
+    setNameEffects(next, `${id}:${String(key)}`);
+  }
+
+  function resetNameEffect(id: NameEffectId) {
+    if (id === "typography" || id === "master") {
+      setNameEffects(pEffects.filter((effect) => effect.id !== id), `reset:${id}`);
+      return;
+    }
+    setNameEffects(pEffects.map((effect) => effect.id === id
+      ? { ...defaultNameEffect(id), enabled: effect.enabled }
+      : effect), `reset:${id}`);
+  }
+
+  function moveNameEffect(id: NameEffectId, direction: -1 | 1) {
+    const publicOrder = appliedEffects.map((effect) => effect.id);
+    const from = publicOrder.indexOf(id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= publicOrder.length) return;
+    [publicOrder[from], publicOrder[to]] = [publicOrder[to], publicOrder[from]];
+    const ordered = publicOrder.map((effectId) => pEffects.find((effect) => effect.id === effectId)!);
+    const specials = pEffects.filter((effect) => !PUBLIC_EFFECT_IDS.has(effect.id));
+    setNameEffects([...ordered, ...specials], `move:${id}`);
+  }
+
+  let draggedNameEffect = $state<NameEffectId | null>(null);
+  function dropNameEffect(target: NameEffectId) {
+    if (!draggedNameEffect || draggedNameEffect === target) return;
+    const publicOrder = appliedEffects.map((effect) => effect.id);
+    const from = publicOrder.indexOf(draggedNameEffect);
+    const to = publicOrder.indexOf(target);
+    if (from < 0 || to < 0) return;
+    const [moved] = publicOrder.splice(from, 1);
+    publicOrder.splice(to, 0, moved);
+    const specials = pEffects.filter((effect) => !PUBLIC_EFFECT_IDS.has(effect.id));
+    setNameEffects([...publicOrder.map((id) => pEffects.find((effect) => effect.id === id)!), ...specials], `drag:${draggedNameEffect}`);
+    draggedNameEffect = null;
+  }
+
+  function updateGradientStop(index: number, value: string) {
+    const stops = [...(effectOptions(pEffects, "gradient").stops ?? [])];
+    stops[index] = value;
+    updateNameEffect("gradient", "stops", stops);
+  }
+
+  function addGradientStop() {
+    const stops = [...(effectOptions(pEffects, "gradient").stops ?? [])];
+    if (stops.length < GRAD_MAX_STOPS) stops.push(stops[stops.length - 1] ?? "#977df2");
+    updateNameEffect("gradient", "stops", stops);
+  }
+
+  function removeGradientStop(index: number) {
+    const stops = [...(effectOptions(pEffects, "gradient").stops ?? [])];
+    if (stops.length > 2) stops.splice(index, 1);
+    updateNameEffect("gradient", "stops", stops);
+  }
+
+  type NameRecipe = { id: string; name: string; font: string; color: string; effect: string; builtin?: boolean };
+  const NAME_RECIPE_KEY = "catcoms.name-style-recipes.v1";
+
+  function recipeFx(id: NameEffectId, options: NameEffectOptions = {}): NameEffect {
+    const effect = defaultNameEffect(id);
+    return { ...effect, options: { ...effect.options, ...options } };
+  }
+
+  const BUILTIN_NAME_RECIPES: NameRecipe[] = [
+    {
+      id: "cute", name: "Cute", font: "cute", color: "#fff7fc", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("outline", { width: 1.5, color: "#e879c0" }),
+        recipeFx("shadow", { x: 1, y: 2, blur: 1, opacity: 85, color: "#3b1830" }),
+        recipeFx("typography", { weight: 800, tracking: 0.2, bubble: 0.5 }),
+      ]),
+    },
+    {
+      id: "arcade", name: "Neon Arcade", font: "mono", color: "#6ee7d8", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("neon", { glow: 12, intensity: 90 }), recipeFx("glitch", { spread: 2, opacity: 60 }),
+        recipeFx("pulse", { speed: 4, depth: 28 }), recipeFx("typography", { weight: 800, tracking: 1 }),
+      ]),
+    },
+    {
+      id: "holo", name: "Holographic", font: "rounded", color: "#c9fbff", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("gradient", { stops: ["#6ee7d8", "#977df2", "#e879c0", "#6ee7d8"], angle: 105, speed: 5 }),
+        recipeFx("sparkle", { speed: 4, intensity: 80 }), recipeFx("outline", { width: 0.5, color: "#e9fdff" }),
+      ]),
+    },
+    {
+      id: "ghost", name: "Ghost", font: "serif", color: "#d9f5ff", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("ghost", { opacity: 64, blur: 0.5, glow: 10 }), recipeFx("wobble", { speed: 2, amount: 1 }),
+        recipeFx("typography", { italic: true, weight: 600, tracking: 1 }),
+      ]),
+    },
+    {
+      id: "candy", name: "Candy", font: "cute", color: "#fff4fb", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("candy", { color: "#ff82bd", secondary: "#fff4fb", angle: 45, speed: 2 }),
+        recipeFx("outline", { width: 1, color: "#b83d78" }), recipeFx("shadow", { x: 2, y: 2, blur: 2, opacity: 70 }),
+      ]),
+    },
+    {
+      id: "retro", name: "Retro 3D", font: "caps", color: "#ffd66e", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("extrude", { depth: 5, color: "#7c315c", opacity: 95 }), recipeFx("outline", { width: 1, color: "#3b1830" }),
+        recipeFx("typography", { weight: 900, uppercase: true, tracking: 1.5 }),
+      ]),
+    },
+    {
+      id: "ember", name: "Ember", font: "rounded", color: "#ffd36a", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("fire", { height: 6, intensity: 88, speed: 7 }), recipeFx("extrude", { depth: 2, color: "#7a2518" }),
+        recipeFx("typography", { weight: 800 }),
+      ]),
+    },
+  ];
+
+  function loadNameRecipes(): NameRecipe[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem(NAME_RECIPE_KEY) ?? "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.slice(0, 24).flatMap((value): NameRecipe[] => {
+        if (!value || typeof value !== "object") return [];
+        const r = value as Partial<NameRecipe>;
+        if (typeof r.name !== "string" || typeof r.font !== "string" || typeof r.color !== "string" || typeof r.effect !== "string") return [];
+        if (!/^#[0-9a-fA-F]{6}$/.test(r.color) || r.effect.length > 4096) return [];
+        const effects = decodeNameEffects(r.effect);
+        if (r.effect !== "none" && !effects.length) return [];
+        return [{
+          id: typeof r.id === "string" ? r.id : crypto.randomUUID(),
+          name: r.name.slice(0, 32),
+          font: NAME_FONT_IDS.has(r.font) ? r.font : "system",
+          color: r.color.toLowerCase(),
+          effect: encodeNameEffects(effects),
+        }];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  let savedNameRecipes = $state<NameRecipe[]>(loadNameRecipes());
+  let recipeNameDraft = $state("");
+
+  function persistNameRecipes(next: NameRecipe[]) {
+    savedNameRecipes = next.slice(-24);
+    try {
+      localStorage.setItem(NAME_RECIPE_KEY, JSON.stringify(savedNameRecipes));
+    } catch {
+      // The library still works for this session if private storage is unavailable or full.
+    }
+  }
+
+  function applyNameRecipe(recipe: NameRecipe) {
+    rememberNameStyle(`recipe:${recipe.id}`);
+    pFont = recipe.font;
+    pColor = recipe.color;
+    pEffect = recipe.effect;
+    pEffects = decodeNameEffects(recipe.effect);
+  }
+
+  function saveNameRecipe() {
+    const name = recipeNameDraft.trim().slice(0, 32);
+    if (!name) return;
+    persistNameRecipes([...savedNameRecipes, {
+      id: crypto.randomUUID(), name, font: pFont, color: pColor, effect: pEffect,
+    }]);
+    recipeNameDraft = "";
+  }
+
+  function deleteNameRecipe(id: string) {
+    persistNameRecipes(savedNameRecipes.filter((recipe) => recipe.id !== id));
+  }
+
+  const pick = <T,>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)];
+  const chance = (probability: number) => Math.random() < probability;
+
+  function randomizeNameStyle() {
+    const effects: NameEffect[] = [];
+    const fills: NameEffectId[] = fxMotionOff ? ["gradient", "candy"] : ["gradient", "rainbow", "shimmer", "candy"];
+    if (chance(0.75)) effects.push(defaultNameEffect(pick(fills)));
+    if (!fxMotionOff && chance(0.55)) effects.push(defaultNameEffect(pick(["wave", "mexican", "wobble", "pulse"] as const)));
+    const finishes = ["neon", "outline", "shadow", "retro", "glitch", "ghost", "fire", "extrude", "sparkle"] as const;
+    for (const id of [...finishes].sort(() => Math.random() - 0.5).slice(0, chance(0.55) ? 2 : 1)) effects.push(defaultNameEffect(id));
+    effects.push(recipeFx("typography", {
+      weight: pick([600, 700, 800, 900]), tracking: pick([0, 0.3, 0.7, 1.2]),
+      italic: chance(0.18), uppercase: chance(0.18), bubble: chance(0.25) ? 0.5 : 0,
+    }));
+    rememberNameStyle("randomize");
+    pFont = pick(["system", "rounded", "cute", "mono", "script"]);
+    pColor = pick(NAME_COLORS);
+    pEffects = effects;
+    pEffect = encodeNameEffects(effects);
+  }
+
+  let namePreviewMode = $state<"all" | "profile" | "chat" | "member" | "mention">("all");
+  let namePreviewPaused = $state(false);
+
+  function movingNameEffect(id: NameEffectId): boolean {
+    if (!animatedEffect(id)) return false;
+    return id !== "gradient" && id !== "candy" || (effectOptions(pEffects, id).speed ?? 0) > 0;
+  }
+
+  function relativeLuminance(color: string): number {
+    const match = /^#([0-9a-f]{6})$/i.exec(color);
+    if (!match) return 1;
+    const value = Number.parseInt(match[1], 16);
+    const channel = (byte: number) => {
+      const c = byte / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(value >> 16) + 0.7152 * channel((value >> 8) & 255) + 0.0722 * channel(value & 255);
+  }
+
+  function contrastRatio(a: string, b: string): number {
+    const [bright, dark] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+    return (bright + 0.05) / (dark + 0.05);
+  }
+
+  function nameStyleWarnings(): string[] {
+    const warnings: string[] = [];
+    const enabled = appliedEffects.filter((effect) => effect.enabled);
+    const type = effectOptions(pEffects, "typography");
+    const master = effectOptions(pEffects, "master");
+    if (contrastRatio(pColor, "#131218") < 3 && !enabled.some((effect) => FILL_EFFECT_IDS.has(effect.id))) {
+      warnings.push("Low contrast on the darkest chat background.");
+    }
+    if (enabled.filter((effect) => movingNameEffect(effect.id)).length > 2) warnings.push("Several animations at once may feel busy or cost more battery.");
+    if (enabled.length > 5) warnings.push("This stack may become hard to read at member-list size.");
+    if ((type.tracking ?? 0) > 3) warnings.push("Wide letter spacing can clip long names in the member list.");
+    if ((type.bubble ?? 0) > 2 || ((effectOptions(pEffects, "outline").width ?? 0) > 2.5 && effectEnabled(pEffects, "outline"))) {
+      warnings.push("Very thick lettering can close up small characters.");
+    }
+    if (effectEnabled(pEffects, "ghost") && (effectOptions(pEffects, "ghost").opacity ?? 100) < 45) warnings.push("Ghost opacity is faint at compact sizes.");
+    if ((master.intensity ?? 100) > 140) warnings.push("High master intensity can make glows and shadows muddy.");
+    return warnings;
+  }
+  let styleWarnings = $derived(nameStyleWarnings());
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
@@ -2096,14 +2551,11 @@
   function monogram(name: string): string {
     return (name ?? "").trim().slice(0, 2).toUpperCase() || "?";
   }
-  // A member's custom message-bubble background (CSS), or "" for the default. The value comes from an
-  // untrusted profile, so allow only simple colors/gradients: no `url(...)`, `;`, `@`, `{` etc. that
-  // could inject CSS.
-  function bubbleStyle(fp: string): string {
-    const b = (profiles[fp]?.bubble ?? "").trim();
-    if (!b) return "";
-    if (!/^[#a-z0-9 ,.%()-]+$/i.test(b) || /url|expression|image|var\(/i.test(b)) return "";
-    return `background:${b}`;
+  // A profile's custom frame is untrusted; the helper validates it before it reaches CSS. A
+  // companion device inherits its origin's frame just as it already inherits the origin's name.
+  function bubbleStyle(fp: string, own: boolean): string {
+    const profile = profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
+    return visibleMessageFrameStyle(profile?.bubble, appearance.flat, own);
   }
   // The profile card popover (opened by clicking a member's avatar/name).
   let profileCard = $state<string | null>(null);
@@ -2431,6 +2883,8 @@
             ? "font-caps"
             : font === "rounded"
               ? "font-rounded"
+              : font === "cute"
+                ? "font-cute"
               : font === "gothic"
                 ? "font-gothic"
                 : "";
@@ -2445,29 +2899,24 @@
     if (mime.includes("zip") || mime.includes("compressed")) return "🗜";
     return "📄";
   }
-  // Known: none | gradient | neon | rainbow | wave | pulse. Anything else still maps to
-  // `fx-<id>` (harmless: no rule matches), but the id is stripped to [a-z0-9-] first so an
-  // untrusted profile can't smuggle extra class names into the span.
   function fxClass(effect: string): string {
-    if (GRAD2_RE.test(effect)) return "fx-grad2";
-    const id = effect.toLowerCase().replace(/[^a-z0-9-]/g, "");
-    return id && id !== "none" ? `fx-${id}` : "";
+    // The original accent-derived gradient predates the stack codec. Keep rendering it for
+    // profiles that have not opened and re-saved the new editor yet.
+    if (effect === "gradient") return "fx-gradient";
+    return nameEffectClasses(decodeNameEffects(effect));
   }
-  // The inline half of a custom name gradient: the image itself. The clip rules live in
-  // .fx-grad2, so without this style (an old build, a non-matching effect) nothing clips.
+
   function fxStyle(effect: string): string {
-    const m = GRAD2_RE.exec(effect);
-    if (!m) return "";
-    const stops = m[1].split("-").map((h) => "#" + h);
-    const speed = m[3] ? Math.min(10, +m[3]) : 0;
-    if (!speed) return `;background-image:linear-gradient(${m[2]}deg, ${stops.join(", ")})`;
-    // Animated: the first stop repeats at the end so the 200% tile wraps seamlessly; the
-    // keyframes scroll one full tile period. Motion-off rules freeze this with !important.
-    const dur = ((11 - speed) * 1.2).toFixed(1);
-    return (
-      `;background-image:linear-gradient(${m[2]}deg, ${[...stops, stops[0]].join(", ")})` +
-      `;background-size:200% 200%;animation:fx-grad2-scroll ${dur}s linear infinite${m[4] === "r" ? " reverse" : ""}`
-    );
+    if (effect === "gradient") return "";
+    return nameEffectStyle(decodeNameEffects(effect));
+  }
+  const nameSegmenter = typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+  function nameLetters(name: string): string[] {
+    return nameSegmenter
+      ? Array.from(nameSegmenter.segment(name), (part) => part.segment)
+      : Array.from(name);
   }
   function colorStyle(color: string): string {
     return color ? `color:${color}` : "";
@@ -3140,19 +3589,14 @@
       pColor = me.color || pColor;
       pFont = me.font || pFont;
       pEffect = me.effect || pEffect;
+      pEffects = decodeNameEffects(pEffect);
+      styleUndo = [];
+      styleRedo = [];
+      lastStyleHistoryKey = "";
       pDescription = me.description ?? "";
       pBubble = me.bubble ?? "";
       pAvatar = me.avatar || "";
       pBanner = me.banner || "";
-      // Re-seat the gradient creators on whatever the saved profile carries, so opening
-      // the editor shows the stops you actually published rather than the defaults.
-      const g = GRAD2_RE.exec(pEffect);
-      if (g) {
-        pGradStops = g[1].split("-").map((h) => "#" + h);
-        pGradDeg = +g[2];
-        pGradSpeed = g[3] ? Math.min(10, +g[3]) : 0;
-        pGradRev = g[4] === "r";
-      }
       const bg = BUB_GRAD_RE.exec(pBubble);
       if (bg && !BUBBLE_PRESETS.some((b) => b.value === pBubble)) {
         pBubA = bg[1];
@@ -4541,6 +4985,7 @@
     const server = activeServerId;
     const uploadId = crypto.randomUUID();
     const key = uploadKey(server, uploadId);
+    const started = Date.now();
     uploads[key] = {
       server,
       id: uploadId,
@@ -4551,29 +4996,36 @@
       total: Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES)),
       status: "reading",
       progress: 0,
-      ts: Date.now(),
+      updatedAt: started,
+      ts: started,
     };
     try {
       const data = await readBase64(file, (done, total) => {
         const u = uploads[key];
-        if (u && u.status === "reading") u.progress = total > 0 ? 0.1 * done / total : 0;
+        if (u && u.status === "reading") {
+          u.progress = total > 0 ? 0.1 * done / total : 0;
+          u.updatedAt = Date.now();
+        }
       });
       const u = uploads[key];
       if (u) {
         u.status = "uploading";
         u.progress = Math.max(u.progress, 0.1);
+        u.updatedAt = Date.now();
       }
       const cid = await invoke<string>("add_file", { server, name, mime, path, data, uploadId });
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
         uploads[key].done = uploads[key].total;
+        uploads[key].updatedAt = Date.now();
       }
       return cid;
     } catch (e) {
       if (uploads[key]) {
         uploads[key].status = "failed";
         uploads[key].error = String(e);
+        uploads[key].updatedAt = Date.now();
       }
       throw e;
     }
@@ -5006,11 +5458,12 @@
 
   async function downloadFile(f: UiFile) {
     if (activeServerId === null) return;
-    const key = dlKey(activeServerId, f.cid);
+    const server = activeServerId;
+    const key = dlKey(server, f.cid);
     const started = Date.now();
     const held = Math.min(f.held, f.total);
     downloads[key] = {
-      server: activeServerId,
+      server,
       cid: f.cid,
       name: f.name,
       author: f.author,
@@ -5024,28 +5477,24 @@
       networkBytesDone: 0,
       speed: 0,
       lastRateAt: started,
+      updatedAt: started,
       ts: started,
     };
     try {
-      const base64 = await invoke<string>("download_file", { server: activeServerId, cid: f.cid });
-      const a = document.createElement("a");
-      a.href = `data:${f.mime || "application/octet-stream"};base64,${base64}`;
-      a.download = f.name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      const base64 = await invoke<string>("download_file", { server, cid: f.cid });
+      const saved = await saveGroupDownload(invoke, f.name, base64);
       if (downloads[key]) {
-        downloads[key].status = "done";
-        downloads[key].progress = 1;
-        downloads[key].done = downloads[key].total;
-        downloads[key].bytesDone = downloads[key].bytesTotal;
+        Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
+      const notice = downloadSavedNotice(f.name, saved);
+      toast(notice.text, notice.kind, notice.ms);
       refreshFiles(); // the file's chunks are now held locally: update its availability
     } catch (e) {
       error = String(e);
       if (downloads[key]) {
         downloads[key].status = "failed";
         downloads[key].error = String(e);
+        downloads[key].updatedAt = Date.now();
       }
     }
   }
@@ -5144,6 +5593,8 @@
     networkBytesDone: number;
     speed: number;
     lastRateAt: number;
+    updatedAt: number;
+    savedPath?: string;
     error?: string;
     ts: number;
   };
@@ -5161,10 +5612,12 @@
     total: number;
     status: "reading" | "uploading" | "publishing" | "done" | "failed";
     progress: number; // 0..1; 0..0.1 is the webview read, the remainder is backend work
+    updatedAt: number;
     error?: string;
     ts: number;
   };
   let uploads = $state<Record<string, UploadInfo>>({});
+  let transferNow = $state(Date.now());
   const uploadKey = (server: number, id: string) => `${server}:${id}`;
 
   // The active server's transfers, newest first. Uploads are first-class rows instead of a
@@ -5214,12 +5667,16 @@
 
   function transferConnected(t: TransferRow): boolean {
     if (t.direction === "upload" || t.status === "done") return true;
-    return !!t.provider || onlineCount > 1 || t.done >= t.total;
+    return onlineCount > 1 || t.done >= t.total ||
+      (t.status === "downloading" && transferNow - t.updatedAt < 3_000);
   }
 
   function transferIsActive(t: TransferRow): boolean {
+    if (t.direction === "download" && t.status === "downloading") {
+      return transferNow - t.updatedAt < 3_000;
+    }
     return t.status === "reading" || t.status === "uploading" || t.status === "publishing" ||
-      t.status === "downloading" || t.status === "verifying";
+      t.status === "verifying";
   }
 
   function transferPieceStates(t: TransferRow): TransferPiece[] {
@@ -5236,6 +5693,7 @@
   function transferTone(t: TransferRow): string {
     if (t.status === "done") return "complete";
     if (t.status === "failed" || !transferConnected(t)) return "error";
+    if (t.status === "downloading" && !transferIsActive(t)) return "waiting";
     if (t.status === "queued" || t.status === "waiting" || t.status === "reading" ||
         t.status === "publishing" || t.status === "verifying") return "waiting";
     return "active";
@@ -5243,7 +5701,7 @@
 
   function transferStatus(t: TransferRow): string {
     const pct = Math.round(t.progress * 100);
-    if (t.status === "done") return t.direction === "upload" ? "✓ Available" : "✓ Received";
+    if (t.status === "done") return t.direction === "upload" ? "✓ Available" : "✓ Saved";
     if (t.status === "failed") {
       return t.direction === "download" && onlineCount <= 1 ? "No connection" : "✕ Failed";
     }
@@ -5255,6 +5713,7 @@
     if (!transferConnected(t)) return "No connection";
     if (t.status === "queued" || t.status === "waiting") return "Waiting for source…";
     if (t.status === "verifying") return "Verifying…";
+    if (!transferIsActive(t)) return "Waiting for next chunk…";
     return `Receiving ${pct}%`;
   }
 
@@ -5265,7 +5724,8 @@
     ];
     if (t.direction === "download") {
       lines.push(`Data ready: ${formatBytes(t.bytesDone)} / ${formatBytes(t.bytesTotal)}`);
-      lines.push(`Source: ${t.provider ? nameOf(t.provider) : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
+      if (t.savedPath) lines.push(`Saved to: ${t.savedPath}`);
+      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; now offline)"}` : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
       if (t.speed > 0 && t.status === "downloading") lines.push(`Speed: ${formatRate(t.speed)}`);
       if (t.heldBefore > 0) lines.push(`Already held when started: ${t.heldBefore} chunk${t.heldBefore === 1 ? "" : "s"}`);
     } else {
@@ -6285,10 +6745,29 @@
   let spaceCarried = $state<Record<number, Placement> | null>(null);
   let spaceSwallowClick = false; // a drop's trailing click must not open a server
   let spaceEntering = $state<number | null>(null);
+  let spaceEntryPhase = $state<"focus" | "zoom" | null>(null);
   let spaceEnterTimer = 0;
+  let spaceCameraRaf = 0;
   let spaceTrayPinned = $state(false);
   let spaceTrayHeld = $state(false);
   let spaceTray = $derived(spaceTrayPinned || spaceTrayHeld);
+  let spaceSearch = $state("");
+  let spaceSearchOpen = $state(false);
+  let spaceSearchEl = $state<HTMLInputElement | undefined>();
+  let spaceSearchIdx = $state(0);
+  let spaceFocusedServer = $state<number | null>(null);
+  let spaceOnlineCounts = $state<Record<number, number>>({});
+  let spaceActivityAt = $state<Record<number, number>>({});
+  let spaceUndo = $state<Record<number, Placement>[]>([]);
+  let spaceRedo = $state<Record<number, Placement>[]>([]);
+  let spaceNewCluster = $state("");
+  let spaceNewClusterColor = $state("#8d7cf5");
+  let spaceClusterOpen = $state<string | null>(null);
+  let spaceClusterDrop = $state<string | null>(null);
+  let spacePanoYaw = $state(0);
+  let spaceSeamPreview = $state(false);
+  let spaceLayoutBusy = $state(false);
+  let spaceLayoutInput = $state<HTMLInputElement | undefined>();
   // Per-server livery accents, so a hovered server can glow in its own colour.
   let spaceAccents = $state<Record<number, string>>({});
   async function refreshSpaceAccents() {
@@ -6303,16 +6782,114 @@
       }
     }
   }
+  function cloneSpacePlacements(source = spaceState.placements): Record<number, Placement> {
+    return Object.fromEntries(Object.entries(source).map(([id, p]) => [Number(id), { ...p }]));
+  }
+  function rememberSpaceLayout() {
+    spaceUndo = [...spaceUndo.slice(-19), cloneSpacePlacements()];
+    spaceRedo = [];
+  }
+  function undoSpaceLayout() {
+    const previous = spaceUndo[spaceUndo.length - 1];
+    if (!previous) return;
+    spaceRedo = [...spaceRedo.slice(-19), cloneSpacePlacements()];
+    spaceUndo = spaceUndo.slice(0, -1);
+    spaceState.placements = cloneSpacePlacements(previous);
+    saveSpace();
+  }
+  function redoSpaceLayout() {
+    const next = spaceRedo[spaceRedo.length - 1];
+    if (!next) return;
+    spaceUndo = [...spaceUndo.slice(-19), cloneSpacePlacements()];
+    spaceRedo = spaceRedo.slice(0, -1);
+    spaceState.placements = cloneSpacePlacements(next);
+    saveSpace();
+  }
+  async function refreshSpacePresence() {
+    const pairs = await Promise.all(railServers.map(async (s) => {
+      try {
+        const online = await invoke<string[]>("get_online_members", { server: s.id });
+        return [s.id, online.length + 1] as const; // this device is also present
+      } catch {
+        return [s.id, 1] as const;
+      }
+    }));
+    spaceOnlineCounts = Object.fromEntries(pairs);
+  }
+  let spaceMentionCounts = $derived.by(() => {
+    const counts: Record<number, number> = {};
+    for (const item of inboxItems) if (inboxUnseen(item)) counts[item.server] = (counts[item.server] ?? 0) + 1;
+    return counts;
+  });
+  function spaceVoiceCount(server: number): number {
+    let count = 0;
+    for (const s of servers.find((item) => item.id === server)?.channels ?? []) {
+      count += roomMembers(server, s.id).length;
+    }
+    return count;
+  }
+  function stopSpaceCameraTween() {
+    if (spaceCameraRaf) cancelAnimationFrame(spaceCameraRaf);
+    spaceCameraRaf = 0;
+  }
+  function tweenSpaceCamera(target: Placement, duration: number, done: () => void = () => {}) {
+    stopSpaceCameraTween();
+    const from = { ...spaceCam };
+    const dyaw = yawDelta(from.yaw, target.yaw);
+    const dpitch = target.pitch - from.pitch;
+    const start = performance.now();
+    const frame = (now: number) => {
+      const raw = Math.min(1, (now - start) / Math.max(1, duration));
+      const t = 1 - (1 - raw) ** 3;
+      spaceCam = { yaw: wrapYaw(from.yaw + dyaw * t), pitch: clampPitch(from.pitch + dpitch * t) };
+      if (raw < 1) spaceCameraRaf = requestAnimationFrame(frame);
+      else {
+        spaceCameraRaf = 0;
+        done();
+      }
+    };
+    spaceCameraRaf = requestAnimationFrame(frame);
+  }
+  function focusSpaceServer(id: number, duration = 360) {
+    const placement = spaceState.placements[id];
+    if (!placement) return;
+    spaceFocusedServer = id;
+    tweenSpaceCamera(placement, fxMotionOff ? 1 : duration);
+  }
+  function focusSpaceCluster(id: string, duration = 420) {
+    if (!spaceState.clusters.some((cluster) => cluster.id === id)) return;
+    spaceClusterOpen = id;
+    spaceFocusedServer = null;
+    tweenSpaceCamera(spaceClusterAnchor(id), fxMotionOff ? 1 : duration);
+  }
   function toggleSpace() {
     clearTimeout(spaceEnterTimer);
+    stopSpaceCameraTween();
     spaceEntering = null;
+    spaceEntryPhase = null;
     spaceOpen = !spaceOpen;
     spaceLasso = null;
     spaceCarried = null;
     spaceTrayPinned = false;
     spaceTrayHeld = false;
     spaceDrag = null;
-    if (spaceOpen) refreshSpaceAccents();
+    spaceSearch = "";
+    spaceSearchOpen = false;
+    spaceClusterOpen = null;
+    spaceClusterDrop = null;
+    if (spaceOpen) {
+      // Migrate an older or hand-edited layout too, rather than only preventing
+      // new drops from overlapping from this point onward.
+      spaceState.placements = separatePlacements(
+        spaceState.placements,
+        Object.keys(spaceState.placements).map(Number),
+        spaceMinSeparation(),
+      );
+      saveSpace();
+      refreshSpaceAccents();
+      void refreshSpacePresence();
+      void loadInbox();
+    }
   }
   // Where the placed servers land on screen this frame. While carrying, the group's
   // placements are overridden by re-anchoring the stored offsets at the cursor's aim
@@ -6337,6 +6914,54 @@
   });
   // Servers with no place yet (new joins) wait in the tray until hung.
   let spaceUnplaced = $derived(spaceOpen ? railServers.filter((s) => !spaceState.placements[s.id]) : []);
+  let spaceSearchMatches = $derived.by(() => {
+    const q = spaceSearch.trim().toLowerCase();
+    if (!q) return [] as ServerState[];
+    return railServers.filter((s) => {
+      const cluster = spaceState.clusters.find((c) => c.id === spaceState.serverClusters[s.id]);
+      return s.name.toLowerCase().includes(q) || !!cluster?.name.toLowerCase().includes(q);
+    });
+  });
+  function spaceClusterServerIds(cluster: string): number[] {
+    return railServers.filter((s) => spaceState.serverClusters[s.id] === cluster).map((s) => s.id);
+  }
+  function spaceClusterAnchor(cluster: string): Placement {
+    const index = Math.max(0, spaceState.clusters.findIndex((c) => c.id === cluster));
+    const fallback = {
+      yaw: wrapYaw((index * 360) / Math.max(1, spaceState.clusters.length)),
+      pitch: 0,
+    };
+    return placementCentre(spaceState.placements, spaceClusterServerIds(cluster), fallback);
+  }
+  let spaceZones = $derived.by(() => {
+    const zones: { cluster: SpaceCluster; x: number; y: number; rx: number; ry: number; count: number }[] = [];
+    for (const cluster of spaceState.clusters) {
+      const ids = spaceClusterServerIds(cluster.id);
+      const centre = project(spaceCam, spaceClusterAnchor(cluster.id), spaceF);
+      if (!centre.visible) continue;
+      const members = spacePlaced.filter((it) => spaceState.serverClusters[it.s.id] === cluster.id);
+      const spreadX = members.length ? Math.max(...members.map((m) => Math.abs(m.x - centre.x))) : 0;
+      const spreadY = members.length ? Math.max(...members.map((m) => Math.abs(m.y - centre.y))) : 0;
+      zones.push({
+        cluster,
+        x: centre.x,
+        y: centre.y,
+        rx: Math.min(230, Math.max(70, spreadX + spaceState.serverSize)),
+        ry: Math.min(160, Math.max(50, spreadY + spaceState.serverSize * 0.8)),
+        count: ids.length,
+      });
+    }
+    return zones;
+  });
+  let spaceMapServers = $derived.by(() => railServers.flatMap((s) => {
+    const p = spaceState.placements[s.id];
+    if (!p) return [];
+    return [{
+      s,
+      x: ((yawDelta(spaceCam.yaw, p.yaw) + 180) / 360) * 100,
+      y: 50 - ((p.pitch - spaceCam.pitch) / 120) * 72,
+    }];
+  }));
   // A restrained constellation layer gives the floating icons some shared depth.
   // Each visible server links only to its nearest neighbour, with duplicates folded.
   let spaceLinks = $derived.by(() => {
@@ -6369,7 +6994,26 @@
     if (!r) return;
     spaceCursor = { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 };
   }
-  function newSpaceDrag(e: PointerEvent, mode: SpaceDragMode, serverId?: number) {
+  function spaceClusterAtPoint(e: PointerEvent): string | null {
+    const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const id = target?.closest<HTMLElement>("[data-space-cluster]")?.dataset.spaceCluster ?? "";
+    return spaceState.clusters.some((cluster) => cluster.id === id) ? id : null;
+  }
+  function putSpaceCarriedInCluster(cluster: string) {
+    if (!spaceCarried) return;
+    const ids = Object.keys(spaceCarried).map(Number);
+    for (const id of ids) spaceState.serverClusters[id] = cluster;
+    const anchor = spaceClusterAnchor(cluster);
+    const newlyPlaced = Object.fromEntries(
+      ids.filter((id) => !spaceState.placements[id]).map((id) => [id, anchor]),
+    );
+    if (Object.keys(newlyPlaced).length) commitSpacePlacements(newlyPlaced);
+    else saveSpace();
+    spaceClusterOpen = cluster;
+    spaceCarried = null;
+    spaceSwallowClick = true;
+  }
+  function newSpaceDrag(e: PointerEvent, mode: SpaceDragMode, serverId: number | undefined = undefined) {
     spaceCursorFrom(e);
     spaceDrag = {
       id: e.pointerId,
@@ -6440,7 +7084,10 @@
       }
       return;
     }
-    if (spaceDrag.mode === "server" || spaceDrag.mode === "tray") return;
+    if (spaceDrag.mode === "server" || spaceDrag.mode === "tray") {
+      spaceClusterDrop = spaceClusterAtPoint(e);
+      return;
+    }
     if (spaceDrag.mode === "background-maybe") {
       if (Math.hypot(dx, dy) < 6) return; // still a click or a hold
       clearTimeout(spaceHoldTimer);
@@ -6456,7 +7103,9 @@
     clearTimeout(spaceHoldTimer);
     if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
     const mode = spaceDrag.mode;
+    const clusterDrop = spaceCarried ? spaceClusterAtPoint(e) : null;
     spaceDrag = null;
+    spaceClusterDrop = null;
     if (spaceLasso) {
       const path = [...spaceLasso.points, { x: spaceCursor.x, y: spaceCursor.y }];
       const caught = lassoCapturePath(spaceState.placements, spaceCam, path, spaceF);
@@ -6466,6 +7115,10 @@
       }
       spaceLasso = null;
       spaceSwallowClick = true;
+      return;
+    }
+    if (clusterDrop && spaceCarried) {
+      putSpaceCarriedInCluster(clusterDrop);
       return;
     }
     if ((mode === "server" || mode === "tray") && spaceCarried) {
@@ -6495,26 +7148,125 @@
     e.stopPropagation();
     e.preventDefault();
   }
+  function startSpaceSearch(seed = "") {
+    spaceSearchOpen = true;
+    spaceSearch = seed;
+    spaceSearchIdx = 0;
+    void tick().then(() => spaceSearchEl?.focus());
+  }
+  function pickSpaceSearch(open: boolean) {
+    const matches = spaceSearchMatches;
+    if (!matches.length) return;
+    const server = matches[Math.max(0, Math.min(spaceSearchIdx, matches.length - 1))];
+    if (!spaceState.placements[server.id]) placeFromTray(server.id);
+    if (open) spaceIconClick(server.id);
+    else focusSpaceServer(server.id);
+  }
+  function onSpaceSearchKey(e: KeyboardEvent) {
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      spaceSearchIdx = Math.min(spaceSearchMatches.length - 1, spaceSearchIdx + 1);
+      pickSpaceSearch(false);
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      spaceSearchIdx = Math.max(0, spaceSearchIdx - 1);
+      pickSpaceSearch(false);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      pickSpaceSearch(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      spaceSearch = "";
+      spaceSearchOpen = false;
+      spaceFocusedServer = null;
+      spaceRoot?.focus();
+    }
+  }
+  function cycleSpaceFocus(direction: number) {
+    const ids = railServers.filter((s) => !!spaceState.placements[s.id]).map((s) => s.id);
+    if (!ids.length) return;
+    const at = spaceFocusedServer === null ? -1 : ids.indexOf(spaceFocusedServer);
+    const next = ids[(at + direction + ids.length) % ids.length];
+    focusSpaceServer(next);
+  }
+  function handleSpaceKey(e: KeyboardEvent): boolean {
+    if (!spaceOpen || typingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === "/") {
+      e.preventDefault();
+      startSpaceSearch();
+      return true;
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      cycleSpaceFocus(e.shiftKey ? -1 : 1);
+      return true;
+    }
+    if (e.key === "Enter" && spaceFocusedServer !== null) {
+      e.preventDefault();
+      spaceIconClick(spaceFocusedServer);
+      return true;
+    }
+    if (e.key.startsWith("Arrow")) {
+      e.preventDefault();
+      if (e.key === "ArrowLeft") spaceCam = { ...spaceCam, yaw: wrapYaw(spaceCam.yaw - 6) };
+      if (e.key === "ArrowRight") spaceCam = { ...spaceCam, yaw: wrapYaw(spaceCam.yaw + 6) };
+      if (e.key === "ArrowUp") spaceCam = { ...spaceCam, pitch: clampPitch(spaceCam.pitch + 5) };
+      if (e.key === "ArrowDown") spaceCam = { ...spaceCam, pitch: clampPitch(spaceCam.pitch - 5) };
+      spaceFocusedServer = null;
+      return true;
+    }
+    if (e.key.length === 1 && e.key !== " " && e.key.toLowerCase() !== "t") {
+      e.preventDefault();
+      startSpaceSearch(e.key);
+      return true;
+    }
+    return false;
+  }
   function spaceIconClick(id: number) {
     if (spaceCarried || spaceSwallowClick || spaceEntering !== null) return;
+    playSpacePortal();
     if (!spaceState.zoomOnOpen || fxMotionOff) {
       void switchServer(id); // switchServer also folds the space away
       return;
     }
     spaceEntering = id;
+    spaceEntryPhase = "focus";
     clearTimeout(spaceEnterTimer);
-    spaceEnterTimer = window.setTimeout(() => {
-      if (spaceEntering !== id) return;
+    const target = spaceState.placements[id];
+    if (!target) {
       spaceEntering = null;
+      spaceEntryPhase = null;
       void switchServer(id);
-    }, 440);
+      return;
+    }
+    tweenSpaceCamera(target, 360, () => {
+      if (spaceEntering !== id) return;
+      spaceEntryPhase = "zoom";
+      spaceEnterTimer = window.setTimeout(() => {
+        if (spaceEntering !== id) return;
+        spaceEntering = null;
+        spaceEntryPhase = null;
+        void switchServer(id);
+      }, 440);
+    });
   }
   function spaceServerMenu(s: ServerState): MenuItem[] {
+    const clusterItems: MenuItem[] = spaceState.clusters.map((cluster) => ({
+      label: `${spaceState.serverClusters[s.id] === cluster.id ? "✓ " : ""}Neighbourhood: ${cluster.name}`,
+      onSelect: () => assignSpaceCluster(s.id, cluster.id),
+    }));
     return [
       { label: "Open", onSelect: () => spaceIconClick(s.id) },
+      { label: "Focus", onSelect: () => focusSpaceServer(s.id) },
+      ...(clusterItems.length ? [{ divider: true } as MenuItem, ...clusterItems, {
+        label: `${spaceState.serverClusters[s.id] ? "✓ " : ""}Neighbourhood: Unsorted`,
+        onSelect: () => assignSpaceCluster(s.id, ""),
+      } as MenuItem] : []),
+      { divider: true },
       {
         label: "Return to tray",
         onSelect: () => {
+          rememberSpaceLayout();
           const { [s.id]: _gone, ...rest } = spaceState.placements;
           spaceState.placements = rest;
           saveSpace();
@@ -6532,6 +7284,7 @@
     return (2 * Math.atan((size * 0.58) / 560) * 180) / Math.PI;
   }
   function commitSpacePlacements(moved: Record<number, Placement>) {
+    rememberSpaceLayout();
     const merged = { ...spaceState.placements, ...moved };
     spaceState.placements = separatePlacements(merged, Object.keys(moved).map(Number), spaceMinSeparation());
     saveSpace();
@@ -6551,6 +7304,57 @@
   }
   function setSpaceBackdrop(b: string) {
     spaceState.backdrop = b as SpaceState["backdrop"];
+    saveSpace();
+  }
+  function assignSpaceCluster(server: number, cluster: string) {
+    if (cluster && !spaceState.clusters.some((item) => item.id === cluster)) return;
+    if (cluster) spaceState.serverClusters[server] = cluster;
+    else delete spaceState.serverClusters[server];
+    saveSpace();
+  }
+  function toggleSpaceClusterServer(server: number, cluster: string) {
+    const joining = spaceState.serverClusters[server] !== cluster;
+    assignSpaceCluster(server, joining ? cluster : "");
+    if (joining && !spaceState.placements[server]) {
+      commitSpacePlacements({ [server]: spaceClusterAnchor(cluster) });
+    }
+  }
+  function addSpaceCluster() {
+    const name = spaceNewCluster.trim().slice(0, 32);
+    if (!name) return;
+    const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "neighbourhood";
+    let id = base.slice(0, 24), suffix = 2;
+    while (spaceState.clusters.some((c) => c.id === id)) id = `${base.slice(0, 20)}-${suffix++}`;
+    spaceState.clusters = [...spaceState.clusters, { id, name, color: spaceNewClusterColor }];
+    spaceNewCluster = "";
+    saveSpace();
+    spaceClusterOpen = id;
+    if (spaceOpen) focusSpaceCluster(id);
+  }
+  function updateSpaceCluster(id: string, update: Partial<Pick<SpaceCluster, "name" | "color">>) {
+    spaceState.clusters = spaceState.clusters.map((c) => c.id === id ? { ...c, ...update } : c);
+    saveSpace();
+  }
+  function removeSpaceCluster(id: string) {
+    spaceState.clusters = spaceState.clusters.filter((c) => c.id !== id);
+    spaceState.serverClusters = Object.fromEntries(
+      Object.entries(spaceState.serverClusters).filter(([, cluster]) => cluster !== id).map(([server, cluster]) => [Number(server), cluster]),
+    );
+    if (spaceClusterOpen === id) spaceClusterOpen = null;
+    if (spaceClusterDrop === id) spaceClusterDrop = null;
+    saveSpace();
+  }
+  function tidySpace() {
+    const ids = railServers.map((s) => s.id);
+    if (!ids.length) return;
+    rememberSpaceLayout();
+    spaceState.placements = autoArrangePlacements(ids, spaceState.serverClusters, spaceMinSeparation());
+    saveSpace();
+  }
+  function forgetSpacePlacements() {
+    if (!Object.keys(spaceState.placements).length) return;
+    rememberSpaceLayout();
+    spaceState.placements = {};
     saveSpace();
   }
   let spaceImageNote = $state("");
@@ -6593,7 +7397,9 @@
   }
   // A paint-over PNG for image editors. The cardinal centres, cube seams,
   // horizon, visible band, and circular safe areas mirror this renderer.
-  function downloadSpaceTemplate() {
+  let spaceGuideSaving = $state(false);
+  async function downloadSpaceTemplate() {
+    if (spaceGuideSaving) return;
     const c = document.createElement("canvas");
     c.width = 2048;
     c.height = 1024;
@@ -6631,10 +7437,57 @@
     x.font = "18px ui-monospace, monospace";
     x.fillStyle = "rgba(255, 255, 255, 0.4)";
     x.fillText("2048 × 1024 EQUIRECTANGULAR · HIDE THIS GUIDE LAYER BEFORE EXPORT", 1024, 92);
-    const a = document.createElement("a");
-    a.download = "mewtual-server-space-guide-2048x1024.png";
-    a.href = c.toDataURL("image/png");
-    a.click();
+    const dataUrl = c.toDataURL("image/png");
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) {
+      spaceImageNote = "The guide could not be generated.";
+      toast(spaceImageNote, "err", 6000);
+      return;
+    }
+    spaceGuideSaving = true;
+    spaceImageNote = "Saving the guide to Downloads…";
+    try {
+      const saved = await saveSpaceGuide(invoke, dataUrl.slice(comma + 1));
+      const notice = guideSavedNotice(saved);
+      spaceImageNote = notice.note;
+      toast(notice.text, notice.kind, 5000);
+    } catch (err) {
+      spaceImageNote = `Guide failed to open: ${String(err)}`;
+      toast(spaceImageNote, "err", 8000);
+    } finally {
+      spaceGuideSaving = false;
+    }
+  }
+  async function exportSpaceLayout() {
+    spaceLayoutBusy = true;
+    try {
+      const json = JSON.stringify({ kind: "mewtual-server-space-layout", version: 1, space: spaceState }, null, 2);
+      const saved = await invoke<{ path: string; displayed: boolean; warning?: string }>("save_space_layout", { json });
+      toast(saved.displayed ? "Space layout saved to Downloads" : `Layout saved to ${saved.path}`, saved.displayed ? "ok" : "info", 6000);
+    } catch (err) {
+      toast(`Could not export the Space layout: ${String(err)}`, "err", 8000);
+    } finally {
+      spaceLayoutBusy = false;
+    }
+  }
+  async function importSpaceLayout(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error("layout file is too large");
+      const raw = JSON.parse(await file.text());
+      if (raw?.kind !== "mewtual-server-space-layout" || raw?.version !== 1 || !raw.space) {
+        throw new Error("not a Mewtual Server Space layout");
+      }
+      rememberSpaceLayout();
+      spaceState = parseSpace(JSON.stringify(raw.space));
+      saveSpace();
+      toast("Space layout imported", "ok", 5000);
+    } catch (err) {
+      toast(`Could not import the Space layout: ${String(err)}`, "err", 8000);
+    } finally {
+      if (spaceLayoutInput) spaceLayoutInput.value = "";
+    }
   }
   // Background-position for one 90-degree wall slice of an equirect 2:1 panorama
   // (v1 shows equirect quarters flat on the cube: near-field distortion accepted).
@@ -6645,7 +7498,42 @@
     { id: "den", name: "The Den" },
     { id: "ridge", name: "Nightfall Ridge" },
     { id: "void", name: "Void Deck" },
+    { id: "garden", name: "Lumen Garden" },
   ];
+  // Controller support stays entirely local: left stick looks, bumpers cycle,
+  // A opens the focused server, X undoes a move, and B leaves Space.
+  $effect(() => {
+    if (!spaceOpen || typeof navigator === "undefined" || !("getGamepads" in navigator)) return;
+    let raf = 0;
+    let last = performance.now();
+    const previous: boolean[] = [];
+    const frame = (now: number) => {
+      const pad = navigator.getGamepads().find((g) => !!g);
+      if (pad) {
+        const dt = Math.min(40, now - last) / 16.67;
+        const ax = Math.abs(pad.axes[0] ?? 0) > 0.18 ? pad.axes[0] : 0;
+        const ay = Math.abs(pad.axes[1] ?? 0) > 0.18 ? pad.axes[1] : 0;
+        if (ax || ay) {
+          spaceCam = {
+            yaw: wrapYaw(spaceCam.yaw + ax * 1.2 * dt),
+            pitch: clampPitch(spaceCam.pitch - ay * 1.05 * dt),
+          };
+          spaceFocusedServer = null;
+        }
+        const pressed = (index: number) => !!pad.buttons[index]?.pressed && !previous[index];
+        if (pressed(4)) cycleSpaceFocus(-1);
+        if (pressed(5)) cycleSpaceFocus(1);
+        if (pressed(0) && spaceFocusedServer !== null) spaceIconClick(spaceFocusedServer);
+        if (pressed(2)) undoSpaceLayout();
+        if (pressed(1)) toggleSpace();
+        for (let i = 0; i < pad.buttons.length; i += 1) previous[i] = pad.buttons[i].pressed;
+      }
+      last = now;
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  });
   // Panic release: folding the drawer (or the whole stage) away must not leave a note sounding
   // in everyone else's ears. untrack keeps the release out of this effect's dependency set.
   $effect(() => {
@@ -7886,6 +8774,74 @@
   // A short two-note chime via the Web Audio API (no asset to bundle), gated by the
   // notification-sound preference. Played for messages you aren't actively looking at.
   let audioCtx: AudioContext | null = null;
+  // An original, asset-free "painted portal" cue: a soft surface whoomp, an elastic
+  // upward glide, then three glassy droplets. It begins in the click gesture so a
+  // suspended AudioContext can resume, and its crest lands with the visual zoom.
+  function playSpacePortal() {
+    if (!soundOn || !spaceState.entrySound) return;
+    try {
+      audioCtx = audioCtx ?? new AudioContext();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") void ctx.resume();
+      const now = ctx.currentTime;
+      const master = ctx.createGain();
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.34, now + 0.025);
+      master.gain.setValueAtTime(0.34, now + 0.48);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.88);
+      master.connect(ctx.destination);
+
+      const whoomp = ctx.createOscillator();
+      const whoompGain = ctx.createGain();
+      whoomp.type = "sine";
+      whoomp.frequency.setValueAtTime(118, now);
+      whoomp.frequency.exponentialRampToValueAtTime(54, now + 0.24);
+      whoompGain.gain.setValueAtTime(0.46, now);
+      whoompGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      whoomp.connect(whoompGain).connect(master);
+      whoomp.start(now);
+      whoomp.stop(now + 0.3);
+
+      const glide = ctx.createOscillator();
+      const glideGain = ctx.createGain();
+      const wobble = ctx.createOscillator();
+      const wobbleDepth = ctx.createGain();
+      glide.type = "triangle";
+      glide.frequency.setValueAtTime(174, now + 0.04);
+      glide.frequency.exponentialRampToValueAtTime(392, now + 0.3);
+      glide.frequency.exponentialRampToValueAtTime(784, now + 0.58);
+      wobble.type = "sine";
+      wobble.frequency.value = 12;
+      wobbleDepth.gain.setValueAtTime(20, now);
+      wobbleDepth.gain.exponentialRampToValueAtTime(2, now + 0.58);
+      wobble.connect(wobbleDepth).connect(glide.detune);
+      glideGain.gain.setValueAtTime(0.0001, now + 0.04);
+      glideGain.gain.exponentialRampToValueAtTime(0.32, now + 0.1);
+      glideGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.64);
+      glide.connect(glideGain).connect(master);
+      glide.start(now + 0.04);
+      wobble.start(now + 0.04);
+      glide.stop(now + 0.66);
+      wobble.stop(now + 0.66);
+
+      [659.25, 880, 1174.66].forEach((frequency, index) => {
+        const drop = ctx.createOscillator();
+        const dropGain = ctx.createGain();
+        const start = now + 0.33 + index * 0.105;
+        drop.type = "sine";
+        drop.frequency.setValueAtTime(frequency * 0.96, start);
+        drop.frequency.exponentialRampToValueAtTime(frequency, start + 0.045);
+        dropGain.gain.setValueAtTime(0.0001, start);
+        dropGain.gain.exponentialRampToValueAtTime(0.22, start + 0.012);
+        dropGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.24);
+        drop.connect(dropGain).connect(master);
+        drop.start(start);
+        drop.stop(start + 0.26);
+      });
+    } catch {
+      /* audio unavailable */
+    }
+  }
   function playChime(freqs: number[]) {
     if (!soundOn) return;
     try {
@@ -8288,6 +9244,7 @@
       }),
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        spaceActivityAt[server] = Date.now();
         // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
         scheduleInboxReload();
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
@@ -8337,6 +9294,7 @@
         }
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
           refreshMembers();
           if (view === "files") refreshFiles(); // membership change ⇒ re-check fetch availability
@@ -8346,6 +9304,7 @@
         if (e.payload.server === activeServerId) refreshProfiles();
       }),
       listen<{ server: number }>("files-updated", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) refreshFiles();
       }),
       listen<{
@@ -8377,6 +9336,7 @@
         d.bytesTotal = e.payload.bytes_total;
         d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
         d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
+        d.updatedAt = now;
         if (e.payload.done === 0) d.provider = undefined; // fresh transfer: drop any prior provider
         if (e.payload.provider) d.provider = e.payload.provider; // keep the latest live provider
         if (e.payload.done >= e.payload.total) d.status = "verifying";
@@ -8390,12 +9350,14 @@
         u.total = chunkTotal;
         u.done = Math.min(chunkTotal, e.payload.done);
         u.status = e.payload.done >= e.payload.total - 1 ? "publishing" : "uploading";
+        u.updatedAt = Date.now();
         // Reading owns 0..10%. Backend work owns the rest, but only the completed invoke marks
         // the row Done: keep event progress just shy of 100% until persistence has also returned.
         const backend = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
         u.progress = Math.max(u.progress, Math.min(0.99, 0.1 + backend * 0.89));
       }),
       listen<{ server: number }>("status-updated", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) refreshStatuses();
         if (!(e.payload.server === activeServerId && view === "status" && document.hasFocus())) {
           newsUnseen = true;
@@ -8403,6 +9365,7 @@
         if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
       }),
       listen<{ server: number }>("wiki-updated", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) refreshWiki();
       }),
       listen<{ server: number }>("roles-updated", (e) => {
@@ -8420,6 +9383,7 @@
         if (e.payload.server === activeServerId) refreshBadges();
       }),
       listen<{ server: number }>("events-changed", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) refreshEvents();
         if (!(e.payload.server === activeServerId && view === "events" && document.hasFocus())) {
           newsUnseen = true;
@@ -8437,6 +9401,7 @@
         void handleCallSignal(e.payload.from_fp, e.payload.payload, e.payload.server);
       }),
       listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
+        spaceOnlineCounts[e.payload.server] = e.payload.online.length + 1;
         if (e.payload.server === activeServerId) {
           const next = new Set(e.payload.online);
           const t = Date.now();
@@ -8529,6 +9494,13 @@
         else navForward();
         return;
       }
+      if (spaceOpen && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoSpaceLayout();
+        else undoSpaceLayout();
+        return;
+      }
+      if (handleSpaceKey(e)) return;
       if (e.key === "Escape") {
         if (showQuickSwitch) closeQuickSwitch();
         else if (scanOpen) closeScan(null);
@@ -8556,7 +9528,9 @@
         // The space folds last: entry, carrying, and the tray release first, then the view itself.
         else if (spaceOpen && spaceEntering !== null) {
           clearTimeout(spaceEnterTimer);
+          stopSpaceCameraTween();
           spaceEntering = null;
+          spaceEntryPhase = null;
         }
         else if (spaceOpen && spaceCarried) {
           spaceCarried = null;
@@ -8565,7 +9539,9 @@
         else if (spaceOpen && spaceTrayPinned) spaceTrayPinned = false;
         else if (spaceOpen) {
           clearTimeout(spaceEnterTimer);
+          stopSpaceCameraTween();
           spaceEntering = null;
+          spaceEntryPhase = null;
           spaceOpen = false;
         }
         return;
@@ -8653,6 +9629,9 @@
       nowTick = Date.now();
       pruneTicker(); // stale news stops being news
     }, 60_000);
+    // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
+    // clock drives that freshness check; it does not poll the network or alter transfer state.
+    const transferTick = setInterval(() => (transferNow = Date.now()), 1_000);
     // One slow blink about every half minute, and only while somebody is actually looking.
     const blink = setInterval(() => {
       if (!windowFocused || locked) return;
@@ -8682,6 +9661,7 @@
       releaseAll();
       stopPlayback();
       clearInterval(tick);
+      clearInterval(transferTick);
       clearInterval(blink);
       clearInterval(callCleanup);
       clearTimeout(inboxTimer);
@@ -8693,7 +9673,21 @@
 </script>
 
 {#snippet styledName(name: string, color: string, font: string, effect: string)}
-  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color) + fxStyle(effect)}>{name}</span>
+  {@const effects = decodeNameEffects(effect)}
+  {@const letters = nameLetters(name)}
+  {@const mexican = effectEnabled(effects, "mexican")}
+  {@const mexicanOptions = effectOptions(effects, "mexican")}
+  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color) + fxStyle(effect)} aria-label={name} data-name={name}>
+    {#if mexican}
+      {#each letters as letter, i (i)}
+        <span
+          class="fx-letter"
+          aria-hidden="true"
+          style={`animation-delay:${(-1 * (mexicanOptions.direction === -1 ? letters.length - i - 1 : i) * (0.025 + (mexicanOptions.spread ?? 4) * 0.0095)).toFixed(3)}s`}
+        >{letter === " " ? "\u00a0" : letter}</span>
+      {/each}
+    {:else}{name}{/if}
+  </span>
 {/snippet}
 
 <!-- The connectivity detail, rendered by BOTH the create/join screen and Settings ->
@@ -8777,6 +9771,41 @@
       <span class="muted">Name</span>
       <input bind:value={pName} placeholder="display name" />
     </label>
+    <div class="field name-studio">
+      <div class="name-studio-head">
+        <span class="muted">Name Style Studio</span>
+        <div class="name-studio-actions">
+          <button type="button" class="ghost small" disabled={!styleUndo.length} onclick={undoNameStyle} title="Undo the last unsaved style change">↶ Undo</button>
+          <button type="button" class="ghost small" disabled={!styleRedo.length} onclick={redoNameStyle} title="Redo the last undone style change">↷ Redo</button>
+          <button type="button" class="ghost small" onclick={randomizeNameStyle}>⚄ Randomise</button>
+        </div>
+      </div>
+      <span class="muted small">Recipes change the draft only; Save profile publishes it to this server.</span>
+      <div class="name-recipes">
+        {#each BUILTIN_NAME_RECIPES as recipe (recipe.id)}
+          <button type="button" class="name-recipe" title={`Load ${recipe.name}`} onclick={() => applyNameRecipe(recipe)}>
+            {@render styledName(recipe.name, recipe.color, recipe.font, recipe.effect)}
+          </button>
+        {/each}
+      </div>
+      {#if savedNameRecipes.length}
+        <span class="name-studio-label">MY LIBRARY · AVAILABLE ON EVERY SERVER</span>
+        <div class="saved-recipes">
+          {#each savedNameRecipes as recipe (recipe.id)}
+            <span class="saved-recipe">
+              <button type="button" class="name-recipe" title={`Load ${recipe.name}`} onclick={() => applyNameRecipe(recipe)}>
+                {@render styledName(recipe.name, recipe.color, recipe.font, recipe.effect)}
+              </button>
+              <button type="button" class="recipe-delete" aria-label={`Delete saved recipe ${recipe.name}`} title="Delete this saved recipe" onclick={() => deleteNameRecipe(recipe.id)}>✕</button>
+            </span>
+          {/each}
+        </div>
+      {/if}
+      <div class="recipe-save">
+        <input value={recipeNameDraft} maxlength="32" placeholder="Recipe name" aria-label="New recipe name" oninput={(e) => (recipeNameDraft = e.currentTarget.value)} onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveNameRecipe(); } }} />
+        <button type="button" class="ghost small" disabled={!recipeNameDraft.trim()} onclick={saveNameRecipe}>Save current to library</button>
+      </div>
+    </div>
     <div class="field">
       <span class="muted">Font</span>
       <div class="ns-tiles">
@@ -8788,66 +9817,224 @@
             title={f.label}
             aria-label={f.label}
             aria-pressed={pFont === f.id}
-            onclick={() => (pFont = f.id)}
+            onclick={() => setNameFont(f.id)}
           ><span class="name {fontClass(f.id)}">Gg</span></button>
         {/each}
       </div>
     </div>
+    <div class="field type-studio">
+      <span class="muted">Typography</span>
+      <div class="fx-option-grid">
+        <label class="fx-option"><span>Weight <output>{effectOptions(pEffects, "typography").weight}</output></span><input type="range" min="400" max="900" step="100" value={effectOptions(pEffects, "typography").weight} oninput={(e) => updateStudioOption("typography", "weight", e.currentTarget.valueAsNumber)} /></label>
+        <label class="fx-option"><span>Letter spacing <output>{effectOptions(pEffects, "typography").tracking}px</output></span><input type="range" min="-1" max="6" step="0.1" value={effectOptions(pEffects, "typography").tracking} oninput={(e) => updateStudioOption("typography", "tracking", e.currentTarget.valueAsNumber)} /></label>
+        <label class="fx-option"><span>Bubble thickness <output>{effectOptions(pEffects, "typography").bubble}px</output></span><input type="range" min="0" max="3" step="0.25" value={effectOptions(pEffects, "typography").bubble} oninput={(e) => updateStudioOption("typography", "bubble", e.currentTarget.valueAsNumber)} /></label>
+      </div>
+      <div class="type-toggles">
+        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").italic} onchange={(e) => updateStudioOption("typography", "italic", e.currentTarget.checked)} /> Italic</label>
+        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").uppercase} onchange={(e) => updateStudioOption("typography", "uppercase", e.currentTarget.checked)} /> Uppercase</label>
+        <button type="button" class="ghost small" onclick={() => resetNameEffect("typography")}>Reset typography</button>
+      </div>
+    </div>
     <div class="field">
-      <span class="muted">Effect</span>
-      <div class="ns-tiles">
-        {#each NAME_EFFECTS as fx}
-          {@const dead = fxMotionOff && ANIM_FX.has(fx.id)}
-          <button
-            type="button"
-            class="ns-tile"
-            class:active={pEffect === fx.id}
-            class:motion-dead={dead}
-            title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : fx.label}
-            aria-label={fx.label}
-            aria-pressed={pEffect === fx.id}
-            onclick={() => (pEffect = fx.id)}
-          ><span class="name {fxClass(fx.id)}" style={colorStyle(pColor)}>{fx.label}</span></button>
-        {/each}
+      <div class="effect-field-head">
+        <span class="muted">Effects</span>
         <button
           type="button"
-          class="ns-tile"
-          class:active={GRAD2_RE.test(pEffect)}
-          title="Custom gradient: your stops, your angle"
-          aria-label="Custom gradient"
-          aria-pressed={GRAD2_RE.test(pEffect)}
-          onclick={() => (pEffect = grad2Id())}
-        ><span class="name fx-grad2" style={`color:${pGradStops[0]}` + fxStyle(grad2Id())}>Gradient</span></button>
+          class="ghost small"
+          class:active={!appliedEffects.some((effect) => effect.enabled)}
+          title="Temporarily turn every effect off without losing its settings"
+          aria-label="All effects off"
+          aria-pressed={!appliedEffects.some((effect) => effect.enabled)}
+          onclick={disableAllNameEffects}
+        >All off</button>
       </div>
-      {#if GRAD2_RE.test(pEffect)}
-        <div class="grad-maker">
-          {#each pGradStops as stop, si (si)}
-            <span class="grad-stop">
-              <input type="color" value={stop} aria-label={`Gradient stop ${si + 1}`} oninput={(e) => { pGradStops[si] = e.currentTarget.value; pEffect = grad2Id(); }} />
-              {#if pGradStops.length > 2}
-                <button type="button" class="grad-del" title="Remove this stop" aria-label={`Remove gradient stop ${si + 1}`} onclick={() => { pGradStops.splice(si, 1); pEffect = grad2Id(); }}>✕</button>
+      <div class="effect-catalog">
+        {#each EFFECT_GROUPS as group}
+          <div class="effect-catalog-group">
+            <span class="name-studio-label">{group}</span>
+            <div class="ns-tiles">
+              {#each NAME_EFFECTS.filter((effect) => effect.group === group) as fx}
+                {@const dead = fxMotionOff && movingNameEffect(fx.id)}
+                {@const configured = effectConfigured(pEffects, fx.id)}
+                <button
+                  type="button"
+                  class="ns-tile"
+                  class:active={configured}
+                  class:effect-off={configured && !effectEnabled(pEffects, fx.id)}
+                  class:motion-dead={dead}
+                  title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : configured ? `${fx.label}: show its saved settings` : `Add ${fx.label}`}
+                  aria-label={fx.label}
+                  aria-pressed={effectEnabled(pEffects, fx.id)}
+                  onclick={() => selectNameEffect(fx.id)}
+                >{@render styledName(fx.label, pColor, pFont, encodeNameEffects([defaultNameEffect(fx.id)]))}</button>
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </div>
+      <span class="muted small">Add as many as you like, then tick combinations on and off below. Fill effects, and Bounce/Wobble, preserve every setup while enabling one compatible choice at a time.</span>
+
+      <div class="fx-master">
+        <label class="fx-option"><span>Master intensity <output>{effectOptions(pEffects, "master").intensity}%</output></span><input type="range" min="25" max="175" step="5" value={effectOptions(pEffects, "master").intensity} oninput={(e) => updateStudioOption("master", "intensity", e.currentTarget.valueAsNumber)} /></label>
+        <label class="fx-option"><span>Animation speed <output>{effectOptions(pEffects, "master").speed}%</output></span><input type="range" min="25" max="200" step="5" value={effectOptions(pEffects, "master").speed} oninput={(e) => updateStudioOption("master", "speed", e.currentTarget.valueAsNumber)} /></label>
+        <button type="button" class="ghost small" onclick={() => resetNameEffect("master")}>Reset master</button>
+      </div>
+
+      {#if appliedEffects.length}
+        <div class="fx-settings-list" aria-label="Applied effect options">
+          {#each appliedEffects as active, ai (active.id)}
+            {@const definition = NAME_EFFECTS.find((effect) => effect.id === active.id)}
+            <section
+              class="fx-settings"
+              class:effect-off={!active.enabled}
+              class:dragging={draggedNameEffect === active.id}
+              role="group"
+              aria-label={`${definition?.label ?? active.id} effect settings`}
+              ondragover={(e) => e.preventDefault()}
+              ondrop={(e) => { e.preventDefault(); dropNameEffect(active.id); }}
+            >
+              <div class="fx-settings-head">
+                <div class="fx-settings-label">
+                  <button
+                    type="button"
+                    class="fx-drag"
+                    draggable="true"
+                    aria-label={`Drag ${definition?.label ?? active.id} to reorder; arrow controls are also available`}
+                    title="Drag to reorder"
+                    ondragstart={() => (draggedNameEffect = active.id)}
+                    ondragend={() => (draggedNameEffect = null)}
+                  >⠿</button>
+                  <button
+                    type="button"
+                    class="fx-settings-title"
+                    aria-expanded={!collapsedEffects[active.id]}
+                    onclick={() => (collapsedEffects[active.id] = !collapsedEffects[active.id])}
+                  >
+                    <span class="fx-chevron" aria-hidden="true">{collapsedEffects[active.id] ? "▸" : "▾"}</span>
+                    <span>
+                      <strong>{definition?.label ?? active.id}</strong>
+                      <span class="muted small">{definition?.description ?? ""}</span>
+                    </span>
+                  </button>
+                </div>
+                <div class="fx-settings-actions">
+                  <label class="fx-enabled">
+                    <input type="checkbox" checked={active.enabled} onchange={(e) => setNameEffectEnabled(active.id, e.currentTarget.checked)} />
+                    <span>{active.enabled ? "On" : "Off"}</span>
+                  </label>
+                  <button type="button" class="ghost fx-order" disabled={ai === 0} aria-label={`Move ${definition?.label ?? active.id} up`} onclick={() => moveNameEffect(active.id, -1)}>↑</button>
+                  <button type="button" class="ghost fx-order" disabled={ai === appliedEffects.length - 1} aria-label={`Move ${definition?.label ?? active.id} down`} onclick={() => moveNameEffect(active.id, 1)}>↓</button>
+                  <button type="button" class="ghost small" onclick={() => resetNameEffect(active.id)}>Reset</button>
+                  <button type="button" class="ghost small" aria-label={`Remove ${definition?.label ?? active.id} and forget its settings`} onclick={() => removeNameEffect(active.id)}>Remove</button>
+                </div>
+              </div>
+
+              {#if !collapsedEffects[active.id]}
+                <div class="fx-settings-body">
+                {#if active.id === "gradient"}
+                <div class="grad-maker">
+                  {#each active.options.stops ?? [] as stop, si (si)}
+                    <span class="grad-stop">
+                      <input type="color" value={stop} aria-label={`Gradient stop ${si + 1}`} oninput={(e) => updateGradientStop(si, e.currentTarget.value)} />
+                      {#if (active.options.stops?.length ?? 0) > 2}
+                        <button type="button" class="grad-del" title="Remove this stop" aria-label={`Remove gradient stop ${si + 1}`} onclick={() => removeGradientStop(si)}>✕</button>
+                      {/if}
+                    </span>
+                  {/each}
+                  {#if (active.options.stops?.length ?? 0) < GRAD_MAX_STOPS}
+                    <button type="button" class="ghost small" onclick={addGradientStop}>＋ stop</button>
+                  {/if}
+                </div>
+                <label class="fx-option"><span>Angle <output>{active.options.angle}°</output></span><input type="range" min="0" max="360" step="15" value={active.options.angle} oninput={(e) => updateNameEffect(active.id, "angle", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Scroll <output>{active.options.speed ? `speed ${active.options.speed}` : "still"}</output></span><input type="range" min="0" max="10" step="1" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" disabled={!active.options.speed} onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ reverse" : "▶ forward"}</button>
+              {:else if active.id === "rainbow"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ reverse" : "▶ forward"}</button>
+              {:else if active.id === "neon"}
+                <label class="fx-option"><span>Glow size <output>{active.options.glow}px</output></span><input type="range" min="2" max="18" value={active.options.glow} oninput={(e) => updateNameEffect(active.id, "glow", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Brightness <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "wave"}
+                <label class="fx-option"><span>Height <output>{active.options.height}px</output></span><input type="range" min="1" max="8" value={active.options.height} oninput={(e) => updateNameEffect(active.id, "height", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "mexican"}
+                <label class="fx-option"><span>Height <output>{active.options.height}px</output></span><input type="range" min="1" max="10" value={active.options.height} oninput={(e) => updateNameEffect(active.id, "height", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Letter spread <output>{active.options.spread}</output></span><input type="range" min="1" max="10" value={active.options.spread} oninput={(e) => updateNameEffect(active.id, "spread", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ right to left" : "▶ left to right"}</button>
+              {:else if active.id === "pulse"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Fade depth <output>{active.options.depth}%</output></span><input type="range" min="15" max="85" step="5" value={active.options.depth} oninput={(e) => updateNameEffect(active.id, "depth", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "outline"}
+                <label class="fx-option"><span>Thickness <output>{active.options.width}px</output></span><input type="range" min="0.5" max="3" step="0.5" value={active.options.width} oninput={(e) => updateNameEffect(active.id, "width", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-color-option"><span>Outline colour</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+              {:else if active.id === "shadow"}
+                <div class="fx-option-grid">
+                  <label class="fx-option"><span>X <output>{active.options.x}px</output></span><input type="range" min="-8" max="8" value={active.options.x} oninput={(e) => updateNameEffect(active.id, "x", e.currentTarget.valueAsNumber)} /></label>
+                  <label class="fx-option"><span>Y <output>{active.options.y}px</output></span><input type="range" min="-8" max="8" value={active.options.y} oninput={(e) => updateNameEffect(active.id, "y", e.currentTarget.valueAsNumber)} /></label>
+                  <label class="fx-option"><span>Blur <output>{active.options.blur}px</output></span><input type="range" min="0" max="16" value={active.options.blur} oninput={(e) => updateNameEffect(active.id, "blur", e.currentTarget.valueAsNumber)} /></label>
+                  <label class="fx-option"><span>Opacity <output>{active.options.opacity}%</output></span><input type="range" min="10" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+                </div>
+                <label class="fx-color-option"><span>Shadow colour</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+              {:else if active.id === "retro"}
+                <label class="fx-option"><span>Offset <output>{active.options.offset}px</output></span><input type="range" min="1" max="6" value={active.options.offset} oninput={(e) => updateNameEffect(active.id, "offset", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Strength <output>{active.options.opacity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "glitch"}
+                <label class="fx-option"><span>Spread <output>{active.options.spread}px</output></span><input type="range" min="1" max="5" value={active.options.spread} oninput={(e) => updateNameEffect(active.id, "spread", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Strength <output>{active.options.opacity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "shimmer"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Highlight <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ reverse" : "▶ forward"}</button>
+              {:else if active.id === "sparkle"}
+                <label class="fx-option"><span>Twinkle speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Brightness <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "wobble"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Tilt <output>{active.options.amount}°</output></span><input type="range" min="1" max="8" step="0.5" value={active.options.amount} oninput={(e) => updateNameEffect(active.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "candy"}
+                <div class="fx-colour-pair">
+                  <label class="fx-color-option"><span>Stripe one</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+                  <label class="fx-color-option"><span>Stripe two</span><input type="color" value={active.options.secondary} oninput={(e) => updateNameEffect(active.id, "secondary", e.currentTarget.value)} /></label>
+                </div>
+                <label class="fx-option"><span>Angle <output>{active.options.angle}°</output></span><input type="range" min="0" max="360" step="15" value={active.options.angle} oninput={(e) => updateNameEffect(active.id, "angle", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Scroll <output>{active.options.speed ? `speed ${active.options.speed}` : "still"}</output></span><input type="range" min="0" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "ghost"}
+                <label class="fx-option"><span>Opacity <output>{active.options.opacity}%</output></span><input type="range" min="20" max="95" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Frost <output>{active.options.blur}px</output></span><input type="range" min="0" max="3" step="0.25" value={active.options.blur} oninput={(e) => updateNameEffect(active.id, "blur", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Glow <output>{active.options.glow}px</output></span><input type="range" min="2" max="14" value={active.options.glow} oninput={(e) => updateNameEffect(active.id, "glow", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "fire"}
+                <label class="fx-option"><span>Flame height <output>{active.options.height}px</output></span><input type="range" min="1" max="10" value={active.options.height} oninput={(e) => updateNameEffect(active.id, "height", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Heat <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Flicker <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "extrude"}
+                <label class="fx-option"><span>Depth <output>{active.options.depth}</output></span><input type="range" min="1" max="7" value={active.options.depth} oninput={(e) => updateNameEffect(active.id, "depth", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Strength <output>{active.options.opacity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-color-option"><span>Depth colour</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ left" : "▶ right"}</button>
               {/if}
-            </span>
+                {#if fxMotionOff && active.enabled && movingNameEffect(active.id)}
+                  <span class="muted small">Motion is off, so this effect is shown paused.</span>
+                {/if}
+                </div>
+              {/if}
+            </section>
           {/each}
-          {#if pGradStops.length < GRAD_MAX_STOPS}
-            <button type="button" class="ghost small" onclick={() => { pGradStops.push(pGradStops[pGradStops.length - 1]); pEffect = grad2Id(); }}>＋ stop</button>
-          {/if}
-          <input type="range" min="0" max="360" step="15" value={pGradDeg} aria-label="Gradient angle" oninput={(e) => { pGradDeg = +e.currentTarget.value; pEffect = grad2Id(); }} />
-          <span class="muted small">{pGradDeg}°</span>
         </div>
-        <div class="grad-maker">
-          <span class="muted small">Scroll</span>
-          <input type="range" min="0" max="10" step="1" value={pGradSpeed} aria-label="Gradient scroll speed" oninput={(e) => { pGradSpeed = +e.currentTarget.value; pEffect = grad2Id(); }} />
-          <button type="button" class="ghost small" disabled={!pGradSpeed} onclick={() => { pGradRev = !pGradRev; pEffect = grad2Id(); }}>{pGradRev ? "◀ reverse" : "▶ forward"}</button>
-          <span class="muted small">{pGradSpeed ? `speed ${pGradSpeed}` : "still"}</span>
+      {/if}
+      {#if styleWarnings.length}
+        <div class="fx-warnings" role="status">
+          <strong>READABILITY CHECK</strong>
+          {#each styleWarnings as warning}<span>△ {warning}</span>{/each}
         </div>
-        <span class="muted small">Up to {GRAD_MAX_STOPS} stops. Scroll follows the gradient's angle{fxMotionOff ? " (motion is off, so it holds still for you)" : ""}. Builds that predate gradients show your flat colour instead.</span>
+      {:else}
+        <span class="fx-readable">✓ Readable at compact chat sizes</span>
       {/if}
     </div>
     <div class="field">
       <span class="muted">Colour</span>
       <div class="ns-swatches">
-        <input type="color" bind:value={pColor} aria-label="Custom name colour" />
+        <input type="color" value={pColor} aria-label="Custom name colour" oninput={(e) => setNameColor(e.currentTarget.value)} />
         {#each NAME_COLORS as c}
           <button
             type="button"
@@ -8857,7 +10044,7 @@
             aria-label={`Name colour ${c}`}
             aria-pressed={pColor === c}
             style={`background:${c}`}
-            onclick={() => (pColor = c)}
+            onclick={() => setNameColor(c)}
           ></button>
         {/each}
       </div>
@@ -8866,34 +10053,47 @@
       <span class="muted">About you</span>
       <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
     </label>
-    <div class="field">
-      <span class="muted">Message bubble</span>
-      <div class="bubble-presets">
+    <div class="field message-frame-field">
+      <div class="message-frame-head">
+        <span class="muted">Message frame</span>
+        <span class="message-frame-kicker">TX SKIN / LOCAL ID</span>
+      </div>
+      <span class="muted small">Give your posts a personal transmission surface. It stays inside the message lane so timestamps and avatars remain clear.</span>
+      <div class="bubble-presets" aria-label="Message frame preset">
         {#each BUBBLE_PRESETS as b}
           <button
             type="button"
             class="bubble-swatch"
             class:active={pBubble === b.value}
             title={b.label}
-            style={b.value ? `background:${b.value}` : ""}
+            aria-pressed={pBubble === b.value}
             onclick={() => (pBubble = b.value)}
-          >{#if !b.value}Aa{/if}</button>
+          >
+            <span class="bubble-swatch-demo" class:open={!b.value} style={b.value ? `--message-surface:${b.value}` : ""}>
+              <i></i><i></i><i></i>
+            </span>
+            <span class="bubble-swatch-label"><b>{b.code}</b>{b.label}</span>
+          </button>
         {/each}
         <button
           type="button"
           class="bubble-swatch"
           class:active={pBubble === customBubble()}
           title="Custom gradient"
-          style={`background:${customBubble()}`}
+          aria-pressed={pBubble === customBubble()}
           onclick={() => (pBubble = customBubble())}
-        ></button>
+        >
+          <span class="bubble-swatch-demo" style={`--message-surface:${customBubble()}`}><i></i><i></i><i></i></span>
+          <span class="bubble-swatch-label"><b>USR</b>Custom mix</span>
+        </button>
       </div>
       {#if pBubble === customBubble()}
-        <div class="grad-maker">
-          <input type="color" value={pBubA} aria-label="Bubble gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; pBubble = customBubble(); }} />
-          <input type="color" value={pBubB} aria-label="Bubble gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; pBubble = customBubble(); }} />
+        <div class="grad-maker bubble-customizer">
+          <label><span>A / SRC</span><input type="color" value={pBubA} aria-label="Frame gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; pBubble = customBubble(); }} /></label>
+          <span class="bubble-gradient-link" aria-hidden="true"></span>
+          <label><span>B / DST</span><input type="color" value={pBubB} aria-label="Frame gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; pBubble = customBubble(); }} /></label>
         </div>
-        <span class="muted small">Keep it dark enough to read white text on: a text shadow backs it up, but not by much.</span>
+        <span class="muted small">Keep both nodes dark enough for white terminal text; the signal rail adds structure, not contrast.</span>
       {/if}
     </div>
     <div class="field">
@@ -8913,18 +10113,15 @@
       </div>
       <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
     </div>
-    <p class="preview">
-      Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
-    </p>
     <button onclick={saveProfile}>Save profile</button>
   </div>
 {/snippet}
 
 <!-- The settings live preview: the REAL message-log markup at miniature scale, fed by the
      profile DRAFT, so it can never drift from the log and every knob (density, text size,
-     clock, flatten, bubble, name style) applies the moment you turn it. -->
+     clock, flatten, message frame, name style) applies the moment you turn it. -->
 {#snippet previewLog()}
-  {@const pv = appearance.flat || !pBubble ? "" : `background:${pBubble}`}
+  {@const pv = messageFrameStyle(pBubble)}
   <ul class="messages stx-plog">
     <li class:has-bubble={!!pv} style={pv}>
       <span class="t">
@@ -8953,6 +10150,69 @@
       <div class="m-body"><span class="text">bringing biscuits too</span></div>
     </li>
   </ul>
+{/snippet}
+
+<!-- Shared by the standalone Profile surface and Settings → My Profile: both keep this full
+     card-and-chat preview pinned to the editor's right instead of duplicating a smaller preview
+     below a potentially long effect-options list. -->
+{#snippet profilePreview()}
+  <div class="name-preview-stack" class:name-preview-paused={namePreviewPaused}>
+    <div class="stx-ph"><i></i>LIVE PREVIEW</div>
+    <div class="name-preview-tools">
+      {#each ["all", "profile", "chat", "member", "mention"] as mode}
+        <button type="button" class:active={namePreviewMode === mode} onclick={() => (namePreviewMode = mode as typeof namePreviewMode)}>{mode}</button>
+      {/each}
+      <button type="button" class:active={namePreviewPaused} onclick={() => (namePreviewPaused = !namePreviewPaused)}>{namePreviewPaused ? "▶" : "Ⅱ"}</button>
+    </div>
+    {#if namePreviewMode === "all" || namePreviewMode === "profile"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">PROFILE CARD</div>
+        <div class="stx-prof">
+          {#if pBanner}
+            <img class="stx-pbanner" src={imgSrc(pBanner)} alt="" />
+          {:else}
+            <div class="stx-pbanner"></div>
+          {/if}
+          {#if pAvatar}
+            <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
+          {:else}
+            <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+          {/if}
+          <div class="stx-prof-body">
+            <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+            {#if myFp}<div class="stx-pfp">FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</div>{/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+    {#if namePreviewMode === "all" || namePreviewMode === "chat"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">IN CHAT</div>
+        {@render previewLog()}
+      </div>
+    {/if}
+    {#if namePreviewMode === "all" || namePreviewMode === "member"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">MEMBER LIST · COMPACT</div>
+        <div class="stx-member-preview">
+          <span class="presence online">●</span>
+          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
+          <span class="stx-member-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+          <span class="you-badge">you</span>
+        </div>
+      </div>
+    {/if}
+    {#if namePreviewMode === "all" || namePreviewMode === "mention"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">MENTION / NOTIFICATION</div>
+        <div class="stx-mention-preview">
+          <span>{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+          <span class="muted small">mentioned you in #lounge</span>
+        </div>
+      </div>
+    {/if}
+    <p class="muted small stx-pnote">Draft preview · {namePreviewPaused ? "animations paused" : "animations live"}</p>
+  </div>
 {/snippet}
 
 <!-- One roster row in the member column (rendered under the online / offline group heads). -->
@@ -9229,6 +10489,32 @@
         <path d="M0 54L20 46L42 64L66 44L84 60L100 56L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 75%, var(--bg-0))" />
         <path d="M0 72L36 62L70 76L100 68L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 35%, var(--bg-0))" />
       {/if}
+    </svg>
+  {:else if b === "garden"}
+    <svg class="sp-art sp-garden-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <!-- One continuous bioluminescent conservatory: glass ribs repeat across
+           walls while each cardinal face gets its own little garden landmark. -->
+      <path d="M8 100V38Q8 10 50 7Q92 10 92 38V100M8 38Q50 21 92 38M50 7V100" style="fill:none; stroke:color-mix(in oklab, var(--text-2) 20%, transparent); stroke-width:0.65" />
+      <path d="M0 80Q18 68 36 78T70 76T100 78V100H0Z" style="fill:color-mix(in oklab, var(--ok) 11%, var(--bg-0))" />
+      <path d="M0 85Q24 75 48 84T100 82" style="fill:none; stroke:color-mix(in oklab, var(--accent) 28%, transparent); stroke-width:0.5" />
+      {#if fy === 0}
+        <ellipse cx="50" cy="76" rx="18" ry="6" style="fill:color-mix(in oklab, var(--accent) 18%, var(--bg-0)); stroke:color-mix(in oklab, var(--accent) 52%, transparent); stroke-width:0.45" />
+        <path d="M50 75Q43 59 49 45Q55 57 50 75M48 58Q39 51 36 42Q46 43 50 51M51 62Q60 55 65 46Q55 47 50 55" style="fill:color-mix(in oklab, var(--ok) 38%, var(--panel)); stroke:color-mix(in oklab, var(--ok) 58%, transparent); stroke-width:0.35" />
+        <circle cx="49" cy="43" r="2.8" style="fill:color-mix(in oklab, var(--accent) 78%, white); opacity:0.72" />
+      {:else if fy === 90}
+        <path d="M22 80Q20 60 28 47M35 79Q37 58 32 39M72 80Q76 58 67 44M82 81Q79 65 86 53" style="fill:none; stroke:color-mix(in oklab, var(--ok) 62%, var(--panel)); stroke-width:1.1" />
+        <path d="M27 58q-10-8-12 4q8 3 12-4M33 51q10-9 13 3q-8 5-13-3M68 55q-9-8-12 3q8 4 12-3M78 66q10-8 13 3q-8 4-13-3" style="fill:color-mix(in oklab, var(--ok) 34%, var(--panel))" />
+      {:else if fy === 180}
+        <rect x="28" y="49" width="44" height="29" rx="3" style="fill:color-mix(in oklab, var(--panel) 54%, transparent); stroke:color-mix(in oklab, var(--accent) 30%, var(--border)); stroke-width:0.5" />
+        <path d="M31 75Q39 56 46 72Q54 48 61 70Q67 58 70 75" style="fill:color-mix(in oklab, var(--ok) 24%, var(--bg-elev)); stroke:color-mix(in oklab, var(--ok) 58%, transparent); stroke-width:0.4" />
+        <circle cx="46" cy="65" r="1.6" style="fill:var(--accent); opacity:0.75" /><circle cx="61" cy="64" r="1.3" style="fill:var(--text-2); opacity:0.68" />
+      {:else}
+        <path d="M18 22Q26 38 18 55M42 12Q48 31 40 48M69 16Q75 34 68 51M88 25Q81 39 86 56" style="fill:none; stroke:color-mix(in oklab, var(--ok) 48%, var(--panel)); stroke-width:0.8" />
+        <path d="M17 35q-8-6-9 3q6 3 9-3M41 26q9-7 11 3q-7 3-11-3M69 31q-8-7-10 3q7 3 10-3M86 42q8-6 10 3q-7 3-10-3" style="fill:color-mix(in oklab, var(--ok) 32%, var(--panel))" />
+      {/if}
+      {#each [[18, 30], [30, 20], [57, 29], [77, 37], [88, 19], [40, 39], [64, 17]] as [cx, cy], i}
+        <circle class="sp-firefly" cx={cx} cy={cy} r={i % 2 ? 0.65 : 0.45} style={`--fly-delay:${-i * 0.43}s; fill:${i % 3 ? "var(--accent)" : "var(--ok)"}`} />
+      {/each}
     </svg>
   {:else}
     <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -10441,8 +11727,8 @@
         <summary>Link this device to another device you own</summary>
         <p class="muted small">
           Your other device stays the master: it will show a code and ask permission before
-          this device gets anything. Server admission for linked devices arrives with the
-          next protocol slice: the grant is stored until then.
+          this device gets anything. Once approved, open the grant here and join its servers;
+          admission completes when each server's owner is online to serialize it safely.
         </p>
         {#if !pairBlob}
           <button class="ghost" onclick={pairBegin}>Generate pairing code</button>
@@ -11032,7 +12318,7 @@
                 !m.reply_to &&
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
-              {@const bubble = appearance.flat ? "" : bubbleStyle(m.author)}
+              {@const bubble = bubbleStyle(m.author, m.author === myFp || identityOf(m.author).fp === identityOf(myFp).fp)}
               {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
               {@const ident = identityOf(m.author)}
               <li
@@ -11600,7 +12886,12 @@
           </div>
         {:else if view === "profile"}
           <h2>Your profile</h2>
-          {@render profileEditor()}
+          <div class="profile-workspace">
+            {@render profileEditor()}
+            <aside class="stx-prev profile-surface-preview">
+              {@render profilePreview()}
+            </aside>
+          </div>
         {:else if view === "events"}
           <h2>Events</h2>
           <div class="events-tab tab-pane">
@@ -12332,10 +13623,15 @@
       <div
         class="space-view"
         class:sp-carrying={!!spaceCarried}
-        class:sp-entering={spaceEntering !== null}
+        class:sp-lassoing={!!spaceLasso}
+        class:sp-focusing={spaceEntryPhase === "focus"}
+        class:sp-entering={spaceEntryPhase === "zoom"}
         data-backdrop={spaceBackdropEff}
         data-shape={spaceState.shape}
-        style={`--sp-server-size:${spaceState.serverSize}px`}
+        data-shake={spaceState.hoverShake ? "on" : "off"}
+        style={`--sp-server-size:${spaceState.serverSize}px; --sp-ambience:${spaceState.ambience / 100}; --sp-links:${spaceState.links / 100}; --sp-glow:${spaceState.glow / 100}; --sp-glow-pct:${Math.round(spaceState.glow * 0.75)}%; --sp-backdrop-blur:${spaceState.backdropBlur}px; --sp-backdrop-scale:${(1 + spaceState.backdropBlur * 0.004).toFixed(3)}`}
+        tabindex="-1"
+        aria-label="Server Space"
         bind:this={spaceRoot}
         bind:clientWidth={spaceVw}
         bind:clientHeight={spaceVh}
@@ -12371,10 +13667,32 @@
           </div>
           <div class="sp-atmosphere" aria-hidden="true"></div>
           <svg class="sp-constellations" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">
+            {#each spaceZones as zone (zone.cluster.id)}
+              <g class="sp-zone" style={`--sp-zone:${zone.cluster.color}`}>
+                <ellipse cx={spaceVw / 2 + zone.x} cy={spaceVh / 2 + zone.y} rx={zone.rx} ry={zone.ry} />
+              </g>
+            {/each}
             {#each spaceLinks as link (link.key)}
               <line x1={spaceVw / 2 + link.x1} y1={spaceVh / 2 + link.y1} x2={spaceVw / 2 + link.x2} y2={spaceVh / 2 + link.y2} />
             {/each}
           </svg>
+
+          <div class="sp-zone-actions" aria-label="Visible neighbourhoods">
+            {#each spaceZones as zone (zone.cluster.id)}
+              <button
+                type="button"
+                class:drop-target={spaceClusterDrop === zone.cluster.id}
+                data-space-cluster={zone.cluster.id}
+                style={`left:${spaceVw / 2 + zone.x}px; top:${spaceVh / 2 + zone.y - zone.ry + 13}px; --sp-zone:${zone.cluster.color}`}
+                aria-label={`Focus ${zone.cluster.name} neighbourhood, ${zone.count} server${zone.count === 1 ? "" : "s"}`}
+                title="Click to focus · drag servers here to assign"
+                onpointerdown={(e) => { if (!spaceCarried) e.stopPropagation(); }}
+                onclick={() => focusSpaceCluster(zone.cluster.id)}
+              >
+                <i></i><span>{zone.cluster.name}</span><b>{zone.count}</b>
+              </button>
+            {/each}
+          </div>
 
           <svg class="sp-reticle" viewBox="0 0 40 40" aria-hidden="true">
             <circle cx="20" cy="20" r="9" />
@@ -12383,13 +13701,21 @@
 
           <div class="sp-icons">
             {#each spacePlaced as it (it.s.id)}
+              {@const online = spaceOnlineCounts[it.s.id] ?? 1}
+              {@const mentions = spaceMentionCounts[it.s.id] ?? 0}
+              {@const voice = spaceVoiceCount(it.s.id)}
+              {@const recent = it.s.dot || it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
               <button
                 class="sp-srv"
                 class:sp-unread={it.s.unread.length > 0 || it.s.dot}
+                class:sp-recent={recent}
                 class:sp-carried={it.carried}
                 class:sp-enter-target={spaceEntering === it.s.id}
+                class:sp-focus-target={spaceFocusedServer === it.s.id}
+                class:sp-search-dim={!!spaceSearch && !spaceSearchMatches.some((s) => s.id === it.s.id)}
                 style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
                 data-name={it.s.name}
+                title={`${it.s.name} · ${online} online${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}`}
                 onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
                 onclick={() => spaceIconClick(it.s.id)}
                 use:contextMenu={() => spaceServerMenu(it.s)}
@@ -12402,6 +13728,14 @@
                 {#if it.s.unread.length}
                   <span class="rail-badge">{it.s.unread.length}</span>
                 {/if}
+                {#if online > 1}
+                  <span class="sp-orbiters" aria-label={`${online} online`}>
+                    {#each Array(Math.min(8, online - 1)) as _, i}<i style={`--sp-dot:${i}; --sp-dots:${Math.min(8, online - 1)}`}></i>{/each}
+                    {#if online > 9}<b>+{online - 9}</b>{/if}
+                  </span>
+                {/if}
+                {#if mentions}<span class="sp-mention-flare" title={`${mentions} unseen mention${mentions === 1 ? "" : "s"}`}>!</span>{/if}
+                {#if voice}<span class="sp-voice-signal" title={`${voice} in voice`}><i></i><i></i><i></i></span>{/if}
               </button>
             {/each}
           </div>
@@ -12412,6 +13746,108 @@
             </svg>
           {/if}
         </div>
+
+        {#if spaceSearchOpen}
+          <div class="sp-search" onpointerdown={(e) => e.stopPropagation()}>
+            <span>⌕</span>
+            <input bind:this={spaceSearchEl} bind:value={spaceSearch} placeholder="Find a server or neighbourhood" oninput={() => (spaceSearchIdx = 0)} onkeydown={onSpaceSearchKey} />
+            <kbd>enter</kbd>
+            {#if spaceSearch}
+              <div class="sp-search-results">
+                {#each spaceSearchMatches.slice(0, 8) as s, i (s.id)}
+                  <button class:active={i === spaceSearchIdx} onclick={() => { spaceSearchIdx = i; pickSpaceSearch(true); }} onmouseenter={() => { spaceSearchIdx = i; pickSpaceSearch(false); }}>
+                    <span>{s.name}</span>
+                    <small>{spaceState.clusters.find((c) => c.id === spaceState.serverClusters[s.id])?.name ?? (spaceState.placements[s.id] ? "Unsorted" : "Unplaced")}</small>
+                  </button>
+                {/each}
+                {#if !spaceSearchMatches.length}<p>No server or neighbourhood matches.</p>{/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        {#if spaceState.showMinimap}
+          <div class="sp-minimap" aria-label="Space compass">
+            <div class="sp-minimap-head"><span>COMPASS</span><b>{Math.round(spaceCam.yaw)}°</b></div>
+            <div class="sp-minimap-field">
+              <span class="sp-map-centre"></span>
+              {#each spaceMapServers as item (item.s.id)}
+                <button
+                  class:active={spaceFocusedServer === item.s.id}
+                  style={`left:${item.x}%; top:${Math.max(8, Math.min(92, item.y))}%`}
+                  title={item.s.name}
+                  onclick={() => focusSpaceServer(item.s.id)}
+                ></button>
+              {/each}
+            </div>
+            <div class="sp-cardinals"><span>−180</span><span>FRONT</span><span>+180</span></div>
+          </div>
+        {/if}
+
+        {#if spaceState.clusters.length}
+          <aside class="sp-neighbourhoods" aria-label="Neighbourhoods" onpointerdown={(e) => { if (!spaceCarried) e.stopPropagation(); }}>
+            <div class="sp-neighbourhood-head">
+              <span>NEIGHBOURHOODS</span>
+              <small>drop servers here</small>
+            </div>
+            <div class="sp-neighbourhood-list">
+              {#each spaceState.clusters as cluster (cluster.id)}
+                {@const clusterIds = spaceClusterServerIds(cluster.id)}
+                <div
+                  class="sp-neighbourhood"
+                  class:open={spaceClusterOpen === cluster.id}
+                  class:drop-target={spaceClusterDrop === cluster.id}
+                  data-space-cluster={cluster.id}
+                  style={`--sp-zone:${cluster.color}`}
+                >
+                  <div class="sp-neighbourhood-row">
+                    <button type="button" class="sp-neighbourhood-focus" onclick={() => focusSpaceCluster(cluster.id)} title={`Focus ${cluster.name}`}>
+                      <i></i>
+                      <span>{cluster.name}<small>{clusterIds.length} server{clusterIds.length === 1 ? "" : "s"}</small></span>
+                    </button>
+                    <button
+                      type="button"
+                      class="sp-neighbourhood-edit"
+                      class:active={spaceClusterOpen === cluster.id}
+                      aria-label={`${spaceClusterOpen === cluster.id ? "Close" : "Edit"} ${cluster.name}`}
+                      title="Add or remove servers"
+                      onclick={(e) => { e.stopPropagation(); spaceClusterOpen = spaceClusterOpen === cluster.id ? null : cluster.id; }}
+                    >{spaceClusterOpen === cluster.id ? "−" : "+"}</button>
+                  </div>
+                  {#if spaceClusterOpen === cluster.id}
+                    <div class="sp-neighbourhood-editor">
+                      <p>Click to add or remove. You can also drag a server onto this neighbourhood.</p>
+                      {#if railServers.length}
+                        <div class="sp-neighbourhood-servers">
+                          {#each railServers as server (server.id)}
+                            {@const assigned = spaceState.serverClusters[server.id] === cluster.id}
+                            <button
+                              type="button"
+                              class:assigned
+                              onclick={(e) => { e.stopPropagation(); toggleSpaceClusterServer(server.id, cluster.id); }}
+                              title={assigned ? `Remove ${server.name} from ${cluster.name}` : `Add ${server.name} to ${cluster.name}`}
+                            >
+                              <span>{assigned ? "✓" : "+"}</span>{server.name}
+                            </button>
+                          {/each}
+                        </div>
+                      {:else}
+                        <p>No servers yet.</p>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            <button type="button" class="sp-neighbourhood-tidy" onclick={tidySpace}>Arrange neighbourhoods</button>
+          </aside>
+        {:else}
+          <aside class="sp-neighbourhoods sp-neighbourhood-empty" aria-label="Neighbourhoods" onpointerdown={(e) => e.stopPropagation()}>
+            <div class="sp-neighbourhood-head"><span>NEIGHBOURHOODS</span></div>
+            <p>Group related servers into visible areas of your Space.</p>
+            <button type="button" onclick={() => openSettings("space")}>Create a neighbourhood…</button>
+          </aside>
+        {/if}
 
         <div class="sp-hud">
           <div class="sp-hud-line">orbit · {spaceBackdropEff === "custom" ? "custom" : (SPACE_BACKDROP_TILES.find((b) => b.id === spaceBackdropEff)?.name ?? spaceBackdropEff)} · {spaceState.shape}</div>
@@ -12425,6 +13861,9 @@
           <span class="sp-key"><b>[drag]</b> look</span>
           <span class="sp-key"><b>[icon drag]</b> move</span>
           <span class="sp-key"><b>[hold + draw]</b> lasso</span>
+          <button class="sp-key sp-key-btn" onclick={undoSpaceLayout} disabled={!spaceUndo.length}><b>[ctrl+z]</b> undo</button>
+          <button class="sp-key sp-key-btn" onclick={tidySpace}><b>[tidy]</b> arrange</button>
+          <button class="sp-key sp-key-btn" onclick={() => startSpaceSearch()}><b>[/]</b> find</button>
           <button class="sp-key sp-key-btn" class:active={spaceTray} onclick={() => (spaceTrayPinned = !spaceTrayPinned)}><b>[t]</b> tray</button>
           <button class="sp-key sp-key-btn" onclick={toggleSpace}><b>[esc]</b> exit</button>
         </div>
@@ -12443,17 +13882,25 @@
             {#if railServers.length}
               <div class="sp-tray-row">
                 {#each railServers as s (s.id)}
-                  <button class="sp-tray-item" class:sp-already-placed={!!spaceState.placements[s.id]} onpointerdown={(e) => onSpaceTrayServerDown(e, s.id)} onclick={() => placeFromTray(s.id)}>
-                    <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
-                      {#if serverIcons[s.id] && appearance.icons !== "flat"}
-                        <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" draggable="false" />
-                      {:else}
-                        {monogram(s.name)}
-                      {/if}
-                      {#if spaceState.placements[s.id]}<span class="sp-placed-mark" aria-hidden="true">✓</span>{/if}
-                    </span>
-                    <span class="sp-tray-name">{s.name}</span>
-                  </button>
+                  <div class="sp-tray-slot">
+                    <button class="sp-tray-item" class:sp-already-placed={!!spaceState.placements[s.id]} onpointerdown={(e) => onSpaceTrayServerDown(e, s.id)} onclick={() => placeFromTray(s.id)}>
+                      <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
+                        {#if serverIcons[s.id] && appearance.icons !== "flat"}
+                          <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" draggable="false" />
+                        {:else}
+                          {monogram(s.name)}
+                        {/if}
+                        {#if spaceState.placements[s.id]}<span class="sp-placed-mark" aria-hidden="true">✓</span>{/if}
+                      </span>
+                      <span class="sp-tray-name">{s.name}</span>
+                    </button>
+                    {#if spaceState.clusters.length}
+                      <select aria-label={`Neighbourhood for ${s.name}`} value={spaceState.serverClusters[s.id] ?? ""} onchange={(e) => assignSpaceCluster(s.id, e.currentTarget.value)}>
+                        <option value="">Unsorted</option>
+                        {#each spaceState.clusters as cluster (cluster.id)}<option value={cluster.id}>{cluster.name}</option>{/each}
+                      </select>
+                    {/if}
+                  </div>
                 {/each}
               </div>
             {:else}
@@ -12471,7 +13918,7 @@
             <label class="stx-search">
               <input bind:value={setSearch} placeholder="Search settings" />
             </label>
-            {#each ["Account", "App", "Connection"] as cat (cat)}
+            {#each ["Help", "Account", "App", "Connection"] as cat (cat)}
               {@const pages = filterPages(USER_SET_PAGES, setSearch).filter((p) => p.cat === cat)}
               {#if pages.length}
                 <div class="stx-cat">{cat}</div>
@@ -12489,7 +13936,43 @@
         </div>
         <div class="stx-content-zone">
           <div class="stx-content">
-            {#if settingsPage === "profile"}
+            {#if settingsPage === "guide"}
+              <div class="stx-crumb">SETTINGS // HELP // FEATURE GUIDE</div>
+              <h1>Feature Guide</h1>
+              <p class="muted small">Everything currently in this build, with the shortest route to it. Search by feature, action or location.</p>
+              <label class="feature-search">
+                <span class="muted small">Find a feature</span>
+                <input bind:value={featureQuery} placeholder="Try wiki, invite, screen share, diagnostics…" />
+              </label>
+              {#each FEATURE_GUIDE_GROUPS as group (group)}
+                {@const items = filteredFeatures.filter((item) => item.group === group)}
+                {#if items.length}
+                  <section class="set-section feature-section">
+                    <h3>{group}</h3>
+                    <div class="feature-list">
+                      {#each items as item (item.title)}
+                        <article class="feature-item">
+                          <div class="feature-copy">
+                            <strong>{item.title}</strong>
+                            <p>{item.detail}</p>
+                            <span class="feature-path">{item.where}</span>
+                          </div>
+                          <div class="feature-actions">
+                            {#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}
+                            {#if item.target}<button type="button" class="ghost small" onclick={() => item.target && openFeatureTarget(item.target)}>Open</button>{/if}
+                          </div>
+                        </article>
+                      {/each}
+                    </div>
+                  </section>
+                {/if}
+              {/each}
+              {#if !filteredFeatures.length}
+                <section class="set-section">
+                  <p class="muted small">No feature matches “{featureQuery}”. Try a broader word, or send the idea through Feedback if it is not here yet.</p>
+                </section>
+              {/if}
+            {:else if settingsPage === "profile"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // MY PROFILE</div>
               <h1>My Profile</h1>
               {#if cur && !cur.isDm}
@@ -12677,7 +14160,7 @@
                     checked={appearance.flat}
                     onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
                   />
-                  <span>Flatten messages: ignore other members' custom bubble backgrounds</span>
+                  <span>Flatten messages: ignore other members' custom message frames</span>
                 </label>
                 <label class="toggle">
                   <input
@@ -12705,7 +14188,10 @@
                     {spaceState.custom ? "Replace image…" : "Custom image…"}
                     <input type="file" accept="image/*" onchange={(e) => loadSpacePano(e.currentTarget.files)} />
                   </label>
-                  <button type="button" class="ghost small" onclick={() => { spaceState.placements = {}; saveSpace(); }}>Forget placements</button>
+                  <button type="button" class="ghost small" onclick={tidySpace}>Auto-arrange</button>
+                  <button type="button" class="ghost small" onclick={undoSpaceLayout} disabled={!spaceUndo.length}>Undo move</button>
+                  <button type="button" class="ghost small" onclick={redoSpaceLayout} disabled={!spaceRedo.length}>Redo</button>
+                  <button type="button" class="ghost small" onclick={forgetSpacePlacements}>Forget placements</button>
                 </div>
                 <div class="stx-duo space-controls">
                   <div class="field">
@@ -12724,7 +14210,60 @@
                   <input type="checkbox" checked={spaceState.zoomOnOpen} onchange={() => { spaceState.zoomOnOpen = !spaceState.zoomOnOpen; saveSpace(); }} />
                   <span>Zoom through a server when opening it</span>
                 </label>
+                <label class="toggle">
+                  <input type="checkbox" checked={spaceState.entrySound} onchange={() => { spaceState.entrySound = !spaceState.entrySound; saveSpace(); }} />
+                  <span>Play the painted-portal sound when entering a server</span>
+                </label>
+                <label class="toggle">
+                  <input type="checkbox" checked={spaceState.showMinimap} onchange={() => { spaceState.showMinimap = !spaceState.showMinimap; saveSpace(); }} />
+                  <span>Show the orientation compass and off-screen servers</span>
+                </label>
                 <p class="muted small">Backdrop, shape, size, and placements stay on this device, like desktop icon positions. Drops automatically make room so servers cannot overlap.</p>
+                <div class="space-layout-actions">
+                  <button type="button" class="ghost" onclick={exportSpaceLayout} disabled={spaceLayoutBusy}>{spaceLayoutBusy ? "Exporting…" : "Export layout"}</button>
+                  <label class="ghost space-file">
+                    Import layout…
+                    <input bind:this={spaceLayoutInput} type="file" accept="application/json,.json" onchange={(e) => importSpaceLayout(e.currentTarget.files)} />
+                  </label>
+                </div>
+                <div class="space-input-help" aria-label="Server Space controls">
+                  <span><kbd>Arrows</kbd> look</span>
+                  <span><kbd>Tab</kbd> cycle servers</span>
+                  <span><kbd>Enter</kbd> open focused</span>
+                  <span><kbd>/</kbd> search</span>
+                  <span><kbd>Gamepad</kbd> left stick · bumpers · A/X/B</span>
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Neighbourhoods</h3>
+                <p class="muted small">Group servers into named areas. In Space, use the neighbourhood panel's ＋ list or drag a server onto a neighbourhood; auto-arrange gives every group its own part of the sky.</p>
+                <div class="space-cluster-add">
+                  <input value={spaceNewCluster} maxlength="32" placeholder="Friends, Games, Work…" oninput={(e) => (spaceNewCluster = e.currentTarget.value)} onkeydown={(e) => { if (e.key === "Enter") addSpaceCluster(); }} />
+                  <input type="color" value={spaceNewClusterColor} aria-label="Neighbourhood colour" oninput={(e) => (spaceNewClusterColor = e.currentTarget.value)} />
+                  <button type="button" class="ghost" onclick={addSpaceCluster} disabled={!spaceNewCluster.trim()}>Add neighbourhood</button>
+                </div>
+                {#if spaceState.clusters.length}
+                  <div class="space-cluster-list">
+                    {#each spaceState.clusters as cluster (cluster.id)}
+                      <div class="space-cluster-row">
+                        <input type="color" value={cluster.color} aria-label={`${cluster.name} colour`} oninput={(e) => updateSpaceCluster(cluster.id, { color: e.currentTarget.value })} />
+                        <input value={cluster.name} maxlength="32" aria-label="Neighbourhood name" oninput={(e) => updateSpaceCluster(cluster.id, { name: e.currentTarget.value.slice(0, 32) })} />
+                        <span>{Object.values(spaceState.serverClusters).filter((id) => id === cluster.id).length} servers</span>
+                        <button type="button" class="ghost small" onclick={() => removeSpaceCluster(cluster.id)}>Remove</button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
+              <section class="set-section">
+                <h3>Atmosphere &amp; motion</h3>
+                <div class="stx-duo space-fx-controls">
+                  <label class="field"><span class="muted small">Ambient particles: {spaceState.ambience}%</span><input type="range" min="0" max="100" step="5" value={spaceState.ambience} oninput={(e) => { spaceState.ambience = +e.currentTarget.value; saveSpace(); }} /></label>
+                  <label class="field"><span class="muted small">Constellation lines: {spaceState.links}%</span><input type="range" min="0" max="100" step="5" value={spaceState.links} oninput={(e) => { spaceState.links = +e.currentTarget.value; saveSpace(); }} /></label>
+                  <label class="field"><span class="muted small">Server glow &amp; rings: {spaceState.glow}%</span><input type="range" min="0" max="100" step="5" value={spaceState.glow} oninput={(e) => { spaceState.glow = +e.currentTarget.value; saveSpace(); }} /></label>
+                  <label class="field"><span class="muted small">Backdrop blur: {spaceState.backdropBlur}px</span><input type="range" min="0" max="12" step="1" value={spaceState.backdropBlur} oninput={(e) => { spaceState.backdropBlur = +e.currentTarget.value; saveSpace(); }} /></label>
+                </div>
+                <label class="toggle"><input type="checkbox" checked={spaceState.hoverShake} onchange={() => { spaceState.hoverShake = !spaceState.hoverShake; saveSpace(); }} /><span>Shake a server strongly on hover</span></label>
               </section>
               <section class="set-section">
                 <h3>Custom image guide</h3>
@@ -12732,11 +14271,33 @@
                   <div>
                     <strong>Use a 2:1 equirectangular panorama</strong>
                     <p>2048 × 1024 works best. Keep important detail near the horizon and inside the middle half; make the left and right edges seamless. Other aspect ratios are centre-cropped automatically.</p>
-                    <p>The template marks all four viewing directions, cube seams, and circle-safe areas. Use it as an overlay in your image editor, then hide the guide before exporting.</p>
+                    <p>The template marks all four viewing directions, cube seams, and circle-safe areas. It saves to Downloads and opens in your default image viewer; use it as an overlay in your image editor, then hide the guide before exporting.</p>
                     {#if spaceImageNote}<p class="space-image-note">{spaceImageNote}</p>{/if}
                   </div>
-                  <button type="button" class="ghost" onclick={downloadSpaceTemplate}>Download 2048 × 1024 guide</button>
+                  <button type="button" class="ghost" onclick={downloadSpaceTemplate} disabled={spaceGuideSaving}>
+                    {spaceGuideSaving ? "Opening guide…" : "Save & open 2048 × 1024 guide"}
+                  </button>
                 </div>
+                {#if spaceState.custom}
+                  <div class="space-pano-tools">
+                    <div class="space-pano-preview" style={`background-image:url(${spaceState.custom})`}>
+                      <span class="sp-pano-horizon"></span>
+                      {#each [[0, "BACK"], [25, "LEFT"], [50, "FRONT"], [75, "RIGHT"], [100, "BACK"]] as [left, label]}
+                        <span class="sp-pano-cardinal" style={`left:${left}%`}>{label}</span>
+                      {/each}
+                    </div>
+                    <label class="field"><span class="muted small">Preview direction: {spacePanoYaw}°</span><input type="range" min="0" max="270" step="90" value={spacePanoYaw} oninput={(e) => (spacePanoYaw = +e.currentTarget.value)} /></label>
+                    <div class="space-pano-window" style={`background-image:url(${spaceState.custom}); background-position:${panoPos(spacePanoYaw)}`}></div>
+                    <label class="toggle"><input type="checkbox" checked={spaceSeamPreview} onchange={() => (spaceSeamPreview = !spaceSeamPreview)} /><span>Show the left/right seam check</span></label>
+                    {#if spaceSeamPreview}
+                      <div class="space-seam-preview">
+                        <span style={`background-image:url(${spaceState.custom}); background-position:left center`}></span>
+                        <span style={`background-image:url(${spaceState.custom}); background-position:right center`}></span>
+                        <b>SEAM</b>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
               </section>
             {:else if settingsPage === "notifications"}
               <div class="stx-crumb">SETTINGS // APP // NOTIFICATIONS</div>
@@ -12744,7 +14305,7 @@
               <section class="set-section">
                 <label class="toggle">
                   <input type="checkbox" checked={soundOn} onchange={toggleSound} />
-                  <span>Play a sound for new messages</span>
+                  <span>Play app sounds: message alerts and Server Space effects</span>
                 </label>
                 <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
               </section>
@@ -12941,31 +14502,7 @@
             </aside>
           {:else if settingsPage === "profile"}
             <aside class="stx-prev">
-              <div class="stx-ph"><i></i>LIVE PREVIEW</div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">PROFILE CARD</div>
-                <div class="stx-prof">
-                  {#if pBanner}
-                    <img class="stx-pbanner" src={imgSrc(pBanner)} alt="" />
-                  {:else}
-                    <div class="stx-pbanner"></div>
-                  {/if}
-                  {#if pAvatar}
-                    <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
-                  {:else}
-                    <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
-                  {/if}
-                  <div class="stx-prof-body">
-                    <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
-                    {#if myFp}<div class="stx-pfp">FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</div>{/if}
-                  </div>
-                </div>
-              </div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">IN CHAT</div>
-                {@render previewLog()}
-              </div>
-              <p class="muted small stx-pnote">Exactly what members of this server see, card and chat both.</p>
+              {@render profilePreview()}
             </aside>
           {/if}
           <button type="button" class="stx-esc" onclick={() => (showSettings = false)} title="Close (Esc)">
