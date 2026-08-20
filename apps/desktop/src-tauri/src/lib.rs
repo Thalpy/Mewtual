@@ -9,6 +9,8 @@
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -16,7 +18,8 @@ use base64::Engine;
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger, PairingSecrets,
     PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord, ServerStore,
-    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES,
+    MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
@@ -3768,6 +3771,174 @@ fn launch_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+const SPACE_GUIDE_NAME: &str = "mewtual-server-space-guide-2048x1024.png";
+const MAX_SPACE_GUIDE_BYTES: usize = 16 * 1024 * 1024;
+const SPACE_LAYOUT_NAME: &str = "mewtual-server-space-layout.json";
+const MAX_SPACE_LAYOUT_BYTES: usize = 1024 * 1024;
+
+/// Keep the frontend from turning this deliberately narrow command into an arbitrary-file
+/// writer. The canvas export must be a reasonably-sized 2048 x 1024 PNG with an IHDR first.
+fn validate_space_guide_png(bytes: &[u8]) -> bool {
+    bytes.len() >= 24
+        && bytes.len() <= MAX_SPACE_GUIDE_BYTES
+        && bytes[..8] == [137, 80, 78, 71, 13, 10, 26, 10]
+        && &bytes[12..16] == b"IHDR"
+        && u32::from_be_bytes(bytes[16..20].try_into().expect("four-byte PNG width")) == 2048
+        && u32::from_be_bytes(bytes[20..24].try_into().expect("four-byte PNG height")) == 1024
+}
+
+/// Layout export is intentionally its own narrow writer: accepting only our small, versioned
+/// object keeps a compromised webview from using the command as an arbitrary Downloads writer.
+fn validate_space_layout_json(json: &str) -> bool {
+    if json.is_empty() || json.len() > MAX_SPACE_LAYOUT_BYTES {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    value.get("kind").and_then(|v| v.as_str()) == Some("mewtual-server-space-layout")
+        && value.get("version").and_then(|v| v.as_u64()) == Some(1)
+        && value.get("space").is_some_and(serde_json::Value::is_object)
+}
+
+fn safe_download_name(requested: &str) -> String {
+    // Peer-provided file names are display data, not paths. Apply Windows' strict character rules
+    // everywhere so a shared name behaves consistently on every desktop platform.
+    let leaf = requested.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = leaf
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        // Leaves room for a collision suffix even when every scalar needs two UTF-16 code units.
+        .take(120)
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let mut name = if trimmed.is_empty() {
+        "mewtual-download".to_string()
+    } else {
+        trimmed.to_string()
+    };
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let numbered_device = (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.len() == 4
+        && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
+        name.insert(0, '_');
+    }
+    name
+}
+
+fn numbered_download_name(name: &str, number: usize) -> String {
+    if number == 0 {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mewtual-download");
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(extension) => format!("{stem} ({number}).{extension}"),
+        None => format!("{stem} ({number})"),
+    }
+}
+
+/// Write without replacing an earlier download. `create_new` also closes the exists/write race.
+fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(downloads).map_err(|e| e.to_string())?;
+    let safe_name = safe_download_name(requested_name);
+    for number in 0..1_000 {
+        let name = numbered_download_name(&safe_name, number);
+        let path = downloads.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error.to_string());
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("too many copies of the guide already exist in Downloads".into())
+}
+
+fn launch_path(path: &Path) -> Result<(), String> {
+    // As with URLs, never involve a shell: the path is one literal argument to the OS launcher.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler").arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn reveal_path(path: &Path) -> Result<(), String> {
+    // Reveal rather than execute arbitrary shared files. This gives every Download button a
+    // visible system window without silently launching a peer-supplied executable or document.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(format!("/select,{}", path.to_string_lossy()));
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedFileResult {
+    path: String,
+    displayed: bool,
+    warning: Option<String>,
+}
+
 /// Open a prefilled bug report / feature request on the tracker in the user's default browser.
 /// Mewtual has no service of its own to receive feedback, so filing means handing GitHub a
 /// filled-in form: the app carries no GitHub credentials and posts nothing itself, and the user
@@ -3787,6 +3958,82 @@ async fn open_external_url(url: String) -> Result<(), String> {
         return Err("only http and https links can be opened".into());
     }
     launch_url(&url)
+}
+
+/// Save the generated Server Space overlay to Downloads and show it in the user's normal image
+/// viewer. A normal detached `<a download>` is not dependable inside a desktop webview and gives
+/// no visible result when it is rejected.
+#[tauri::command]
+async fn save_and_open_space_guide(
+    app: AppHandle,
+    png_base64: String,
+) -> Result<SavedFileResult, String> {
+    if png_base64.len() > MAX_SPACE_GUIDE_BYTES * 2 {
+        return Err("the generated guide is unexpectedly large".into());
+    }
+    let bytes = B64
+        .decode(png_base64)
+        .map_err(|_| "the generated guide could not be decoded".to_string())?;
+    if !validate_space_guide_png(&bytes) {
+        return Err("the generated guide is not a valid 2048 x 1024 PNG".into());
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, SPACE_GUIDE_NAME, &bytes)?;
+    let warning = launch_path(&path).err().map(|error| {
+        format!("The guide was saved, but its image viewer could not be opened: {error}")
+    });
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+    })
+}
+
+/// Export a portable Server Space layout to Downloads and reveal it without executing it.
+#[tauri::command]
+async fn save_space_layout(app: AppHandle, json: String) -> Result<SavedFileResult, String> {
+    if !validate_space_layout_json(&json) {
+        return Err("the layout is not a valid Mewtual Server Space export".into());
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, SPACE_LAYOUT_NAME, json.as_bytes())?;
+    let warning = reveal_path(&path)
+        .err()
+        .map(|error| format!("The layout was saved, but Downloads could not be opened: {error}"));
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+    })
+}
+
+/// Persist a completed group-file transfer through the native shell. Unlike `<a download>`, this
+/// has an observable result in a Tauri webview. The file is revealed, never executed automatically.
+#[tauri::command]
+async fn save_download(
+    app: AppHandle,
+    name: String,
+    data_base64: String,
+) -> Result<SavedFileResult, String> {
+    if data_base64.len() > MAX_FILE_BYTES * 2 {
+        return Err("the downloaded file is unexpectedly large".into());
+    }
+    let bytes = B64
+        .decode(data_base64)
+        .map_err(|_| "the downloaded file could not be decoded".to_string())?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(format!("file is larger than the {MAX_FILE_BYTES}-byte limit"));
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, &name, &bytes)?;
+    let warning = reveal_path(&path)
+        .err()
+        .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+    })
 }
 
 /// Is there already a vault on this machine? The frontend asks before it draws the gate:
@@ -4656,7 +4903,10 @@ pub fn run() {
             pairing_open,
             pairing_join,
             open_issue_url,
-            open_external_url
+            open_external_url,
+            save_and_open_space_guide,
+            save_space_layout,
+            save_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Mewtual desktop app");
@@ -5083,5 +5333,45 @@ mod tests {
         assert!(!is_external_http_url("file:///c:/windows/system32/calc.exe"));
         assert!(!is_external_http_url("https:///missing-host"));
         assert!(!is_external_http_url(""));
+    }
+
+    #[test]
+    fn space_guide_save_only_accepts_the_expected_png_shape() {
+        let mut header = vec![0u8; 24];
+        header[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+        header[12..16].copy_from_slice(b"IHDR");
+        header[16..20].copy_from_slice(&2048u32.to_be_bytes());
+        header[20..24].copy_from_slice(&1024u32.to_be_bytes());
+        assert!(validate_space_guide_png(&header));
+
+        let mut wrong_size = header.clone();
+        wrong_size[16..20].copy_from_slice(&1024u32.to_be_bytes());
+        assert!(!validate_space_guide_png(&wrong_size));
+
+        header[0] = 0;
+        assert!(!validate_space_guide_png(&header));
+    }
+
+    #[test]
+    fn space_layout_export_only_accepts_our_versioned_object() {
+        assert!(validate_space_layout_json(
+            r#"{"kind":"mewtual-server-space-layout","version":1,"space":{"placements":{}}}"#
+        ));
+        assert!(!validate_space_layout_json(
+            r#"{"kind":"mewtual-server-space-layout","version":2,"space":{}}"#
+        ));
+        assert!(!validate_space_layout_json(
+            r#"{"kind":"something-else","version":1,"space":{}}"#
+        ));
+        assert!(!validate_space_layout_json("not json"));
+    }
+
+    #[test]
+    fn downloaded_file_names_cannot_escape_downloads_or_use_device_names() {
+        assert_eq!(safe_download_name("../../report?.pdf"), "report_.pdf");
+        assert_eq!(safe_download_name(r"..\..\CON.txt"), "_CON.txt");
+        assert_eq!(safe_download_name(" . "), "mewtual-download");
+        assert_eq!(numbered_download_name("photo.png", 2), "photo (2).png");
+        assert_eq!(numbered_download_name("README", 3), "README (3)");
     }
 }

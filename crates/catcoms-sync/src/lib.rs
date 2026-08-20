@@ -10660,6 +10660,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_authenticated_call_signal_round_trips_with_sender_and_payload() {
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+
+        alice
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .unwrap();
+        assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
+
+        let alice_fp = roles::fingerprint(&ids[0]);
+        let bob_fp = roles::fingerprint(&ids[1]);
+        let payload = br#"{"type":"offer","sdp":"opaque-to-sync"}"#;
+        let (sent, _) = tokio::join!(bob.send_call_signal(&alice_fp, payload), alice.run_once());
+
+        assert!(sent.unwrap(), "the sender had a verified route to Alice");
+        assert_eq!(
+            alice.take_call_signals(),
+            vec![(bob_fp, payload.to_vec())],
+            "the recipient keeps the authenticated sender and opaque payload intact"
+        );
+        assert!(
+            alice.take_call_signals().is_empty(),
+            "draining a call signal emits it only once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_signal_without_a_verified_peer_route_reports_not_sent() {
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_fp = roles::fingerprint(&ids[0]);
+
+        assert!(!bob
+            .send_call_signal(&alice_fp, b"unroutable-offer")
+            .await
+            .unwrap());
+        assert!(alice.take_call_signals().is_empty());
+    }
+
+    #[tokio::test]
     async fn one_member_flooding_call_signals_starves_only_itself() {
         // P4: the whole point. Bob floods; Carol's single SDP offer must still be there when
         // the actor drains, and the flood must be rate-limited on top.
