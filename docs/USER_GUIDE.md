@@ -95,6 +95,21 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
   map with direct **Open** buttons.
 
+### Server Space
+
+- Open the 360° server room from the rail's orbit button or with **Ctrl/Cmd+O**. Drag empty
+  space to look around; drag a server to move it; hold on empty space and draw a loop to lasso
+  several servers. Drops make room automatically, so icons do not overlap.
+- Create named **neighbourhoods** in **Settings → Server Space**. Every neighbourhood then
+  appears in the panel inside Space, even while it is empty. Press its **＋** to add or remove
+  servers, click its name to look at it, or drag a server directly onto its panel row or floating
+  label. Adding an unplaced server hangs it in that neighbourhood automatically.
+- Press **T** for the server tray; its per-server neighbourhood menu is another way to assign
+  one while arranging the room. **Arrange neighbourhoods** gives each group its own region.
+- Entering a server uses a short focus-and-zoom transition with an original painted-portal
+  sound. Both the zoom and the entry sound can be switched off independently in
+  **Settings → Server Space**; the sound also follows the app's global sound preference.
+
 ### Right-click menus & keyboard shortcuts
 - **Right-click** almost anything for quick actions: a **message** (copy text, quote, copy
   sender), a **wiki page** (open, **post a link to it in chat**, copy link), a **file** (open
