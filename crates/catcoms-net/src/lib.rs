@@ -62,14 +62,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
+use std::net::SocketAddrV4;
+use std::num::NonZeroU16;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_rt::{
-    DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId, Responder, Topic,
-    TransportError, TransportEvent,
+    Clock, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId, Responder, SystemClock,
+    Topic, TransportError, TransportEvent,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -79,6 +82,7 @@ use libp2p::core::upgrade::Version;
 use libp2p::core::Endpoint;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{
     dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, NewExternalAddrCandidate,
@@ -89,7 +93,8 @@ use libp2p::{
     rendezvous, request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::task::JoinHandle;
 
 /// Max request/response frame size.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -166,6 +171,141 @@ pub struct AutoNatResult {
     pub reachable: bool,
     /// The upstream error for a failed test. Empty on success.
     pub error: Option<String>,
+}
+
+/// The router protocol that produced (or failed to produce) an inbound port mapping.
+///
+/// libp2p supplies UPnP IGD. The separate `portmapper` clients deliberately have UPnP disabled so
+/// the two implementations do not race to manage the same mapping; they probe PCP first and then
+/// NAT-PMP, and report which protocol the gateway actually advertised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PortMappingMechanism {
+    /// Universal Plug and Play Internet Gateway Device protocol.
+    Upnp,
+    /// Port Control Protocol (RFC 6887).
+    Pcp,
+    /// NAT Port Mapping Protocol.
+    NatPmp,
+}
+
+impl std::fmt::Display for PortMappingMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Upnp => "UPnP",
+            Self::Pcp => "PCP",
+            Self::NatPmp => "NAT-PMP",
+        })
+    }
+}
+
+/// IP transport whose stable listen port is being mapped through the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PortMappingTransport {
+    /// The libp2p TCP listener.
+    Tcp,
+    /// The libp2p QUIC listener (a UDP mapping).
+    Udp,
+}
+
+impl std::fmt::Display for PortMappingTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Tcp => "TCP",
+            Self::Udp => "UDP/QUIC",
+        })
+    }
+}
+
+/// A best-effort router port-mapping lifecycle event.
+///
+/// A mapping is evidence of a candidate public address, not proof that the wider internet can
+/// reach it. The actor separately offers successful candidates to AutoNAT for a remote callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortMappingEvent {
+    /// A gateway created an inbound mapping to this node's stable listen port.
+    Mapped {
+        /// The protocol that created the mapping.
+        mechanism: PortMappingMechanism,
+        /// TCP or UDP/QUIC.
+        transport: PortMappingTransport,
+        /// The public multiaddr, without this node's `/p2p/<peer-id>` suffix.
+        address: Multiaddr,
+    },
+    /// A protocol probe found no usable gateway for this transport.
+    Unavailable {
+        /// Protocol that was unavailable.
+        mechanism: PortMappingMechanism,
+        /// TCP or UDP/QUIC.
+        transport: PortMappingTransport,
+        /// Scoped diagnostic; callers must not interpret one protocol's failure as every mapping
+        /// mechanism having failed.
+        detail: String,
+    },
+    /// A previously surfaced mapping expired. Callers must stop advertising it unless a renewed
+    /// mapping has already replaced it.
+    Expired {
+        /// Protocol that owned the mapping.
+        mechanism: PortMappingMechanism,
+        /// TCP or UDP/QUIC.
+        transport: PortMappingTransport,
+        /// The public address that is no longer known to be mapped.
+        address: Multiaddr,
+    },
+}
+
+/// One currently active public router mapping in [`PortMappingSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivePortMapping {
+    /// Protocol that owns the lease.
+    pub mechanism: PortMappingMechanism,
+    /// TCP or UDP/QUIC.
+    pub transport: PortMappingTransport,
+    /// Public multiaddr, without this node's peer-id suffix.
+    pub address: Multiaddr,
+}
+
+/// The latest scoped failure for one router protocol and transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortMappingFailure {
+    /// Protocol that failed or whose previous lease expired.
+    pub mechanism: PortMappingMechanism,
+    /// TCP or UDP/QUIC.
+    pub transport: PortMappingTransport,
+    /// Bounded upstream/context detail.
+    pub detail: String,
+}
+
+/// Coalesced authoritative router-mapping state.
+///
+/// A snapshot rather than an unbounded event log is important for library users that do not show
+/// diagnostics: retaining a `MeshService` without draining diagnostics must consume constant
+/// memory. A slow consumer can skip intermediate telemetry but cannot miss the current address set
+/// or resurrect an expired route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortMappingSnapshot {
+    /// All live leases, one per mechanism/transport owner.
+    pub active: Vec<ActivePortMapping>,
+    /// Latest failures for keys that do not currently have a live lease.
+    pub unavailable: Vec<PortMappingFailure>,
+}
+
+/// Coalesced AutoNAT evidence, retaining the latest result for every address/server pair.
+///
+/// `latest` preserves the event-style convenience API used by integration tests, while `results`
+/// lets the product rank all still-relevant routes without forgetting a second successful one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoNatSnapshot {
+    /// Latest result for each distinct candidate/server pair.
+    pub results: Vec<AutoNatResult>,
+    /// Result that caused this snapshot update.
+    pub latest: Option<AutoNatResult>,
+}
+
+/// Current relay-circuit listen addresses owned by this mesh node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelayAddressSnapshot {
+    /// Every live `/p2p-circuit` address. Empty after the reservation/listener expires.
+    pub addresses: Vec<Multiaddr>,
 }
 
 // ----- request/response codec ------------------------------------------------
@@ -309,16 +449,26 @@ pub struct MeshBehaviour {
     /// only on those infrastructure swarms; ordinary members must not become public dial-back
     /// services merely by joining a group.
     pub autonat_client: autonat::v2::client::Behaviour<OsCryptoRng>,
-    /// UPnP/NAT-PMP: best-effort ask the home router to open a port, so this node becomes directly
-    /// reachable (the discovered public address is advertised + folded into a fresh invite); no
-    /// relay needed when the router cooperates.
-    pub upnp: libp2p::upnp::tokio::Behaviour,
+    /// UPnP IGD: best-effort ask a compatible home router to open a port. PCP and NAT-PMP are
+    /// separate actor-owned clients because libp2p's behaviour does not implement them.
+    pub upnp: Toggle<libp2p::upnp::tokio::Behaviour>,
 }
 
 impl MeshBehaviour {
     fn new(
         key: &libp2p::identity::Keypair,
         relay_client: relay::client::Behaviour,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::new_with_port_mapping(key, relay_client, false)
+    }
+
+    /// Router mapping is an explicit product capability, not a side effect of constructing any
+    /// TCP swarm. Keeping it off in the general/library builders prevents loopback tests, CLI
+    /// probes and callers that never opted in from touching the user's gateway.
+    fn new_with_port_mapping(
+        key: &libp2p::identity::Keypair,
+        relay_client: relay::client::Behaviour,
+        enable_port_mapping: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(key.clone()),
@@ -342,7 +492,7 @@ impl MeshBehaviour {
             OsCryptoRng,
             autonat::v2::client::Config::default(),
         );
-        let upnp = libp2p::upnp::tokio::Behaviour::default();
+        let upnp = Toggle::from(enable_port_mapping.then(libp2p::upnp::tokio::Behaviour::default));
         let connection_limits = connection_limits::Behaviour::new(
             connection_limits::ConnectionLimits::default()
                 .with_max_pending_incoming(Some(64))
@@ -447,13 +597,26 @@ pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
 pub fn build_tcp_swarm_with_key(
     key: libp2p::identity::Keypair,
 ) -> Result<Swarm<MeshBehaviour>, NetError> {
+    build_tcp_swarm_with_key_and_port_mapping(key, false)
+}
+
+/// Build the product TCP swarm with automatic UPnP/PCP/NAT-PMP explicitly enabled.
+///
+/// General library/CLI constructors deliberately use [`build_tcp_swarm_with_key`] instead, where
+/// mapping is disabled: merely binding a test loopback socket must never change a real router.
+pub fn build_tcp_swarm_with_key_and_port_mapping(
+    key: libp2p::identity::Keypair,
+    enable_port_mapping: bool,
+) -> Result<Swarm<MeshBehaviour>, NetError> {
     Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_other_transport(infra_transport::client_transport)
         .map_err(|e| NetError::Build(e.to_string()))?
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(MeshBehaviour::new)
+        .with_behaviour(move |key, relay| {
+            MeshBehaviour::new_with_port_mapping(key, relay, enable_port_mapping)
+        })
         .map_err(|e| NetError::Build(e.to_string()))?
         .build())
 }
@@ -899,19 +1062,408 @@ type InboundResponses = FuturesUnordered<
     Pin<Box<dyn Future<Output = (ResponseChannel<Vec<u8>>, Option<Bytes>)> + Send>>,
 >;
 
+/// A PCP/NAT-PMP worker is tied to exactly one stable TCP or UDP listen port. Dropping the actor
+/// aborts these workers and stops lease renewal; the router's bounded lease then expires naturally.
+/// A detached renewal task must never outlive the server that owned the port.
+#[derive(Debug)]
+struct PortMapperTask {
+    port: NonZeroU16,
+    handle: JoinHandle<()>,
+}
+
+type PortMappingKey = (PortMappingMechanism, PortMappingTransport);
+
+/// AutoNAT servers and identify candidates are network input. Retaining one observation for every
+/// peer/address ever seen would let churn grow a long-lived node without bound, even though the
+/// public watch channel itself is coalesced.
+const MAX_AUTONAT_OBSERVATIONS: usize = 64;
+
+type AutoNatKey = (Multiaddr, libp2p::PeerId);
+
+fn record_autonat_result(
+    results: &mut HashMap<AutoNatKey, AutoNatResult>,
+    order: &mut VecDeque<AutoNatKey>,
+    result: AutoNatResult,
+) {
+    let key = (result.address.clone(), result.server);
+    // An updated pair becomes newest. Removing the old occurrence also keeps the order queue at
+    // exactly one entry per map key, which makes the bound deterministic.
+    order.retain(|candidate| candidate != &key);
+    results.insert(key.clone(), result);
+    order.push_back(key);
+    while results.len() > MAX_AUTONAT_OBSERVATIONS {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        results.remove(&oldest);
+    }
+}
+
+fn forget_autonat_address(
+    results: &mut HashMap<AutoNatKey, AutoNatResult>,
+    order: &mut VecDeque<AutoNatKey>,
+    address: &Multiaddr,
+) -> bool {
+    let old_len = results.len();
+    results.retain(|(candidate, _), _| candidate != address);
+    order.retain(|(candidate, _)| candidate != address);
+    results.len() != old_len
+}
+
+fn autonat_candidate_is_current(
+    configured: &HashSet<Multiaddr>,
+    mappings: &HashMap<PortMappingKey, Multiaddr>,
+    address: &Multiaddr,
+) -> bool {
+    configured.contains(address) || mappings.values().any(|candidate| candidate == address)
+}
+
+/// Automatic discovery must pass the global classifier, while an explicit caller assertion is an
+/// independent owner and may intentionally be a LAN-only route. This distinction is load-bearing
+/// when a broken gateway returns the exact private socket an operator configured manually.
+fn external_address_is_allowed(configured: &HashSet<Multiaddr>, address: &Multiaddr) -> bool {
+    configured.contains(address) || addr_is_globally_routable(address)
+}
+
+/// Record a mechanism's ownership of one external address. The returned old address is safe to
+/// remove from libp2p only when no other mapping still owns it; `add_new` is false when the
+/// address was already present through another mechanism. Manual/configured ownership is checked
+/// separately by the actor because it is not a router lease.
+fn activate_port_mapping(
+    active: &mut HashMap<PortMappingKey, Multiaddr>,
+    key: PortMappingKey,
+    address: Multiaddr,
+) -> (Option<Multiaddr>, bool) {
+    let add_new = !active.values().any(|candidate| candidate == &address);
+    let previous = active.insert(key, address.clone());
+    let remove_old = previous
+        .filter(|old| old != &address && !active.values().any(|candidate| candidate == old));
+    (remove_old, add_new)
+}
+
+/// Drop one matching mapping owner and answer whether the external address has no mapping owner
+/// left. A late expiry for an address already replaced under the same key is deliberately inert.
+fn expire_port_mapping(
+    active: &mut HashMap<PortMappingKey, Multiaddr>,
+    key: PortMappingKey,
+    address: &Multiaddr,
+) -> bool {
+    if active.get(&key) != Some(address) {
+        return false;
+    }
+    active.remove(&key);
+    !active.values().any(|candidate| candidate == address)
+}
+
+impl Drop for PortMapperTask {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+/// Extract the mapping-relevant endpoint from a concrete local IPv4 listen address. The current
+/// `portmapper` client discovers an IPv4 default gateway and produces NAT44 mappings, so an
+/// IPv6-only socket is not evidence that the resulting IPv4 mapping would have a listener behind
+/// it. Relayed listen addresses are also excluded: their TCP/UDP ports belong to the relay, not to
+/// this node, and replacing a local mapping worker with one of those ports would advertise a dead
+/// route.
+fn port_mapping_endpoint(addr: &Multiaddr) -> Option<(PortMappingTransport, NonZeroU16)> {
+    if is_relayed(addr) {
+        return None;
+    }
+
+    let mut protocols = addr.iter();
+    let mut has_ipv4_listener = false;
+    while let Some(protocol) = protocols.next() {
+        match protocol {
+            Protocol::Ip4(ip) => {
+                // Mapping the route-selected LAN interface cannot make a socket that is bound
+                // only to localhost accept the forwarded packets.
+                has_ipv4_listener = !ip.is_loopback();
+            }
+            Protocol::Tcp(port) if has_ipv4_listener => {
+                return NonZeroU16::new(port).map(|p| (PortMappingTransport::Tcp, p));
+            }
+            Protocol::Udp(port)
+                if has_ipv4_listener && protocols.any(|p| matches!(p, Protocol::QuicV1)) =>
+            {
+                return NonZeroU16::new(port).map(|p| (PortMappingTransport::Udp, p));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Convert a router's IPv4 socket into the transport-specific libp2p address other peers dial.
+fn mapped_multiaddr(addr: SocketAddrV4, transport: PortMappingTransport) -> Multiaddr {
+    let base = Multiaddr::empty().with(Protocol::Ip4(*addr.ip()));
+    match transport {
+        PortMappingTransport::Tcp => base.with(Protocol::Tcp(addr.port())),
+        PortMappingTransport::Udp => base.with(Protocol::Udp(addr.port())).with(Protocol::QuicV1),
+    }
+}
+
+/// Ordered mechanisms a mapping attempt should try. PCP is the standards-track successor and is
+/// preferred, but a successful PCP discovery does not suppress NAT-PMP: if its MAP request times
+/// out or is denied, the caller continues to the next entry.
+fn mapping_attempt_plan(pcp: bool, nat_pmp: bool) -> Vec<PortMappingMechanism> {
+    let mut plan = Vec::with_capacity(2);
+    if pcp {
+        plan.push(PortMappingMechanism::Pcp);
+    }
+    if nat_pmp {
+        plan.push(PortMappingMechanism::NatPmp);
+    }
+    plan
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingLeaseAction {
+    /// The watch repeated the same socket; no product state changes.
+    Continue,
+    /// The lease disappeared. Withdraw it and return to the outer retry loop.
+    Retry,
+    /// The gateway renewed at a different public socket. Withdraw the old route, then publish this
+    /// replacement while retaining the same worker.
+    Replace(SocketAddrV4),
+}
+
+fn mapping_lease_action(previous: SocketAddrV4, next: Option<SocketAddrV4>) -> MappingLeaseAction {
+    match next {
+        Some(next) if next == previous => MappingLeaseAction::Continue,
+        Some(next) => MappingLeaseAction::Replace(next),
+        None => MappingLeaseAction::Retry,
+    }
+}
+
+/// Probe PCP/NAT-PMP, create one mapping, and retain/renew it for the lifetime of the worker.
+/// UPnP is disabled here because libp2p's behaviour already owns that protocol. Keeping the two
+/// implementations disjoint prevents duplicate IGD leases and makes diagnostics truthful.
+async fn run_port_mapper_attempt(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: &mpsc::Sender<PortMappingEvent>,
+) -> Result<(), ()> {
+    let protocol = match transport {
+        PortMappingTransport::Tcp => portmapper::Protocol::Tcp,
+        PortMappingTransport::Udp => portmapper::Protocol::Udp,
+    };
+    let probe_client = portmapper::Client::new(portmapper::Config {
+        enable_upnp: false,
+        enable_pcp: true,
+        enable_nat_pmp: true,
+        protocol,
+    });
+
+    // Probe before requesting the mapping. Besides producing an honest diagnostic, this lets the
+    // library choose NAT-PMP when PCP is absent; an unprobed one-shot would optimistically try PCP
+    // and stop after that protocol's timeout without falling through.
+    let probe = match probe_client.probe().await {
+        Ok(Ok(probe)) => probe,
+        Ok(Err(error)) => {
+            let detail = error.to_string();
+            for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism,
+                        transport,
+                        detail: detail.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Err(());
+                }
+            }
+            return Ok(());
+        }
+        Err(error) => {
+            let detail = format!("port-mapping probe stopped: {error}");
+            for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism,
+                        transport,
+                        detail: detail.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Err(());
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    let plan = mapping_attempt_plan(probe.pcp, probe.nat_pmp);
+    for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+        if !plan.contains(&mechanism)
+            && tx
+                .send(PortMappingEvent::Unavailable {
+                    mechanism,
+                    transport,
+                    detail: "no compatible gateway answered the probe".to_string(),
+                })
+                .await
+                .is_err()
+        {
+            return Err(());
+        }
+    }
+
+    drop(probe_client);
+
+    // A probe result says a protocol answered discovery; it does not say the subsequent MAP
+    // request will be granted. `portmapper` 0.18 only logs that request's error and leaves its
+    // watch channel open at `None`, so waiting on `changed()` alone can hang forever. Give each
+    // advertised protocol its own bounded attempt, allowing NAT-PMP to follow a failed PCP MAP.
+    const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
+    for mechanism in plan {
+        let client = portmapper::Client::new(portmapper::Config {
+            enable_upnp: false,
+            enable_pcp: mechanism == PortMappingMechanism::Pcp,
+            enable_nat_pmp: mechanism == PortMappingMechanism::NatPmp,
+            protocol,
+        });
+        let mut external = client.watch_external_address();
+        client.update_local_port(port);
+        let first = tokio::select! {
+            changed = external.changed() => {
+                match changed {
+                    Ok(()) => *external.borrow_and_update(),
+                    Err(_) => None,
+                }
+            }
+            _ = SystemClock.sleep(ACQUIRE_WITHIN) => None,
+        };
+        let Some(first) = first else {
+            tx.send(PortMappingEvent::Unavailable {
+                mechanism,
+                transport,
+                detail: format!(
+                    "gateway answered discovery but did not grant a mapping within {}s",
+                    ACQUIRE_WITHIN.as_secs()
+                ),
+            })
+            .await
+            .map_err(|_| ())?;
+            continue;
+        };
+
+        tx.send(PortMappingEvent::Mapped {
+            mechanism,
+            transport,
+            address: mapped_multiaddr(first, transport),
+        })
+        .await
+        .map_err(|_| ())?;
+        let mut previous = first;
+        while external.changed().await.is_ok() {
+            let next = *external.borrow_and_update();
+            match mapping_lease_action(previous, next) {
+                MappingLeaseAction::Continue => continue,
+                MappingLeaseAction::Retry => {
+                    tx.send(PortMappingEvent::Expired {
+                        mechanism,
+                        transport,
+                        address: mapped_multiaddr(previous, transport),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    // The old lease really expired and the library's renewal attempt did not
+                    // replace it. Return to the outer retry instead of waiting forever at `None`.
+                    return Ok(());
+                }
+                MappingLeaseAction::Replace(next) => {
+                    tx.send(PortMappingEvent::Expired {
+                        mechanism,
+                        transport,
+                        address: mapped_multiaddr(previous, transport),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    tx.send(PortMappingEvent::Mapped {
+                        mechanism,
+                        transport,
+                        address: mapped_multiaddr(next, transport),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    previous = next;
+                }
+            }
+        }
+        tx.send(PortMappingEvent::Expired {
+            mechanism,
+            transport,
+            address: mapped_multiaddr(previous, transport),
+        })
+        .await
+        .map_err(|_| ())?;
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Retrying matters on laptops: the first probe may run before Wi-Fi has a default route, or the
+/// user may move between networks without the stable listener changing. A successful mapping's
+/// own lease task renews internally; this interval is reached only after an attempt ended without
+/// a live watcher (or that watcher closed).
+async fn run_port_mapper(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: mpsc::Sender<PortMappingEvent>,
+) {
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    loop {
+        if run_port_mapper_attempt(transport, port, &tx).await.is_err() {
+            return;
+        }
+        SystemClock.sleep(RETRY_AFTER).await;
+    }
+}
+
 struct Actor {
     swarm: Swarm<MeshBehaviour>,
+    /// Whether this product instance explicitly opted into changing the local gateway.
+    enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     listen_tx: mpsc::Sender<Multiaddr>,
-    /// UPnP outcome: `Some(addr)` = the router opened a port and reported this public address
-    /// (surfaced so a fresh invite can carry a directly-dialable bootstrap, no relay);
-    /// `None` = no usable gateway (so a waiter stops promptly instead of timing out).
-    upnp_tx: mpsc::Sender<Option<Multiaddr>>,
+    /// Unified UPnP/PCP/NAT-PMP lifecycle stream for the product layer. It persists successful
+    /// addresses into invites/peer records and removes them again on lease expiry.
+    port_mapping_tx: watch::Sender<PortMappingSnapshot>,
+    /// PCP/NAT-PMP workers report back here so the swarm actor alone mutates external addresses.
+    port_mapper_tx: mpsc::Sender<PortMappingEvent>,
+    port_mapper_rx: mpsc::Receiver<PortMappingEvent>,
+    /// At most one worker per IP transport, even though the swarm reports IPv4 and IPv6 listeners
+    /// separately. A changed bound port replaces (and aborts) the old worker.
+    port_mapper_tasks: HashMap<PortMappingTransport, PortMapperTask>,
+    /// Router-lease ownership by mechanism and transport. Libp2p stores external addresses as a
+    /// set, so this layer supplies the reference counting needed when UPnP and PCP map the same
+    /// socket.
+    active_port_mappings: HashMap<PortMappingKey, Multiaddr>,
+    /// Latest scoped failure for keys without a live lease. Coalesced with the active map into a
+    /// watch snapshot so an idle/non-UI `MeshService` does not accumulate diagnostic events.
+    port_mapping_unavailable: HashMap<PortMappingKey, String>,
+    /// Explicit/operator-provided addresses are independent owners. Expiry of an identical router
+    /// mapping must never withdraw a still-configured manual forward.
+    configured_external_addrs: HashSet<Multiaddr>,
     /// Per-address AutoNAT v2 outcomes. Kept separate from transport connectivity because a
     /// failed dial-back does not mean a peer connection failed, and a successful one is
     /// diagnostic evidence rather than a membership event.
-    autonat_tx: mpsc::Sender<AutoNatResult>,
+    autonat_tx: watch::Sender<AutoNatSnapshot>,
+    /// Latest observation for every address/server pair. A second successful route must survive a
+    /// later failure of the first, and a consumer that starts late still needs the full evidence.
+    /// The FIFO order enforces `MAX_AUTONAT_OBSERVATIONS` under peer/address churn.
+    autonat_results: HashMap<AutoNatKey, AutoNatResult>,
+    autonat_order: VecDeque<AutoNatKey>,
+    /// Live relay-circuit listen addresses. The product must withdraw one when the reservation's
+    /// listener expires instead of continuing to present a dead circuit as "relay ready".
+    relay_addresses: HashSet<Multiaddr>,
+    relay_address_tx: watch::Sender<RelayAddressSnapshot>,
     /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
     upgrade_tx: mpsc::Sender<PeerId>,
     /// Rendezvous-discovered peer records, surfaced but never auto-dialed. Unbounded
@@ -975,6 +1527,9 @@ impl Actor {
                 event = self.swarm.select_next_some() => {
                     self.on_swarm_event(event, &mut inbound).await;
                 }
+                Some(event) = self.port_mapper_rx.recv() => {
+                    self.on_port_mapping_event(event);
+                }
                 Some((channel, resp)) = inbound.next(), if !inbound.is_empty() => {
                     if let Some(bytes) = resp {
                         let _ = self
@@ -986,6 +1541,226 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Start one PCP/NAT-PMP mapping worker for this transport, or replace it if the actual bound
+    /// port changed. The ordinary steady-state path reports four listeners on one saved port, so
+    /// the equality guard prevents four gateway probes from one launch.
+    fn ensure_port_mapper(&mut self, transport: PortMappingTransport, port: NonZeroU16) {
+        let unchanged_and_running = self
+            .port_mapper_tasks
+            .get(&transport)
+            .is_some_and(|task| task.port == port && !task.handle.is_finished());
+        if unchanged_and_running {
+            return;
+        }
+
+        // A changed port makes the old route dead immediately even if its router lease has time
+        // left. A finished worker is treated the same way: it can no longer renew the lease.
+        self.port_mapper_tasks.remove(&transport);
+        for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+            if let Some(address) = self
+                .active_port_mappings
+                .get(&(mechanism, transport))
+                .cloned()
+            {
+                self.on_port_mapping_event(PortMappingEvent::Expired {
+                    mechanism,
+                    transport,
+                    address,
+                });
+            }
+        }
+        let tx = self.port_mapper_tx.clone();
+        let handle = tokio::spawn(run_port_mapper(transport, port, tx));
+        self.port_mapper_tasks
+            .insert(transport, PortMapperTask { port, handle });
+    }
+
+    /// Apply a mapper event to the swarm before surfacing it. Successful mappings become AutoNAT
+    /// candidates and rendezvous/identify addresses; expired leases are withdrawn immediately so
+    /// a stale public address is not kept in the live peer record.
+    fn on_port_mapping_event(&mut self, event: PortMappingEvent) {
+        // A router behind CGNAT/double NAT can successfully map its *private* upstream socket.
+        // That is useful diagnostic evidence but not an internet route, so never advertise it as
+        // one or ask AutoNAT to waste a callback on it.
+        let event = match event {
+            PortMappingEvent::Mapped {
+                mechanism,
+                transport,
+                address,
+            } if !addr_is_globally_routable(&address) => {
+                // libp2p-UPnP may already have promoted the address before its behaviour event is
+                // surfaced. Remove it unless an explicit/manual owner independently configured
+                // the identical socket; the router lease itself is still refused below.
+                if !external_address_is_allowed(&self.configured_external_addrs, &address) {
+                    self.swarm.remove_external_address(&address);
+                    self.forget_autonat_address(&address);
+                }
+                if let Some(old) = self
+                    .active_port_mappings
+                    .get(&(mechanism, transport))
+                    .cloned()
+                {
+                    self.on_port_mapping_event(PortMappingEvent::Expired {
+                        mechanism,
+                        transport,
+                        address: old,
+                    });
+                }
+                PortMappingEvent::Unavailable {
+                    mechanism,
+                    transport,
+                    detail: format!(
+                        "gateway returned non-public address {address} (likely CGNAT or double NAT)"
+                    ),
+                }
+            }
+            event => event,
+        };
+        match &event {
+            PortMappingEvent::Mapped {
+                mechanism,
+                transport,
+                address,
+            } => {
+                tracing::info!(
+                    %mechanism,
+                    %transport,
+                    %address,
+                    "router mapped a public address; offering it to AutoNAT"
+                );
+                let (remove_old, add_new) = activate_port_mapping(
+                    &mut self.active_port_mappings,
+                    (*mechanism, *transport),
+                    address.clone(),
+                );
+                self.port_mapping_unavailable
+                    .remove(&(*mechanism, *transport));
+                if let Some(old) = remove_old {
+                    if !self.configured_external_addrs.contains(&old) {
+                        self.swarm.remove_external_address(&old);
+                        self.forget_autonat_address(&old);
+                    }
+                }
+                if add_new && !self.configured_external_addrs.contains(address) {
+                    self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                        FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate {
+                            addr: address,
+                        }),
+                    );
+                    self.swarm.add_external_address(address.clone());
+                }
+                self.flush_pending_registers();
+            }
+            PortMappingEvent::Unavailable {
+                mechanism,
+                transport,
+                detail,
+            } => {
+                self.port_mapping_unavailable
+                    .insert((*mechanism, *transport), detail.clone());
+                tracing::info!(%mechanism, %transport, %detail, "router mapping unavailable");
+            }
+            PortMappingEvent::Expired {
+                mechanism,
+                transport,
+                address,
+            } => {
+                tracing::info!(%mechanism, %transport, %address, "router port mapping expired");
+                let matched =
+                    self.active_port_mappings.get(&(*mechanism, *transport)) == Some(address);
+                let last_mapping_owner = expire_port_mapping(
+                    &mut self.active_port_mappings,
+                    (*mechanism, *transport),
+                    address,
+                );
+                let still_owned = self
+                    .active_port_mappings
+                    .values()
+                    .any(|candidate| candidate == address)
+                    || self.configured_external_addrs.contains(address);
+                if *mechanism == PortMappingMechanism::Upnp && still_owned {
+                    // libp2p-UPnP emits `ToSwarm::ExternalAddrExpired` before its public expiry
+                    // event. Re-add an identical address still owned by PCP/NAT-PMP or a manual
+                    // forward; libp2p's external-address set has no ownership count of its own.
+                    self.swarm.add_external_address(address.clone());
+                } else if last_mapping_owner && !still_owned {
+                    self.swarm.remove_external_address(address);
+                    self.forget_autonat_address(address);
+                }
+                if matched {
+                    self.port_mapping_unavailable.insert(
+                        (*mechanism, *transport),
+                        format!("previous mapping {address} expired; retrying"),
+                    );
+                }
+            }
+        }
+        self.publish_port_mapping_snapshot();
+    }
+
+    /// Publish the current mapping state as one bounded/coalesced value. A consumer can miss
+    /// intermediate retries but never observes an expired address as current.
+    fn publish_port_mapping_snapshot(&self) {
+        let mut active: Vec<_> = self
+            .active_port_mappings
+            .iter()
+            .map(|(&(mechanism, transport), address)| ActivePortMapping {
+                mechanism,
+                transport,
+                address: address.clone(),
+            })
+            .collect();
+        active.sort_by(|a, b| {
+            (a.mechanism, a.transport, a.address.to_string()).cmp(&(
+                b.mechanism,
+                b.transport,
+                b.address.to_string(),
+            ))
+        });
+        let mut unavailable: Vec<_> = self
+            .port_mapping_unavailable
+            .iter()
+            .filter(|(key, _)| !self.active_port_mappings.contains_key(key))
+            .map(|(&(mechanism, transport), detail)| PortMappingFailure {
+                mechanism,
+                transport,
+                detail: detail.clone(),
+            })
+            .collect();
+        unavailable.sort_by_key(|failure| (failure.mechanism, failure.transport));
+        self.port_mapping_tx.send_replace(PortMappingSnapshot {
+            active,
+            unavailable,
+        });
+    }
+
+    /// Publish all bounded current AutoNAT observations. `latest` is present only for an actual
+    /// dial-back result; lifecycle pruning publishes `None` so an expired route cannot be mistaken
+    /// for fresh evidence by event-style consumers.
+    fn publish_autonat_snapshot(&self, latest: Option<AutoNatResult>) {
+        let mut results: Vec<_> = self.autonat_results.values().cloned().collect();
+        results.sort_by(|a, b| {
+            (a.address.to_string(), a.server.to_string())
+                .cmp(&(b.address.to_string(), b.server.to_string()))
+        });
+        self.autonat_tx
+            .send_replace(AutoNatSnapshot { results, latest });
+    }
+
+    fn forget_autonat_address(&mut self, address: &Multiaddr) {
+        if forget_autonat_address(&mut self.autonat_results, &mut self.autonat_order, address) {
+            self.publish_autonat_snapshot(None);
+        }
+    }
+
+    fn autonat_address_is_current(&self, address: &Multiaddr) -> bool {
+        autonat_candidate_is_current(
+            &self.configured_external_addrs,
+            &self.active_port_mappings,
+            address,
+        )
     }
 
     fn handle_command(&mut self, cmd: Command) {
@@ -1059,6 +1834,7 @@ impl Actor {
                 self.swarm.behaviour_mut().autonat_client.on_swarm_event(
                     FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr: &addr }),
                 );
+                self.configured_external_addrs.insert(addr.clone());
                 self.swarm.add_external_address(addr);
                 // A registration may have been waiting on exactly this.
                 self.flush_pending_registers();
@@ -1378,25 +2154,53 @@ impl Actor {
         event: SwarmEvent<MeshBehaviourEvent>,
         inbound: &mut InboundResponses,
     ) {
-        // Opportunistically retry deferred registrations: an external address may
-        // have become available (and propagated to the behaviour) since the last try.
-        if !self.pending_registers.is_empty() {
-            self.flush_pending_registers();
-        }
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "listening");
+                if self.enable_port_mapping {
+                    if let Some((transport, port)) = port_mapping_endpoint(&address) {
+                        self.ensure_port_mapper(transport, port);
+                    }
+                }
                 // A granted relay-circuit reservation is how a NAT'd node becomes
                 // reachable; confirm it as an external address so rendezvous
                 // registrations advertise it, then flush any deferred registrations.
                 if is_relayed(&address) {
                     self.swarm.add_external_address(address.clone());
+                    self.relay_addresses.insert(address.clone());
+                    let mut addresses: Vec<_> = self.relay_addresses.iter().cloned().collect();
+                    addresses.sort_by_key(ToString::to_string);
+                    self.relay_address_tx
+                        .send_replace(RelayAddressSnapshot { addresses });
                     self.flush_pending_registers();
                 }
                 let _ = self.listen_tx.try_send(address);
             }
-            SwarmEvent::ExternalAddrConfirmed { .. } => {
-                self.flush_pending_registers();
+            SwarmEvent::ExpiredListenAddr { address, .. } => {
+                if self.relay_addresses.remove(&address) {
+                    self.swarm.remove_external_address(&address);
+                    self.forget_autonat_address(&address);
+                    let mut addresses: Vec<_> = self.relay_addresses.iter().cloned().collect();
+                    addresses.sort_by_key(ToString::to_string);
+                    self.relay_address_tx
+                        .send_replace(RelayAddressSnapshot { addresses });
+                }
+            }
+            SwarmEvent::ExternalAddrConfirmed { address } => {
+                let has_ip_literal = address
+                    .iter()
+                    .any(|protocol| matches!(protocol, Protocol::Ip4(_) | Protocol::Ip6(_)));
+                if has_ip_literal
+                    && !external_address_is_allowed(&self.configured_external_addrs, &address)
+                {
+                    // UPnP confirms its address in the Swarm before its public behaviour event.
+                    // Enforce the canonical classifier here, before any pending rendezvous
+                    // registration can publish a multicast/reserved/non-public gateway result.
+                    self.swarm.remove_external_address(&address);
+                    self.forget_autonat_address(&address);
+                } else {
+                    self.flush_pending_registers();
+                }
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
@@ -1548,59 +2352,96 @@ impl Actor {
             // than a server merely claiming it dialled us. Failures remain address- and
             // observer-specific; they are surfaced without turning them into a node-wide state.
             SwarmEvent::Behaviour(MeshBehaviourEvent::AutonatClient(e)) => {
-                let reachable = e.result.is_ok();
-                let error = e.result.err().map(|err| err.to_string());
-                if reachable {
-                    tracing::info!(
+                if !self.autonat_address_is_current(&e.tested_addr) {
+                    // Ignore callbacks delivered during the unowned interval after expiry. If the
+                    // same socket is later reacquired it becomes eligible again: a callback that
+                    // succeeds then really did reach the newly-current route at that moment.
+                    tracing::debug!(
                         address = %e.tested_addr,
                         server = %e.server,
-                        "AutoNAT dial-back succeeded"
+                        "ignoring AutoNAT result for an address with no current owner"
                     );
                 } else {
-                    tracing::info!(
-                        address = %e.tested_addr,
-                        server = %e.server,
-                        error = error.as_deref().unwrap_or("unknown"),
-                        "AutoNAT dial-back failed"
+                    let reachable = e.result.is_ok();
+                    let error = e.result.err().map(|err| err.to_string());
+                    if reachable {
+                        tracing::info!(
+                            address = %e.tested_addr,
+                            server = %e.server,
+                            "AutoNAT dial-back succeeded"
+                        );
+                    } else {
+                        tracing::info!(
+                            address = %e.tested_addr,
+                            server = %e.server,
+                            error = error.as_deref().unwrap_or("unknown"),
+                            "AutoNAT dial-back failed"
+                        );
+                    }
+                    let result = AutoNatResult {
+                        address: e.tested_addr,
+                        server: e.server,
+                        reachable,
+                        error,
+                    };
+                    record_autonat_result(
+                        &mut self.autonat_results,
+                        &mut self.autonat_order,
+                        result.clone(),
                     );
+                    self.publish_autonat_snapshot(Some(result));
                 }
-                let _ = self.autonat_tx.try_send(AutoNatResult {
-                    address: e.tested_addr,
-                    server: e.server,
-                    reachable,
-                    error,
-                });
             }
             // Relay-client lifecycle (reservation accepted/expired, circuit opened).
             SwarmEvent::Behaviour(MeshBehaviourEvent::RelayClient(e)) => {
                 tracing::debug!(?e, "relay-client event");
             }
-            // UPnP/NAT-PMP: the router mapped our port and told us our public address. Promote it
-            // to an external address (so identify/rendezvous advertise it) and surface it so a
-            // fresh invite can carry a directly-dialable bootstrap; direct connect, no relay.
+            // libp2p's behaviour is UPnP IGD only (PCP/NAT-PMP are driven by the workers above).
+            // Fold both implementations through one event path so candidates, diagnostics and
+            // expiry all have identical semantics.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
                 libp2p::upnp::Event::NewExternalAddr(addr) => {
-                    tracing::info!(%addr, "UPnP mapped a public address; node is directly reachable");
-                    self.swarm.behaviour_mut().autonat_client.on_swarm_event(
-                        FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate {
-                            addr: &addr,
-                        }),
-                    );
-                    self.swarm.add_external_address(addr.clone());
-                    self.flush_pending_registers();
-                    let _ = self.upnp_tx.try_send(Some(addr));
+                    if let Some((transport, _)) = port_mapping_endpoint(&addr) {
+                        self.on_port_mapping_event(PortMappingEvent::Mapped {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            address: addr,
+                        });
+                    } else {
+                        tracing::warn!(%addr, "UPnP returned an address with no TCP or QUIC port");
+                    }
                 }
                 libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
-                    tracing::info!(%addr, "UPnP port mapping expired");
-                    self.swarm.remove_external_address(&addr);
+                    if let Some((transport, _)) = port_mapping_endpoint(&addr) {
+                        self.on_port_mapping_event(PortMappingEvent::Expired {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            address: addr,
+                        });
+                    } else {
+                        self.swarm.remove_external_address(&addr);
+                        self.forget_autonat_address(&addr);
+                    }
                 }
                 libp2p::upnp::Event::GatewayNotFound => {
-                    tracing::info!("no UPnP gateway found; direct reachability needs a port-forward or a relay");
-                    let _ = self.upnp_tx.try_send(None);
+                    for transport in [PortMappingTransport::Tcp, PortMappingTransport::Udp] {
+                        self.on_port_mapping_event(PortMappingEvent::Unavailable {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            detail: "no UPnP IGD gateway answered discovery".to_string(),
+                        });
+                    }
                 }
                 libp2p::upnp::Event::NonRoutableGateway => {
-                    tracing::info!("UPnP gateway is not internet-routable (likely CGNAT/double-NAT); a relay is required");
-                    let _ = self.upnp_tx.try_send(None);
+                    for transport in [PortMappingTransport::Tcp, PortMappingTransport::Udp] {
+                        self.on_port_mapping_event(PortMappingEvent::Unavailable {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            detail:
+                                "UPnP gateway is not internet-routable (likely CGNAT or double NAT)"
+                                    .to_string(),
+                        });
+                    }
                 }
             },
             // Rendezvous client: surface discovered records (NEVER auto-dial them) and
@@ -1672,12 +2513,13 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
-    /// `None` once [`MeshService::take_external_addrs`] has handed the receiver to a background
-    /// waiter (UPnP discovery outlives any call a UI can block on).
-    upnp_rx: Mutex<Option<mpsc::Receiver<Option<Multiaddr>>>>,
-    /// `None` once the desktop has taken the AutoNAT result stream for its background
+    /// `None` once the desktop has taken the coalesced router-mapping state.
+    port_mapping_rx: Mutex<Option<watch::Receiver<PortMappingSnapshot>>>,
+    /// `None` once the desktop has taken the AutoNAT evidence snapshot for its background
     /// reachability collector.
-    autonat_rx: Mutex<Option<mpsc::Receiver<AutoNatResult>>>,
+    autonat_rx: Mutex<Option<watch::Receiver<AutoNatSnapshot>>>,
+    /// `None` once the desktop has taken the live relay-circuit address set.
+    relay_address_rx: Mutex<Option<watch::Receiver<RelayAddressSnapshot>>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
@@ -1693,28 +2535,45 @@ impl std::fmt::Debug for Command {
 impl MeshService {
     /// Spawn the actor for an already-built (listening/dialing) swarm.
     pub fn spawn(swarm: Swarm<MeshBehaviour>) -> Self {
-        Self::spawn_protecting(swarm, Vec::new())
+        Self::spawn_protecting(swarm, Vec::new(), false)
     }
 
     /// [`MeshService::spawn`], plus the peers this node was **constructed to dial** (its
     /// bootstrap/infra set). Those are never deniable by an eviction: see `Actor::protected`.
-    fn spawn_protecting(swarm: Swarm<MeshBehaviour>, protected: Vec<libp2p::PeerId>) -> Self {
+    fn spawn_protecting(
+        swarm: Swarm<MeshBehaviour>,
+        protected: Vec<libp2p::PeerId>,
+        enable_port_mapping: bool,
+    ) -> Self {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
-        let (upnp_tx, upnp_rx) = mpsc::channel(16);
-        let (autonat_tx, autonat_rx) = mpsc::channel(16);
+        let (port_mapping_tx, port_mapping_rx) = watch::channel(PortMappingSnapshot::default());
+        let (port_mapper_tx, port_mapper_rx) = mpsc::channel(32);
+        let (autonat_tx, autonat_rx) = watch::channel(AutoNatSnapshot::default());
+        let (relay_address_tx, relay_address_rx) = watch::channel(RelayAddressSnapshot::default());
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
         let (registered_tx, registered_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             swarm,
+            enable_port_mapping,
             cmd_rx,
             event_tx,
             listen_tx,
-            upnp_tx,
+            port_mapping_tx,
+            port_mapper_tx,
+            port_mapper_rx,
+            port_mapper_tasks: HashMap::new(),
+            active_port_mappings: HashMap::new(),
+            port_mapping_unavailable: HashMap::new(),
+            configured_external_addrs: HashSet::new(),
             autonat_tx,
+            autonat_results: HashMap::new(),
+            autonat_order: VecDeque::new(),
+            relay_addresses: HashSet::new(),
+            relay_address_tx,
             upgrade_tx,
             discovered_tx,
             registered_tx,
@@ -1733,8 +2592,9 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
-            upnp_rx: Mutex::new(Some(upnp_rx)),
+            port_mapping_rx: Mutex::new(Some(port_mapping_rx)),
             autonat_rx: Mutex::new(Some(autonat_rx)),
+            relay_address_rx: Mutex::new(Some(relay_address_rx)),
             upgrade_rx: Mutex::new(upgrade_rx),
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
@@ -1748,41 +2608,47 @@ impl MeshService {
         self.listen_rx.lock().await.recv().await
     }
 
-    /// Await the next public address discovered via **UPnP** (the home router opened a port and
-    /// reported our internet-facing address). It is already added as an external address; callers
-    /// (e.g. invite minting) can fold it into a directly-dialable bootstrap so a peer can connect
-    /// with no relay. UPnP is best-effort: this resolves to `None` both when there is no usable
-    /// gateway (signalled promptly, so the caller doesn't wait out a full timeout) and once the
-    /// actor stops; either way the caller simply proceeds without a UPnP bootstrap. Also `None`
-    /// once [`MeshService::take_external_addrs`] has moved the channel to a background waiter.
-    pub async fn next_external_addr(&self) -> Option<Multiaddr> {
-        let mut guard = self.upnp_rx.lock().await;
-        guard.as_mut()?.recv().await.flatten()
+    /// Await the next coalesced UPnP/PCP/NAT-PMP state snapshot.
+    pub async fn next_port_mapping_snapshot(&self) -> Option<PortMappingSnapshot> {
+        let mut guard = self.port_mapping_rx.lock().await;
+        let rx = guard.as_mut()?;
+        rx.changed().await.ok()?;
+        let snapshot = rx.borrow_and_update().clone();
+        Some(snapshot)
     }
 
-    /// Take ownership of the UPnP external-address channel so a **background** task can wait out a
-    /// realistic router-discovery window after this `MeshService` has been moved into the layers
-    /// above it. SSDP/IGD discovery routinely needs tens of seconds, which is far longer than
-    /// founding a server may block for; the answer therefore has to be collected by somebody who
-    /// outlives the call. Returns the receiver on the first call and `None` after that, so exactly
-    /// one consumer ever sees each address; [`MeshService::next_external_addr`] then yields `None`.
-    pub async fn take_external_addrs(&self) -> Option<mpsc::Receiver<Option<Multiaddr>>> {
-        self.upnp_rx.lock().await.take()
+    /// Take the single-consumer coalesced mapping state for a background collector. The current
+    /// value is retained even when it changed before the collector started.
+    pub async fn take_port_mapping_snapshots(
+        &self,
+    ) -> Option<watch::Receiver<PortMappingSnapshot>> {
+        self.port_mapping_rx.lock().await.take()
     }
 
-    /// Await the next AutoNAT v2 result for one external-address candidate.
+    /// Await the next coalesced AutoNAT v2 evidence snapshot.
     ///
     /// A success proves only that the named server reached that address at that moment. A failure
     /// is likewise scoped to one address/server pair; callers should keep listening because a
     /// second candidate (IPv6 rather than IPv4, or QUIC rather than TCP) may still succeed.
-    pub async fn next_autonat_result(&self) -> Option<AutoNatResult> {
+    pub async fn next_autonat_snapshot(&self) -> Option<AutoNatSnapshot> {
         let mut guard = self.autonat_rx.lock().await;
-        guard.as_mut()?.recv().await
+        let rx = guard.as_mut()?;
+        rx.changed().await.ok()?;
+        let snapshot = rx.borrow_and_update().clone();
+        Some(snapshot)
     }
 
-    /// Take the single-consumer AutoNAT result stream for a background diagnostics collector.
-    pub async fn take_autonat_results(&self) -> Option<mpsc::Receiver<AutoNatResult>> {
+    /// Take the single-consumer coalesced AutoNAT evidence for a background collector.
+    pub async fn take_autonat_snapshots(&self) -> Option<watch::Receiver<AutoNatSnapshot>> {
         self.autonat_rx.lock().await.take()
+    }
+
+    /// Take the current relay-circuit address set. An empty later snapshot means the reservation
+    /// listener expired and callers must withdraw the circuit from invites/peer records.
+    pub async fn take_relay_address_snapshots(
+        &self,
+    ) -> Option<watch::Receiver<RelayAddressSnapshot>> {
+        self.relay_address_rx.lock().await.take()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct
@@ -1883,7 +2749,7 @@ impl MeshService {
                 .map_err(|e| NetError::Dial(e.to_string()))?;
         }
         let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
-        Ok(Self::spawn_protecting(swarm, protected))
+        Ok(Self::spawn_protecting(swarm, protected, false))
     }
 
     /// Build a **TCP + QUIC** node that listens on `listen` and dials `dial`, then spawn it. Also
@@ -1898,7 +2764,7 @@ impl MeshService {
     ) -> Result<(Self, libp2p::PeerId), NetError> {
         let listen: Vec<Multiaddr> = listen.into_iter().collect();
         let swarm = build_tcp_swarm()?;
-        let (svc, id, _bound) = Self::listen_dial_spawn(swarm, &listen, dial)?;
+        let (svc, id, _bound) = Self::listen_dial_spawn(swarm, &listen, dial, false)?;
         Ok((svc, id))
     }
 
@@ -1914,7 +2780,18 @@ impl MeshService {
         dial: &[Multiaddr],
     ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
         let swarm = build_tcp_swarm_with_key(key)?;
-        Self::listen_dial_spawn(swarm, listen, dial)
+        Self::listen_dial_spawn(swarm, listen, dial, false)
+    }
+
+    /// Product constructor that explicitly enables UPnP/PCP/NAT-PMP for the supplied stable
+    /// all-interface listeners. General TCP constructors keep router mutation disabled.
+    pub fn new_tcp_with_key_and_port_mapping(
+        key: libp2p::identity::Keypair,
+        listen: &[Multiaddr],
+        dial: &[Multiaddr],
+    ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
+        let swarm = build_tcp_swarm_with_key_and_port_mapping(key, true)?;
+        Self::listen_dial_spawn(swarm, listen, dial, true)
     }
 
     /// Apply the listen/dial set to a freshly-built swarm and spawn its actor. Shared by the
@@ -1923,6 +2800,7 @@ impl MeshService {
         mut swarm: Swarm<MeshBehaviour>,
         listen: &[Multiaddr],
         dial: &[Multiaddr],
+        enable_port_mapping: bool,
     ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
         let libp2p_id = *swarm.local_peer_id();
         let mut bound = Vec::new();
@@ -1949,7 +2827,11 @@ impl MeshService {
         // Whatever this node was constructed to dial is its bootstrap/infra set, chosen locally
         // and never by a peer record, so no eviction may take it away (see `Actor::protected`).
         let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
-        Ok((Self::spawn_protecting(swarm, protected), libp2p_id, bound))
+        Ok((
+            Self::spawn_protecting(swarm, protected, enable_port_mapping),
+            libp2p_id,
+            bound,
+        ))
     }
 
     /// A cheap, clonable [`MeshHandle`] to this node's command channel, for driving rendezvous
@@ -2144,6 +3026,184 @@ mod tests {
         libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id()
+    }
+
+    #[test]
+    fn router_mapping_uses_the_tcp_and_quic_listen_ports_only() {
+        let tcp: Multiaddr = "/ip4/0.0.0.0/tcp/22487".parse().unwrap();
+        let quic: Multiaddr = "/ip4/0.0.0.0/udp/22487/quic-v1".parse().unwrap();
+        let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/22487".parse().unwrap();
+        let plain_udp: Multiaddr = "/ip4/0.0.0.0/udp/22487".parse().unwrap();
+        let ipv6_only: Multiaddr = "/ip6/::/udp/22487/quic-v1".parse().unwrap();
+        let relayed: Multiaddr = "/ip4/198.51.100.8/tcp/4001/p2p/12D3KooWJvFzZpCWKjQbGvYQ8uY4rMw1qQznfKqcxpN6qjHVVqUd/p2p-circuit"
+            .parse()
+            .unwrap();
+        let memory: Multiaddr = "/memory/7".parse().unwrap();
+
+        assert_eq!(
+            port_mapping_endpoint(&tcp),
+            Some((PortMappingTransport::Tcp, NonZeroU16::new(22487).unwrap()))
+        );
+        assert_eq!(
+            port_mapping_endpoint(&quic),
+            Some((PortMappingTransport::Udp, NonZeroU16::new(22487).unwrap()))
+        );
+        assert_eq!(port_mapping_endpoint(&plain_udp), None);
+        assert_eq!(port_mapping_endpoint(&loopback), None);
+        assert_eq!(port_mapping_endpoint(&ipv6_only), None);
+        assert_eq!(port_mapping_endpoint(&relayed), None);
+        assert_eq!(port_mapping_endpoint(&memory), None);
+    }
+
+    #[tokio::test]
+    async fn router_mapping_behaviour_requires_the_explicit_product_builder() {
+        let disabled = build_tcp_swarm_with_key(libp2p::identity::Keypair::generate_ed25519())
+            .expect("default TCP swarm");
+        assert!(!disabled.behaviour().upnp.is_enabled());
+
+        let enabled = build_tcp_swarm_with_key_and_port_mapping(
+            libp2p::identity::Keypair::generate_ed25519(),
+            true,
+        )
+        .expect("mapping-enabled TCP swarm");
+        assert!(enabled.behaviour().upnp.is_enabled());
+    }
+
+    #[test]
+    fn mapper_falls_back_from_pcp_to_nat_pmp_and_classifies_lease_changes() {
+        assert_eq!(
+            mapping_attempt_plan(true, true),
+            vec![PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp],
+            "a PCP MAP timeout must leave NAT-PMP as the next attempt"
+        );
+        assert_eq!(
+            mapping_attempt_plan(false, true),
+            vec![PortMappingMechanism::NatPmp]
+        );
+
+        let old: SocketAddrV4 = "8.8.8.8:22487".parse().unwrap();
+        let new: SocketAddrV4 = "9.9.9.9:22487".parse().unwrap();
+        assert_eq!(
+            mapping_lease_action(old, Some(old)),
+            MappingLeaseAction::Continue
+        );
+        assert_eq!(
+            mapping_lease_action(old, None),
+            MappingLeaseAction::Retry,
+            "Some -> None withdraws the route and returns to the outer retry loop"
+        );
+        assert_eq!(
+            mapping_lease_action(old, Some(new)),
+            MappingLeaseAction::Replace(new),
+            "Some(old) -> Some(new) replaces the published socket in the live worker"
+        );
+    }
+
+    #[test]
+    fn autonat_observations_are_bounded_updated_and_pruned_by_address() {
+        let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        let mut results = HashMap::new();
+        let mut order = VecDeque::new();
+
+        for n in 0..=MAX_AUTONAT_OBSERVATIONS {
+            record_autonat_result(
+                &mut results,
+                &mut order,
+                AutoNatResult {
+                    address: address.clone(),
+                    server: test_peer(n as u8),
+                    reachable: n % 2 == 0,
+                    error: None,
+                },
+            );
+        }
+        assert_eq!(results.len(), MAX_AUTONAT_OBSERVATIONS);
+        assert_eq!(order.len(), MAX_AUTONAT_OBSERVATIONS);
+        assert!(
+            !results.contains_key(&(address.clone(), test_peer(0))),
+            "the oldest observation is evicted under server churn"
+        );
+
+        let newest = test_peer(MAX_AUTONAT_OBSERVATIONS as u8);
+        record_autonat_result(
+            &mut results,
+            &mut order,
+            AutoNatResult {
+                address: address.clone(),
+                server: newest,
+                reachable: true,
+                error: None,
+            },
+        );
+        assert_eq!(results.len(), MAX_AUTONAT_OBSERVATIONS);
+        assert_eq!(order.back(), Some(&(address.clone(), newest)));
+        assert!(forget_autonat_address(&mut results, &mut order, &address));
+        assert!(results.is_empty());
+        assert!(order.is_empty());
+
+        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp);
+        let reacquired = HashMap::from([(pcp, address.clone())]);
+        assert!(
+            autonat_candidate_is_current(&HashSet::new(), &reacquired, &address,),
+            "same-address remapping establishes a new current route that can be tested again"
+        );
+        assert!(
+            !autonat_candidate_is_current(&HashSet::new(), &HashMap::new(), &address,),
+            "a late result in the unowned interval is rejected"
+        );
+    }
+
+    #[test]
+    fn router_mapping_addresses_preserve_the_transport_a_joiner_must_dial() {
+        let public: SocketAddrV4 = "203.0.113.7:22487".parse().unwrap();
+        assert_eq!(
+            mapped_multiaddr(public, PortMappingTransport::Tcp).to_string(),
+            "/ip4/203.0.113.7/tcp/22487"
+        );
+        assert_eq!(
+            mapped_multiaddr(public, PortMappingTransport::Udp).to_string(),
+            "/ip4/203.0.113.7/udp/22487/quic-v1"
+        );
+    }
+
+    #[test]
+    fn router_mapping_ownership_keeps_shared_addresses_until_the_last_lease() {
+        let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        let replacement: Multiaddr = "/ip4/9.9.9.9/tcp/22487".parse().unwrap();
+        let upnp = (PortMappingMechanism::Upnp, PortMappingTransport::Tcp);
+        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp);
+        let mut active = HashMap::new();
+
+        assert_eq!(
+            activate_port_mapping(&mut active, upnp, address.clone()),
+            (None, true)
+        );
+        assert_eq!(
+            activate_port_mapping(&mut active, pcp, address.clone()),
+            (None, false),
+            "the swarm already owns this address through UPnP"
+        );
+        assert!(!expire_port_mapping(&mut active, upnp, &address));
+        assert!(expire_port_mapping(&mut active, pcp, &address));
+
+        activate_port_mapping(&mut active, pcp, address.clone());
+        assert_eq!(
+            activate_port_mapping(&mut active, pcp, replacement.clone()),
+            (Some(address.clone()), true),
+            "replacing one key retires its unshared old address"
+        );
+        assert!(
+            !expire_port_mapping(&mut active, pcp, &address),
+            "a stale expiry cannot remove the replacement"
+        );
+        assert_eq!(active.get(&pcp), Some(&replacement));
+
+        let private: Multiaddr = "/ip4/192.168.1.9/tcp/22487".parse().unwrap();
+        assert!(!external_address_is_allowed(&HashSet::new(), &private));
+        assert!(
+            external_address_is_allowed(&HashSet::from([private.clone()]), &private),
+            "a rejected private router result cannot remove an identical manual LAN route"
+        );
     }
 
     /// The eviction deny list is bounded, and the bound drops the **oldest** eviction.

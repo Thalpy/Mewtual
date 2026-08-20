@@ -250,6 +250,39 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       return [];
     case "get_moderation":
       return { events: [], votes: [] };
+    case "get_connectivity":
+      return clone({
+        action: "found",
+        subject: "Lantern Room",
+        at: VISUAL_FIXTURE_NOW - 3 * 60_000,
+        server: 1,
+        advertised: [
+          "/ip4/192.168.1.42/tcp/22487/p2p/12D3KooWFixture",
+          "/ip4/192.168.1.42/udp/22487/quic-v1/p2p/12D3KooWFixture",
+        ],
+        public_direct: false,
+        upnp:
+          "no mapping obtained within 25s (UPnP unavailable; PCP unavailable; NAT-PMP unavailable)",
+        autonat:
+          "not tested: no public address candidate and AutoNAT server were available together",
+        steps: [
+          {
+            at: VISUAL_FIXTURE_NOW - 3 * 60_000,
+            kind: "listen",
+            target: "port 22487",
+            detail: "bound IPv4 + IPv6 over TCP + QUIC; 2 addresses auto-detected",
+            status: "ok",
+          },
+          {
+            at: VISUAL_FIXTURE_NOW - 3 * 60_000,
+            kind: "invite",
+            target: "",
+            detail: "invite minted carrying 2 addresses and 0 rendezvous entries",
+            status: "ok",
+          },
+        ],
+        last_error: "",
+      });
     case "get_channels":
       return server === 1
         ? clone([

@@ -13,8 +13,9 @@ premise having turned out to be false (the tag is keyed on the same secret as th
 it never defended P8's attacker, and "P9 blocks P8" was wrong).
 
 **Section 1c is the status board** and is the answer to "is P-whatever fixed". **Section 9**
-tracks the ladder. The direct-listen/UPnP work is built, and AutoNAT v2 now has a mesh client,
-relay/rendezvous servers, per-address diagnostics and regression coverage. AutoNAT is still only
+tracks the ladder. Stable direct listeners plus UPnP/PCP/NAT-PMP mapping are built, and AutoNAT v2
+now has a mesh client, opt-in relay/rendezvous servers, per-address diagnostics and regression
+coverage. AutoNAT is still only
 **partial as a product rung**: no public infrastructure node is deployed, it does not yet drive
 automatic escalation, and pairwise reachability is not a persistent model. mDNS, concurrent rung
 racing, the two-way invite code, switchboards, the port-forwarding wizard and hosted mode are all
@@ -323,7 +324,7 @@ It is still not a menu. A choice is surfaced only when everything in flight has 
 | Rung | What | User effort | Third party | Beats CGNAT | Beats symmetric NAT |
 |---|---|---|---|---|---|
 | 0a | mDNS (same LAN) | none | none | n/a | n/a |
-| 0b | UPnP on a per-install port, IPv6, QUIC | none | none | via IPv6, if a pinhole opens | yes |
+| 0b | UPnP/PCP/NAT-PMP on a per-install port, IPv6, QUIC | none | none | only where the controlled gateway can map the upstream path | yes |
 | 0c | AutoNAT (the sensor everything branches on) | none | **yes, a dial-back peer** | n/a | n/a |
 | 1 | Two-way invite code | one paste back | STUN only | yes | no |
 | 2 | Switchboard members (transport relay only) | none | none | inherits | inherits |
@@ -345,7 +346,20 @@ A **per-install** fixed port (see O6), IPv6 listening, QUIC alongside TCP.
 **[v1 RETRACTED] v1 called IPv6 "the highest-value item here".** Overstated. Consumer routers
 generally ship a default-deny inbound IPv6 firewall, and the `libp2p-upnp` behaviour is
 IGD-based and **IPv4-only by construction**: there is no code path that opens an IPv6 pinhole.
-PCP would do it and is not implemented. IPv6 also **does not compose with an IPv4-only peer**,
+
+**Built for IPv4 gateways (2026-08-20).** Separate actor-owned `portmapper` clients probe and
+maintain PCP or NAT-PMP mappings for both the stable TCP port and UDP/QUIC port, while libp2p keeps
+owning UPnP IGD so the implementations do not duplicate one another's leases. A unified bounded
+snapshot labels mechanism + transport, rejects non-public/CGNAT results as unusable while preserving
+the reason, offers public mappings to AutoNAT, and folds them into the live bootstrap/peer record.
+Lease ownership is reference-counted across UPnP/PCP/NAT-PMP and manual forwards; a late/slow
+consumer sees authoritative current state rather than an unbounded event backlog, and failed probe
+or MAP attempts retry after 60 seconds. The next displayed invite is re-minted
+when the live address set changes, although an already copied signed code is immutable. `portmapper`
+0.18 is pinned because it matches the
+workspace's Rust 1.89 baseline; its high-level gateway/address path is IPv4-only. RFC 6887 supports
+IPv6 firewall pinholes, but **this implementation does not**, so the original IPv6 limitation is
+only partly closed. IPv6 also **does not compose with an IPv4-only peer**,
 and the model has no notion of *pairwise* reachability, only per-node. Keep IPv6, downgrade the
 claim to "free when it works, silently absent otherwise", and make reachability pairwise in the
 model, which is also the right input to switchboard selection.
@@ -357,22 +371,32 @@ point there was no feature, code or result path. It is the sensor rungs 1 and 2 
 eligibility test for switchboards. It is a **prerequisite**, not a follow-on.
 
 **Partially built (2026-08-20).** `MeshBehaviour` now runs the libp2p AutoNAT **v2 client**;
-public relay and rendezvous swarms run the v2 server; a result travels through `MeshService` into
+relay and rendezvous swarms can run the v2 server after explicit `--enable-autonat`; a result travels through `MeshService` into
 the desktop connectivity record; and the UI distinguishes a nonce-verified callback from a failed
-address test, a UPnP mapping and a relay path. Explicit public addresses (manual forward, public
-IPv6, UPnP) are offered as candidates as well as identify-observed addresses. Two end-to-end memory
-transport tests prove both callback success and scoped failure through the actor boundary.
+address test, a router mapping and a relay path. Explicit public direct addresses (manual forward,
+public IPv6, UPnP/PCP/NAT-PMP) are offered as candidates. Although upstream identify can suggest
+additional candidates, product evidence is retained only while the exact address has a current
+configured or mapping owner; a successful relay-circuit callback is never called direct
+reachability. Two end-to-end memory transport tests prove both callback success and scoped failure
+through the actor boundary.
 
 The scope is deliberately narrow. Ordinary members do **not** serve dial-backs: making every
 stable member listener an anonymous public probe service would add a resource and metadata surface.
-Only the already-public relay/rendezvous infrastructure serves. V2 is used instead of the legacy
+Only explicitly enabled relay/rendezvous infrastructure serves. V2 is used instead of the legacy
 aggregate-status protocol: the client accepts success only after receiving the callback nonce from
 a fresh connection, and the requester uploads 30--100 KiB before the smaller callback, reducing
 false positives and reflection amplification. Infra swarms additionally cap pending outbound
-callbacks at 64 and total established connections accordingly; upstream v2 has no aggregate dial
-queue bound of its own.
+callbacks at 64 and total established connections accordingly. That bounds concurrency, not a
+sustained requester on one connection: upstream exposes neither per-peer request-rate nor target
+policy. Serving is therefore experimental and **off by default** until that deployment blocker is
+closed.
 
-A result remains **per address, server and moment**. Success does not prove every observer can
+A result remains **per address, server and moment**. A bounded snapshot retains the newest
+observation for each address/server pair (with a fixed global cap), ranks public success above
+public failure above local success, and prunes all observations when their route is withdrawn.
+“Public” there classifies the candidate address, not the observer: operator configuration permits
+a private/LAN relay or rendezvous. The UI therefore says a direct callback succeeded, not that the
+node is universally reachable from the internet. Success does not prove every observer can
 reach every transport; failure does not prove every candidate is private. The desktop therefore
 keeps listening across candidates and reports those qualifiers rather than collapsing the result
 into a permanent boolean.
@@ -587,7 +611,8 @@ ago" (message your friend) from "it is online but we cannot reach it" (escalate)
 shared helper is full" (retry later). That distinction is the difference between a user
 messaging their friend and a user uninstalling.
 
-UPnP already reports gateway-not-found and non-routable-gateway into a channel nobody surfaces.
+UPnP/PCP/NAT-PMP now surface gateway-not-found, non-public/CGNAT and probe failures in the shared
+Connectivity assistant; symmetric-NAT classification below remains unbuilt.
 Symmetric-NAT detection is two STUN queries to different servers, which is cheap, and is what
 rung 1 needs in order to know whether to bother.
 
@@ -716,9 +741,9 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 |---|---:|---|---|---|
 | **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
 | **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Started P8; P8 is now **closed** without P9, which is closed as a decision rather than built: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
-| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, server on relay/rendezvous, and scoped diagnostics are built; mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | light |
-| **[ ]** | 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
-| **[ ]** | 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
+| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, experimental opt-in server on relay/rendezvous, scoped live diagnostics, and UPnP/PCP/NAT-PMP mapping are built; request/target policy, mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | light |
+| **[~]** | 3 | Shared live status line/readout/diagnosis is built; concurrent rung racing, failure messaging and pre-flight self-test remain | needs 0-2 | none |
+| **[~]** | 4 | Settings / Connectivity and onboarding share the live evidence panel; the create-server mode/Advanced redesign remains | needs UI pass | none |
 | **[ ]** | 5 | Two-way invite code: MAC binding, 60s life, address validation, async join via the existing offline queue | needs 0-2 | yes |
 | **[~]** | 6 | Node capacity fixes (P2, P3), TCP/443 listener, jittered discovery (P11), relay external-address misconfig (P12), bootstrap address validation (P7) | **blocks any public deployment** | yes |
 | **[ ]** | 7 | Switchboards: rendezvous-registered capability, relay-only never admit, aggregate egress budget, `Disconnect` plus deny list (P6), consent flow | needs 1, 2, 6 | **mandatory** |
@@ -789,8 +814,9 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
 
 ### Blocks an honest answer somewhere
 
-- **AutoNAT (rung 0c) is only a scoped sensor so far.** The v2 client, public-infrastructure
-  server and diagnostics exist, but there is no default deployed server, recurring/pairwise model
+- **AutoNAT (rung 0c) is only a scoped sensor so far.** The v2 client, opt-in public-infrastructure
+  server and diagnostics exist, but serving is off by default pending request-rate/target policy,
+  and there is no default deployed server, recurring/pairwise model
   or automatic escalation into relay/hole-punch rungs. The panel can prove one address from one
   server at one moment; it correctly remains unknown without that candidate/server pair. Turning
   those observations into the escalation trigger and switchboard-eligibility signal remains the

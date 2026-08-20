@@ -11629,6 +11629,102 @@ button.fx-order {
   text-align: left;
 }
 
+/* Shared onboarding + Settings reachability lede, adapted from the approved connectivity mockup.
+   It stays evidence-led: the key is derived from AutoNAT/relay/router events, never from a listen
+   socket being present. */
+.reach-status-line {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin: 10px 0 8px;
+  padding: 8px 11px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  font-size: 0.84rem;
+}
+
+.reach-status-dot {
+  flex: none;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.reach-status-line[data-tone="ok"] .reach-status-dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--ok) 45%, transparent);
+}
+
+.reach-status-line[data-tone="warn"] .reach-status-dot {
+  background: var(--warn);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--warn) 45%, transparent);
+}
+
+.reach-status-line[data-tone="pending"] .reach-status-dot {
+  background: transparent;
+  border: 1.5px solid var(--faint);
+  animation: conn-pulse 1.6s ease-in-out infinite;
+}
+
+.reach-status-key {
+  flex: none;
+  min-width: 10.5em;
+  font: 600 0.62rem var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.reach-status-line[data-tone="ok"] .reach-status-key { color: var(--ok); }
+.reach-status-line[data-tone="warn"] .reach-status-key { color: var(--warn); }
+.reach-status-body { color: var(--text-2); }
+
+.conn-readout {
+  margin: 0 0 8px;
+  padding: 9px 11px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--muted);
+  font: 0.68rem/1.7 var(--mono);
+  letter-spacing: 0.035em;
+}
+
+.conn-diagnosis {
+  margin: 8px 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in oklab, var(--warn) 65%, var(--border));
+  border-radius: var(--r);
+  background: var(--warn-dim);
+  color: var(--text-2);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.conn-diagnosis b { color: var(--text); }
+.connect-peer-count { margin: 8px 0 0; }
+
+@keyframes conn-pulse { 50% { opacity: 0.35; } }
+
+:root[data-motion="off"] .reach-status-line[data-tone="pending"] .reach-status-dot {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reach-status-line[data-tone="pending"] .reach-status-dot { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .reach-status-line { flex-wrap: wrap; }
+  .reach-status-body { flex-basis: calc(100% - 16px); margin-left: 16px; }
+}
+
 .conn-detail h4 {
   margin: 10px 0 2px;
   font-family: var(--mono);

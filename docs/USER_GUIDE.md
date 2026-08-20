@@ -275,12 +275,18 @@ When you found a server, open the **Network (optional)** section. How others rea
 | **Same machine** (two windows) | Nothing; leave it blank. |
 | **Same Wi-Fi / LAN** | Your **LAN IP** (e.g. `192.168.1.5`) in *Reachable address*. |
 | **Over the internet (port-forward)** | Your **public IP** (or `host:port`) in *Reachable address*, and forward that TCP port. |
-| **Over the internet (no port-forward)** | A **relay**; see below. |
+| **Over the internet (automatic)** | Leave the network fields blank; Mewtual tries UPnP, PCP and NAT-PMP on its stable port. |
+| **Over the internet (mapping unavailable)** | A **relay**; see below. |
 
 Find your LAN IP with `ipconfig` (Windows) / `ip addr` (Linux). The invite carries every
 address you advertise; the joiner dials all of them and the one that works wins. If you leave
-the fields blank, Mewtual also gives UPnP/NAT-PMP a chance to obtain a public address from a
-cooperative home router. This is best effort and does not work through every router or CGNAT.
+the fields blank, Mewtual also gives UPnP IGD, PCP and NAT-PMP a chance to obtain TCP and
+UDP/QUIC public addresses from a cooperative home router. This is best effort: a mapping still
+needs AutoNAT verification, and double NAT, CGNAT or an upstream firewall may keep it unreachable.
+The Connectivity assistant shows which protocol/transport answered and preserves its failure
+reason (including a non-public/CGNAT upstream address). It withdraws expired leases from the live
+bootstrap and peer record, and the next invite displayed is re-minted without them. A signed code
+you already copied cannot be rewritten, so relay/rendezvous fallbacks still matter.
 
 The server's network identity and port persist across restarts. Opening **Server settings →
 Invites** refreshes an unused invite when its reachable-address set has changed. Generate a new

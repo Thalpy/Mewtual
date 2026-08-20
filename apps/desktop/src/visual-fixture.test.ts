@@ -37,6 +37,19 @@ test("visual fixture supplies every read used by the empty Wiki and lazy Help ro
   assert.deepEqual(visualFixtureResponse("get_wiki_pending"), []);
 });
 
+test("visual fixture supplies the full degraded connectivity assistant state", () => {
+  const report = visualFixtureResponse("get_connectivity") as {
+    action: string;
+    advertised: string[];
+    upnp: string;
+    steps: unknown[];
+  };
+  assert.equal(report.action, "found");
+  assert.equal(report.advertised.length, 2);
+  assert.match(report.upnp, /PCP unavailable/);
+  assert.equal(report.steps.length, 2);
+});
+
 test("visual fixture fails loudly for an unsupported native dependency", () => {
   assert.throws(
     () => visualFixtureResponse("new_native_command"),

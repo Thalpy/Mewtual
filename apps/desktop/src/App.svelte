@@ -53,7 +53,8 @@
   import { extractInfobox, infoboxTemplate } from "./infobox";
   import {
     type Connectivity, type JoinAttempt, describeOutcome, formatConnectivity, formatJoinLog,
-    reachabilitySummary,
+    connectivityReadout, connectivityStatus, reachabilityEventAffectsReport, reachabilitySummary,
+    withOrderedConnectivity, withOrderedRefreshedInvite,
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
@@ -343,6 +344,7 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
+    const targetServer = id ?? activeServerId;
     if (id !== null && id !== activeServerId) switchServer(id);
     serverNameDraft = cur?.name ?? "";
     // The draft never carries the images: set_livery ignores them (set_server_icon /
@@ -351,6 +353,7 @@
     serverSettingsPage = page;
     setSearch = "";
     showServerSettings = true;
+    if (page === "invites" && targetServer !== null) void refreshInviteFor(targetServer);
   }
   async function renameServer() {
     const name = serverNameDraft.trim();
@@ -4858,6 +4861,7 @@
   let joinAttempts = $state<JoinAttempt[]>([]);
   let joinLogCopied = $state(false);
   let connectivity = $state<Connectivity | null>(null);
+  let connectivityRefreshGeneration = 0;
   let connCopied = $state(false);
   let debugLog = $state<{ enabled: boolean; active: boolean; dir: string; file: string } | null>(null);
   let debugLogBusy = $state(false);
@@ -4871,12 +4875,25 @@
     }
   }
   async function refreshConnectivity() {
+    const generation = ++connectivityRefreshGeneration;
     try {
-      connectivity = await invoke<Connectivity>("get_connectivity");
+      const refreshed = await invoke<Connectivity>("get_connectivity");
+      connectivity = withOrderedConnectivity(
+        connectivity,
+        refreshed,
+        generation,
+        connectivityRefreshGeneration,
+      );
     } catch {
       // A build without the command (or a locked app) simply has nothing to show; the panel
-      // says so rather than raising an error over a diagnostic.
-      connectivity = null;
+      // says so rather than raising an error over a diagnostic. An older failure must not erase
+      // a newer successful snapshot.
+      connectivity = withOrderedConnectivity(
+        connectivity,
+        null,
+        generation,
+        connectivityRefreshGeneration,
+      );
     }
   }
   async function refreshDebugLog() {
@@ -5702,7 +5719,7 @@
 
   function serverMenu(s: ServerState): MenuItem[] {
     const items: MenuItem[] = [];
-    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => copyText(s.invite) });
+    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => void copyFreshInvite(s.id) });
     items.push({ label: "Server settings", icon: "⚙", onSelect: () => openServerSettings(s.id) });
     items.push({ divider: true });
     items.push({
@@ -6202,13 +6219,40 @@
       toast(`Saving "${activeWikiPage}" failed: ${e}`, "err", 9000);
     }
   }
-  async function refreshInvite() {
-    if (!cur || activeServerId === null) return;
+  const inviteRefreshGeneration = new Map<number, number>();
+
+  async function updateInviteFor(
+    server: number,
+    mintFresh = false,
+  ): Promise<string | undefined> {
+    const generation = (inviteRefreshGeneration.get(server) ?? 0) + 1;
+    inviteRefreshGeneration.set(server, generation);
     try {
-      cur.invite = (await invoke<string | null>("get_invite", { server: activeServerId })) ?? "";
+      // Keep both command names as static literals. Besides making the security boundary easy to
+      // audit, this lets the command-ledger test prove every frontend IPC call is registered.
+      const invite = (
+        mintFresh
+          ? await invoke<string | null>("mint_invite_fresh", { server })
+          : await invoke<string | null>("get_invite", { server })
+      ) ?? "";
+      const latest = inviteRefreshGeneration.get(server) ?? 0;
+      if (generation !== latest) return undefined;
+      servers = withOrderedRefreshedInvite(servers, server, invite, generation, latest);
+      return invite;
     } catch (e) {
-      error = String(e);
+      if (generation === (inviteRefreshGeneration.get(server) ?? 0)) error = String(e);
+      return undefined;
     }
+  }
+
+  async function refreshInviteFor(server: number): Promise<string | undefined> {
+    return updateInviteFor(server);
+  }
+
+  async function refreshInvite() {
+    const server = activeServerId;
+    if (server === null) return;
+    await refreshInviteFor(server);
   }
 
   // Centre-crop an image file to a size×size JPEG, returned as raw base64 (no data: prefix).
@@ -10174,16 +10218,33 @@
     updateAvail = null;
   }
 
-  async function copyInvite() {
-    if (!cur) return;
+  async function copyFreshInvite(server: number): Promise<boolean> {
+    const invite = await refreshInviteFor(server);
+    if (invite === undefined) {
+      toast("Invite changed but could not be refreshed; nothing was copied", "err", 4500);
+      return false;
+    }
+    if (!invite) {
+      toast("No invite is available for this server", "info", 3000);
+      return false;
+    }
     try {
-      await navigator.clipboard.writeText(wrapInvite(cur.invite, cur.id));
-      copied = true;
+      await navigator.clipboard.writeText(wrapInvite(invite, server));
       toast("Friend code copied", "ok", 1800);
-      setTimeout(() => (copied = false), 1500);
+      return true;
     } catch {
       // Clipboard may be unavailable in the webview: the textarea allows manual copy.
       toast("Clipboard unavailable: select and copy the code manually", "err", 3500);
+      return false;
+    }
+  }
+
+  async function copyInvite() {
+    const server = activeServerId;
+    if (server === null) return;
+    if (await copyFreshInvite(server)) {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
     }
   }
 
@@ -10192,13 +10253,12 @@
   // The new invite carries the live bootstrap address, so it works even after a restart changed
   // the listen port. An admin's invitee is owner-serialized (admitted when the owner is online).
   async function generateInvite() {
-    if (activeServerId === null || !cur) return;
+    const server = activeServerId;
+    if (server === null || !cur) return;
     mintingInvite = true;
     try {
-      cur.invite = await invoke<string>("mint_invite_fresh", { server: activeServerId });
-      copied = false;
-    } catch (e) {
-      error = String(e);
+      const invite = await updateInviteFor(server, true);
+      if (invite !== undefined && activeServerId === server) copied = false;
     } finally {
       mintingInvite = false;
     }
@@ -10978,6 +11038,15 @@
           refreshFiles(); // a peer came/went: re-evaluate the availability hint (has_peers)
         }
       }),
+      listen<number>("reachability-changed", (e) => {
+        // Router mapping and AutoNAT settle after founding/joining returns. Both onboarding and
+        // Settings use this same report. Refresh that server's cached invite too: the event can
+        // arrive while another server is active, and copied codes must never retain an expired
+        // mapping or relay route.
+        if (locked) return;
+        if (reachabilityEventAffectsReport(connectivity, e.payload)) refreshConnectivity();
+        void refreshInviteFor(e.payload);
+      }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
@@ -11268,8 +11337,27 @@
      cannot support (see `reachabilitySummary`: AutoNAT v2 proves one address/observer pair at
      one moment, not universal reachability). -->
 {#snippet connDetail(c: Connectivity)}
+  {@const status = connectivityStatus(c)}
   <div class="conn-detail">
-    <h4>Router port mapping (UPnP)</h4>
+    <div class="reach-status-line" data-tone={status.tone}>
+      <span class="reach-status-dot" aria-hidden="true"></span>
+      <span class="reach-status-key">{status.key}</span>
+      <span class="reach-status-body">{status.sentence}</span>
+    </div>
+    <pre class="conn-readout">{connectivityReadout(c)}</pre>
+    {#if status.tone === "warn"}
+      <div class="conn-diagnosis">
+        <b>No outside route is proven yet.</b>
+        {#if c.upnp.includes("unavailable") || c.upnp.includes("no mapping obtained")}
+          This router did not provide an automatic mapping. A manual port forward, a known public
+          address, or a relay can provide the missing route.
+        {:else}
+          Refresh after the remote check settles, or configure a relay when this network does not
+          accept incoming connections.
+        {/if}
+      </div>
+    {/if}
+    <h4>Automatic port mapping (UPnP / PCP / NAT-PMP)</h4>
     <p class="muted small">{c.upnp || "not attempted"}</p>
     <h4>Remote dial-back (AutoNAT)</h4>
     <p class="muted small">{c.autonat || "not tested"}</p>
@@ -13615,7 +13703,7 @@
             Last attempt: <b>{connectivity.action === "found" ? "founding a server" : "joining"}</b>
             {connectivity.subject ? ` (${connectivity.subject})` : ""} at {fmtLocal(connectivity.at)}.
           </p>
-          <p class="muted small">Reachable from the internet: <b>{reach.verdict}</b>. {reach.detail}</p>
+          <p class="muted small">Observed reachability: <b>{reach.verdict}</b>. {reach.detail}</p>
           {@render connDetail(connectivity)}
           <div class="pc-actions">
             <button class="ghost small" onclick={refreshConnectivity}>Refresh</button>
@@ -14649,15 +14737,11 @@
             {:else if storageChecking}<p class="muted">Reading and authenticating this server's local file records…</p>{:else}<p class="muted">The storage snapshot could not be loaded.</p>{/if}
           </div>
         {:else if view === "connectivity"}
-          {@const reach = reachabilitySummary(connectivity)}
           <div class="operations-pane tab-pane">
             <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={refreshConnectivity}>Refresh</button></header>
-            <section class="connect-summary">
-              <span class="connect-orb" data-state={reach.verdict.includes("unknown") ? "unknown" : "evidence"}>{Math.max(onlineCount - 1, 0)}</span>
-              <div><h3>{reach.verdict}</h3><p>{reach.detail}</p><span class="muted small">{Math.max(onlineCount - 1, 0)} of {Math.max(members - 1, 0)} other members connected now.</span></div>
-            </section>
             {#if connectivity?.action}
               {@render connDetail(connectivity)}
+              <p class="muted small connect-peer-count">{Math.max(onlineCount - 1, 0)} of {Math.max(members - 1, 0)} other members connected now.</p>
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
             {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
           </div>
@@ -16730,7 +16814,7 @@
                     The last thing this app tried: <b>{connectivity.action === "found" ? "founding" : "joining"}</b>
                     {connectivity.subject ? ` (${connectivity.subject})` : ""}, {fmtLocal(connectivity.at)}.
                   </p>
-                  <p class="muted small">Reachable from the internet: <b>{reach.verdict}</b>. {reach.detail}</p>
+                  <p class="muted small">Observed reachability: <b>{reach.verdict}</b>. {reach.detail}</p>
                   <div class="invite-actions">
                     <button class="ghost small" onclick={refreshConnectivity}>Refresh</button>
                     <button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied!" : "Copy report"}</button>

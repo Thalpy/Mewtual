@@ -58,9 +58,23 @@ Implementations:
   - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
     circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
     `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
-    `MeshBehaviour` also runs an AutoNAT v2 client; `next_autonat_result()` or the
-    single-consumer `take_autonat_results()` returns an `AutoNatResult` scoped to one candidate,
-    server and test. Relay/rendezvous swarms serve v2 dial-backs; ordinary members do not.
+    `MeshBehaviour` also runs an AutoNAT v2 client; `next_autonat_snapshot()` or the
+    single-consumer `take_autonat_snapshots()` returns a bounded `AutoNatSnapshot` containing the
+    latest `AutoNatResult` for each candidate/server pair. Results remain scoped to one candidate,
+    server and test, are pruned when that route is withdrawn, and are accepted only while the
+    address has a live configured or router-mapping owner. Relay/rendezvous swarms can serve v2
+    dial-backs only after the operator's
+    experimental `--enable-autonat` opt-in; ordinary members never do.
+    Router mapping is coalesced current state: `next_port_mapping_snapshot()` or the
+    single-consumer `take_port_mapping_snapshots()` yields a bounded `PortMappingSnapshot` of live
+    leases and scoped failures labelled by UPnP, PCP or NAT-PMP and TCP or UDP/QUIC. A slow/late
+    consumer may skip intermediate retries but cannot resurrect an expired current route. Only
+    globally routable mappings are offered to AutoNAT/the swarm; duplicate mapping and
+    manual-forward owners are reference-counted. `take_relay_address_snapshots()` similarly
+    exposes the live circuit-listener set so reservation expiry is withdrawn. The product layer
+    updates the live bootstrap/peer record and re-mints the next displayed invite after any set
+    change.
+    Already copied signed invite strings are immutable and cannot be rewritten after lease loss.
   - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
     `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are

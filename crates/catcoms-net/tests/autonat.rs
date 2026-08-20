@@ -37,14 +37,18 @@ async fn autonat_server(memory_port: u64) -> Multiaddr {
 async fn result_for(client: &MeshService, wanted: &Multiaddr) -> catcoms_net::AutoNatResult {
     timeout(WAIT, async {
         loop {
-            let result = client
-                .next_autonat_result()
+            let snapshot = client
+                .next_autonat_snapshot()
                 .await
-                .expect("AutoNAT result stream closed");
+                .expect("AutoNAT snapshot stream closed");
             // Identify also contributes the observed outbound memory address as a candidate. It
             // is deliberately tested too; this helper selects the explicit candidate whose
             // product-facing result this regression test pins.
-            if &result.address == wanted {
+            if let Some(result) = snapshot
+                .results
+                .into_iter()
+                .find(|result| &result.address == wanted)
+            {
                 break result;
             }
         }

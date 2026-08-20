@@ -93,14 +93,16 @@ rendezvous namespace and so never defended the attacker P8 was filed about. The 
 in [`design-zeroconf-reachability.md`](design-zeroconf-reachability.md) section 1c is
 authoritative; section 11 carries the loose ends that are not defects.
 
-**Not built: most of the ladder.** AutoNAT and mDNS, racing the rungs concurrently, failure
-messaging, the two-way invite code, switchboard members, the port-forwarding wizard, hosted
-mode, the public DHT. And one that is not code: **a bootstrap node has to be provisioned and
-run** before rung 4 means anything.
+**Still not built: most of the higher ladder.** Stable direct ports, UPnP/PCP/NAT-PMP, scoped
+AutoNAT v2 and the live failure panel now exist. mDNS, recurring/pairwise reachability, racing the
+rungs concurrently, the two-way invite code, switchboard members, the port-forwarding wizard,
+hosted mode and the public DHT do not. Public AutoNAT serving is experimental/off by default until
+request-rate and target policy can be enforced. And one item is operational rather than code: **a
+bootstrap node has to be provisioned and run** before rung 4 means anything.
 
-**Designed but not implemented: the connectivity UI.** The create-server dialog still asks for
-three multiaddrs. Mockup and copy spec exist and are approved; most of what they display needs
-its backend rung first.
+**Partially implemented: the connectivity UI.** Onboarding and Settings share the mockup's live
+status line, readout and diagnosis over real mapping/AutoNAT evidence. The create-server mode and
+Advanced redesign, automatic escalation and unbuilt reply-code/switchboard states remain.
 
 Working rule carried out of this: **adversarial review happens per slice, before the commit
 that lands it.** Batching it at the end is how unreviewed work reached `main` twice.

@@ -25,7 +25,17 @@ table with the commit that closed it.
   serves AutoNAT v2 learns the requester's source address, candidate addresses, peer id and probe
   timing, and can withhold service or cause a false negative. It cannot forge a v2 positive merely
   by claiming success: the client accepts success only after the fresh callback returns its nonce.
-  Ordinary members do not serve anonymous probes; public nodes cap pending callback connections.
+  Ordinary members do not serve anonymous probes. Relay/rendezvous nodes cap pending callback
+  connections, but upstream v2 exposes no hook for per-peer request-rate or target-address policy:
+  one connected client could otherwise sustain egress/port-scan work. AutoNAT serving is therefore
+  **experimental, disabled by default, and requires the operator's `--enable-autonat` opt-in**.
+  A successful callback proves only that the configured observer reached that exact candidate at
+  that moment. Operator configuration also permits LAN/private infrastructure, so the product does
+  not turn that result into the broader claim “reachable from the internet”.
+- **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP can expose this
+  app's stable TCP and UDP/QUIC listeners and can return a wrong or stale public socket. Noise and
+  connection limits still protect the listener; AutoNAT is the independent test before the UI
+  calls the route verified. A malicious gateway can still cause denial of service or dead invites.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

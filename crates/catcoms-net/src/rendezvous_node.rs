@@ -76,6 +76,7 @@ use catcoms_rt::{Clock, OsCryptoRng, SystemClock};
 use futures::StreamExt;
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
     autonat, connection_limits, identify, noise, ping, rendezvous, yamux, Multiaddr, Swarm,
@@ -94,6 +95,9 @@ use crate::NetError;
 /// Deliberate, operator-tunable sizing for a rendezvous node.
 #[derive(Debug, Clone)]
 pub struct RendezvousLimits {
+    /// Opt in to the public AutoNAT v2 dial-back service. Disabled by default until a wrapper can
+    /// enforce per-peer request-rate and target policy around the upstream server behaviour.
+    pub enable_autonat: bool,
     /// Registrations the table may hold. This is the ceiling on the census a single successful
     /// namespace-less `Discover` can return, so it is also the amplification ceiling: at roughly
     /// 250 bytes per signed peer record, 8,192 records is about 2 MB. Halving it halves both the
@@ -180,6 +184,7 @@ pub struct RendezvousLimits {
 impl Default for RendezvousLimits {
     fn default() -> Self {
         Self {
+            enable_autonat: false,
             max_registrations_total: 8_192,
             max_registrations_per_peer: 16,
             max_registrations_per_prefix: 64,
@@ -306,19 +311,22 @@ impl RendezvousLimits {
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct RendezvousBehaviour {
+    /// Connection caps run before protocol behaviours so a refused connection allocates no
+    /// rendezvous or AutoNAT handler state.
+    pub connection_limits: connection_limits::Behaviour,
+    /// Per-source-prefix quotas plus the deny path the census and rate policies drive.
+    pub admission: Admission,
     /// The rendezvous registration/discovery protocol.
     pub rendezvous: rendezvous::server::Behaviour,
     /// Address discovery (lets a registering client learn its observed address).
     pub identify: identify::Behaviour,
     /// Keep-alive.
     pub ping: ping::Behaviour,
-    /// AutoNAT v2 dial-back service. A connected client can have this public node test one of its
-    /// external-address candidates without making ordinary group members public probe servers.
-    pub autonat_server: autonat::v2::server::Behaviour<OsCryptoRng>,
-    /// Connection caps so a registration/discovery flood cannot exhaust the server.
-    pub connection_limits: connection_limits::Behaviour,
-    /// Per-source-prefix quotas plus the deny path the census and rate policies drive.
-    pub admission: Admission,
+    /// Optional AutoNAT v2 dial-back service. A connected client can have this public node test one
+    /// of its external-address candidates without making ordinary group members public probe
+    /// servers. It is disabled unless the operator explicitly accepts the upstream server's
+    /// missing per-peer request-rate and target-address policy hooks.
+    pub autonat_server: Toggle<autonat::v2::server::Behaviour<OsCryptoRng>>,
 }
 
 pub(crate) fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour {
@@ -330,12 +338,16 @@ fn rendezvous_behaviour_with(
     limits: &RendezvousLimits,
 ) -> RendezvousBehaviour {
     RendezvousBehaviour {
+        connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
+        admission: Admission::new(limits.admission.clone(), 0),
         rendezvous: rendezvous::server::Behaviour::new(limits.to_server_config()),
         identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
-        autonat_server: autonat::v2::server::Behaviour::new(OsCryptoRng),
-        connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
-        admission: Admission::new(limits.admission.clone(), 0),
+        autonat_server: Toggle::from(
+            limits
+                .enable_autonat
+                .then(|| autonat::v2::server::Behaviour::new(OsCryptoRng)),
+        ),
     }
 }
 
@@ -385,7 +397,13 @@ pub fn build_memory_rendezvous_swarm() -> Swarm<RendezvousBehaviour> {
                 .multiplex(yamux::Config::default())
         })
         .expect("memory transport")
-        .with_behaviour(rendezvous_behaviour)
+        .with_behaviour(|key| {
+            let limits = RendezvousLimits {
+                enable_autonat: true,
+                ..Default::default()
+            };
+            rendezvous_behaviour_with(key, &limits)
+        })
         .expect("rendezvous behaviour")
         .build()
 }
@@ -908,6 +926,20 @@ impl QueryPolicy {
 mod tests {
     use super::*;
     use libp2p::PeerId;
+
+    #[test]
+    fn public_autonat_server_requires_explicit_opt_in() {
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let default_behaviour = rendezvous_behaviour_with(&key, &RendezvousLimits::default());
+        assert!(!default_behaviour.autonat_server.is_enabled());
+
+        let enabled = RendezvousLimits {
+            enable_autonat: true,
+            ..Default::default()
+        };
+        let enabled_behaviour = rendezvous_behaviour_with(&key, &enabled);
+        assert!(enabled_behaviour.autonat_server.is_enabled());
+    }
 
     fn prefix(addr: &str) -> AddrPrefix {
         crate::admission::addr_prefix(&addr.parse::<Multiaddr>().unwrap(), 24, 56).unwrap()

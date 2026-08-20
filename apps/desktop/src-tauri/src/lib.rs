@@ -25,9 +25,11 @@ use catcoms_app::{
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
-    addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
-    keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
-    validate_operator_rendezvous_addrs, MeshHandle, MeshService, RendezvousTarget,
+    addr_is_globally_routable, addr_is_loopback, addr_is_undialable, keypair_from_seed,
+    phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
+    validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, MeshHandle, MeshService,
+    PortMappingMechanism, PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot,
+    RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
 use catcoms_sync::join_namespace;
@@ -35,7 +37,7 @@ use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
@@ -46,8 +48,9 @@ struct ServerEntry {
     invite: Option<String>,
     name: String,
     /// The current reachable bootstrap addresses for this device, captured when the server was
-    /// founded/reloaded. Reused to mint a *fresh* invite on demand (so it carries the live
-    /// address, not a stale one). Empty for a joiner (only the owner mints).
+    /// founded/joined/reloaded. Reused to mint a *fresh* owner invite on demand and, for every
+    /// member, to republish the live signed peer record after mapping/relay changes. A joiner
+    /// cannot mint an invite, but its base direct addresses must still remain in this set.
     bootstrap: Vec<String>,
     /// The rendezvous infra multiaddrs this server registered at (if any), so a fresh on-demand
     /// invite is also discovery-enabled. Empty when the server uses direct bootstrap only. Not
@@ -74,6 +77,9 @@ struct ServerEntry {
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
+    /// Invite minting crosses actor and optional rendezvous awaits. Serialize it so two self-heal/
+    /// explicit requests cannot finish out of order and overwrite a newer route-set token.
+    invite_mint: Mutex<()>,
     next_id: Mutex<u64>,
     store: Mutex<Option<ServerStore>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
@@ -107,30 +113,38 @@ struct AppState {
     /// at, and keeping a history of every address every invite ever named is a worse trade than
     /// it sounds.
     diag: Mutex<Connectivity>,
-    /// Per-server UPnP result, kept out of [`Connectivity`] because it lands *after* the attempt
-    /// that started it returns (and possibly after the user has started another one). Keyed by
-    /// server id so a late answer can never be reported against a different server's attempt.
+    /// Per-server automatic router-mapping result (UPnP/PCP/NAT-PMP), kept out of
+    /// [`Connectivity`] because it lands *after* the attempt that started it returns (and possibly
+    /// after the user has started another one). Keyed by server id so a late answer can never be
+    /// reported against a different server's attempt. The field retains its original `upnp` name
+    /// for frontend command compatibility during the diagnostics transition.
     upnp: Mutex<HashMap<u64, String>>,
-    /// Per-server AutoNAT v2 outcome. Like UPnP, the result arrives after founding/joining has
-    /// returned and is keyed so one attempt can never inherit another server's dial-back result.
-    autonat: Mutex<HashMap<u64, String>>,
+    /// Per-server structured AutoNAT v2 evidence. Keeping every current address/server result lets
+    /// the read path filter against the live advertised set and retain a second successful route.
+    autonat: Mutex<HashMap<u64, AutoNatEvidence>>,
     /// One integrity/inventory scan per server per process session. Health is a point-in-time
     /// observation, so file events deliberately do not invalidate it behind the user's back;
     /// explicit authenticated repair is the only operation that replaces a cached report.
     storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
 }
 
-/// UPnP has not been asked yet (no transport window was taken).
-const UPNP_NOT_ATTEMPTED: &str = "not attempted";
-/// The mapping request is out and the router has not answered yet.
-const UPNP_WAITING: &str = "waiting for the router";
-/// The transport reported no usable IGD gateway (no UPnP, or a CGNAT'd one).
-const UPNP_NO_GATEWAY: &str = "no usable gateway (no UPnP, or your ISP uses CGNAT)";
-/// The router never answered inside [`UPNP_WINDOW_SECS`].
-const UPNP_TIMED_OUT: &str = "the router did not answer in time";
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AutoNatEvidence {
+    waiting: bool,
+    results: Vec<AutoNatResult>,
+}
+
+/// Automatic mapping has not started (no durable transport retained its event stream).
+const PORT_MAPPING_NOT_ATTEMPTED: &str = "not attempted";
+/// Mapping probes are out and the router has not answered yet.
+const PORT_MAPPING_WAITING: &str = "waiting for router mapping (UPnP, PCP, NAT-PMP)";
+/// None of the enabled router protocols produced a mapping inside the initial diagnostic window.
+const PORT_MAPPING_TIMED_OUT: &str = "no mapping obtained within 25s";
+const PORT_MAPPING_INACTIVE: &str = "no active router mapping";
 /// A join that failed before admission cannot preserve its temporary listener long enough for a
 /// router mapping to matter. This is more accurate than the old blanket "not attempted".
-const UPNP_FAILED_JOIN: &str = "not retained: the join failed before this node became a member";
+const PORT_MAPPING_FAILED_JOIN: &str =
+    "not retained: the join failed before this node became a member";
 
 /// No public candidate/server pair produced an AutoNAT v2 result inside the collection window.
 const AUTONAT_NOT_TESTED: &str =
@@ -204,7 +218,11 @@ struct Connectivity {
     server: u64,
     /// The addresses this node offers other peers, as folded into the invite.
     advertised: Vec<String>,
-    /// The UPnP result for `server` (filled in by `get_connectivity` from the per-server map).
+    /// Whether at least one non-relayed advertised address is globally routable according to the
+    /// backend's canonical classifier. The frontend must not duplicate partial IP-range logic.
+    public_direct: bool,
+    /// Automatic UPnP/PCP/NAT-PMP result for `server` (filled in by `get_connectivity`).
+    /// Serialized as `upnp` for compatibility with the existing frontend command contract.
     upnp: String,
     /// The AutoNAT v2 result for `server`, likewise filled by `get_connectivity`.
     autonat: String,
@@ -833,7 +851,7 @@ const DISCOVERY_JITTER_MS: u64 = 15_000;
 const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
 
 /// A uniformly random delay in `[base_ms, base_ms + spread_ms)`, drawn from the injected OS RNG
-/// seam (`catcoms_rt::OsCryptoRng`) rather than an ambient `rand::random`, so this file keeps to
+/// seam (`catcoms_rt::OsCryptoRng`) rather than an ambient randomness helper, so this file keeps to
 /// the same discipline the `crates` gate enforces even though it is not itself gated.
 fn jittered_delay(base_ms: u64, spread_ms: u64) -> Duration {
     let mut rng = OsCryptoRng;
@@ -853,7 +871,7 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
         // A short randomised start offset, then an independently randomised period each round.
         let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
-            tokio::time::sleep(delay).await;
+            SystemClock.sleep(delay).await;
             if actor.drive_discovery().await.is_err() {
                 break; // the actor stopped
             }
@@ -1396,7 +1414,7 @@ fn external_addrs(bootstrap: &[String]) -> Vec<Multiaddr> {
     bootstrap
         .iter()
         .filter_map(|s| external_addr(s))
-        .filter(|a| !addr_is_private(a))
+        .filter(addr_is_globally_routable)
         .collect()
 }
 
@@ -1417,13 +1435,10 @@ async fn register_join_ns(
         .map_err(|e| e.to_string())
 }
 
-/// How long to let the router answer a UPnP/NAT-PMP mapping request, in the background. SSDP/IGD
-/// discovery on a consumer router routinely needs ten seconds or more, so the old four-second
-/// window (which additionally only ran when the user had supplied neither an advertise address nor
-/// a relay) lost that race far more often than it won it, and the one genuinely zero-config path
-/// to reachability was wasted. It now always runs, never blocks founding, and folds its answer
-/// into the stored bootstrap so every later invite carries it.
-const UPNP_WINDOW_SECS: u64 = 25;
+/// How long the Connectivity assistant labels automatic mapping as "waiting" before giving an
+/// honest no-result summary. The collector itself stays alive afterward: mappings are renewable
+/// leases, so late successes and expirations must still update peer records and stored invites.
+const PORT_MAPPING_WINDOW_SECS: u64 = 25;
 
 /// Everything that makes a node reachable from *outside* this machine, gathered in one place so
 /// founding and reloading do identical work.
@@ -1645,7 +1660,8 @@ fn build_transport(
     let key = keypair_from_seed(net.key_seed).map_err(|e| e.to_string())?;
     let port = choose_port(net);
     let (mesh, libp2p_id, bound) =
-        MeshService::new_tcp_with_key(key, &listen_addrs(port), dial).map_err(|e| e.to_string())?;
+        MeshService::new_tcp_with_key_and_port_mapping(key, &listen_addrs(port), dial)
+            .map_err(|e| e.to_string())?;
     // With `port == 0` the OS assigned the number; read it back off whatever bound.
     let port = if port != 0 {
         port
@@ -1742,55 +1758,331 @@ async fn load_or_init_server_net(
     net
 }
 
-/// Watch for the UPnP mapping this node asked its router for, in the background, and fold the
-/// public address it reports into the server's stored bootstrap list so every invite minted from
-/// then on carries a directly-dialable address: no relay, no port-forward. Founding must not wait
-/// on it (see [`UPNP_WINDOW_SECS`]), so the answer is collected out here instead.
-fn spawn_upnp_fold(
+/// Deterministically summarize the live router mappings for the Connectivity assistant. Failed
+/// probes are kept per mechanism/transport: one unavailable UDP mapping must not be broadened into
+/// "PCP failed" while its TCP probe is still in flight.
+fn port_mapping_status(
+    active: &HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    unavailable: &HashMap<(PortMappingMechanism, PortMappingTransport), String>,
+    waiting: bool,
+) -> String {
+    if !active.is_empty() {
+        let mut mappings: Vec<String> = active
+            .iter()
+            .map(|((mechanism, transport), addr)| format!("{mechanism} {transport}: {addr}"))
+            .collect();
+        mappings.sort_unstable();
+        return format!("mapped via {}", mappings.join("; "));
+    }
+    if waiting {
+        return PORT_MAPPING_WAITING.to_string();
+    }
+
+    let mut absent = Vec::new();
+    for mechanism in [
+        PortMappingMechanism::Upnp,
+        PortMappingMechanism::Pcp,
+        PortMappingMechanism::NatPmp,
+    ] {
+        let tcp = unavailable.get(&(mechanism, PortMappingTransport::Tcp));
+        let udp = unavailable.get(&(mechanism, PortMappingTransport::Udp));
+        match (tcp, udp) {
+            (Some(tcp), Some(udp)) if tcp == udp => {
+                absent.push(format!("{mechanism} unavailable: {tcp}"));
+            }
+            (Some(tcp), Some(udp)) => absent.push(format!(
+                "{mechanism} unavailable (TCP: {tcp}; UDP/QUIC: {udp})"
+            )),
+            (Some(tcp), None) => {
+                absent.push(format!("{mechanism} TCP unavailable: {tcp}"));
+            }
+            (None, Some(udp)) => {
+                absent.push(format!("{mechanism} UDP/QUIC unavailable: {udp}"));
+            }
+            (None, None) => {}
+        }
+    }
+    if absent.is_empty() {
+        PORT_MAPPING_TIMED_OUT.to_string()
+    } else {
+        // An unavailable entry can describe a lease that existed and later expired. Calling that
+        // an initial timeout is both contradictory and misleading, so use neutral live-state copy.
+        format!("{} ({})", PORT_MAPPING_INACTIVE, absent.join("; "))
+    }
+}
+
+/// Retire one mechanism's lease and answer whether the durable bootstrap address can be removed.
+/// Multiple router protocols may report the same socket, so only the final owner withdrawing it
+/// makes the address stale. Kept pure so the duplicate-lease edge case is regression tested.
+#[cfg(test)]
+fn retire_port_mapping(
+    active: &mut HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    mechanism: PortMappingMechanism,
+    transport: PortMappingTransport,
+    address: &Multiaddr,
+) -> bool {
+    if active.get(&(mechanism, transport)) != Some(address) {
+        return false;
+    }
+    active.remove(&(mechanism, transport));
+    !active.values().any(|candidate| candidate == address)
+}
+
+/// Replace one mechanism's current lease and return an old address that no other mapping still
+/// owns. Although the PCP/NAT-PMP worker normally emits `Expired(old)` before `Mapped(new)`, the
+/// product fold must also tolerate an implementation (or UPnP gateway) that reports only the new
+/// address; otherwise the old route would survive forever in invites and peer records.
+#[cfg(test)]
+fn replace_port_mapping(
+    active: &mut HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    mechanism: PortMappingMechanism,
+    transport: PortMappingTransport,
+    address: Multiaddr,
+) -> Option<Multiaddr> {
+    let previous = active.insert((mechanism, transport), address.clone());
+    previous.filter(|old| old != &address && !active.values().any(|candidate| candidate == old))
+}
+
+/// Add or remove one mapped address in the durable bootstrap and republish only if the effective
+/// address set changed. Two mechanisms may own the same public socket; expiry of one must not
+/// withdraw an address while the other still has an active lease for it.
+async fn fold_mapped_bootstrap(
+    app: &AppHandle,
+    server: u64,
+    peer_id: &str,
+    address: &Multiaddr,
+    add: bool,
+) -> bool {
+    let entry = format!("{address}/p2p/{peer_id}");
+    fold_bootstrap_entry(app, server, &entry, add).await
+}
+
+/// Add or remove one exact dial address from this member's live peer record. Router mappings use a
+/// bare transport address plus our peer id; relay circuit addresses already contain both relay and
+/// local peer ids and therefore call this helper directly.
+async fn fold_bootstrap_entry(app: &AppHandle, server: u64, entry: &str, add: bool) -> bool {
+    let entry = entry.to_string();
+    let state = app.state::<AppState>();
+    let changed_and_actor = {
+        let mut servers = state.inner().servers.lock().await;
+        let Some(server_entry) = servers.get_mut(&server) else {
+            return false;
+        };
+        let changed = if add {
+            if server_entry.bootstrap.contains(&entry) {
+                false
+            } else {
+                // Public router mappings beat LAN and loopback candidates during address racing.
+                server_entry.bootstrap.insert(0, entry.clone());
+                true
+            }
+        } else if let Some(index) = server_entry
+            .bootstrap
+            .iter()
+            .position(|item| item == &entry)
+        {
+            server_entry.bootstrap.remove(index);
+            true
+        } else {
+            false
+        };
+        changed.then(|| (server_entry.actor.clone(), server_entry.bootstrap.clone()))
+    };
+
+    let Some((actor, bootstrap)) = changed_and_actor else {
+        return false;
+    };
+    {
+        // The Connectivity assistant reads the last attempt record, not `ServerEntry` directly.
+        // Keep its advertised-address list live too, otherwise it would announce a successful PCP
+        // mapping while the copyable report still said "Addresses this node advertises: none".
+        let mut diag = state.inner().diag.lock().await;
+        if diag.server == server {
+            if add {
+                if !diag.advertised.contains(&entry) {
+                    diag.advertised.insert(0, entry.clone());
+                }
+            } else if let Some(index) = diag.advertised.iter().position(|item| item == &entry) {
+                diag.advertised.remove(index);
+            }
+        }
+    }
+    // A router lease nobody is told about is useless, while an expired lease left in an old peer
+    // record is a persistent dead dial. Publish both additions and removals on a fresh sequence.
+    if let Some(seq) = next_record_seq(state.inner(), server).await {
+        actor.publish_self_record(bootstrap, seq).await;
+    }
+    true
+}
+
+async fn store_port_mapping_status(
+    app: &AppHandle,
+    server: u64,
+    active: &HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    unavailable: &HashMap<(PortMappingMechanism, PortMappingTransport), String>,
+    waiting: bool,
+) {
+    let state = app.state::<AppState>();
+    let outcome = port_mapping_status(active, unavailable, waiting);
+    let changed = state
+        .inner()
+        .upnp
+        .lock()
+        .await
+        .insert(server, outcome.clone())
+        .as_ref()
+        != Some(&outcome);
+    if changed {
+        let _ = app.emit("reachability-changed", server);
+    }
+}
+
+/// Reconcile one authoritative mapping snapshot into the live peer record. The source uses a watch
+/// channel, so a slow/late consumer sees the newest set rather than an unbounded event backlog.
+async fn apply_port_mapping_snapshot(
+    app: &AppHandle,
+    server: u64,
+    peer_id: &str,
+    snapshot: PortMappingSnapshot,
+    active: &mut HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    unavailable: &mut HashMap<(PortMappingMechanism, PortMappingTransport), String>,
+    mapping_owned: &mut HashSet<Multiaddr>,
+) {
+    let next: HashMap<_, _> = snapshot
+        .active
+        .into_iter()
+        .map(|entry| ((entry.mechanism, entry.transport), entry.address))
+        .collect();
+
+    // Remove a replaced/expired address only if no new lease still names it. Multiple protocols
+    // can own the same socket, and a baseline manual address is absent from `mapping_owned`.
+    for (key, old) in active.iter() {
+        if next.get(key) != Some(old)
+            && !next.values().any(|candidate| candidate == old)
+            && mapping_owned.remove(old)
+        {
+            fold_mapped_bootstrap(app, server, peer_id, old, false).await;
+        }
+    }
+    for (key, address) in &next {
+        if active.get(key) != Some(address)
+            && fold_mapped_bootstrap(app, server, peer_id, address, true).await
+        {
+            mapping_owned.insert(address.clone());
+        }
+    }
+    *active = next;
+    *unavailable = snapshot
+        .unavailable
+        .into_iter()
+        .map(|failure| {
+            (
+                (failure.mechanism, failure.transport),
+                failure.detail.chars().take(240).collect(),
+            )
+        })
+        .collect();
+}
+
+/// Watch UPnP, PCP and NAT-PMP in the background and fold live public mappings into the server's
+/// stored bootstrap. Founding does not wait for a router, but the current snapshot remains live for
+/// renewal/expiry and consumes constant memory even when a non-UI caller never takes it.
+fn spawn_port_mapping_fold(
     app: AppHandle,
     server: u64,
-    mut rx: mpsc::Receiver<Option<Multiaddr>>,
+    mut rx: watch::Receiver<PortMappingSnapshot>,
     peer_id: String,
 ) {
     tokio::spawn(async move {
-        let found = timeout(Duration::from_secs(UPNP_WINDOW_SECS), rx.recv()).await;
-        // Nested Options: the outer is the timeout, the middle the channel, the inner the actor's
-        // "no usable gateway" signal (sent promptly so we are not just waiting out the window).
-        // Each of the three means something different to a user staring at a failed invite, so
-        // the connectivity panel gets the distinction rather than a shrug.
-        let state = app.state::<AppState>();
-        let outcome = match &found {
-            Ok(Some(Some(addr))) => addr.to_string(),
-            Ok(Some(None)) => UPNP_NO_GATEWAY.to_string(),
-            // The channel closed with the transport (the server was dropped mid-window).
-            Ok(None) => UPNP_NOT_ATTEMPTED.to_string(),
-            Err(_) => UPNP_TIMED_OUT.to_string(),
-        };
-        state
-            .inner()
-            .upnp
-            .lock()
-            .await
-            .insert(server, outcome.clone());
-        let Ok(Some(Some(addr))) = found else { return };
-        let entry = format!("{addr}/p2p/{peer_id}");
-        let (actor, bootstrap) = {
-            let mut servers = state.inner().servers.lock().await;
-            let Some(e) = servers.get_mut(&server) else {
-                return;
+        let deadline = SystemClock.sleep(Duration::from_secs(PORT_MAPPING_WINDOW_SECS));
+        tokio::pin!(deadline);
+        let mut waiting = true;
+        let mut active = HashMap::new();
+        let mut unavailable = HashMap::new();
+        // Only remove addresses this collector inserted. A manual forward can intentionally be
+        // identical to a router mapping and remains valid after that mapping lease expires.
+        let mut mapping_owned = HashSet::new();
+        let initial = rx.borrow_and_update().clone();
+        apply_port_mapping_snapshot(
+            &app,
+            server,
+            &peer_id,
+            initial,
+            &mut active,
+            &mut unavailable,
+            &mut mapping_owned,
+        )
+        .await;
+        loop {
+            let changed = tokio::select! {
+                _ = &mut deadline, if waiting => {
+                    waiting = false;
+                    false
+                }
+                result = rx.changed() => {
+                    if result.is_err() {
+                        waiting = false;
+                        store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
+                        break;
+                    }
+                    true
+                }
             };
-            if !e.bootstrap.contains(&entry) {
-                // Front of the list: a public address beats the LAN and loopback entries beside it.
-                e.bootstrap.insert(0, entry);
+            if changed {
+                let snapshot = rx.borrow_and_update().clone();
+                apply_port_mapping_snapshot(
+                    &app,
+                    server,
+                    &peer_id,
+                    snapshot,
+                    &mut active,
+                    &mut unavailable,
+                    &mut mapping_owned,
+                )
+                .await;
+                // All three mechanisms have answered for both transports, so no-result is known
+                // without making the user wait for the full diagnostic window.
+                if active.is_empty() && unavailable.len() == 6 {
+                    waiting = false;
+                }
             }
-            (e.actor.clone(), e.bootstrap.clone())
-        };
-        // The whole point of the mapping is that members can now reach us directly, and they only
-        // learn that from a *fresher* peer record. Republishing on the next number in this
-        // launch's block is what turns the UPnP result into something other members can act on;
-        // without it the router opened a port nobody was ever told about.
-        if let Some(seq) = next_record_seq(state.inner(), server).await {
-            actor.publish_self_record(bootstrap, seq).await;
+            store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
+        }
+    });
+}
+
+async fn apply_relay_snapshot(
+    app: &AppHandle,
+    server: u64,
+    snapshot: RelayAddressSnapshot,
+    previous: &mut HashSet<String>,
+) {
+    let next: HashSet<String> = snapshot
+        .addresses
+        .into_iter()
+        .map(|address| address.to_string())
+        .collect();
+    for expired in previous.difference(&next) {
+        fold_bootstrap_entry(app, server, expired, false).await;
+    }
+    for available in next.difference(previous) {
+        fold_bootstrap_entry(app, server, available, true).await;
+    }
+    *previous = next;
+}
+
+/// Keep relay reservation addresses honest after the synchronous initial reservation. A relay
+/// listener can expire or be re-created later; the watch snapshot ensures Settings, invites and
+/// peer records all withdraw/add the same exact circuit address.
+fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAddressSnapshot>) {
+    tokio::spawn(async move {
+        let mut previous = HashSet::new();
+        let initial = rx.borrow_and_update().clone();
+        apply_relay_snapshot(&app, server, initial, &mut previous).await;
+        while rx.changed().await.is_ok() {
+            let snapshot = rx.borrow_and_update().clone();
+            apply_relay_snapshot(&app, server, snapshot, &mut previous).await;
+            let _ = app.emit("reachability-changed", server);
         }
     });
 }
@@ -1799,59 +2091,129 @@ fn spawn_upnp_fold(
 ///
 /// The upstream client probes on a five-second cadence and may test several identify/manual
 /// candidates. Thirty seconds gives it multiple turns without delaying founding or joining; the
-/// server stays live after the window and later confirmed addresses still benefit libp2p, but the
-/// one-shot diagnostic refuses to sit at "waiting" forever.
+/// server stays live after the window and the collector keeps listening, but the diagnostic
+/// refuses to sit at "waiting" forever.
 const AUTONAT_WINDOW_SECS: u64 = 30;
 
-/// Collect per-address AutoNAT v2 events and retain the strongest honest result for the panel.
-///
-/// A globally-routable success wins immediately because v2 requires the callback carrying our
-/// nonce to arrive. Failures and non-public successes are retained only as scoped observations and
-/// the collector keeps listening: IPv4 may fail while IPv6 succeeds, or TCP while QUIC succeeds.
-fn spawn_autonat_fold(
-    app: AppHandle,
+fn bootstrap_names_address(entries: &[String], address: &Multiaddr) -> bool {
+    let bare = address.to_string();
+    let with_peer = format!("{bare}/p2p/");
+    entries
+        .iter()
+        .any(|entry| entry == &bare || entry.starts_with(&with_peer))
+}
+
+/// Derive the visible AutoNAT state from all current observations and the *current* advertised
+/// address set. Identify-only observations remain telemetry, an expired route disappears without
+/// bespoke string invalidation, and one failed route cannot erase a second successful route.
+fn autonat_status(advertised: &[String], evidence: Option<&AutoNatEvidence>) -> String {
+    let Some(evidence) = evidence else {
+        return AUTONAT_NOT_TESTED.to_string();
+    };
+    let current: Vec<_> = evidence
+        .results
+        .iter()
+        .filter(|result| {
+            bootstrap_names_address(advertised, &result.address)
+                && !result
+                    .address
+                    .iter()
+                    .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        })
+        .collect();
+
+    if let Some(result) = current
+        .iter()
+        .copied()
+        .find(|result| result.reachable && addr_is_globally_routable(&result.address))
+    {
+        return format!(
+            "reachable {} (verified by AutoNAT server {})",
+            result.address, result.server
+        );
+    }
+    if let Some(result) = current
+        .iter()
+        .copied()
+        .find(|result| !result.reachable && addr_is_globally_routable(&result.address))
+    {
+        let detail: String = result
+            .error
+            .as_deref()
+            .unwrap_or("dial-back failed")
+            .chars()
+            .take(240)
+            .collect();
+        return format!(
+            "unreachable {} from AutoNAT server {}: {detail}",
+            result.address, result.server
+        );
+    }
+    if let Some(result) = current.iter().copied().find(|result| result.reachable) {
+        return format!(
+            "local-only {} (the callback worked, but this is not a public address)",
+            result.address
+        );
+    }
+    if evidence.waiting {
+        AUTONAT_WAITING.to_string()
+    } else {
+        AUTONAT_NOT_TESTED.to_string()
+    }
+}
+
+async fn store_autonat_snapshot(
+    app: &AppHandle,
     server: u64,
-    mut rx: mpsc::Receiver<catcoms_net::AutoNatResult>,
+    snapshot: AutoNatSnapshot,
+    waiting: bool,
 ) {
+    let state = app.state::<AppState>();
+    let next = AutoNatEvidence {
+        waiting,
+        results: snapshot.results,
+    };
+    let changed = state
+        .inner()
+        .autonat
+        .lock()
+        .await
+        .insert(server, next.clone())
+        .as_ref()
+        != Some(&next);
+    if changed {
+        let _ = app.emit("reachability-changed", server);
+    }
+}
+
+/// Collect coalesced per-address AutoNAT v2 evidence. The product filters it against live routes
+/// only when read, closing startup-order and expiry races without an unbounded output queue.
+fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoNatSnapshot>) {
     tokio::spawn(async move {
-        let deadline = tokio::time::sleep(Duration::from_secs(AUTONAT_WINDOW_SECS));
+        let deadline = SystemClock.sleep(Duration::from_secs(AUTONAT_WINDOW_SECS));
         tokio::pin!(deadline);
-        let mut last = AUTONAT_NOT_TESTED.to_string();
+        let mut waiting = true;
+        let initial = rx.borrow_and_update().clone();
+        store_autonat_snapshot(&app, server, initial, waiting).await;
         loop {
             tokio::select! {
-                _ = &mut deadline => break,
-                result = rx.recv() => {
-                    let Some(result) = result else { break };
-                    let public = addr_is_globally_routable(&result.address);
-                    if result.reachable && public {
-                        last = format!(
-                            "reachable {} (verified by AutoNAT server {})",
-                            result.address, result.server
-                        );
+                _ = &mut deadline, if waiting => {
+                    waiting = false;
+                    let snapshot = rx.borrow().clone();
+                    store_autonat_snapshot(&app, server, snapshot, waiting).await;
+                }
+                result = rx.changed() => {
+                    if result.is_err() {
+                        waiting = false;
+                        let snapshot = rx.borrow().clone();
+                        store_autonat_snapshot(&app, server, snapshot, waiting).await;
                         break;
                     }
-                    if result.reachable {
-                        last = format!(
-                            "local-only {} (the callback worked, but this is not a public address)",
-                            result.address
-                        );
-                    } else if public {
-                        last = format!(
-                            "unreachable {} from AutoNAT server {}: {}",
-                            result.address,
-                            result.server,
-                            result.error.as_deref().unwrap_or("dial-back failed")
-                        );
-                    }
+                    let snapshot = rx.borrow_and_update().clone();
+                    store_autonat_snapshot(&app, server, snapshot, waiting).await;
                 }
             }
         }
-        app.state::<AppState>()
-            .inner()
-            .autonat
-            .lock()
-            .await
-            .insert(server, last);
     });
 }
 
@@ -2129,10 +2491,11 @@ async fn found_server_inner(
         rz_target,
         rz_handle,
     } = reach;
-    // Take the UPnP channel before the transport disappears into the server, so a background task
-    // can wait out a realistic router-discovery window without holding up the UI.
-    let upnp_rx = mesh.take_external_addrs().await;
-    let autonat_rx = mesh.take_autonat_results().await;
+    // Take the router-mapping lifecycle before the transport disappears into the server, so a
+    // background task can retain mappings and withdraw expired addresses without holding up UI.
+    let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
+    let autonat_rx = mesh.take_autonat_snapshots().await;
+    let relay_address_rx = mesh.take_relay_address_snapshots().await;
     diag.advertised = bootstrap.clone();
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
@@ -2223,21 +2586,26 @@ async fn found_server_inner(
             invite.rendezvous.len()
         ),
     ));
-    if let Some(rx) = upnp_rx {
+    if let Some(rx) = port_mapping_rx {
         state
             .upnp
             .lock()
             .await
-            .insert(server_id, UPNP_WAITING.to_string());
-        spawn_upnp_fold(app.clone(), server_id, rx, id);
+            .insert(server_id, PORT_MAPPING_WAITING.to_string());
+        spawn_port_mapping_fold(app.clone(), server_id, rx, id);
     }
     if let Some(rx) = autonat_rx {
-        state
-            .autonat
-            .lock()
-            .await
-            .insert(server_id, AUTONAT_WAITING.to_string());
+        state.autonat.lock().await.insert(
+            server_id,
+            AutoNatEvidence {
+                waiting: true,
+                results: Vec::new(),
+            },
+        );
         spawn_autonat_fold(app.clone(), server_id, rx);
+    }
+    if let Some(rx) = relay_address_rx {
+        spawn_relay_fold(app.clone(), server_id, rx);
     }
     Ok(FoundResult {
         server: server_id,
@@ -2368,8 +2736,9 @@ async fn join_server_inner(
     for addr in external_addrs(&joiner_addrs) {
         let _ = mesh.add_external_address(addr).await;
     }
-    let upnp_rx = mesh.take_external_addrs().await;
-    let autonat_rx = mesh.take_autonat_results().await;
+    let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
+    let autonat_rx = mesh.take_autonat_snapshots().await;
+    let relay_address_rx = mesh.take_relay_address_snapshots().await;
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
@@ -2412,11 +2781,12 @@ async fn join_server_inner(
         server.set_rendezvous_nodes(rz_config);
     }
     // A joiner is a full member the moment the Welcome lands, so it publishes its own signed peer
-    // record exactly like the founder does (defect P1). It mints no invites and therefore keeps no
-    // `bootstrap` list, so the addresses are the auto-detected ones; the non-routable entries are
-    // stripped inside `publish_self_record`.
+    // record exactly like the founder does (defect P1). `ServerEntry.bootstrap` is also the live
+    // source for later mapping/relay republication, so retain these base addresses even though a
+    // joiner cannot mint owner-scoped invites. Non-routable entries are stripped inside
+    // `publish_self_record`.
     diag.advertised.clone_from(&joiner_addrs);
-    if let Err(e) = server.publish_self_record(joiner_addrs, net.record_seq) {
+    if let Err(e) = server.publish_self_record(joiner_addrs.clone(), net.record_seq) {
         eprintln!("join: publishing the peer record failed: {e}");
     }
 
@@ -2435,7 +2805,8 @@ async fn join_server_inner(
     actor.catch_up_roles(inviter).await;
     actor.catch_up_moderation(inviter).await;
     let channels = ui_channels(actor.channels().await);
-    // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
+    // A joiner mints no invites (owner-scoped), but these addresses still drive its signed live
+    // peer record. A later router mapping or relay reservation is folded into this same set.
     let server_id = register_server(
         app,
         state,
@@ -2443,7 +2814,7 @@ async fn join_server_inner(
         events,
         None,
         name,
-        Vec::new(),
+        joiner_addrs,
         Vec::new(),
         None,
         is_dm,
@@ -2455,21 +2826,26 @@ async fn join_server_inner(
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
     diag.server = server_id;
-    if let Some(rx) = upnp_rx {
+    if let Some(rx) = port_mapping_rx {
         state
             .upnp
             .lock()
             .await
-            .insert(server_id, UPNP_WAITING.to_string());
-        spawn_upnp_fold(app.clone(), server_id, rx, local_peer_id);
+            .insert(server_id, PORT_MAPPING_WAITING.to_string());
+        spawn_port_mapping_fold(app.clone(), server_id, rx, local_peer_id);
     }
     if let Some(rx) = autonat_rx {
-        state
-            .autonat
-            .lock()
-            .await
-            .insert(server_id, AUTONAT_WAITING.to_string());
+        state.autonat.lock().await.insert(
+            server_id,
+            AutoNatEvidence {
+                waiting: true,
+                results: Vec::new(),
+            },
+        );
         spawn_autonat_fold(app.clone(), server_id, rx);
+    }
+    if let Some(rx) = relay_address_rx {
+        spawn_relay_fold(app.clone(), server_id, rx);
     }
     Ok(FoundResult {
         server: server_id,
@@ -2525,16 +2901,16 @@ async fn get_channels(state: State<'_, AppState>, server: u64) -> Result<Vec<UiC
     ))
 }
 
-/// Does `current` offer a way to reach us that `minted` does not?
+/// Did the live address set change since this signed invite was minted?
 ///
 /// An `InviteToken` signs its bootstrap list, so an address learned after minting cannot be
-/// patched in: the invite has to be re-minted or it is simply wrong. This is the predicate that
-/// decides when that is worth doing, and it is deliberately one-directional. Losing an address
-/// (a relay circuit that dropped) does not make an invite stale, because the remaining addresses
-/// still work and re-minting would invalidate nothing and churn a nonce for no one's benefit.
-/// Gaining one does, because the invite is now strictly less useful than the node it points at.
-fn invite_missing_addresses(minted: &[String], current: &[String]) -> bool {
-    current.iter().any(|a| !minted.contains(a))
+/// patched in or removed: the currently presented invite has to be re-minted. Previously copied
+/// codes remain immutable and may still contain a route that later expired, which is why racing
+/// all entries and keeping relay/rendezvous fallbacks remain necessary.
+fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
+    minted.len() != current.len()
+        || minted.iter().any(|a| !current.contains(a))
+        || current.iter().any(|a| !minted.contains(a))
 }
 
 /// The single-use invite to share (founder only); `None` for a joiner.
@@ -2545,10 +2921,9 @@ fn invite_missing_addresses(minted: &[String], current: &[String]) -> bool {
 /// the router had just opened. A friend on another network then got "timed out connecting to the
 /// server" and every fix underneath looked broken.
 ///
-/// Doing it here rather than in the UPnP path is what makes it general: every display path goes
-/// through this command, so *any* later reachability gain (UPnP, a relay circuit, a rendezvous
-/// registration) produces a correct invite the next time anyone looks, with no event to miss and
-/// no frontend change to keep in step.
+/// Doing it here rather than in one mapper path is what makes it general. The frontend calls this
+/// before every display/copy and on each reachability event, so both gains and losses produce a
+/// token whose signed address set matches the current route set.
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
     require_unlocked_session(&state).await?;
@@ -2565,17 +2940,17 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
     let stale = hex::decode(&hex_invite)
         .ok()
         .and_then(|b| InviteToken::decode(&b).ok())
-        .is_some_and(|t| invite_missing_addresses(&t.bootstrap, &current));
+        .is_some_and(|t| invite_addresses_changed(&t.bootstrap, &current));
     if !stale {
         return Ok(Some(hex_invite));
     }
-    // Best effort: a re-mint that fails (no longer owner, actor gone) must not lose the invite
-    // the caller already has, so fall back to it rather than surfacing an error here.
+    // The old token is known to name the wrong route set. If re-minting fails, surface the error;
+    // returning it as a fallback would let the UI copy a route we just withdrew.
     match mint_and_store_invite(&state, server).await {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
             eprintln!("get_invite: re-mint after a reachability change failed: {e}");
-            Ok(Some(hex_invite))
+            Err(format!("the live invite could not be refreshed: {e}"))
         }
     }
 }
@@ -2618,6 +2993,7 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
 /// because a stored one went stale, belongs in [`mint_invite_fresh`] and not here; the P6
 /// eviction lift is the first such thing.
 async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, String> {
+    let _mint_guard = state.invite_mint.lock().await;
     let (bootstrap, rendezvous, handle) = {
         let servers = state.servers.lock().await;
         let e = servers
@@ -2631,10 +3007,10 @@ async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, 
     rng.fill_bytes(&mut nonce);
     let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
     let encoded = if rendezvous.is_empty() {
-        actor.mint_invite(nonce, expires, bootstrap).await?
+        actor.mint_invite(nonce, expires, bootstrap.clone()).await?
     } else {
         let encoded = actor
-            .mint_invite_with_rendezvous(nonce, expires, bootstrap, rendezvous.clone())
+            .mint_invite_with_rendezvous(nonce, expires, bootstrap.clone(), rendezvous.clone())
             .await?;
         // Register the fresh invite's namespace so the new joiner can discover us. This node's own
         // rendezvous config (typed into the create-server form, or restored from its own sealed
@@ -2652,11 +3028,30 @@ async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, 
         encoded
     };
     let invite_hex = hex::encode(encoded);
-    if let Some(e) = state.servers.lock().await.get_mut(&server) {
+    {
+        let mut servers = state.servers.lock().await;
+        let e = servers
+            .get_mut(&server)
+            .ok_or_else(|| "server closed while minting its invite".to_string())?;
+        if !invite_routes_still_current(&bootstrap, &rendezvous, &e.bootstrap, &e.rendezvous) {
+            return Err(
+                "reachable addresses changed while the invite was being minted; retry".to_string(),
+            );
+        }
         e.invite = Some(invite_hex.clone());
     }
     persist_registry(state).await;
     Ok(invite_hex)
+}
+
+fn invite_routes_still_current(
+    expected_bootstrap: &[String],
+    expected_rendezvous: &[String],
+    current_bootstrap: &[String],
+    current_rendezvous: &[String],
+) -> bool {
+    !invite_addresses_changed(expected_bootstrap, current_bootstrap)
+        && !invite_addresses_changed(expected_rendezvous, current_rendezvous)
 }
 
 /// Rename a server; a **local** display label in this client's rail (server names are not
@@ -3463,13 +3858,38 @@ async fn get_join_attempts(
 
 /// What the last founding/joining attempt did, plus what this node knows about its own
 /// reachability. Feeds the connectivity panel on the create/join screens.
+fn reconcile_advertised(current: &mut Vec<String>, live: Option<Vec<String>>) {
+    if let Some(live) = live {
+        *current = live;
+    }
+}
+
 #[tauri::command]
 async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, String> {
     require_unlocked_session(&state).await?;
     let mut diag = state.diag.lock().await.clone();
+    // A mapper or relay can change between the inner found/join body spawning its collector and
+    // the wrapper committing `diag`. ServerEntry retains every member's base direct addresses, so
+    // its bootstrap is authoritative in both directions: replacement closes both “mapped,
+    // advertises none” and “expired relay remains ready” startup races.
+    if diag.server != 0 {
+        let live = state
+            .servers
+            .lock()
+            .await
+            .get(&diag.server)
+            .map(|entry| entry.bootstrap.clone());
+        reconcile_advertised(&mut diag.advertised, live);
+    }
+    diag.public_direct = diag.advertised.iter().any(|address| {
+        !address.contains("/p2p-circuit")
+            && address
+                .parse::<Multiaddr>()
+                .is_ok_and(|addr| addr_is_globally_routable(&addr))
+    });
     let failed_join = diag.action == "join" && diag.server == 0;
     diag.upnp = if failed_join {
-        UPNP_FAILED_JOIN.to_string()
+        PORT_MAPPING_FAILED_JOIN.to_string()
     } else {
         state
             .upnp
@@ -3477,18 +3897,13 @@ async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, St
             .await
             .get(&diag.server)
             .cloned()
-            .unwrap_or_else(|| UPNP_NOT_ATTEMPTED.to_string())
+            .unwrap_or_else(|| PORT_MAPPING_NOT_ATTEMPTED.to_string())
     };
     diag.autonat = if failed_join {
         AUTONAT_FAILED_JOIN.to_string()
     } else {
-        state
-            .autonat
-            .lock()
-            .await
-            .get(&diag.server)
-            .cloned()
-            .unwrap_or_else(|| AUTONAT_NOT_TESTED.to_string())
+        let evidence = state.autonat.lock().await.get(&diag.server).cloned();
+        autonat_status(&diag.advertised, evidence.as_ref())
     };
     Ok(diag)
 }
@@ -4240,8 +4655,9 @@ async fn reload_one(
     // `establish_reachability` has already advertised every direct candidate and offered it to
     // AutoNAT. Do not add them again here: the v2 client treats each candidate event as work, so a
     // duplicate would spend another public-server probe without adding evidence.
-    let upnp_rx = mesh.take_external_addrs().await;
-    let autonat_rx = mesh.take_autonat_results().await;
+    let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
+    let autonat_rx = mesh.take_autonat_snapshots().await;
+    let relay_address_rx = mesh.take_relay_address_snapshots().await;
 
     // Re-register the persisted invite's own (nonce-keyed) namespace, so the invite that is about
     // to be re-presented in the UI still resolves for whoever is holding it. (`rz_handle` is `Some`
@@ -4355,17 +4771,27 @@ async fn reload_one(
     if net.port != saved_port {
         persist_server_net(state, record.id, &net).await;
     }
-    if let Some(rx) = upnp_rx {
-        spawn_upnp_fold(app.clone(), record.id, rx, id);
-    }
-    if let Some(rx) = autonat_rx {
+    if let Some(rx) = port_mapping_rx {
         app.state::<AppState>()
             .inner()
-            .autonat
+            .upnp
             .lock()
             .await
-            .insert(record.id, AUTONAT_WAITING.to_string());
+            .insert(record.id, PORT_MAPPING_WAITING.to_string());
+        spawn_port_mapping_fold(app.clone(), record.id, rx, id);
+    }
+    if let Some(rx) = autonat_rx {
+        app.state::<AppState>().inner().autonat.lock().await.insert(
+            record.id,
+            AutoNatEvidence {
+                waiting: true,
+                results: Vec::new(),
+            },
+        );
         spawn_autonat_fold(app.clone(), record.id, rx);
+    }
+    if let Some(rx) = relay_address_rx {
+        spawn_relay_fold(app.clone(), record.id, rx);
     }
     Ok(())
 }
@@ -5810,6 +6236,205 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn port_mapping_diagnostics_distinguish_waiting_unavailable_and_live_transports() {
+        let mut active = HashMap::new();
+        let mut unavailable = HashMap::new();
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, true),
+            PORT_MAPPING_WAITING
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            PORT_MAPPING_TIMED_OUT
+        );
+
+        // A single failed transport is scoped and does not claim the whole mechanism failed.
+        unavailable.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+            "no gateway answered".to_string(),
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            "no active router mapping (PCP TCP unavailable: no gateway answered)"
+        );
+        unavailable.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Udp),
+            "no gateway answered".to_string(),
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            "no active router mapping (PCP unavailable: no gateway answered)"
+        );
+
+        active.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+            "/ip4/203.0.113.7/tcp/22487".parse().unwrap(),
+        );
+        active.insert(
+            (PortMappingMechanism::NatPmp, PortMappingTransport::Udp),
+            "/ip4/203.0.113.7/udp/22487/quic-v1".parse().unwrap(),
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            "mapped via NAT-PMP UDP/QUIC: /ip4/203.0.113.7/udp/22487/quic-v1; PCP TCP: /ip4/203.0.113.7/tcp/22487"
+        );
+    }
+
+    #[test]
+    fn an_address_is_withdrawn_only_after_its_last_mapping_lease_expires() {
+        let address: Multiaddr = "/ip4/203.0.113.7/tcp/22487".parse().unwrap();
+        let mut active = HashMap::from([
+            (
+                (PortMappingMechanism::Upnp, PortMappingTransport::Tcp),
+                address.clone(),
+            ),
+            (
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+                address.clone(),
+            ),
+        ]);
+
+        assert!(!retire_port_mapping(
+            &mut active,
+            PortMappingMechanism::Upnp,
+            PortMappingTransport::Tcp,
+            &address,
+        ));
+        assert!(active.values().any(|candidate| candidate == &address));
+        assert!(retire_port_mapping(
+            &mut active,
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            &address,
+        ));
+        assert!(active.is_empty());
+
+        let old: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        let replacement: Multiaddr = "/ip4/9.9.9.9/tcp/22487".parse().unwrap();
+        active.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+            old.clone(),
+        );
+        assert_eq!(
+            replace_port_mapping(
+                &mut active,
+                PortMappingMechanism::Pcp,
+                PortMappingTransport::Tcp,
+                replacement.clone(),
+            ),
+            Some(old),
+            "a replacement event retires its unshared predecessor without a separate expiry"
+        );
+        assert_eq!(
+            active.get(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp)),
+            Some(&replacement)
+        );
+    }
+
+    #[test]
+    fn autonat_results_rank_all_current_routes_and_ignore_expired_evidence() {
+        let observer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let result = |address: &str, reachable: bool| catcoms_net::AutoNatResult {
+            address: address.parse().unwrap(),
+            server: observer,
+            reachable,
+            error: (!reachable).then(|| "dial-back failed".to_string()),
+        };
+        let a = "/ip4/8.8.8.8/tcp/22487";
+        let b = "/ip4/9.9.9.9/tcp/22487";
+        let local = "/ip4/192.168.1.9/tcp/22487";
+        let mut evidence = AutoNatEvidence {
+            waiting: false,
+            results: vec![result(a, false), result(local, true)],
+        };
+        assert!(
+            autonat_status(&[a.into(), local.into()], Some(&evidence))
+                .starts_with("unreachable /ip4/8.8.8.8"),
+            "a local callback must not erase an actionable public failure"
+        );
+
+        evidence.results = vec![result(a, true), result(b, true)];
+        assert!(autonat_status(&[a.into(), b.into()], Some(&evidence)).starts_with("reachable "));
+
+        // A's newest observation is now a failure, but B retains an independent success.
+        evidence.results = vec![result(a, false), result(b, true)];
+        assert!(
+            autonat_status(&[a.into(), b.into()], Some(&evidence))
+                .starts_with("reachable /ip4/9.9.9.9"),
+            "failure of one route cannot erase a second verified route"
+        );
+        assert!(
+            autonat_status(&[a.into()], Some(&evidence)).starts_with("unreachable /ip4/8.8.8.8"),
+            "with B expired, only A's current failure remains"
+        );
+        assert_eq!(
+            autonat_status(&[], Some(&evidence)),
+            AUTONAT_NOT_TESTED,
+            "evidence for routes no longer advertised is not current state"
+        );
+    }
+
+    #[test]
+    fn autonat_evidence_must_name_an_address_the_product_advertises() {
+        let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        assert!(bootstrap_names_address(
+            &[format!(
+                "{address}/p2p/12D3KooWJvFzZpCWKjQbGvYQ8uY4rMw1qQznfKqcxpN6qjHVVqUd"
+            )],
+            &address,
+        ));
+        assert!(!bootstrap_names_address(
+            &["/ip4/9.9.9.9/tcp/22487/p2p/other".to_string()],
+            &address,
+        ));
+    }
+
+    #[test]
+    fn a_relay_callback_is_never_reported_as_direct_reachability() {
+        let relay = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let target = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let circuit = format!("/ip4/8.8.8.8/tcp/4001/p2p/{relay}/p2p-circuit/p2p/{target}");
+        let evidence = AutoNatEvidence {
+            waiting: false,
+            results: vec![AutoNatResult {
+                address: circuit.parse().unwrap(),
+                server: relay,
+                reachable: true,
+                error: None,
+            }],
+        };
+        assert_eq!(
+            autonat_status(&[circuit], Some(&evidence)),
+            AUTONAT_NOT_TESTED
+        );
+    }
+
+    #[test]
+    fn live_bootstrap_reconciliation_removes_a_relay_lost_during_startup() {
+        let circuit = "/ip4/8.8.8.8/tcp/4001/p2p/relay/p2p-circuit/p2p/member".to_string();
+        let mut advertised = vec![circuit];
+        reconcile_advertised(&mut advertised, Some(Vec::new()));
+        assert!(
+            advertised.is_empty(),
+            "the expired circuit is authoritative"
+        );
+
+        let mut failed_attempt = vec!["diagnostic-only-address".to_string()];
+        reconcile_advertised(&mut failed_attempt, None);
+        assert_eq!(
+            failed_attempt,
+            vec!["diagnostic-only-address"],
+            "a failed attempt with no live server keeps its diagnostic evidence"
+        );
+    }
+
     #[tokio::test]
     async fn explicit_lock_saves_continuity_and_closes_the_webview_command_boundary() {
         let root = tempfile::tempdir().unwrap();
@@ -5855,41 +6480,54 @@ mod tests {
     /// just opened. Their friend on another network then gets an unactionable timeout. This
     /// predicate is what makes the invite self-heal the next time anyone reads it.
     #[test]
-    fn an_invite_is_stale_only_when_reachability_was_gained() {
+    fn an_invite_is_stale_when_the_live_address_set_changes() {
         let lan = "/ip4/192.168.0.5/tcp/9000/p2p/ID".to_string();
         let loop_ = "/ip4/127.0.0.1/tcp/9000/p2p/ID".to_string();
         let public = "/ip4/203.0.113.9/tcp/9000/p2p/ID".to_string();
 
         // The real case: UPnP landed after the mint, so the stored invite is missing the address
         // that is the entire point of the mapping.
-        assert!(invite_missing_addresses(
+        assert!(invite_addresses_changed(
             &[loop_.clone(), lan.clone()],
             &[public.clone(), loop_.clone(), lan.clone()]
         ));
 
         // Nothing gained: no re-mint, so reading the invite repeatedly cannot churn nonces.
-        assert!(!invite_missing_addresses(
+        assert!(!invite_addresses_changed(
             &[public.clone(), loop_.clone()],
             &[public.clone(), loop_.clone()]
         ));
         // Order is not a change.
-        assert!(!invite_missing_addresses(
+        assert!(!invite_addresses_changed(
             &[public.clone(), loop_.clone()],
             &[loop_.clone(), public.clone()]
         ));
-        // Deliberately one-directional: an address *lost* (a relay circuit that dropped) leaves
-        // the rest working, so it is not worth invalidating a nonce somebody may be about to use.
-        assert!(!invite_missing_addresses(
+        // A lost lease must disappear from the next invite shown to the operator. An already
+        // copied signed code cannot be rewritten and remains usable through any other entries.
+        assert!(invite_addresses_changed(
             &[public.clone(), loop_.clone(), lan.clone()],
             std::slice::from_ref(&loop_)
         ));
         // Degenerate cases stay quiet rather than re-minting forever.
-        assert!(!invite_missing_addresses(&[], &[]));
-        assert!(!invite_missing_addresses(
+        assert!(!invite_addresses_changed(&[], &[]));
+        assert!(invite_addresses_changed(std::slice::from_ref(&public), &[]));
+        assert!(invite_addresses_changed(&[], std::slice::from_ref(&public)));
+
+        assert!(invite_routes_still_current(
             std::slice::from_ref(&public),
-            &[]
+            &["rz-a".to_string()],
+            std::slice::from_ref(&public),
+            &["rz-a".to_string()],
         ));
-        assert!(invite_missing_addresses(&[], &[public]));
+        assert!(
+            !invite_routes_still_current(
+                std::slice::from_ref(&public),
+                &["rz-a".to_string()],
+                std::slice::from_ref(&loop_),
+                &["rz-a".to_string()],
+            ),
+            "an older overlapping mint cannot store after the live route set changes"
+        );
     }
 
     /// Settings promises the user "this session's file is X". If that name is wrong they open
@@ -6113,19 +6751,26 @@ mod tests {
         }
 
         // A real public address is advertised, with our own /p2p/ stripped (libp2p re-appends it).
-        let public = format!("/ip4/203.0.113.7/udp/9000/quic-v1/p2p/{ID}");
+        let public = format!("/ip4/8.8.8.8/udp/9000/quic-v1/p2p/{ID}");
         let out = external_addrs(&[public]);
         assert_eq!(
             out.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
-            vec!["/ip4/203.0.113.7/udp/9000/quic-v1"]
+            vec!["/ip4/8.8.8.8/udp/9000/quic-v1"]
         );
 
         // A mixed list keeps only the routable entries; no fallback to loopback any more.
         let mixed = vec![
             format!("/ip4/127.0.0.1/tcp/9/p2p/{ID}"),
-            format!("/ip6/2001:db8::5/tcp/9/p2p/{ID}"),
+            format!("/ip6/2606:4700::1111/tcp/9/p2p/{ID}"),
         ];
         assert_eq!(external_addrs(&mixed).len(), 1);
+
+        // Documentation and multicast literals are syntactically valid but never internet
+        // endpoints; the bridge uses the same canonical classifier as the transport actor.
+        for host in ["/ip4/203.0.113.7", "/ip6/2001:db8::5", "/ip4/224.0.0.1"] {
+            let reserved = format!("{host}/tcp/9/p2p/{ID}");
+            assert!(external_addrs(&[reserved]).is_empty());
+        }
     }
 
     #[test]

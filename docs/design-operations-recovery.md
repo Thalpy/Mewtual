@@ -31,13 +31,15 @@ estimates based on held-chunk ratios and must not be described as filesystem all
 ## Connectivity assistant
 
 The assistant reuses the bridge's existing three-state diagnostic. It may say an action succeeded,
-failed, or was merely started; it may not equate a listen address, UPnP mapping, rendezvous
+failed, or was merely started; it may not equate a listen address, router mapping, rendezvous
 registration, or issued dial with proven inbound reachability. Current authenticated live-member
 connections are reported separately from the last onboarding attempt.
 
 The assistant offers copyable evidence and concrete next steps: check that another member is
 online, configure rendezvous/relay, inspect the operator's join log, or enable the privacy-labelled
-debug log. AutoNAT remains a tracked hardening item.
+debug log. It now updates live as UPnP/PCP/NAT-PMP and AutoNAT settle, using the shared status-line,
+mono readout and one-cause diagnosis from the connectivity UI spec. AutoNAT remains scoped to one
+candidate/server/moment; recurring pairwise reachability is still a tracked hardening item.
 
 ## Vault-sealed durable UI state
 

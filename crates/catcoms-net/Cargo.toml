@@ -14,6 +14,10 @@ bytes.workspace = true
 tracing.workspace = true
 blake3 = "1"
 hex = "0.4"
+# libp2p's `upnp` behaviour speaks IGD only. PCP and NAT-PMP cover routers that expose the
+# newer/Apple-style mapping protocols instead. Pin 0.18 because it is the maintained release whose
+# declared MSRV still matches this workspace's Rust 1.89 baseline (0.19 requires Rust 1.91).
+portmapper = { version = "=0.18.0", default-features = false }
 # PEM decoding for the operator-supplied TCP/443 TLS certificate. Already in the tree via
 # rustls (QUIC + libp2p-tls), so this adds no new crate, only a direct edge to it.
 rustls-pki-types = { version = "1.14", features = ["std"] }

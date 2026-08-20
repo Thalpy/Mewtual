@@ -59,6 +59,7 @@ use catcoms_rt::{Clock, OsCryptoRng, SystemClock};
 use futures::StreamExt;
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
     autonat, connection_limits, identify, noise, ping, relay, yamux, Multiaddr, Swarm,
@@ -91,9 +92,10 @@ pub const NOMINAL_CIRCUIT_BYTES_PER_SEC: u64 = 16 * 1024;
 ///
 /// Upstream makes every v2 requester upload 30--100 KiB before the much smaller callback, which
 /// removes reflection amplification, but its server behaviour has no aggregate dial queue limit.
-/// The connection-limits behaviour is declared after it in the derive tree and supplies that
-/// missing resource ceiling. Sixty-four is ample for honest probes and small enough that a probe
-/// flood cannot consume the relay's file descriptors ahead of circuit traffic.
+/// The connection-limits behaviour is declared first in the derive tree and supplies that missing
+/// resource ceiling before the public protocol handlers allocate state. Sixty-four is ample for
+/// honest probes and small enough that a probe flood cannot consume the relay's file descriptors
+/// ahead of circuit traffic.
 const MAX_PENDING_AUTONAT_DIALBACKS: u32 = 64;
 
 /// Deliberate, operator-tunable sizing for a relay. Every number is a bandwidth or memory
@@ -104,6 +106,10 @@ const MAX_PENDING_AUTONAT_DIALBACKS: u32 = 64;
 /// an individual operator can absorb without checking.
 #[derive(Debug, Clone)]
 pub struct RelayLimits {
+    /// Opt in to the public AutoNAT v2 dial-back service. Disabled by default because upstream
+    /// exposes no hook for per-peer request-rate or target-address policy; connection caps bound
+    /// concurrency but do not stop sustained egress/port-scan abuse over one Noise connection.
+    pub enable_autonat: bool,
     /// Concurrent reservations, i.e. how many NAT'd nodes can be *reachable* through this relay
     /// at once. A reservation is one idle TCP connection plus a map entry: cheap in bandwidth,
     /// real in file descriptors. 4096 reservations is roughly 4096 open sockets, which needs an
@@ -218,6 +224,7 @@ pub struct RelayLimits {
 impl Default for RelayLimits {
     fn default() -> Self {
         Self {
+            enable_autonat: false,
             max_reservations: 4_096,
             max_reservations_per_peer: 4,
             reservation_duration_secs: 60 * 60,
@@ -373,22 +380,23 @@ impl RelayLimits {
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct RelayBehaviour {
+    /// Connection caps run first so refused connections allocate no relay/AutoNAT handler state.
+    pub connection_limits: connection_limits::Behaviour,
+    /// Per-source-prefix quotas plus the load-shed deny path. Its declaration order is likewise
+    /// load-bearing: admission happens before any public protocol behaviour.
+    pub admission: Admission,
     /// The circuit-relay-v2 server.
     pub relay: relay::Behaviour,
     /// Address discovery for clients reserving slots.
     pub identify: identify::Behaviour,
     /// Keep-alive.
     pub ping: ping::Behaviour,
-    /// AutoNAT v2 dial-back service. A relay is already the mutually reachable public third party
-    /// a NAT'd member depends on, so it is the right place to test that member's direct address.
-    /// V2 requires more requester bytes than callback bytes and a fresh callback socket; the
-    /// connection limits below additionally cap concurrent outbound probes.
-    pub autonat_server: autonat::v2::server::Behaviour<OsCryptoRng>,
-    /// Connection caps. This swarm was the only internet-exposed one without them, which
-    /// contradicted the "connection limits on every swarm" claim in `HANDOVER.md`.
-    pub connection_limits: connection_limits::Behaviour,
-    /// Per-source-prefix quotas plus the load-shed deny path.
-    pub admission: Admission,
+    /// Optional AutoNAT v2 dial-back service. A relay is already the mutually reachable public
+    /// third party a NAT'd member depends on, so it is the right place to test that member's direct
+    /// address. It remains disabled unless the operator explicitly accepts the upstream server's
+    /// missing per-peer request-rate and target-address policy hooks; connection limits only cap
+    /// simultaneous outbound probes.
+    pub autonat_server: Toggle<autonat::v2::server::Behaviour<OsCryptoRng>>,
 }
 
 pub(crate) fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour {
@@ -397,12 +405,16 @@ pub(crate) fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour
 
 fn relay_behaviour_with(key: &libp2p::identity::Keypair, limits: &RelayLimits) -> RelayBehaviour {
     RelayBehaviour {
+        connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
+        admission: Admission::new(limits.admission.clone(), 0),
         relay: relay::Behaviour::new(key.public().to_peer_id(), limits.to_relay_config()),
         identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
-        autonat_server: autonat::v2::server::Behaviour::new(OsCryptoRng),
-        connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
-        admission: Admission::new(limits.admission.clone(), 0),
+        autonat_server: Toggle::from(
+            limits
+                .enable_autonat
+                .then(|| autonat::v2::server::Behaviour::new(OsCryptoRng)),
+        ),
     }
 }
 
@@ -454,7 +466,13 @@ pub fn build_memory_relay_swarm() -> Swarm<RelayBehaviour> {
                 .multiplex(yamux::Config::default())
         })
         .expect("memory transport")
-        .with_behaviour(relay_behaviour)
+        .with_behaviour(|key| {
+            let limits = RelayLimits {
+                enable_autonat: true,
+                ..Default::default()
+            };
+            relay_behaviour_with(key, &limits)
+        })
         .expect("relay behaviour")
         .build()
 }
@@ -1006,6 +1024,20 @@ impl ShedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_autonat_server_requires_explicit_opt_in() {
+        let key = libp2p::identity::Keypair::generate_ed25519();
+        let default_behaviour = relay_behaviour_with(&key, &RelayLimits::default());
+        assert!(!default_behaviour.autonat_server.is_enabled());
+
+        let enabled = RelayLimits {
+            enable_autonat: true,
+            ..Default::default()
+        };
+        let enabled_behaviour = relay_behaviour_with(&key, &enabled);
+        assert!(enabled_behaviour.autonat_server.is_enabled());
+    }
 
     #[test]
     fn the_configured_limits_are_not_the_upstream_defaults() {

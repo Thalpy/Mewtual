@@ -22,7 +22,7 @@ patterns=(
 allow_regex='crates/catcoms-rt/src/(clock|rng)\.rs'
 
 search_roots=()
-for d in crates bins; do
+for d in crates bins apps/desktop/src-tauri/src; do
   [ -d "$d" ] && search_roots+=("$d")
 done
 

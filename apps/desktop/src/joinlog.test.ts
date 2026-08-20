@@ -10,10 +10,16 @@ import assert from "node:assert/strict";
 
 import {
   OUTCOME_COPY,
+  connectivityReadout,
+  connectivityStatus,
   describeOutcome,
   formatConnectivity,
   formatJoinLog,
   reachabilitySummary,
+  reachabilityEventAffectsReport,
+  withOrderedConnectivity,
+  withOrderedRefreshedInvite,
+  withRefreshedInvite,
   type Connectivity,
   type JoinAttempt,
 } from "./joinlog.ts";
@@ -107,7 +113,8 @@ const emptyReport: Connectivity = {
   at: Date.UTC(2026, 7, 19, 21, 0, 0),
   server: 0,
   advertised: [],
-  upnp: "no usable gateway (no UPnP, or your ISP uses CGNAT)",
+  public_direct: false,
+  upnp: "no mapping obtained within 25s (UPnP unavailable; PCP unavailable; NAT-PMP unavailable)",
   autonat: "not tested: no public address candidate and AutoNAT server were available together",
   steps: [],
   last_error: "timed out connecting to the server",
@@ -119,15 +126,19 @@ test("reachability distinguishes a real AutoNAT callback from weaker evidence", 
   assert.match(none.detail, /AutoNAT/);
   assert.equal(reachabilitySummary(null).verdict, "unknown");
 
-  const upnp = reachabilitySummary({ ...emptyReport, upnp: "/ip4/203.0.113.7/tcp/9000" });
-  assert.equal(upnp.verdict, "probably reachable directly");
-  assert.match(upnp.detail, /good evidence/);
+  const mapped = reachabilitySummary({
+    ...emptyReport,
+    upnp: "mapped via PCP TCP: /ip4/203.0.113.7/tcp/9000",
+  });
+  assert.equal(mapped.verdict, "mapping obtained (not verified)");
+  assert.match(mapped.detail, /PCP TCP/);
+  assert.match(mapped.detail, /candidate route/);
 
   const tested = reachabilitySummary({
     ...emptyReport,
     autonat: "reachable /ip4/45.79.12.34/tcp/9000 (verified by AutoNAT server 12D3KooWTest)",
   });
-  assert.equal(tested.verdict, "reachable directly (tested)");
+  assert.equal(tested.verdict, "direct callback succeeded");
   assert.match(tested.detail, /fresh callback/);
 
   const failed = reachabilitySummary({
@@ -142,6 +153,111 @@ test("reachability distinguishes a real AutoNAT callback from weaker evidence", 
     advertised: ["/ip4/198.51.100.4/tcp/4000/p2p/RELAY/p2p-circuit/p2p/ME"],
   });
   assert.equal(relay.verdict, "reachable through a relay");
+
+  const directAndRelay = reachabilitySummary({
+    ...emptyReport,
+    advertised: ["/ip4/198.51.100.4/tcp/4000/p2p/RELAY/p2p-circuit/p2p/ME"],
+    autonat: "reachable /ip4/45.79.12.34/tcp/9000 (verified by AutoNAT server 12D3KooWTest)",
+  });
+  assert.equal(directAndRelay.verdict, "direct callback succeeded");
+});
+
+test("the shared connectivity helper exposes honest status-line states and a real readout", () => {
+  assert.equal(connectivityStatus(null).tone, "pending");
+  assert.equal(
+    connectivityStatus({ ...emptyReport, upnp: "waiting for router mapping (UPnP, PCP, NAT-PMP)" }).key,
+    "CHECKING…",
+  );
+  assert.equal(
+    connectivityStatus({
+      ...emptyReport,
+      advertised: ["/ip4/192.168.1.5/tcp/22487/p2p/ME"],
+    }).key,
+    "THIS NETWORK ONLY",
+  );
+  assert.equal(
+    connectivityStatus({
+      ...emptyReport,
+      autonat: "reachable /ip4/45.79.12.34/tcp/22487 (verified by AutoNAT server PEER)",
+    }).key,
+    "DIRECT CALLBACK OK",
+  );
+
+  const readout = connectivityReadout({
+    ...emptyReport,
+    advertised: [
+      "/ip4/203.0.113.7/tcp/22487/p2p/ME",
+      "/ip6/2001:db8::7/udp/22487/quic-v1/p2p/ME",
+    ],
+    upnp: "mapped via PCP TCP: /ip4/203.0.113.7/tcp/22487",
+  });
+  assert.match(readout, /PORT 22487/);
+  assert.match(readout, /MAPPING mapped via PCP TCP/);
+  assert.match(readout, /IPV6 1 · QUIC offered · RELAY none/);
+
+  const relayOnly = connectivityReadout({
+    ...emptyReport,
+    advertised: [
+      "/ip6/2001:4860::1/udp/4001/quic-v1/p2p/RELAY/p2p-circuit/p2p/ME",
+    ],
+  });
+  assert.match(relayOnly, /PORT unknown/);
+  assert.match(relayOnly, /IPV6 0 · QUIC none · RELAY ready/);
+});
+
+test("an async invite refresh updates only the server named by its event", () => {
+  const before = [
+    { id: 1, invite: "stale-route", name: "one" },
+    { id: 2, invite: "active-server", name: "two" },
+  ];
+  const after = withRefreshedInvite(before, 1, "fresh-route");
+  assert.deepEqual(after, [
+    { id: 1, invite: "fresh-route", name: "one" },
+    { id: 2, invite: "active-server", name: "two" },
+  ]);
+  assert.equal(after[1], before[1], "an unrelated active server retains object identity");
+  assert.deepEqual(
+    withRefreshedInvite(before, 99, "late-result"),
+    before,
+    "a late refresh for a server already left cannot update another server",
+  );
+  assert.equal(withRefreshedInvite(before, 1, null)[0]?.invite, "");
+
+  const newer = withOrderedRefreshedInvite(before, 1, "new-route", 2, 2);
+  const afterLateOlder = withOrderedRefreshedInvite(newer, 1, "old-route", 1, 2);
+  assert.equal(afterLateOlder, newer, "an older same-server completion is ignored by identity");
+  assert.equal(afterLateOlder[0]?.invite, "new-route");
+
+  assert.equal(
+    reachabilityEventAffectsReport({ server: 1 }, 1),
+    true,
+    "server A's global report refreshes even while some unrelated server B is active",
+  );
+  assert.equal(reachabilityEventAffectsReport({ server: 1 }, 2), false);
+});
+
+test("an older connectivity refresh cannot restore withdrawn reachability", () => {
+  const newer = {
+    ...emptyReport,
+    server: 1,
+    advertised: [],
+    upnp: "no active router mapping: previous mapping expired; retrying",
+    autonat: "not tested: no current public address candidate",
+  };
+  const older = {
+    ...newer,
+    advertised: ["/ip4/203.0.113.8/tcp/22487/p2p/ME"],
+    upnp: "mapped via PCP",
+    autonat: "reachable /ip4/203.0.113.8/tcp/22487",
+  };
+
+  assert.equal(
+    withOrderedConnectivity(newer, older, 1, 2),
+    newer,
+    "a late pre-expiry response is ignored by identity",
+  );
+  assert.equal(withOrderedConnectivity(newer, older, 2, 2), older);
+  assert.equal(withOrderedConnectivity(newer, null, 1, 2), newer);
 });
 
 test("the connectivity report keeps the last error verbatim", () => {
@@ -154,10 +270,11 @@ test("the connectivity report keeps the last error verbatim", () => {
     ],
   });
   assert.match(text, /Last error \(verbatim\): timed out connecting to the server/);
+  assert.match(text, /Automatic port mapping:/);
   assert.match(text, /\[unknown\] dial \/ip4\/10\.0\.0\.1\/tcp\/9000: dialled/);
   assert.match(text, /\[failed\] connect: none of the dialled addresses answered within 20s/);
   assert.match(text, /Addresses this node advertises \(1\):/);
-  assert.match(text, /Reachable from the internet: unknown/);
+  assert.match(text, /Observed reachability: unknown/);
   assert.match(text, /AutoNAT: not tested:/);
 });
 
