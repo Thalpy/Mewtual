@@ -21,6 +21,11 @@ crates/*/fuzz/artifacts
 # Local Codex repository instructions
 /AGENTS.md
 
+# Local review-bot comment perturbation tool
+/scripts/comment_review_noise.py
+/scripts/comment_review_noise_test.py
+/scripts/__pycache__/
+
 # Signing keys. The updater's private key is meant to live outside the repo entirely
 # (~/.tauri/), so nothing here should ever match: this is a backstop for the day someone
 # runs `tauri signer generate` without -w, or drops a copy in to debug a release.

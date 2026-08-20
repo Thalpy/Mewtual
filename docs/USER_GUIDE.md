@@ -91,9 +91,14 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   that one again). Nothing installs unless you press Update, and **Settings → Updates** can check
   on demand, including for a version you skipped.
 - **Sidebar**; the server's channels and its member list (with role badges).
-- **Main pane surfaces**; **Chat · Files · Status · Wiki · Profile · Transfers · Events**.
+- **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Profile · Transfers · Events**.
   Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
   map with direct **Open** buttons.
+- **Top-bar ticker**; new announcements, wiki changes, events, and messages that notify you crawl
+  across the full space between **Forward** and **Minimise**. Each item appears only once in an
+  unlocked session. Hover or keyboard-focus a headline to pause it; click it to open the exact
+  item (including switching server/channel and flashing a message). Non-message headlines use the
+  short three-pip news cue configured under **Settings → Notifications**.
 
 ### Server Space
 
@@ -151,15 +156,46 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   **join #channel…**. Anyone who opens the same name lands in the same channel.
 - A **dot** marks unread. Opening a channel pulls its **backlog** from another member.
 
+### Profile message studios
+- Open **Profile** (or **Settings → My Profile**) for the **Message Frame Studio**. Pick a
+  surface and one of five chassis, then build an ordered stack of scan, pulse, trace, and flicker
+  layers. Each layer can be tuned, reordered, temporarily disabled, reset, or removed. Scan uses
+  one shared top-to-bottom sweep across the visible message stack and appears only inside frames
+  whose authors enabled it; Trace follows the bottom edge of the message box. Tune opacity and
+  signal-edge strength while the side preview renders the same layered chat
+  markup. Consecutive messages from you share one continuous frame without overlapping layers,
+  and the frame adds only a small inset around the text rather than widening the message lane.
+- **Message Arrival Studio** on the same card chooses how newly received posts from you arrive:
+  still, glide, fly in, pop, or drift. Duration, travel or scale depth, starting visibility, entry
+  direction, and response curve are configurable. It affects only genuinely new rows from your
+  profile, not another member's posts or history when a channel opens. The side preview loops the
+  draft and offers **Replay** so the short entrance can be checked immediately.
+- These choices travel with your server profile. Under **Settings → Appearance**, you can disable
+  peer frames or arrival motion locally. Flattening hides other members' frames while leaving your
+  own visible; disabling arrivals suppresses every member's entrance locally. Neither control
+  changes what other members see.
+
 ### DMs, friends, Inbox & News
 - Open **DMs** from the left rail to create a private 1:1, redeem a friend code, sort friends by
   recent/activity/reconnect, or accept an authenticated friend request from someone you share a
   server with. A DM is its own encrypted two-member server, keeping that identity unlinkable from
   your other communities.
 - Open **Inbox** for every message that mentions you or replies to you across all servers and DMs.
-  Switch it to **News** for recent status posts and upcoming events across your communities.
+  Switch it to **News** for recent announcements and upcoming events across your communities.
 
-### Rich text, links & emoji (in chat, status, and the wiki)
+### Notification sounds
+
+- **Settings → Notifications** has a device-wide sound master plus separate **Messages**,
+  **Mentions & replies**, and **News ticker** switches. Each category can use its built-in cue or
+  a local custom MP3/WAV/OGG/WebM/M4A/AAC/FLAC file (up to 8 seconds / 384 KiB).
+- Open **Server settings → Notifications** to leave each category on **Inherit global**, force it
+  **On/Off for this server**, choose the built-in cue, or import a custom tone just for that
+  server. Both panels show the effective enabled/disabled state and tone source.
+- Voice-room banners remain individually switchable per server on that page and use the server's
+  effective **Mentions & replies** tone. All custom files and preferences stay on this device;
+  they are never sent to other members.
+
+### Rich text, links, emoji & text effects
 - **Markdown** works: `**bold**`, `*italic*`, `` `code` ``, lists, `> quotes`, links.
 - **`[[Page Name]]`** links to a wiki page, and **`[[Page Name|shown text]]`** links it under
   different text (click to open; a **red** link means it doesn't exist yet; click to create it).
@@ -167,14 +203,32 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   composer opens a picker.
 - **Link cards**; a reference that sits **on a line of its own** unfurls into a small card
   showing what it points at: the opening of a wiki page, a file's size and who shared it, a
-  status post's text, an event's time and description, plus a picture where there is one. A
+  announcement's text, an event's time and description, plus a picture where there is one. A
   reference written *inside* a sentence stays an inline chip, so your prose isn't broken up
   (and a bulleted list of links stays a list).
   Clicking a card opens the thing it describes; right-clicking one offers its actions.
+- **Text effects** work in chat (including edits), profile bios, announcements, wiki prose,
+  and event titles/details. Highlight some words and the floating **Aa** strip appears above
+  the selection. Its previews show the real effect; hover one for a plain-language explanation,
+  click it to apply, or use **+** for the complete searchable catalog. The **Aa FX** button beside
+  each editor opens that catalog even when nothing is selected.
+- The copyable form is `[fx:cyber]signal online[/fx]`. The catalog includes shaky and wavy
+  motion, rainbow sparkles, one-shot Animalese speech beats, angry flame, gloom, cyber and CRT
+  signals, click-to-reveal censorship, and a broad set of named pride flags. The catalog's copy
+  button makes markup easy to move between surfaces without memorising it.
+- Under **Settings → Appearance → Message text effects**, choose **Full**, **Low**, or **Plain**.
+  Full effects can animate, respond to the pointer, and play quiet Animalese blips. Low keeps
+  static colour/type cues but has no movement, pointer response, or effect audio. Plain shows
+  ordinary text. Your operating-system reduced-motion setting forces Low, and censored text
+  remains concealed in every mode until you reveal it.
+- The ten common effects have defaults from **Alt+Shift+1** through **Alt+Shift+0**. Open
+  **Settings → Keybinds → Text-effect shortcuts** to change, clear, or reset any effect's binding,
+  including every pride variant. Bindings are local to this device and require Ctrl/Cmd or Alt,
+  so ordinary typing is never captured.
 
 ### Sharing media (drag-and-drop embeds)
 - **Drag an image, video, or audio file onto the chat box** (or use the 📎 button) and it
-  **embeds inline** in your message. The same works in the Status composer and the Wiki
+  **embeds inline** in your message. The same works in the Announcements composer and the Wiki
   editor. Embedded files are stored in the fileshare (under `embed/…` or `wiki/<page>/…`).
 - **Click an embedded image to view it full screen**; Esc or a click outside closes it, and
   **Actual size** switches between fit-to-window and 1:1. **Right-click** an image for
@@ -229,7 +283,7 @@ required and remains single-use.
 The **Files** tab is a folder browser:
 
 - **Share a file here** uploads into the current folder; **＋ new folder** organises them.
-  Uploads (everywhere: files, chat, status, wiki) show **toast notifications** for each step,
+  Uploads (everywhere: files, chat, announcements, wiki) show **toast notifications** for each step,
   and sharing a file whose **content already exists** on the server reuses the existing copy
   instead of storing a duplicate.
 - **Click a file to open its info pane (Properties)**; a preview (for images/video/audio),
@@ -237,13 +291,13 @@ The **Files** tab is a folder browser:
   size, type and folder, plus a **Download** button. Owners and admins also get a two-click
   **Delete** there (deleting unlists the file for everyone; members who already downloaded it
   keep their copy). You can also **right-click any embedded image/video/audio or file chip**
-  in chat, status, or a wiki page and pick **Properties**.
+  in chat, announcements, or a wiki page and pick **Properties**.
 - Properties also shows **Circulates until**; every shared file gets a **30-day circulation
   window** (the date it stops being offered around automatically; nothing is ever deleted
   from anyone's device, and it stays fetchable while any member holds a copy). The uploader
   or an owner/admin can toggle **Keep forever**. A file **embedded in a wiki page never
   expires** (marked 📌 in the file list); and **Used in** lists exactly where the file
-  appears: the wiki pages (click to open) plus chat/status reference counts.
+  appears: the wiki pages (click to open) plus chat/announcement reference counts.
 - Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
   rest, and only members can open them.
 
@@ -252,7 +306,7 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
 
 ---
 
-## 7. Wiki, status, events & calls
+## 7. Wiki, announcements, events & calls
 
 - **Wiki**; collaborative pages, each written in **Markdown or Wikitext** (a per-page
   `md / wiki` switch in Edit mode, shared with every member; wikitext gives you
@@ -263,7 +317,7 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
   links here** list; **rename/delete** in the page header; an editor **toolbar + live
   preview**; drag images/video/audio into the editor (or use the toolbar 📎) to embed them
   **at the caret**, and the toolbar's **+ insert** opens the same picker as the chat composer
-  (link/embed shared files, status posts, other pages, events). Files embedded in a wiki page
+  (link/embed shared files, announcements, other pages, events). Files embedded in a wiki page
   are **pinned; they never drop out of circulation**. The **?** button shows in-app
   formatting help. Same-page edits from two members merge character-by-character.
 - **Infobox**; the summary card that floats at a page's top right, Wikipedia-style. Write one
@@ -291,8 +345,8 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
   silence the wiki forever. Admins see the queue (with diffs) under **Review** above the
   page list; authors see an "awaiting review" note on the page. While review is on,
   rename/delete are owner/admin-only, and files embedded in pending edits stay pinned.
-- **Status**; a per-server feed of short posts (announcements/activity). Supports the same
-  rich text + media embeds.
+- **Announcements**; a per-server feed of short community updates. Supports the same rich text,
+  text effects, and media embeds as chat.
 - **Events**; a per-server calendar (**Ctrl+7**). Any member can add one with a title,
   start/end time, description and an optional **image**; the image is shared like any other
   file and shows on the event itself and on every link to it. The event's author, an owner or
