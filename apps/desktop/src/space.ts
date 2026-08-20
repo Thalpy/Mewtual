@@ -14,12 +14,22 @@ export const PITCH_MAX = 60;
 
 export type Placement = { yaw: number; pitch: number };
 export type ScreenPoint = { x: number; y: number };
+export type SpaceCluster = { id: string; name: string; color: string };
 export type SpaceState = {
-  backdrop: string; // "den" | "ridge" | "void" | "custom"
+  backdrop: string; // "den" | "ridge" | "void" | "garden" | "custom"
   custom: string; // data: URL of a user equirect panorama ("" = none)
   shape: "circle" | "square"; // local viewport aperture
   serverSize: number; // icon diameter in CSS px, before perspective scaling
   zoomOnOpen: boolean;
+  entrySound: boolean;
+  showMinimap: boolean;
+  ambience: number; // 0..100, particles + atmospheric drift
+  links: number; // 0..100, constellation visibility
+  glow: number; // 0..100, idle ring + halo intensity
+  hoverShake: boolean;
+  backdropBlur: number; // 0..12 CSS px
+  clusters: SpaceCluster[];
+  serverClusters: Record<number, string>;
   placements: Record<number, Placement>;
 };
 
@@ -184,6 +194,32 @@ export function applyOffsets(
   return out;
 }
 
+// Spherical centre for a set of placements. Averaging direction vectors, rather
+// than yaw numbers, makes 359° + 1° centre on 0° instead of the opposite wall.
+// Empty and perfectly-opposed sets use the caller's stable fallback.
+export function placementCentre(
+  placements: Record<number, Placement>,
+  ids: number[],
+  fallback: Placement,
+): Placement {
+  let x = 0, y = 0, z = 0, count = 0;
+  for (const id of ids) {
+    const placement = placements[id];
+    if (!placement) continue;
+    const vector = dir(placement.yaw, placement.pitch);
+    x += vector[0];
+    y += vector[1];
+    z += vector[2];
+    count += 1;
+  }
+  const length = Math.hypot(x, y, z);
+  if (!count || length < 1e-6) return { yaw: wrapYaw(fallback.yaw), pitch: clampPitch(fallback.pitch) };
+  return {
+    yaw: wrapYaw(Math.atan2(x, z) / DEG),
+    pitch: clampPitch(Math.asin(Math.max(-1, Math.min(1, y / length))) / DEG),
+  };
+}
+
 function angularDistance(a: Placement, b: Placement): number {
   const av = dir(a.yaw, a.pitch), bv = dir(b.yaw, b.pitch);
   const dot = Math.max(-1, Math.min(1, av[0] * bv[0] + av[1] * bv[1] + av[2] * bv[2]));
@@ -235,9 +271,45 @@ export function separatePlacements(
   return out;
 }
 
+// Deterministic tidy-up for the whole sphere. Named neighbourhoods occupy their
+// own longitude sectors and their members form compact, centred grids within
+// each sector. The final separation pass handles large icon sizes and dense rows.
+export function autoArrangePlacements(
+  ids: number[],
+  serverClusters: Record<number, string>,
+  minSeparationDeg: number,
+): Record<number, Placement> {
+  const unique = [...new Set(ids.filter(Number.isInteger))].sort((a, b) => a - b);
+  const grouped = new Map<string, number[]>();
+  for (const id of unique) {
+    const key = serverClusters[id] || "";
+    const members = grouped.get(key) ?? [];
+    members.push(id);
+    grouped.set(key, members);
+  }
+  const groups = [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const out: Record<number, Placement> = {};
+  const step = Math.max(8, minSeparationDeg * 1.35);
+  for (let gi = 0; gi < groups.length; gi += 1) {
+    const members = groups[gi][1];
+    const centerYaw = wrapYaw((gi * 360) / Math.max(1, groups.length));
+    const cols = Math.max(1, Math.ceil(Math.sqrt(members.length)));
+    const rows = Math.ceil(members.length / cols);
+    for (let i = 0; i < members.length; i += 1) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      out[members[i]] = {
+        yaw: wrapYaw(centerYaw + (col - (cols - 1) / 2) * step),
+        pitch: clampPitch((row - (rows - 1) / 2) * step),
+      };
+    }
+  }
+  return separatePlacements(out, unique, minSeparationDeg);
+}
+
 // -------- persistence (per-device, like desktop icon positions) --------
 
-export const SPACE_BACKDROPS = ["den", "ridge", "void", "custom"] as const;
+export const SPACE_BACKDROPS = ["den", "ridge", "void", "garden", "custom"] as const;
 
 export function defaultSpace(): SpaceState {
   return {
@@ -246,6 +318,15 @@ export function defaultSpace(): SpaceState {
     shape: "square",
     serverSize: SERVER_SIZE_DEFAULT,
     zoomOnOpen: true,
+    entrySound: true,
+    showMinimap: true,
+    ambience: 72,
+    links: 55,
+    glow: 84,
+    hoverShake: true,
+    backdropBlur: 0,
+    clusters: [],
+    serverClusters: {},
     placements: {},
   };
 }
@@ -264,6 +345,35 @@ export function parseSpace(raw: string | null): SpaceState {
       out.serverSize = Math.round(Math.max(SERVER_SIZE_MIN, Math.min(SERVER_SIZE_MAX, j.serverSize)));
     }
     if (typeof j.zoomOnOpen === "boolean") out.zoomOnOpen = j.zoomOnOpen;
+    if (typeof j.entrySound === "boolean") out.entrySound = j.entrySound;
+    if (typeof j.showMinimap === "boolean") out.showMinimap = j.showMinimap;
+    for (const key of ["ambience", "links", "glow"] as const) {
+      if (typeof j[key] === "number" && Number.isFinite(j[key])) {
+        out[key] = Math.round(Math.max(0, Math.min(100, j[key])));
+      }
+    }
+    if (typeof j.hoverShake === "boolean") out.hoverShake = j.hoverShake;
+    if (typeof j.backdropBlur === "number" && Number.isFinite(j.backdropBlur)) {
+      out.backdropBlur = Math.round(Math.max(0, Math.min(12, j.backdropBlur)));
+    }
+    if (Array.isArray(j.clusters)) {
+      const seen = new Set<string>();
+      for (const raw of j.clusters.slice(0, 24)) {
+        if (!raw || typeof raw !== "object") continue;
+        const id = typeof raw.id === "string" ? raw.id.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32) : "";
+        const name = typeof raw.name === "string" ? raw.name.trim().slice(0, 32) : "";
+        const color = typeof raw.color === "string" && /^#[0-9a-fA-F]{6}$/.test(raw.color) ? raw.color : "#8d7cf5";
+        if (!id || !name || seen.has(id)) continue;
+        seen.add(id);
+        out.clusters.push({ id, name, color });
+      }
+      if (j.serverClusters && typeof j.serverClusters === "object") {
+        for (const [key, value] of Object.entries(j.serverClusters as Record<string, unknown>)) {
+          const server = Number(key);
+          if (Number.isInteger(server) && typeof value === "string" && seen.has(value)) out.serverClusters[server] = value;
+        }
+      }
+    }
     if (j.placements && typeof j.placements === "object") {
       for (const [k, v] of Object.entries(j.placements as Record<string, unknown>)) {
         const id = Number(k);

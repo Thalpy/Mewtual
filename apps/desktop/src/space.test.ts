@@ -11,11 +11,13 @@ import {
   PITCH_MAX,
   angularOffsets,
   applyOffsets,
+  autoArrangePlacements,
   clampPitch,
   defaultSpace,
   lassoCapture,
   lassoCapturePath,
   parseSpace,
+  placementCentre,
   project,
   separatePlacements,
   unproject,
@@ -134,6 +136,24 @@ test("applyOffsets clamps pitch on drop", () => {
   assert.equal(dropped[1].pitch, PITCH_MAX);
 });
 
+test("placementCentre averages across the yaw seam", () => {
+  const centre = placementCentre({
+    1: { yaw: 358, pitch: -4 },
+    2: { yaw: 2, pitch: 4 },
+  }, [1, 2], { yaw: 90, pitch: 20 });
+  assert.ok(Math.abs(yawDelta(centre.yaw, 0)) < 1e-6);
+  assert.ok(Math.abs(centre.pitch) < 1e-6);
+});
+
+test("placementCentre uses its fallback for an empty or balanced set", () => {
+  const fallback = { yaw: -20, pitch: 99 };
+  assert.deepEqual(placementCentre({}, [7], fallback), { yaw: 340, pitch: PITCH_MAX });
+  assert.deepEqual(placementCentre({
+    1: { yaw: 0, pitch: 0 },
+    2: { yaw: 180, pitch: 0 },
+  }, [1, 2], fallback), { yaw: 340, pitch: PITCH_MAX });
+});
+
 test("collision separation keeps fixed servers still and nudges moved servers apart", () => {
   const placements = {
     1: { yaw: 0, pitch: 0 },
@@ -155,6 +175,16 @@ test("collision separation handles the yaw seam", () => {
     2: { yaw: 1, pitch: 0 },
   }, [2], 8);
   assert.notDeepEqual(out[2], { yaw: 1, pitch: 0 });
+});
+
+test("auto arrange is deterministic and keeps neighbourhoods together", () => {
+  const groups = { 1: "friends", 2: "friends", 3: "work", 4: "work" };
+  const a = autoArrangePlacements([4, 2, 1, 3], groups, 6);
+  const b = autoArrangePlacements([1, 2, 3, 4], groups, 6);
+  assert.deepEqual(a, b);
+  assert.ok(Math.abs(yawDelta(a[1].yaw, a[2].yaw)) < 30);
+  assert.ok(Math.abs(yawDelta(a[3].yaw, a[4].yaw)) < 30);
+  assert.ok(Math.abs(yawDelta(a[1].yaw, a[3].yaw)) > 120);
 });
 
 test("parseSpace survives garbage and hand-edits", () => {
@@ -181,14 +211,47 @@ test("parseSpace validates new interaction preferences and migrates old stores",
   assert.equal(old.shape, "square");
   assert.equal(old.serverSize, 46);
   assert.equal(old.zoomOnOpen, true);
+  assert.equal(old.entrySound, true);
+  assert.equal(old.showMinimap, true);
+  assert.equal(old.glow, 84);
 
   const parsed = parseSpace(JSON.stringify({
     shape: "circle",
     serverSize: 999,
     zoomOnOpen: false,
+    entrySound: false,
     placements: {},
   }));
   assert.equal(parsed.shape, "circle");
   assert.equal(parsed.serverSize, 88);
   assert.equal(parsed.zoomOnOpen, false);
+  assert.equal(parsed.entrySound, false);
+});
+
+test("parseSpace validates effects, clusters, and the fourth backdrop", () => {
+  const parsed = parseSpace(JSON.stringify({
+    backdrop: "garden",
+    ambience: 999,
+    links: -4,
+    glow: 61.2,
+    hoverShake: false,
+    backdropBlur: 30,
+    clusters: [
+      { id: "friends", name: " Friends ", color: "#12abEF" },
+      { id: "friends", name: "duplicate", color: "#ffffff" },
+      { id: "bad id!", name: "Work", color: "not-a-colour" },
+    ],
+    serverClusters: { 1: "friends", 2: "missing", 3: "badid" },
+  }));
+  assert.equal(parsed.backdrop, "garden");
+  assert.equal(parsed.ambience, 100);
+  assert.equal(parsed.links, 0);
+  assert.equal(parsed.glow, 61);
+  assert.equal(parsed.hoverShake, false);
+  assert.equal(parsed.backdropBlur, 12);
+  assert.deepEqual(parsed.clusters, [
+    { id: "friends", name: "Friends", color: "#12abEF" },
+    { id: "badid", name: "Work", color: "#8d7cf5" },
+  ]);
+  assert.deepEqual(parsed.serverClusters, { 1: "friends", 3: "badid" });
 });
