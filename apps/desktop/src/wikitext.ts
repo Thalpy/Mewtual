@@ -17,6 +17,8 @@
 
 // --- escaping -----------------------------------------------------------------------------------
 
+import { TEXT_EFFECT_RE, parseTextEffect, stripTextEffects, textEffectHtml } from "./message-effects.ts";
+
 /** Escape for use inside a double-quoted attribute value. */
 export function escAttr(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -129,7 +131,7 @@ export function stripMagicWords(text: string): string {
  * embeds drop out entirely; a link keeps its label, which IS the prose the author wrote.
  */
 export function plainSummary(text: string, max = 180): string {
-  let t = stripMagicWords(text ?? "");
+  let t = stripTextEffects(stripMagicWords(text ?? ""));
   t = t.replace(/<!--[\s\S]*?-->/g, " "); // html comments
   t = t.replace(/```[\s\S]*?(?:```|$)/g, " "); // fenced code, closed or running to the end
   t = t.replace(/^\s*#redirect\s*\[\[[^\]\n]*\]\]/i, " "); // a redirect marker is not prose
@@ -157,6 +159,7 @@ function sticky(re: RegExp): RegExp {
 }
 
 const S_NOWIKI = /<nowiki>([\s\S]*?)<\/nowiki>/y;
+const S_TEXT_EFFECT = sticky(TEXT_EFFECT_RE);
 const S_EMBED = sticky(EMBED_RE);
 const S_WIKI = sticky(WIKI_LINK_RE);
 const S_REF = sticky(REF_LINK_RE);
@@ -209,6 +212,16 @@ export function inlineToHtml(src: string): string {
         continue;
       }
     } else if (c === "[") {
+      m = at(S_TEXT_EFFECT, src, i);
+      if (m) {
+        const effect = parseTextEffect(m[0]);
+        if (effect) {
+          flush();
+          out += textEffectHtml(effect.id, effect.text);
+          i += effect.raw.length;
+          continue;
+        }
+      }
       m = at(S_WIKI, src, i);
       if (m && m[1].trim()) {
         flush();

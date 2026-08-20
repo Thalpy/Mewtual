@@ -6,8 +6,30 @@
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onMount, tick, untrack } from "svelte";
   import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
-  import { messageFrameStyle, visibleMessageFrameStyle } from "./message-frame";
+  import {
+    TEXT_EFFECTS, TEXT_EFFECT_GROUPS, insertTextEffect, textEffectHtml,
+  } from "./message-effects";
+  import {
+    DEFAULT_TEXT_EFFECT_KEYBINDS, effectForKeybind, keybindConflict, keybindFromEvent,
+    sanitizeTextEffectKeybinds,
+  } from "./text-effect-keybinds";
+  import {
+    defaultMessageFrameLayer, encodeMessageFrame, messageFrameArrivalStyle, messageFrameLayerStyle,
+    messageFramePosition, messageFrameScanGeometry, messageFrameStyle, parseMessageFrame, visibleMessageFrameMotion,
+    visibleMessageFrameStyle, type MessageFrame, type MessageFrameArrival,
+    type MessageFrameEasing, type MessageFrameEffectId, type MessageFrameEffectOptions,
+    type MessageFrameMotion, type MessageFrameShape,
+  } from "./message-frame";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
+  import { scheduleNewsChime } from "./news-chime";
+  import { acceptTickerReceipt, messageTickerId } from "./ticker";
+  import {
+    MAX_CUSTOM_TONE_BYTES, MAX_CUSTOM_TONE_SECONDS, NOTIFICATION_SOUND_KINDS,
+    customToneError, customToneMime, defaultGlobalSoundPrefs, defaultServerSoundPrefs,
+    parseGlobalSoundPrefs, parseServerSoundPrefs, resolveNotificationSound,
+    type GlobalSoundPrefs, type NotificationSoundKind, type ServerSoundPrefs, type SoundOverride,
+    type StoredTone, type ToneOverride,
+  } from "./notification-sounds";
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupDownload, saveSpaceGuide,
   } from "./native-download";
@@ -164,6 +186,7 @@
   ];
   const SRV_SET_PAGES: SetPage[] = [
     { id: "overview", label: "Overview", cat: "Overview" },
+    { id: "notifications", label: "Notifications", cat: "Overview" },
     { id: "livery", label: "Livery", cat: "Overview" },
     { id: "members", label: "Members", cat: "People" },
     { id: "badges", label: "Badges", cat: "People" },
@@ -208,10 +231,10 @@
     { group: "Knowledge & media", title: "Files & folders", detail: "Encrypted sharing, folders, previews, deduplication, circulation controls and usage tracking.", where: "Open a server → Files", shortcut: "Ctrl+2", target: "surface:files" },
     { group: "Knowledge & media", title: "Transfers", detail: "Track uploads and downloads, progress, availability and the peer serving a download.", where: "Open a server → Transfers", shortcut: "Ctrl+6", target: "surface:downloads" },
     { group: "Knowledge & media", title: "Wiki", detail: "Markdown or Wikitext pages, nested pages, backlinks, infoboxes, history, rollback and optional edit review.", where: "Open a server → Wiki", shortcut: "Ctrl+4", target: "surface:wiki" },
-    { group: "Knowledge & media", title: "Status", detail: "Post short server updates with the same rich text and media embeds as chat.", where: "Open a server → Status", shortcut: "Ctrl+3", target: "surface:status" },
-    { group: "Knowledge & media", title: "News", detail: "Read recent status posts and upcoming events from every server in one feed.", where: "Left rail → Inbox → News", target: "news" },
+    { group: "Knowledge & media", title: "Announcements", detail: "Post short server announcements with the same rich text and media embeds as chat.", where: "Open a server → Announcements", shortcut: "Ctrl+3", target: "surface:status" },
+    { group: "Knowledge & media", title: "News", detail: "Read recent announcements and upcoming events from every server in one feed.", where: "Left rail → Inbox → News", target: "news" },
     { group: "Knowledge & media", title: "Events", detail: "Create shared events with times, descriptions and optional artwork.", where: "Open a server → Events", shortcut: "Ctrl+7", target: "surface:events" },
-    { group: "People & trust", title: "Profiles", detail: "Per-server names, bios, banners, animated avatars, message frames and composable name effects.", where: "Profile, or Settings → My Profile", shortcut: "Ctrl+5", target: "settings:profile" },
+    { group: "People & trust", title: "Profiles", detail: "Per-server names, bios, banners, animated avatars, plus studios for name effects, joined message frames and new-message motion.", where: "Profile, or Settings → My Profile", shortcut: "Ctrl+5", target: "settings:profile" },
     { group: "People & trust", title: "Identity verification", detail: "Compare cryptographic fingerprints out of band and keep a private verified mark.", where: "Settings → Verification", target: "settings:verify" },
     { group: "People & trust", title: "Linked devices", detail: "Grant another device access with a one-time ceremony carried by paste, QR or sound; revoke companions per server.", where: "Settings → Devices", target: "settings:devices" },
     { group: "People & trust", title: "Vault & lock", detail: "Lock the visible session and use a passphrase, sigil or played melody as the local vault secret.", where: "Settings → Vault & Lock", shortcut: "Ctrl+L", target: "settings:vault" },
@@ -223,7 +246,7 @@
     { group: "Community", title: "Server livery", detail: "Publish a safe shared palette, icon, cursor, typography and background treatment; every member can opt out.", where: "Server settings → Livery", target: "server:livery" },
     { group: "App & network", title: "Quick switcher", detail: "Jump to channels, surfaces, servers and DMs without hunting through the rails.", where: "Anywhere in the unlocked app", shortcut: "Ctrl+K", target: "quick" },
     { group: "App & network", title: "Server Space", detail: "Arrange servers in a navigable 360-degree room; group them into interactive neighbourhoods, search, auto-arrange, or use a custom backdrop.", where: "Left rail → Orbit", shortcut: "Ctrl+O", target: "space" },
-    { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion and local livery overrides.", where: "Settings → Appearance", target: "settings:appearance" },
+    { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion, and local opt-outs for shared livery, message frames and arrivals.", where: "Settings → Appearance", target: "settings:appearance" },
     { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and opt into a privacy-labelled debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
     { group: "App & network", title: "Signed updates", detail: "Check for a newer signed release and choose whether to install, defer or skip it.", where: "Settings → Updates", target: "settings:updates" },
     { group: "App & network", title: "Feedback", detail: "Open a pre-filled bug report or feature request for review before submitting, or copy it to send another way.", where: "Left rail → Feedback", target: "feedback" },
@@ -309,21 +332,78 @@
   let feedbackText = $state("");
   let feedbackCopied = $state(false);
   let feedbackOpened = $state(false);
-  // Notification-sound preference (wired to actual playback in 10g), persisted locally.
+  // Notification sound policy is entirely local. The master preserves the original one-switch
+  // behavior; category defaults and per-server overrides refine it without publishing preferences
+  // to peers or changing any server document.
   let soundOn = $state(typeof localStorage !== "undefined" ? localStorage.getItem("catcoms.sound") !== "off" : true);
+  const GLOBAL_SOUND_PREFS_KEY = "catcoms.sound.preferences.v1";
+  const serverSoundPrefsKey = (server: number) => `catcoms.sound.server.${server}.v1`;
+  function loadGlobalSoundPrefs(): GlobalSoundPrefs {
+    try { return parseGlobalSoundPrefs(localStorage.getItem(GLOBAL_SOUND_PREFS_KEY)); }
+    catch { return defaultGlobalSoundPrefs(); }
+  }
+  function readServerSoundPrefs(server: number): ServerSoundPrefs {
+    try { return parseServerSoundPrefs(localStorage.getItem(serverSoundPrefsKey(server))); }
+    catch { return defaultServerSoundPrefs(); }
+  }
+  let globalSoundPrefs = $state<GlobalSoundPrefs>(loadGlobalSoundPrefs());
+  let serverSoundPrefs = $state<ServerSoundPrefs>(defaultServerSoundPrefs());
+  const SOUND_LABELS: Record<NotificationSoundKind, { title: string; detail: string }> = {
+    message: { title: "Messages", detail: "Ordinary message notifications" },
+    mention: { title: "Mentions & replies", detail: "Messages specifically aimed at you" },
+    news: { title: "News ticker", detail: "Announcement, wiki, event, and ticker headline cue" },
+  };
   function toggleSound() {
     soundOn = !soundOn;
     try { localStorage.setItem("catcoms.sound", soundOn ? "on" : "off"); } catch { /* ignore */ }
+  }
+  function saveGlobalSoundPrefs() {
+    try { localStorage.setItem(GLOBAL_SOUND_PREFS_KEY, JSON.stringify(globalSoundPrefs)); }
+    catch { toast("Could not save sound settings: custom tones may be too large", "err", 4500); }
+  }
+  function loadServerSoundPreferences(server: number | null) {
+    serverSoundPrefs = server === null ? defaultServerSoundPrefs() : readServerSoundPrefs(server);
+  }
+  function saveServerSoundPrefs() {
+    if (activeServerId === null) return;
+    try { localStorage.setItem(serverSoundPrefsKey(activeServerId), JSON.stringify(serverSoundPrefs)); }
+    catch { toast("Could not save this server's sound settings", "err", 4500); }
+  }
+  function setGlobalSoundEnabled(kind: NotificationSoundKind, enabled: boolean) {
+    globalSoundPrefs[kind].enabled = enabled;
+    saveGlobalSoundPrefs();
+  }
+  function setGlobalToneMode(kind: NotificationSoundKind, tone: "default" | "custom") {
+    if (tone === "custom" && !globalSoundPrefs[kind].custom) return;
+    globalSoundPrefs[kind].tone = tone;
+    saveGlobalSoundPrefs();
+  }
+  function setServerSoundEnabled(kind: NotificationSoundKind, enabled: SoundOverride) {
+    serverSoundPrefs[kind].enabled = enabled;
+    saveServerSoundPrefs();
+  }
+  function setServerToneMode(kind: NotificationSoundKind, tone: ToneOverride) {
+    if (tone === "custom" && !serverSoundPrefs[kind].custom) return;
+    serverSoundPrefs[kind].tone = tone;
+    saveServerSoundPrefs();
+  }
+  function soundPolicy(kind: NotificationSoundKind, server: number | null) {
+    const local = server === null
+      ? null
+      : server === activeServerId
+        ? serverSoundPrefs
+        : readServerSoundPrefs(server);
+    return resolveNotificationSound(soundOn, globalSoundPrefs, local, kind);
   }
 
   // Appearance: the whole theme is a token map in app.css; these choices only flip
   // data-attributes / one CSS variable on <html>, so they can never fork the layout.
   // Semantic colours (green=presence, gold=mentions, red=danger) are constant in every preset.
-  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string; clock: string; scale: number };
+  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string; messageMotion: string; textEffects: string; clock: string; scale: number };
   const APPEARANCE_KEY = "catcoms.appearance";
   // clock: "" = the locale's habit, "12"/"24" force a convention. scale: whole-interface text
   // size in percent; clamped where applied, not where stored.
-  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: false, icons: "", motion: "", clock: "", scale: 100 };
+  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: false, icons: "", motion: "", messageMotion: "", textEffects: "", clock: "", scale: 100 };
   function loadAppearance(): Appearance {
     try {
       return { ...APPEARANCE_DEFAULT, ...JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") };
@@ -634,6 +714,11 @@
     // Hover motion is personal and never livery-controllable: a server must not be able to
     // start animating a viewer's chrome. "off" is also what prefers-reduced-motion gets.
     set("motion", appearance.motion === "off" ? "off" : "");
+    const reduced = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const textEffects = appearance.textEffects === "off"
+      ? "off"
+      : appearance.textEffects === "low" || reduced ? "low" : "full";
+    set("text-effects", textEffects);
     for (const t of [...LIVERY_TOKENS, "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
     el.removeAttribute("data-livery-pattern");
     el.removeAttribute("data-livery-cursor");
@@ -1433,6 +1518,18 @@
   let newChannel = $state("");
 
   let messages = $state<Msg[]>([]);
+  // Only rows inserted by a live update receive an arrival animation. A short-lived id set keeps
+  // history loads and ordinary re-renders still, and also lets each sender choose their motion.
+  let arrivalMessageIds = $state<Set<string>>(new Set());
+  function markMessageArrivals(ids: string[]) {
+    if (!ids.length) return;
+    arrivalMessageIds = new Set([...arrivalMessageIds, ...ids]);
+    setTimeout(() => {
+      const next = new Set(arrivalMessageIds);
+      for (const id of ids) next.delete(id);
+      arrivalMessageIds = next;
+    }, 900);
+  }
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
   // Beyond the plain substring there's an advanced filter set (Ctrl+Shift+F): author, date range,
@@ -1772,7 +1869,7 @@
   let quickIdx = $state(0);
   const QUICK_SURFACES: { label: string; tab: Tab }[] = [
     { label: "Files", tab: "files" },
-    { label: "Status", tab: "status" },
+    { label: "Announcements", tab: "status" },
     { label: "Wiki", tab: "wiki" },
     { label: "Events", tab: "events" },
     { label: "Transfers", tab: "downloads" },
@@ -1886,6 +1983,14 @@
     const dd = String(d.getDate()).padStart(2, "0");
     return `${wd} ${d.getFullYear()}-${mm}-${dd}`;
   }
+  let messageFrameBreaks = $derived.by(() => {
+    const breaks = new Set<number>();
+    if (firstUnreadIdx >= 0) breaks.add(firstUnreadIdx);
+    for (let i = 1; i < messages.length; i++) {
+      if (!sameDay(messages[i - 1].ts, messages[i].ts)) breaks.add(i);
+    }
+    return breaks;
+  });
 
   let draft = $state("");
   let sending = $state(false);
@@ -1955,6 +2060,189 @@
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   let menuEl = $state<HTMLElement | undefined>();
   let composerEl = $state<HTMLTextAreaElement | undefined>();
+  let editMessageEl = $state<HTMLTextAreaElement | undefined>();
+  let announcementInputEl = $state<HTMLTextAreaElement | undefined>();
+  let profileBioEl = $state<HTMLTextAreaElement | undefined>();
+  let eventTitleEl = $state<HTMLInputElement | undefined>();
+  let eventBodyEl = $state<HTMLTextAreaElement | undefined>();
+
+  type TextEffectTarget = "chat" | "chat-edit" | "announcement" | "wiki" | "bio" | "event-title" | "event-body";
+  const TEXT_EFFECT_KEYBINDS_KEY = "catcoms.text-effect-keybinds";
+  function loadTextEffectKeybinds(): Record<string, string> {
+    try {
+      const stored = localStorage.getItem(TEXT_EFFECT_KEYBINDS_KEY);
+      return stored === null
+        ? { ...DEFAULT_TEXT_EFFECT_KEYBINDS }
+        : sanitizeTextEffectKeybinds(JSON.parse(stored));
+    } catch {
+      return { ...DEFAULT_TEXT_EFFECT_KEYBINDS };
+    }
+  }
+  let textEffectKeybinds = $state<Record<string, string>>(loadTextEffectKeybinds());
+  let textEffectTarget = $state<TextEffectTarget | null>(null);
+  let textEffectSelection = $state({ start: 0, end: 0 });
+  let textEffectBubble = $state({ x: 0, y: 0 });
+  let showTextEffectCatalog = $state(false);
+  let textEffectQuery = $state("");
+  let recordingTextEffect = $state("");
+  let textEffectKeyError = $state("");
+  let suppressTextEffectSelection = false;
+  const QUICK_TEXT_EFFECT_IDS = ["shake", "wave", "sparkle", "animalese", "flame", "gloom", "cyber", "crt", "censor", "pride/rainbow"];
+  let quickTextEffects = $derived(TEXT_EFFECTS.filter((effect) => QUICK_TEXT_EFFECT_IDS.includes(effect.id)));
+  let filteredTextEffects = $derived.by(() => {
+    const q = textEffectQuery.trim().toLowerCase();
+    return q
+      ? TEXT_EFFECTS.filter((effect) => `${effect.label} ${effect.description} ${effect.group} ${effect.id}`.toLowerCase().includes(q))
+      : TEXT_EFFECTS;
+  });
+
+  function textEffectElement(target: TextEffectTarget): HTMLInputElement | HTMLTextAreaElement | undefined {
+    if (target === "chat") return composerEl;
+    if (target === "chat-edit") return editMessageEl;
+    if (target === "announcement") return announcementInputEl;
+    if (target === "wiki") return wikiTextarea;
+    if (target === "bio") return profileBioEl;
+    if (target === "event-title") return eventTitleEl;
+    return eventBodyEl;
+  }
+  function textEffectValue(target: TextEffectTarget): string {
+    if (target === "chat") return draft;
+    if (target === "chat-edit") return editDraft;
+    if (target === "announcement") return statusDraft;
+    if (target === "wiki") return wikiBody;
+    if (target === "bio") return pDescription;
+    if (target === "event-title") return evTitle;
+    return evBody;
+  }
+  function setTextEffectValue(target: TextEffectTarget, value: string) {
+    if (target === "chat") draft = value;
+    else if (target === "chat-edit") editDraft = value;
+    else if (target === "announcement") statusDraft = value;
+    else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
+    else if (target === "bio") pDescription = value;
+    else if (target === "event-title") evTitle = value;
+    else evBody = value;
+  }
+  function captureTextEffectSelection(target: TextEffectTarget): boolean {
+    const input = textEffectElement(target);
+    if (!input) return false;
+    textEffectSelection = { start: input.selectionStart ?? 0, end: input.selectionEnd ?? 0 };
+    return true;
+  }
+  function openTextEffectCatalog(target: TextEffectTarget) {
+    if (!captureTextEffectSelection(target)) return;
+    textEffectTarget = target;
+    textEffectQuery = "";
+    showTextEffectCatalog = true;
+  }
+  function textEffectTargetLabel(target: TextEffectTarget): string {
+    return ({
+      chat: "chat message",
+      "chat-edit": "edited message",
+      announcement: "announcement",
+      wiki: "wiki prose",
+      bio: "profile bio",
+      "event-title": "event title",
+      "event-body": "event details",
+    } as Record<TextEffectTarget, string>)[target];
+  }
+  function textEffectSelectionAnchor(input: HTMLInputElement | HTMLTextAreaElement, start: number, end: number) {
+    const rect = input.getBoundingClientRect();
+    const computed = getComputedStyle(input);
+    const mirror = document.createElement("div");
+    const picked = document.createElement("span");
+    const copied = [
+      "font-family", "font-size", "font-style", "font-weight", "font-variant", "line-height",
+      "letter-spacing", "text-transform", "text-indent", "word-spacing", "tab-size",
+      "padding-top", "padding-right", "padding-bottom", "padding-left", "border-top-width",
+      "border-right-width", "border-bottom-width", "border-left-width", "box-sizing",
+    ];
+    mirror.style.position = "fixed";
+    mirror.style.left = "0";
+    mirror.style.top = "0";
+    mirror.style.width = `${rect.width}px`;
+    mirror.style.visibility = "hidden";
+    mirror.style.pointerEvents = "none";
+    mirror.style.overflow = "hidden";
+    mirror.style.whiteSpace = input instanceof HTMLInputElement ? "pre" : "pre-wrap";
+    mirror.style.overflowWrap = input instanceof HTMLInputElement ? "normal" : "break-word";
+    for (const prop of copied) mirror.style.setProperty(prop, computed.getPropertyValue(prop));
+    mirror.append(document.createTextNode(input.value.slice(0, start)));
+    picked.textContent = input.value.slice(start, end) || "\u200b";
+    mirror.append(picked, document.createTextNode(input.value.slice(end)));
+    document.body.append(mirror);
+    const mirrorRect = mirror.getBoundingClientRect();
+    const pickedRect = picked.getBoundingClientRect();
+    const x = rect.left + pickedRect.left - mirrorRect.left + pickedRect.width / 2 - input.scrollLeft;
+    const y = rect.top + pickedRect.top - mirrorRect.top - input.scrollTop - 8;
+    mirror.remove();
+    const halfPalette = Math.min(205, Math.max(0, (innerWidth - 18) / 2));
+    return {
+      x: Math.max(9 + halfPalette, Math.min(innerWidth - 9 - halfPalette, x)),
+      y: Math.max(8, Math.min(rect.bottom - 8, y)),
+    };
+  }
+  function onTextEffectSelection(target: TextEffectTarget) {
+    if (suppressTextEffectSelection || !captureTextEffectSelection(target)) return;
+    if (textEffectSelection.start === textEffectSelection.end) {
+      if (!showTextEffectCatalog && textEffectTarget === target) textEffectTarget = null;
+      return;
+    }
+    const input = textEffectElement(target);
+    if (!input) return;
+    textEffectBubble = textEffectSelectionAnchor(input, textEffectSelection.start, textEffectSelection.end);
+    textEffectTarget = target;
+    showTextEffectCatalog = false;
+  }
+  async function applyTextEffect(id: string, target = textEffectTarget) {
+    if (!target) return;
+    const wrapped = insertTextEffect(textEffectValue(target), textEffectSelection.start, textEffectSelection.end, id);
+    setTextEffectValue(target, wrapped.value);
+    showTextEffectCatalog = false;
+    textEffectTarget = null;
+    suppressTextEffectSelection = true;
+    await tick();
+    const input = textEffectElement(target);
+    input?.focus();
+    input?.setSelectionRange(wrapped.selectionStart, wrapped.selectionEnd);
+    queueMicrotask(() => { suppressTextEffectSelection = false; });
+  }
+  function activeTextEffectTarget(): TextEffectTarget | null {
+    const active = document.activeElement;
+    for (const target of ["chat", "chat-edit", "announcement", "wiki", "bio", "event-title", "event-body"] as TextEffectTarget[]) {
+      if (textEffectElement(target) === active) return target;
+    }
+    return null;
+  }
+  function setTextEffectKeybind(id: string, chord: string) {
+    const conflict = keybindConflict(textEffectKeybinds, id, chord);
+    if (conflict) { textEffectKeyError = conflict; return; }
+    textEffectKeybinds = { ...textEffectKeybinds, [id]: chord };
+    textEffectKeyError = "";
+    recordingTextEffect = "";
+    try { localStorage.setItem(TEXT_EFFECT_KEYBINDS_KEY, JSON.stringify(textEffectKeybinds)); } catch { /* best-effort */ }
+  }
+  function clearTextEffectKeybind(id: string) {
+    const next = { ...textEffectKeybinds };
+    delete next[id];
+    textEffectKeybinds = next;
+    recordingTextEffect = "";
+    textEffectKeyError = "";
+    try { localStorage.setItem(TEXT_EFFECT_KEYBINDS_KEY, JSON.stringify(next)); } catch { /* best-effort */ }
+  }
+  function resetTextEffectKeybinds() {
+    textEffectKeybinds = { ...DEFAULT_TEXT_EFFECT_KEYBINDS };
+    recordingTextEffect = "";
+    textEffectKeyError = "";
+    try { localStorage.removeItem(TEXT_EFFECT_KEYBINDS_KEY); } catch { /* best-effort */ }
+  }
+  function recordTextEffectKey(e: KeyboardEvent, id: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") { recordingTextEffect = ""; textEffectKeyError = ""; return; }
+    const chord = keybindFromEvent(e);
+    if (chord) setTextEffectKeybind(id, chord);
+  }
 
   // Group the file list into the current folder's subfolders + files-here (folder browser).
   let folderView = $derived.by(() => {
@@ -2167,6 +2455,80 @@
   let pBubA = $state("#41295a");
   let pBubB = $state("#1a2980");
   const customBubble = () => `linear-gradient(135deg,${pBubA},${pBubB})`;
+  let pFrame = $derived(parseMessageFrame(pBubble));
+  let framePreviewReplay = $state(0);
+  let collapsedFrameEffects = $state<Record<string, boolean>>({});
+  const FRAME_SHAPES: { id: MessageFrameShape; code: string; label: string; description: string }[] = [
+    { id: "terminal", code: "TRM", label: "Terminal", description: "Clipped operator panel with a signal rail" },
+    { id: "bracket", code: "BRK", label: "Brackets", description: "Open targeting corners with a quiet centre" },
+    { id: "packet", code: "PKT", label: "Packet", description: "Squared data block with a header bus" },
+    { id: "holo", code: "HOL", label: "Holo", description: "Soft projected glass with a luminous edge" },
+    { id: "signal", code: "SIG", label: "Signal", description: "Minimal transmission rail and fading wash" },
+  ];
+  const FRAME_EFFECTS: { id: MessageFrameEffectId; code: string; label: string; description: string }[] = [
+    { id: "scan", code: "SCN", label: "Scan", description: "The channel's shared sweep crosses this frame" },
+    { id: "pulse", code: "PLS", label: "Pulse", description: "The signal edge breathes gently" },
+    { id: "trace", code: "TRC", label: "Trace", description: "A short telemetry trace runs the frame" },
+    { id: "flicker", code: "FLK", label: "Flicker", description: "A restrained terminal refresh flicker" },
+  ];
+  const FRAME_MOTIONS: { id: MessageFrameMotion; label: string; description: string; glyph: string }[] = [
+    { id: "none", label: "Still", description: "No entrance movement", glyph: "—" },
+    { id: "glide", label: "Glide", description: "Lift gently into place", glyph: "↑" },
+    { id: "fly", label: "Fly in", description: "Sweep in from the side", glyph: "→" },
+    { id: "pop", label: "Pop", description: "A quick soft-scale arrival", glyph: "◇" },
+    { id: "drift", label: "Drift", description: "Float diagonally into place", glyph: "↗" },
+  ];
+  const FRAME_EASINGS: { id: MessageFrameEasing; label: string; description: string }[] = [
+    { id: "soft", label: "Soft", description: "Gentle terminal easing" },
+    { id: "snappy", label: "Snappy", description: "Fast response with a firm stop" },
+    { id: "spring", label: "Spring", description: "A restrained overshoot" },
+  ];
+  function updateFrame(patch: Partial<typeof pFrame>) {
+    pBubble = encodeMessageFrame({ ...pFrame, ...patch });
+  }
+  function selectFrameEffect(id: MessageFrameEffectId) {
+    if (pFrame.effects.some((layer) => layer.id === id)) {
+      collapsedFrameEffects[id] = false;
+      return;
+    }
+    updateFrame({ effects: [...pFrame.effects, defaultMessageFrameLayer(id)] });
+    collapsedFrameEffects[id] = false;
+  }
+  function setFrameEffectEnabled(id: MessageFrameEffectId, enabled: boolean) {
+    updateFrame({ effects: pFrame.effects.map((layer) => layer.id === id ? { ...layer, enabled } : layer) });
+  }
+  function updateFrameEffect(id: MessageFrameEffectId, key: keyof MessageFrameEffectOptions, value: number) {
+    updateFrame({ effects: pFrame.effects.map((layer) => layer.id === id
+      ? { ...layer, options: { ...layer.options, [key]: value } }
+      : layer) });
+  }
+  function resetFrameEffect(id: MessageFrameEffectId) {
+    updateFrame({ effects: pFrame.effects.map((layer) => layer.id === id
+      ? { ...defaultMessageFrameLayer(id), enabled: layer.enabled }
+      : layer) });
+  }
+  function removeFrameEffect(id: MessageFrameEffectId) {
+    updateFrame({ effects: pFrame.effects.filter((layer) => layer.id !== id) });
+    delete collapsedFrameEffects[id];
+  }
+  function disableAllFrameEffects() {
+    updateFrame({ effects: pFrame.effects.map((layer) => ({ ...layer, enabled: false })) });
+  }
+  function moveFrameEffect(id: MessageFrameEffectId, direction: -1 | 1) {
+    const from = pFrame.effects.findIndex((layer) => layer.id === id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= pFrame.effects.length) return;
+    const effects = [...pFrame.effects];
+    [effects[from], effects[to]] = [effects[to], effects[from]];
+    updateFrame({ effects });
+  }
+  function updateFrameArrival(patch: Partial<MessageFrameArrival>) {
+    updateFrame({ arrival: { ...pFrame.arrival, ...patch } });
+  }
+  function resetMessageStudio() {
+    pBubble = "";
+    collapsedFrameEffects = {};
+  }
   const FILL_EFFECT_IDS = new Set<NameEffectId>(["gradient", "rainbow", "shimmer", "candy"]);
   const TRANSFORM_EFFECT_IDS = new Set<NameEffectId>(["wave", "wobble"]);
 
@@ -2553,9 +2915,22 @@
   }
   // A profile's custom frame is untrusted; the helper validates it before it reaches CSS. A
   // companion device inherits its origin's frame just as it already inherits the origin's name.
-  function bubbleStyle(fp: string, own: boolean): string {
-    const profile = profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
-    return visibleMessageFrameStyle(profile?.bubble, appearance.flat, own);
+  function profileFor(fp: string): Prof | undefined {
+    return profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
+  }
+  function bubbleStyle(fp: string): string {
+    const isOwn = fp === myFp || (!!myFp && identityOf(fp).fp === identityOf(myFp).fp);
+    return visibleMessageFrameStyle(profileFor(fp)?.bubble, appearance.flat, isOwn);
+  }
+  function arrivalMotion(fp: string, id: string): MessageFrameMotion {
+    return visibleMessageFrameMotion(
+      profileFor(fp)?.bubble,
+      arrivalMessageIds.has(id),
+      appearance.messageMotion === "off" || fxMotionOff,
+    );
+  }
+  function arrivalStyle(fp: string): string {
+    return messageFrameArrivalStyle(profileFor(fp)?.bubble);
   }
   // The profile card popover (opened by clicking a member's avatar/name).
   let profileCard = $state<string | null>(null);
@@ -2612,7 +2987,7 @@
       if (hadEvents) {
         for (const ev of events) {
           if (knownEvents.has(ev.id)) continue;
-          pushTicker("event", `event:${srv}:${ev.id}`, ev.title, () => void goSurface(srv, "events"));
+          pushTicker("event", srv, `event:${srv}:${ev.id}`, msgSnippet(ev.title, 60), () => void goSurface(srv, "events"));
         }
       }
     } catch {
@@ -3304,6 +3679,7 @@
     navStack = []; // where you have been is part of what the lock screen takes off the screen
     navAt = -1;
     tickerItems = []; // and so is anything the ticker was naming
+    tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
     servers = [];
     activeServerId = null;
     dmHome = false;
@@ -3557,6 +3933,7 @@
     showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
     acceptCallsHere = loadAccept(id); // this server's call-notification preference
+    loadServerSoundPreferences(id); // local message/mention/news overrides for this server
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
     loadLiveryOptOut(id); // whether the user opted out of this server's livery
     loadVerified(id); // this server's locally-verified members
@@ -3597,8 +3974,9 @@
       pBubble = me.bubble ?? "";
       pAvatar = me.avatar || "";
       pBanner = me.banner || "";
-      const bg = BUB_GRAD_RE.exec(pBubble);
-      if (bg && !BUBBLE_PRESETS.some((b) => b.value === pBubble)) {
+      const frame = parseMessageFrame(pBubble);
+      const bg = BUB_GRAD_RE.exec(frame.surface);
+      if (bg && !BUBBLE_PRESETS.some((b) => b.value === frame.surface)) {
         pBubA = bg[1];
         pBubB = bg[2];
       }
@@ -3694,10 +4072,17 @@
     }
   }
 
-  async function refresh() {
+  async function refresh(animateArrivals = false) {
     if (!cur || !cur.active || activeServerId === null) return;
     try {
-      messages = await invoke<Msg[]>("get_messages", { server: activeServerId, channel: cur.active });
+      const previous = new Set(messages.map((message) => message.id));
+      const next = await invoke<Msg[]>("get_messages", { server: activeServerId, channel: cur.active });
+      messages = next;
+      if (animateArrivals) {
+        // Own posts already animate at optimistic insertion; excluding them prevents the
+        // acknowledged, server-assigned id from replaying the entrance a second time.
+        markMessageArrivals(next.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
+      }
       advanceReadMark();
     } catch (e) {
       error = String(e);
@@ -3849,7 +4234,7 @@
       if (hadStatuses) {
         for (const st of statuses) {
           if (knownStatuses.has(st.id)) continue;
-          pushTicker("status", `status:${srv}:${st.id}`, `${nameOf(st.author)}: ${msgSnippet(st.text, 60)}`, () =>
+          pushTicker("status", srv, `status:${srv}:${st.id}`, `${nameOf(st.author)}: ${msgSnippet(st.text, 60)}`, () =>
             void goSurface(srv, "status"),
           );
         }
@@ -3994,8 +4379,9 @@
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
   async function handleRichClick(e: MouseEvent) {
     const target = e.target as HTMLElement | null;
-    // A spoiler: first click reveals it (don't also follow any link inside).
-    const sp = target?.closest("[data-spoiler]") as HTMLElement | null;
+    // Spoilers and censored effects use the same local, reader-controlled reveal. First click
+    // reveals them and never follows a link that happens to sit inside.
+    const sp = target?.closest("[data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
     if (sp && !sp.classList.contains("revealed")) {
       e.preventDefault();
       sp.classList.add("revealed");
@@ -4058,12 +4444,12 @@
   function richClicks(node: HTMLElement) {
     const h = (e: Event) => handleRichClick(e as MouseEvent);
     const c = (e: Event) => handleRichContext(e as MouseEvent);
-    // A link card is focusable and reads as a button, so it has to open from the keyboard too;
-    // the synthesized click goes through the same delegated handler as a real one.
+    // Link cards, spoilers, and censored effects are focusable buttons, so they must open from
+    // the keyboard too; the synthesized click uses the same delegated handler as a real one.
     const k = (e: Event) => {
       const ev = e as KeyboardEvent;
       if (ev.key !== "Enter" && ev.key !== " ") return;
-      const card = (ev.target as HTMLElement | null)?.closest(".ref-card") as HTMLElement | null;
+      const card = (ev.target as HTMLElement | null)?.closest(".ref-card, [data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
       if (!card) return;
       ev.preventDefault();
       card.click();
@@ -4076,6 +4462,187 @@
         node.removeEventListener("click", h);
         node.removeEventListener("contextmenu", c);
         node.removeEventListener("keydown", k);
+      },
+    };
+  }
+
+  // Text effects are rendered in several independent surfaces, so their viewport/pointer
+  // behaviour is delegated once at the document. Animalese is armed the first time each rendered
+  // instance becomes visible; a WeakSet prevents scroll-jiggling from replaying it. Sound uses the
+  // shared app preference and is deliberately quiet, short, deterministic, and Full-mode only.
+  function mountTextEffectRuntime() {
+    const played = new WeakSet<HTMLElement>();
+    const observed = new WeakSet<HTMLElement>();
+    let pointerFx: HTMLElement | null = null;
+    let animaleseAudioUntil = 0;
+
+    function playAnimalese(el: HTMLElement) {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
+      const units = [...el.querySelectorAll<HTMLElement>(".fx-animalese-unit")]
+        .filter((unit) => (unit.textContent ?? "").trim())
+        .slice(0, 48);
+      if (!units.length) return;
+      try {
+        audioCtx ??= new AudioContext();
+        void audioCtx.resume();
+        if (audioCtx.currentTime < animaleseAudioUntil) return;
+        const start = audioCtx.currentTime + 0.025;
+        animaleseAudioUntil = start + units.length * 0.052;
+        units.forEach((unit, index) => {
+          const tone = Number(unit.dataset.fxTone ?? 0);
+          const at = start + index * 0.052;
+          const osc = audioCtx!.createOscillator();
+          const gain = audioCtx!.createGain();
+          osc.type = index % 3 === 0 ? "triangle" : "sine";
+          osc.frequency.setValueAtTime(210 + tone * 19 + (index % 4) * 7, at);
+          gain.gain.setValueAtTime(0.0001, at);
+          gain.gain.exponentialRampToValueAtTime(0.018, at + 0.006);
+          gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.043);
+          osc.connect(gain).connect(audioCtx!.destination);
+          osc.start(at);
+          osc.stop(at + 0.05);
+        });
+      } catch {
+        // Visual reveal remains useful where Web Audio is unavailable or gesture-gated.
+      }
+    }
+
+    const intersection = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const el = entry.target as HTMLElement;
+        intersection.unobserve(el);
+        if (played.has(el)) continue;
+        played.add(el);
+        el.classList.add("fx-play");
+        playAnimalese(el);
+      }
+    }, { threshold: 0.18 });
+
+    function discover(root: ParentNode) {
+      const effects = root instanceof HTMLElement && root.matches("[data-text-fx]")
+        ? [root]
+        : [...root.querySelectorAll<HTMLElement>("[data-text-fx]")];
+      for (const effect of effects) {
+        effect.querySelectorAll<HTMLElement>(".text-fx-unit").forEach((unit, index) =>
+          unit.style.setProperty("--fx-i", String(index)));
+        if (effect.dataset.textFx === "animalese" && !observed.has(effect)) {
+          observed.add(effect);
+          intersection.observe(effect);
+        }
+      }
+    }
+
+    const mutations = new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof HTMLElement) discover(node);
+      }
+    });
+    discover(document.body);
+    mutations.observe(document.body, { childList: true, subtree: true });
+
+    const onPointerMove = (event: PointerEvent) => {
+      const next = document.documentElement.dataset.textEffects === "full"
+        ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-text-fx='censor'])") ?? null
+        : null;
+      if (pointerFx && pointerFx !== next) {
+        pointerFx.classList.remove("fx-pointer");
+        pointerFx.style.removeProperty("--fx-px");
+        pointerFx.style.removeProperty("--fx-py");
+      }
+      pointerFx = next;
+      if (!next) return;
+      const rect = next.getBoundingClientRect();
+      const x = rect.width ? (event.clientX - rect.left) / rect.width - 0.5 : 0;
+      const y = rect.height ? (event.clientY - rect.top) / rect.height - 0.5 : 0;
+      next.style.setProperty("--fx-px", x.toFixed(3));
+      next.style.setProperty("--fx-py", y.toFixed(3));
+      next.classList.add("fx-pointer");
+    };
+    document.addEventListener("pointermove", onPointerMove, { passive: true });
+    return () => {
+      intersection.disconnect();
+      mutations.disconnect();
+      document.removeEventListener("pointermove", onPointerMove);
+    };
+  }
+
+  // A Scan layer remains clipped inside its author's frame, but every enabled Scan shares the
+  // message viewport's coordinates and animation phase. The result is one channel-wide beam,
+  // revealed only while it crosses frames whose authors opted into the layer.
+  function channelScan(node: HTMLUListElement) {
+    let raf = 0;
+    const observedBodies = new Set<HTMLElement>();
+
+    const syncAnimations = (rows: HTMLLIElement[]) => {
+      const animations: Animation[] = [];
+      for (const row of rows) {
+        for (const layer of row.querySelectorAll<HTMLElement>(":scope > .m-body > .message-frame-fx > .frame-fx-scan")) {
+          animations.push(...layer.getAnimations());
+        }
+      }
+      const duration = Number(animations[0]?.effect?.getTiming().duration);
+      if (!Number.isFinite(duration) || duration <= 0) return;
+      const phase = performance.now() % duration;
+      for (const animation of animations) animation.currentTime = phase;
+    };
+
+    const measure = () => {
+      raf = 0;
+      const rows = [...node.children].filter((child): child is HTMLLIElement => child instanceof HTMLLIElement);
+      const viewport = node.getBoundingClientRect();
+      const viewportTop = viewport.top + node.clientTop;
+      const viewportBottom = viewportTop + node.clientHeight;
+      const scanRows: HTMLLIElement[] = [];
+      const measured: { row: HTMLLIElement; body: HTMLElement; rect: DOMRect }[] = [];
+      for (const row of rows) {
+        row.style.removeProperty("--frame-scan-offset");
+        row.style.removeProperty("--frame-scan-height");
+        const body = row.querySelector<HTMLElement>(":scope > .m-body");
+        if (!body) continue;
+        if (!observedBodies.has(body)) {
+          resize.observe(body);
+          observedBodies.add(body);
+        }
+        measured.push({ row, body, rect: body.getBoundingClientRect() });
+      }
+      const visible = measured.filter(({ rect }) => rect.bottom > viewportTop && rect.top < viewportBottom);
+      const scanTop = visible.length ? Math.max(viewportTop, visible[0].rect.top) : viewportTop;
+      const scanBottom = visible.length
+        ? Math.min(viewportBottom, visible.at(-1)?.rect.bottom ?? viewportBottom)
+        : viewportBottom;
+      const scanHeight = Math.max(1, scanBottom - scanTop);
+      for (const { row, body, rect } of measured) {
+        if (!body.querySelector(":scope > .message-frame-fx > .frame-fx-scan")) continue;
+        const geometry = messageFrameScanGeometry(scanTop, scanHeight, rect.top);
+        row.style.setProperty("--frame-scan-offset", `${geometry.offset}px`);
+        row.style.setProperty("--frame-scan-height", `${geometry.height}px`);
+        scanRows.push(row);
+      }
+      for (const body of observedBodies) {
+        if (node.contains(body)) continue;
+        resize.unobserve(body);
+        observedBodies.delete(body);
+      }
+      syncAnimations(scanRows);
+    };
+
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    };
+    const resize = new ResizeObserver(schedule);
+    const mutations = new MutationObserver(schedule);
+    resize.observe(node);
+    mutations.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    node.addEventListener("scroll", schedule, { passive: true });
+    schedule();
+    return {
+      destroy() {
+        cancelAnimationFrame(raf);
+        resize.disconnect();
+        mutations.disconnect();
+        node.removeEventListener("scroll", schedule);
       },
     };
   }
@@ -4365,7 +4932,7 @@
       const id = el.getAttribute("data-status-id") ?? "";
       const label = chipLabel(el) || "status";
       openMenu(e, [
-        { label: "Open status", icon: "⊞", onSelect: () => openStatusRef(id) },
+        { label: "Open announcement", icon: "⊞", onSelect: () => openStatusRef(id) },
         { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
         ...rowActions(el),
       ]);
@@ -4418,7 +4985,7 @@
       if (knownPages.length) {
         for (const pg of wikiPages) {
           if (knownPages.includes(pg)) continue;
-          pushTicker("wiki", `wiki:${srv}:${pg}`, pg, () => void goWikiPage(srv, pg));
+          pushTicker("wiki", srv, `wiki:${srv}:${pg}`, pg, () => void goWikiPage(srv, pg));
         }
       }
       wikiMap = await invoke<Record<string, string>>("get_wiki_map", { server: activeServerId });
@@ -4973,6 +5540,81 @@
     });
   }
 
+  // Decode only metadata before retaining a custom notification tone. This keeps an accidentally
+  // selected song from becoming a minutes-long alert and gives unsupported codecs a clear error
+  // at import time rather than a silent failure when the next message arrives.
+  function customToneDuration(file: File): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const audio = new Audio();
+      let settled = false;
+      const finish = (duration: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        audio.removeAttribute("src");
+        URL.revokeObjectURL(url);
+        if (duration === null) reject(new Error("could not decode that audio file"));
+        else resolve(duration);
+      };
+      const timer = setTimeout(() => finish(null), 5000);
+      audio.preload = "metadata";
+      audio.onloadedmetadata = () => finish(audio.duration);
+      audio.onerror = () => finish(null);
+      audio.src = url;
+    });
+  }
+
+  async function importCustomTone(
+    scope: "global" | "server",
+    kind: NotificationSoundKind,
+    files: FileList | null,
+  ) {
+    const file = files?.[0];
+    if (!file) return;
+    const mime = customToneMime(file.type, file.name);
+    // Reject obvious type/size failures before asking the decoder to touch the bytes.
+    const earlyError = customToneError(mime, file.size, 1);
+    if (earlyError) { toast(earlyError, "err", 4500); return; }
+    try {
+      const duration = await customToneDuration(file);
+      const validationError = customToneError(mime, file.size, duration);
+      if (validationError || !mime) {
+        toast(validationError ?? "Unsupported audio file", "err", 4500);
+        return;
+      }
+      const stored: StoredTone = {
+        name: file.name.trim().slice(0, 96) || "custom tone",
+        mime,
+        dataUrl: `data:${mime};base64,${await readBase64(file)}`,
+      };
+      if (scope === "global") {
+        globalSoundPrefs[kind].custom = stored;
+        globalSoundPrefs[kind].tone = "custom";
+        saveGlobalSoundPrefs();
+      } else {
+        serverSoundPrefs[kind].custom = stored;
+        serverSoundPrefs[kind].tone = "custom";
+        saveServerSoundPrefs();
+      }
+      toast(`${SOUND_LABELS[kind].title} tone set to ${stored.name}`, "ok", 2600);
+    } catch (e) {
+      toast(`Could not import tone: ${String(e)}`, "err", 4500);
+    }
+  }
+
+  function removeCustomTone(scope: "global" | "server", kind: NotificationSoundKind) {
+    if (scope === "global") {
+      globalSoundPrefs[kind].custom = null;
+      globalSoundPrefs[kind].tone = "default";
+      saveGlobalSoundPrefs();
+    } else {
+      serverSoundPrefs[kind].custom = null;
+      serverSoundPrefs[kind].tone = "inherit";
+      saveServerSoundPrefs();
+    }
+  }
+
   // The one upload path used by files, embeds, wiki attachments, event art and custom emoji.
   // Keeping it central means every group upload gets the same progress and terminal state.
   async function addSharedFile(
@@ -5327,7 +5969,7 @@
     return {
       kind: "status",
       icon: "◈",
-      kicker: `Status · ${relDay(post.ts, Date.now())}`,
+      kicker: `Announcement · ${relDay(post.ts, Date.now())}`,
       title: nameOf(post.author),
       body: plainSummary(post.text, 200) || "(no text)",
       thumb: firstEmbedCid(post.text),
@@ -5856,8 +6498,7 @@
     replyingTo = "";
   }
   function msgSnippet(text: string, n = 70): string {
-    const t = text.replace(/\s+/g, " ").trim();
-    return t.length > n ? t.slice(0, n) + "…" : t;
+    return plainSummary(text, n);
   }
 
   // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
@@ -6034,7 +6675,7 @@
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
     await tick();
     if (!statuses.some((s) => s.id === id)) {
-      error = "That status post is no longer in this server's feed.";
+      error = "That announcement is no longer in this server's feed.";
       return;
     }
     statusEl?.querySelector(`[data-sid="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -8262,7 +8903,7 @@
     if (!loadAccept(server)) return;
     alertedRooms.add(key);
     voiceAlert = { server, channel, name: channelNameFor(server, channel) };
-    playMention();
+    playMention(server);
   }
   // Join (or switch to) a channel's voice room. The channel id IS the call id.
   async function joinVoice(channel: string, server: number, name: string) {
@@ -8514,6 +9155,7 @@
       reply_to,
       pinned: false,
     }];
+    markMessageArrivals([pendingId]);
     await tick();
     try {
       await invoke("send_message", { server, channel, text, replyTo: reply_to });
@@ -8842,8 +9484,7 @@
       /* audio unavailable */
     }
   }
-  function playChime(freqs: number[]) {
-    if (!soundOn) return;
+  function playSynthChime(freqs: number[]) {
     try {
       audioCtx = audioCtx ?? new AudioContext();
       const ctx = audioCtx;
@@ -8866,13 +9507,66 @@
       /* audio unavailable */
     }
   }
-  // A regular new-message chime (two notes) vs a distinct, brighter rising triad for a message that
-  // mentions you or replies to you.
-  function playNotify() {
-    playChime([880, 1318.5]);
+
+  const activeTonePlayers = new Set<HTMLAudioElement>();
+  function playStoredTone(tone: StoredTone, fallback: () => void) {
+    try {
+      const player = new Audio(tone.dataUrl);
+      let failed = false;
+      const cleanup = () => {
+        activeTonePlayers.delete(player);
+        player.onended = null;
+        player.onerror = null;
+      };
+      const fail = () => {
+        if (failed) return;
+        failed = true;
+        cleanup();
+        fallback(); // corrupt/unsupported local data never turns notifications silently off
+      };
+      player.volume = 0.72;
+      player.onended = cleanup;
+      player.onerror = fail;
+      activeTonePlayers.add(player); // hold it until playback ends; GC must not cut a cue short
+      void player.play().catch(fail);
+    } catch {
+      fallback();
+    }
   }
-  function playMention() {
-    playChime([987.8, 1318.5, 1760]);
+
+  // One policy gate for every notification caller. Custom files are local data URLs validated at
+  // import/load; built-ins stay asset-free Web Audio. Server overrides are read even for a server
+  // that is not currently open, which is precisely when most message notifications arrive.
+  function playConfiguredSound(kind: NotificationSoundKind, server: number | null) {
+    const policy = soundPolicy(kind, server);
+    if (!policy.enabled) return;
+    const builtIn = () => {
+      if (kind === "message") playSynthChime([880, 1318.5]);
+      else if (kind === "mention") playSynthChime([987.8, 1318.5, 1760]);
+      else {
+        try {
+          audioCtx = audioCtx ?? new AudioContext();
+          if (audioCtx.state === "suspended") void audioCtx.resume();
+          scheduleNewsChime(audioCtx);
+        } catch {
+          /* audio unavailable */
+        }
+      }
+    };
+    if (policy.custom) playStoredTone(policy.custom, builtIn);
+    else builtIn();
+  }
+
+  // A regular new-message chime vs a brighter mention/reply triad. Passing the source server is
+  // important: notifications generally arrive while some *other* server is open.
+  function playNotify(server: number | null = activeServerId) {
+    playConfiguredSound("message", server);
+  }
+  function playMention(server: number | null = activeServerId) {
+    playConfiguredSound("mention", server);
+  }
+  function playNewsTicker(server: number | null = activeServerId) {
+    playConfiguredSound("news", server);
   }
 
   // ---- location & history --------------------------------------------------
@@ -9036,17 +9730,25 @@
   // The strip only moves when something actually happened, so the motion itself is the signal
   // rather than decoration. Items are built where the data lands rather than from the raw events,
   // because an event only says "the wiki changed" while a diff says WHICH page.
-  type TickerKind = "status" | "wiki" | "event";
-  type TickerItem = { id: string; kind: TickerKind; text: string; at: number; go: () => void };
+  type TickerKind = "status" | "wiki" | "event" | "message";
+  type TickerItem = { id: string; server: number; kind: TickerKind; text: string; at: number; go: () => void };
   const TICKER_TTL = 5 * 60_000; // news for five minutes; after that it is just history
   const TICKER_MAX = 8;
   let tickerItems = $state<TickerItem[]>([]);
-  function pushTicker(kind: TickerKind, id: string, text: string, go: () => void) {
-    if (locked) return; // nothing that names app content may reach a locked screen
-    if (!text.trim() || tickerItems.some((t) => t.id === id)) return;
+  // Receipts live for the unlocked UI session. Unlike the old feed-coupled set they are never
+  // pruned just because a five-minute item aged out, so a replayed backend event cannot crawl or
+  // ring a second time. lockScreen clears them because wiki/page ids can contain content names.
+  let tickerReceipts = $state<Set<string>>(new Set());
+  function pushTicker(kind: TickerKind, server: number, id: string, text: string, go: () => void): boolean {
+    if (locked) return false; // nothing that names app content may reach a locked screen
+    if (!text.trim()) return false;
+    const nextReceipts = acceptTickerReceipt(tickerReceipts, id);
+    if (!nextReceipts) return false;
     const at = Date.now();
     const kept = tickerItems.filter((t) => at - t.at < TICKER_TTL);
-    tickerItems = [...kept, { id, kind, text, at, go }].slice(-TICKER_MAX);
+    tickerItems = [...kept, { id, server, kind, text, at, go }].slice(-TICKER_MAX);
+    tickerReceipts = nextReceipts;
+    return true;
   }
   function pruneTicker() {
     const at = Date.now();
@@ -9074,6 +9776,79 @@
       await openWikiPage(page, { noRedirect: true });
     } finally {
       navStepEnd();
+    }
+  }
+  async function goTickerMessage(server: number, channel: string, messageId: string) {
+    navStepStart();
+    try {
+      inboxView = false;
+      if (server !== activeServerId) await switchServer(server);
+      view = "chat";
+      // A channel update can arrive before its channel-list event. Register a readable fallback
+      // so the click can still land instead of silently selecting an absent sidebar entry.
+      if (cur && !cur.channels.some((c) => c.id === channel)) {
+        cur.channels = [...cur.channels, { id: channel, name: channelNameFor(server, channel) }];
+      }
+      if (cur?.active !== channel) await switchTo(channel);
+      else await refresh();
+      jumpToMessageId(messageId);
+    } finally {
+      navStepEnd();
+    }
+  }
+
+  function messageTickerText(server: number, channel: string, message: Msg): string {
+    const group = servers.find((s) => s.id === server);
+    const channelName = group?.channels.find((c) => c.id === channel)?.name ?? "channel";
+    // Profiles are scoped to the active server. Never label a cross-server fingerprint with the
+    // active server's unrelated profile; the group/channel plus message snippet remains useful.
+    const sender = server === activeServerId ? `${nameOf(message.author)}: ` : "";
+    return `${group?.name ?? "Server"} · #${channelName} · ${sender}${msgSnippet(message.text, 72)}`;
+  }
+
+  function notifyMessage(
+    server: number,
+    channel: string,
+    message: Msg | undefined,
+    kind: "message" | "mention",
+  ) {
+    if (!message?.id) return; // current clients assign stable ids; legacy rows cannot be click targets
+    if (server === activeServerId && message.author === myFp) return;
+    const accepted = pushTicker(
+      "message",
+      server,
+      messageTickerId(server, channel, message.id),
+      messageTickerText(server, channel, message),
+      () => void goTickerMessage(server, channel, message.id),
+    );
+    // A repeated channel-updated event (reaction, topic, duplicate bridge delivery) must not ring
+    // for the same row again. The ticker receipt is the shared exactly-once gate for both signals.
+    if (!accepted) return;
+    if (kind === "mention") playMention(server);
+    else playNotify(server);
+  }
+
+  async function notifyLatestChannelMessage(
+    server: number,
+    channel: string,
+    mode: "message" | "mention" | "detect",
+  ) {
+    try {
+      const channelMessages = await invoke<Msg[]>("get_messages", { server, channel });
+      const latest = channelMessages[channelMessages.length - 1];
+      let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
+      // Mention detection depends on the active server's identity/profile and read marks. If the
+      // user switches servers during this fetch, degrade to an ordinary message notification.
+      if (mode === "detect" && server === activeServerId && targetsMe(channel, channelMessages)) {
+        if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
+        kind = "mention";
+      }
+      notifyMessage(server, channel, latest, kind);
+    } catch {
+      // Without a stable message id there is nothing safe to put in a clickable ticker. Preserve
+      // the audible alert, but do not create a headline that cannot land anywhere.
+      if (mode === "mention") playMention(server);
+      else playNotify(server);
     }
   }
 
@@ -9191,19 +9966,14 @@
   // An item crawls exactly once and is then consumed: the lane is a notification, not a loop.
   // When the queue empties the slot settles back to the ident line, so a bar that is moving
   // always means something arrived, and a bar that stops means you are caught up.
-  let tbShown = $state<Set<string>>(new Set());
   // Newest six unshown: a burst drops its oldest rather than crawling for minutes.
-  let tbQueue = $derived(tickerItems.filter((i) => !tbShown.has(i.id)).slice(-6));
+  let tbQueue = $derived(tickerItems.slice(-6));
   let tbHead = $derived(tbQueue[0] ?? null);
   // The same thresholds the voice stage's meter uses, so the two readings of one mic agree.
   let tbMicBars = $derived([0, 0.25, 0.5, 0.75].filter((t) => micLevel > t).length);
-  const tbCrawlDur = (text: string) => Math.min(20, Math.max(6, 5.5 + text.length * 0.1));
+  const tbCrawlDur = (text: string) => Math.min(24, Math.max(10, 8.5 + text.length * 0.11));
   function tbAdvance(id: string) {
-    const next = new Set(tbShown);
-    next.add(id);
-    // Ids that have aged out of the feed can never come back, so the set stays bounded.
-    for (const k of next) if (!tickerItems.some((i) => i.id === k)) next.delete(k);
-    tbShown = next;
+    tickerItems = tickerItems.filter((item) => item.id !== id);
   }
 
   // ---- window chrome -------------------------------------------------------
@@ -9253,17 +10023,16 @@
         if (inCall && server === callServer && channel === callChannel) void refreshJukebox();
         if (server === activeServerId && channel === cur?.active) {
           refreshTopic(); // topic edits ride the same channel-updated event
-          refresh().then(() => {
-            // You're looking at this channel: only chime if the window isn't focused; use the
-            // mention chime if the just-arrived (newest) message is aimed at you.
+          refresh(true).then(() => {
+            // You're looking at this channel: only notify if the window isn't focused. The same
+            // stable message id gates its sound and its clickable ticker receipt exactly once.
             if (document.hasFocus()) return;
             const last = messages[messages.length - 1];
             const forMe =
               last &&
               last.author !== myFp &&
               (mentionsMe(last.text) || (!!last.reply_to && msgById.get(last.reply_to)?.author === myFp));
-            if (forMe) playMention();
-            else playNotify();
+            notifyMessage(server, channel, last, forMe ? "mention" : "message");
           });
           return;
         }
@@ -9272,24 +10041,15 @@
           if (!s.unread.includes(channel)) s.unread.push(channel);
           if (server !== activeServerId) s.dot = true;
           if (server !== activeServerId) {
-            playNotify(); // another server: no per-server identity here to detect a mention
+            // Another server: its profile identity is not loaded, so this is an ordinary-message
+            // alert, but its own server sound override still applies.
+            void notifyLatestChannelMessage(server, channel, "message");
           } else if (mentionChannels.has(channel)) {
-            playMention(); // already a known mention channel: new activity is still aimed at me
+            void notifyLatestChannelMessage(server, channel, "mention");
           } else {
-            // A non-active channel of the server I'm in: scan it for a message that @-mentions me or
-            // replies to one of mine. A hit gets the distinct mention chime + a badge; else the
-            // generic chime. (Already-badged channels are handled above without a re-scan.)
-            invoke<Msg[]>("get_messages", { server, channel })
-              .then((msgs) => {
-                if (server !== activeServerId) return; // switched servers mid-fetch: drop it
-                if (targetsMe(channel, msgs)) {
-                  if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
-                  playMention();
-                } else {
-                  playNotify();
-                }
-              })
-              .catch(() => playNotify());
+            // A non-active channel of the server I'm in: scan for a message aimed at me, then use
+            // that same fetched row for the ticker so its click target and sound cannot diverge.
+            void notifyLatestChannelMessage(server, channel, "detect");
           }
         }
       }),
@@ -9434,6 +10194,15 @@
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
     const onKey = (e: KeyboardEvent) => {
+      if (!locked && !e.repeat) {
+        const target = activeTextEffectTarget();
+        const effect = target ? effectForKeybind(textEffectKeybinds, keybindFromEvent(e)) : "";
+        if (target && effect) {
+          e.preventDefault();
+          if (captureTextEffectSelection(target)) void applyTextEffect(effect, target);
+          return;
+        }
+      }
       // Melody unlock: the home row is a piano while the lock screen's melody tab is up.
       if (gateEntry && unlockMethod === "melody" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const k = e.key.toLowerCase();
@@ -9502,7 +10271,8 @@
       }
       if (handleSpaceKey(e)) return;
       if (e.key === "Escape") {
-        if (showQuickSwitch) closeQuickSwitch();
+        if (textEffectTarget) { textEffectTarget = null; showTextEffectCatalog = false; }
+        else if (showQuickSwitch) closeQuickSwitch();
         else if (scanOpen) closeScan(null);
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
@@ -9624,6 +10394,7 @@
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
     window.addEventListener("mousedown", onMouseNav);
+    const stopTextEffects = mountTextEffectRuntime();
     // Keep relative presence times current.
     const tick = setInterval(() => {
       nowTick = Date.now();
@@ -9658,6 +10429,7 @@
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mousedown", onMouseNav);
+      stopTextEffects();
       releaseAll();
       stopPlayback();
       clearInterval(tick);
@@ -9745,6 +10517,17 @@
       {nameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
+{/snippet}
+
+{#snippet textEffectButton(target: TextEffectTarget, label = "Text effects")}
+  <button
+    type="button"
+    class="text-fx-trigger"
+    class:active={textEffectTarget === target}
+    title={`${label}: select text for the quick Aa strip, or open the full catalog`}
+    aria-label={label}
+    onclick={() => openTextEffectCatalog(target)}
+  ><span>Aa</span><b>FX</b></button>
 {/snippet}
 
 <!-- The profile editor, rendered by BOTH the profile surface (Ctrl+5) and Settings → My
@@ -10049,27 +10832,31 @@
         {/each}
       </div>
     </div>
-    <label class="field">
-      <span class="muted">About you</span>
-      <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
-    </label>
-    <div class="field message-frame-field">
+    <div class="field text-fx-field">
+      <div class="text-fx-field-head"><label class="muted" for="profile-bio">About you</label>{@render textEffectButton("bio", "Bio text effects")}</div>
+      <textarea id="profile-bio" bind:this={profileBioEl} bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…" onselect={() => onTextEffectSelection("bio")}></textarea>
+    </div>
+    <div class="field message-frame-field frame-studio">
       <div class="message-frame-head">
-        <span class="muted">Message frame</span>
-        <span class="message-frame-kicker">TX SKIN / LOCAL ID</span>
+        <div>
+          <span class="name-studio-label">MESSAGE FRAME STUDIO</span>
+          <strong>Frame &amp; arrival</strong>
+        </div>
+        <button type="button" class="ghost small" disabled={!pBubble} onclick={resetMessageStudio}>Reset all</button>
       </div>
-      <span class="muted small">Give your posts a personal transmission surface. It stays inside the message lane so timestamps and avatars remain clear.</span>
+      <span class="muted small">Style your posts without widening the message lane. Consecutive posts join into one continuous, translucent frame.</span>
+      <span class="name-studio-label">SURFACE</span>
       <div class="bubble-presets" aria-label="Message frame preset">
         {#each BUBBLE_PRESETS as b}
           <button
             type="button"
             class="bubble-swatch"
-            class:active={pBubble === b.value}
+            class:active={pFrame.surface === b.value}
             title={b.label}
-            aria-pressed={pBubble === b.value}
-            onclick={() => (pBubble = b.value)}
+            aria-pressed={pFrame.surface === b.value}
+            onclick={() => updateFrame({ surface: b.value })}
           >
-            <span class="bubble-swatch-demo" class:open={!b.value} style={b.value ? `--message-surface:${b.value}` : ""}>
+            <span class="bubble-swatch-demo" class:open={!b.value} style={b.value ? `--message-surface:${b.value};--message-opacity:${pFrame.opacity / 100}` : ""}>
               <i></i><i></i><i></i>
             </span>
             <span class="bubble-swatch-label"><b>{b.code}</b>{b.label}</span>
@@ -10078,23 +10865,188 @@
         <button
           type="button"
           class="bubble-swatch"
-          class:active={pBubble === customBubble()}
+          class:active={pFrame.surface === customBubble()}
           title="Custom gradient"
-          aria-pressed={pBubble === customBubble()}
-          onclick={() => (pBubble = customBubble())}
+          aria-pressed={pFrame.surface === customBubble()}
+          onclick={() => updateFrame({ surface: customBubble() })}
         >
-          <span class="bubble-swatch-demo" style={`--message-surface:${customBubble()}`}><i></i><i></i><i></i></span>
+          <span class="bubble-swatch-demo" style={`--message-surface:${customBubble()};--message-opacity:${pFrame.opacity / 100}`}><i></i><i></i><i></i></span>
           <span class="bubble-swatch-label"><b>USR</b>Custom mix</span>
         </button>
       </div>
-      {#if pBubble === customBubble()}
+      {#if pFrame.surface === customBubble()}
         <div class="grad-maker bubble-customizer">
-          <label><span>A / SRC</span><input type="color" value={pBubA} aria-label="Frame gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; pBubble = customBubble(); }} /></label>
+          <label><span>A / SRC</span><input type="color" value={pBubA} aria-label="Frame gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; updateFrame({ surface: customBubble() }); }} /></label>
           <span class="bubble-gradient-link" aria-hidden="true"></span>
-          <label><span>B / DST</span><input type="color" value={pBubB} aria-label="Frame gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; pBubble = customBubble(); }} /></label>
+          <label><span>B / DST</span><input type="color" value={pBubB} aria-label="Frame gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; updateFrame({ surface: customBubble() }); }} /></label>
         </div>
         <span class="muted small">Keep both nodes dark enough for white terminal text; the signal rail adds structure, not contrast.</span>
       {/if}
+      <span class="name-studio-label">CHASSIS</span>
+      <div class="frame-preset-grid" aria-label="Message frame chassis">
+        {#each FRAME_SHAPES as shape}
+          <button
+            type="button"
+            class="frame-preset-tile"
+            class:active={pFrame.shape === shape.id}
+            title={shape.description}
+            aria-pressed={pFrame.shape === shape.id}
+            disabled={!pFrame.surface}
+            onclick={() => updateFrame({ shape: shape.id })}
+          >
+            <span
+              class="frame-preset-demo frame-{shape.id}"
+              style={`--message-surface:${pFrame.surface || "#3a3f4b"};--message-opacity:${pFrame.opacity / 100};--message-edge:${pFrame.edge}%`}
+              aria-hidden="true"
+            ><i></i><i></i></span>
+            <span class="bubble-swatch-label"><b>{shape.code}</b>{shape.label}</span>
+          </button>
+        {/each}
+      </div>
+      <div class="frame-control-grid">
+        <label class="frame-control">
+          <span><b>Frame opacity</b><output>{pFrame.opacity}%</output></span>
+          <input type="range" min="20" max="90" step="1" value={pFrame.opacity} disabled={!pFrame.surface} oninput={(e) => updateFrame({ opacity: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label class="frame-control">
+          <span><b>Signal edge</b><output>{pFrame.edge}%</output></span>
+          <input type="range" min="0" max="100" step="1" value={pFrame.edge} disabled={!pFrame.surface} oninput={(e) => updateFrame({ edge: e.currentTarget.valueAsNumber })} />
+        </label>
+      </div>
+      <div class="effect-field-head frame-layer-head">
+        <div>
+          <span class="name-studio-label">FRAME LAYER STUDIO</span>
+          <strong>Ambient effects</strong>
+        </div>
+        <button
+          type="button"
+          class="ghost small"
+          class:active={!pFrame.effects.some((layer) => layer.enabled)}
+          disabled={!pFrame.effects.length}
+          title="Turn every frame layer off without losing its settings"
+          onclick={disableAllFrameEffects}
+        >All off</button>
+      </div>
+      <div class="frame-preset-grid" aria-label="Ambient message frame effect catalog">
+        {#each FRAME_EFFECTS as effect}
+          {@const configured = pFrame.effects.some((layer) => layer.id === effect.id)}
+          {@const demoLayer = pFrame.effects.find((layer) => layer.id === effect.id) ?? defaultMessageFrameLayer(effect.id)}
+          <button
+            type="button"
+            class="frame-preset-tile"
+            class:active={configured}
+            class:effect-off={configured && !demoLayer.enabled}
+            title={configured ? `${effect.label}: show its saved settings` : `Add ${effect.label}`}
+            aria-pressed={configured && demoLayer.enabled}
+            disabled={!pFrame.surface}
+            onclick={() => selectFrameEffect(effect.id)}
+          >
+            <span
+              class="frame-preset-demo frame-{pFrame.shape}"
+              style={`--message-surface:${pFrame.surface || "#3a3f4b"};--message-opacity:${pFrame.opacity / 100};--message-edge:${pFrame.edge}%`}
+              aria-hidden="true"
+            >
+              <span class="message-frame-fx"><i class="frame-fx-layer frame-fx-{effect.id}" class:reverse={effect.id !== "scan" && demoLayer.options.direction < 0} style={messageFrameLayerStyle(demoLayer)}></i></span>
+              <i></i><i></i>
+            </span>
+            <span class="bubble-swatch-label"><b>{effect.code}</b>{effect.label}</span>
+          </button>
+        {/each}
+      </div>
+      <span class="muted small">Add and combine layers, then tune, reorder, or temporarily disable them below. Later layers render above earlier ones.</span>
+      {#if pFrame.effects.length}
+        <div class="fx-settings-list frame-layer-list" aria-label="Applied frame layer options">
+          {#each pFrame.effects as layer, li (layer.id)}
+            {@const definition = FRAME_EFFECTS.find((effect) => effect.id === layer.id)}
+            <section class="fx-settings" class:effect-off={!layer.enabled} aria-label={`${definition?.label ?? layer.id} frame layer settings`}>
+              <div class="fx-settings-head">
+                <div class="fx-settings-label">
+                  <span class="frame-layer-index" aria-hidden="true">L{li + 1}</span>
+                  <button type="button" class="fx-settings-title" aria-expanded={!collapsedFrameEffects[layer.id]} onclick={() => (collapsedFrameEffects[layer.id] = !collapsedFrameEffects[layer.id])}>
+                    <span class="fx-chevron" aria-hidden="true">{collapsedFrameEffects[layer.id] ? "▸" : "▾"}</span>
+                    <span><strong>{definition?.label ?? layer.id}</strong><span class="muted small">{definition?.description ?? ""}</span></span>
+                  </button>
+                </div>
+                <div class="fx-settings-actions">
+                  <label class="fx-enabled"><input type="checkbox" checked={layer.enabled} onchange={(e) => setFrameEffectEnabled(layer.id, e.currentTarget.checked)} /><span>{layer.enabled ? "On" : "Off"}</span></label>
+                  <button type="button" class="ghost fx-order" disabled={li === 0} aria-label={`Move ${definition?.label ?? layer.id} down a visual layer`} onclick={() => moveFrameEffect(layer.id, -1)}>↑</button>
+                  <button type="button" class="ghost fx-order" disabled={li === pFrame.effects.length - 1} aria-label={`Move ${definition?.label ?? layer.id} up a visual layer`} onclick={() => moveFrameEffect(layer.id, 1)}>↓</button>
+                  <button type="button" class="ghost small" onclick={() => resetFrameEffect(layer.id)}>Reset</button>
+                  <button type="button" class="ghost small" onclick={() => removeFrameEffect(layer.id)}>Remove</button>
+                </div>
+              </div>
+              {#if !collapsedFrameEffects[layer.id]}
+                <div class="fx-settings-body">
+                  <div class="fx-option-grid">
+                    {#if layer.id !== "scan"}<label class="fx-option"><span>Speed <output>{layer.options.speed}</output></span><input type="range" min="1" max="10" value={layer.options.speed} oninput={(e) => updateFrameEffect(layer.id, "speed", e.currentTarget.valueAsNumber)} /></label>{/if}
+                    <label class="fx-option"><span>Strength <output>{layer.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={layer.options.intensity} oninput={(e) => updateFrameEffect(layer.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+                  </div>
+                  {#if layer.id === "scan"}
+                    <label class="fx-option"><span>Beam width <output>{layer.options.amount}px</output></span><input type="range" min="1" max="8" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                    <span class="muted small">Shares one top-to-bottom sweep across the visible message stack with every Scan-enabled frame.</span>
+                  {:else if layer.id === "pulse"}
+                    <label class="fx-option"><span>Breathing depth <output>{layer.options.amount}%</output></span><input type="range" min="10" max="80" step="5" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                  {:else if layer.id === "trace"}
+                    <label class="fx-option"><span>Trace length <output>{layer.options.amount}%</output></span><input type="range" min="10" max="70" step="5" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                    <button type="button" class="ghost small fx-direction" onclick={() => updateFrameEffect(layer.id, "direction", layer.options.direction < 0 ? 1 : -1)}>{layer.options.direction < 0 ? "◀ right to left" : "▶ left to right"}</button>
+                  {:else}
+                    <label class="fx-option"><span>Refresh variance <output>{layer.options.amount}%</output></span><input type="range" min="5" max="80" step="5" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                  {/if}
+                </div>
+              {/if}
+            </section>
+          {/each}
+        </div>
+      {/if}
+      <div class="message-frame-head motion-studio-head">
+        <div>
+          <span class="name-studio-label">MESSAGE ARRIVAL STUDIO</span>
+          <strong>New-message arrival</strong>
+        </div>
+        <span class="message-frame-kicker">PROFILE MOTION</span>
+      </div>
+      <div class="frame-motion-grid" aria-label="New message arrival animation">
+        {#each FRAME_MOTIONS as motion}
+          <button
+            type="button"
+            class="frame-motion-tile motion-demo-{motion.id}"
+            class:active={pFrame.motion === motion.id}
+            title={motion.description}
+            aria-pressed={pFrame.motion === motion.id}
+            onclick={() => updateFrame({ motion: motion.id })}
+          >
+            <span aria-hidden="true">{motion.glyph}</span>
+            <b>{motion.label}</b>
+          </button>
+        {/each}
+      </div>
+      {#if pFrame.motion !== "none"}
+        <div class="arrival-settings">
+          <div class="fx-option-grid">
+            <label class="fx-option"><span>Duration <output>{pFrame.arrival.duration}ms</output></span><input type="range" min="240" max="1200" step="20" value={pFrame.arrival.duration} oninput={(e) => updateFrameArrival({ duration: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option"><span>{pFrame.motion === "pop" ? "Scale depth" : "Travel"} <output>{pFrame.arrival.distance}</output></span><input type="range" min="4" max="80" step="2" value={pFrame.arrival.distance} oninput={(e) => updateFrameArrival({ distance: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option"><span>Starting visibility <output>{pFrame.arrival.fade}%</output></span><input type="range" min="0" max="80" step="5" value={pFrame.arrival.fade} oninput={(e) => updateFrameArrival({ fade: e.currentTarget.valueAsNumber })} /></label>
+            <div class="arrival-direction">
+              <span class="muted small">ENTRY VECTOR</span>
+              <button type="button" class="ghost small" disabled={pFrame.motion === "pop"} onclick={() => updateFrameArrival({ direction: pFrame.arrival.direction < 0 ? 1 : -1 })}>
+                {#if pFrame.motion === "fly"}{pFrame.arrival.direction < 0 ? "← from left" : "from right →"}
+                {:else if pFrame.motion === "glide"}{pFrame.arrival.direction < 0 ? "↑ from above" : "from below ↓"}
+                {:else if pFrame.motion === "drift"}{pFrame.arrival.direction < 0 ? "↖ drift left" : "drift right ↗"}
+                {:else}centred{/if}
+              </button>
+            </div>
+          </div>
+          <div class="arrival-curve-picker" aria-label="Arrival easing">
+            <span class="name-studio-label">RESPONSE CURVE</span>
+            <div>
+              {#each FRAME_EASINGS as easing}
+                <button type="button" class:active={pFrame.arrival.easing === easing.id} title={easing.description} aria-pressed={pFrame.arrival.easing === easing.id} onclick={() => updateFrameArrival({ easing: easing.id })}>{easing.label}</button>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {/if}
+      <span class="muted small">Chassis, layer stack, and arrival recipe travel with your profile. Viewers may flatten peer frames or disable arrivals locally in Settings - Appearance.</span>
     </div>
     <div class="field">
       <span class="muted">Avatar</span>
@@ -10117,13 +11069,35 @@
   </div>
 {/snippet}
 
+{#snippet frameLayers(frame: MessageFrame, visible = true)}
+  {#if visible && frame.surface && frame.effects.some((layer) => layer.enabled)}
+    <span class="message-frame-fx" aria-hidden="true">
+      {#each frame.effects as layer (layer.id)}
+        {#if layer.enabled}
+          <i class="frame-fx-layer frame-fx-{layer.id}" class:reverse={layer.id !== "scan" && layer.options.direction < 0} style={messageFrameLayerStyle(layer)}></i>
+        {/if}
+      {/each}
+    </span>
+  {/if}
+{/snippet}
+
 <!-- The settings live preview: the REAL message-log markup at miniature scale, fed by the
      profile DRAFT, so it can never drift from the log and every knob (density, text size,
      clock, flatten, message frame, name style) applies the moment you turn it. -->
 {#snippet previewLog()}
   {@const pv = messageFrameStyle(pBubble)}
-  <ul class="messages stx-plog">
-    <li class:has-bubble={!!pv} style={pv}>
+  {@const previewMotion = pFrame.motion}
+  <ul
+    class="messages stx-plog frame-motion-preview"
+    class:preview-arrival={previewMotion !== "none"}
+    class:arrival-glide={previewMotion === "glide"}
+    class:arrival-fly={previewMotion === "fly"}
+    class:arrival-pop={previewMotion === "pop"}
+    class:arrival-drift={previewMotion === "drift"}
+    style={messageFrameArrivalStyle(pBubble)}
+    use:channelScan
+  >
+    <li class="frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-start={!!pv} style={pv}>
       <span class="t">
         <span class="gutter-avatar">
           {#if pAvatar}
@@ -10134,6 +11108,7 @@
         </span>
       </span>
       <div class="m-body">
+        {@render frameLayers(pFrame)}
         <span class="author">
           <span class="author-link">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
           {#if myFp && badges[myFp]}
@@ -10145,9 +11120,9 @@
         <span class="text">tea is ready when you are <span class="mention mention-me">@you</span></span>
       </div>
     </li>
-    <li class="grouped" class:has-bubble={!!pv} style={pv}>
+    <li class="grouped frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-end={!!pv} style={pv}>
       <span class="t">{fmtTime(Date.now())}</span>
-      <div class="m-body"><span class="text">bringing biscuits too</span></div>
+      <div class="m-body">{@render frameLayers(pFrame)}<span class="text">bringing biscuits too</span></div>
     </li>
   </ul>
 {/snippet}
@@ -10181,14 +11156,20 @@
           <div class="stx-prof-body">
             <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
             {#if myFp}<div class="stx-pfp">FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</div>{/if}
+            {#if pDescription}<span class="stx-prof-desc" use:richClicks>{@html renderMessage(pDescription, "")}</span>{/if}
           </div>
         </div>
       </div>
     {/if}
     {#if namePreviewMode === "all" || namePreviewMode === "chat"}
       <div class="stx-pcard">
-        <div class="stx-pcap">IN CHAT</div>
-        {@render previewLog()}
+        <div class="stx-pcap frame-preview-cap">
+          <span>IN CHAT</span>
+          <button type="button" title="Replay the selected arrival" disabled={pFrame.motion === "none"} onclick={() => (framePreviewReplay += 1)}>REPLAY</button>
+        </div>
+        {#key `${pBubble}:${framePreviewReplay}`}
+          {@render previewLog()}
+        {/key}
       </div>
     {/if}
     {#if namePreviewMode === "all" || namePreviewMode === "member"}
@@ -10884,7 +11865,7 @@
     <div class="ip-tabs" role="tablist">
       <button type="button" role="tab" aria-selected={insertTab === "files"} class:active={insertTab === "files"} onclick={() => (insertTab = "files")}>Files</button>
       {#if !cur?.isDm}
-        <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Status</button>
+        <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Announcements</button>
         <button type="button" role="tab" aria-selected={insertTab === "wiki"} class:active={insertTab === "wiki"} onclick={() => (insertTab = "wiki")}>Wiki</button>
         <button type="button" role="tab" aria-selected={insertTab === "events"} class:active={insertTab === "events"} onclick={() => (insertTab = "events")}>Events</button>
       {/if}
@@ -10895,7 +11876,7 @@
       bind:this={insertInput}
       class="ip-search"
       bind:value={insertQuery}
-      placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
+      placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your announcements…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
       onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeInsert(); (insertTarget === "wiki" ? wikiTextarea : composerEl)?.focus(); } }}
     />
     <div class="ip-list">
@@ -10924,7 +11905,7 @@
       {:else if insertTab === "status"}
         {#each insertStatuses as s}
           <div class="ip-row">
-            <button type="button" class="ip-item" title="Insert a link to this post" onclick={() => insertStatusRef(s)}>
+            <button type="button" class="ip-item" title="Insert a link to this announcement" onclick={() => insertStatusRef(s)}>
               <span class="ip-ico">◈</span>
               <span class="ip-name">{msgSnippet(s.text, 70) || "(empty post)"}</span>
               <span class="ip-meta">{fmtTime(s.ts)}</span>
@@ -10932,14 +11913,14 @@
             <span class="ip-mode">link</span>
           </div>
         {:else}
-          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your posts match that." : "You haven't posted a status on this server yet."}</p>
+          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your announcements match that." : "You haven't posted an announcement on this server yet."}</p>
         {/each}
       {:else if insertTab === "events"}
         {#each insertEvents as ev (ev.id)}
           <div class="ip-row">
             <button type="button" class="ip-item" title="Insert a link to this event" onclick={() => insertEventRef(ev)}>
               <span class="ip-ico">⧗</span>
-              <span class="ip-name">{ev.title}</span>
+              <span class="ip-name">{msgSnippet(ev.title, 70)}</span>
               <span class="ip-meta">{fmtEventWhen(ev)}</span>
             </button>
             <span class="ip-mode">link</span>
@@ -11082,7 +12063,7 @@
       <p class="muted small">Nothing scheduled: add an event on the right.</p>
     {/each}
   {:else if view === "status" && !dm}
-    <h3><span>Status</span></h3>
+    <h3><span>Announcements</span></h3>
     <p class="muted small">A slow feed for this server: one post at a time, no replies.</p>
   {:else if !dm}
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
@@ -11201,6 +12182,7 @@
             style="--crawl: {tbCrawlDur(head.text)}s"
             title={head.text}
             onclick={head.go}
+            onanimationstart={() => { if (head.kind !== "message") playNewsTicker(head.server); }}
             onanimationend={() => tbAdvance(head.id)}
           >
             <span class="tb-tick-glyph" aria-hidden="true"></span>
@@ -11212,7 +12194,6 @@
       <span class="tb-ident" data-tauri-drag-region>mewtual@{tbPreset} · {APP_VERSION}</span>
     {/if}
   </div>
-  <span class="tb-drag" data-tauri-drag-region></span>
   <div class="tb-controls">
     <button type="button" class="tb-btn" aria-label="Minimise" title="Minimise" onclick={() => appWindow.minimize()}>
       <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0.5 5.5h9" /></svg>
@@ -11884,7 +12865,7 @@
               <button class:active={inboxMode === "news"} onclick={() => { inboxMode = "news"; newsUnseen = false; loadNews(); }}>News</button>
             </div>
             <span class="muted small">
-              {inboxMode === "mentions" ? "Mentions & replies, across every server & DM" : "Status posts & upcoming events, across your servers"}
+              {inboxMode === "mentions" ? "Mentions & replies, across every server & DM" : "Announcements & upcoming events, across your servers"}
             </span>
             <button class="ghost small inbox-refresh" onclick={() => (inboxMode === "mentions" ? loadInbox() : loadNews())} disabled={inboxMode === "mentions" ? inboxLoading : newsLoading}>↻ Refresh</button>
           </div>
@@ -11894,31 +12875,31 @@
             {:else}
               {#if newsUpcoming.length}
                 <h3 class="ev-h"><span>Upcoming events</span></h3>
-                <ul class="inbox-list">
+                <ul class="inbox-list" use:richClicks>
                   {#each newsUpcoming as n (n.server + ":" + n.kind + ":" + n.ts + n.text)}
                     <li class="inbox-item">
-                      <button class="inbox-jump" onclick={() => jumpToNews(n)}>
+                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
                         <div class="inbox-meta">
                           <span class="inbox-tag event-tag">⧗ event</span>
                           <span class="inbox-where">{n.serverName}</span>
                           <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{dayLabel(n.ts)}</span>
                         </div>
-                        <div class="inbox-body"><span class="inbox-text">{n.text}</span></div>
+                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
                       </button>
                     </li>
                   {/each}
                 </ul>
               {/if}
-              <h3 class="ev-h"><span>Recent status</span></h3>
+              <h3 class="ev-h"><span>Recent announcements</span></h3>
               {#if !newsFeed.length}
-                <p class="muted inbox-empty">No status posts yet: servers' Status surfaces feed this.</p>
+                <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
               {:else}
-                <ul class="inbox-list">
+                <ul class="inbox-list" use:richClicks>
                   {#each newsFeed as n (n.server + ":" + n.ts + ":" + n.author)}
                     <li class="inbox-item">
-                      <button class="inbox-jump" onclick={() => jumpToNews(n)}>
+                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
                         <div class="inbox-meta">
-                          <span class="inbox-tag reply-tag">◇ status</span>
+                          <span class="inbox-tag reply-tag">◇ announcement</span>
                           <span class="inbox-where">{n.serverName}</span>
                           <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{fmtTime(n.ts)}</span>
                         </div>
@@ -12078,7 +13059,7 @@
               {#if files.length}<span class="tab-count">{files.length}</span>{/if}
             </button>
             <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
-              <span class="sb-ico">◇</span>status
+              <span class="sb-ico">◇</span>announcements
             </button>
             <button type="button" class:active={view === "wiki"} onclick={() => switchView("wiki")}>
               <span class="sb-ico">✎</span>wiki
@@ -12299,6 +13280,7 @@
             class:drag-over={dragOver}
             bind:this={messagesEl}
             use:richClicks
+            use:channelScan
             ondragover={(e) => { e.preventDefault(); dragOver = true; }}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
@@ -12318,20 +13300,33 @@
                 !m.reply_to &&
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
-              {@const bubble = bubbleStyle(m.author, m.author === myFp || identityOf(m.author).fp === identityOf(myFp).fp)}
+              {@const framePosition = messageFramePosition(messages, mi, messageFrameBreaks)}
+              {@const bubble = bubbleStyle(m.author)}
+              {@const messageFrame = parseMessageFrame(profileFor(m.author)?.bubble)}
+              {@const arrival = arrivalMotion(m.author, m.id)}
+              {@const arrivalVars = arrivalStyle(m.author)}
               {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
               {@const ident = identityOf(m.author)}
               <li
+                class="frame-{messageFrame.shape}"
                 data-mi={mi}
                 class:own={m.author === myFp}
                 class:grouped
                 class:unread={isUnread(m)}
                 class:pings-me={m.author !== myFp && mentionsMe(m.text)}
                 class:has-bubble={!!bubble}
+                class:frame-start={!!bubble && framePosition === "start"}
+                class:frame-middle={!!bubble && framePosition === "middle"}
+                class:frame-end={!!bubble && framePosition === "end"}
+                class:message-arrival={arrival !== "none"}
+                class:arrival-glide={arrival === "glide"}
+                class:arrival-fly={arrival === "fly"}
+                class:arrival-pop={arrival === "pop"}
+                class:arrival-drift={arrival === "drift"}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchCur?.ch === cur?.active && searchCur?.idx === mi}
                 class:flash={!!m.id && m.id === flashId}
-                style={bubble}
+                style={[bubble, arrivalVars].filter(Boolean).join(";")}
                 use:contextMenu={() => messageMenu(m)}
               >
                 {#if grouped}
@@ -12348,6 +13343,7 @@
                   </span>
                 {/if}
                 <div class="m-body">
+                {@render frameLayers(messageFrame, !!bubble)}
                 {#if m.reply_to}
                   {@const parent = msgById.get(m.reply_to)}
                   <button
@@ -12399,11 +13395,14 @@
                 {#if m.id && editingId === m.id}
                   <div class="msg-edit">
                     <textarea
+                      bind:this={editMessageEl}
                       bind:value={editDraft}
                       rows="2"
+                      onselect={() => onTextEffectSelection("chat-edit")}
                       onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveEdit(m); } else if (e.key === "Escape") { e.preventDefault(); cancelEdit(); } }}
                     ></textarea>
                     <div class="msg-edit-actions">
+                      {@render textEffectButton("chat-edit", "Edited message text effects")}
                       <button class="ghost small" onclick={() => saveEdit(m)}>Save</button>
                       <button class="ghost small" onclick={cancelEdit}>Cancel</button>
                       <span class="muted small">Enter to save · Esc to cancel</span>
@@ -12531,7 +13530,7 @@
                 type="button"
                 class="attach ip-toggle"
                 class:on={showInsert && insertTarget === "chat"}
-                title="Link or embed a file, one of your status posts, or a wiki page"
+                title="Link or embed a file, one of your announcements, or a wiki page"
                 aria-label="Insert a link or embed"
                 aria-expanded={showInsert && insertTarget === "chat"}
                 onclick={() => toggleInsert("chat")}
@@ -12553,10 +13552,12 @@
                 class="composer-input"
                 placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
                 oninput={onComposerInput}
+                onselect={() => onTextEffectSelection("chat")}
                 onkeydown={onComposerKeydown}
                 onblur={() => queueMicrotask(() => (mentionQuery = null))}
               ></textarea>
               <span class="c-hint">enter to send · shift+enter newline</span>
+              {@render textEffectButton("chat", "Message text effects")}
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
               <button type="submit" disabled={uploading || sending}>Send</button>
             </form>
@@ -12603,7 +13604,7 @@
             {/if}
           </ul>
         {:else if view === "status"}
-          <h2>Status</h2>
+          <h2>Announcements</h2>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <form
             class="composer"
@@ -12623,7 +13624,8 @@
                 onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
               />
             </label>
-            <input bind:value={statusDraft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Post a status…"} />
+            {@render textEffectButton("announcement", "Announcement text effects")}
+            <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
             <button type="submit" disabled={uploading}>Post</button>
           </form>
           <ul class="status-list tab-pane" bind:this={statusEl} use:richClicks>
@@ -12637,7 +13639,7 @@
                 <span class="status-text">{@html renderMessage(s.text, myMentionName)}</span>
               </li>
             {:else}
-              <li class="muted">No status posts yet.</li>
+              <li class="muted">No announcements yet.</li>
             {/each}
           </ul>
         {:else if view === "wiki"}
@@ -12751,12 +13753,13 @@
                     <button class="wiki-tb" title="Numbered list" onclick={() => wikiList(true)}>1≡</button>
                     <button class="wiki-tb" title="Insert a table" onclick={insertWikiTable}>⊞</button>
                     <button class="wiki-tb" title="Insert an infobox: the summary card that floats at the top right of the page (one per page)" onclick={insertWikiInfobox}>▤</button>
+                    {@render textEffectButton("wiki", "Wiki text effects")}
                     <span class="wiki-tb-sep"></span>
                     <div class="wiki-ip-anchor">
                       <button
                         class="wiki-tb"
                         class:active={showInsert && insertTarget === "wiki"}
-                        title="Link or embed a shared file, a status post, another page, or an event"
+                        title="Link or embed a shared file, an announcement, another page, or an event"
                         aria-expanded={showInsert && insertTarget === "wiki"}
                         onclick={() => toggleInsert("wiki")}
                       >+ insert</button>
@@ -12781,7 +13784,7 @@
                     ondragleave={() => (dragOver = false)}
                     ondrop={onWikiDrop}
                   >
-                    <textarea bind:this={wikiTextarea} bind:value={wikiBody} oninput={() => (wikiDirty = true)} onkeydown={onWikiEditKey} rows="18"
+                    <textarea bind:this={wikiTextarea} bind:value={wikiBody} oninput={() => (wikiDirty = true)} onselect={() => onTextEffectSelection("wiki")} onkeydown={onWikiEditKey} rows="18"
                       placeholder={wikiFormat === "wiki"
                         ? "Wikitext. == Heading ==, '''bold''', ''italic'', [[Page]] or [[Page|label]] links, * bullet / # numbered lists; drop or attach a file to embed it."
                         : "Markdown. # Heading, **bold**, *italic*, [[Page]] or [[Page|label]] links, - lists; drop or attach a file to embed it."}></textarea>
@@ -12904,12 +13907,12 @@
               ondrop={onEventDrop}
               onsubmit={(e) => { e.preventDefault(); createEvent(); }}
             >
-              <input bind:value={evTitle} maxlength="120" placeholder="Event title" />
+              <div class="text-fx-input-row"><input bind:this={eventTitleEl} bind:value={evTitle} maxlength="120" placeholder="Event title" onselect={() => onTextEffectSelection("event-title")} />{@render textEffectButton("event-title", "Event title effects")}</div>
               <div class="event-times">
                 <label><span class="muted small">Starts</span><input type="datetime-local" bind:value={evStart} /></label>
                 <label><span class="muted small">Ends (optional)</span><input type="datetime-local" bind:value={evEnd} /></label>
               </div>
-              <textarea bind:value={evBody} rows="2" maxlength="1024" placeholder="Details (optional)"></textarea>
+              <div class="text-fx-input-row"><textarea bind:this={eventBodyEl} bind:value={evBody} rows="2" maxlength="1024" placeholder="Details (optional)" onselect={() => onTextEffectSelection("event-body")}></textarea>{@render textEffectButton("event-body", "Event detail effects")}</div>
               <div class="ev-image-row">
                 {#if evImage}
                   <span class="ev-image-pick">
@@ -12936,17 +13939,17 @@
               <button disabled={!evTitle.trim() || !evStart}>Create event</button>
             </form>
             <h3 class="ev-h"><span>Upcoming: {upcomingEvents.length}</span></h3>
-            <ul class="event-list">
+            <ul class="event-list" use:richClicks>
               {#each upcomingEvents as e (e.id)}
                 <li class="event-row" class:flash={flashEventId === e.id}>
                   <div class="ev-when">{fmtEventWhen(e)}</div>
                   <div class="ev-main">
-                    <div class="ev-title">{e.title}</div>
-                    {#if e.body}<div class="ev-body">{e.body}</div>{/if}
+                    <div class="ev-title">{@html renderMessage(e.title, "")}</div>
+                    {#if e.body}<div class="ev-body">{@html renderMessage(e.body, "")}</div>{/if}
                     <div class="ev-meta">by {@render nameTag(e.author)}</div>
                   </div>
                   {#if e.image && mediaUrls[e.image]}
-                    <img class="ev-poster" src={mediaUrls[e.image]} alt={`Poster for ${e.title}`} />
+                    <img class="ev-poster" src={mediaUrls[e.image]} alt={`Poster for ${plainSummary(e.title, 100)}`} />
                   {/if}
                   {#if e.author === myFp || canModerate}
                     {#if confirmDeleteEventId === e.id}
@@ -12962,12 +13965,13 @@
             </ul>
             {#if pastEvents.length}
               <h3 class="ev-h"><span>Past: {pastEvents.length}</span></h3>
-              <ul class="event-list past">
+              <ul class="event-list past" use:richClicks>
                 {#each pastEvents as e (e.id)}
                   <li class="event-row">
                     <div class="ev-when">{fmtEventWhen(e)}</div>
                     <div class="ev-main">
-                      <div class="ev-title">{e.title}</div>
+                      <div class="ev-title">{@html renderMessage(e.title, "")}</div>
+                      {#if e.body}<div class="ev-body">{@html renderMessage(e.body, "")}</div>{/if}
                       <div class="ev-meta">by {@render nameTag(e.author)}</div>
                     </div>
                     {#if e.author === myFp || canModerate}
@@ -13432,6 +14436,70 @@
       </div>
     {/if}
 
+    {#if textEffectTarget && !showTextEffectCatalog && textEffectSelection.start !== textEffectSelection.end}
+      {@const fxTarget = textEffectTarget}
+      <div
+        class="text-fx-selection-bar"
+        style={`left:${textEffectBubble.x}px;top:${textEffectBubble.y}px`}
+        role="toolbar"
+        aria-label={`Apply a text effect to selected ${textEffectTargetLabel(fxTarget)}`}
+      >
+        {#each quickTextEffects as effect (effect.id)}
+          <button
+            type="button"
+            class="text-fx-aa"
+            aria-label={`Apply ${effect.label}`}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => applyTextEffect(effect.id, fxTarget)}
+          >
+            <span class="text-fx-aa-live" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
+            <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
+          </button>
+        {/each}
+        <button type="button" class="text-fx-aa more" title="Every text effect and copyable code" onmousedown={(e) => e.preventDefault()} onclick={() => (showTextEffectCatalog = true)}>＋</button>
+      </div>
+    {/if}
+
+    {#if textEffectTarget && showTextEffectCatalog}
+      {@const fxTarget = textEffectTarget}
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) { showTextEffectCatalog = false; textEffectTarget = null; } }}>
+        <div class="overlay-card text-fx-catalog" role="dialog" aria-modal="true" aria-labelledby="text-fx-title">
+          <header class="overlay-head">
+            <div><span class="name-studio-label">TEXT EFFECTS // {textEffectTargetLabel(fxTarget).toUpperCase()}</span><h2 id="text-fx-title">Make the selected words act</h2></div>
+            <button class="ghost" title="Close" onclick={() => { showTextEffectCatalog = false; textEffectTarget = null; }}>✕</button>
+          </header>
+          <div class="text-fx-catalog-intro">
+            <p>Select an Aa preview to wrap the current selection. Hover any preview for its plain-language behavior.</p>
+            <code>[fx:cyber]copy/pasteable text[/fx]</code>
+            <span class="muted small">Full mode animates and reacts to the pointer. Low is static and silent. Plain removes the decoration. Censor stays concealed until revealed.</span>
+          </div>
+          <input class="text-fx-search" bind:value={textEffectQuery} placeholder="Find shaky, trans pride, cyber, CRT…" aria-label="Search text effects" />
+          <div class="text-fx-catalog-scroll">
+            {#each TEXT_EFFECT_GROUPS as group}
+              {@const effects = filteredTextEffects.filter((effect) => effect.group === group)}
+              {#if effects.length}
+                <section class="text-fx-group">
+                  <h3>{group}</h3>
+                  <div class="text-fx-grid">
+                    {#each effects as effect (effect.id)}
+                      <div class="text-fx-choice">
+                        <button type="button" class="text-fx-choice-main" onclick={() => applyTextEffect(effect.id, fxTarget)}>
+                          <span class="text-fx-choice-preview">{@html textEffectHtml(effect.id, effect.preview)}</span>
+                          <span class="text-fx-choice-name"><strong>{effect.label}</strong><code>[fx:{effect.id}]</code></span>
+                          <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}<span>{effect.animated ? "Full: animated · Low: static" : "Static in every motion mode"}</span></span>
+                        </button>
+                        <button type="button" class="text-fx-copy" title={`Copy ${effect.label} markup`} aria-label={`Copy ${effect.label} markup`} onclick={() => copyText(`[fx:${effect.id}]text[/fx]`)}>⧉</button>
+                      </div>
+                    {/each}
+                  </div>
+                </section>
+              {/if}
+            {/each}
+          </div>
+        </div>
+      </div>
+    {/if}
+
     {#if profileCard}
       {@const fp = profileCard}
       {@const p = profiles[fp]}
@@ -13467,7 +14535,7 @@
               </div>
             </div>
             {#if p?.description}
-              <p class="pc-desc">{p.description}</p>
+              <p class="pc-desc" use:richClicks>{@html renderMessage(p.description, "")}</p>
             {:else}
               <p class="muted small">No description yet.</p>
             {/if}
@@ -14110,6 +15178,26 @@
                   </div>
                 </div>
               </section>
+              <section class="set-section">
+                <h3>Message text effects</h3>
+                <p class="muted small">
+                  Your local comfort setting for effects other people add to prose. The operating
+                  system's reduced-motion preference also forces Low. Censored text always stays
+                  concealed until you reveal it.
+                </p>
+                <div class="field">
+                  <span class="muted small">Playback</span>
+                  <div class="stx-seg text-fx-mode">
+                    <button type="button" class:on={!appearance.textEffects} onclick={() => (appearance = { ...appearance, textEffects: "" })}>FULL</button>
+                    <button type="button" class:on={appearance.textEffects === "low"} onclick={() => (appearance = { ...appearance, textEffects: "low" })}>LOW</button>
+                    <button type="button" class:on={appearance.textEffects === "off"} onclick={() => (appearance = { ...appearance, textEffects: "off" })}>PLAIN</button>
+                  </div>
+                </div>
+                <p class="muted small">
+                  Full includes animation, pointer reactions, and Animalese voice blips. Low keeps
+                  a static visual identity and stays silent. Plain shows ordinary readable text.
+                </p>
+              </section>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <section class="set-section">
                   <h3>Livery</h3>
@@ -14157,11 +15245,20 @@
                 <label class="toggle">
                   <input
                     type="checkbox"
+                    checked={appearance.messageMotion !== "off"}
+                    onchange={() => (appearance = { ...appearance, messageMotion: appearance.messageMotion === "off" ? "" : "off" })}
+                  />
+                  <span>Message arrivals: let each member's messages use that member's chosen entrance</span>
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
                     checked={appearance.flat}
                     onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
                   />
-                  <span>Flatten messages: ignore other members' custom message frames</span>
+                  <span>Flatten other members' custom message frames (mine stays visible)</span>
                 </label>
+                <p class="muted small">These are local viewing controls. Arrival motion is resolved per message author; flattening only hides peer frames.</p>
                 <label class="toggle">
                   <input
                     type="checkbox"
@@ -14303,14 +15400,62 @@
               <div class="stx-crumb">SETTINGS // APP // NOTIFICATIONS</div>
               <h1>Notifications</h1>
               <section class="set-section">
+                <h3>Global sound defaults</h3>
                 <label class="toggle">
                   <input type="checkbox" checked={soundOn} onchange={toggleSound} />
-                  <span>Play app sounds: message alerts and Server Space effects</span>
+                  <span>Play app sounds on this device</span>
                 </label>
-                <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
+                <p class="muted small">This master switch silences notification tones and Server Space effects. Each server can inherit or override the three notification categories below.</p>
               </section>
               <section class="set-section">
-                <p class="muted small">Voice-call notifications are per server: each server's Settings → Overview has the toggle.</p>
+                <h3>Notification tones</h3>
+                <div class="sound-settings-list">
+                  {#each NOTIFICATION_SOUND_KINDS as kind (kind)}
+                    {@const pref = globalSoundPrefs[kind]}
+                    <article class="sound-setting-row">
+                      <div class="sound-setting-head">
+                        <div><strong>{SOUND_LABELS[kind].title}</strong><span>{SOUND_LABELS[kind].detail}</span></div>
+                        <label class="toggle compact">
+                          <input type="checkbox" checked={pref.enabled} onchange={(e) => setGlobalSoundEnabled(kind, e.currentTarget.checked)} />
+                          <span>{pref.enabled ? "On" : "Off"}</span>
+                        </label>
+                      </div>
+                      <div class="sound-setting-controls">
+                        <label>
+                          <span>Tone</span>
+                          <select value={pref.tone} onchange={(e) => setGlobalToneMode(kind, e.currentTarget.value as "default" | "custom")}>
+                            <option value="default">Built-in</option>
+                            <option value="custom" disabled={!pref.custom}>Custom{pref.custom ? ` · ${pref.custom.name}` : ""}</option>
+                          </select>
+                        </label>
+                        <button type="button" class="ghost small" disabled={!soundOn || !pref.enabled} onclick={() => playConfiguredSound(kind, null)}>Test</button>
+                        <label class="ghost small sound-file">
+                          {pref.custom ? "Replace custom…" : "Choose custom…"}
+                          <input type="file" accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.ogg,.webm,.m4a,.aac,.flac" onchange={(e) => { const input = e.currentTarget; void importCustomTone("global", kind, input.files).finally(() => (input.value = "")); }} />
+                        </label>
+                        {#if pref.custom}
+                          <button type="button" class="ghost small" onclick={() => removeCustomTone("global", kind)}>Remove custom</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+                <p class="muted small">Custom tones stay on this device. MP3/WAV/OGG/WebM/M4A/AAC/FLAC · up to {MAX_CUSTOM_TONE_SECONDS}s and {Math.round(MAX_CUSTOM_TONE_BYTES / 1024)} KiB.</p>
+              </section>
+              <section class="set-section">
+                <h3>Current server</h3>
+                {#if activeServerId !== null && cur}
+                  <div class="sound-effective-list">
+                    {#each NOTIFICATION_SOUND_KINDS as kind (kind)}
+                      {@const effective = soundPolicy(kind, activeServerId)}
+                      <span><b>{SOUND_LABELS[kind].title}</b><i class:on={effective.enabled}>{effective.enabled ? "enabled" : "disabled"}</i><small>{effective.source}</small></span>
+                    {/each}
+                    <span><b>Voice-call banner</b><i class:on={acceptCallsHere}>{acceptCallsHere ? "enabled" : "disabled"}</i><small>server setting</small></span>
+                  </div>
+                  <button type="button" class="ghost small" onclick={() => { showSettings = false; openServerSettings(null, "notifications"); }}>Open {cur.name} overrides</button>
+                {:else}
+                  <p class="muted small">Open a server to inspect or change its overrides.</p>
+                {/if}
               </section>
             {:else if settingsPage === "voice"}
               <div class="stx-crumb">SETTINGS // APP // VOICE &amp; CALLS</div>
@@ -14358,6 +15503,7 @@
                   <li><code>~~strike~~</code> → <s>strike</s></li>
                   <li><code>`code`</code> → <code>code</code> (inline) · <code>```</code> for a block</li>
                   <li><code>||spoiler||</code> → a blacked-out spoiler you click to reveal</li>
+                  <li><code>[fx:cyber]signal[/fx]</code> → a text effect; select words or use the Aa FX button for the catalog</li>
                   <li><code>&gt; quote</code> → a block quote</li>
                   <li><code>@</code> then a name → mention a member (notifies them)</li>
                   <li><code>:name:</code> → a custom emoji (added in a server's Settings → Emoji), or use the 😀 picker</li>
@@ -14371,7 +15517,7 @@
               <section class="set-section">
                 <ul class="stx-keys">
                   <li><kbd>Ctrl+K</kbd><span>Quick switcher: channels, surfaces, servers, DMs</span></li>
-                  <li><kbd>Ctrl+1…7</kbd><span>Surfaces: chat, files, status, wiki, profile, downloads, events</span></li>
+                  <li><kbd>Ctrl+1…7</kbd><span>Surfaces: chat, files, announcements, wiki, profile, downloads, events</span></li>
                   <li><kbd>Ctrl+B / Ctrl+I</kbd><span>Bold / italic in the composer</span></li>
                   <li><kbd>Ctrl+Shift+F</kbd><span>Search with the filter panel open</span></li>
                   <li><kbd>Ctrl+L</kbd><span>Lock the session</span></li>
@@ -14381,7 +15527,36 @@
                   <li><kbd>Z / X</kbd><span>Piano octave down / up (lock screen and instrument drawer)</span></li>
                   <li><kbd>Esc</kbd><span>Close the topmost thing, one layer at a time</span></li>
                 </ul>
-                <p class="muted small">Remapping is not wired up yet: it is on the list.</p>
+              </section>
+              <section class="set-section text-fx-keybinds">
+                <div class="text-fx-keybind-head">
+                  <div>
+                    <h3>Text-effect shortcuts</h3>
+                    <p class="muted small">Select text in any supported editor, then use its shortcut. Custom bindings stay on this device.</p>
+                  </div>
+                  <button type="button" class="ghost small" onclick={resetTextEffectKeybinds}>Reset defaults</button>
+                </div>
+                {#if textEffectKeyError}<p class="form-error" role="alert">{textEffectKeyError}</p>{/if}
+                {#each TEXT_EFFECT_GROUPS as group}
+                  <h4 class="text-fx-keygroup">{group}</h4>
+                  <ul class="text-fx-keylist">
+                    {#each TEXT_EFFECTS.filter((effect) => effect.group === group) as effect (effect.id)}
+                      <li>
+                        <span class="text-fx-key-preview" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
+                        <span class="text-fx-key-name"><strong>{effect.label}</strong><small>{effect.description}</small></span>
+                        <kbd>{textEffectKeybinds[effect.id] || "Unassigned"}</kbd>
+                        <button
+                          type="button"
+                          class="ghost small text-fx-record"
+                          class:active={recordingTextEffect === effect.id}
+                          onclick={() => { recordingTextEffect = effect.id; textEffectKeyError = ""; }}
+                          onkeydown={(event) => recordTextEffectKey(event, effect.id)}
+                        >{recordingTextEffect === effect.id ? "Press keys…" : "Change"}</button>
+                        <button type="button" class="ghost small" disabled={!textEffectKeybinds[effect.id]} onclick={() => clearTextEffectKeybind(effect.id)}>Clear</button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/each}
               </section>
             {:else if settingsPage === "network"}
               <div class="stx-crumb">SETTINGS // CONNECTION // NETWORK</div>
@@ -14555,10 +15730,62 @@
                 <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
               </form>
               <p class="muted small">The name is your own label for this server (not shared with other members).</p>
-              <label class="toggle">
-                <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
-                <span>Notify me of voice calls on this server</span>
-              </label>
+              </section>
+            {:else if serverSettingsPage === "notifications"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // NOTIFICATIONS</div>
+              <h1>Notifications</h1>
+              <section class="set-section">
+                <h3>Sound overrides</h3>
+                <p class="muted small">Inherit follows Settings → Notifications. “On” or “Off” overrides that category for this server; the device-wide master switch can still silence everything.</p>
+                <div class="sound-settings-list">
+                  {#each NOTIFICATION_SOUND_KINDS as kind (kind)}
+                    {@const pref = serverSoundPrefs[kind]}
+                    {@const effective = soundPolicy(kind, activeServerId)}
+                    <article class="sound-setting-row">
+                      <div class="sound-setting-head">
+                        <div><strong>{SOUND_LABELS[kind].title}</strong><span>{SOUND_LABELS[kind].detail}</span></div>
+                        <span class="sound-effective" class:on={effective.enabled}>{effective.enabled ? "Enabled" : "Disabled"} · {effective.source}</span>
+                      </div>
+                      <div class="sound-setting-controls">
+                        <label>
+                          <span>Enabled</span>
+                          <select value={pref.enabled} onchange={(e) => setServerSoundEnabled(kind, e.currentTarget.value as SoundOverride)}>
+                            <option value="inherit">Inherit global</option>
+                            <option value="on">On for this server</option>
+                            <option value="off">Off for this server</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>Tone</span>
+                          <select value={pref.tone} onchange={(e) => setServerToneMode(kind, e.currentTarget.value as ToneOverride)}>
+                            <option value="inherit">Inherit global</option>
+                            <option value="default">Built-in</option>
+                            <option value="custom" disabled={!pref.custom}>Custom{pref.custom ? ` · ${pref.custom.name}` : ""}</option>
+                          </select>
+                        </label>
+                        <button type="button" class="ghost small" disabled={!effective.enabled} onclick={() => playConfiguredSound(kind, activeServerId)}>Test</button>
+                        <label class="ghost small sound-file">
+                          {pref.custom ? "Replace custom…" : "Choose custom…"}
+                          <input type="file" accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.ogg,.webm,.m4a,.aac,.flac" onchange={(e) => { const input = e.currentTarget; void importCustomTone("server", kind, input.files).finally(() => (input.value = "")); }} />
+                        </label>
+                        {#if pref.custom}
+                          <button type="button" class="ghost small" onclick={() => removeCustomTone("server", kind)}>Remove custom</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Voice calls</h3>
+                <label class="toggle">
+                  <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
+                  <span>Notify me when a voice room becomes active on this server</span>
+                </label>
+                <p class="muted small">The voice banner uses the effective Mentions &amp; replies tone. Turning this off suppresses the banner and its sound.</p>
+              </section>
+              <section class="set-section">
+                <button type="button" class="ghost small" onclick={() => { showServerSettings = false; openSettings("notifications"); }}>Open global sound defaults</button>
               </section>
             {:else if serverSettingsPage === "calls"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // CALLS &amp; RELAY</div>
@@ -15114,7 +16341,7 @@
                       <span class="usage-count">{fileInfoUsage.chat_count} chat message{fileInfoUsage.chat_count === 1 ? "" : "s"}</span>
                     {/if}
                     {#if fileInfoUsage.status_count > 0}
-                      <span class="usage-count">{fileInfoUsage.status_count} status post{fileInfoUsage.status_count === 1 ? "" : "s"}</span>
+                      <span class="usage-count">{fileInfoUsage.status_count} announcement{fileInfoUsage.status_count === 1 ? "" : "s"}</span>
                     {/if}
                     {#if fileInfoUsage.event_count > 0}
                       <span class="usage-count">{fileInfoUsage.event_count} event{fileInfoUsage.event_count === 1 ? "" : "s"}</span>

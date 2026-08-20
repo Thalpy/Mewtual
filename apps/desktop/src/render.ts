@@ -40,6 +40,7 @@ import {
   wikitextToHtml,
 } from "./wikitext.ts";
 import { extractInfobox, infoboxHtml } from "./infobox.ts";
+import { TEXT_EFFECT_RE, parseTextEffect, textEffectHtml } from "./message-effects.ts";
 
 // The token grammar lives in `wikitext.ts` (both renderers need it) but is re-exported here: this
 // is the module `refs.ts`'s round-trip tests pin the composer's markers against.
@@ -188,10 +189,30 @@ const refLink: TokenizerAndRendererExtension = {
   },
 };
 
+// `[fx:shake]text[/fx]` and the other fixed-catalog text effects. The body is deliberately plain
+// text rather than nested HTML; the renderer escapes it and the normal DOMPurify boundary follows.
+const textEffect: TokenizerAndRendererExtension = {
+  name: "texteffect",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("[fx:");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const match = TEXT_EFFECT_RE.exec(src);
+    if (!match) return undefined;
+    const effect = parseTextEffect(match[0]);
+    return effect ? { type: "texteffect", raw: effect.raw, effect: effect.id, text: effect.text } : undefined;
+  },
+  renderer(token) {
+    return textEffectHtml(token.effect, token.text);
+  },
+};
+
 let configured = false;
 function configure() {
   if (configured) return;
-  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed, remoteEmbed, refLink], breaks: true, gfm: true });
+  marked.use({ extensions: [textEffect, wikiLink, emoji, mention, spoiler, embed, remoteEmbed, refLink], breaks: true, gfm: true });
   configured = true;
 }
 
@@ -209,7 +230,8 @@ const SANITIZE = {
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
     "data-remote-url",
     "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "data-event-id",
-    "tabindex", "role", "aria-hidden", "colspan",
+    "data-text-fx", "data-pride", "data-fx-tone",
+    "tabindex", "role", "aria-hidden", "aria-label", "colspan",
   ],
 };
 

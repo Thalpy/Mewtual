@@ -8,13 +8,15 @@
 //
 // Pure string handling only (no Svelte, no DOM), so it is directly unit-testable.
 
+import { stripTextEffects } from "./message-effects.ts";
+
 /**
  * A `[label](…)` / `![alt](…)` label. `[`, `]` and newlines would terminate the marker early and
  * break the tokenizer, so they're replaced rather than escaped; whitespace collapses and the result
  * is bounded to the tokenizer's own label limit.
  */
 export function refLabel(s: string, n = 60): string {
-  return s
+  return stripTextEffects(s)
     .replace(/[[\]\n]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
