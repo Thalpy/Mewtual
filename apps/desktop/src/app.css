@@ -924,6 +924,12 @@ select:focus {
 }
 
 .messages li .text {
+  /* A URL, fingerprint, or pasted token may have no natural break point. The message body is a
+     flex item, so it must be allowed to shrink as well as provide an emergency wrap opportunity;
+     otherwise that token widens the chat pane and creates a window-level horizontal scrollbar. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   line-height: var(--lh-msg);
 }
 
@@ -931,6 +937,18 @@ select:focus {
   background: transparent;
   align-self: stretch;
   max-width: none;
+}
+
+/* Explicit history-window edges keep the DOM bounded while remaining keyboard-accessible. */
+.messages li.message-window-edge {
+  display: flex;
+  justify-content: center;
+  padding: 0.35rem 0.6rem;
+  background: transparent;
+}
+
+.messages li.message-window-edge:hover {
+  background: transparent;
 }
 
 .messages .author {
@@ -1797,18 +1815,6 @@ button.attach:hover {
   padding: 0;
 }
 
-.wiki-help h3 {
-  margin: 0.8rem 0 0.3rem;
-  font-size: 0.9rem;
-}
-
-.wiki-help code {
-  background: var(--bg-0);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--r);
-  padding: 0 0.3em;
-}
-
 /* --- Phase 10f: custom emoji --- */
 
 .composer-wrap {
@@ -2008,42 +2014,6 @@ button.primary:hover:not(:disabled) {
 .danger-text { color: var(--danger); }
 .danger-text:hover { color: var(--danger-hi); }
 
-/* Send-feedback overlay */
-.feedback .fb-seg {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 14px;
-}
-.feedback .fb-seg button {
-  flex: 1;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  background: var(--bg-elev);
-  cursor: pointer;
-}
-.feedback .fb-seg button.active {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
-.fb-label {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--muted);
-  font-size: 0.9em;
-}
-.fb-text {
-  width: 100%;
-  resize: vertical;
-  font: inherit;
-  padding: 8px;
-  border-radius: var(--r);
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
-  color: inherit;
-  box-sizing: border-box;
-  margin-bottom: 10px;
-}
 .invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* Generic inline segment (status-bar cells, the feedback kind switcher).
@@ -8294,21 +8264,6 @@ button.focus-leave:hover {
   width: 100%;
   margin: 0 0 0.9rem;
 }
-/* The help panel's worked example. */
-.wiki-help-block {
-  margin: 0.4rem 0 0.8rem;
-  padding: 0.55rem 0.7rem;
-  background: var(--bg-0);
-  border: 1px solid var(--bg-elev);
-  border-radius: 4px;
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  white-space: pre;
-  overflow-x: auto;
-  color: var(--text-2);
-}
-
 /* --- Jukebox dock + add-from-share picker --- */
 /* The deck the whole room hears, docked on both call surfaces the way the instrument drawer is.
    Token-only like the rest of the stage, so a server's livery and a user's appearance preset

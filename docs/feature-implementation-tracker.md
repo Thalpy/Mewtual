@@ -14,6 +14,7 @@ documentation, and the repository's mandatory full suites all pass.
 | Notification controls | 12e | Parallel work; review later | Permission state, content leakage, per-server precedence | Review the other task's implementation and full suites before merge |
 | Voice completion | 12f | Test/review later | Media E2E, signaling auth, TURN privacy, device failure recovery | User test first; focused WebRTC/signaling review afterward |
 | Channel governance | 12g | Deferred | Permission semantics, history compatibility, owner/admin enforcement | Design + antagonist review before a wire/schema change |
+| Desktop performance + IPC hardening | 12h | Active; frames gated, bounded chat DOM/render cache/event coalescing, Feedback/QR lazy split, 100-command ledger and native lock gate implemented | Stable history anchors, no plaintext cache persistence, stale async responses, locked-webview IPC denial, OS URL/file bounds, honest R2/R6/R7 claims | [`PERFORMANCE-SECURITY-HARDENING.md`](PERFORMANCE-SECURITY-HARDENING.md); focused frontend/Rust tests; production bundle measurements; full gates before handoff |
 
 ## Experimental ideas (after phase 12a-12d)
 

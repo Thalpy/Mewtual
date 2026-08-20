@@ -25,9 +25,9 @@ use catcoms_app::{
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
-    addr_is_loopback, addr_is_private, addr_is_undialable, keypair_from_seed, phase0_peer_id,
-    target_peer_in_multiaddr, validate_invite_rendezvous_addrs, validate_operator_rendezvous_addrs,
-    MeshHandle, MeshService, RendezvousTarget,
+    addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
+    keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
+    validate_operator_rendezvous_addrs, MeshHandle, MeshService, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
 use catcoms_sync::join_namespace;
@@ -111,6 +111,9 @@ struct AppState {
     /// that started it returns (and possibly after the user has started another one). Keyed by
     /// server id so a late answer can never be reported against a different server's attempt.
     upnp: Mutex<HashMap<u64, String>>,
+    /// Per-server AutoNAT v2 outcome. Like UPnP, the result arrives after founding/joining has
+    /// returned and is keyed so one attempt can never inherit another server's dial-back result.
+    autonat: Mutex<HashMap<u64, String>>,
     /// One integrity/inventory scan per server per process session. Health is a point-in-time
     /// observation, so file events deliberately do not invalidate it behind the user's back;
     /// explicit authenticated repair is the only operation that replaces a cached report.
@@ -125,6 +128,18 @@ const UPNP_WAITING: &str = "waiting for the router";
 const UPNP_NO_GATEWAY: &str = "no usable gateway (no UPnP, or your ISP uses CGNAT)";
 /// The router never answered inside [`UPNP_WINDOW_SECS`].
 const UPNP_TIMED_OUT: &str = "the router did not answer in time";
+/// A join that failed before admission cannot preserve its temporary listener long enough for a
+/// router mapping to matter. This is more accurate than the old blanket "not attempted".
+const UPNP_FAILED_JOIN: &str = "not retained: the join failed before this node became a member";
+
+/// No public candidate/server pair produced an AutoNAT v2 result inside the collection window.
+const AUTONAT_NOT_TESTED: &str =
+    "not tested: no public address candidate and AutoNAT server were available together";
+/// A public relay/rendezvous is connected and the background collector is waiting for a callback.
+const AUTONAT_WAITING: &str = "waiting for a dial-back result";
+/// The temporary join swarm was dropped before it could become a durable member transport.
+const AUTONAT_FAILED_JOIN: &str =
+    "not tested: the join never reached a connected AutoNAT server as a member";
 
 /// One thing a founding or joining attempt did, in the order it did it.
 ///
@@ -173,10 +188,10 @@ impl DiagStep {
 /// Everything the app can honestly say about its own reachability and about the last thing it
 /// tried, for the connectivity panel on the create/join screens.
 ///
-/// Deliberately says nothing about "am I reachable from the internet". AutoNAT is not
-/// implemented (`docs/design-zeroconf-reachability.md` rung 0c), so nothing here can dial this
-/// node back, and a public address obtained from UPnP or a relay circuit is evidence, not proof.
-/// The UI states that rather than showing a green tick the code cannot support.
+/// AutoNAT v2 can now prove that one connected public infrastructure node reached one candidate
+/// address at one moment. That is real dial-back evidence, but deliberately not promoted into a
+/// timeless or universal node property: reachability varies by address family, transport, NAT and
+/// observer. A UPnP address remains evidence rather than proof until AutoNAT tests it.
 #[derive(Serialize, Clone, Default)]
 struct Connectivity {
     /// `found`, `join`, or empty when nothing has been attempted this session.
@@ -191,6 +206,8 @@ struct Connectivity {
     advertised: Vec<String>,
     /// The UPnP result for `server` (filled in by `get_connectivity` from the per-server map).
     upnp: String,
+    /// The AutoNAT v2 result for `server`, likewise filled by `get_connectivity`.
+    autonat: String,
     /// What the attempt did, oldest first.
     steps: Vec<DiagStep>,
     /// The last error, verbatim, so the user can copy exactly what the code said.
@@ -204,8 +221,20 @@ struct PendingGrant {
     origin: DeviceId,
 }
 
-/// Clone out the actor for `server` (so we never hold the servers lock across an await).
-async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+/// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
+/// networking in the background, but that must not leave their plaintext projections callable by
+/// injected/stale frontend code behind the lock screen.
+async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
+    if *state.session_resumable.lock().await && state.store.lock().await.is_some() {
+        Ok(())
+    } else {
+        Err("the vault is locked".into())
+    }
+}
+
+/// Internal actor lookup used by persistence/reload paths which must keep operating while the UI
+/// is locked. Native command handlers use [`actor_of`] so the webview cannot cross that boundary.
+async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor, String> {
     state
         .servers
         .lock()
@@ -215,10 +244,17 @@ async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> 
         .ok_or_else(|| "unknown server".to_string())
 }
 
+/// Clone out the actor for an unlocked webview command (never holding either lock across actor I/O).
+async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+    require_unlocked_session(state).await?;
+    actor_of_unchecked(state, server).await
+}
+
 /// Clone the actor and DM marker together. Moderation is server-wide and intentionally absent
 /// from 1:1 DM spaces, so its bridge commands use this helper to enforce that boundary before
 /// invoking the actor.
 async fn server_actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+    require_unlocked_session(state).await?;
     let servers = state.servers.lock().await;
     let entry = servers
         .get(&server)
@@ -835,6 +871,18 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
 fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
+            // Actor networking stays live behind the explicit lock, but its event stream can
+            // contain member fingerprints, channel ids, delivery state and call signalling.
+            // Drop those notifications at the native boundary; unlock reloads fresh projections.
+            if require_unlocked_session(&app.state::<AppState>())
+                .await
+                .is_err()
+            {
+                if matches!(&ev, AppEvent::Closed) {
+                    break;
+                }
+                continue;
+            }
             match ev {
                 AppEvent::ChannelsUpdated => {
                     let _ = app.emit("channels-changed", ServerEvt { server });
@@ -1164,7 +1212,7 @@ async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
 /// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
 /// store, a stopped actor, or an I/O error is logged, not fatal; the app keeps running).
 async fn persist_server(state: &AppState, server: u64) {
-    let actor = match actor_of(state, server).await {
+    let actor = match actor_of_unchecked(state, server).await {
         Ok(a) => a,
         Err(_) => return,
     };
@@ -1195,7 +1243,7 @@ async fn persist_server(state: &AppState, server: u64) {
 async fn persist_address_cache(app: &AppHandle, server: u64) {
     let state = app.state::<AppState>();
     let state = state.inner();
-    let Ok(actor) = actor_of(state, server).await else {
+    let Ok(actor) = actor_of_unchecked(state, server).await else {
         return;
     };
     // Fetch the key, then the bytes, before taking the store lock, so the actor round-trip never
@@ -1429,7 +1477,7 @@ async fn establish_reachability(
                 steps.push(DiagStep::unknown(
                     "advertise",
                     a.clone(),
-                    "the address you supplied; nothing here can test it from outside",
+                    "the address you supplied; AutoNAT will test it if public infrastructure connects",
                 ));
                 bootstrap.insert(0, a)
             }
@@ -1459,10 +1507,20 @@ async fn establish_reachability(
         }
     }
 
-    // Optional rendezvous: connect to it and advertise our reachable address(es) on the raw mesh
-    // (so the deferred registration can flush), keeping a handle to register each invite's
-    // namespace after the server is spawned. The node is then discoverable with no hard-coded
-    // address; a joiner needs only the pasted invite.
+    // Promote every plausible direct address even when no rendezvous is configured, and offer it
+    // to AutoNAT v2 for a real callback. Previously external addresses were added only inside
+    // `connect_rendezvous`, so a manually-forwarded address or global IPv6 on a direct-only server
+    // was never tested. Relay circuits are excluded by `external_addrs`; a reservation promotes
+    // itself because "reachable through a relay" is a separate property from direct reachability.
+    for addr in external_addrs(&bootstrap) {
+        if let Err(e) = mesh.add_external_address(addr.clone()).await {
+            eprintln!("reachability: could not offer {addr} to AutoNAT: {e}");
+        }
+    }
+
+    // Optional rendezvous: connect to it, keeping a handle to register each invite's namespace
+    // after the server is spawned. The node is then discoverable with no hard-coded address; a
+    // joiner needs only the pasted invite.
     let mut rz_target = None;
     let mut rz_handle = None;
     let rendezvous = net.rendezvous.trim();
@@ -1539,14 +1597,13 @@ async fn reserve_relay_circuit(mesh: &MeshService, relay: &str) -> Result<String
     Ok(addr.to_string())
 }
 
-/// Dial the rendezvous node, wait for the connection, and advertise our routable addresses so the
-/// deferred registration can flush. A relay *circuit* address is intentionally not advertised
-/// here; it auto-promotes to an external address on reservation (in the transport actor), so the
-/// rendezvous still learns it.
+/// Dial the rendezvous node and wait for the connection. Routable addresses are offered to the
+/// transport by [`establish_reachability`] independently of whether rendezvous is configured;
+/// this helper only establishes the infrastructure path.
 async fn connect_rendezvous(
     mesh: &MeshService,
     rendezvous: &str,
-    bootstrap: &[String],
+    _bootstrap: &[String],
 ) -> Result<RendezvousTarget, String> {
     // Operator-typed: this is the "rendezvous" field of the create-server form, so a DNS name is
     // both legitimate and (for a TCP/443 TLS/WebSocket node) required.
@@ -1570,11 +1627,6 @@ async fn connect_rendezvous(
     })
     .await
     .map_err(|_| "could not connect to the rendezvous".to_string())?;
-    for addr in external_addrs(bootstrap) {
-        mesh.add_external_address(addr)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
     Ok(rz)
 }
 
@@ -1740,6 +1792,66 @@ fn spawn_upnp_fold(
         if let Some(seq) = next_record_seq(state.inner(), server).await {
             actor.publish_self_record(bootstrap, seq).await;
         }
+    });
+}
+
+/// How long the background connectivity collector waits for AutoNAT v2.
+///
+/// The upstream client probes on a five-second cadence and may test several identify/manual
+/// candidates. Thirty seconds gives it multiple turns without delaying founding or joining; the
+/// server stays live after the window and later confirmed addresses still benefit libp2p, but the
+/// one-shot diagnostic refuses to sit at "waiting" forever.
+const AUTONAT_WINDOW_SECS: u64 = 30;
+
+/// Collect per-address AutoNAT v2 events and retain the strongest honest result for the panel.
+///
+/// A globally-routable success wins immediately because v2 requires the callback carrying our
+/// nonce to arrive. Failures and non-public successes are retained only as scoped observations and
+/// the collector keeps listening: IPv4 may fail while IPv6 succeeds, or TCP while QUIC succeeds.
+fn spawn_autonat_fold(
+    app: AppHandle,
+    server: u64,
+    mut rx: mpsc::Receiver<catcoms_net::AutoNatResult>,
+) {
+    tokio::spawn(async move {
+        let deadline = tokio::time::sleep(Duration::from_secs(AUTONAT_WINDOW_SECS));
+        tokio::pin!(deadline);
+        let mut last = AUTONAT_NOT_TESTED.to_string();
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                result = rx.recv() => {
+                    let Some(result) = result else { break };
+                    let public = addr_is_globally_routable(&result.address);
+                    if result.reachable && public {
+                        last = format!(
+                            "reachable {} (verified by AutoNAT server {})",
+                            result.address, result.server
+                        );
+                        break;
+                    }
+                    if result.reachable {
+                        last = format!(
+                            "local-only {} (the callback worked, but this is not a public address)",
+                            result.address
+                        );
+                    } else if public {
+                        last = format!(
+                            "unreachable {} from AutoNAT server {}: {}",
+                            result.address,
+                            result.server,
+                            result.error.as_deref().unwrap_or("dial-back failed")
+                        );
+                    }
+                }
+            }
+        }
+        app.state::<AppState>()
+            .inner()
+            .autonat
+            .lock()
+            .await
+            .insert(server, last);
     });
 }
 
@@ -1948,6 +2060,7 @@ async fn found_server(
     rendezvous: String,
     is_dm: bool,
 ) -> Result<FoundResult, String> {
+    require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
         action: "found".into(),
         subject: display_name.clone(),
@@ -2019,6 +2132,7 @@ async fn found_server_inner(
     // Take the UPnP channel before the transport disappears into the server, so a background task
     // can wait out a realistic router-discovery window without holding up the UI.
     let upnp_rx = mesh.take_external_addrs().await;
+    let autonat_rx = mesh.take_autonat_results().await;
     diag.advertised = bootstrap.clone();
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
@@ -2117,6 +2231,14 @@ async fn found_server_inner(
             .insert(server_id, UPNP_WAITING.to_string());
         spawn_upnp_fold(app.clone(), server_id, rx, id);
     }
+    if let Some(rx) = autonat_rx {
+        state
+            .autonat
+            .lock()
+            .await
+            .insert(server_id, AUTONAT_WAITING.to_string());
+        spawn_autonat_fold(app.clone(), server_id, rx);
+    }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -2135,6 +2257,7 @@ async fn join_server(
     display_name: String,
     is_dm: bool,
 ) -> Result<FoundResult, String> {
+    require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
         action: "join".into(),
         at: SystemClock.now_ms(),
@@ -2237,6 +2360,17 @@ async fn join_server_inner(
         (mesh, inviter, Vec::new())
     };
 
+    // Prepare this future member's own reachability before moving the mesh into `Server::join`.
+    // A successful join remains a full listening member, so UPnP and AutoNAT are just as useful
+    // here as for the founder; the old path silently discarded both result streams.
+    let local_peer_id = peer_id_of(&net)?;
+    let joiner_addrs = auto_bootstrap(net.port, &local_peer_id);
+    for addr in external_addrs(&joiner_addrs) {
+        let _ = mesh.add_external_address(addr).await;
+    }
+    let upnp_rx = mesh.take_external_addrs().await;
+    let autonat_rx = mesh.take_autonat_results().await;
+
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
     // Past this point the transport is up, so a failure here is the MLS admission itself: the
@@ -2281,13 +2415,6 @@ async fn join_server_inner(
     // record exactly like the founder does (defect P1). It mints no invites and therefore keeps no
     // `bootstrap` list, so the addresses are the auto-detected ones; the non-routable entries are
     // stripped inside `publish_self_record`.
-    let joiner_addrs = match peer_id_of(&net) {
-        Ok(id) => auto_bootstrap(net.port, &id),
-        Err(e) => {
-            eprintln!("join: could not derive the local peer id: {e}");
-            Vec::new()
-        }
-    };
     diag.advertised.clone_from(&joiner_addrs);
     if let Err(e) = server.publish_self_record(joiner_addrs, net.record_seq) {
         eprintln!("join: publishing the peer record failed: {e}");
@@ -2328,6 +2455,22 @@ async fn join_server_inner(
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
     diag.server = server_id;
+    if let Some(rx) = upnp_rx {
+        state
+            .upnp
+            .lock()
+            .await
+            .insert(server_id, UPNP_WAITING.to_string());
+        spawn_upnp_fold(app.clone(), server_id, rx, local_peer_id);
+    }
+    if let Some(rx) = autonat_rx {
+        state
+            .autonat
+            .lock()
+            .await
+            .insert(server_id, AUTONAT_WAITING.to_string());
+        spawn_autonat_fold(app.clone(), server_id, rx);
+    }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -2339,7 +2482,10 @@ async fn join_server_inner(
 /// Leave a server: shut down its actor and drop it from the registry.
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     state.storage_health.lock().await.remove(&server);
+    state.upnp.lock().await.remove(&server);
+    state.autonat.lock().await.remove(&server);
     if let Some(entry) = state.servers.lock().await.remove(&server) {
         entry.actor.shutdown().await;
     }
@@ -2405,6 +2551,7 @@ fn invite_missing_addresses(minted: &[String], current: &[String]) -> bool {
 /// no frontend change to keep in step.
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
+    require_unlocked_session(&state).await?;
     let (stored, current) = {
         let servers = state.servers.lock().await;
         match servers.get(&server) {
@@ -2478,7 +2625,7 @@ async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, 
             .ok_or_else(|| "unknown server".to_string())?;
         (e.bootstrap.clone(), e.rendezvous.clone(), e.mesh.clone())
     };
-    let actor = actor_of(&state, server).await?;
+    let actor = actor_of(state, server).await?;
     let mut nonce = [0u8; 16];
     let mut rng = OsCryptoRng;
     rng.fill_bytes(&mut nonce);
@@ -2508,7 +2655,7 @@ async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, 
     if let Some(e) = state.servers.lock().await.get_mut(&server) {
         e.invite = Some(invite_hex.clone());
     }
-    persist_registry(&state).await;
+    persist_registry(state).await;
     Ok(invite_hex)
 }
 
@@ -2520,6 +2667,7 @@ async fn rename_server(
     server: u64,
     name: String,
 ) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("name cannot be empty".into());
@@ -2790,6 +2938,7 @@ async fn get_badges(
 }
 
 /// Share a file (base64-encoded bytes); returns its content-address hex.
+#[allow(clippy::too_many_arguments)] // Tauri injects app/state; the remaining fields are one file form.
 #[tauri::command]
 async fn add_file(
     app: AppHandle,
@@ -2810,6 +2959,12 @@ async fn add_file(
             let (tx, mut rx) = mpsc::channel(64);
             let task = tokio::spawn(async move {
                 while let Some((done, total)) = rx.recv().await {
+                    if require_unlocked_session(&app.state::<AppState>())
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
                     let _ = app.emit(
                         "upload-progress",
                         UploadProgressEvt {
@@ -2927,6 +3082,7 @@ struct DmStat {
 /// the awaits), then queries each; bounded by the (small) number of DMs.
 #[tauri::command]
 async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
+    require_unlocked_session(&state).await?;
     let dms: Vec<(u64, ServerActor)> = {
         let servers = state.servers.lock().await;
         servers
@@ -3126,6 +3282,7 @@ async fn download_file(
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
     })?;
+    require_unlocked_session(&state).await?;
     let _ = app.emit(
         "download-progress",
         DownloadProgressEvt {
@@ -3142,6 +3299,9 @@ async fn download_file(
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
     for i in 0..total {
+        // A transfer can outlive the click that started it. Do not return plaintext or continue
+        // emitting file metadata after an explicit lock closes the webview session.
+        require_unlocked_session(&state).await?;
         let (chunk, provider) = actor.fetch_file_chunk(raw.clone(), i).await?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
@@ -3164,6 +3324,7 @@ async fn download_file(
     if Cid::of(&out).as_bytes() != &target {
         return Err("the reassembled file failed its integrity check".into());
     }
+    require_unlocked_session(&state).await?;
     Ok(B64.encode(&out))
 }
 
@@ -3304,14 +3465,31 @@ async fn get_join_attempts(
 /// reachability. Feeds the connectivity panel on the create/join screens.
 #[tauri::command]
 async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, String> {
+    require_unlocked_session(&state).await?;
     let mut diag = state.diag.lock().await.clone();
-    diag.upnp = state
-        .upnp
-        .lock()
-        .await
-        .get(&diag.server)
-        .cloned()
-        .unwrap_or_else(|| UPNP_NOT_ATTEMPTED.to_string());
+    let failed_join = diag.action == "join" && diag.server == 0;
+    diag.upnp = if failed_join {
+        UPNP_FAILED_JOIN.to_string()
+    } else {
+        state
+            .upnp
+            .lock()
+            .await
+            .get(&diag.server)
+            .cloned()
+            .unwrap_or_else(|| UPNP_NOT_ATTEMPTED.to_string())
+    };
+    diag.autonat = if failed_join {
+        AUTONAT_FAILED_JOIN.to_string()
+    } else {
+        state
+            .autonat
+            .lock()
+            .await
+            .get(&diag.server)
+            .cloned()
+            .unwrap_or_else(|| AUTONAT_NOT_TESTED.to_string())
+    };
     Ok(diag)
 }
 
@@ -3341,6 +3519,7 @@ fn validate_ui_state_json(json: &str) -> Result<(), String> {
 /// on first run keeps plaintext localStorage out of this path entirely.
 #[tauri::command]
 async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
@@ -3356,6 +3535,7 @@ async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn save_ui_state(state: State<'_, AppState>, json: String) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     validate_ui_state_json(&json)?;
     let guard = state.store.lock().await;
     let store = guard
@@ -3924,6 +4104,7 @@ async fn get_messages(
 /// are per-server); the bridge tags each item with its server context.
 #[tauri::command]
 async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, String> {
+    require_unlocked_session(&state).await?;
     // Snapshot (id, name, is_dm, actor) under the lock, then query each actor without holding it.
     let servers: Vec<(u64, String, bool, ServerActor)> = {
         let guard = state.servers.lock().await;
@@ -4056,13 +4237,11 @@ async fn reload_one(
         rz_target,
         rz_handle,
     } = reach;
-    // Advertise our reachable addresses unconditionally, so that a server whose steady-state
-    // rendezvous config was restored from the snapshot can re-register a dialable record on the
-    // actor's next discovery tick. Harmless for a server without rendezvous.
-    for addr in external_addrs(&bootstrap) {
-        let _ = mesh.add_external_address(addr).await;
-    }
+    // `establish_reachability` has already advertised every direct candidate and offered it to
+    // AutoNAT. Do not add them again here: the v2 client treats each candidate event as work, so a
+    // duplicate would spend another public-server probe without adding evidence.
     let upnp_rx = mesh.take_external_addrs().await;
+    let autonat_rx = mesh.take_autonat_results().await;
 
     // Re-register the persisted invite's own (nonce-keyed) namespace, so the invite that is about
     // to be re-presented in the UI still resolves for whoever is holding it. (`rz_handle` is `Some`
@@ -4179,6 +4358,15 @@ async fn reload_one(
     if let Some(rx) = upnp_rx {
         spawn_upnp_fold(app.clone(), record.id, rx, id);
     }
+    if let Some(rx) = autonat_rx {
+        app.state::<AppState>()
+            .inner()
+            .autonat
+            .lock()
+            .await
+            .insert(record.id, AUTONAT_WAITING.to_string());
+        spawn_autonat_fold(app.clone(), record.id, rx);
+    }
     Ok(())
 }
 
@@ -4187,11 +4375,16 @@ async fn reload_one(
 /// to point the user's browser (or a registered `foo://` handler) anywhere, so the allowlist
 /// is a constant here rather than anything the webview can influence.
 const ISSUE_URL_PREFIX: &str = "https://github.com/Thalpy/Mewtual/issues/new?";
+const ISSUE_URL_MAX_BYTES: usize = 6_000;
 
 /// Is this a new-issue URL on our own tracker? Split out from the command so the allowlist
 /// itself is testable without launching a browser.
 fn is_tracker_url(url: &str) -> bool {
-    url.starts_with(ISSUE_URL_PREFIX)
+    url.len() <= ISSUE_URL_MAX_BYTES
+        && !url
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        && url.starts_with(ISSUE_URL_PREFIX)
 }
 
 fn is_external_http_url(url: &str) -> bool {
@@ -4467,6 +4660,7 @@ fn backup_destination(downloads: &Path, stamp: u64) -> Result<PathBuf, String> {
 /// Restore is intentionally a locked-screen operation and is not performed by this command.
 #[tauri::command]
 async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<BackupResult, String> {
+    require_unlocked_session(&state).await?;
     // Capture every actor first, without holding either state lock across its round trip.
     let servers: Vec<(u64, ServerActor, ServerRecord)> = {
         let servers = state.servers.lock().await;
@@ -4536,6 +4730,7 @@ async fn change_vault_secret(
     current_secret: String,
     new_secret: String,
 ) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     let current_secret = Zeroizing::new(current_secret);
     let new_secret = Zeroizing::new(new_secret);
     let guard = state.store.lock().await;
@@ -4556,7 +4751,8 @@ async fn change_vault_secret(
 /// filled-in form: the app carries no GitHub credentials and posts nothing itself, and the user
 /// submits (and so authors) the issue from their own browser.
 #[tauri::command]
-async fn open_issue_url(url: String) -> Result<(), String> {
+async fn open_issue_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     if !is_tracker_url(&url) {
         return Err("refusing to open a URL outside the issue tracker".into());
     }
@@ -4565,7 +4761,8 @@ async fn open_issue_url(url: String) -> Result<(), String> {
 
 /// Open a chat/wiki link in the system browser, keeping the Mewtual webview on the conversation.
 #[tauri::command]
-async fn open_external_url(url: String) -> Result<(), String> {
+async fn open_external_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     if !is_external_http_url(&url) {
         return Err("only http and https links can be opened".into());
     }
@@ -4578,8 +4775,10 @@ async fn open_external_url(url: String) -> Result<(), String> {
 #[tauri::command]
 async fn save_and_open_space_guide(
     app: AppHandle,
+    state: State<'_, AppState>,
     png_base64: String,
 ) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
     if png_base64.len() > MAX_SPACE_GUIDE_BYTES * 2 {
         return Err("the generated guide is unexpectedly large".into());
     }
@@ -4603,7 +4802,12 @@ async fn save_and_open_space_guide(
 
 /// Export a portable Server Space layout to Downloads and reveal it without executing it.
 #[tauri::command]
-async fn save_space_layout(app: AppHandle, json: String) -> Result<SavedFileResult, String> {
+async fn save_space_layout(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
     if !validate_space_layout_json(&json) {
         return Err("the layout is not a valid Mewtual Server Space export".into());
     }
@@ -4624,9 +4828,11 @@ async fn save_space_layout(app: AppHandle, json: String) -> Result<SavedFileResu
 #[tauri::command]
 async fn save_download(
     app: AppHandle,
+    state: State<'_, AppState>,
     name: String,
     data_base64: String,
 ) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
     if data_base64.len() > MAX_FILE_BYTES * 2 {
         return Err("the downloaded file is unexpectedly large".into());
     }
@@ -4742,7 +4948,12 @@ async fn unlock(
             name: record.display_name.clone(),
             invite: record.invite.clone(),
             channel: channel_id("general").to_string(),
-            channels: ui_channels(actor_of(&state, record.id).await?.channels().await),
+            channels: ui_channels(
+                actor_of_unchecked(&state, record.id)
+                    .await?
+                    .channels()
+                    .await,
+            ),
             is_dm: record.is_dm,
         });
     }
@@ -4761,9 +4972,38 @@ async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<Reloade
 }
 
 #[tauri::command]
-async fn lock_session(state: State<'_, AppState>) -> Result<(), String> {
+async fn lock_session(
+    state: State<'_, AppState>,
+    ui_state_json: Option<String>,
+) -> Result<(), String> {
+    lock_session_inner(&state, ui_state_json).await
+}
+
+/// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
+/// malformed continuity state or a vault write failure is reported, but must never leave the
+/// sensitive webview session open as a side effect of that error.
+async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
+    // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
+    // separate fire-and-forget commands could race, causing the save to arrive after the lock and
+    // be correctly rejected by the new session gate.
+    let save_result = if let Some(json) = ui_state_json {
+        match validate_ui_state_json(&json) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                let guard = state.store.lock().await;
+                match guard.as_ref() {
+                    Some(store) => store
+                        .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
+                        .map_err(|error| error.to_string()),
+                    None => Err("unlock the vault before saving UI state".to_string()),
+                }
+            }
+        }
+    } else {
+        Ok(())
+    };
     *state.session_resumable.lock().await = false;
-    Ok(())
+    save_result
 }
 
 // ---------------------------------------------------------------------------
@@ -4862,6 +5102,7 @@ async fn ceremony_origin(state: &AppState) -> Result<DeviceId, String> {
 /// request. The secrets stay in this process; only the request travels.
 #[tauri::command]
 async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, String> {
+    require_unlocked_session(&state).await?;
     let mut rng = OsCryptoRng;
     let (secrets, blob) = catcoms_app::begin_pairing(&mut rng).map_err(|e| e.to_string())?;
     let device_id = secrets.device_id().to_string();
@@ -4879,6 +5120,7 @@ async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, Strin
 /// the pending view wholesale).
 #[tauri::command]
 async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<PairingRead, String> {
+    require_unlocked_session(&state).await?;
     let origin = ceremony_origin(&state).await?;
     let view = catcoms_app::read_pairing_blob(&blob, &origin).map_err(|e| e.to_string())?;
     if state
@@ -4918,6 +5160,7 @@ async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<Pairin
 /// the pending view.
 #[tauri::command]
 async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     if let Some(pending) = state.pending_grant.lock().await.take() {
         // Already-spent just means a mint won the race; either way the nonce is dead.
         let _ = state
@@ -4958,6 +5201,7 @@ async fn pairing_mint(
     device_name: String,
     turn: Option<HashMap<String, String>>,
 ) -> Result<PairingBundle, String> {
+    require_unlocked_session(&state).await?;
     // Mint ONLY from the pending view `pairing_read` stored; the popup's device is the
     // certified device, closing the read→mint TOCTOU. The lock is held for the whole
     // mint so a concurrent re-read cannot swap the ceremony out from under the accept.
@@ -5063,6 +5307,7 @@ async fn pairing_open(
     bundle: String,
     passphrase: String,
 ) -> Result<PairingOpened, String> {
+    require_unlocked_session(&state).await?;
     let guard = state.pairing.lock().await;
     let secrets = guard
         .as_ref()
@@ -5116,6 +5361,7 @@ async fn pairing_join(
     state: State<'_, AppState>,
     server_index: Option<usize>,
 ) -> Result<Vec<PairingJoinResult>, String> {
+    require_unlocked_session(&state).await?;
     let grants = state.pairing_grants.lock().await.clone();
     if grants.is_empty() {
         return Err("no grants to join; open a grant bundle first".to_string());
@@ -5384,7 +5630,11 @@ fn newest_log_file(dir: &std::path::Path) -> String {
 
 /// The debug log's current state, for Settings.
 #[tauri::command]
-async fn get_debug_logging(app: AppHandle) -> Result<DebugLogging, String> {
+async fn get_debug_logging(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DebugLogging, String> {
+    require_unlocked_session(&state).await?;
     let log = app.try_state::<LogState>();
     let active = log.as_ref().is_some_and(|l| l.active);
     // Prefer the directory this process actually opened, so the path shown is the path being
@@ -5408,7 +5658,12 @@ async fn get_debug_logging(app: AppHandle) -> Result<DebugLogging, String> {
 /// Turn the debug log on or off for the **next** launch (a tracing subscriber is install-once
 /// per process, so nothing can be attached to this one after the fact).
 #[tauri::command]
-async fn set_debug_logging(app: AppHandle, enabled: bool) -> Result<DebugLogging, String> {
+async fn set_debug_logging(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<DebugLogging, String> {
+    require_unlocked_session(&state).await?;
     let dir = log_dir(&app)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let flag = debug_flag_path(&app)?;
@@ -5417,7 +5672,7 @@ async fn set_debug_logging(app: AppHandle, enabled: bool) -> Result<DebugLogging
     } else if flag.exists() {
         std::fs::remove_file(&flag).map_err(|e| e.to_string())?;
     }
-    get_debug_logging(app).await
+    get_debug_logging(app, state).await
 }
 
 /// Build and run the Tauri application.
@@ -5555,6 +5810,46 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn explicit_lock_saves_continuity_and_closes_the_webview_command_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        assert!(require_unlocked_session(&state).await.is_ok());
+
+        let continuity = r#"{"version":1,"drafts":{"1:2":"latest"},"readMarks":{"1:2":9}}"#;
+        lock_session_inner(&state, Some(continuity.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        let saved = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_ui_state()
+            .unwrap();
+        assert_eq!(saved, continuity.as_bytes());
+
+        // Validation errors are returned to the caller, but the security boundary still closes.
+        *state.session_resumable.lock().await = true;
+        assert!(lock_session_inner(&state, Some("not json".into()))
+            .await
+            .is_err());
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        // The vault remains mounted so actors and persistence may continue behind the UI lock.
+        assert!(state.store.lock().await.is_some());
+    }
+
     /// The trap this guards: founding mints the invite immediately, UPnP answers seconds later,
     /// so the invite a user copies first is the one *without* the public address their router
     /// just opened. Their friend on another network then gets an unactionable timeout. This
@@ -5586,11 +5881,14 @@ mod tests {
         // the rest working, so it is not worth invalidating a nonce somebody may be about to use.
         assert!(!invite_missing_addresses(
             &[public.clone(), loop_.clone(), lan.clone()],
-            &[loop_.clone()]
+            std::slice::from_ref(&loop_)
         ));
         // Degenerate cases stay quiet rather than re-minting forever.
         assert!(!invite_missing_addresses(&[], &[]));
-        assert!(!invite_missing_addresses(&[public.clone()], &[]));
+        assert!(!invite_missing_addresses(
+            std::slice::from_ref(&public),
+            &[]
+        ));
         assert!(invite_missing_addresses(&[], &[public]));
     }
 
@@ -5960,6 +6258,14 @@ mod tests {
         ));
         assert!(!is_tracker_url("file:///c:/windows/system32/calc.exe"));
         assert!(!is_tracker_url("https://github.com/Thalpy/Mewtual"));
+        assert!(!is_tracker_url(
+            "https://github.com/Thalpy/Mewtual/issues/new?title=x\nfile:///tmp/payload"
+        ));
+        assert!(!is_tracker_url(&format!(
+            "{}body={}",
+            ISSUE_URL_PREFIX,
+            "x".repeat(ISSUE_URL_MAX_BYTES)
+        )));
     }
 
     #[test]

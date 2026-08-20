@@ -72,14 +72,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use catcoms_rt::{Clock, SystemClock};
+use catcoms_rt::{Clock, OsCryptoRng, SystemClock};
 use futures::StreamExt;
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    connection_limits, identify, noise, ping, rendezvous, yamux, Multiaddr, Swarm, SwarmBuilder,
-    Transport,
+    autonat, connection_limits, identify, noise, ping, rendezvous, yamux, Multiaddr, Swarm,
+    SwarmBuilder, Transport,
 };
 
 use crate::admission::{AddrPrefix, Admission, AdmissionConfig};
@@ -209,6 +209,13 @@ const COOKIE_ID_BYTES: u64 = 16;
 /// cookie store can reach. 4,194,304 ids is about 64 MB, which a 1 GB node survives.
 const MAX_COOKIE_IDS: u64 = 4 * 1024 * 1024;
 
+/// Concurrent AutoNAT v2 callbacks allowed from this public node.
+///
+/// V2 is anti-amplifying (the requester uploads more bytes than the callback sends), but the
+/// upstream server has no aggregate dial queue bound. This cap keeps anonymous reachability tests
+/// from taking every outbound socket or established slot away from rendezvous traffic.
+const MAX_PENDING_AUTONAT_DIALBACKS: u32 = 64;
+
 impl RendezvousLimits {
     /// The upstream `rendezvous::server::Config` these limits describe.
     pub fn to_server_config(&self) -> rendezvous::server::Config {
@@ -220,12 +227,17 @@ impl RendezvousLimits {
             .with_max_ttl(self.max_ttl_secs)
     }
 
-    /// The connection caps these limits describe.
+    /// The connection caps these limits describe, including AutoNAT's outbound callbacks.
     pub fn to_connection_limits(&self) -> connection_limits::ConnectionLimits {
         connection_limits::ConnectionLimits::default()
             .with_max_pending_incoming(Some(self.max_pending_incoming))
             .with_max_established_incoming(Some(self.max_established_incoming))
             .with_max_established_per_peer(Some(self.max_established_per_peer))
+            .with_max_pending_outgoing(Some(MAX_PENDING_AUTONAT_DIALBACKS))
+            .with_max_established(Some(
+                self.max_established_incoming
+                    .saturating_add(MAX_PENDING_AUTONAT_DIALBACKS),
+            ))
     }
 
     fn validate(&self) -> Result<(), NetError> {
@@ -300,6 +312,9 @@ pub struct RendezvousBehaviour {
     pub identify: identify::Behaviour,
     /// Keep-alive.
     pub ping: ping::Behaviour,
+    /// AutoNAT v2 dial-back service. A connected client can have this public node test one of its
+    /// external-address candidates without making ordinary group members public probe servers.
+    pub autonat_server: autonat::v2::server::Behaviour<OsCryptoRng>,
     /// Connection caps so a registration/discovery flood cannot exhaust the server.
     pub connection_limits: connection_limits::Behaviour,
     /// Per-source-prefix quotas plus the deny path the census and rate policies drive.
@@ -318,6 +333,7 @@ fn rendezvous_behaviour_with(
         rendezvous: rendezvous::server::Behaviour::new(limits.to_server_config()),
         identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
+        autonat_server: autonat::v2::server::Behaviour::new(OsCryptoRng),
         connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
         admission: Admission::new(limits.admission.clone(), 0),
     }

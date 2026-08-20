@@ -35,6 +35,10 @@ libp2p = { version = "0.56", features = [
     "identify",
     "ping",
     "rendezvous",
+    # AutoNAT v2 lets a connected, publicly reachable peer or infrastructure node dial this
+    # node back and verify an address from outside. It measures reachability; it does not create
+    # a path through NAT, so relay/DCUtR remain the fallback when the probe fails.
+    "autonat",
     "upnp",
     # Rung 4 of the connectivity ladder: a TLS/WebSocket listener on TCP/443. Corporate,
     # university and guest networks routinely filter outbound traffic to arbitrary high

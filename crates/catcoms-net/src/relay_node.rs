@@ -55,14 +55,14 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use catcoms_rt::{Clock, SystemClock};
+use catcoms_rt::{Clock, OsCryptoRng, SystemClock};
 use futures::StreamExt;
 use libp2p::core::transport::MemoryTransport;
 use libp2p::core::upgrade::Version;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    connection_limits, identify, noise, ping, relay, yamux, Multiaddr, Swarm, SwarmBuilder,
-    Transport,
+    autonat, connection_limits, identify, noise, ping, relay, yamux, Multiaddr, Swarm,
+    SwarmBuilder, Transport,
 };
 
 use crate::admission::{AddrPrefix, Admission, AdmissionConfig};
@@ -86,6 +86,15 @@ use crate::NetError;
 /// node whose circuits are all saturated voice calls is the worst case, not the average. Sizing
 /// against the average is how the shipped configuration ended up contradicting itself.
 pub const NOMINAL_CIRCUIT_BYTES_PER_SEC: u64 = 16 * 1024;
+
+/// AutoNAT v2 callbacks the public relay may have in flight at once.
+///
+/// Upstream makes every v2 requester upload 30--100 KiB before the much smaller callback, which
+/// removes reflection amplification, but its server behaviour has no aggregate dial queue limit.
+/// The connection-limits behaviour is declared after it in the derive tree and supplies that
+/// missing resource ceiling. Sixty-four is ample for honest probes and small enough that a probe
+/// flood cannot consume the relay's file descriptors ahead of circuit traffic.
+const MAX_PENDING_AUTONAT_DIALBACKS: u32 = 64;
 
 /// Deliberate, operator-tunable sizing for a relay. Every number is a bandwidth or memory
 /// commitment; the doc comment on each says what it costs.
@@ -264,12 +273,17 @@ impl RelayLimits {
         }
     }
 
-    /// The connection caps these limits describe.
+    /// The connection caps these limits describe, including AutoNAT's outbound callbacks.
     pub fn to_connection_limits(&self) -> connection_limits::ConnectionLimits {
         connection_limits::ConnectionLimits::default()
             .with_max_pending_incoming(Some(self.max_pending_incoming))
             .with_max_established_incoming(Some(self.max_established_incoming))
             .with_max_established_per_peer(Some(self.max_established_per_peer))
+            .with_max_pending_outgoing(Some(MAX_PENDING_AUTONAT_DIALBACKS))
+            .with_max_established(Some(
+                self.max_established_incoming
+                    .saturating_add(MAX_PENDING_AUTONAT_DIALBACKS),
+            ))
     }
 
     /// Bytes a **fully loaded** relay moves in one budget window, at the nominal per-circuit rate.
@@ -365,6 +379,11 @@ pub struct RelayBehaviour {
     pub identify: identify::Behaviour,
     /// Keep-alive.
     pub ping: ping::Behaviour,
+    /// AutoNAT v2 dial-back service. A relay is already the mutually reachable public third party
+    /// a NAT'd member depends on, so it is the right place to test that member's direct address.
+    /// V2 requires more requester bytes than callback bytes and a fresh callback socket; the
+    /// connection limits below additionally cap concurrent outbound probes.
+    pub autonat_server: autonat::v2::server::Behaviour<OsCryptoRng>,
     /// Connection caps. This swarm was the only internet-exposed one without them, which
     /// contradicted the "connection limits on every swarm" claim in `HANDOVER.md`.
     pub connection_limits: connection_limits::Behaviour,
@@ -381,6 +400,7 @@ fn relay_behaviour_with(key: &libp2p::identity::Keypair, limits: &RelayLimits) -
         relay: relay::Behaviour::new(key.public().to_peer_id(), limits.to_relay_config()),
         identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
+        autonat_server: autonat::v2::server::Behaviour::new(OsCryptoRng),
         connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
         admission: Admission::new(limits.admission.clone(), 0),
     }

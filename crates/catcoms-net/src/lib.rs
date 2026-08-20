@@ -68,8 +68,8 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_rt::{
-    DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError,
-    TransportEvent,
+    DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId, Responder, Topic,
+    TransportError, TransportEvent,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -81,12 +81,12 @@ use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{
-    dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, SwarmEvent, THandler,
-    THandlerInEvent, THandlerOutEvent, ToSwarm,
+    dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, NewExternalAddrCandidate,
+    SwarmEvent, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use libp2p::{
-    allow_block_list, connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous,
-    request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
+    allow_block_list, autonat, connection_limits, dcutr, gossipsub, identify, noise, relay,
+    rendezvous, request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -148,6 +148,24 @@ pub struct Registered {
     pub ttl: u64,
     /// The rendezvous node that granted it.
     pub rendezvous_node: libp2p::PeerId,
+}
+
+/// The result of one AutoNAT v2 dial-back for one candidate address.
+///
+/// Reachability is deliberately **per address and per observer**, not a permanent property of the
+/// node. A successful v2 result means the named server really opened a fresh connection and the
+/// client received the matching nonce; a failure means only that this server could not reach this
+/// address at this moment. Callers must not generalise either result to every transport or network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoNatResult {
+    /// The local external-address candidate the server tested.
+    pub address: Multiaddr,
+    /// The public relay/rendezvous node that performed the dial-back.
+    pub server: libp2p::PeerId,
+    /// `true` only after the callback connection carrying the expected nonce arrived.
+    pub reachable: bool,
+    /// The upstream error for a failed test. Empty on success.
+    pub error: Option<String>,
 }
 
 // ----- request/response codec ------------------------------------------------
@@ -286,6 +304,11 @@ pub struct MeshBehaviour {
     /// Rendezvous client: register our (signed) peer record under a blinded namespace
     /// and discover other members, without hard-coded bootstrap addresses.
     pub rendezvous_client: rendezvous::client::Behaviour,
+    /// AutoNAT v2 client: asks a connected public relay/rendezvous node to dial an external
+    /// address candidate back from a fresh socket. The corresponding **server** behaviour lives
+    /// only on those infrastructure swarms; ordinary members must not become public dial-back
+    /// services merely by joining a group.
+    pub autonat_client: autonat::v2::client::Behaviour<OsCryptoRng>,
     /// UPnP/NAT-PMP: best-effort ask the home router to open a port, so this node becomes directly
     /// reachable (the discovered public address is advertised + folded into a fresh invite); no
     /// relay needed when the router cooperates.
@@ -312,6 +335,13 @@ impl MeshBehaviour {
         let dcutr = dcutr::Behaviour::new(key.public().to_peer_id());
         let identify = identify::Behaviour::new(identify_config(key));
         let rendezvous_client = rendezvous::client::Behaviour::new(key.clone());
+        // Use the repository's sanctioned OS-randomness seam rather than the behaviour's ambient
+        // default. AutoNAT v2 nonces are security-sensitive and must follow the same dependency
+        // boundary as every other random value in the application.
+        let autonat_client = autonat::v2::client::Behaviour::new(
+            OsCryptoRng,
+            autonat::v2::client::Config::default(),
+        );
         let upnp = libp2p::upnp::tokio::Behaviour::default();
         let connection_limits = connection_limits::Behaviour::new(
             connection_limits::ConnectionLimits::default()
@@ -358,6 +388,7 @@ impl MeshBehaviour {
             dcutr,
             identify,
             rendezvous_client,
+            autonat_client,
             upnp,
         })
     }
@@ -877,6 +908,10 @@ struct Actor {
     /// (surfaced so a fresh invite can carry a directly-dialable bootstrap, no relay);
     /// `None` = no usable gateway (so a waiter stops promptly instead of timing out).
     upnp_tx: mpsc::Sender<Option<Multiaddr>>,
+    /// Per-address AutoNAT v2 outcomes. Kept separate from transport connectivity because a
+    /// failed dial-back does not mean a peer connection failed, and a successful one is
+    /// diagnostic evidence rather than a membership event.
+    autonat_tx: mpsc::Sender<AutoNatResult>,
     /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
     upgrade_tx: mpsc::Sender<PeerId>,
     /// Rendezvous-discovered peer records, surfaced but never auto-dialed. Unbounded
@@ -1015,6 +1050,15 @@ impl Actor {
             Command::Dial(addr) => self.dial_gated(addr),
             Command::AddExternalAddress(addr) => {
                 tracing::debug!(%addr, "add external address");
+                // `Swarm::add_external_address` is an assertion: it marks the address confirmed
+                // immediately. The caller may have strong local evidence (a UPnP mapping or an
+                // operator-configured address), so preserve that behaviour for rendezvous and
+                // invites, but separately offer the same address to AutoNAT for an actual remote
+                // dial-back. The upstream v2 client has no public `probe_address` method; feeding
+                // the standard behaviour event is its supported candidate input.
+                self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                    FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr: &addr }),
+                );
                 self.swarm.add_external_address(addr);
                 // A registration may have been waiting on exactly this.
                 self.flush_pending_registers();
@@ -1499,6 +1543,34 @@ impl Actor {
             SwarmEvent::Behaviour(MeshBehaviourEvent::Identify(e)) => {
                 tracing::trace!(?e, "identify event");
             }
+            // AutoNAT v2 only reports success after this process receives a fresh callback
+            // carrying the nonce it generated. That makes a positive result materially stronger
+            // than a server merely claiming it dialled us. Failures remain address- and
+            // observer-specific; they are surfaced without turning them into a node-wide state.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::AutonatClient(e)) => {
+                let reachable = e.result.is_ok();
+                let error = e.result.err().map(|err| err.to_string());
+                if reachable {
+                    tracing::info!(
+                        address = %e.tested_addr,
+                        server = %e.server,
+                        "AutoNAT dial-back succeeded"
+                    );
+                } else {
+                    tracing::info!(
+                        address = %e.tested_addr,
+                        server = %e.server,
+                        error = error.as_deref().unwrap_or("unknown"),
+                        "AutoNAT dial-back failed"
+                    );
+                }
+                let _ = self.autonat_tx.try_send(AutoNatResult {
+                    address: e.tested_addr,
+                    server: e.server,
+                    reachable,
+                    error,
+                });
+            }
             // Relay-client lifecycle (reservation accepted/expired, circuit opened).
             SwarmEvent::Behaviour(MeshBehaviourEvent::RelayClient(e)) => {
                 tracing::debug!(?e, "relay-client event");
@@ -1509,6 +1581,11 @@ impl Actor {
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
                 libp2p::upnp::Event::NewExternalAddr(addr) => {
                     tracing::info!(%addr, "UPnP mapped a public address; node is directly reachable");
+                    self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                        FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate {
+                            addr: &addr,
+                        }),
+                    );
                     self.swarm.add_external_address(addr.clone());
                     self.flush_pending_registers();
                     let _ = self.upnp_tx.try_send(Some(addr));
@@ -1598,6 +1675,9 @@ pub struct MeshService {
     /// `None` once [`MeshService::take_external_addrs`] has handed the receiver to a background
     /// waiter (UPnP discovery outlives any call a UI can block on).
     upnp_rx: Mutex<Option<mpsc::Receiver<Option<Multiaddr>>>>,
+    /// `None` once the desktop has taken the AutoNAT result stream for its background
+    /// reachability collector.
+    autonat_rx: Mutex<Option<mpsc::Receiver<AutoNatResult>>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
@@ -1624,6 +1704,7 @@ impl MeshService {
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
         let (upnp_tx, upnp_rx) = mpsc::channel(16);
+        let (autonat_tx, autonat_rx) = mpsc::channel(16);
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
         let (registered_tx, registered_rx) = mpsc::unbounded_channel();
@@ -1633,6 +1714,7 @@ impl MeshService {
             event_tx,
             listen_tx,
             upnp_tx,
+            autonat_tx,
             upgrade_tx,
             discovered_tx,
             registered_tx,
@@ -1652,6 +1734,7 @@ impl MeshService {
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
             upnp_rx: Mutex::new(Some(upnp_rx)),
+            autonat_rx: Mutex::new(Some(autonat_rx)),
             upgrade_rx: Mutex::new(upgrade_rx),
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
@@ -1685,6 +1768,21 @@ impl MeshService {
     /// one consumer ever sees each address; [`MeshService::next_external_addr`] then yields `None`.
     pub async fn take_external_addrs(&self) -> Option<mpsc::Receiver<Option<Multiaddr>>> {
         self.upnp_rx.lock().await.take()
+    }
+
+    /// Await the next AutoNAT v2 result for one external-address candidate.
+    ///
+    /// A success proves only that the named server reached that address at that moment. A failure
+    /// is likewise scoped to one address/server pair; callers should keep listening because a
+    /// second candidate (IPv6 rather than IPv4, or QUIC rather than TCP) may still succeed.
+    pub async fn next_autonat_result(&self) -> Option<AutoNatResult> {
+        let mut guard = self.autonat_rx.lock().await;
+        guard.as_mut()?.recv().await
+    }
+
+    /// Take the single-consumer AutoNAT result stream for a background diagnostics collector.
+    pub async fn take_autonat_results(&self) -> Option<mpsc::Receiver<AutoNatResult>> {
+        self.autonat_rx.lock().await.take()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct

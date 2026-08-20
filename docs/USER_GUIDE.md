@@ -171,6 +171,9 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - Every server starts with **#general**. Create/join a channel by typing its name into
   **join #channel…**. Anyone who opens the same name lands in the same channel.
 - A **dot** marks unread. Opening a channel pulls its **backlog** from another member.
+- Long channels initially mount only the latest messages so scrolling and new arrivals stay
+  responsive. Scroll to an edge or use **Load older/newer messages**; search, reply and unread
+  jumps mount a bounded window around their target automatically.
 - Per-channel drafts and read positions are encrypted in the local vault. They survive a normal
   restart, are cleared from memory when you lock, and are never copied into plaintext browser
   storage. This continuity is local to this device; it is not synced to other members.
@@ -473,7 +476,14 @@ wiki, and roles; they share nothing.
 - **At-rest, not anti-malware.** Encryption protects a stolen disk, not a live compromise;
   while the app runs, keys are unsealed in memory. Same envelope as Signal-desktop. A
   keylogger capturing your passphrase, or malware running as you, defeats it.
+- **Lock closes the app command window, not the network node.** Ctrl/Cmd+L clears frontend
+  plaintext and native commands refuse reads/mutations until you unlock again, while the native
+  actors may stay online to receive encrypted updates. It is not a defence against malware that
+  already controls the process or operating system.
 - **Metadata.** Peers/relays can observe *that* you communicate (timing, IPs), not *what*.
+- **Remote images contact their host.** An HTTP(S) image pasted into chat is lazy-loaded with no
+  referrer, but its host can still see your IP and request timing. Files shared through Mewtual's
+  encrypted fileshare do not make that third-party request.
 - **Display names aren't identities.** Members are cryptographically identified by their
   **device fingerprint** (shown in the member list), not their chosen name.
 - **Roles aren't access control** (§8); being a "member" vs "admin" doesn't change what

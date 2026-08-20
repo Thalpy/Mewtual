@@ -233,6 +233,17 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
           image: "",
         },
       ]);
+    // The empty Wiki state is enough to exercise its real navigation and lazy-loaded Help view.
+    // Keep every read used by `refreshWiki` explicit so a future dependency still fails loudly.
+    case "get_wiki_pages":
+      return [];
+    case "get_wiki_map":
+    case "get_wiki_meta":
+      return {};
+    case "get_wiki_review_days":
+      return 0;
+    case "get_wiki_pending":
+      return [];
     case "get_devices":
       return {};
     case "get_dm_requests":

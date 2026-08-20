@@ -24,6 +24,11 @@
     type MessageFrameEasing, type MessageFrameEffectId, type MessageFrameEffectOptions,
     type MessageFrameMotion, type MessageFrameShape,
   } from "./message-frame";
+  import {
+    CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, initialChatWindow,
+    nearScrollBottom, reconcileChatWindow, revealNewer, revealOlder, windowAround,
+    type ChatWindow,
+  } from "./chat-performance";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
   import { scheduleNewsChime } from "./news-chime";
   import { acceptTickerReceipt, messageTickerId } from "./ticker";
@@ -67,8 +72,6 @@
     applyOffsets, autoArrangePlacements, clampPitch, defaultSpace, lassoCapturePath, parseSpace,
     placementCentre, project, separatePlacements, unproject, wrapYaw, yawDelta,
   } from "./space";
-  import QRCode from "qrcode";
-  import jsQR from "jsqr";
   // The repo-root logo, bundled by Vite as a same-origin asset (the CSP allows img-src 'self').
   import logoUrl from "../../../assets/mewtual-logo.svg";
   // Raw rather than as URLs: inline SVG inherits currentColor, so one drawing themes itself
@@ -360,11 +363,25 @@
     }
   }
   let showFeedback = $state(false); // the Send-feedback overlay
-  let feedbackKind = $state<"bug" | "feature">("bug");
-  let feedbackTitle = $state("");
-  let feedbackText = $state("");
-  let feedbackCopied = $state(false);
-  let feedbackOpened = $state(false);
+  type FeedbackOverlayComponent = (typeof import("./FeedbackOverlay.svelte"))["default"];
+  let FeedbackOverlay = $state<FeedbackOverlayComponent | null>(null);
+  let feedbackOverlayLoading = false;
+  let feedbackOverlayError = $state("");
+  async function loadFeedbackOverlay() {
+    if (FeedbackOverlay || feedbackOverlayLoading) return;
+    feedbackOverlayLoading = true;
+    feedbackOverlayError = "";
+    try {
+      FeedbackOverlay = (await import("./FeedbackOverlay.svelte")).default;
+    } catch (cause) {
+      feedbackOverlayError = String(cause);
+    } finally {
+      feedbackOverlayLoading = false;
+    }
+  }
+  $effect(() => {
+    if (showFeedback && !FeedbackOverlay) void loadFeedbackOverlay();
+  });
   // Notification sound policy is entirely local. The master preserves the original one-switch
   // behavior; category defaults and per-server overrides refine it without publishing preferences
   // to peers or changing any server document.
@@ -1394,16 +1411,45 @@
   // Paste remains the baseline; QR and the acoustic channel are conveniences for the same
   // strings. QR fits both legs when small enough; sound is request-leg-sized only.
   const QR_MAX_CHARS = 2600; // v40-L capacity headroom; beyond this we say "use paste"
+  type QrRenderer = { toCanvas: typeof import("qrcode").toCanvas };
+  let qrCodeLoader: Promise<QrRenderer> | null = null;
+  let qrDecoderLoader: Promise<typeof import("jsqr")> | null = null;
+  function loadQrCode() {
+    // QR is a pairing convenience rather than startup UI, so keep both sizeable codecs outside
+    // the initial webview payload. Vite emits real async chunks for these dynamic imports.
+    return (qrCodeLoader ??= import("qrcode").then((module) => {
+      // qrcode uses `export =` typings while Vite's CommonJS interop supplies `default` at
+      // runtime. Accept either shape so the lazy boundary works in tests and production builds.
+      const compatible = module as unknown as QrRenderer & { default?: QrRenderer };
+      return compatible.default ?? compatible;
+    }));
+  }
+  function loadQrDecoder() {
+    return (qrDecoderLoader ??= import("jsqr"));
+  }
   // Svelte action: render `text` as a QR into the canvas (re-renders when text changes).
   function qr(canvas: HTMLCanvasElement, text: string) {
-    const draw = (t: string) => {
+    let live = true;
+    let generation = 0;
+    const draw = async (t: string) => {
+      const current = ++generation;
       if (!t || t.length > QR_MAX_CHARS) return;
-      QRCode.toCanvas(canvas, t, { margin: 1, width: 220 }).catch(() => {});
+      try {
+        const QRCode = await loadQrCode();
+        if (!live || current !== generation || !canvas.isConnected) return;
+        await QRCode.toCanvas(canvas, t, { margin: 1, width: 220 });
+      } catch {
+        // Paste remains the baseline pairing path if the optional renderer cannot load.
+      }
     };
-    draw(text);
+    void draw(text);
     return {
       update(t: string) {
-        draw(t);
+        void draw(t);
+      },
+      destroy() {
+        live = false;
+        generation += 1;
       },
     };
   }
@@ -1419,6 +1465,9 @@
     scanTarget = into;
     scanOpen = true;
     try {
+      // Load the decoder before asking for camera access; if the optional chunk fails, no media
+      // stream is created and therefore none can be stranded outside `closeScan` cleanup.
+      const { default: decodeQr } = await loadQrDecoder();
       scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
       await tick();
       if (!scanVideoEl) throw new Error("no video element");
@@ -1432,7 +1481,7 @@
         c.height = scanVideoEl.videoHeight;
         ctx.drawImage(scanVideoEl, 0, 0);
         const img = ctx.getImageData(0, 0, c.width, c.height);
-        const hit = jsQR(img.data, img.width, img.height);
+        const hit = decodeQr(img.data, img.width, img.height);
         if (hit?.data) closeScan(hit.data);
       }, 180);
     } catch {
@@ -1634,6 +1683,15 @@
   let newChannel = $state("");
 
   let messages = $state<Msg[]>([]);
+  // The actor remains the source of truth for the complete channel history. Only a bounded slice
+  // enters the DOM, which caps Svelte work, rich-media resolution, observers and layout cost in a
+  // long-running room. Sanitized HTML is cached in memory only and wiped at the lock boundary.
+  const messageRenderCache = new SanitizedMessageCache();
+  let messageWindow = $state<ChatWindow>({ start: 0, end: 0 });
+  let messageWindowScope = $state("");
+  let chatStickToBottom = $state(true);
+  let expandingMessageWindow = false;
+  let renderedMessages = $derived(messages.slice(messageWindow.start, messageWindow.end));
   // Only rows inserted by a live update receive an arrival animation. A short-lived id set keeps
   // history loads and ordinary re-renders still, and also lets each sender choose their motion.
   let arrivalMessageIds = $state<Set<string>>(new Set());
@@ -1915,7 +1973,31 @@
     }
   }
 
-  function scrollToMatch(msgIdx: number) {
+  function activeMessageScope(): string {
+    return activeServerId !== null && cur?.active ? `${activeServerId}:${cur.active}` : "";
+  }
+  function messageDomKey(message: Msg, index: number): string {
+    // Persisted messages have immutable ids. The fallback is only for legacy rows which predate
+    // them; including the index avoids accidentally reusing DOM state between equal timestamps.
+    return message.id || `legacy:${message.ts}:${message.author}:${index}`;
+  }
+  function renderedMessage(message: Msg): string {
+    return messageRenderCache.render(
+      activeMessageScope(),
+      message.id || `legacy:${message.ts}:${message.author}`,
+      message.text,
+      message.edited,
+      myMentionName,
+      renderMessage,
+    );
+  }
+  async function ensureMessageRendered(msgIdx: number) {
+    if (msgIdx >= messageWindow.start && msgIdx < messageWindow.end) return;
+    messageWindow = windowAround(msgIdx, messages.length, CHAT_INITIAL_ROWS);
+    await tick();
+  }
+  async function scrollToMatch(msgIdx: number) {
+    await ensureMessageRendered(msgIdx);
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
   // Go to a hit, following it into another channel if that's where it lives. The channel we leave
@@ -1926,10 +2008,10 @@
       chanMsgs[cur.active] = messages;
       await switchTo(h.ch, true);
       if (h.m.id) jumpToMessageId(h.m.id);
-      else scrollToMatch(h.idx); // a legacy message has no id: its index still holds
+      else void scrollToMatch(h.idx); // a legacy message has no id: its index still holds
       return;
     }
-    scrollToMatch(h.idx);
+    void scrollToMatch(h.idx);
   }
   function stepMatch(dir: number) {
     if (!searchMatches.length) return;
@@ -1946,7 +2028,7 @@
   function refilter() {
     searchPos = 0;
     const h = searchMatches[0];
-    if (h && h.ch === (cur?.active ?? "")) scrollToMatch(h.idx);
+    if (h && h.ch === (cur?.active ?? "")) void scrollToMatch(h.idx);
   }
   function clearFilters() {
     Object.assign(filters, noFilters());
@@ -2641,6 +2723,26 @@
   let wikiEdit = $state(false); // edit (textarea) vs read (rendered) mode
   let wikiEl = $state<HTMLDivElement | undefined>(undefined); // rendered-page container (media resolve)
   let showWikiHelp = $state(false);
+  type WikiHelpOverlayComponent = (typeof import("./WikiHelpOverlay.svelte"))["default"];
+  let WikiHelpOverlay = $state<WikiHelpOverlayComponent | null>(null);
+  let wikiHelpLoading = false;
+  let wikiHelpLoadError = $state("");
+  async function loadWikiHelpOverlay() {
+    if (WikiHelpOverlay || wikiHelpLoading) return;
+    wikiHelpLoading = true;
+    wikiHelpLoadError = "";
+    try {
+      WikiHelpOverlay = (await import("./WikiHelpOverlay.svelte")).default;
+    } catch (cause) {
+      wikiHelpLoadError = String(cause);
+    } finally {
+      wikiHelpLoading = false;
+    }
+  }
+  $effect(() => {
+    // Warm this small help chunk after entering Wiki, while keeping it off the app startup path.
+    if ((view === "wiki" || showWikiHelp) && !WikiHelpOverlay) void loadWikiHelpOverlay();
+  });
   let wikiFormat = $derived(wikiMeta[activeWikiPage] === "wiki" ? "wiki" : "md");
   let wikiPreview = $state(false); // live side-by-side preview in edit mode
   let wikiPreviewEl = $state<HTMLDivElement | undefined>(undefined);
@@ -3662,9 +3764,52 @@
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
+  async function revealOlderMessages() {
+    const node = messagesEl;
+    if (!node || messageWindow.start <= 0 || expandingMessageWindow) return;
+    expandingMessageWindow = true;
+    const previousHeight = node.scrollHeight;
+    const previousTop = node.scrollTop;
+    messageWindow = revealOlder(messageWindow, messages.length, CHAT_WINDOW_STEP);
+    await tick();
+    // Retain the reader's visual anchor after inserting rows above the viewport.
+    if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
+    expandingMessageWindow = false;
+  }
+  function revealNewerMessages() {
+    messageWindow = revealNewer(messageWindow, messages.length, CHAT_WINDOW_STEP);
+  }
+  function onChatScroll() {
+    const node = messagesEl;
+    if (!node) return;
+    // Do not auto-expand a short, non-scrollable list: it would defeat the DOM bound on unusual
+    // compact themes. The explicit edge control remains available in that case.
+    if (
+      node.scrollTop < 80 &&
+      node.scrollHeight > node.clientHeight + 40 &&
+      messageWindow.start > 0
+    ) {
+      void revealOlderMessages();
+    }
+    if (nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight) && messageWindow.end < messages.length) {
+      revealNewerMessages();
+      chatStickToBottom = false;
+      return;
+    }
+    chatStickToBottom =
+      messageWindow.end >= messages.length &&
+      nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight);
+  }
+
   $effect(() => {
     void messages;
-    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+    void messageWindow;
+    if (!chatStickToBottom) return;
+    tick().then(() => {
+      if (messagesEl && chatStickToBottom && messageWindow.end >= messages.length) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    });
   });
 
   // Persist the rendezvous address as a reusable default (it's usually a stable infra node).
@@ -3701,7 +3846,6 @@
   // same flush as the {@html} block, finds zero placeholders, and never re-runs: so embeds
   // render on first send but vanish after a restart.
   $effect(() => {
-    void messages;
     void statuses;
     void files;
     void emojiUrls;
@@ -4010,13 +4154,13 @@
       else delete drafts[key];
     }
     clearTimeout(uiStateSaveTimer);
-    if (uiStateReady) {
-      const continuityJson = JSON.stringify({ version: 1, drafts, readMarks });
-      void invoke("save_ui_state", { json: continuityJson }).catch((e) => console.warn("Final UI continuity save failed", e));
-    }
+    clearTimeout(inboxTimer);
+    if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
+    inboxIdle = undefined;
+    const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks }) : null;
     try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
-    void invoke("lock_session");
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
+    void invoke("lock_session", { uiStateJson: continuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
     showServerSettings = false;
@@ -4253,6 +4397,10 @@
     storageHealth = null;
     storageRepairNote = "";
     messages = [];
+    messageRenderCache.clear();
+    messageWindow = { start: 0, end: 0 };
+    messageWindowScope = "";
+    chatStickToBottom = true;
     roster = [];
     members = 0;
     files = [];
@@ -4275,6 +4423,11 @@
 
   async function switchServer(id: number) {
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
+    // Drop plaintext render artifacts and window anchors before changing trust/context scope.
+    messageRenderCache.clear();
+    messageWindow = { start: 0, end: 0 };
+    messageWindowScope = "";
+    chatStickToBottom = true;
     activeServerId = id;
     inboxView = false;
     spaceOpen = false; // navigating anywhere leaves the orbit view behind
@@ -4412,6 +4565,10 @@
   async function switchTo(id: string, keepSearch = false) {
     if (!cur) return;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
+    messageRenderCache.clear();
+    messageWindow = { start: 0, end: 0 };
+    messageWindowScope = "";
+    chatStickToBottom = true;
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
     cur.unread = cur.unread.filter((c) => c !== id);
@@ -4458,12 +4615,29 @@
     }
   }
 
+  let refreshRevision = 0;
   async function refresh(animateArrivals = false) {
     if (!cur || !cur.active || activeServerId === null) return;
+    const server = activeServerId;
+    const channel = cur.active;
+    const revision = ++refreshRevision;
     try {
-      const previous = new Set(messages.map((message) => message.id));
-      const next = await invoke<Msg[]>("get_messages", { server: activeServerId, channel: cur.active });
+      const previousMessages = messages;
+      const previous = new Set(previousMessages.map((message) => message.id));
+      const next = await invoke<Msg[]>("get_messages", { server, channel });
+      // A slow response from the conversation we just left must never populate the new one.
+      if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
+      const nextScope = `${server}:${channel}`;
+      const nextWindow = reconcileChatWindow(
+        previousMessages,
+        next,
+        messageWindow,
+        chatStickToBottom,
+        messageWindowScope !== nextScope,
+      );
       messages = next;
+      messageWindow = nextWindow;
+      messageWindowScope = nextScope;
       if (animateArrivals) {
         // Own posts already animate at optimistic insertion; excluding them prevents the
         // acknowledged, server-assigned id from replaying the entrance a second time.
@@ -4474,6 +4648,12 @@
       error = String(e);
     }
   }
+
+  // A single network merge can emit several channel notifications. Serialize and coalesce their
+  // full snapshots so the bridge never has multiple large `get_messages` payloads racing for the
+  // same view. Direct navigation/send acknowledgements still call `refresh` at their own explicit
+  // completion points.
+  const channelEventRefresh = new CoalescedAsyncRefresh(refresh);
 
   // Delivery states for OWN messages (docs/design-delivery-states.md). Evidence-based lower
   // bounds: a member is counted only once it has provably built on the message, so counts
@@ -5169,6 +5349,34 @@
       document.removeEventListener("keydown", onSoundGesture, true);
       document.removeEventListener("pointerdown", onPalettePointerDown, true);
       document.removeEventListener("selectionchange", onDocumentSelectionChange);
+    };
+  }
+
+  // Resolve placeholders only in the row Svelte has just mounted or updated. Resource-index
+  // changes still use the coarse effect above because an older placeholder can become resolvable,
+  // but ordinary chat arrivals no longer rescan every historical row four times.
+  function resolveChatRow(node: HTMLLIElement, _message: Msg) {
+    let live = true;
+    let generation = 0;
+    const resolve = () => {
+      const current = ++generation;
+      queueMicrotask(() => {
+        if (!live || current !== generation || !node.isConnected) return;
+        void resolveMedia(node);
+        void resolveRemoteMedia(node);
+        void resolveEmoji(node);
+        void resolveRefCards(node);
+      });
+    };
+    resolve();
+    return {
+      update(_next: Msg) {
+        resolve();
+      },
+      destroy() {
+        live = false;
+        generation += 1;
+      },
     };
   }
 
@@ -7081,7 +7289,7 @@
   function jumpToMessageId(id: string) {
     const idx = messages.findIndex((m) => m.id === id);
     if (idx < 0) return; // parent not in the loaded list (deleted / scrolled out of history)
-    scrollToMatch(idx);
+    void scrollToMatch(idx);
     flashId = id;
     setTimeout(() => {
       if (flashId === id) flashId = "";
@@ -7383,6 +7591,7 @@
 
   // Cross-server inbox: the backend scans every server's channels for messages addressed to me.
   async function loadInbox() {
+    if (locked) return;
     inboxLoading = true;
     try {
       inboxItems = await invoke<InboxEntry[]>("get_inbox");
@@ -7393,9 +7602,23 @@
     }
   }
   let inboxTimer: ReturnType<typeof setTimeout> | undefined;
+  let inboxIdle: number | undefined;
   function scheduleInboxReload() {
+    if (locked) return;
     clearTimeout(inboxTimer);
-    inboxTimer = setTimeout(loadInbox, 1500); // debounce the cross-server scan
+    if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
+    inboxIdle = undefined;
+    inboxTimer = setTimeout(() => {
+      inboxTimer = undefined;
+      if ("requestIdleCallback" in window) {
+        inboxIdle = window.requestIdleCallback(() => {
+          inboxIdle = undefined;
+          void loadInbox();
+        }, { timeout: 2_500 });
+      } else {
+        void loadInbox();
+      }
+    }, 1_000); // coalesce bursts, then run the cross-server scan off the interaction path
   }
   // An inbox entry is "unseen" until you've read past it in that channel (the same read marks that
   // drive jump-to-unread); resolved against the entry's own server, not the active one.
@@ -9762,7 +9985,8 @@
     scheduleUiStateSave();
     sending = true;
     const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
-    messages = [...messages, {
+    const previousMessages = messages;
+    const nextMessages = [...previousMessages, {
       id: pendingId,
       author: myFp,
       text,
@@ -9772,6 +9996,17 @@
       reply_to,
       pinned: false,
     }];
+    const nextScope = `${server}:${channel}`;
+    chatStickToBottom = true;
+    messages = nextMessages;
+    messageWindow = reconcileChatWindow(
+      previousMessages,
+      nextMessages,
+      messageWindow,
+      true,
+      messageWindowScope !== nextScope,
+    );
+    messageWindowScope = nextScope;
     markMessageArrivals([pendingId]);
     await tick();
     try {
@@ -9865,68 +10100,6 @@
     if (activeServerId === null || !ch || !m.id) return;
     try {
       await invoke("set_pin", { server: activeServerId, channel: ch, msgId: m.id, pinned: !m.pinned });
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  // The issue tracker feedback is filed against. The backend refuses to launch anything that
-  // isn't under this, so the URL built here is the only one the app can ever open.
-  const ISSUE_TRACKER = "https://github.com/Thalpy/Mewtual";
-
-  function feedbackReport(): string {
-    return [
-      `**Type:** ${feedbackKind === "bug" ? "Bug report" : "Feature request"}`,
-      `**App:** Mewtual desktop ${APP_VERSION}`,
-      `**Environment:** ${navigator.userAgent}`,
-      ``,
-      feedbackText.trim(),
-    ].join("\n");
-  }
-
-  // A title is optional in the form: fall back to the first line of the description so the
-  // issue never lands on GitHub untitled.
-  function feedbackSubject(): string {
-    const typed = feedbackTitle.trim();
-    const first = feedbackText.trim().split("\n")[0].trim();
-    return (typed || first || (feedbackKind === "bug" ? "Bug report" : "Feature request")).slice(0, 120);
-  }
-
-  async function copyFeedback() {
-    try {
-      await navigator.clipboard.writeText(feedbackReport());
-      feedbackCopied = true;
-      setTimeout(() => (feedbackCopied = false), 2000);
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  // File the report on the tracker by opening GitHub's new-issue form, prefilled, in the
-  // user's browser. The app holds no GitHub credentials and posts nothing itself: the user
-  // reviews the filled-in form and presses Submit, which also keeps them as the issue author
-  // so maintainers can reply to them.
-  async function openFeedbackIssue() {
-    const labels = feedbackKind === "bug" ? "bug" : "enhancement";
-    const url = (body: string) =>
-      `${ISSUE_TRACKER}/issues/new?labels=${labels}` +
-      `&title=${encodeURIComponent(feedbackSubject())}` +
-      `&body=${encodeURIComponent(body)}`;
-    let body = feedbackReport();
-    // GitHub serves a 414 rather than a form past roughly 8k of URL, and percent-encoding
-    // inflates the body several times over. Trim the tail instead of handing over a dead
-    // link, and put the full text on the clipboard so nothing typed is lost.
-    const LIMIT = 6000;
-    const NOTE = "\n\n_(Report truncated: the full text is on your clipboard.)_";
-    if (url(body).length > LIMIT) {
-      await copyFeedback();
-      while (body.length > 200 && url(body + NOTE).length > LIMIT) body = body.slice(0, -200);
-      body += NOTE;
-    }
-    try {
-      await invoke("open_issue_url", { url: url(body) });
-      feedbackOpened = true;
-      setTimeout(() => (feedbackOpened = false), 4000);
     } catch (e) {
       error = String(e);
     }
@@ -10642,7 +10815,7 @@
         if (inCall && server === callServer && channel === callChannel) void refreshJukebox();
         if (server === activeServerId && channel === cur?.active) {
           refreshTopic(); // topic edits ride the same channel-updated event
-          refresh(true).then(() => {
+          channelEventRefresh.request(true).then(() => {
             // You're looking at this channel: only notify if the window isn't focused. The same
             // stable message id gates its sound and its clickable ticker receipt exactly once.
             if (document.hasFocus()) return;
@@ -11064,6 +11237,7 @@
       clearInterval(blink);
       clearInterval(callCleanup);
       clearTimeout(inboxTimer);
+      if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
       clearTimeout(updateTimer);
       clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
@@ -11091,12 +11265,14 @@
 
 <!-- The connectivity detail, rendered by BOTH the create/join screen and Settings ->
      Diagnostics: one panel, two doors. It reports what was TRIED, never a verdict the code
-     cannot support (see `reachabilitySummary`: AutoNAT does not exist, so "can the internet
-     reach me" is honestly unknown). -->
+     cannot support (see `reachabilitySummary`: AutoNAT v2 proves one address/observer pair at
+     one moment, not universal reachability). -->
 {#snippet connDetail(c: Connectivity)}
   <div class="conn-detail">
     <h4>Router port mapping (UPnP)</h4>
     <p class="muted small">{c.upnp || "not attempted"}</p>
+    <h4>Remote dial-back (AutoNAT)</h4>
+    <p class="muted small">{c.autonat || "not tested"}</p>
     <h4>Addresses this device offers ({c.advertised.length})</h4>
     {#if c.advertised.length}
       <ul class="conn-addrs">
@@ -13783,7 +13959,7 @@
             {/if}
             <span class="head-actions">
               {#if firstUnreadIdx >= 0}
-                <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => scrollToMatch(firstUnreadIdx)}>↑ {unreadCount} new</button>
+                <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => void scrollToMatch(firstUnreadIdx)}>↑ {unreadCount} new</button>
               {/if}
               <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
               <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F · Ctrl+Shift+F for filters)" aria-label="Search messages" onclick={() => openSearch()}>{@render icoSearch()}</button>
@@ -13985,12 +14161,21 @@
             bind:this={messagesEl}
             use:richClicks
             use:channelScan
+            onscroll={onChatScroll}
             ondragover={(e) => { e.preventDefault(); dragOver = true; }}
             ondragleave={() => (dragOver = false)}
             ondrop={(e) => onComposerDrop("chat", e)}
           >
-            {#each messages as m, mi}
-              {@const newDay = mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
+            {#if messageWindow.start > 0}
+              <li class="message-window-edge">
+                <button class="ghost small" type="button" onclick={revealOlderMessages}>
+                  Load {Math.min(CHAT_WINDOW_STEP, messageWindow.start)} older messages
+                </button>
+              </li>
+            {/if}
+            {#each renderedMessages as m, visibleIndex (messageDomKey(m, messageWindow.start + visibleIndex))}
+              {@const mi = messageWindow.start + visibleIndex}
+              {@const newDay = visibleIndex === 0 || mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
               {#if newDay}
                 <li class="day-divider" aria-hidden="true"><span>{dayLabel(m.ts)}</span></li>
               {/if}
@@ -14037,6 +14222,7 @@
                 class:flash={!!m.id && m.id === flashId}
                 style={[bubble, arrivalVars].filter(Boolean).join(";")}
                 use:contextMenu={() => messageMenu(m)}
+                use:resolveChatRow={m}
               >
                 {#if grouped}
                   <span class="t" title={new Date(m.ts).toLocaleString()}>
@@ -14126,7 +14312,7 @@
                   {#if warning}
                     <button type="button" class="warning-banner" onclick={() => toggleWarning(warning.id)} title="Collapse this warned post"><b>Warning:</b> {warning.reason}<span>collapse</span></button>
                   {/if}
-                  <span class="text">{@html renderMessage(m.text, myMentionName)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
+                  <span class="text">{@html renderedMessage(m)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
                 {/if}
                 {#if m.id && replyCounts.get(m.id)}
                   {@const n = replyCounts.get(m.id)}
@@ -14182,6 +14368,13 @@
             {:else}
               <li class="muted">No messages yet: say hello.</li>
             {/each}
+            {#if messageWindow.end < messages.length}
+              <li class="message-window-edge">
+                <button class="ghost small" type="button" onclick={revealNewerMessages}>
+                  Load {Math.min(CHAT_WINDOW_STEP, messages.length - messageWindow.end)} newer messages
+                </button>
+              </li>
+            {/if}
           </ul>
           <div class="composer-wrap">
             {#if mentionQuery !== null && mentionCandidates.length}
@@ -17350,113 +17543,40 @@
     {/if}
 
     {#if showFeedback}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showFeedback = false; }}>
-        <div class="overlay-card">
-          <header class="overlay-head">
-            <h2>💬 Send feedback</h2>
-            <button class="ghost" onclick={() => (showFeedback = false)}>✕</button>
-          </header>
-          <div class="overlay-body feedback">
-            <div class="seg fb-seg">
-              <button class:active={feedbackKind === "bug"} onclick={() => (feedbackKind = "bug")}>🐞 Bug report</button>
-              <button class:active={feedbackKind === "feature"} onclick={() => (feedbackKind = "feature")}>✨ Feature request</button>
-            </div>
-            <label class="fb-label" for="fb-title">Title</label>
-            <input
-              id="fb-title"
-              class="fb-text"
-              bind:value={feedbackTitle}
-              maxlength="120"
-              placeholder={feedbackKind === "bug" ? "Short summary of the problem" : "Short summary of the idea"}
-            />
-            <label class="fb-label" for="fb-text">
-              {feedbackKind === "bug"
-                ? "What went wrong? Steps to reproduce, and what you expected to happen."
-                : "What would you like Mewtual to do?"}
-            </label>
-            <textarea id="fb-text" class="fb-text" bind:value={feedbackText} rows="7" placeholder="Describe it here…"></textarea>
-            <p class="muted small">
-              Filing opens a prefilled issue on the
-              <strong>{feedbackKind === "bug" ? "bug tracker" : "feature request tracker"}</strong>
-              in your browser: review it and press Submit there. Mewtual sends nothing on its own and holds no GitHub
-              account of yours, so nothing is posted until you submit it. Your app version and environment are included
-              to help debugging. No GitHub account? Copy the report and send it to the maintainer instead.
-            </p>
-            <div class="file-info-actions">
-              <button class="primary" disabled={!feedbackText.trim()} onclick={openFeedbackIssue}>
-                {feedbackOpened ? "✓ Opened in your browser" : feedbackKind === "bug" ? "🐞 File on GitHub" : "✨ File on GitHub"}
-              </button>
-              <button class="ghost" disabled={!feedbackText.trim()} onclick={copyFeedback}>
-                {feedbackCopied ? "✓ Copied to clipboard" : "Copy report"}
-              </button>
+      {#if FeedbackOverlay}
+        <FeedbackOverlay
+          version={APP_VERSION}
+          onclose={() => (showFeedback = false)}
+          onerror={(message) => (error = message)}
+        />
+      {:else}
+        <!-- Keep failure local and retryable; a failed optional chunk must not destabilize chat. -->
+        <div class="overlay" role="presentation">
+          <div class="overlay-card">
+            <header class="overlay-head"><h2>Send feedback</h2><button class="ghost" onclick={() => (showFeedback = false)}>✕</button></header>
+            <div class="overlay-body">
+              <p class="muted">{feedbackOverlayError ? "The feedback view could not be loaded." : "Loading feedback…"}</p>
+              {#if feedbackOverlayError}<button class="ghost" onclick={loadFeedbackOverlay}>Retry</button>{/if}
             </div>
           </div>
         </div>
-      </div>
+      {/if}
     {/if}
 
     {#if showWikiHelp}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showWikiHelp = false; }}>
-        <div class="overlay-card">
-          <header class="overlay-head">
-            <h2>Wiki formatting</h2>
-            <button class="ghost" onclick={() => (showWikiHelp = false)}>✕</button>
-          </header>
-          <div class="overlay-body wiki-help">
-            <p>Each page is written in <strong>Markdown</strong> or <strong>Wikitext</strong>: pick per page with the
-              <code>md / wiki</code> switch in Edit mode. The choice is a page property shared with every member.
-              Pages with 3+ headings get an automatic <strong>Contents</strong> box.</p>
-            <h3>Link to another page (both formats)</h3>
-            <p><code>[[Getting Started]]</code>, or with display text: <code>[[Getting Started|the guide]]</code>.
-              Click a link to open it; a <span class="wikilink missing">red link</span> means the page doesn't exist
-              yet: click it to create it.</p>
-            <h3>Embed an image / video / audio (both formats)</h3>
-            <p>In Edit mode, <strong>drag a file onto the editor</strong> or use the 📎 button. It's stored in the
-              fileshare under <code>wiki/&lt;page&gt;/</code> and shown inline.</p>
-            <h3>Infobox (both formats)</h3>
-            <p>The summary card that floats at the top right of a page. Write one block, anywhere on the
-              page, with the <code>▤</code> toolbar button; <code>title</code>, <code>image</code> and
-              <code>caption</code> are the card's own chrome, every other line is a row, and a line with an
-              empty value becomes a section band. One infobox per page.</p>
-            <pre class="wiki-help-block">{`{{Infobox
-| title   = Whiskers
-| image   = (use 📎 or + insert to place a file here)
-| caption = At the cafe
-| Species = Cat
-| Owner   = [[Alice]]
-| Details =
-| Age     = 4
-}}`}</pre>
-            <h3>Markdown pages</h3>
-            <ul>
-              <li><code>**bold**</code>, <code>*italic*</code>, <code>`code`</code></li>
-              <li><code># Heading</code>, <code>## Subheading</code></li>
-              <li><code>- bullet</code> lists, <code>1. numbered</code> lists</li>
-              <li><code>&gt; quote</code>, <code>---</code> divider, <code>[text](https://link)</code></li>
-            </ul>
-            <h3>Wikitext pages</h3>
-            <ul>
-              <li><code>'''bold'''</code>, <code>''italic''</code>, <code>'''''both'''''</code></li>
-              <li><code>== Heading ==</code>, <code>=== Subheading ===</code></li>
-              <li><code>* bullet</code> / <code># numbered</code> lists; nest by repeating (<code>**</code>, <code>##</code>)</li>
-              <li><code>; term : definition</code>, <code>:</code> indent, <code>----</code> divider</li>
-              <li><code>[https://link label]</code> external link</li>
-              <li><code>{"{|"}</code> … <code>{"|}"}</code> table, with <code>|-</code> rows, <code>!</code> header cells, <code>|+</code> caption</li>
-              <li><code>&lt;nowiki&gt;…&lt;/nowiki&gt;</code> shows markup literally</li>
-            </ul>
-            <h3>Page tools</h3>
-            <ul>
-              <li><strong>Contents box</strong>: automatic at 3+ headings; force with <code>__TOC__</code>, suppress with <code>__NOTOC__</code>.</li>
-              <li><strong>Sections</strong>: hover a heading in Read mode for a per-section <em>edit</em> jump.</li>
-              <li><strong>Redirects</strong>: a page whose first line is <code>#REDIRECT [[Target]]</code> forwards readers there.</li>
-              <li><strong>Rename / delete</strong>: in the page header (rename doesn't rewrite links: old links go red).</li>
-              <li><strong>What links here</strong>: pages linking to the open page, listed under it.</li>
-            </ul>
+      {#if WikiHelpOverlay}
+        <WikiHelpOverlay onclose={() => (showWikiHelp = false)} />
+      {:else}
+        <div class="overlay" role="presentation">
+          <div class="overlay-card">
+            <header class="overlay-head"><h2>Wiki formatting</h2><button class="ghost" onclick={() => (showWikiHelp = false)}>✕</button></header>
+            <div class="overlay-body">
+              <p class="muted">{wikiHelpLoadError ? "Wiki help could not be loaded." : "Loading wiki help…"}</p>
+              {#if wikiHelpLoadError}<button class="ghost" onclick={loadWikiHelpOverlay}>Retry</button>{/if}
+            </div>
           </div>
         </div>
-      </div>
+      {/if}
     {/if}
 
     {#if showQuickSwitch}

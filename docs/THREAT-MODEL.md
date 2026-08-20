@@ -21,6 +21,15 @@ table with the commit that closed it.
   malicious; the owner is the root of governance authority by construction.
 - **Governance/policy actions vary.** Some are protocol-enforced; some are enforced only by the
   honest client today. The tables below are the source of truth.
+- **Public reachability infrastructure is low-trust, not invisible.** A relay/rendezvous that
+  serves AutoNAT v2 learns the requester's source address, candidate addresses, peer id and probe
+  timing, and can withhold service or cause a false negative. It cannot forge a v2 positive merely
+  by claiming success: the client accepts success only after the fresh callback returns its nonce.
+  Ordinary members do not serve anonymous probes; public nodes cap pending callback connections.
+- **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
+  native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
+  the main-window capability reduce injection reach; the native command gate is the enforcement
+  layer, not the fact that Svelte hid or cleared a control.
 
 ## Protocol- / crypto-enforced (a modified client CANNOT bypass)
 
@@ -37,6 +46,7 @@ table with the commit that closed it.
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
 | UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption | `catcoms-app::ServerStore`; desktop `create_backup` |
 | Vault-secret rotation | The current wrapper is authenticated; the same root DEK is atomically rewrapped with a fresh Argon2 salt/nonce, so no half-rekeyed data tree is possible | `catcoms-storage::change_vault_passphrase`; desktop `change_vault_secret` |
+| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped and long downloads re-check while actors continue native background network/persistence work | desktop `require_unlocked_session`; `lock_session`; `forward_events` |
 | Moderation-record attribution and field integrity | Each event/vote has a canonical group-bound Ed25519 signature; the reader verifies signer fingerprint and linked-device origin, so records cannot be altered or replayed into another server without detection | `catcoms-app::moderation` |
 | Path traversal | Virtual file paths normalized (drops `.`/`..`/empty) so a path can't escape the share | `catcoms-app::normalize_path` |
 
@@ -140,3 +150,5 @@ roadmap:
 - When the UI implies a rule is enforced, make sure the rule is either in the protocol table or
   carries an in-app note that it is advisory (as the roles panel already does).
 - When a residual is closed, move it up with the commit hash.
+- When a Tauri command is added or removed, update `apps/desktop/src/tauri-command-security.ts`;
+  the frontend suite checks the ledger against the native handler and every literal invocation.

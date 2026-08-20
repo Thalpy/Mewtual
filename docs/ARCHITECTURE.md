@@ -12,7 +12,7 @@ code was written), the honest residual risks, and the phased build plan.
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
 | Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
 | Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. |
-| Networking | **rust-libp2p** (QUIC + TCP + WSS; *no WebRTC in v1*). Zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and an authenticated rendezvous. Invites embed bootstrap multiaddrs. |
+| Networking | **rust-libp2p** (QUIC + TCP + WSS; *no WebRTC in v1*). Zero-knowledge **circuit-relay v2 + DCUtR** hole-punching, an authenticated rendezvous, and **AutoNAT v2** dial-back testing by public relay/rendezvous nodes. Invites embed bootstrap multiaddrs. |
 | Invites | Strictly **single-use, device-bound** (one device per invite); revocable/expirable. |
 | Files | Content-addressed over **ciphertext**. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
 | Moderation | One group-bound, independently signed moderation document per server. Warnings attest to bounded snapshots; kick votes are advisory; only the owner-only MLS removal path changes membership. The log is not yet protocol-enforced append-only (threat-model R7). |
@@ -62,6 +62,8 @@ is broken. The load-bearing fixes:
 
 - **Metadata** is the dominant weakness: who-talks-to-whom, timing, group sizes, and; once
   two members hole-punch; each other's IP, are partly observable. Mitigated, not eliminated.
+  AutoNAT additionally reveals a candidate address and probe timing to its chosen public server;
+  a positive is scoped to that server/address/moment and is not a universal reachability claim.
   No nation-state-grade metadata protection is promised.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals
   *after* the device is removed.

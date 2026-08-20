@@ -162,40 +162,54 @@ export type Connectivity = {
   server: number;
   advertised: string[];
   upnp: string;
+  autonat: string;
   steps: DiagStep[];
   last_error: string;
 };
 
 /// The honest answer to "am I reachable from the internet".
 ///
-/// AutoNAT is not implemented (`docs/design-zeroconf-reachability.md`, rung 0c), so nothing in
-/// this app can have a peer dial it back, and no amount of local information settles the
-/// question. A public address from UPnP or a reserved relay circuit is evidence and is reported
-/// as evidence; it is never reported as a verdict.
+/// AutoNAT v2 now supplies a real, nonce-verified callback for one candidate address from one
+/// connected public relay/rendezvous node. That settles that address/observer pair at that moment,
+/// not every possible network path. A relay circuit remains independently usable even when the
+/// direct AutoNAT test fails, while a UPnP mapping without a callback remains evidence only.
 export function reachabilitySummary(c: Connectivity | null): {
   verdict: string;
   detail: string;
 } {
   const upnp = c?.upnp ?? "";
+  const autonat = c?.autonat ?? "";
   const relayed = (c?.advertised ?? []).some((a) => a.includes("p2p-circuit"));
   const publicUpnp = upnp.startsWith("/");
   if (relayed) {
     return {
       verdict: "reachable through a relay",
       detail:
-        "A relay circuit is reserved, so joiners can reach this node through the relay even behind NAT. Whether they can also reach it directly is untested.",
+        `A relay circuit is reserved, so joiners can reach this node through the relay even behind NAT. Direct-path test: ${autonat || "not tested"}.`,
+    };
+  }
+  if (autonat.startsWith("reachable ")) {
+    return {
+      verdict: "reachable directly (tested)",
+      detail: `A public AutoNAT server completed a fresh callback to this node: ${autonat.slice("reachable ".length)}. This proves that address from that observer at test time; another network or transport can still differ.`,
+    };
+  }
+  if (autonat.startsWith("unreachable ")) {
+    return {
+      verdict: "direct test failed",
+      detail: `AutoNAT could not reach the tested public address: ${autonat.slice("unreachable ".length)}. Use a relay, check the firewall/port forward, or test another address family.`,
     };
   }
   if (publicUpnp) {
     return {
       verdict: "probably reachable directly",
-      detail: `Your router opened a port and reported ${upnp}. That is good evidence, not proof: nothing here can dial this machine from outside to check.`,
+      detail: `Your router opened a port and reported ${upnp}. That is good evidence, but AutoNAT did not complete a remote callback to it: ${autonat || "not tested"}.`,
     };
   }
   return {
     verdict: "unknown",
     detail:
-      "This app cannot test whether it is reachable from the internet: that needs a peer willing to dial back (AutoNAT), which is not implemented yet. No public address was obtained, so a joiner on another network may not be able to reach you; a relay or a rendezvous address is the way around that.",
+      `AutoNAT needs a public relay or rendezvous node willing to dial back and a public address candidate at the same time. Result: ${autonat || "not tested"}. No verified direct path is available; a relay is the reliable fallback.`,
   };
 }
 
@@ -212,6 +226,7 @@ export function formatConnectivity(c: Connectivity | null): string {
   out.push(`Reachable from the internet: ${reach.verdict}`);
   out.push(`  ${reach.detail}`);
   out.push(`UPnP: ${c.upnp || "not attempted"}`);
+  out.push(`AutoNAT: ${c.autonat || "not tested"}`);
   out.push(
     c.advertised.length
       ? `Addresses this node advertises (${c.advertised.length}):`

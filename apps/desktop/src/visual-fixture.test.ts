@@ -29,6 +29,14 @@ test("visual fixture returns isolated channel message copies", () => {
   assert.equal(second.length, 5);
 });
 
+test("visual fixture supplies every read used by the empty Wiki and lazy Help route", () => {
+  assert.deepEqual(visualFixtureResponse("get_wiki_pages"), []);
+  assert.deepEqual(visualFixtureResponse("get_wiki_map"), {});
+  assert.deepEqual(visualFixtureResponse("get_wiki_meta"), {});
+  assert.equal(visualFixtureResponse("get_wiki_review_days"), 0);
+  assert.deepEqual(visualFixtureResponse("get_wiki_pending"), []);
+});
+
 test("visual fixture fails loudly for an unsupported native dependency", () => {
   assert.throws(
     () => visualFixtureResponse("new_native_command"),

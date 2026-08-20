@@ -58,6 +58,9 @@ Implementations:
   - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
     circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
     `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
+    `MeshBehaviour` also runs an AutoNAT v2 client; `next_autonat_result()` or the
+    single-consumer `take_autonat_results()` returns an `AutoNatResult` scoped to one candidate,
+    server and test. Relay/rendezvous swarms serve v2 dial-backs; ordinary members do not.
   - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
     `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are

@@ -108,13 +108,12 @@ const emptyReport: Connectivity = {
   server: 0,
   advertised: [],
   upnp: "no usable gateway (no UPnP, or your ISP uses CGNAT)",
+  autonat: "not tested: no public address candidate and AutoNAT server were available together",
   steps: [],
   last_error: "timed out connecting to the server",
 };
 
-test("reachability is reported as unknown unless there is actual evidence", () => {
-  // AutoNAT is not implemented, so "yes, the internet can reach you" is not a claim this code
-  // is entitled to make. The failure mode the design doc names is showing it anyway.
+test("reachability distinguishes a real AutoNAT callback from weaker evidence", () => {
   const none = reachabilitySummary(emptyReport);
   assert.equal(none.verdict, "unknown");
   assert.match(none.detail, /AutoNAT/);
@@ -122,7 +121,21 @@ test("reachability is reported as unknown unless there is actual evidence", () =
 
   const upnp = reachabilitySummary({ ...emptyReport, upnp: "/ip4/203.0.113.7/tcp/9000" });
   assert.equal(upnp.verdict, "probably reachable directly");
-  assert.match(upnp.detail, /evidence, not proof/);
+  assert.match(upnp.detail, /good evidence/);
+
+  const tested = reachabilitySummary({
+    ...emptyReport,
+    autonat: "reachable /ip4/45.79.12.34/tcp/9000 (verified by AutoNAT server 12D3KooWTest)",
+  });
+  assert.equal(tested.verdict, "reachable directly (tested)");
+  assert.match(tested.detail, /fresh callback/);
+
+  const failed = reachabilitySummary({
+    ...emptyReport,
+    autonat: "unreachable /ip6/2001:4860::1/tcp/9000 from AutoNAT server 12D3KooWTest: dial failed",
+  });
+  assert.equal(failed.verdict, "direct test failed");
+  assert.match(failed.detail, /relay/);
 
   const relay = reachabilitySummary({
     ...emptyReport,
@@ -145,6 +158,7 @@ test("the connectivity report keeps the last error verbatim", () => {
   assert.match(text, /\[failed\] connect: none of the dialled addresses answered within 20s/);
   assert.match(text, /Addresses this node advertises \(1\):/);
   assert.match(text, /Reachable from the internet: unknown/);
+  assert.match(text, /AutoNAT: not tested:/);
 });
 
 test("a connectivity report with nothing attempted says so", () => {

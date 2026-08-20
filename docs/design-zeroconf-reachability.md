@@ -5,7 +5,7 @@ substantially rewritten the same day after three adversarial reviews (privacy / 
 abuse-and-adoption) refuted several claims in v1. Sections marked **[v1 RETRACTED]** record
 what the first draft asserted and why it was wrong, so the mistake is not re-made.
 
-**Where it stands (2026-08-19):** the invite path is fixed, the two deployment-blocking
+**Where it stands (2026-08-20):** the invite path is fixed, the two deployment-blocking
 CRITICALs are closed, and **every defect P1 to P14 has been worked to a conclusion**. Nine are
 closed outright; P3 is deferred by decision (census rate-limited, not prevented); P5, P6 and P10
 are partial with their remaining gaps named in the board; and P9 is **closed as a decision**, its
@@ -13,11 +13,12 @@ premise having turned out to be false (the tag is keyed on the same secret as th
 it never defended P8's attacker, and "P9 blocks P8" was wrong).
 
 **Section 1c is the status board** and is the answer to "is P-whatever fixed". **Section 9**
-tracks the ladder, of which rungs 0 and 1 are built and the rest are not: AutoNAT, mDNS,
-concurrent rung racing, the two-way invite code, switchboards, the port-forwarding wizard and
-hosted mode are all still to come, and a bootstrap node has to be provisioned by a human before
-rung 4 means anything. **Section 11** carries the loose ends that are not defects. Nothing here
-is deployed.
+tracks the ladder. The direct-listen/UPnP work is built, and AutoNAT v2 now has a mesh client,
+relay/rendezvous servers, per-address diagnostics and regression coverage. AutoNAT is still only
+**partial as a product rung**: no public infrastructure node is deployed, it does not yet drive
+automatic escalation, and pairwise reachability is not a persistent model. mDNS, concurrent rung
+racing, the two-way invite code, switchboards, the port-forwarding wizard and hosted mode are all
+still to come. **Section 11** carries the loose ends that are not defects. Nothing here is deployed.
 
 Extends [`ARCHITECTURE.md`](ARCHITECTURE.md), [`design-6e-rendezvous.md`](design-6e-rendezvous.md),
 [`design-6e-relay.md`](design-6e-relay.md). Touches the boundary tracked in
@@ -351,9 +352,30 @@ model, which is also the right input to switchboard selection.
 
 ### Rung 0c: AutoNAT
 
-**[v1 RETRACTED] v1 wrote the entire ladder around AutoNAT and AutoNAT does not exist**: no
-feature, no code, nothing. It is the sensor rungs 1 and 2 branch on and the eligibility test for
-switchboards. It is a **prerequisite**, not a follow-on.
+**[v1 RETRACTED] v1 wrote the entire ladder around AutoNAT when AutoNAT did not exist**: at that
+point there was no feature, code or result path. It is the sensor rungs 1 and 2 branch on and the
+eligibility test for switchboards. It is a **prerequisite**, not a follow-on.
+
+**Partially built (2026-08-20).** `MeshBehaviour` now runs the libp2p AutoNAT **v2 client**;
+public relay and rendezvous swarms run the v2 server; a result travels through `MeshService` into
+the desktop connectivity record; and the UI distinguishes a nonce-verified callback from a failed
+address test, a UPnP mapping and a relay path. Explicit public addresses (manual forward, public
+IPv6, UPnP) are offered as candidates as well as identify-observed addresses. Two end-to-end memory
+transport tests prove both callback success and scoped failure through the actor boundary.
+
+The scope is deliberately narrow. Ordinary members do **not** serve dial-backs: making every
+stable member listener an anonymous public probe service would add a resource and metadata surface.
+Only the already-public relay/rendezvous infrastructure serves. V2 is used instead of the legacy
+aggregate-status protocol: the client accepts success only after receiving the callback nonce from
+a fresh connection, and the requester uploads 30--100 KiB before the smaller callback, reducing
+false positives and reflection amplification. Infra swarms additionally cap pending outbound
+callbacks at 64 and total established connections accordingly; upstream v2 has no aggregate dial
+queue bound of its own.
+
+A result remains **per address, server and moment**. Success does not prove every observer can
+reach every transport; failure does not prove every candidate is private. The desktop therefore
+keeps listening across candidates and reports those qualifiers rather than collapsing the result
+into a permanent boolean.
 
 It also **needs a peer willing to dial you back**, and a brand-new founder has no peers, so the
 only candidate is the bootstrap node. **Rung 0 therefore depends on rung 4**, which inverts v1's
@@ -362,6 +384,12 @@ framing that dependency is only incurred on failure. Say so plainly.
 Without it the escalation trigger degenerates to a timeout, and a timeout cannot distinguish
 "the founder is unreachable" (escalate) from "the founder is asleep" (escalating is useless, and
 rung 3 then asks the user to reconfigure a router to fix someone else's problem).
+
+That paragraph still describes the product's escalation logic today: the measurement is surfaced
+but does not yet drive concurrent rung racing or pre-flight invite gating. And with no relay or
+rendezvous in the configuration--the exact shape of the 2026-08-20 field reports--there is no
+dial-back server, so the honest result remains unknown. A public bootstrap deployment is still the
+dependency this rung cannot remove.
 
 ### Rung 1: two-way invite code
 
@@ -601,16 +629,18 @@ rejected", and **neither party could find out why**. Three causes, all closed:
    key material), because the file exists to be shared.
 3. **Nothing surfaced what an attempt actually did.** A `Connectivity` record in the bridge
    captures, per found/join: the advertised addresses, the UPnP result (distinguishing
-   no-gateway from timed-out from an address), an ordered step log (`listen`/`advertise`/`relay`/
-   `rendezvous`/`discover`/`dial`/`connect`/`join`/`invite`) each `ok`/`failed`/`unknown`, and the
-   last error **verbatim**. Read by `get_connectivity`, rendered on the create/join screen and in
-   Settings / Diagnostics, copyable as text.
+   no-gateway from timed-out from an address), the AutoNAT v2 result, an ordered step log
+   (`listen`/`advertise`/`relay`/`rendezvous`/`discover`/`dial`/`connect`/`join`/`invite`) each
+   `ok`/`failed`/`unknown`, and the last error **verbatim**. Read by `get_connectivity`, rendered
+   on the create/join screen and in Settings / Diagnostics, copyable as text.
 
-   **It does not answer "am I reachable from the internet".** AutoNAT is rung 0c and does not
-   exist, so nothing can dial this node back; `reachabilitySummary` reports `unknown` unless a
-   relay circuit is reserved or UPnP returned a public address, and even then says "evidence, not
-   proof". Per-address dial outcomes are also reported as `unknown` rather than invented: libp2p
-   dials the set concurrently and only the first connection surfaces.
+   It now answers the narrower question AutoNAT can actually test: **could this connected public
+   server reach this address at this moment?** A nonce-verified callback is labelled direct and
+   tested; failure stays scoped to that address/server pair. Without both public infrastructure
+   and a public candidate, `reachabilitySummary` remains `unknown`. A relay reservation is a
+   separately usable route, while UPnP without a callback remains evidence rather than proof.
+   Per-address *outbound dial* outcomes are still reported as `unknown` rather than invented:
+   libp2p dials the set concurrently and only the first connection surfaces.
 
 Still open here: the pre-flight self-test above, the last-seen rendezvous query on a failed dial,
 symmetric-NAT detection, and the invite declaring which rungs it depends on.
@@ -686,7 +716,7 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 |---|---:|---|---|---|
 | **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
 | **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Started P8; P8 is now **closed** without P9, which is closed as a decision rather than built: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
-| **[ ]** | 2 | AutoNAT into `MeshBehaviour`; mDNS; pairwise reachability in the model | prerequisite for rungs 1, 2 | light |
+| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, server on relay/rendezvous, and scoped diagnostics are built; mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | light |
 | **[ ]** | 3 | Concurrent rung racing, status line, failure messaging, pre-flight self-test | needs 0-2 | none |
 | **[ ]** | 4 | Create-server flow, Advanced, Settings / Connectivity | needs UI pass | none |
 | **[ ]** | 5 | Two-way invite code: MAC binding, 60s life, address validation, async join via the existing offline queue | needs 0-2 | yes |
@@ -759,10 +789,12 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
 
 ### Blocks an honest answer somewhere
 
-- **AutoNAT (rung 0c) does not exist.** Consequence today: the connectivity panel cannot answer
-  "am I reachable from the internet" and correctly says unknown; a relay reservation or a UPnP
-  address is labelled evidence, not proof. Also the escalation trigger for rungs 1 and 2, and the
-  eligibility test for switchboards. The single highest-leverage missing piece.
+- **AutoNAT (rung 0c) is only a scoped sensor so far.** The v2 client, public-infrastructure
+  server and diagnostics exist, but there is no default deployed server, recurring/pairwise model
+  or automatic escalation into relay/hole-punch rungs. The panel can prove one address from one
+  server at one moment; it correctly remains unknown without that candidate/server pair. Turning
+  those observations into the escalation trigger and switchboard-eligibility signal remains the
+  highest-leverage reachability work.
 - **Per-dial outcomes are not observable.** `MeshService` races a dial set and only the winner
   surfaces, so the panel shows per-address results as unknown rather than inventing them. Needs
   per-dial event plumbing out of the transport.
