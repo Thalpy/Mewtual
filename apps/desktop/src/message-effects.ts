@@ -9,11 +9,20 @@ export type TextEffectDefinition = {
   animated: boolean;
 };
 
+export type TextEffectPointerRegion = "palette" | "trigger" | "editor" | "outside";
+
+/** A textarea retains its selection after blur; only the three owning regions keep its Aa bar. */
+export function dismissTextEffectPalette(catalogOpen: boolean, region: TextEffectPointerRegion): boolean {
+  return !catalogOpen && region === "outside";
+}
+
 const BASE_EFFECTS: TextEffectDefinition[] = [
   { id: "shake", label: "Shaky", description: "Nervous, excited, or unstable lettering.", group: "Motion", preview: "systems unstable", animated: true },
   { id: "wave", label: "Wavy", description: "Letters rise and fall in sequence.", group: "Motion", preview: "signal rolling", animated: true },
   { id: "sparkle", label: "Rainbow sparkles", description: "A bright spectrum with small starbursts.", group: "Motion", preview: "critical success!", animated: true },
-  { id: "animalese", label: "Animalese", description: "Reveals in speech beats with deterministic voice blips once on screen.", group: "Motion", preview: "hello operator", animated: true },
+  { id: "speakese", label: "Speakese", description: "Pops in letter by letter with a distinct, phoneme-coloured voice blip.", group: "Motion", preview: "hello operator", animated: true },
+  { id: "perfect-cherry-blossom", label: "Perfect Cherry Blossom", description: "Petal-pink lettering with drifting sakura; cursor movement shakes loose a fresh bloom.", group: "Motion", preview: "petals on the signal", animated: true },
+  { id: "red-truth", label: "The Red Truth", description: "A declarative crimson entrance: opening seal, synthesized sting, then a clean letter reveal.", group: "Mood", preview: "This statement is absolute.", animated: true },
   { id: "flame", label: "Angry flame", description: "Hot, forceful text with an ember edge.", group: "Mood", preview: "I am FURIOUS", animated: true },
   { id: "gloom", label: "Gloom", description: "Heavy, drained text that seems to sink.", group: "Mood", preview: "not my day", animated: true },
   { id: "cyber", label: "Cyber", description: "Cyan/magenta terminal interference.", group: "Signal", preview: "BREACH READY", animated: true },
@@ -56,8 +65,44 @@ export const TEXT_EFFECTS: readonly TextEffectDefinition[] = [
 
 export const TEXT_EFFECT_GROUPS: readonly TextEffectGroup[] = ["Motion", "Mood", "Signal", "Pride", "Utility"];
 export const TEXT_EFFECT_RE = /^\[fx:([a-z0-9/-]{1,40})\]([^\n]{1,320}?)\[\/fx\]/i;
+export const SPEAKESE_STEP_SECONDS = 0.072;
+export const MAX_SPEAKESE_BLIPS = 64;
+export const PERFECT_CHERRY_BLOSSOM_PETALS = 7;
+
+export type SpeakeseBlip = {
+  at: number;
+  stop: number;
+  frequency: number;
+  endFrequency: number;
+  waveform: OscillatorType;
+  peak: number;
+};
+
+export function speakeseSoundPlan(tones: number[], start: number): SpeakeseBlip[] {
+  return tones.slice(0, MAX_SPEAKESE_BLIPS).map((rawTone, index) => {
+    const tone = Math.max(0, Math.min(23, Number.isFinite(rawTone) ? rawTone : 0));
+    return {
+      at: start + index * SPEAKESE_STEP_SECONDS,
+      stop: start + index * SPEAKESE_STEP_SECONDS + 0.065,
+      frequency: 185 * Math.pow(2, tone / 17),
+      endFrequency: 198 * Math.pow(2, tone / 17),
+      waveform: tone % 3 === 0 ? "triangle" : "sine",
+      peak: 0.036,
+    };
+  });
+}
+
+/** An original three-voice flourish: a low declaration, rising edge, and glassy seal. */
+export function redTruthSoundPlan(start: number): SpeakeseBlip[] {
+  return [
+    { at: start, stop: start + 0.24, frequency: 196, endFrequency: 123, waveform: "triangle", peak: 0.047 },
+    { at: start + 0.055, stop: start + 0.31, frequency: 523.25, endFrequency: 783.99, waveform: "sine", peak: 0.034 },
+    { at: start + 0.135, stop: start + 0.39, frequency: 987.77, endFrequency: 1318.51, waveform: "sine", peak: 0.025 },
+  ];
+}
 
 const EFFECT_IDS = new Set(TEXT_EFFECTS.map((effect) => effect.id));
+const EFFECT_ALIASES: Record<string, string> = { animalese: "speakese" };
 const FLAG_COLORS = new Map(PRIDE_FLAGS.map(([id, _label, colors]) => [id, colors]));
 
 function escText(value: string): string {
@@ -73,35 +118,65 @@ function boundedUnits(units: string[], max = 160): string[] {
   return [...units.slice(0, max - 1), units.slice(max - 1).join("")];
 }
 
+const SPEECH_PAIRS = new Set(["th", "sh", "ch", "ph", "ng", "qu", "ck", "ee", "oo", "ea", "ai", "ou", "ow", "oi", "oy"]);
+function speechTone(chars: string[], index: number): number {
+  const bare = (value = "") => value.normalize("NFKD").replace(/\p{Mark}/gu, "").toLowerCase();
+  const current = bare(chars[index]);
+  const ahead = current + bare(chars[index + 1]);
+  const behind = bare(chars[index - 1]) + current;
+  const phoneme = SPEECH_PAIRS.has(ahead) ? ahead : SPEECH_PAIRS.has(behind) ? behind : current;
+  let hash = 0;
+  for (const code of Array.from(phoneme)) hash = (hash * 37 + (code.codePointAt(0) ?? 0)) >>> 0;
+  // Vowels, consonants/digraphs, and punctuation occupy noticeably different registers.
+  if (/^[aeiouy]/.test(phoneme)) return 2 + (hash % 7);
+  if (/^[a-z]/.test(phoneme)) return 10 + (hash % 10);
+  return 20 + (hash % 4);
+}
+
 function unitHtml(text: string, className: string, tones = false): string {
   const chars = boundedUnits(Array.from(text));
   return chars.map((char, index) => {
-    let hash = 0;
-    for (const code of Array.from(char.normalize("NFKD"))) hash = (hash * 31 + (code.codePointAt(0) ?? 0)) >>> 0;
-    const tone = tones ? ` data-fx-tone="${hash % 18}"` : "";
+    const tone = tones ? ` data-fx-tone="${speechTone(chars, index)}"` : "";
     return `<span class="${className} fx-i-${index % 16}"${tone}>${escText(char)}</span>`;
   }).join("");
 }
 
+function cherryBlossomPetalsHtml(): string {
+  return Array.from({ length: PERFECT_CHERRY_BLOSSOM_PETALS }, (_, index) =>
+    `<i class="fx-blossom-petal fx-blossom-petal-${index + 1}"></i>`,
+  ).join("");
+}
+
 export function isTextEffectId(id: string): boolean {
-  return EFFECT_IDS.has(id);
+  return EFFECT_IDS.has(id) || Object.hasOwn(EFFECT_ALIASES, id);
+}
+
+export function canonicalTextEffectId(id: string): string {
+  return EFFECT_ALIASES[id] ?? id;
 }
 
 export function parseTextEffect(source: string): { raw: string; id: string; text: string } | null {
   const match = TEXT_EFFECT_RE.exec(source);
   if (!match || !isTextEffectId(match[1])) return null;
-  return { raw: match[0], id: match[1], text: match[2] };
+  return { raw: match[0], id: canonicalTextEffectId(match[1]), text: match[2] };
 }
 
 /** Fixed-catalog HTML only. The shared DOMPurify pass remains the final enforcement boundary. */
 export function textEffectHtml(id: string, text: string): string {
   if (!isTextEffectId(id)) return escText(text);
+  id = canonicalTextEffectId(id);
   const safeId = id.replace(/\//g, "-");
   if (id === "wave") {
     return `<span class="text-fx text-fx-wave" data-text-fx="wave" aria-label="${escAttr(text)}"><span class="text-fx-visual" aria-hidden="true">${unitHtml(text, "text-fx-unit")}</span></span>`;
   }
-  if (id === "animalese") {
-    return `<span class="text-fx text-fx-animalese" data-text-fx="animalese" aria-label="${escAttr(text)}"><span class="text-fx-visual" aria-hidden="true">${unitHtml(text, "text-fx-unit fx-animalese-unit", true)}</span></span>`;
+  if (id === "speakese") {
+    return `<span class="text-fx text-fx-speakese" data-text-fx="speakese" aria-label="${escAttr(text)}"><span class="text-fx-visual" aria-hidden="true">${unitHtml(text, "text-fx-unit fx-speakese-unit", true)}</span></span>`;
+  }
+  if (id === "red-truth") {
+    return `<span class="text-fx text-fx-red-truth" data-text-fx="red-truth" aria-label="${escAttr(text)}"><i class="fx-red-truth-flourish" aria-hidden="true"></i><span class="text-fx-visual" aria-hidden="true">${unitHtml(text, "text-fx-unit fx-red-truth-unit")}</span></span>`;
+  }
+  if (id === "perfect-cherry-blossom") {
+    return `<span class="text-fx text-fx-perfect-cherry-blossom" data-text-fx="perfect-cherry-blossom" aria-label="${escAttr(text)}"><span class="text-fx-visual" aria-hidden="true">${escText(text)}</span><span class="fx-blossom-petals" aria-hidden="true">${cherryBlossomPetalsHtml()}</span></span>`;
   }
   if (id === "censor") {
     return `<span class="text-fx text-fx-censor" data-text-fx="censor" tabindex="0" role="button" title="Reveal censored text">${escText(text)}</span>`;
@@ -119,7 +194,7 @@ export function textEffectGradient(id: string): string {
 }
 
 export function formatTextEffect(id: string, text: string): string {
-  return isTextEffectId(id) ? `[fx:${id}]${text}[/fx]` : text;
+  return isTextEffectId(id) ? `[fx:${canonicalTextEffectId(id)}]${text}[/fx]` : text;
 }
 
 export function insertTextEffect(
@@ -131,7 +206,7 @@ export function insertTextEffect(
   const a = Math.max(0, Math.min(source.length, Math.floor(start)));
   const b = Math.max(a, Math.min(source.length, Math.floor(end)));
   const selected = source.slice(a, b) || (id === "censor" ? "classified" : "text");
-  const open = `[fx:${isTextEffectId(id) ? id : "cyber"}]`;
+  const open = `[fx:${isTextEffectId(id) ? canonicalTextEffectId(id) : "cyber"}]`;
   const close = "[/fx]";
   let tokenCount = 0;
   const lines = selected.split("\n").map((line) => {

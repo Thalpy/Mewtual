@@ -25,3 +25,21 @@ test("stored bindings keep only catalogued, modified, unique, non-reserved chord
   assert.deepEqual(clean, { shake: "Alt+X" });
   assert.equal(effectForKeybind({ ...DEFAULT_TEXT_EFFECT_KEYBINDS, cyber: "Alt+X" }, "Alt+X"), "cyber");
 });
+
+test("a saved Animalese shortcut migrates to Speakese", () => {
+  assert.deepEqual(sanitizeTextEffectKeybinds({ animalese: "Alt+M" }), { speakese: "Alt+M" });
+  assert.equal(DEFAULT_TEXT_EFFECT_KEYBINDS.speakese, "Alt+Shift+4");
+  assert.equal(DEFAULT_TEXT_EFFECT_KEYBINDS.animalese, undefined);
+});
+
+test("the two theatrical effects have mnemonic defaults and remain customizable", () => {
+  assert.equal(DEFAULT_TEXT_EFFECT_KEYBINDS["red-truth"], "Alt+Shift+R");
+  assert.equal(DEFAULT_TEXT_EFFECT_KEYBINDS["perfect-cherry-blossom"], "Alt+Shift+C");
+  assert.deepEqual(sanitizeTextEffectKeybinds({
+    "red-truth": "Ctrl+Alt+T",
+    "perfect-cherry-blossom": "Ctrl+Alt+P",
+  }), {
+    "perfect-cherry-blossom": "Ctrl+Alt+P",
+    "red-truth": "Ctrl+Alt+T",
+  });
+});

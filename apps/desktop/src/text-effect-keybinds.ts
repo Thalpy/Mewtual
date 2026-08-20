@@ -4,7 +4,9 @@ export const DEFAULT_TEXT_EFFECT_KEYBINDS: Record<string, string> = {
   shake: "Alt+Shift+1",
   wave: "Alt+Shift+2",
   sparkle: "Alt+Shift+3",
-  animalese: "Alt+Shift+4",
+  speakese: "Alt+Shift+4",
+  "red-truth": "Alt+Shift+R",
+  "perfect-cherry-blossom": "Alt+Shift+C",
   flame: "Alt+Shift+5",
   gloom: "Alt+Shift+6",
   cyber: "Alt+Shift+7",
@@ -51,7 +53,7 @@ export function sanitizeTextEffectKeybinds(raw: unknown): Record<string, string>
   const out: Record<string, string> = {};
   const used = new Set<string>();
   for (const effect of TEXT_EFFECTS) {
-    const chord = source[effect.id];
+    const chord = source[effect.id] ?? (effect.id === "speakese" ? source.animalese : undefined);
     if (
       typeof chord !== "string" || chord.length > 48 || !/^(?=.*(?:Ctrl|Meta|Alt))/.test(chord) ||
       RESERVED_KEYBINDS.has(chord) || used.has(chord)

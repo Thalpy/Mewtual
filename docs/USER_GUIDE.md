@@ -63,6 +63,12 @@ can travel by paste, QR or sound. The new device receives its own key and joins 
 server when that server's owner is online to serialize the admission safely. Owners can inspect
 linked devices under **Server settings → Devices**, and you can revoke your own companions there.
 
+Use **Settings → Backup & Recovery** to create a coherent encrypted copy of the unlocked vault in
+your Downloads folder. The copy remains protected by the same vault secret, so keep that secret
+separately. One-click restore is deliberately not offered yet: replacing a live vault safely needs
+a locked-screen, staged verification and rollback flow. Keep the exported folder intact until that
+flow lands.
+
 ---
 
 ## 3. Quick start
@@ -90,8 +96,11 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   restart**, **Later** (it asks again next launch), or **Skip this version** (it never asks about
   that one again). Nothing installs unless you press Update, and **Settings → Updates** can check
   on demand, including for a version you skipped.
-- **Sidebar**; the server's channels and its member list (with role badges).
-- **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Profile · Transfers · Events**.
+- **Sidebar**; the server's channels and its member list (with role badges). Servers also have a
+  dedicated **Moderation** button and compact **Storage** / **Connectivity** controls immediately
+  above your profile; DMs omit the server-governance controls.
+- **Main pane surfaces**; **Chat · Files · Announcements · Wiki · Profile · Transfers · Events**,
+  plus the operations surfaces opened from the sidebar.
   Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
   map with direct **Open** buttons.
 - **Top-bar ticker**; new announcements, wiki changes, events, and messages that notify you crawl
@@ -155,6 +164,9 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - Every server starts with **#general**. Create/join a channel by typing its name into
   **join #channel…**. Anyone who opens the same name lands in the same channel.
 - A **dot** marks unread. Opening a channel pulls its **backlog** from another member.
+- Per-channel drafts and read positions are encrypted in the local vault. They survive a normal
+  restart, are cleared from memory when you lock, and are never copied into plaintext browser
+  storage. This continuity is local to this device; it is not synced to other members.
 
 ### Profile message studios
 - Open **Profile** (or **Settings → My Profile**) for the **Message Frame Studio**. Pick a
@@ -213,15 +225,18 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   click it to apply, or use **+** for the complete searchable catalog. The **Aa FX** button beside
   each editor opens that catalog even when nothing is selected.
 - The copyable form is `[fx:cyber]signal online[/fx]`. The catalog includes shaky and wavy
-  motion, rainbow sparkles, one-shot Animalese speech beats, angry flame, gloom, cyber and CRT
-  signals, click-to-reveal censorship, and a broad set of named pride flags. The catalog's copy
-  button makes markup easy to move between surfaces without memorising it.
+  motion, rainbow sparkles, one-shot Speakese that pops in letter by letter with phoneme-varied
+  voice blips, The Red Truth's synthesized seal-and-letter entrance, cursor-shed petals on Perfect
+  Cherry Blossom, angry flame, gloom, cyber and CRT signals, click-to-reveal censorship, and a
+  broad set of named pride flags. The catalog's copy button makes markup easy to move between
+  surfaces without memorising it. Existing `[fx:animalese]...[/fx]` posts still render as Speakese.
 - Under **Settings → Appearance → Message text effects**, choose **Full**, **Low**, or **Plain**.
-  Full effects can animate, respond to the pointer, and play quiet Animalese blips. Low keeps
-  static colour/type cues but has no movement, pointer response, or effect audio. Plain shows
+  Full effects can animate, respond to the pointer, and play quiet effect audio. Low keeps static
+  colour/type cues but has no movement, pointer response, petal shedding, or effect audio. Plain shows
   ordinary text. Your operating-system reduced-motion setting forces Low, and censored text
   remains concealed in every mode until you reveal it.
-- The ten common effects have defaults from **Alt+Shift+1** through **Alt+Shift+0**. Open
+- The ten original quick effects have defaults from **Alt+Shift+1** through **Alt+Shift+0**;
+  **The Red Truth** uses **Alt+Shift+R** and **Perfect Cherry Blossom** uses **Alt+Shift+C**. Open
   **Settings → Keybinds → Text-effect shortcuts** to change, clear, or reset any effect's binding,
   including every pride variant. Bindings are local to this device and require Ctrl/Cmd or Alt,
   so ordinary typing is never captured.
@@ -367,7 +382,32 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
 
 ---
 
-## 8. Roles & server settings
+## 8. Moderation, operations & server settings
+
+Open **Moderation** in a server's sidebar for its chronological user-event plane:
+
+- Owners and admins can select individual messages or **Shift-click a range**, enter a public
+  reason, and **Warn & collapse** them. Other members see a compact warning marker and can expand
+  the preserved message for context. A warning is a signed, immutable snapshot; deleting the live
+  post later does not silently erase the evidence. Batch deletion requires a second confirmation.
+- A moderator can make a removal case and attach signed warnings concerning that member. Members
+  vote **yes/no** in public; the tally is advisory. Only the owner can resolve the case and only an
+  owner-authorized MLS removal can actually remove the member and rotate the group keys.
+- Signatures and signer attribution are verified when the timeline is read. Moderator authority is
+  checked against the current owner-signed roles, so a forged or currently unauthorized entry is
+  displayed as ignored rather than treated as policy. See `THREAT-MODEL.md` for the remaining
+  honest-client enforcement boundary.
+
+The two compact operations buttons above your profile provide local, evidence-based diagnostics:
+
+- **Storage** verifies every file manifest and referenced encrypted chunk on this device. Missing,
+  unreadable and invalid items are reported separately. **Repair from peers** fetches missing or
+  corrupt chunks through the authenticated, content-address-checked member path, then verifies
+  again; it cannot invent bytes when no reachable member holds them or repair an invalid manifest.
+  The same health summary is explicitly available in **Transfers**.
+- **Connectivity** explains what this device can actually observe: connected members, the current
+  path evidence and existing network settings. It does not promise global reachability from a
+  local observation. **Copy diagnostic** provides the same bounded report for troubleshooting.
 
 Right-click the server icon and open **Server settings**:
 
