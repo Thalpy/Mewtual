@@ -14,8 +14,9 @@ npm install
 npm run tauri dev      # starts Vite (port 1420) + opens the app window
 ```
 
-Found a server → open **"Invite someone"** → **Copy** the single-use invite. Type in
-#general and messages appear live.
+Found a server → right-click its rail icon → **Server settings → Invites** → copy the
+single-use invite. Type in #general and messages appear live. For the complete current surface
+map, open **Settings → Feature Guide** in the app or see the repository README's feature table.
 
 ## Run two instances (to actually chat between them)
 
@@ -70,8 +71,11 @@ Joining dials **every** address in the invite, so the reachable one wins.
 
 You can also be in **several servers at once**; found/join adds a server to the left rail.
 
-**Deferred:** rendezvous auto-discovery (joining with *no* address in the invite; the CLI
-already does this over real TCP; not yet wired into the desktop `found`/`join`).
+The desktop also supports **rendezvous discovery**: configure a rendezvous multiaddress while
+founding (or as the default under Settings → Network), and an invite can locate the founder
+without embedding the founder's hard-coded address. Post-join re-registration/discovery helps
+existing members reconnect after restarts. This does not make servers publicly discoverable;
+joining still requires the valid single-use invite.
 
 ## Layout
 

@@ -49,16 +49,17 @@
 | 8u/8v | **wiki** — per-server collaborative pages (name→body map doc) + Chat/Wiki view toggle (page list + editor); page bodies are automerge `Text`, so concurrent edits merge **char-by-char** (8v) | done |
 | 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
 | 10 | **desktop UI / product overhaul** — **10a–10h done**: tabbed nav + Settings overlay; a sanitized markdown renderer (`marked`+DOMPurify) with `[[wiki links]]`, `:emoji:`, and `![cid embeds]`; fileshare **folders** + drag-drop **media embeds** in chat/status (built in code from CID-verified blobs); a **wiki** overhaul (markdown, links, backlinks, media, in-app help); **custom emoji**; **notification sounds**; and **owner/admin roles** + a server-settings role manager. 10c & 10h adversarially reviewed; roles enforcement is documented as policy-layer (cryptographic hardening is a named follow-up) | done |
-| 8… | rendezvous discovery in the UI · chunked large-file transfer · last-copy-safe blob retention | planned |
-| 8 | Product model + Tauri desktop UI | planned |
-| 9 | Android | planned |
-| 10 | Hardening + calendar | planned |
+| 11 | Desktop expansion: discovery UI, chunked transfers, DMs/friends, events/news, search/inbox, delivery states, multi-device, wiki history/review, livery and voice surfaces | done/current |
+| 12 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned |
+| 13 | Hardening: last-copy-safe retention, recovery/export, AutoNAT, voice completion, supply-chain attestation and independent security review | planned |
 
 Features/things in stack:
-1. Draw waveform for midi in voice chat (fun) [Do we go full DAW lite?]
-2. needs better midi settings in the settings pannel
-3. a *lot* of settings are stubs and aren't fully integrated.
-4. 
+1. Draw a waveform or shared visualizer for MIDI/instruments in voice chat (fun; decide whether
+   this stays a toy or becomes a small collaborative music surface).
+2. Add better MIDI settings: device routing, velocity curve, sustain handling and per-instrument
+   receive controls.
+3. Explicit settings gaps: vault re-key, keybind remapping, notification granularity, and the
+   protocol-backed Security / Server Nodes pages.
 
 ---
 

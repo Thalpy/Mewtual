@@ -6,6 +6,10 @@ All notable changes to Mewtual are documented here.
 
 ### Added
 
+- **Searchable Feature Guide**: Settings now includes a complete feature directory with plain
+  descriptions, exact UI locations, shortcuts and direct **Open** actions for chat surfaces,
+  DMs, Inbox/News, Server Space and both settings areas. The repository README carries the same
+  high-level map so substantial features are no longer hidden in handover notes.
 - **Wiki page history**: every page keeps its revisions (who changed what, when), with a line
   diff against the previous version and one-click restore. Rollbacks, renames, deletions and
   review decisions are all recorded, so nothing is silently erased.

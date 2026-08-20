@@ -41,14 +41,15 @@ server is running.
 
 ---
 
-## 2. First launch & your passphrase
+## 2. First launch & your vault secret
 
-On launch, Mewtual asks for a **passphrase**. This isn't an account; it's the key that
-**encrypts everything on this device at rest**.
+On launch, Mewtual asks for a **vault secret**. This isn't an account; it is the input that
+**encrypts everything on this device at rest**. A passphrase is the recommended option; the
+setup screen also offers a drawn multi-factor **sigil** or a played **melody**.
 
-- **First run:** the passphrase you type *becomes* your encryption passphrase. There is **no
-  recovery**; if you forget it, the local data is unreadable.
-- **Later runs:** type the same passphrase to unlock. Your servers, channels, history,
+- **First run:** the secret you enter *becomes* your vault secret. There is **no recovery**; if
+  you forget it, the local data is unreadable.
+- **Later runs:** enter the same secret to unlock. Your servers, channels, history,
   profiles, files, wiki, and roles all come back; **readable offline**, even before any
   other member is online.
 
@@ -56,15 +57,20 @@ Everything on disk (group state, messages, files, avatars) is sealed under this 
 (Argon2id + XChaCha20-Poly1305). A stolen laptop or a copied app-data folder is opaque
 without it.
 
+To add another computer or device without pretending both are the same cryptographic device,
+open **Settings → Devices → Link a new device**. The two devices compare a short code; the grant
+can travel by paste, QR or sound. The new device receives its own key and joins each granted
+server when that server's owner is online to serialize the admission safely. Owners can inspect
+linked devices under **Server settings → Devices**, and you can revoke your own companions there.
+
 ---
 
 ## 3. Quick start
 
 1. **Found a server**; type a display name, click **Found a server**.
-2. **Invite a friend**; open **⚙ Settings** (gear on the left rail) → **Invite someone** →
-   **Copy invite** (or use the **＋ Invite someone** button under the member list). Invites are
-   single-use; click **Generate new invite** any time you need a fresh one (e.g. after a
-   restart, or once the last one was used).
+2. **Invite a friend**; right-click the server icon → **Server settings → Invites** →
+   **Copy invite** (or use the invite button under the member list). Invites are single-use;
+   click **Generate new invite** whenever you need another one.
 3. **They join**; your friend opens Mewtual, sets a passphrase, pastes the invite into the
    join box, clicks **Join**.
 
@@ -74,7 +80,8 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 
 ## 4. The layout
 
-- **Left rail**; your servers (one icon each) + **＋** to add one + **💬** to send feedback
+- **Left rail**; your servers (one icon each), **DMs**, the cross-server **Inbox / News** feed,
+  **Server Space** (the orbit icon), **＋** to add one, and **💬** to send feedback
   (a bug report or feature request: **File on GitHub** opens a prefilled issue on the tracker in
   your browser for you to review and submit, and **Copy report** puts the same text on your
   clipboard if you would rather send it another way) + **⚙** for Settings.
@@ -84,15 +91,18 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   that one again). Nothing installs unless you press Update, and **Settings → Updates** can check
   on demand, including for a version you skipped.
 - **Sidebar**; the server's channels and its member list (with role badges).
-- **Main pane tabs**; **Chat · Files · Status · Wiki · Profile**. Click a tab to switch.
+- **Main pane surfaces**; **Chat · Files · Status · Wiki · Profile · Transfers · Events**.
+  Click one to switch. If that list feels like a lot, **Settings → Feature Guide** is a searchable
+  map with direct **Open** buttons.
 
 ### Right-click menus & keyboard shortcuts
 - **Right-click** almost anything for quick actions: a **message** (copy text, quote, copy
   sender), a **wiki page** (open, **post a link to it in chat**, copy link), a **file** (open
   details, download, post to chat, copy address, delete), a **member** (copy fingerprint,
   make/demote admin, remove; owner), or a **server icon** (copy invite, settings, leave).
-- **Keyboard**: **Enter** sends, **Shift+Enter** adds a newline; **Esc** closes the open
-  menu/panel; **Ctrl/Cmd+1–5** switch tabs; **Ctrl/Cmd+K** jumps to the message box.
+- **Keyboard**: **Enter** sends, **Shift+Enter** adds a newline; **Esc** closes the topmost
+  menu/panel; **Ctrl/Cmd+1–7** switch surfaces; **Ctrl/Cmd+K** opens the quick switcher for
+  channels, surfaces, servers and DMs; **Ctrl/Cmd+L** locks; **Ctrl/Cmd+O** opens Server Space.
 - The **member list** and **wiki page list** get a search box once they grow; server icons show
   an **unread badge**.
 
@@ -125,6 +135,14 @@ You're now in a shared, encrypted `#general` channel. Type and send.
 - Every server starts with **#general**. Create/join a channel by typing its name into
   **join #channel…**. Anyone who opens the same name lands in the same channel.
 - A **dot** marks unread. Opening a channel pulls its **backlog** from another member.
+
+### DMs, friends, Inbox & News
+- Open **DMs** from the left rail to create a private 1:1, redeem a friend code, sort friends by
+  recent/activity/reconnect, or accept an authenticated friend request from someone you share a
+  server with. A DM is its own encrypted two-member server, keeping that identity unlinkable from
+  your other communities.
+- Open **Inbox** for every message that mentions you or replies to you across all servers and DMs.
+  Switch it to **News** for recent status posts and upcoming events across your communities.
 
 ### Rich text, links & emoji (in chat, status, and the wiki)
 - **Markdown** works: `**bold**`, `*italic*`, `` `code` ``, lists, `> quotes`, links.
@@ -162,12 +180,13 @@ When you found a server, open the **Network (optional)** section. How others rea
 | **Over the internet (no port-forward)** | A **relay**; see below. |
 
 Find your LAN IP with `ipconfig` (Windows) / `ip addr` (Linux). The invite carries every
-address you advertise; the joiner dials all of them and the one that works wins.
+address you advertise; the joiner dials all of them and the one that works wins. If you leave
+the fields blank, Mewtual also gives UPnP/NAT-PMP a chance to obtain a public address from a
+cooperative home router. This is best effort and does not work through every router or CGNAT.
 
-> After you **reopen** the app, a server comes back up on a new port, so its *old* invite may
-> no longer reach new joiners; found-time addresses can change. Click **Generate new invite**
-> after reopening to mint one that carries the current address. Members who were already
-> connected are re-dialed automatically when they're reachable.
+The server's network identity and port persist across restarts. Opening **Server settings →
+Invites** refreshes an unused invite when its reachable-address set has changed. Generate a new
+invite after the previous one is consumed, or whenever you want to deliberately replace it.
 
 ### Using a relay (no port-forwarding)
 
@@ -178,6 +197,15 @@ peers behind NATs. It is **zero-knowledge**; it only routes ciphertext.
    address, e.g. `/ip4/203.0.113.9/tcp/4000/p2p/12D3KooW…`.
 2. When founding, paste that into the **Relay address** field.
 3. Share the invite as usual; your friend joins **through the relay from anywhere**.
+
+### Using rendezvous discovery
+
+A rendezvous node helps members find one another without putting a member's hard-coded address in
+the invite. Set a default under **Settings → Network**, or provide one while founding. The desktop
+registers the founder, discovers them when a valid invite is pasted, and keeps re-registering after
+the join so members can reconnect after a restart. The rendezvous sees opaque namespaces and
+network metadata, not group keys or plaintext. It is not a public directory: the invite is still
+required and remains single-use.
 
 ---
 
@@ -204,12 +232,12 @@ The **Files** tab is a folder browser:
 - Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
   rest, and only members can open them.
 
-**Custom emoji** live in the `emoji/` folder. Add one in **⚙ Settings → Custom emoji**:
-type a `code` and upload an image. Then anyone types `:code:` to use it.
+**Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
+type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
 
 ---
 
-## 7. Wiki, status & events
+## 7. Wiki, status, events & calls
 
 - **Wiki**; collaborative pages, each written in **Markdown or Wikitext** (a per-page
   `md / wiki` switch in Edit mode, shared with every member; wikitext gives you
@@ -255,22 +283,37 @@ type a `code` and upload an image. Then anyone types `:code:` to use it.
   file and shows on the event itself and on every link to it. The event's author, an owner or
   an admin can delete it. Upcoming events also appear in the cross-server **News** feed.
 
+### Voice, video & shared play
+
+- Choose **Join voice** in a chat channel's header. Voice rooms belong to channels and remain
+  active while you move around the app. The call stage provides mute/deafen, per-person volume,
+  input/output device selection, camera and screen sharing.
+- **Instruments** opens an on-screen keyboard that also accepts computer-keyboard or Web MIDI
+  input; notes are shared live with the room. The **Jukebox** queues audio already circulating in
+  the server's Files area, so it does not upload a second copy.
+- Media uses a peer-to-peer WebRTC mesh with authenticated signalling. STUN is configured under
+  **Settings → Voice & Calls**; optional personal or server-provided TURN relays still-encrypted
+  media when a direct media path cannot be made. Large rooms multiply every sender's upload, so
+  the current mesh is intended for small groups.
+
 ---
 
 ## 8. Roles & server settings
 
-Open **⚙ Settings → Server**:
+Right-click the server icon and open **Server settings**:
 
 - The **owner** is the server's founder. Owners can **promote/demote admins** (member list);
   roles show as badges in the sidebar.
 - **What roles do today:** the owner is cryptographically anchored (it's the group's MLS
   committer), and an admin grant is **signed by the owner**, so a member **cannot forge** an
   admin role; the badges are trustworthy against tampering.
+- **Removal:** the owner can remove a member under **Server settings → Members**. This is a real
+  MLS removal: it advances the epoch, rotates discovery secrets and cascades to that member's
+  linked devices.
 - **What roles do NOT do yet (be aware):** roles are *not* a full access-control system.
   Everyone in a server can read everything in it (they hold the group key); a role does not
-  restrict what a member can see. Removing/kicking a member isn't in the UI yet. Ownership
-  follows the founder, so if the founder leaves the group ownership passes to the next member.
-  Treat roles as **trusted designation + display**, not a hard permission wall.
+  restrict what a member can see. Treat roles as **trusted designation + moderation controls**,
+  not a hard content-permission wall.
 
 ---
 
@@ -320,11 +363,12 @@ wiki, and roles; they share nothing.
   (set a new passphrase; re-found / re-join with an invite).
 - **Can't connect over a network** → check the founder advertised a reachable address, the TCP
   port is forwarded, or use a **relay** (§5). Both peers must be running while connecting.
-- **An old invite stopped working after a restart** → the server came back on a new port; the
-  owner should share a fresh invite (§5).
+- **An unused invite stopped working** → open **Server settings → Invites** while the owner is
+  online and generate a fresh one; the owner's current reachable addresses are folded into it.
 - **An avatar / file / embed shows as unavailable** → the member who has it may be offline; it
   appears once a peer holding it is reachable.
-- **No automatic peer discovery yet** → you still paste an invite to join.
+- **A rendezvous invite still needs to be pasted** → expected: rendezvous discovers the member's
+  address, but it does not replace the single-use authorization carried by the invite (§5).
 
 ---
 
