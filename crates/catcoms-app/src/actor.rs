@@ -3292,6 +3292,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_actor_surfaces_an_inbound_call_signal_with_its_verified_sender() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        alice_srv
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .unwrap();
+        let alice_record = alice_srv.sync.self_record().unwrap().clone();
+        let alice_fp = alice_srv.my_fingerprint();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let mut bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        assert!(bob_srv.sync.ingest_peer_record(alice_record));
+        let bob_fp = bob_srv.my_fingerprint();
+        let (bob, _bob_events, bob_handle) = spawn(bob_srv);
+
+        let payload = br#"{"type":"offer","sdp":"opaque-to-actor"}"#.to_vec();
+        assert!(bob
+            .send_call_signal(alice_fp, payload.clone())
+            .await
+            .unwrap());
+
+        let received = timeout(Duration::from_secs(5), async {
+            loop {
+                match alice_events.recv().await {
+                    Some(AppEvent::CallSignal { from_fp, payload }) => break (from_fp, payload),
+                    Some(_) => continue,
+                    None => panic!("alice actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("Alice did not surface the call signal");
+        assert_eq!(received, (bob_fp, payload));
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_actors_converge_on_profiles() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
