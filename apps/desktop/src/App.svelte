@@ -3531,6 +3531,19 @@
     const p = profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
     return p?.name?.trim() || fp;
   }
+  // The call surfaces' counterpart to nameOf/profileFor. Resolves against the room's server
+  // first and only falls back to the viewed server's map, so a peer keeps one name for the
+  // whole call no matter where the user wanders in the rail.
+  function callProfileFor(fp: string): Prof | undefined {
+    return (
+      callProfiles[fp] ??
+      (deviceMap[fp] ? callProfiles[deviceMap[fp].origin] : undefined) ??
+      profiles[fp]
+    );
+  }
+  function callNameOf(fp: string): string {
+    return callProfileFor(fp)?.name?.trim() || fp;
+  }
   // Two-letter mono monogram for a rail circle (one letter for a one-character name).
   function monogram(name: string): string {
     return (name ?? "").trim().slice(0, 2).toUpperCase() || "?";
@@ -4987,6 +5000,23 @@
       profiles = map;
     } catch (e) {
       error = String(e);
+    }
+  }
+  // The call surfaces' own copy of the room server's profiles. Deliberately a separate fetch
+  // from refreshProfiles: that one is keyed to whatever server is being viewed and is wiped on
+  // every switch, which is exactly the behaviour the call chrome must not inherit.
+  async function refreshCallProfiles() {
+    const server = callServer;
+    if (server === null) return;
+    try {
+      const list = await invoke<Prof[]>("get_profiles", { server });
+      if (callServer !== server) return; // left, or moved rooms, mid-fetch
+      const map: Record<string, Prof> = {};
+      for (const p of list) map[p.fingerprint] = p;
+      callProfiles = map;
+    } catch {
+      // A missing profile renders as a fingerprint, which is honest and still identifies the
+      // peer. Surfacing an error banner over a cosmetic lookup would be worse than the gap.
     }
   }
   async function refreshFiles() {
@@ -8087,8 +8117,20 @@
   // key). You join a channel's room; others see it via presence (below) and join the same room.
   let callChannel = $state(""); // the channel id of my active voice room ("" = not in a call)
   let callChannelName = $state(""); // for the call bar
-  let callServer: number | null = null; // the server the room is on
+  // Reactive, unlike the plain binding this replaces: the call chrome has to re-render when the
+  // room's server stops being the viewed one, which is the whole point of the fields below.
+  let callServer = $state<number | null>(null); // the server the room is on
+  let callServerName = $state(""); // the room's server, for chrome that must not say "here"
   let callSelfFp = $state(""); // identity on callServer; the viewed server may change mid-call
+  // Names and avatars on the call surfaces MUST resolve against the room's server, never the
+  // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
+  // so reading it from the call bar re-labelled you and every peer the moment you clicked
+  // another server: your own name changed under you, and the dock read as though the call had
+  // moved with you. This map is fetched once for callServer and is cleared only on leave.
+  let callProfiles = $state<Record<string, Prof>>({});
+  // True while the user is looking at a different server from the one the call is on. The dock
+  // uses it to say where the call actually is instead of silently implying "here".
+  let callElsewhere = $derived(inCall && callServer !== null && callServer !== activeServerId);
   let localStream: MediaStream | null = null;
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
@@ -10165,6 +10207,10 @@
     if (!(await ensureMic())) { callServer = null; callSelfFp = ""; return; }
     callChannel = channel;
     callChannelName = name;
+    // Snapshot the room's server identity now, while we are certainly on it. Everything the
+    // dock renders afterwards has to survive the user walking off to another server.
+    callServerName = servers.find((s) => s.id === server)?.name ?? "";
+    void refreshCallProfiles();
     inCall = true;
     callMuted = false;
     focusOpen = false;
@@ -10221,7 +10267,9 @@
     callChannel = "";
     callChannelName = "";
     callServer = null;
+    callServerName = "";
     callSelfFp = "";
+    callProfiles = {};
     for (const fp of Object.keys(waitingIce)) delete waitingIce[fp];
   }
   function toggleMute() {
@@ -11275,6 +11323,9 @@
       }),
       listen<{ server: number }>("profiles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshProfiles();
+        // A rename on the room's server has to reach the dock even while another server is
+        // being viewed, which is precisely when the active-server refresh above does nothing.
+        if (e.payload.server === callServer) void refreshCallProfiles();
       }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
@@ -11792,6 +11843,26 @@
   {:else}
     <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
       {nameOf(fp).slice(0, 1).toUpperCase()}
+    </span>
+  {/if}
+{/snippet}
+
+<!--
+  Call-surface twins of nameTag/avatarTag. Identical rendering, different lookup: these resolve
+  through the room server's profile map so switching servers mid-call cannot rename the room.
+-->
+{#snippet callNameTag(fp: string)}
+  {@const p = callProfileFor(fp)}
+  {@render styledName(callNameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
+{/snippet}
+
+{#snippet callAvatarTag(fp: string)}
+  {@const p = callProfileFor(fp)}
+  {#if p?.avatar}
+    <img class="avatar" src={imgSrc(p.avatar)} alt="" />
+  {:else}
+    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+      {callNameOf(fp).slice(0, 1).toUpperCase()}
     </span>
   {/if}
 {/snippet}
@@ -13065,7 +13136,7 @@
       {/if}
       <span class="stage-spacer"></span>
       {#if jukeNow}
-        <span class="stage-label juke-dj" title="Whoever pressed last owns the deck">dj {jukeIsDj() ? "you" : nameOf(jukeNow.dj)}</span>
+        <span class="stage-label juke-dj" title="Whoever pressed last owns the deck">dj {jukeIsDj() ? "you" : callNameOf(jukeNow.dj)}</span>
       {/if}
       <span class="juke-vol-ico">{@render icoSpeaker()}</span>
       <input
@@ -13100,7 +13171,7 @@
           <button class="ghost juke-tbtn" title="Skip: takes the deck and moves everyone on" aria-label="Skip" onclick={jukeSkip}>{@render icoSkip()}</button>
           <span class="stage-spacer"></span>
           {#if cur}
-            <span class="stage-label juke-by" style={`color:${instColor(cur.author)}`} title={`Queued by ${nameOf(cur.author)}`}>added by {nameOf(cur.author)}</span>
+            <span class="stage-label juke-by" style={`color:${instColor(cur.author)}`} title={`Queued by ${callNameOf(cur.author)}`}>added by {callNameOf(cur.author)}</span>
           {/if}
         </div>
       </div>
@@ -13130,7 +13201,7 @@
           {@const gone = jukeGone(e.cid)}
           {@const days = jukeExpiryDays(e.cid)}
           <li class="juke-row" class:gone>
-            <span class="juke-dot" style={`background:${instColor(e.author)}`} title={`Queued by ${nameOf(e.author)}`}></span>
+            <span class="juke-dot" style={`background:${instColor(e.author)}`} title={`Queued by ${callNameOf(e.author)}`}></span>
             <button class="juke-nm" title={gone ? `${e.name} is no longer in the share` : `Play ${e.name} for the room`} onclick={() => jukePlayEntry(e.id)}>{e.name}</button>
             {#if jukeFetching === e.cid}
               <span class="juke-chip info">FETCHING</span>
@@ -15844,8 +15915,8 @@
         <span class="call-title">Voice · #{callChannelName}</span>
         <span class="call-status">{callStatusText}</span>
         <div class="call-avatars">
-          {@render avatarTag(callSelfFp)}
-          {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
+          {@render callAvatarTag(callSelfFp)}
+          {#each callParticipants as fp}{@render callAvatarTag(fp)}{/each}
         </div>
         {@render micMeter()}
         {#if videoAnnounced}
@@ -15888,8 +15959,8 @@
               {@const vol = peerVolumes[fp] ?? 1}
               <li class="stage-peer">
                 <div class="stage-row">
-                  <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render avatarTag(fp)}</span>
-                  <span class="stage-nm">{@render nameTag(fp)}</span>
+                  <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
+                  <span class="stage-nm">{@render callNameTag(fp)}</span>
                   <span class="stage-spacer"></span>
                   {#if (remoteHeld[fp] ?? []).length > 0}
                     <span class="stage-playing" title="Playing right now">{@render icoNote()}</span>
@@ -15938,8 +16009,8 @@
 
         <div class="stage-self">
           <div class="stage-row">
-            <span class="stage-av" class:talking={speaking.me}>{@render avatarTag(callSelfFp)}</span>
-            <span class="stage-nm">{@render nameTag(callSelfFp)}</span>
+            <span class="stage-av" class:talking={speaking.me}>{@render callAvatarTag(callSelfFp)}</span>
+            <span class="stage-nm">{@render callNameTag(callSelfFp)}</span>
             <span class="stage-fp">{callSelfFp.slice(0, 4)}·{callSelfFp.slice(4, 8)}</span>
             <span class="stage-spacer"></span>
             {@render micMeter()}
@@ -16048,7 +16119,7 @@
                 <!-- svelte-ignore a11y_media_has_caption -->
                 <video class="focus-vid" class:contain={vid === 2} autoplay playsinline muted use:srcObject={stream}></video>
               {:else}
-                <span class="focus-face">{@render catEars(me ? "me" : fp)}{@render avatarTag(fp)}</span>
+                <span class="focus-face">{@render catEars(me ? "me" : fp)}{@render callAvatarTag(fp)}</span>
               {/if}
               <span class="focus-name">
                 <span class="focus-nm">{me ? "you" : nameOf(fp)}</span>

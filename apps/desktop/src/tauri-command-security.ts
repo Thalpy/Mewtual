@@ -28,7 +28,7 @@ export const TAURI_COMMAND_GROUPS = {
       "get_dm_requests", "file_available", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
-      "get_join_attempts", "get_connectivity", "get_switchboard_status", "set_switchboard_offered", "get_channel_topic", "get_jukebox", "get_inbox",
+      "get_join_attempts", "get_connectivity", "get_call_transport", "get_switchboard_status", "set_switchboard_offered", "get_channel_topic", "get_jukebox", "get_inbox",
       "get_messages",
     ],
   },
