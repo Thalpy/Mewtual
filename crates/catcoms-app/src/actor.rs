@@ -22,8 +22,8 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView,
-    InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats,
+    ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange, FileUsage,
+    FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats,
     ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
     WikiPendingEdit, WikiRevision,
 };
@@ -302,6 +302,14 @@ pub enum AppCommand {
         cid: Vec<u8>,
         idx: usize,
         reply: oneshot::Sender<ChunkResult>,
+    },
+    /// Read one window of a file's plaintext, for the media protocol: whole-file reads do not fit
+    /// a player that wants to start on the first chunk and seek by the second.
+    ReadFileRange {
+        cid: Vec<u8>,
+        start: u64,
+        max_len: usize,
+        reply: oneshot::Sender<Result<FileRange, String>>,
     },
     /// Whether the file's blob is already held locally (no network fetch needed to open it).
     FileAvailable {
@@ -1583,6 +1591,30 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// Read one window of a file's plaintext. See [`AppCommand::ReadFileRange`].
+    pub async fn read_file_range(
+        &self,
+        cid: Vec<u8>,
+        start: u64,
+        max_len: usize,
+    ) -> Result<FileRange, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ReadFileRange {
+                cid,
+                start,
+                max_len,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// Whether the file's blob is held locally (openable without a network fetch).
     pub async fn file_available(&self, cid: Vec<u8>) -> bool {
         let (reply, rx) = oneshot::channel();
@@ -2733,6 +2765,21 @@ where
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
                             Ok(arr) => server
                                 .fetch_file_chunk(&Cid::from_bytes(arr), idx)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            Err(_) => Err("bad content address".to_string()),
+                        };
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::ReadFileRange {
+                        cid,
+                        start,
+                        max_len,
+                        reply,
+                    }) => {
+                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server
+                                .read_file_range(&Cid::from_bytes(arr), start, max_len)
                                 .await
                                 .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),

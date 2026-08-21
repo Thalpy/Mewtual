@@ -1954,6 +1954,20 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 /// paying a whole bucket step and the product's bulk traffic doubles.
 const CHUNK_BYTES: usize = catcoms_storage::CHUNK_PAD_CEILING;
 
+/// One window of a shared file's plaintext, as served to the media protocol.
+#[derive(Debug, Clone)]
+pub struct FileRange {
+    /// The requested plaintext bytes, clamped to the end of the file.
+    pub bytes: Vec<u8>,
+    /// The file's full plaintext length, for `Content-Range`.
+    pub total_size: u64,
+    /// The declared MIME type (best-effort; may be empty).
+    pub mime: String,
+    /// The peer that served a chunk this range needed, or `None` when every chunk it touched was
+    /// already held locally. This is what lets the UI say "loading" rather than "downloading".
+    pub provider: Option<String>,
+}
+
 /// One shared file as the UI sees it. `cid` is the **whole-file plaintext** content address (raw
 /// bytes); the file's stable identity / download+embed handle (a chunked file has no single
 /// ciphertext blob); `author` is the uploader's device fingerprint. The file's bytes are
@@ -3349,6 +3363,85 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             return None;
         }
         Some((manifest.chunks.len(), manifest.total_size))
+    }
+
+    /// Read a byte range of a listed file's plaintext.
+    ///
+    /// This is the media path: a player asks for the window it is about to show rather than the
+    /// whole file, so playback can start on the first chunk and a seek costs one chunk instead of
+    /// a re-download. It goes through exactly the same local-first fetch as a download
+    /// ([`Server::fetch_and_open_chunk`]), so a chunk already in the vault never touches the
+    /// network and a corrupt one is re-fetched, and every chunk is AEAD-opened before it is
+    /// served. What it does *not* do is the whole-file content-address check a download ends
+    /// with: that check needs every byte, and the point here is to not have every byte. Chunk
+    /// authentication is what stands in for it, which is why a range is only ever assembled out
+    /// of opened chunks.
+    pub async fn read_file_range(
+        &mut self,
+        cid: &Cid,
+        start: u64,
+        max_len: usize,
+    ) -> Result<FileRange, AppError> {
+        let Some(entry) = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])
+        else {
+            return Err(AppError::Invalid(
+                "no such file in this server's index".into(),
+            ));
+        };
+        let mime = entry.mime.clone();
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref)
+            .map_err(|_| AppError::Invalid("corrupt file reference".into()))?;
+        let total_size = manifest.total_size;
+        if total_size > MAX_FILE_BYTES as u64 {
+            return Err(AppError::Invalid(
+                "file declares an implausible size".into(),
+            ));
+        }
+        if start >= total_size {
+            // A player probing past the end is normal, not an error; an empty tail says so.
+            return Ok(FileRange {
+                bytes: Vec::new(),
+                total_size,
+                mime,
+                provider: None,
+            });
+        }
+        let end = start.saturating_add(max_len as u64).min(total_size);
+        let first = (start / CHUNK_BYTES as u64) as usize;
+        let last = ((end - 1) / CHUNK_BYTES as u64) as usize;
+        let mut buf = Vec::with_capacity((end - start) as usize);
+        let mut provider = None;
+        for idx in first..=last {
+            let Some(chunk_ref) = manifest.chunks.get(idx).cloned() else {
+                return Err(AppError::Invalid(format!("chunk {idx} is out of range")));
+            };
+            let (chunk, from) = self.fetch_and_open_chunk(&chunk_ref, idx).await?;
+            // Every chunk but the last is exactly CHUNK_BYTES (`bytes.chunks(CHUNK_BYTES)` on the
+            // way in), which is the whole basis for turning a byte offset into a chunk index
+            // without reading everything before it. Check it rather than trust it: if the two ever
+            // drift, silently serving misaligned bytes would corrupt playback in a way that looks
+            // like a codec bug.
+            if idx != manifest.chunks.len() - 1 && chunk.len() != CHUNK_BYTES {
+                return Err(AppError::Invalid(format!(
+                    "chunk {idx} is {} bytes, expected {CHUNK_BYTES}",
+                    chunk.len()
+                )));
+            }
+            provider = provider.or(from);
+            let base = idx as u64 * CHUNK_BYTES as u64;
+            let lo = start.saturating_sub(base).min(chunk.len() as u64) as usize;
+            let hi = (end - base).min(chunk.len() as u64) as usize;
+            buf.extend_from_slice(&chunk[lo..hi]);
+        }
+        Ok(FileRange {
+            bytes: buf,
+            total_size,
+            mime,
+            provider,
+        })
     }
 
     /// Fetch + decrypt a single chunk (`idx`) of a listed file, returning its plaintext bytes + the
@@ -8815,6 +8908,59 @@ mod tests {
         );
         assert_ne!(sizes[1], sizes[2], "the next bucket up is a distinct class");
         assert_eq!(sizes[0], 256 * 1024 + 24 + 4 + 16);
+    }
+
+    #[tokio::test]
+    async fn a_media_range_reads_exactly_the_requested_window_across_a_chunk_boundary() {
+        // The media path's whole reason to exist: serve the window a player asked for without
+        // reading everything before it. The pattern is position-dependent, so a range that came
+        // back off by even one byte (bad chunk index, bad intra-chunk offset) fails loudly.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let n = CHUNK_BYTES * 2 + 4242;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        let cid = alice
+            .add_file("clip.bin", "video/mp4", "", &data)
+            .await
+            .unwrap();
+
+        // A window wholly inside the first chunk.
+        let head = alice.read_file_range(&cid, 0, 1024).await.unwrap();
+        assert_eq!(head.bytes, data[..1024]);
+        assert_eq!(head.total_size, n as u64);
+        assert_eq!(head.mime, "video/mp4");
+        assert!(
+            head.provider.is_none(),
+            "the uploader holds every chunk, so nothing may be requested from the network"
+        );
+
+        // A window straddling the first/second chunk boundary: the case plain chunk indexing
+        // gets wrong.
+        let start = CHUNK_BYTES as u64 - 10;
+        let span = alice.read_file_range(&cid, start, 20).await.unwrap();
+        assert_eq!(span.bytes, data[start as usize..start as usize + 20]);
+
+        // A window in the short tail chunk, clamped to the end of the file.
+        let tail_start = (CHUNK_BYTES * 2) as u64 + 4000;
+        let tail = alice.read_file_range(&cid, tail_start, 8192).await.unwrap();
+        assert_eq!(tail.bytes, data[tail_start as usize..]);
+        assert_eq!(tail.bytes.len(), 242, "the read stops at the end of file");
+
+        // Seeking past the end is a normal thing for a player to probe; it is not an error.
+        let past = alice
+            .read_file_range(&cid, n as u64 + 99, 512)
+            .await
+            .unwrap();
+        assert!(past.bytes.is_empty());
+        assert_eq!(past.total_size, n as u64);
+    }
+
+    #[tokio::test]
+    async fn a_media_range_refuses_a_file_that_is_not_listed() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let missing = Cid::of(b"nothing here");
+        assert!(alice.read_file_range(&missing, 0, 16).await.is_err());
     }
 
     #[tokio::test]
