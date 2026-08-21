@@ -9505,6 +9505,18 @@
   let jukeFetching = $state(""); // the cid currently being pulled off the share
   let jukeReady = $state<Record<string, boolean>>({}); // cid -> already fetched
   let jukeVol = $state(loadJukeVol());
+  // Dock fold, shared by both call surfaces because the deck is one deck. What stays is the
+  // room's shared state (track, time, transport, DJ, sync chip); what folds is the queue, which
+  // is planning rather than state. Planning is the part you put away.
+  let jukeOpen = $state(loadCallSetting("jukeopen", "on") !== "off");
+  function toggleJukeOpen() {
+    jukeOpen = !jukeOpen;
+    try {
+      localStorage.setItem("catcoms.call.jukeopen", jukeOpen ? "on" : "off");
+    } catch {
+      /* storage unavailable */
+    }
+  }
   const jukeUrls: Record<string, string> = {}; // cid -> the fetched blob's url
   const jukeFailed = new Set<string>(); // cids nobody would serve: the DJ's auto-advance skips them
   // The transport we currently follow. `seq`/`fromFp` decide who wins a race, `off`/`at` anchor the
@@ -13244,7 +13256,7 @@
   Everything here reads the transport and presses it; none of it owns any of it.
 -->
 {#snippet jukeDock()}
-  <div class="juke-dock">
+  <div class="juke-dock" class:folded={!jukeOpen}>
     <div class="juke-head">
       <span class="juke-head-ico">{@render icoNote()}</span>
       <span class="stage-label">JUKEBOX</span>
@@ -13255,6 +13267,9 @@
         <span class="juke-chip warn" title="The DJ went quiet: the deck is frozen until someone presses">DECK STALE</span>
       {:else if jukeNow}
         <span class="juke-chip ok" title="You are where the DJ says the room is">SYNCED</span>
+      {/if}
+      {#if !jukeOpen && jukeUpNext.length}
+        <span class="stage-label juke-qn" title={`${jukeUpNext.length} queued`}>Q{jukeUpNext.length}</span>
       {/if}
       <span class="stage-spacer"></span>
       {#if jukeNow}
@@ -13272,9 +13287,29 @@
         title="Jukebox volume (yours only)"
         oninput={(e) => setJukeVol(Number(e.currentTarget.value))}
       />
+      <button
+        class="ghost stage-chev juke-chev"
+        aria-expanded={jukeOpen}
+        title={jukeOpen ? "Fold the jukebox to one line" : "Open the jukebox"}
+        aria-label={jukeOpen ? "Fold the jukebox" : "Open the jukebox"}
+        onclick={toggleJukeOpen}
+      >{#if jukeOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
     </div>
 
-    {#if jukeNow}
+    {#if jukeNow && !jukeOpen}
+      <!-- Folded: one line of the room's shared state, plus a hairline of progress. -->
+      <div class="juke-min">
+        <button
+          class="juke-play mini"
+          title={jukeNow.paused || jukeStale ? "Play for the room" : "Pause the room"}
+          aria-label={jukeNow.paused || jukeStale ? "Play" : "Pause"}
+          onclick={jukeToggle}
+        >{#if jukeNow.paused || jukeStale}{@render icoPlay()}{:else}{@render icoPause()}{/if}</button>
+        <span class="juke-min-nm" title={jukeNow.name}>{jukeNow.name}</span>
+        <span class="juke-time">{jukeElapsed(jukePaint)} / {jukeDur > 0 ? jukeClock(jukeDur) : "?:??"}</span>
+      </div>
+      <div class="juke-bar slim"><i class="juke-bar-fill" style={`width:${jukePct(jukePaint)}%`}></i></div>
+    {:else if jukeNow}
       {@const cur = jukeQueue.find((e) => e.id === jukeNow?.entry)}
       <div class="juke-now">
         <div class="juke-now-top">
@@ -13304,6 +13339,7 @@
       </div>
     {/if}
 
+    {#if jukeOpen}
     <div class="juke-rule">
       <span class="stage-label">UP NEXT</span>
       <span class="juke-rule-line"></span>
@@ -13337,6 +13373,7 @@
           </li>
         {/each}
       </ul>
+    {/if}
     {/if}
   </div>
 {/snippet}

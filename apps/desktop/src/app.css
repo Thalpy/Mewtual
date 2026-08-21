@@ -12818,3 +12818,42 @@ button.stage-sec:hover {
   line-height: 1.45;
   color: var(--muted);
 }
+
+/* Jukebox fold. What stays is the room's shared state; what folds is the queue. */
+.juke-dock.folded {
+  gap: 4px;
+  padding-bottom: 6px;
+}
+button.stage-chev.juke-chev {
+  padding: 1px 3px;
+  margin-right: -2px;
+}
+.juke-qn {
+  color: var(--faint);
+}
+/* Folded now-playing: the audible truth in one row. */
+.juke-min {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+button.juke-play.mini {
+  width: 20px;
+  height: 20px;
+}
+.juke-play.mini .ico {
+  width: 0.7rem;
+  height: 0.7rem;
+}
+.juke-min-nm {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.juke-bar.slim {
+  height: 2px;
+}
