@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "node --experimental-strip-types --test src/*.test.ts",
+    "test:flows": "node scripts/flow-check.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
