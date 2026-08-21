@@ -12931,3 +12931,14 @@ body > #jukebox-media {
   color: var(--transfer);
   border-color: color-mix(in oklab, var(--transfer) 40%, var(--panel));
 }
+
+/* In the room without a microphone. Not an error state: the jukebox and the instruments work
+   perfectly well without one, so this reads as an offer rather than a warning. */
+button.stage-mute.nomic {
+  color: var(--muted);
+  border-style: dashed;
+}
+button.stage-mute.nomic:hover {
+  color: var(--text);
+  border-style: solid;
+}

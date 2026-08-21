@@ -8115,6 +8115,9 @@
   };
   let inCall = $state(false);
   let callMuted = $state(false);
+  // Whether this device has a microphone in the room at all, as distinct from having muted one.
+  // Being in a room without one is a supported state, not a failed join.
+  let micOn = $state(false);
   let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
   let callPeerStates = $state<Record<string, string>>({}); // fp -> RTCPeerConnectionState
   // A voice room is per-CHANNEL: the channel id doubles as the call id (for signalling + the media
@@ -8398,8 +8401,8 @@
     localStream = next;
     addAnalyser("me", next); // the meter was watching the track that just went away
   }
-  async function ensureMic(): Promise<boolean> {
-    if (localStream) return true;
+  async function ensureMic(announce = true): Promise<MediaStream | null> {
+    if (localStream) return localStream;
     // Try the remembered input first; a device that has since vanished must not block the call.
     const tries: (MediaTrackConstraints | boolean)[] = micDev
       ? [{ deviceId: { exact: micDev } }, true]
@@ -8408,13 +8411,36 @@
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
         void refreshAudioDevices();
-        return true;
+        return localStream;
       } catch {
         /* remembered device gone: fall back to the system default */
       }
     }
-    error = "Couldn't access the microphone (permission denied or no device).";
-    return false;
+    // Joining a room does not announce this: no microphone is a perfectly good way to be in a
+    // room (the jukebox and the instruments do not need one), so the dock says so in place
+    // rather than the app raising it as a failure.
+    if (announce) error = "Couldn't access the microphone (permission denied or no device).";
+    return null;
+  }
+  /**
+   * Turn the microphone on for a room already joined. Adding a track raises negotiationneeded on
+   * every existing peer, and the perfect-negotiation path already handles the renegotiation, so
+   * this needs no signalling of its own.
+   */
+  async function enableMic() {
+    if (localStream || !inCall) return;
+    const stream = await ensureMic();
+    if (!stream) return;
+    callMuted = false;
+    for (const t of stream.getAudioTracks()) t.enabled = true;
+    for (const p of Object.values(callPeers)) {
+      for (const t of stream.getTracks()) {
+        try { p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
+      }
+    }
+    addAnalyser("me", stream);
+    micOn = true;
+    pushInstState();
   }
   function attachRemote(fp: string, stream: MediaStream) {
     let el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
@@ -10343,7 +10369,11 @@
     }
     callServer = server;
     callSelfFp = selfFp;
-    if (!(await ensureMic())) { callServer = null; callSelfFp = ""; return; }
+    // A missing or refused microphone is no longer a reason not to join. The room is also where
+    // the jukebox and the instruments live, and neither needs one: the data channel carries the
+    // instruments and the deck rides the mesh, so a peer with no mic is a full participant in
+    // everything except talking. The dock offers the mic in place if one turns up later.
+    micOn = (await ensureMic(false)) !== null;
     callChannel = channel;
     callChannelName = name;
     // Snapshot the room's server identity now, while we are certainly on it. Everything the
@@ -10408,6 +10438,7 @@
     if (callServer !== null && callChannel && callSelfFp) dropPresence(callServer, callChannel, callSelfFp);
     inCall = false;
     callMuted = false;
+    micOn = false;
     callChannel = "";
     callChannelName = "";
     callServer = null;
@@ -16168,7 +16199,11 @@
         {#if videoAnnounced}
           <button class="ghost focus-chip" title="Open the video focus view" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
         {/if}
-        <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
+        {#if micOn}
+          <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
+        {:else}
+          <button class="ghost small btn-ico stage-mute nomic" title="You are in this room without a microphone: the jukebox and the instruments still work. Click to turn a mic on." onclick={enableMic}>{@render icoMicOff()} No mic</button>
+        {/if}
         <button class="call-hangup btn-ico" title="Leave voice" onclick={leaveVoice}>{@render icoHangup()} Leave</button>
         <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{#if callDockTop}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
       </div>
