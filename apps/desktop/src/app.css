@@ -12701,7 +12701,11 @@ button.fx-order {
    a top-docked bar never competes with window dragging. */
 .call-bar.top,
 .stage.top {
-  top: calc(var(--titlebar-h) + 10px);
+  /* Under the channel header, not over it: the header names where you are, and covering it was
+     the fastest way to make a top-docked bar feel like it had gone wrong. The offset is measured
+     from the live header (see headBottom) because a wrapped topic changes its height; the
+     fallback only applies for the frame before the first measurement lands. */
+  top: calc(var(--chan-head-bottom, 96px) + 8px);
   bottom: auto;
 }
 .stage.top {
@@ -12757,10 +12761,6 @@ button.call-srv.away {
 }
 button.call-srv.away:hover {
   border-color: var(--warn);
-}
-.stage-chip.away-chip {
-  color: var(--warn);
-  border-color: var(--warn-brd);
 }
 .call-bar.away {
   background: var(--warn-dim);
@@ -12941,4 +12941,48 @@ button.stage-mute.nomic {
 button.stage-mute.nomic:hover {
   color: var(--text);
   border-style: solid;
+}
+
+/* The voice section of the Connectivity surface: the media plane's own evidence, in the same
+   place the mesh's lives, because they are the same question asked about two stacks. */
+.connection-voice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+}
+.connection-voice header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.connection-voice h3 {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+}
+.connection-voice p {
+  margin: 2px 0 0;
+}
+.conn-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.conn-facts li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.conn-facts li .stage-label {
+  flex: none;
+  min-width: 11ch;
 }

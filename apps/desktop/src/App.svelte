@@ -5379,6 +5379,30 @@
       if (viewCurrent(gen, srv)) error = String(e);
     }
   }
+  // The media plane's own report. The mesh and the call are two separate NAT-traversal stacks, so
+  // "chat works" says nothing about whether a call will, and until this was surfaced there was
+  // nowhere to look when one failed. See get_call_transport.
+  type CallBridge = { fingerprint: string; addresses: number; direct: boolean };
+  type CallTransport = {
+    public_direct: boolean;
+    autonat: string;
+    public_ipv4: string[];
+    public_ipv6: string[];
+    bridges: CallBridge[];
+    relay_likely_required: boolean;
+    advice: string;
+  };
+  let callTransport = $state<CallTransport | null>(null);
+  async function refreshCallTransport() {
+    const server = callServer ?? activeServerId;
+    if (server === null) return;
+    try {
+      callTransport = await invoke<CallTransport>("get_call_transport", { server });
+    } catch {
+      callTransport = null; // an unknown server or a locked vault: the panel says nothing rather than lying
+    }
+  }
+
   // --- Diagnostics: the join log, the connectivity report, and the debug log ---------------
   //
   // Three surfaces for one problem: a join that fails tells nobody anything. The join log is the
@@ -10090,6 +10114,55 @@
     if (!live || live.paused) el.pause();
     else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
   }
+  // True window fullscreen, distinct from the focus view. Focus is a layout (the call takes the
+  // app); fullscreen is the window losing its chrome. They are separate wishes and either can be
+  // wanted without the other, so both toggles exist in both states.
+  let winFullscreen = $state(false);
+  async function toggleFullscreen() {
+    try {
+      const next = !(await appWindow.isFullscreen());
+      await appWindow.setFullscreen(next);
+      winFullscreen = next;
+    } catch (e) {
+      console.warn("could not toggle fullscreen", String(e));
+    }
+  }
+
+  /**
+   * Show the connection report for the call. Switches to the room's server first when the user is
+   * looking elsewhere: the report is per server, so opening it from a different one would answer
+   * a question nobody asked.
+   */
+  async function openCallDiagnostics() {
+    if (callServer !== null && callServer !== activeServerId) await switchServer(callServer);
+    void refreshCallTransport();
+    void refreshConnectivity();
+    switchView("connectivity");
+  }
+
+  /**
+   * Publish the channel header's bottom edge so the top-docked voice bar can sit under it rather
+   * than over it. Measured rather than assumed: the header grows when a topic wraps, so any
+   * constant here would be wrong at exactly the moments the topic is worth reading.
+   */
+  function headBottom(node: HTMLElement) {
+    const update = () => {
+      const px = Math.round(node.getBoundingClientRect().bottom);
+      document.documentElement.style.setProperty("--chan-head-bottom", `${px}px`);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    window.addEventListener("resize", update);
+    return {
+      destroy() {
+        ro.disconnect();
+        window.removeEventListener("resize", update);
+        document.documentElement.style.removeProperty("--chan-head-bottom");
+      },
+    };
+  }
+
   /**
    * Hand the one deck element to whichever surface currently wants to show it. Re-parenting keeps
    * playback running (a media element survives being moved in the DOM), which is the whole reason
@@ -12433,7 +12506,6 @@
       <span class="call-srv-nm">{callSrvLabel}</span>
       <span class="call-srv-ch">#{callChannelName}</span>
     </button>
-    <span class="stage-chip away-chip">VIEWING ELSEWHERE</span>
   {:else}
     <span class="call-srv">
       {#if callServer !== null && serverIcons[callServer]}
@@ -13587,6 +13659,16 @@
 
 <!-- Dock slot: a frame with one edge weighted, so the glyph reads as "which end it sits at".
      The CSS flips it vertically when the dock is already at the top. -->
+<!-- Fullscreen: the window losing its chrome, distinct from the focus view's layout. -->
+{#snippet icoFullscreen()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9" />
+    <path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9" />
+    <path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15" />
+    <path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15" />
+  </svg>
+{/snippet}
+
 {#snippet icoDock()}
   <svg class="ico ico-dock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <rect x="4" y="4" width="16" height="16" rx="2.5" />
@@ -15227,7 +15309,7 @@
         {#if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->
-          <h2 class="chan-head">
+          <h2 class="chan-head" use:headBottom>
             {#if cur?.isDm}
               <span class="chan-title"><span class="ch-hash">@</span>{cur.name}</span>
             {:else}
@@ -15947,6 +16029,60 @@
               {@render connDetail(connectivity)}
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
             {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            <!-- The media plane's own evidence. It lives here rather than in a panel of its own
+                 because "why will my call not connect" and "why will my server not connect" are
+                 the same question asked about two stacks, and answering them in two places is how
+                 you end up with a user reading the wrong one. -->
+            <section class="connection-voice" aria-labelledby="connection-voice-title">
+              <header>
+                <div>
+                  <h3 id="connection-voice-title">VOICE AND VIDEO</h3>
+                  <p class="muted small">The call media path is separate from the mesh: chat working does not mean a call will.</p>
+                </div>
+                <button class="ghost small" onclick={refreshCallTransport}>Refresh</button>
+              </header>
+              {#if callTransport}
+                <ul class="conn-facts">
+                  <li>
+                    <span class="stage-label">DIRECT ROUTE</span>
+                    <span class={callTransport.public_direct ? "ok-t" : "fail-t"}>
+                      {callTransport.public_direct ? "this device is directly reachable" : "behind NAT"}
+                    </span>
+                  </li>
+                  <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
+                  {#if callTransport.public_ipv6.length}
+                    <li><span class="stage-label">PUBLIC IPV6</span><span class="ok-t">{callTransport.public_ipv6.join(", ")}</span></li>
+                  {/if}
+                  {#if callTransport.public_ipv4.length}
+                    <li><span class="stage-label">PUBLIC IPV4</span><span class="muted small">{callTransport.public_ipv4.join(", ")}</span></li>
+                  {/if}
+                  <li>
+                    <span class="stage-label">RELAY HOSTS</span>
+                    <span class={callTransport.bridges.length ? "ok-t" : "muted small"}>
+                      {callTransport.bridges.length
+                        ? `${callTransport.bridges.length} member(s) offering, ${callTransport.bridges.filter((b) => b.direct).length} with a public route`
+                        : "none offering"}
+                    </span>
+                  </li>
+                </ul>
+                <p class="muted small">{callTransport.advice}</p>
+              {:else}
+                <p class="muted small">No report yet. Press Refresh, or join a voice room.</p>
+              {/if}
+              {#if inCall && callParticipants.length}
+                <ul class="conn-facts">
+                  {#each callParticipants as fp (fp)}
+                    <li>
+                      <span class="stage-label">{callNameOf(fp).slice(0, 18)}</span>
+                      <span class="muted small">
+                        link {callPeerStates[fp] ?? "new"}{peerTransport[fp] ? `, ${peerTransport[fp] === "relayed" ? "relayed through a TURN" : "direct peer to peer"}` : ", path not known yet"}
+                      </span>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+
             <section class="connection-hosting" aria-labelledby="connection-hosting-title">
               <header>
                 <div>
@@ -16586,14 +16722,17 @@
               : "Direct: peer to peer, nobody in the media path"}
           >{roomPath === "relayed" ? "RLY" : "P2P"}</span>
         {/if}
+        <button
+          class="ghost stage-sec"
+          title="Open the connection report for this call"
+          onclick={openCallDiagnostics}
+        >CONN</button>
         <div class="call-avatars">
           {@render callAvatarTag(callSelfFp)}
           {#each callParticipants as fp}{@render callAvatarTag(fp)}{/each}
         </div>
         {@render micMeter()}
-        {#if videoAnnounced}
-          <button class="ghost focus-chip" title="Open the video focus view" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
-        {/if}
+        <button class="ghost focus-chip" title="Open the focus view: the call takes the window" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
         {#if micOn}
           <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
         {:else}
@@ -16621,6 +16760,11 @@
               onclick={() => (secInfoOpen = !secInfoOpen)}
             >E2E · {roomPath === "relayed" ? "RELAY" : "DIRECT"}</button>
           {/if}
+          <button
+            class="ghost stage-sec"
+            title="Open the connection report for this call"
+            onclick={openCallDiagnostics}
+          >CONN</button>
           {#if callParticipants.length === 0}
             <span class="stage-tally solo">solo</span>
           {:else}
@@ -16628,9 +16772,8 @@
               {linksUp}/{callParticipants.length} links up
             </span>
           {/if}
-          {#if videoAnnounced}
-            <button class="ghost focus-chip" title="Open the video focus view" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
-          {/if}
+          <button class="ghost focus-chip" title="Open the focus view: the call takes the window" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
+          <button class="ghost stage-chev" title={winFullscreen ? "Leave fullscreen" : "Fullscreen"} aria-label={winFullscreen ? "Leave fullscreen" : "Fullscreen"} onclick={toggleFullscreen}>{@render icoFullscreen()}</button>
           <button
             class="ghost stage-chev"
             title={callDockTop ? "Dock the voice bar at the bottom" : "Dock the voice bar at the top"}
@@ -16823,6 +16966,7 @@
           {:else}
             <span class="focus-e2e" title="Every frame rides an end-to-end encrypted peer link">E2E</span>
           {/if}
+          <button class="ghost focus-exit" title={winFullscreen ? "Leave fullscreen" : "Fullscreen"} aria-label={winFullscreen ? "Leave fullscreen" : "Fullscreen"} onclick={toggleFullscreen}>{@render icoFullscreen()}</button>
           <button class="ghost focus-exit" title="Leave focus: back to chat and the voice dock" aria-label="Leave focus" onclick={exitFocus}>{@render icoFocusOut()}</button>
         </header>
 
