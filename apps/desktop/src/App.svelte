@@ -5,7 +5,11 @@
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onMount, tick, untrack } from "svelte";
-  import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
+  import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
+  import {
+    TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
+    type TextFileKind,
+  } from "./textfile";
   import {
     MAX_SPEAKESE_BLIPS, SPEAKESE_STEP_SECONDS, TEXT_EFFECTS, TEXT_EFFECT_GROUPS,
     cherryBlossomShouldBurst, dismissTextEffectPalette, insertTextEffect, redTruthNoiseSample,
@@ -7135,6 +7139,14 @@
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
   let fileInfoUsage = $state<UiFileUsage | null>(null); // null = still checking
   let fileInfoExpiryBusy = $state(false);
+  // Reading a text/markdown share inline. `fileTextState` is the reader's whole story: nothing to
+  // read, fetching, readable, over the inline cap (a fetch the reader has to ask for), not
+  // actually text, or the fetch failed.
+  let fileText = $state("");
+  let fileTextLines = $state(0);
+  let fileTextState = $state<"none" | "loading" | "ready" | "too-big" | "binary" | "error">("none");
+  let fileTextMode = $state<"render" | "source">("render"); // markdown only; other text is source
+  let fileTextWrap = $state(true); // off for logs and code, where columns carry meaning
 
   // The default circulation lifetime, mirroring `catcoms_app::FILE_EXPIRY_DEFAULT_MS`. Used only
   // to compute the deadline "Restore 30-day expiry" writes back; new shares are stamped by the
@@ -7375,6 +7387,12 @@
     fileInfoPreviewError = false;
     confirmDeleteCid = "";
     fileInfoUsage = null;
+    fileText = "";
+    fileTextLines = 0;
+    fileTextMode = "render";
+    // `fileTextKind` reads off the listing just assigned, so the reader shows its bar and a
+    // "Loading…" line from the first frame rather than an empty frame until the fetch starts.
+    fileTextState = fileTextKind ? "loading" : "none";
     const id = activeServerId;
     // Where the file is used (wiki pages + status/chat counts). Async like the availability row,
     // and guarded against the pane being switched while the scan is in flight.
@@ -7405,6 +7423,8 @@
         if (fileInfo?.cid === f.cid) fileInfoPreviewError = true;
       }
     }
+    // Documents, config and source read inline the same way media plays inline.
+    if (fileTextKind && fileInfo?.cid === f.cid) await loadFileText(f);
   }
 
   function closeFileInfo() {
@@ -7414,6 +7434,9 @@
     fileInfoAvail = null;
     confirmDeleteCid = "";
     fileInfoUsage = null;
+    fileText = "";
+    fileTextLines = 0;
+    fileTextState = "none";
   }
 
   /** From Properties → "Used in": close the pane and open the wiki page that embeds the file. */
@@ -7444,6 +7467,48 @@
     if (m.startsWith("audio/")) return "audio";
     return "";
   });
+
+  // Which reader the pane offers below the media block. Gated on `previewKind` so a listing that
+  // somehow satisfies both (a .txt stamped image/png, say) shows one preview, not two.
+  const fileTextKind = $derived<TextFileKind>(
+    fileInfo && !previewKind ? textFileKind(fileInfo.name, fileInfo.mime) : ""
+  );
+  // A markdown file opens rendered and can be flipped to its source; everything else IS source.
+  const fileTextRendered = $derived(fileTextKind === "markdown" && fileTextMode === "render");
+  // Memoised so parsing + sanitizing a long document runs when the body changes, not on every
+  // repaint of the pane around it (the progress bar under it ticks once per chunk).
+  const fileTextHtml = $derived(fileTextRendered ? renderTextDocument(fileText) : "");
+
+  /**
+   * Fetch and decode a text share for the reader. Files over the inline cap are not pulled at all
+   * until `force` (the "Read it anyway" button): `download_file` returns the whole blob in one
+   * base64 string, and a listing may declare up to 256 MiB.
+   */
+  async function loadFileText(f: UiFile, force = false) {
+    const id = activeServerId;
+    if (id === null) return;
+    if (!force && f.size > TEXT_PREVIEW_MAX_BYTES) {
+      fileTextState = "too-big";
+      return;
+    }
+    fileTextState = "loading";
+    try {
+      const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
+      // Guard against the pane being closed or switched while the fetch was in flight.
+      if (fileInfo?.cid !== f.cid) return;
+      const decoded = decodeTextFile(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
+      if (!decoded.ok) {
+        fileTextState = "binary";
+        return;
+      }
+      fileText = decoded.text;
+      fileTextLines = decoded.lines;
+      fileTextState = "ready";
+    } catch {
+      // Not held locally and no peer sharing it right now: say so instead of spinning forever.
+      if (fileInfo?.cid === f.cid) fileTextState = "error";
+    }
+  }
 
   // Index the loaded messages by id once per change, so reply-parent lookups (the quote on every
   // reply + the composer banner) are O(1) instead of a linear scan per render.
@@ -17811,6 +17876,67 @@
                   <video controls src={fileInfoPreview}></video>
                 {:else if previewKind === "audio"}
                   <audio controls src={fileInfoPreview}></audio>
+                {/if}
+              </div>
+            {/if}
+
+            {#if fileTextKind}
+              <div class="file-text">
+                <div class="file-text-bar">
+                  {#if fileTextKind === "markdown"}
+                    <div class="file-text-toggle" role="group" aria-label="Markdown view">
+                      <button
+                        type="button"
+                        class:active={fileTextMode === "render"}
+                        aria-pressed={fileTextMode === "render"}
+                        onclick={() => (fileTextMode = "render")}
+                      >rendered</button>
+                      <button
+                        type="button"
+                        class:active={fileTextMode === "source"}
+                        aria-pressed={fileTextMode === "source"}
+                        onclick={() => (fileTextMode = "source")}
+                      >source</button>
+                    </div>
+                  {:else}
+                    <span class="muted small">{fileInfo.mime || "plain text"}</span>
+                  {/if}
+                  <span class="file-text-spacer"></span>
+                  {#if fileTextState === "ready"}
+                    <span class="muted small">{lineCountLabel(fileTextLines)}</span>
+                    {#if !fileTextRendered}
+                      <div class="file-text-toggle">
+                        <button
+                          type="button"
+                          class:active={fileTextWrap}
+                          aria-pressed={fileTextWrap}
+                          title="Wrap long lines instead of scrolling sideways"
+                          onclick={() => (fileTextWrap = !fileTextWrap)}
+                        >↩ wrap</button>
+                      </div>
+                    {/if}
+                  {/if}
+                </div>
+
+                {#if fileTextState === "loading"}
+                  <p class="muted small file-text-note">Loading…</p>
+                {:else if fileTextState === "too-big"}
+                  <p class="muted small file-text-note">
+                    {fmtSize(fileInfo.size)} is past the {fmtSize(TEXT_PREVIEW_MAX_BYTES)} inline limit.
+                    <button class="ghost small" onclick={() => fileInfo && loadFileText(fileInfo, true)}>Read it anyway</button>
+                  </p>
+                {:else if fileTextState === "binary"}
+                  <p class="muted small file-text-note">This isn't readable text: download it and open it in the right app.</p>
+                {:else if fileTextState === "error"}
+                  <p class="muted small file-text-note">Can't read it: the file isn't downloaded yet and no peer is sharing it right now.</p>
+                {:else if fileTextState === "ready"}
+                  {#if !fileText.trim()}
+                    <p class="muted small file-text-note">This file is empty.</p>
+                  {:else if fileTextRendered}
+                    <div class="file-text-body wiki-render" use:richClicks>{@html fileTextHtml}</div>
+                  {:else}
+                    <pre class="file-text-body source" class:wrap={fileTextWrap}>{fileText}</pre>
+                  {/if}
                 {/if}
               </div>
             {/if}

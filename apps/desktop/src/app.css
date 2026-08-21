@@ -1984,6 +1984,73 @@ button.primary:hover:not(:disabled) {
   border-radius: var(--r);
 }
 .file-info .file-preview audio { width: 100%; }
+
+/* Reading a text/markdown share inline: a toolbar (view toggle, line count, wrap) over either the
+   rendered document or its source. */
+.file-info .file-text {
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-elev);
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.file-text-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.file-text-spacer { flex: 1; }
+.file-text-toggle {
+  display: flex;
+  gap: 3px;
+}
+.file-text-toggle button {
+  padding: 2px 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.file-text-toggle button:hover,
+.file-text-toggle button.active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-dim);
+}
+.file-text-note {
+  margin: 0;
+  padding: 10px 12px;
+}
+/* Both readers share one frame; `.wiki-render` still supplies the document typography, so only
+   the box it sits in is overridden here. */
+.file-info .file-text-body {
+  flex: none;
+  max-height: 360px;
+  overflow: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 12px;
+}
+.file-info .file-text-body.source {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  line-height: 1.45;
+  tab-size: 4;
+  white-space: pre;
+}
+.file-info .file-text-body.source.wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .file-meta {
   display: grid;
   grid-template-columns: max-content 1fr;

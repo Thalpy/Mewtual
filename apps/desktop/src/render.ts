@@ -19,7 +19,7 @@
 // 10c/10f) replaces those placeholders with media elements it builds in code from the group's
 // own content-addressed blobs; so untrusted text can never inject a live tag or remote URL.
 
-import { marked, type TokenizerAndRendererExtension } from "marked";
+import { marked, Marked, type TokenizerAndRendererExtension } from "marked";
 import DOMPurify from "dompurify";
 
 import {
@@ -264,4 +264,21 @@ export function renderWiki(text: string, format?: string): string {
     ? infoboxHtml(box, wiki ? inlineToHtml : (s) => marked.parseInline(stripMagicWords(s)) as string)
     : "";
   return DOMPurify.sanitize(card + body, SANITIZE) as string;
+}
+
+// A shared `.md` in the Files tab is a document someone uploaded, not a page of this server's
+// wiki, so it gets its OWN marked instance with none of the app's extensions registered. A
+// `[[Page]]` or `![](cid:…)` inside it would otherwise become a placeholder span that nothing in
+// the Properties pane ever resolves, i.e. an empty box where the author wrote text. Here that
+// syntax stays literal. `breaks` is off too: a plain markdown file follows the standard rule that
+// a single newline is not a line break, unlike the chat composer.
+const document_ = new Marked({ gfm: true, breaks: false });
+
+/**
+ * Render a standalone markdown file (Files tab → Properties → "Rendered"), sanitized with the
+ * same strict allow-list as everything else: no media tags, no raw HTML, so an uploaded file
+ * cannot pull in a remote URL or inject a live element.
+ */
+export function renderTextDocument(text: string): string {
+  return DOMPurify.sanitize(document_.parse(text ?? "") as string, SANITIZE) as string;
 }
