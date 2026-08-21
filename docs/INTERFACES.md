@@ -91,6 +91,12 @@ Implementations:
     exposes the live circuit-listener set so reservation expiry is withdrawn. The product layer
     updates the live bootstrap/peer record and re-mints the next displayed invite after any set
     change.
+    `MeshService`/`MeshHandle::remove_external_address(addr)` withdraws one caller-configured
+    owner while preserving an identical active router-mapping owner. The desktop's discovery timer
+    uses this with a route-source poll: changed raw IPv4/IPv6 entries update the aggregate
+    owner map, AutoNAT/rendezvous external set, Connectivity, and one new signed peer-record epoch
+    before that pass's PEX. Native OS network-change events remain a latency refinement; polling is
+    the portable recovery path.
     PCPv6 tracks Epoch for every response and randomizes rapid renewal after a restart signal, but
     each transport/interface worker observes that signal independently; it is not a full
     gateway-wide RFC ANNOUNCE coordinator.
@@ -292,6 +298,10 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
+  // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
+  // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
+  cache_known_records() -> usize;  async dial_cached_peers() -> usize;
   authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
                         target:PeerId, expires_at_ms:u64) -> bool;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync

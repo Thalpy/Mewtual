@@ -297,6 +297,25 @@ you already copied cannot be rewritten, so relay/rendezvous fallbacks still matt
 The server's network identity and port persist across restarts. Opening **Server settings →
 Invites** refreshes an unused invite when its reachable-address set has changed. Generate a new
 invite after the previous one is consumed, or whenever you want to deliberately replace it.
+Ordinary founder invites expire after one hour; standing switchboard routes inside an assisted
+invite expire much sooner.
+
+After joining, the original inviter is no longer the only route. Mewtual keeps the newest signed
+IPv4/IPv6 candidate record for each member, polls a bounded sample of known connections through
+authenticated peer exchange, and retries unavailable members with increasing randomized delays.
+A newly signed address update is tried immediately. Any reachable member can supply the current
+records for the rest of the group, so reconnecting through one member is enough to start healing
+the address book and catching up missed messages. “Offline” in the roster means this device has no
+live authenticated connection from your current vantage point; another member may still reach it.
+About once per discovery cycle, Mewtual also rechecks the IPv4/IPv6 addresses selected by the local
+network. Moving between networks or receiving a new dynamic address therefore republishes a fresh
+signed record without restarting the app, although detection may take roughly a minute.
+
+Mewtual does not keep probing every historical public IP forever. Dynamic addresses can be
+reassigned to another subscriber, so the latest signed record replaces withdrawn addresses while
+retaining all IPv4/IPv6 routes that member currently advertises. If every member has only stale
+routes and there is no reachable rendezvous, relay, switchboard or out-of-band reply, the group
+cannot discover a new address from nothing.
 
 ### Two-way connection reply
 

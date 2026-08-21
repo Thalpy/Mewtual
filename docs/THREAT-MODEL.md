@@ -63,6 +63,18 @@ table with the commit that closed it.
   router-assigned lifetime up to a 24-hour sanity cap; a crash can therefore leave the pinhole
   until that grant expires. Publishing a global IPv6 privacy address also makes that
   device/address visible to invite recipients, peers and the configured AutoNAT observer.
+- **Discovery retries are availability aids, not proof of presence.** The current member roster and
+  self-signature gate every cached record, while the common discovery policy caps outbound dials.
+  Failed current epochs retry with monotonic exponential backoff and jitter; a newly signed epoch
+  is tried immediately. Each discovery pass also asks the local kernel which IPv4/IPv6 source it
+  would route toward documentation-only destinations (UDP `connect` sends no packet), then
+  republishes a changed raw route set. Exact ownership preserves an identical manual/mapping/relay
+  route; without native network-change notifications the update can lag by roughly one period.
+  The cache intentionally replaces rather than permanently unions withdrawn
+  public IPs: an ISP may reassign an old address, and Noise authentication prevents impersonation
+  but not the metadata/connection cost of probing its new holder. PEX success proves one live
+  member connection at that moment; failure means only “not reachable from this device by this
+  path,” never offline, removed, or malicious.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

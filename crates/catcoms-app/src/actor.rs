@@ -3130,8 +3130,12 @@ where
                                 }
                             }
                         }
-                        server.dial_cached_peers().await;
+                        // Fold records learned by the PEX requests above into the passive view
+                        // before dialing it. The previous order delayed a newly learned member or
+                        // dynamic-IP epoch until the *next* minute tick, even though its fresh
+                        // signature is precisely the signal that should bypass retry backoff.
                         server.cache_known_records();
+                        server.dial_cached_peers().await;
                         let switchboards = server.connected_switchboard_offers();
                         if switchboards != last_switchboards {
                             last_switchboards = switchboards;

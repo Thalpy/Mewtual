@@ -42,6 +42,23 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+/// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
+/// same IPv6 socket is commonly both a raw interface route and a PCP firewall pinhole; removing
+/// either owner alone must not withdraw the route from PEX, invites, rendezvous, or AutoNAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BootstrapOwner {
+    AutomaticInterface,
+    Configured,
+    PortMapping,
+    Relay,
+}
+
+#[derive(Debug, Clone)]
+struct InterfaceRouteIdentity {
+    port: u16,
+    peer_id: String,
+}
+
 /// One running server: its actor handle, the single-use invite to share (founder only), and
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
@@ -56,6 +73,13 @@ struct ServerEntry {
     /// member, to republish the live signed peer record after mapping/relay changes. A joiner
     /// cannot mint an invite, but its base direct addresses must still remain in this set.
     bootstrap: Vec<String>,
+    /// Ownership of every exact entry in `bootstrap`. An address is removed from the aggregate
+    /// only after its final owner disappears; this is load-bearing for a raw global IPv6 address
+    /// that an active PCPv6 firewall lease also names.
+    bootstrap_owners: HashMap<String, HashSet<BootstrapOwner>>,
+    /// Stable listener coordinates used by the discovery timer to poll the OS-selected IPv4/IPv6
+    /// source routes. `None` only for the temporary companion path with no persisted identity.
+    interface_routes: Option<InterfaceRouteIdentity>,
     /// The rendezvous infra multiaddrs this server registered at (if any), so a fresh on-demand
     /// invite is also discovery-enabled. Empty when the server uses direct bootstrap only. Not
     /// separately persisted; on reload it is recovered from the persisted invite's `rendezvous`.
@@ -932,6 +956,65 @@ fn jittered_delay(base_ms: u64, spread_ms: u64) -> Duration {
     Duration::from_millis(base_ms.saturating_add(offset))
 }
 
+/// Poll the route-selected IPv4/IPv6 source addresses and publish one new authoritative address
+/// epoch when they change. Wildcard TCP/QUIC listeners already cover a newly appeared interface;
+/// this reconciliation is what teaches invites, PEX, rendezvous and AutoNAT about the new concrete
+/// route (and withdraws a vanished one). Mapping/manual/relay ownership is preserved separately.
+async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
+    let state = app.state::<AppState>();
+    let state = state.inner();
+    let prepared = {
+        let mut servers = state.servers.lock().await;
+        let Some(entry) = servers.get_mut(&server) else {
+            return false;
+        };
+        let (Some(identity), Some(mesh)) = (entry.interface_routes.clone(), entry.mesh.clone())
+        else {
+            return false;
+        };
+        let next = auto_bootstrap(identity.port, &identity.peer_id);
+        let (removed, added) =
+            reconcile_automatic_bootstrap(&mut entry.bootstrap, &mut entry.bootstrap_owners, &next);
+        if removed.is_empty() && added.is_empty() {
+            return false;
+        }
+        (
+            entry.actor.clone(),
+            mesh,
+            entry.bootstrap.clone(),
+            removed,
+            added,
+        )
+    };
+    let (actor, mesh, bootstrap, removed, added) = prepared;
+
+    // Keep libp2p's external-address ownership in lockstep. Only global routes enter this set;
+    // private LAN routes remain invite-only. A PCP lease for the same IPv6 socket independently
+    // protects it inside the net actor when the raw-interface owner is removed.
+    for address in external_addrs(&removed) {
+        if let Err(error) = mesh.remove_external_address(address.clone()).await {
+            eprintln!("interface refresh: could not withdraw {address}: {error}");
+        }
+    }
+    for address in external_addrs(&added) {
+        if let Err(error) = mesh.add_external_address(address.clone()).await {
+            eprintln!("interface refresh: could not advertise {address}: {error}");
+        }
+    }
+
+    if let Some(seq) = next_record_seq(state, server).await {
+        actor.publish_self_record(bootstrap.clone(), seq).await;
+    }
+    {
+        let mut diag = state.diag.lock().await;
+        if diag.server == server {
+            diag.advertised = bootstrap;
+        }
+    }
+    let _ = app.emit("reachability-changed", server);
+    true
+}
+
 /// Spawn a per-server timer that periodically drives steady-state discovery, so the group
 /// re-finds itself after a restart and members keep exchanging peer records. Exits once the actor
 /// stops (`drive_discovery` errors).
@@ -941,6 +1024,9 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
         let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
             SystemClock.sleep(delay).await;
+            // Poll before PEX/rendezvous so a new interface address receives a fresh signed epoch
+            // and can be shared in this same discovery pass.
+            refresh_interface_routes(&app, server).await;
             if actor.drive_discovery().await.is_err() {
                 break; // the actor stopped
             }
@@ -1175,6 +1261,104 @@ fn auto_bootstrap(port: u16, peer_id: &str) -> Vec<String> {
     out
 }
 
+/// Add one ownership claim and, if this is the first owner, one aggregate bootstrap entry. The
+/// caller chooses front/back placement because mapped/manual/relay routes should race before raw
+/// LAN and loopback candidates, while a refreshed interface route should retain normal order.
+fn add_bootstrap_owner(
+    bootstrap: &mut Vec<String>,
+    owners: &mut HashMap<String, HashSet<BootstrapOwner>>,
+    entry: String,
+    owner: BootstrapOwner,
+    prefer_front: bool,
+) -> bool {
+    let first_owner = owners.get(&entry).is_none_or(HashSet::is_empty);
+    owners.entry(entry.clone()).or_default().insert(owner);
+    if first_owner && !bootstrap.contains(&entry) {
+        if prefer_front {
+            bootstrap.insert(0, entry);
+        } else {
+            bootstrap.push(entry);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Remove one ownership claim and answer whether the exact aggregate route disappeared. Unknown
+/// or repeated expiry events are inert; an address survives while any other source still owns it.
+fn remove_bootstrap_owner(
+    bootstrap: &mut Vec<String>,
+    owners: &mut HashMap<String, HashSet<BootstrapOwner>>,
+    entry: &str,
+    owner: BootstrapOwner,
+) -> bool {
+    let Some(entry_owners) = owners.get_mut(entry) else {
+        return false;
+    };
+    if !entry_owners.remove(&owner) || !entry_owners.is_empty() {
+        return false;
+    }
+    owners.remove(entry);
+    if let Some(index) = bootstrap.iter().position(|candidate| candidate == entry) {
+        bootstrap.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+fn bootstrap_owners(
+    entries: &[String],
+    owner: BootstrapOwner,
+) -> HashMap<String, HashSet<BootstrapOwner>> {
+    entries
+        .iter()
+        .cloned()
+        .map(|entry| (entry, HashSet::from([owner])))
+        .collect()
+}
+
+/// Reconcile only the OS-derived owner against a fresh route-source sample. The returned vectors
+/// contain aggregate additions/removals, not ownership-only changes, so callers update Swarm and
+/// signed records exactly once and preserve an identical manual/mapping/relay route.
+fn reconcile_automatic_bootstrap(
+    bootstrap: &mut Vec<String>,
+    owners: &mut HashMap<String, HashSet<BootstrapOwner>>,
+    next: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let previous: HashSet<String> = owners
+        .iter()
+        .filter(|(_, entry_owners)| entry_owners.contains(&BootstrapOwner::AutomaticInterface))
+        .map(|(entry, _)| entry.clone())
+        .collect();
+    let next_set: HashSet<&str> = next.iter().map(String::as_str).collect();
+    let mut removed = Vec::new();
+    for old in &previous {
+        if !next_set.contains(old.as_str())
+            && remove_bootstrap_owner(bootstrap, owners, old, BootstrapOwner::AutomaticInterface)
+        {
+            removed.push(old.clone());
+        }
+    }
+
+    let mut added = Vec::new();
+    for entry in next {
+        if !previous.contains(entry)
+            && add_bootstrap_owner(
+                bootstrap,
+                owners,
+                entry.clone(),
+                BootstrapOwner::AutomaticInterface,
+                false,
+            )
+        {
+            added.push(entry.clone());
+        }
+    }
+    (removed, added)
+}
+
 /// The addresses a server binds: IPv4 **and** IPv6, TCP **and** QUIC, all on one port number.
 /// IPv6 has no NAT in front of it, so it silently rescues users their router would otherwise
 /// strand; QUIC's UDP hole-punching is materially more reliable than TCP's. Both listeners are
@@ -1263,6 +1447,8 @@ async fn register_server(
     invite: Option<String>,
     name: String,
     bootstrap: Vec<String>,
+    bootstrap_owners: HashMap<String, HashSet<BootstrapOwner>>,
+    interface_routes: Option<InterfaceRouteIdentity>,
     rendezvous: Vec<String>,
     mesh: Option<MeshHandle>,
     is_dm: bool,
@@ -1275,7 +1461,7 @@ async fn register_server(
         *n
     };
     forward_events(app.clone(), id, events);
-    spawn_discovery_timer(app.clone(), id, actor.clone());
+    let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         id,
         ServerEntry {
@@ -1285,6 +1471,8 @@ async fn register_server(
             invite,
             name,
             bootstrap,
+            bootstrap_owners,
+            interface_routes,
             rendezvous,
             mesh,
             is_dm,
@@ -1292,6 +1480,9 @@ async fn register_server(
             record_seq,
         },
     );
+    // Start only after the entry exists. A zero-millisecond randomized first tick must not race
+    // the registry insertion and silently skip the initial interface/discovery refresh.
+    spawn_discovery_timer(app.clone(), id, timer_actor);
     id
 }
 
@@ -1523,6 +1714,9 @@ const PORT_MAPPING_WINDOW_SECS: u64 = 25;
 struct Reachability {
     /// The dialable addresses a minted invite should carry (relayed first when there is a relay).
     bootstrap: Vec<String>,
+    /// Per-entry ownership matching `bootstrap`, retained after startup so interface polling can
+    /// withdraw only the raw route without trampling manual or relay ownership.
+    bootstrap_owners: HashMap<String, HashSet<BootstrapOwner>>,
     /// The validated rendezvous target this server registers at, if any.
     rz_target: Option<RendezvousTarget>,
     /// A handle for registering later invites' namespaces; kept only once the rendezvous connected.
@@ -1643,6 +1837,7 @@ async fn establish_reachability(
 ) -> (Reachability, Vec<String>) {
     let mut problems = Vec::new();
     let mut bootstrap = auto_bootstrap(port, peer_id);
+    let mut bootstrap_owners = bootstrap_owners(&bootstrap, BootstrapOwner::AutomaticInterface);
     record_listener_evidence(mesh, accepted_listeners, steps).await;
 
     let advertise = net.advertise.trim();
@@ -1655,7 +1850,13 @@ async fn establish_reachability(
                     a.clone(),
                     "the address you supplied; AutoNAT will test it if public infrastructure connects",
                 ));
-                bootstrap.insert(0, a)
+                add_bootstrap_owner(
+                    &mut bootstrap,
+                    &mut bootstrap_owners,
+                    a,
+                    BootstrapOwner::Configured,
+                    true,
+                );
             }
             Err(e) => {
                 steps.push(DiagStep::failed("advertise", advertise, e.clone()));
@@ -1674,7 +1875,13 @@ async fn establish_reachability(
                     addr.clone(),
                     "circuit reserved; joiners can reach this node through the relay",
                 ));
-                bootstrap.insert(0, addr)
+                add_bootstrap_owner(
+                    &mut bootstrap,
+                    &mut bootstrap_owners,
+                    addr,
+                    BootstrapOwner::Relay,
+                    true,
+                );
             }
             Err(e) => {
                 steps.push(DiagStep::failed("relay", relay, e.clone()));
@@ -1721,6 +1928,7 @@ async fn establish_reachability(
     (
         Reachability {
             bootstrap,
+            bootstrap_owners,
             rz_target,
             rz_handle,
         },
@@ -2059,13 +2267,20 @@ async fn fold_mapped_bootstrap(
     add: bool,
 ) -> bool {
     let entry = format!("{address}/p2p/{peer_id}");
-    fold_bootstrap_entry(app, server, &entry, add).await
+    fold_bootstrap_entry(app, server, &entry, BootstrapOwner::PortMapping, add).await
 }
 
 /// Add or remove one exact dial address from this member's live peer record. Router mappings use a
 /// bare transport address plus our peer id; relay circuit addresses already contain both relay and
-/// local peer ids and therefore call this helper directly.
-async fn fold_bootstrap_entry(app: &AppHandle, server: u64, entry: &str, add: bool) -> bool {
+/// local peer ids and therefore call this helper directly. `owner` prevents one lifecycle from
+/// withdrawing an identical route that another lifecycle still owns.
+async fn fold_bootstrap_entry(
+    app: &AppHandle,
+    server: u64,
+    entry: &str,
+    owner: BootstrapOwner,
+    add: bool,
+) -> bool {
     let entry = entry.to_string();
     let state = app.state::<AppState>();
     let changed_and_actor = {
@@ -2074,22 +2289,21 @@ async fn fold_bootstrap_entry(app: &AppHandle, server: u64, entry: &str, add: bo
             return false;
         };
         let changed = if add {
-            if server_entry.bootstrap.contains(&entry) {
-                false
-            } else {
-                // Public router mappings beat LAN and loopback candidates during address racing.
-                server_entry.bootstrap.insert(0, entry.clone());
-                true
-            }
-        } else if let Some(index) = server_entry
-            .bootstrap
-            .iter()
-            .position(|item| item == &entry)
-        {
-            server_entry.bootstrap.remove(index);
-            true
+            // Mapping, configured and relay routes beat LAN/loopback during address racing.
+            add_bootstrap_owner(
+                &mut server_entry.bootstrap,
+                &mut server_entry.bootstrap_owners,
+                entry.clone(),
+                owner,
+                owner != BootstrapOwner::AutomaticInterface,
+            )
         } else {
-            false
+            remove_bootstrap_owner(
+                &mut server_entry.bootstrap,
+                &mut server_entry.bootstrap_owners,
+                &entry,
+                owner,
+            )
         };
         changed.then(|| (server_entry.actor.clone(), server_entry.bootstrap.clone()))
     };
@@ -2151,26 +2365,20 @@ async fn apply_port_mapping_snapshot(
     snapshot: PortMappingSnapshot,
     active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
     unavailable: &mut HashMap<PortMappingStatusKey, String>,
-    mapping_owned: &mut HashSet<Multiaddr>,
 ) {
     let (next, next_unavailable) = port_mapping_snapshot_state(snapshot);
 
-    // Remove a replaced/expired address only if no new lease still names it. Multiple protocols
-    // can own the same socket, and a baseline manual address is absent from `mapping_owned`.
-    for (key, old) in active.iter() {
-        if next.get(key) != Some(old)
-            && !next.values().any(|candidate| candidate == old)
-            && mapping_owned.remove(old)
-        {
-            fold_mapped_bootstrap(app, server, peer_id, old, false).await;
-        }
+    // The bridge needs one aggregate PortMapping owner per exact socket. The snapshot itself may
+    // contain several protocol/interface owners; compare its unique address sets so expiry of one
+    // protocol cannot withdraw the other, while a raw/manual collision remains protected by the
+    // `ServerEntry` ownership map.
+    let previous_addresses: HashSet<_> = active.values().cloned().collect();
+    let next_addresses: HashSet<_> = next.values().cloned().collect();
+    for old in previous_addresses.difference(&next_addresses) {
+        fold_mapped_bootstrap(app, server, peer_id, old, false).await;
     }
-    for (key, address) in &next {
-        if active.get(key) != Some(address)
-            && fold_mapped_bootstrap(app, server, peer_id, address, true).await
-        {
-            mapping_owned.insert(address.clone());
-        }
+    for address in next_addresses.difference(&previous_addresses) {
+        fold_mapped_bootstrap(app, server, peer_id, address, true).await;
     }
     *active = next;
     *unavailable = next_unavailable;
@@ -2222,9 +2430,6 @@ fn spawn_port_mapping_fold(
         let mut waiting = true;
         let mut active = HashMap::new();
         let mut unavailable = HashMap::new();
-        // Only remove addresses this collector inserted. A manual forward can intentionally be
-        // identical to a router mapping and remains valid after that mapping lease expires.
-        let mut mapping_owned = HashSet::new();
         let initial = rx.borrow_and_update().clone();
         apply_port_mapping_snapshot(
             &app,
@@ -2233,7 +2438,6 @@ fn spawn_port_mapping_fold(
             initial,
             &mut active,
             &mut unavailable,
-            &mut mapping_owned,
         )
         .await;
         loop {
@@ -2260,7 +2464,6 @@ fn spawn_port_mapping_fold(
                     snapshot,
                     &mut active,
                     &mut unavailable,
-                    &mut mapping_owned,
                 )
                 .await;
                 // Failure entries are scoped by mechanism, transport and (for PCPv6) local
@@ -2285,10 +2488,10 @@ async fn apply_relay_snapshot(
         .map(|address| address.to_string())
         .collect();
     for expired in previous.difference(&next) {
-        fold_bootstrap_entry(app, server, expired, false).await;
+        fold_bootstrap_entry(app, server, expired, BootstrapOwner::Relay, false).await;
     }
     for available in next.difference(previous) {
-        fold_bootstrap_entry(app, server, available, true).await;
+        fold_bootstrap_entry(app, server, available, BootstrapOwner::Relay, true).await;
     }
     *previous = next;
 }
@@ -2905,6 +3108,7 @@ async fn found_server_inner(
     }
     let Reachability {
         bootstrap,
+        bootstrap_owners,
         rz_target,
         rz_handle,
     } = reach;
@@ -2986,6 +3190,11 @@ async fn found_server_inner(
         Some(invite_hex),
         name,
         bootstrap,
+        bootstrap_owners,
+        Some(InterfaceRouteIdentity {
+            port,
+            peer_id: id.clone(),
+        }),
         rz_vec,
         Some(mesh_handle),
         is_dm,
@@ -3578,6 +3787,8 @@ async fn join_server_inner(
     let channels = ui_channels(actor.channels().await);
     // A joiner mints no invites (owner-scoped), but these addresses still drive its signed live
     // peer record. A later router mapping or relay reservation is folded into this same set.
+    let joiner_bootstrap_owners =
+        bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
     let server_id = register_server(
         app,
         state,
@@ -3588,6 +3799,11 @@ async fn join_server_inner(
         None,
         name,
         joiner_addrs,
+        joiner_bootstrap_owners,
+        Some(InterfaceRouteIdentity {
+            port: net.port,
+            peer_id: local_peer_id.clone(),
+        }),
         Vec::new(),
         Some(mesh_handle),
         is_dm,
@@ -5855,6 +6071,7 @@ async fn reload_one(
     }
     let Reachability {
         bootstrap,
+        bootstrap_owners,
         rz_target,
         rz_handle,
     } = reach;
@@ -5963,7 +6180,7 @@ async fn reload_one(
     actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
     forward_events(app.clone(), record.id, events);
-    spawn_discovery_timer(app.clone(), record.id, actor.clone());
+    let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {
@@ -5973,6 +6190,11 @@ async fn reload_one(
             invite: presented_invite,
             name: record.display_name.clone(),
             bootstrap,
+            bootstrap_owners,
+            interface_routes: Some(InterfaceRouteIdentity {
+                port,
+                peer_id: id.clone(),
+            }),
             rendezvous: rz_vec,
             mesh: Some(mesh_handle),
             is_dm: record.is_dm,
@@ -5980,6 +6202,7 @@ async fn reload_one(
             record_seq: net.record_seq,
         },
     );
+    spawn_discovery_timer(app.clone(), record.id, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)
     if net.port != saved_port {
@@ -7194,6 +7417,8 @@ async fn join_one_grant(
         None,
         name,
         Vec::new(),
+        HashMap::new(),
+        None,
         Vec::new(),
         Some(mesh_handle),
         false,
@@ -8217,6 +8442,61 @@ mod tests {
                 format!("/ip6/2001:db8::5/udp/443/quic-v1/p2p/{id}"),
             ]
         );
+    }
+
+    #[test]
+    fn interface_refresh_replaces_one_epoch_without_dropping_other_owners() {
+        let id = "12D3KooWfakepeerid";
+        let old_v4 = dialable_addrs("192.168.1.20".parse().unwrap(), 9000, id);
+        let old_v6 = dialable_addrs("2606:4700::20".parse().unwrap(), 9000, id);
+        let loopback = dialable_addrs(std::net::Ipv4Addr::LOCALHOST.into(), 9000, id);
+        let mut bootstrap = old_v4
+            .iter()
+            .chain(&old_v6)
+            .chain(&loopback)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut owners = bootstrap_owners(&bootstrap, BootstrapOwner::AutomaticInterface);
+
+        // A PCPv6 lease commonly names the same GUA socket as the raw interface route. Removing
+        // the interface owner must leave that exact route until the mapping snapshot expires.
+        add_bootstrap_owner(
+            &mut bootstrap,
+            &mut owners,
+            old_v6[0].clone(),
+            BootstrapOwner::PortMapping,
+            true,
+        );
+        let new_v4 = dialable_addrs("10.0.0.44".parse().unwrap(), 9000, id);
+        let next = new_v4.iter().chain(&loopback).cloned().collect::<Vec<_>>();
+        let (removed, added) = reconcile_automatic_bootstrap(&mut bootstrap, &mut owners, &next);
+
+        let mut expected_removed = old_v4.into_iter().collect::<HashSet<_>>();
+        expected_removed.insert(old_v6[1].clone());
+        assert_eq!(
+            removed.into_iter().collect::<HashSet<_>>(),
+            expected_removed
+        );
+        assert_eq!(
+            added.into_iter().collect::<HashSet<_>>(),
+            HashSet::from_iter(new_v4.clone())
+        );
+        assert!(bootstrap.contains(&old_v6[0]));
+        assert!(!bootstrap.contains(&old_v6[1]));
+        assert_eq!(
+            owners.get(&old_v6[0]),
+            Some(&HashSet::from([BootstrapOwner::PortMapping]))
+        );
+        assert!(new_v4.iter().all(|entry| bootstrap.contains(entry)));
+        assert!(loopback.iter().all(|entry| bootstrap.contains(entry)));
+
+        assert!(remove_bootstrap_owner(
+            &mut bootstrap,
+            &mut owners,
+            &old_v6[0],
+            BootstrapOwner::PortMapping,
+        ));
+        assert!(!bootstrap.contains(&old_v6[0]));
     }
 
     #[test]

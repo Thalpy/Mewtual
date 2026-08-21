@@ -873,6 +873,10 @@ enum Command {
     /// does not need a relay circuit to be registerable at a rendezvous. Flushes any
     /// deferred registrations.
     AddExternalAddress(Multiaddr),
+    /// Withdraw one address previously asserted through [`Command::AddExternalAddress`]. Router
+    /// mappings may independently own the same socket, so the actor removes it from Swarm only
+    /// after the final configured/mapping owner is gone.
+    RemoveExternalAddress(Multiaddr),
     /// Register our peer record under `namespace` at the rendezvous node `rz_node`
     /// (must already be connected to it). Deferred until we have an external address.
     RendezvousRegister {
@@ -1243,6 +1247,17 @@ fn autonat_candidate_is_current(
 /// when a broken gateway returns the exact private socket an operator configured manually.
 fn external_address_is_allowed(configured: &HashSet<Multiaddr>, address: &Multiaddr) -> bool {
     configured.contains(address) || addr_is_globally_routable(address)
+}
+
+/// Retire one caller-configured external-address owner. `true` means the address has no remaining
+/// configured or router-mapping owner and must be removed from Swarm. Keeping this decision pure
+/// pins the important IPv6 case where a raw GUA and a PCP firewall pinhole name the same socket.
+fn retire_configured_external_address(
+    configured: &mut HashSet<Multiaddr>,
+    mappings: &HashMap<PortMappingKey, Multiaddr>,
+    address: &Multiaddr,
+) -> bool {
+    configured.remove(address) && !mappings.values().any(|candidate| candidate == address)
 }
 
 /// Record a mechanism's ownership of one external address. The returned old address is safe to
@@ -2738,6 +2753,17 @@ impl Actor {
                 // A registration may have been waiting on exactly this.
                 self.flush_pending_registers();
             }
+            Command::RemoveExternalAddress(addr) => {
+                tracing::debug!(%addr, "remove configured external address");
+                if retire_configured_external_address(
+                    &mut self.configured_external_addrs,
+                    &self.active_port_mappings,
+                    &addr,
+                ) {
+                    self.swarm.remove_external_address(&addr);
+                    self.forget_autonat_address(&addr);
+                }
+            }
             Command::RendezvousRegister { namespace, rz_node } => {
                 self.note_infra(rz_node);
                 // Defer until we have an external address to advertise; flushed on
@@ -3701,6 +3727,15 @@ impl MeshService {
             .map_err(|_| TransportError::Closed)
     }
 
+    /// Withdraw an address previously asserted with [`MeshService::add_external_address`]. An
+    /// identical active router mapping remains advertised until its own lease expires.
+    pub async fn remove_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::RemoveExternalAddress(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
     /// Build a memory-transport node that listens on `listen` and dials `dial`,
     /// then spawn it. For deterministic local testing.
     pub fn new_memory(listen: Option<Multiaddr>, dial: &[Multiaddr]) -> Result<Self, NetError> {
@@ -3906,6 +3941,15 @@ impl MeshHandle {
     pub async fn add_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
             .send(Command::AddExternalAddress(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Withdraw an address previously asserted with [`MeshHandle::add_external_address`]. The
+    /// command is actor-owned so it can preserve an identical live router-mapping owner.
+    pub async fn remove_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::RemoveExternalAddress(addr))
             .await
             .map_err(|_| TransportError::Closed)
     }
@@ -4414,6 +4458,25 @@ mod tests {
             external_address_is_allowed(&HashSet::from([private.clone()]), &private),
             "a rejected private router result cannot remove an identical manual LAN route"
         );
+
+        let shared_v6: Multiaddr = "/ip6/2606:4700::10/tcp/22487".parse().unwrap();
+        let mut configured = HashSet::from([shared_v6.clone()]);
+        let mapped_v6 = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            Some(IpAddr::V6("2606:4700::10".parse().unwrap())),
+        );
+        let mappings = HashMap::from([(mapped_v6, shared_v6.clone())]);
+        assert!(
+            !retire_configured_external_address(&mut configured, &mappings, &shared_v6),
+            "removing a raw-interface owner must preserve an identical PCPv6 pinhole"
+        );
+        assert!(!configured.contains(&shared_v6));
+        assert!(retire_configured_external_address(
+            &mut HashSet::from([shared_v6.clone()]),
+            &HashMap::new(),
+            &shared_v6,
+        ));
 
         let v6_owner = (
             PortMappingMechanism::Pcp,

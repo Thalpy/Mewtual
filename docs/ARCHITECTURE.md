@@ -78,6 +78,15 @@ is broken. The load-bearing fixes:
   claimed. Switchboard offers disclose the helper's stable identities/candidate addresses to the
   invite recipient and disclose the joiner's IP/timing to the helper. Signed candidates are not
   proof of address ownership or reachability.
+- Post-join discovery is self-healing only while some route survives: the desktop polls a bounded
+  set of peers with authenticated PEX, retries cached/current signed address epochs with monotonic
+  exponential backoff and jitter, and resets that delay on a new signed epoch or connection
+  lifecycle. The same roughly-minute pass re-samples the kernel's route-selected IPv4/IPv6 sources
+  and republishes a changed address epoch; exact route ownership prevents raw-interface removal
+  from withdrawing an identical mapping/manual/relay route. It intentionally does not merge
+  withdrawn public IPs forever because an ISP can reassign them. A fully isolated device whose current address is unknown to every peer still needs
+  out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
+  cannot manufacture a route from no contact.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals
   *after* the device is removed.
 - **Already-fetched files cannot be un-shared.**

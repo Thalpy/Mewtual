@@ -214,9 +214,19 @@ const MAX_PEX_ENTRIES: usize = 64;
 /// each person by their devices, and the eviction that got there was `HashMap` iteration order,
 /// which Rust randomises per process: which member's calls broke would differ every launch.
 const MAX_PEER_RECORDS: usize = 512;
-/// Bound on the steady-state-discovery "already dialed" dedup set; cleared on overflow (re-dials
-/// stay policy-budget-gated, so clearing only costs a bounded re-consideration, never unbounded RAM).
-const MAX_DIALED_PEERS: usize = 4096;
+/// Bound on the steady-state dial retry ledger. Entries are transient and policy-budgeted; the
+/// cap is a memory boundary against a rendezvous rotating transport identities.
+const MAX_DIAL_RETRIES: usize = 4096;
+/// Base delay before a discovery candidate that did not connect is tried again. The desktop
+/// discovery driver runs roughly once a minute, so a one-minute floor avoids duplicate work while
+/// still repairing an ordinary disconnect on the next useful pass.
+const DIAL_RETRY_BASE_MS: u64 = 60_000;
+/// Maximum retry delay. A peer that is offline for days must not consume every discovery pass,
+/// but it must also never become permanently retired merely because its first dial failed.
+const DIAL_RETRY_MAX_MS: u64 = 15 * 60_000;
+/// Positive jitter applied to each retry deadline. This keeps members that observed the same
+/// outage from all redialling one peer on the same second.
+const DIAL_RETRY_JITTER_MS: u64 = 15_000;
 /// Cap on dialable addresses carried per peer record.
 const MAX_PEX_ADDRESSES: usize = 8;
 /// Minimum interval (ms, on the injected clock) between PEX responses served to the
@@ -2446,6 +2456,20 @@ struct JoinHelperCapability {
     expires_at_ms: u64,
 }
 
+/// Transient retry state for one discovery identity.
+///
+/// The key lives outside this value because it is intentionally the discovery policy's identity:
+/// a signed PEX/cache candidate is keyed by member device id, while a not-yet-proven rendezvous
+/// candidate is keyed by the opaque transport bytes the rendezvous returned. `seq` is what makes
+/// a freshly signed address epoch immediately eligible even if the preceding route is backed off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DialRetry {
+    seq: u64,
+    attempts: u8,
+    last_attempt_ms: u64,
+    next_attempt_ms: u64,
+}
+
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
     group: ServerGroup,
@@ -2619,9 +2643,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// The eclipse-resistant dial policy (one long-lived per group; transient; rebuilt on restore)
     /// that ranks discovered candidates into a bounded dial plan. The transport NEVER auto-dials.
     discovery: DiscoveryPolicy,
-    /// Discovered peers already dialed this session (dedup, keyed on the opaque peer bytes), so
-    /// repeated discovery of the same member doesn't re-dial. Transient.
-    dialed_peers: HashSet<Vec<u8>>,
+    /// Bounded, expiring retry state for discovery candidates. This replaced the old
+    /// process-lifetime `dialed_peers` set: that set made a failed first attempt permanent, so a
+    /// member whose network or public IP recovered could not be contacted until this app
+    /// restarted. A new signed sequence bypasses the delay; otherwise attempts use exponential
+    /// backoff and jitter. Live connections are suppressed separately by `connected_peers`.
+    dial_retries: HashMap<Vec<u8>, DialRetry>,
     /// Advisory-only isolation detector (never gates anything): hysteretic over R (roster) / D
     /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
     /// "verify out-of-band" hint. Transient; rebuilt on restore.
@@ -2788,7 +2815,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             roster_gen: 0,
             rendezvous_nodes: Vec::new(),
             discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
-            dialed_peers: HashSet::new(),
+            dial_retries: HashMap::new(),
             eclipse: EclipseDetector::new(EclipseConfig::default()),
             pending_dm_invites: Vec::new(),
             pending_call_signals: Vec::new(),
@@ -3481,6 +3508,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Some(TransportEvent::PeerConnected(peer)) => {
                 self.connected_peers.insert(peer);
+                self.clear_dial_retries_for_transport(peer);
                 self.remember_peer(peer);
                 // A freshly-connected peer is a catch-up source; proactively probe in
                 // case we fell behind while the live topic was outside our window
@@ -3512,9 +3540,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Some(TransportEvent::PeerDisconnected(peer)) => {
                 // Drop it from the live-connection set so presence + the availability hint reflect
-                // the loss. (Catch-up source lists are left as-is; they age out / re-prove; only
-                // liveness needs the precise removal.)
+                // the loss. Clear any leftover retry row too, so the next discovery pass promotes
+                // this previously-live member immediately instead of inheriting a pre-connect
+                // backoff. (Catch-up source lists are left as-is; they age out / re-prove; only
+                // liveness and redial eligibility need the precise removal.)
                 self.connected_peers.remove(&peer);
+                self.clear_dial_retries_for_transport(peer);
                 Ok(true)
             }
         }
@@ -4407,6 +4438,83 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// Whether discovery may spend another dial on `key` at signed address epoch `seq`.
+    ///
+    /// An unseen identity and a newer signed epoch are immediately eligible. Equal epochs wait
+    /// for their monotonic deadline; a wall-clock correction must never prolong or accelerate a
+    /// transport retry.
+    fn dial_retry_eligible(&self, key: &[u8], seq: u64) -> bool {
+        match self.dial_retries.get(key) {
+            None => true,
+            Some(previous) if seq > previous.seq => true,
+            Some(previous) => self.clock.monotonic_ms() >= previous.next_attempt_ms,
+        }
+    }
+
+    /// Record one policy-approved dial and schedule its next opportunity with bounded
+    /// exponential backoff. This is deliberately recorded only after `DiscoveryPolicy::plan`
+    /// grants the peer: budget-deferred candidates have not been attempted and remain eligible.
+    fn note_dial_attempt(&mut self, key: Vec<u8>, seq: u64) {
+        let now = self.clock.monotonic_ms();
+        let attempts = self
+            .dial_retries
+            .get(&key)
+            .filter(|previous| previous.seq == seq)
+            .map_or(1, |previous| previous.attempts.saturating_add(1));
+        // Shift only as far as can affect the capped result. Avoiding a large shift is both a
+        // panic guard and what keeps a perpetually-offline peer's state simple.
+        let exponent = attempts.saturating_sub(1).min(8);
+        let base = DIAL_RETRY_BASE_MS
+            .saturating_mul(1u64 << exponent)
+            .min(DIAL_RETRY_MAX_MS);
+        let jitter = if DIAL_RETRY_JITTER_MS == 0 {
+            0
+        } else {
+            self.rng.next_u64() % (DIAL_RETRY_JITTER_MS + 1)
+        };
+        let delay = base.saturating_add(jitter).min(DIAL_RETRY_MAX_MS);
+
+        if !self.dial_retries.contains_key(&key) && self.dial_retries.len() >= MAX_DIAL_RETRIES {
+            // Drop the least-recently-attempted row. The dial policy still limits any
+            // reconsideration this permits; deterministic key tie-breaking keeps tests stable.
+            let victim = self
+                .dial_retries
+                .iter()
+                .min_by(|(key_a, a), (key_b, b)| {
+                    a.last_attempt_ms
+                        .cmp(&b.last_attempt_ms)
+                        .then_with(|| key_a.cmp(key_b))
+                })
+                .map(|(key, _)| key.clone());
+            if let Some(victim) = victim {
+                self.dial_retries.remove(&victim);
+            }
+        }
+        self.dial_retries.insert(
+            key,
+            DialRetry {
+                seq,
+                attempts,
+                last_attempt_ms: now,
+                next_attempt_ms: now.saturating_add(delay),
+            },
+        );
+    }
+
+    /// A successful connection proves every retry identity that resolves to this transport is no
+    /// longer pending. Remove those rows rather than leaving their backoff behind: after a later
+    /// disconnect the next discovery pass should try promptly, not inherit an old failure count.
+    fn clear_dial_retries_for_transport(&mut self, peer: PeerId) {
+        let device_keys: HashSet<Vec<u8>> = self
+            .peer_records
+            .iter()
+            .filter(|(_, record)| record.peer_id == *peer.as_bytes())
+            .map(|(device, _)| device.as_bytes().to_vec())
+            .collect();
+        self.dial_retries
+            .retain(|key, _| !device_keys.contains(key) && transport_peer_from_raw(key) != peer);
+    }
+
     /// Await the next rendezvous-discovered peer (delegates to the transport; inert without
     /// rendezvous; the default never resolves). `&mut self` (not `&self`) so the actor's task
     /// future stays `Send` without requiring `ChannelSync: Sync`.
@@ -4415,7 +4523,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Rank a discovered peer through the [`DiscoveryPolicy`] (which alone decides dials; the
-    /// transport never auto-dials) and dial the chosen addresses if not already dialed. The
+    /// transport never auto-dials) and dial the chosen addresses when their retry deadline permits.
+    /// The
     /// namespace must be one of ours (member-only); membership is re-proven post-dial by the
     /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false`, permanently: see
     /// [`routing_membership_tag`] for why the tag is not carried and why nothing above could use
@@ -4425,7 +4534,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// **this** is the path that dials in the shipping app. Without it, anyone who can register
     /// under the group's namespace (the rendezvous operator, or any member) could serve records
     /// naming `/ip4/192.168.1.1/tcp/22`, with a fresh peer id per record to defeat the
-    /// `dialed_peers` dedup, and every member would run an internal scan of their own LAN and a
+    /// retry identity, and every member would run an internal scan of their own LAN and a
     /// connect flood from their residential address, once per discovery tick, indefinitely.
     ///
     /// Filtering is **per address** here, unlike [`Self::ingest_peer_record`], and the difference
@@ -4458,7 +4567,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::trace!("discovered record had no routable address; dropped");
             return;
         }
-        // This rendezvous just named a peer. Recorded before the already-dialed dedup below:
+        // This rendezvous just named a peer. Recorded before the retry/connected checks below:
         // corroboration is about a root independently surfacing a peer, and a root that keeps
         // naming a peer we happen to have dialed already is still corroborating. Whether the
         // naming is worth anything is decided later, by `effective_discovery_roots`: serving a
@@ -4475,15 +4584,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             rz_root.clone(),
             d.peer.clone(),
         );
-        if self.dialed_peers.contains(&d.peer) {
+        let peer = d.peer;
+        let seq = d.seq;
+        if self
+            .connected_peers
+            .contains(&transport_peer_from_raw(&peer))
+        {
             return;
         }
-        if self.dialed_peers.len() >= MAX_DIALED_PEERS {
-            self.dialed_peers.clear(); // bound memory; re-dials are still policy-budget-gated
+        if !self.dial_retry_eligible(&peer, seq) {
+            return;
         }
-        self.dialed_peers.insert(d.peer.clone());
         let candidate = Candidate {
-            peer: d.peer,
+            peer,
             addresses,
             source: Source::Rendezvous(rz_root),
             // The record's own signed seq gives the policy real anti-replay freshness.
@@ -4491,7 +4604,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // `routing_membership_tag`); and it would change nothing here even if it were set,
             // because this plan holds exactly one candidate and a score only ever orders a list.
             // The gates are the member-only namespace before the dial and MLS/PEX after it.
-            seq: d.seq,
+            seq,
             tag_verified: false,
         };
         let roster = self.member_count();
@@ -4499,6 +4612,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .discovery
             .plan(vec![candidate], roster, &*self.clock, &mut self.rng);
         for pd in plan {
+            self.note_dial_attempt(pd.peer.clone(), seq);
             for addr in &pd.addresses {
                 let _ = self.transport.dial_addr(addr).await;
             }
@@ -5633,43 +5747,59 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .address_cache
             .candidates()
             .into_iter()
-            .filter(|c| !self.dialed_peers.contains(&c.peer))
-            .filter(|c| {
-                Self::cached_peer_device(&c.peer).is_some_and(|d| self.group.contains_device(&d))
-            })
-            .map(|c| Candidate {
-                peer: c.peer,
-                addresses: c
+            .filter_map(|cached| {
+                let device = Self::cached_peer_device(&cached.peer)?;
+                if !self.group.contains_device(&device) {
+                    return None;
+                }
+                // `peer_records` is the authoritative newest signed epoch. It may have refreshed
+                // through PEX earlier in this same discovery pass, before `cache_known_records`
+                // seals it at the end. Dialing `CachedPeer.addresses` here would wait another
+                // whole minute before trying a dynamic-IP update.
+                let record = self.peer_records.get(&device)?;
+                if self.connected_peers.contains(&PeerId::new(record.peer_id))
+                    || !self.dial_retry_eligible(&cached.peer, record.seq)
+                {
+                    return None;
+                }
+                let addresses: Vec<String> = record
                     .addresses
-                    .into_iter()
-                    .filter(|a| peer_addr_is_routable(a))
-                    .collect(),
-                source: Source::Cache,
-                seq: c.seq,
-                // The pre-dial membership tag is a rendezvous-registration primitive; a cache
-                // entry carries no tag, so it ranks on being a prior proven contact.
-                tag_verified: false,
+                    .iter()
+                    .filter(|address| peer_addr_is_routable(address))
+                    .cloned()
+                    .collect();
+                if addresses.is_empty() {
+                    return None;
+                }
+                Some(Candidate {
+                    peer: cached.peer,
+                    addresses,
+                    source: Source::Cache,
+                    seq: record.seq,
+                    // The pre-dial membership tag is a rendezvous-registration primitive; a cache
+                    // entry carries no tag, so it ranks on being a prior proven contact.
+                    tag_verified: false,
+                })
             })
-            .filter(|c| !c.addresses.is_empty())
             .collect();
         if candidates.is_empty() {
             return 0;
         }
-        if self.dialed_peers.len() >= MAX_DIALED_PEERS {
-            self.dialed_peers.clear(); // bound memory; re-dials stay policy-budget-gated
-        }
+        let candidate_seqs: HashMap<Vec<u8>, u64> = candidates
+            .iter()
+            .map(|candidate| (candidate.peer.clone(), candidate.seq))
+            .collect();
         let roster = self.member_count();
         let plan = self
             .discovery
             .plan(candidates, roster, &*self.clock, &mut self.rng);
         let dialed = plan.len();
         for pd in plan {
-            // Marked dialed only once the policy actually planned it. Marking every *candidate*
-            // (which is what this did first) silently retires the ones the dial budget deferred:
-            // the budget is 8 per window, so a group larger than that would have most of its
-            // members struck off as "already dialed" without a single connection attempt, and
-            // this is the path a reload now depends on to heal.
-            self.dialed_peers.insert(pd.peer.clone());
+            // Record an attempt only once the policy actually plans it. Recording every
+            // *candidate* would back off peers the dial budget deferred without touching a
+            // socket, recreating the old sticky-dedup failure in a subtler form.
+            let seq = candidate_seqs.get(&pd.peer).copied().unwrap_or(0);
+            self.note_dial_attempt(pd.peer.clone(), seq);
             for addr in &pd.addresses {
                 let _ = self.transport.dial_addr(addr).await;
             }
@@ -12530,7 +12660,7 @@ mod tests {
         };
         alice.ingest_discovered(scan).await;
         assert!(
-            !alice.dialed_peers.contains(b"attacker-peer".as_slice()),
+            !alice.dial_retries.contains_key(b"attacker-peer".as_slice()),
             "nothing dialable survived, so the record was dropped whole"
         );
         assert_eq!(
@@ -12550,7 +12680,7 @@ mod tests {
             seq: 1,
         };
         alice.ingest_discovered(mixed).await;
-        assert!(alice.dialed_peers.contains(b"honest-peer".as_slice()));
+        assert!(alice.dial_retries.contains_key(b"honest-peer".as_slice()));
         // Still not corroboration: a routable address is a dialable answer, not evidence that the
         // peer named is real. The root counts only once a roster member's signed record claims
         // that transport peer (see
@@ -12598,7 +12728,7 @@ mod tests {
         // And `dial_cached_peers` re-checks membership itself, so a member removed *between*
         // refreshes is still never offered to the dialer.
         alice.address_cache.insert(ghost.clone(), &mut alice.rng);
-        alice.dialed_peers.clear(); // as a fresh launch would
+        alice.dial_retries.clear(); // as a fresh launch would
         assert_eq!(
             alice.dial_cached_peers().await,
             1,
@@ -12606,7 +12736,7 @@ mod tests {
         );
 
         // A group larger than one dial-budget window still gets everybody attempted eventually:
-        // only the peers the policy actually planned are struck off as dialed.
+        // only the peers the policy actually planned receive retry state.
         for n in 0..24u8 {
             let mut b = [0u8; 32];
             b[0] = 0xA0 | (n & 0x0F);
@@ -12621,12 +12751,12 @@ mod tests {
                 &mut alice.rng,
             );
         }
-        alice.dialed_peers.clear();
+        alice.dial_retries.clear();
         let first = alice.dial_cached_peers().await;
         assert!(
-            first > 0 && alice.dialed_peers.len() == first,
-            "only the peers the policy planned are retired, got {first} planned and {} retired",
-            alice.dialed_peers.len()
+            first > 0 && alice.dial_retries.len() == first,
+            "only the peers the policy planned are backed off, got {first} planned and {} tracked",
+            alice.dial_retries.len()
         );
         // Tidy up before the cache assertions below. Retain Bob by his *exact* device id, not by
         // the filler rows' byte pattern: a real device id is a BLAKE3 hash, so it matches the
@@ -12634,7 +12764,7 @@ mod tests {
         // and left the count assertion below reading 0. That made the test flaky, not the code.
         let bob_peer = bob.device.device_id().as_bytes().to_vec();
         alice.address_cache.retain(|c| c.peer == bob_peer);
-        alice.dialed_peers.clear();
+        alice.dial_retries.clear();
 
         // ...and a sealed cache carrying the row does not resurrect them either: the load-time
         // re-proof drops any row whose record does not verify against the current roster.
@@ -12646,6 +12776,113 @@ mod tests {
             alice.cached_peer_count(),
             1,
             "only the real member survives"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_cached_dial_retries_without_restarting_the_app() {
+        // Regression for the process-lifetime `dialed_peers` set: one unsuccessful attempt used
+        // to retire a perfectly valid current member until the whole process restarted.
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let clock = ManualClock::new(1_000);
+        alice.clock = Arc::new(clock.clone());
+
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        assert_eq!(alice.cache_known_records(), 1);
+        let key = bob.device.device_id().as_bytes().to_vec();
+
+        assert_eq!(alice.dial_cached_peers().await, 1);
+        assert_eq!(alice.dial_retries.get(&key).unwrap().attempts, 1);
+        assert_eq!(
+            alice.dial_cached_peers().await,
+            0,
+            "the same discovery pass cannot hammer one offline endpoint"
+        );
+
+        // Advance through the maximum possible first-delay jitter. The policy's independent
+        // budget window also rolls over, exactly as the desktop's minute tick would.
+        clock.advance_ms(DIAL_RETRY_BASE_MS + DIAL_RETRY_JITTER_MS);
+        assert_eq!(
+            alice.dial_cached_peers().await,
+            1,
+            "an offline peer becomes eligible again without a process restart"
+        );
+        assert_eq!(alice.dial_retries.get(&key).unwrap().attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn a_fresher_signed_address_epoch_bypasses_dial_backoff() {
+        // A dynamic-IP update is stronger evidence than the old retry timer. Waiting out a
+        // fifteen-minute backoff after learning a newly signed route would make the freshness
+        // sequence actively work against recovery.
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let clock = ManualClock::new(1_000);
+        alice.clock = Arc::new(clock);
+
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        alice.cache_known_records();
+        assert_eq!(alice.dial_cached_peers().await, 1);
+
+        bob.publish_self_record(vec!["/ip6/2001:db8::22/udp/1/quic-v1".into()], 8)
+            .unwrap();
+        assert!(
+            !alice.ingest_peer_record(bob.self_record().unwrap().clone()),
+            "a refresh is accepted but is not counted as a newly-known member"
+        );
+        assert_eq!(
+            alice.peer_record(&bob.device.device_id()).unwrap().seq,
+            8,
+            "the fresher record replaced the old route"
+        );
+        assert_eq!(
+            alice.dial_cached_peers().await,
+            1,
+            "a new signed route is tried immediately, before the cache is sealed at tick end"
+        );
+        let key = bob.device.device_id().as_bytes().to_vec();
+        let retry = alice.dial_retries.get(&key).unwrap();
+        assert_eq!(retry.seq, 8);
+        assert_eq!(retry.attempts, 1, "the new address epoch starts fresh");
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_member_is_promoted_for_redial_on_the_next_pass() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let bob_transport = bob.local_peer();
+
+        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+            .unwrap();
+        assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
+        alice.cache_known_records();
+        assert_eq!(alice.dial_cached_peers().await, 1);
+
+        // A successful connection consumes the old failure history and suppresses duplicate
+        // dials while it is live.
+        alice.connected_peers.insert(bob_transport);
+        alice.clear_dial_retries_for_transport(bob_transport);
+        assert!(alice.dial_retries.is_empty());
+        assert_eq!(alice.dial_cached_peers().await, 0);
+
+        // This is the state transition `PeerDisconnected` performs in `run_once`.
+        alice.connected_peers.remove(&bob_transport);
+        alice.clear_dial_retries_for_transport(bob_transport);
+        assert_eq!(
+            alice.dial_cached_peers().await,
+            1,
+            "a formerly-live member is retried on the next discovery pass"
         );
     }
 
@@ -13088,7 +13325,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_discovered_processes_known_namespaces_and_ignores_others() {
         // Steady-state discovery: a record discovered under one of our member-only rendezvous
-        // namespaces is processed (marked dialed, so we don't reconsider it); a record under an
+        // namespaces is processed (given bounded retry state); a record under an
         // unrecognized namespace is ignored (not one we register/discover under).
         let mut alice = solo_node();
         let rz = vec![7u8; 38]; // an opaque rendezvous node id
@@ -13108,7 +13345,7 @@ mod tests {
         };
         alice.ingest_discovered(good).await;
         assert!(
-            alice.dialed_peers.contains(&vec![1, 2, 3]),
+            alice.dial_retries.contains_key(&vec![1, 2, 3]),
             "a record under our namespace is processed"
         );
 
@@ -13120,7 +13357,7 @@ mod tests {
         };
         alice.ingest_discovered(unknown).await;
         assert!(
-            !alice.dialed_peers.contains(&vec![9, 9]),
+            !alice.dial_retries.contains_key(&vec![9, 9]),
             "a record under an unrecognized namespace is ignored"
         );
     }
