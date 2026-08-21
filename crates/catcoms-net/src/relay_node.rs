@@ -62,11 +62,12 @@ use libp2p::core::upgrade::Version;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    autonat, connection_limits, identify, noise, ping, relay, yamux, Multiaddr, Swarm,
-    SwarmBuilder, Transport,
+    connection_limits, identify, noise, ping, relay, yamux, Multiaddr, Swarm, SwarmBuilder,
+    Transport,
 };
 
 use crate::admission::{AddrPrefix, Admission, AdmissionConfig};
+use crate::autonat_server::{guarded_autonat_server, AutoNatDialGuard, GuardedAutoNatServer};
 use crate::fdlimit::check_open_file_limit;
 use crate::identify_config;
 use crate::infra_transport::{
@@ -106,9 +107,10 @@ const MAX_PENDING_AUTONAT_DIALBACKS: u32 = 64;
 /// an individual operator can absorb without checking.
 #[derive(Debug, Clone)]
 pub struct RelayLimits {
-    /// Opt in to the public AutoNAT v2 dial-back service. Disabled by default because upstream
-    /// exposes no hook for per-peer request-rate or target-address policy; connection caps bound
-    /// concurrency but do not stop sustained egress/port-scan abuse over one Noise connection.
+    /// Opt in to the guarded AutoNAT v2 dial-back service. Disabled by default because serving
+    /// still reveals probe metadata and permits bounded probes of other ports sharing the
+    /// requester's public NAT address. The pre-dial guard enforces direct exact-source-IP targets
+    /// plus node/source-prefix/peer rate and concurrency limits before opening a socket.
     pub enable_autonat: bool,
     /// Concurrent reservations, i.e. how many NAT'd nodes can be *reachable* through this relay
     /// at once. A reservation is one idle TCP connection plus a map entry: cheap in bandwidth,
@@ -380,6 +382,9 @@ impl RelayLimits {
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct RelayBehaviour {
+    /// AutoNAT callback target/rate gate. This is intentionally first: it consumes the wrapped
+    /// server's callback tag even when a later connection-limit behaviour refuses the dial.
+    pub autonat_guard: AutoNatDialGuard,
     /// Connection caps run first so refused connections allocate no relay/AutoNAT handler state.
     pub connection_limits: connection_limits::Behaviour,
     /// Per-source-prefix quotas plus the load-shed deny path. Its declaration order is likewise
@@ -391,12 +396,9 @@ pub struct RelayBehaviour {
     pub identify: identify::Behaviour,
     /// Keep-alive.
     pub ping: ping::Behaviour,
-    /// Optional AutoNAT v2 dial-back service. A relay is already the mutually reachable public
-    /// third party a NAT'd member depends on, so it is the right place to test that member's direct
-    /// address. It remains disabled unless the operator explicitly accepts the upstream server's
-    /// missing per-peer request-rate and target-address policy hooks; connection limits only cap
-    /// simultaneous outbound probes.
-    pub autonat_server: Toggle<autonat::v2::server::Behaviour<OsCryptoRng>>,
+    /// Optional AutoNAT v2 dial-back service. The first-declared guard restricts callbacks to the
+    /// requester's observed public IP and applies node/peer/source-prefix windows before dialing.
+    pub autonat_server: Toggle<GuardedAutoNatServer<OsCryptoRng>>,
 }
 
 pub(crate) fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour {
@@ -404,17 +406,23 @@ pub(crate) fn relay_behaviour(key: &libp2p::identity::Keypair) -> RelayBehaviour
 }
 
 fn relay_behaviour_with(key: &libp2p::identity::Keypair, limits: &RelayLimits) -> RelayBehaviour {
+    relay_behaviour_with_policy(key, limits, false)
+}
+
+fn relay_behaviour_with_policy(
+    key: &libp2p::identity::Keypair,
+    limits: &RelayLimits,
+    allow_memory_for_tests: bool,
+) -> RelayBehaviour {
+    let (autonat_guard, autonat_server) = guarded_autonat_server(allow_memory_for_tests);
     RelayBehaviour {
+        autonat_guard,
         connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
         admission: Admission::new(limits.admission.clone(), 0),
         relay: relay::Behaviour::new(key.public().to_peer_id(), limits.to_relay_config()),
         identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
-        autonat_server: Toggle::from(
-            limits
-                .enable_autonat
-                .then(|| autonat::v2::server::Behaviour::new(OsCryptoRng)),
-        ),
+        autonat_server: Toggle::from(limits.enable_autonat.then_some(autonat_server)),
     }
 }
 
@@ -471,7 +479,7 @@ pub fn build_memory_relay_swarm() -> Swarm<RelayBehaviour> {
                 enable_autonat: true,
                 ..Default::default()
             };
-            relay_behaviour_with(key, &limits)
+            relay_behaviour_with_policy(key, &limits, true)
         })
         .expect("relay behaviour")
         .build()
@@ -606,6 +614,10 @@ impl RelayNode {
 
     /// Replace the clock (tests drive the shed sweep with a `ManualClock`).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.swarm
+            .behaviour_mut()
+            .autonat_guard
+            .set_clock(clock.clone());
         self.clock = clock;
         self
     }

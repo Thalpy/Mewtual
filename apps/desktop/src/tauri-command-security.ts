@@ -14,9 +14,9 @@ export const TAURI_COMMAND_GROUPS = {
     ],
   },
   server_lifecycle_and_membership: {
-    boundary: "Signed invites, group membership and role-changing operations; protocol checks are authoritative.",
+    boundary: "Signed invites, bounded pre-join reply dialing, group membership and role-changing operations; protocol checks are authoritative.",
     commands: [
-      "found_server", "join_server", "leave_server", "get_invite", "mint_invite_fresh",
+      "found_server", "preview_invite", "join_server", "apply_join_reply", "leave_server", "get_invite", "mint_invite_fresh",
       "set_admin", "remove_member", "revoke_device",
     ],
   },
@@ -28,7 +28,7 @@ export const TAURI_COMMAND_GROUPS = {
       "get_dm_requests", "file_available", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
-      "get_join_attempts", "get_connectivity", "get_channel_topic", "get_jukebox", "get_inbox",
+      "get_join_attempts", "get_connectivity", "get_switchboard_status", "set_switchboard_offered", "get_channel_topic", "get_jukebox", "get_inbox",
       "get_messages",
     ],
   },

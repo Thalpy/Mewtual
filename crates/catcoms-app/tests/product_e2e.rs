@@ -877,6 +877,7 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
         advertise: String::new(),
         relay: String::new(),
         rendezvous: String::new(),
+        switchboard: false,
         record_seq: 0,
     };
     alice.seq = net.reserve_record_seq_block() - 65_536;

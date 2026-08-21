@@ -17,6 +17,7 @@ import {
   formatJoinLog,
   reachabilitySummary,
   reachabilityEventAffectsReport,
+  switchboardEventRefreshDecision,
   withOrderedConnectivity,
   withOrderedRefreshedInvite,
   withRefreshedInvite,
@@ -234,6 +235,19 @@ test("an async invite refresh updates only the server named by its event", () =>
     "server A's global report refreshes even while some unrelated server B is active",
   );
   assert.equal(reachabilityEventAffectsReport({ server: 1 }, 2), false);
+
+  assert.deepEqual(switchboardEventRefreshDecision(false, 2, 1), {
+    refreshStatus: false,
+    refreshInvite: true,
+  });
+  assert.deepEqual(switchboardEventRefreshDecision(false, 1, 1), {
+    refreshStatus: true,
+    refreshInvite: true,
+  });
+  assert.deepEqual(switchboardEventRefreshDecision(true, 1, 1), {
+    refreshStatus: false,
+    refreshInvite: false,
+  });
 });
 
 test("an older connectivity refresh cannot restore withdrawn reachability", () => {
@@ -264,6 +278,7 @@ test("the connectivity report keeps the last error verbatim", () => {
   const text = formatConnectivity({
     ...emptyReport,
     advertised: ["/ip4/192.168.1.5/tcp/9000/p2p/ME"],
+    mesh_observations: ["12D3observer observed /ip4/198.51.100.4/tcp/49152"],
     steps: [
       { at: 1, kind: "dial", target: "/ip4/10.0.0.1/tcp/9000", detail: "dialled", status: "unknown" },
       { at: 2, kind: "connect", target: "", detail: "none of the dialled addresses answered within 20s", status: "failed" },
@@ -276,6 +291,8 @@ test("the connectivity report keeps the last error verbatim", () => {
   assert.match(text, /Addresses this node advertises \(1\):/);
   assert.match(text, /Observed reachability: unknown/);
   assert.match(text, /AutoNAT: not tested:/);
+  assert.match(text, /Peer-observed outbound sockets \(1; diagnostic only, not listener routes\):/);
+  assert.match(text, /12D3observer observed \/ip4\/198\.51\.100\.4\/tcp\/49152/);
 });
 
 test("a connectivity report with nothing attempted says so", () => {

@@ -33,8 +33,10 @@
 
 pub mod addr;
 pub mod admission;
+pub mod autonat_server;
 pub mod fdlimit;
 pub mod infra_transport;
+pub mod join_reply;
 pub mod metering;
 pub mod relay_node;
 pub mod rendezvous_node;
@@ -47,6 +49,7 @@ pub use addr::{
 pub use infra_transport::{
     is_advertisable, is_websocket_addr, is_wildcard_addr, load_ws_tls_pem, WsTlsConfig,
 };
+pub use join_reply::{JoinReply, JoinReplyError, JOIN_REPLY_LIFETIME_MS};
 pub use metering::ByteMeters;
 pub use relay_node::{
     build_memory_relay_swarm, build_relay_swarm, build_relay_swarm_with_key, run_relay,
@@ -306,6 +309,33 @@ pub struct AutoNatSnapshot {
 pub struct RelayAddressSnapshot {
     /// Every live `/p2p-circuit` address. Empty after the reservation/listener expires.
     pub addresses: Vec<Multiaddr>,
+}
+
+/// Addresses the Swarm has actually reported through `NewListenAddr`, withdrawn again through
+/// `ExpiredListenAddr`. This is stronger than a successful `listen_on` request, whose OS bind can
+/// still fail asynchronously.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListenerSnapshot {
+    /// Current direct and relay listen addresses.
+    pub addresses: Vec<Multiaddr>,
+}
+
+/// One low-trust observation of this node's outbound socket, reported by a connected Identify
+/// peer.  It is diagnostics only: TCP source ports are commonly ephemeral and a peer may lie, so
+/// this address must never be advertised or dialled as a listener route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshObservation {
+    /// Connected peer that reported the observation.
+    pub observer: libp2p::PeerId,
+    /// Address the peer says it observed for this connection.
+    pub address: Multiaddr,
+}
+
+/// Coalesced, bounded observations keyed by connected peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeshObservationSnapshot {
+    /// At most one latest observation per peer; removed when that peer disconnects.
+    pub observations: Vec<MeshObservation>,
 }
 
 // ----- request/response codec ------------------------------------------------
@@ -1077,6 +1107,24 @@ type PortMappingKey = (PortMappingMechanism, PortMappingTransport);
 /// peer/address ever seen would let churn grow a long-lived node without bound, even though the
 /// public watch channel itself is coalesced.
 const MAX_AUTONAT_OBSERVATIONS: usize = 64;
+const MAX_MESH_OBSERVATIONS: usize = 32;
+
+fn record_mesh_observation(
+    observations: &mut HashMap<libp2p::PeerId, Multiaddr>,
+    order: &mut VecDeque<libp2p::PeerId>,
+    observer: libp2p::PeerId,
+    address: Multiaddr,
+) {
+    order.retain(|candidate| candidate != &observer);
+    observations.insert(observer, address);
+    order.push_back(observer);
+    while observations.len() > MAX_MESH_OBSERVATIONS {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        observations.remove(&oldest);
+    }
+}
 
 type AutoNatKey = (Multiaddr, libp2p::PeerId);
 
@@ -1432,6 +1480,8 @@ struct Actor {
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     listen_tx: mpsc::Sender<Multiaddr>,
+    active_listeners: HashSet<Multiaddr>,
+    listener_snapshot_tx: watch::Sender<ListenerSnapshot>,
     /// Unified UPnP/PCP/NAT-PMP lifecycle stream for the product layer. It persists successful
     /// addresses into invites/peer records and removes them again on lease expiry.
     port_mapping_tx: watch::Sender<PortMappingSnapshot>,
@@ -1464,6 +1514,12 @@ struct Actor {
     /// listener expires instead of continuing to present a dead circuit as "relay ready".
     relay_addresses: HashSet<Multiaddr>,
     relay_address_tx: watch::Sender<RelayAddressSnapshot>,
+    /// Latest outbound-address observation from each connected Identify peer. This is kept wholly
+    /// separate from external-address ownership so telemetry can never become a dial candidate by
+    /// accident.
+    mesh_observations: HashMap<libp2p::PeerId, Multiaddr>,
+    mesh_observation_order: VecDeque<libp2p::PeerId>,
+    mesh_observation_tx: watch::Sender<MeshObservationSnapshot>,
     /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
     upgrade_tx: mpsc::Sender<PeerId>,
     /// Rendezvous-discovered peer records, surfaced but never auto-dialed. Unbounded
@@ -1747,6 +1803,23 @@ impl Actor {
         });
         self.autonat_tx
             .send_replace(AutoNatSnapshot { results, latest });
+    }
+
+    fn publish_mesh_observations(&self) {
+        let mut observations: Vec<_> = self
+            .mesh_observations
+            .iter()
+            .map(|(observer, address)| MeshObservation {
+                observer: *observer,
+                address: address.clone(),
+            })
+            .collect();
+        observations.sort_by(|a, b| {
+            (a.observer.to_string(), a.address.to_string())
+                .cmp(&(b.observer.to_string(), b.address.to_string()))
+        });
+        self.mesh_observation_tx
+            .send_replace(MeshObservationSnapshot { observations });
     }
 
     fn forget_autonat_address(&mut self, address: &Multiaddr) {
@@ -2157,6 +2230,11 @@ impl Actor {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "listening");
+                self.active_listeners.insert(address.clone());
+                let mut addresses: Vec<_> = self.active_listeners.iter().cloned().collect();
+                addresses.sort_by_key(ToString::to_string);
+                self.listener_snapshot_tx
+                    .send_replace(ListenerSnapshot { addresses });
                 if self.enable_port_mapping {
                     if let Some((transport, port)) = port_mapping_endpoint(&address) {
                         self.ensure_port_mapper(transport, port);
@@ -2177,6 +2255,12 @@ impl Actor {
                 let _ = self.listen_tx.try_send(address);
             }
             SwarmEvent::ExpiredListenAddr { address, .. } => {
+                if self.active_listeners.remove(&address) {
+                    let mut addresses: Vec<_> = self.active_listeners.iter().cloned().collect();
+                    addresses.sort_by_key(ToString::to_string);
+                    self.listener_snapshot_tx
+                        .send_replace(ListenerSnapshot { addresses });
+                }
                 if self.relay_addresses.remove(&address) {
                     self.swarm.remove_external_address(&address);
                     self.forget_autonat_address(&address);
@@ -2256,6 +2340,11 @@ impl Actor {
                     self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
+                    if self.mesh_observations.remove(&peer_id).is_some() {
+                        self.mesh_observation_order
+                            .retain(|candidate| candidate != &peer_id);
+                        self.publish_mesh_observations();
+                    }
                     // Always paired: an evicted peer is refused by `Eviction` before a connection
                     // is ever established, so it cannot reach this arm without having been
                     // announced as connected first.
@@ -2342,8 +2431,23 @@ impl Actor {
                     tracing::debug!(peer = %remote_peer_id, error = %e, "DCUtR hole-punch failed; staying relayed");
                 }
             },
-            // identify drives DCUtR's external-address candidates (and a relay learns
-            // a client's addresses through it). Noisy; trace only.
+            // Identify's `observed_addr` is useful NAT telemetry but is not a listener address:
+            // TCP source ports are usually ephemeral and the reporting peer is untrusted. Keep a
+            // bounded, connected-peer snapshot for the assistant and never feed it into Swarm.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            })) => {
+                record_mesh_observation(
+                    &mut self.mesh_observations,
+                    &mut self.mesh_observation_order,
+                    peer_id,
+                    info.observed_addr.clone(),
+                );
+                self.publish_mesh_observations();
+                tracing::trace!(peer = %peer_id, observed = %info.observed_addr, "identify observation recorded");
+            }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Identify(e)) => {
                 tracing::trace!(?e, "identify event");
             }
@@ -2513,6 +2617,7 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
+    listener_snapshot_rx: Mutex<watch::Receiver<ListenerSnapshot>>,
     /// `None` once the desktop has taken the coalesced router-mapping state.
     port_mapping_rx: Mutex<Option<watch::Receiver<PortMappingSnapshot>>>,
     /// `None` once the desktop has taken the AutoNAT evidence snapshot for its background
@@ -2520,6 +2625,8 @@ pub struct MeshService {
     autonat_rx: Mutex<Option<watch::Receiver<AutoNatSnapshot>>>,
     /// `None` once the desktop has taken the live relay-circuit address set.
     relay_address_rx: Mutex<Option<watch::Receiver<RelayAddressSnapshot>>>,
+    /// `None` once a product collector has taken the connected-peer observation snapshot.
+    mesh_observation_rx: Mutex<Option<watch::Receiver<MeshObservationSnapshot>>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
@@ -2549,10 +2656,14 @@ impl MeshService {
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
+        let (listener_snapshot_tx, listener_snapshot_rx) =
+            watch::channel(ListenerSnapshot::default());
         let (port_mapping_tx, port_mapping_rx) = watch::channel(PortMappingSnapshot::default());
         let (port_mapper_tx, port_mapper_rx) = mpsc::channel(32);
         let (autonat_tx, autonat_rx) = watch::channel(AutoNatSnapshot::default());
         let (relay_address_tx, relay_address_rx) = watch::channel(RelayAddressSnapshot::default());
+        let (mesh_observation_tx, mesh_observation_rx) =
+            watch::channel(MeshObservationSnapshot::default());
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
         let (registered_tx, registered_rx) = mpsc::unbounded_channel();
@@ -2562,6 +2673,8 @@ impl MeshService {
             cmd_rx,
             event_tx,
             listen_tx,
+            active_listeners: HashSet::new(),
+            listener_snapshot_tx,
             port_mapping_tx,
             port_mapper_tx,
             port_mapper_rx,
@@ -2574,6 +2687,9 @@ impl MeshService {
             autonat_order: VecDeque::new(),
             relay_addresses: HashSet::new(),
             relay_address_tx,
+            mesh_observations: HashMap::new(),
+            mesh_observation_order: VecDeque::new(),
+            mesh_observation_tx,
             upgrade_tx,
             discovered_tx,
             registered_tx,
@@ -2592,9 +2708,11 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
+            listener_snapshot_rx: Mutex::new(listener_snapshot_rx),
             port_mapping_rx: Mutex::new(Some(port_mapping_rx)),
             autonat_rx: Mutex::new(Some(autonat_rx)),
             relay_address_rx: Mutex::new(Some(relay_address_rx)),
+            mesh_observation_rx: Mutex::new(Some(mesh_observation_rx)),
             upgrade_rx: Mutex::new(upgrade_rx),
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
@@ -2606,6 +2724,15 @@ impl MeshService {
     /// reservation is granted). Returns `None` once the actor stops.
     pub async fn next_listen_addr(&self) -> Option<Multiaddr> {
         self.listen_rx.lock().await.recv().await
+    }
+
+    /// Await the next authoritative live-listener snapshot. The receiver retains a change that
+    /// happened before this call, closing the startup race in UI diagnostics.
+    pub async fn next_listener_snapshot(&self) -> Option<ListenerSnapshot> {
+        let mut rx = self.listener_snapshot_rx.lock().await;
+        rx.changed().await.ok()?;
+        let snapshot = rx.borrow_and_update().clone();
+        Some(snapshot)
     }
 
     /// Await the next coalesced UPnP/PCP/NAT-PMP state snapshot.
@@ -2649,6 +2776,14 @@ impl MeshService {
         &self,
     ) -> Option<watch::Receiver<RelayAddressSnapshot>> {
         self.relay_address_rx.lock().await.take()
+    }
+
+    /// Take the current connected-peer Identify observations. These values are diagnostics only:
+    /// consumers must not add them to invites, external addresses, rendezvous records, or dials.
+    pub async fn take_mesh_observation_snapshots(
+        &self,
+    ) -> Option<watch::Receiver<MeshObservationSnapshot>> {
+        self.mesh_observation_rx.lock().await.take()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct
@@ -2900,6 +3035,41 @@ impl MeshHandle {
             .map_err(|_| TransportError::Closed)
     }
 
+    /// Queue one small address set as a single actor-drain dial batch.
+    ///
+    /// The actor groups adjacent `Command::Dial` values by their terminal peer id before touching
+    /// libp2p, so TCP/QUIC candidates race inside one `DialOpts` and the normal `(peer,address)`
+    /// ledger suppresses duplicates. This helper intentionally caps at four: its caller is the
+    /// pre-membership two-way invite path, where every target came from an untrusted paste.
+    pub async fn dial_join_candidates(
+        &self,
+        addresses: &[Multiaddr],
+    ) -> Result<(), TransportError> {
+        for address in addresses.iter().take(4) {
+            self.cmd_tx
+                .send(Command::Dial(address.clone()))
+                .await
+                .map_err(|_| TransportError::Closed)?;
+        }
+        Ok(())
+    }
+
+    /// Send one bounded control request without routing it through the group `ChannelSync` actor.
+    /// Used by the short pre-member reply proof so a quiet joiner cannot stall every group
+    /// command while the network request waits for its timeout.
+    pub async fn request_control(
+        &self,
+        peer: PeerId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Request { peer, data, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
     /// See [`MeshService::add_external_address`].
     pub async fn add_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
@@ -3053,6 +3223,44 @@ mod tests {
         assert_eq!(port_mapping_endpoint(&ipv6_only), None);
         assert_eq!(port_mapping_endpoint(&relayed), None);
         assert_eq!(port_mapping_endpoint(&memory), None);
+    }
+
+    #[test]
+    fn mesh_observations_replace_per_peer_and_stay_bounded() {
+        let mut observations = HashMap::new();
+        let mut order = VecDeque::new();
+        let first = test_peer(1);
+        record_mesh_observation(
+            &mut observations,
+            &mut order,
+            first,
+            "/ip4/198.51.100.1/tcp/40000".parse().unwrap(),
+        );
+        record_mesh_observation(
+            &mut observations,
+            &mut order,
+            first,
+            "/ip4/198.51.100.2/tcp/40001".parse().unwrap(),
+        );
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[&first].to_string(),
+            "/ip4/198.51.100.2/tcp/40001"
+        );
+
+        for n in 2..=(MAX_MESH_OBSERVATIONS as u8 + 2) {
+            record_mesh_observation(
+                &mut observations,
+                &mut order,
+                test_peer(n),
+                format!("/ip4/198.51.100.{n}/tcp/40000").parse().unwrap(),
+            );
+        }
+        assert_eq!(observations.len(), MAX_MESH_OBSERVATIONS);
+        assert!(
+            !observations.contains_key(&first),
+            "the oldest peer is evicted"
+        );
     }
 
     #[tokio::test]

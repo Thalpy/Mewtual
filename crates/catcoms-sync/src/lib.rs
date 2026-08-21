@@ -26,6 +26,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 
 use automerge::{AutoCommit, AutomergeError, ChangeHash};
 use bytes::Bytes;
@@ -37,8 +38,8 @@ use catcoms_discovery::{
     EclipseDetector, EclipseLevel, EclipseObservation, PolicyConfig, Source,
 };
 use catcoms_mls::{
-    restore_server, serialize_key_package, snapshot_server, Incoming, InviteError, InviteLedger,
-    InviteToken, MlsDevice, ServerGroup,
+    key_package_signature_key, restore_server, serialize_key_package, snapshot_server, Incoming,
+    InviteError, InviteLedger, InviteToken, MlsDevice, ServerGroup,
 };
 use catcoms_replication::{EncryptedDoc, SealedOp};
 use catcoms_rt::{
@@ -113,6 +114,63 @@ const KIND_DEVICE_ADD: u8 = 9;
 /// **forwards** the owner's signature rather than re-signing (the companion holds the owner's key
 /// from its grant, not the relay's).
 const KIND_DEVICE_ADMIT_RESULT: u8 = 10;
+/// Request kind: a pre-member asks an already-connected group member to forward one invite
+/// admission request to a current transport peer.  This is deliberately an application-level
+/// handshake forward, not a general circuit relay: the helper can carry only the bounded join
+/// request/Welcome exchange, and the joiner still accepts a Welcome only under the inviter key
+/// pinned in the signed invite.
+const KIND_JOIN_FORWARD: u8 = 11;
+/// Additive, membership-authenticated query for a standing switchboard offer. Keeping this out of
+/// the strict v1 PEX bundle is a compatibility boundary: older peers answer an unknown kind with
+/// an empty response instead of rejecting otherwise valid peer records.
+const KIND_SWITCHBOARD_OFFER: u8 = 12;
+/// Pre-admission proof-of-reply-channel request. Public so the desktop's retained pre-join
+/// transport can verify it before constructing `ChannelSync` and disclosing the bearer invite.
+pub const JOIN_REPLY_PROOF_KIND: u8 = 13;
+const JOIN_REPLY_PROOF_DOMAIN: &str = "catcoms/join-reply/dialback-proof/v1";
+/// A helper keeps at most this many staged forwarded joins.  In practice there is normally one;
+/// the bound makes a pasted bearer invite incapable of turning a member into durable state.
+const MAX_FORWARDED_JOINS: usize = 16;
+/// Maximum distinct transport contacts one reply-window join will try. The reply's public
+/// candidates are bearer-visible, so a malicious holder can connect extra peer identities; keep
+/// that churn from growing the attempted/pending sets for the whole window. The named inviter is
+/// always eligible even when the helper allowance is full.
+/// Retries allowed for one `(connection peer, invite nonce)` during the helper window.  A retry
+/// is useful after a transient member disconnect; an unbounded loop would make the tiny wrapper
+/// a request amplifier.
+const MAX_JOIN_FORWARD_ATTEMPTS: u8 = 4;
+const MAX_JOIN_FORWARD_COUNTERS: usize = 64;
+/// Cheap identity-independent gate charged before invite/plan/KeyPackage signature validation.
+/// Its short window and larger allowance isolate public CPU work without consuming the stricter
+/// outbound forwarding budget below.
+const MAX_JOIN_FORWARD_PREAUTH_ATTEMPTS: u16 = 32;
+const JOIN_FORWARD_PREAUTH_WINDOW_MS: u64 = 10_000;
+/// Aggregate pre-member forwarding work per helper window. This remains identity-independent so
+/// rotating Noise keys cannot serialize minutes of target timeouts through one group actor.
+const MAX_JOIN_FORWARD_NODE_ATTEMPTS: u8 = 4;
+/// Proof-bearing one-time helpers admitted into one reply window. The named inviter has a
+/// reserved slot; bearer holders cannot rotate identities to starve it for the whole 60 seconds.
+const MAX_REPLY_PROVEN_HELPERS: usize = 3;
+/// Forwarding is useful only while the reply-code listener is still alive.  Expiring the route
+/// at this layer also prevents a missing staged Welcome from reserving a helper slot forever.
+const JOIN_FORWARD_LIFETIME_MS: u64 = 120_000;
+/// A pre-member must not be able to hold the single-threaded group actor indefinitely while a
+/// helper waits on either side of a forwarded admission. This is deliberately no longer than the
+/// transport request/response deadline used by production transports.
+const JOIN_FORWARD_HOP_TIMEOUT_MS: u64 = 5_000;
+/// Offers are short-lived presence assertions, not durable roles. A fresh invite can carry one
+/// only while it is live; opt-out stops serving/forwarding immediately even if an old copied
+/// invite keeps the now-stale address until its own expiry.
+/// Lifetime a hosting member grants to one signed standing-switchboard offer.
+pub const SWITCHBOARD_OFFER_LIFETIME_MS: u64 = 120_000;
+/// Maximum clock-skew allowance accepted for a member's two-minute switchboard offer.
+///
+/// Consumers must apply this bound again immediately before dialing/forwarding. Carrying the
+/// helper-signed offer inside an hour-long invite must never extend the helper's consent window.
+pub const SWITCHBOARD_OFFER_MAX_FUTURE_MS: u64 = 5 * 60_000;
+const SWITCHBOARD_OFFER_DOMAIN: &str = "catcoms/switchboard-offer/v1";
+const INVITE_JOIN_PLAN_DOMAIN: &str = "catcoms/invite-join-plan/v1";
+const MAX_INVITE_SWITCHBOARDS: usize = 3;
 /// Bound on buffered inbound call signals before the actor drains them, so a member can't flood
 /// the queue. The queue stays a global FIFO (drain order is arrival order), but the *eviction*
 /// rule is per-sender fair: see [`ChannelSync::bound_call_signals`].
@@ -1419,6 +1477,246 @@ impl PeerDescriptor {
     }
 }
 
+/// A short-lived, self-signed standing-switchboard offer learned over an authenticated member
+/// connection. It is deliberately separate from [`PeerDescriptor`]: that record's v1 codec is a
+/// deployed strict compatibility boundary, while an old peer can safely ignore this new request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchboardOffer {
+    pub group_id: Vec<u8>,
+    pub device_pubkey: Vec<u8>,
+    pub peer_id: [u8; 32],
+    pub addresses: Vec<String>,
+    pub seq: u64,
+    pub expires_at_ms: u64,
+    pub signature: [u8; 64],
+}
+
+fn switchboard_offer_payload(
+    group_id: &[u8],
+    device_pubkey: &[u8],
+    peer_id: &[u8; 32],
+    addresses: &[String],
+    seq: u64,
+    expires_at_ms: u64,
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(SWITCHBOARD_OFFER_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(device_pubkey).expect("pubkey fits");
+    e.put_bytes(peer_id).expect("peer id fits");
+    e.put_u64(seq);
+    e.put_u64(expires_at_ms);
+    e.put_u32(addresses.len() as u32);
+    for address in addresses {
+        e.put_str(address).expect("validated address fits");
+    }
+    e.finish()
+}
+
+impl SwitchboardOffer {
+    pub fn device_id(&self) -> DeviceId {
+        DeviceId::from_public_key_bytes(&self.device_pubkey)
+    }
+
+    pub fn verify_self(&self) -> bool {
+        let payload = switchboard_offer_payload(
+            &self.group_id,
+            &self.device_pubkey,
+            &self.peer_id,
+            &self.addresses,
+            self.seq,
+            self.expires_at_ms,
+        );
+        verify_with_public_bytes(&self.device_pubkey, &payload, &self.signature)
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.put_bytes(&self.group_id).expect("group id fits");
+        e.put_bytes(&self.device_pubkey).expect("pubkey fits");
+        e.put_bytes(&self.peer_id).expect("peer id fits");
+        e.put_u64(self.seq);
+        e.put_u64(self.expires_at_ms);
+        e.put_u32(self.addresses.len() as u32);
+        for address in &self.addresses {
+            e.put_str(address).expect("validated address fits");
+        }
+        e.put_bytes(&self.signature).expect("signature fits");
+        e.finish()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, SyncError> {
+        let mut d = Decoder::new(bytes);
+        let group_id = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+        let device_pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+        let peer_id = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        let seq = d.get_u64().map_err(|_| SyncError::Malformed)?;
+        let expires_at_ms = d.get_u64().map_err(|_| SyncError::Malformed)?;
+        let count = d.get_u32().map_err(|_| SyncError::Malformed)? as usize;
+        if count == 0 || count > MAX_PEX_ADDRESSES {
+            return Err(SyncError::Malformed);
+        }
+        let mut addresses = Vec::with_capacity(count);
+        for _ in 0..count {
+            let address = d.get_str().map_err(|_| SyncError::Malformed)?;
+            if address.len() > MAX_PEX_ADDR_LEN || !peer_addr_is_routable(address) {
+                return Err(SyncError::Malformed);
+            }
+            addresses.push(address.to_string());
+        }
+        let signature = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        d.finish().map_err(|_| SyncError::Malformed)?;
+        Ok(Self {
+            group_id,
+            device_pubkey,
+            peer_id,
+            addresses,
+            seq,
+            expires_at_ms,
+            signature,
+        })
+    }
+}
+
+/// One explicitly labelled member fallback endorsed by the invite's named inviter. The helper
+/// identity is separate from the inviter bootstrap, which lets a joiner preserve direct-first
+/// dialing and prevents an old client from silently treating helpers as the admission authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchboardRoute {
+    /// The helper's complete self-signed offer. The inviter endorses these exact bytes in the
+    /// outer plan, but cannot manufacture a helper identity, substitute its routes, or lengthen
+    /// its consent window. Keeping the original offer is deliberately redundant with the
+    /// inviter signature: the two signatures prove two different decisions.
+    pub offer: SwitchboardOffer,
+}
+
+impl SwitchboardRoute {
+    /// Whether the helper itself signed this offer for the invite's group.
+    pub fn verify_helper_endorsement(&self, group_id: &[u8]) -> bool {
+        self.offer.group_id == group_id && self.offer.verify_self()
+    }
+
+    /// Recheck the helper's short consent window at the point of use.
+    pub fn is_fresh_for_invite(&self, group_id: &[u8], now_ms: u64, invite_expiry: u64) -> bool {
+        self.verify_helper_endorsement(group_id)
+            && self.offer.expires_at_ms >= now_ms
+            && self.offer.expires_at_ms <= invite_expiry
+            && self.offer.expires_at_ms.saturating_sub(now_ms) <= SWITCHBOARD_OFFER_MAX_FUTURE_MS
+    }
+}
+
+/// Versioned outer envelope around a normal [`InviteToken`]. New readers continue to accept plain
+/// v1/v2 invite bytes, while the desktop gives this envelope a distinct `mewtual-invite-v3:` text
+/// prefix so an old reader can report an unsupported assisted invite instead of treating it as
+/// ordinary hex. The inviter signs the whole plan, so a bearer cannot inject a tracking/dial
+/// target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InviteJoinPlan {
+    pub invite: InviteToken,
+    /// The named inviter's exact transport identity, separate from helper identities/routes.
+    pub inviter_peer: [u8; 32],
+    pub switchboards: Vec<SwitchboardRoute>,
+    pub signature: [u8; 64],
+}
+
+fn invite_join_plan_payload(
+    invite_bytes: &[u8],
+    inviter_peer: &[u8; 32],
+    routes: &[SwitchboardRoute],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(INVITE_JOIN_PLAN_DOMAIN).expect("label fits");
+    e.put_bytes(invite_bytes).expect("invite fits");
+    e.put_bytes(inviter_peer).expect("peer id fits");
+    e.put_u32(routes.len() as u32);
+    for route in routes {
+        e.put_bytes(&route.offer.encode()).expect("offer fits");
+    }
+    e.finish()
+}
+
+impl InviteJoinPlan {
+    pub fn verify(&self) -> bool {
+        self.invite.verify_self()
+            && self
+                .switchboards
+                .iter()
+                .all(|route| route.verify_helper_endorsement(&self.invite.group_id))
+            && verify_with_public_bytes(
+                &self.invite.inviter_public_key,
+                &invite_join_plan_payload(
+                    &self.invite.encode(),
+                    &self.inviter_peer,
+                    &self.switchboards,
+                ),
+                &self.signature,
+            )
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let unsigned = invite_join_plan_payload(
+            &self.invite.encode(),
+            &self.inviter_peer,
+            &self.switchboards,
+        );
+        let mut e = Encoder::new();
+        e.put_bytes(&unsigned).expect("plan fits");
+        e.put_bytes(&self.signature).expect("signature fits");
+        e.finish()
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, SyncError> {
+        let mut outer = Decoder::new(bytes);
+        let unsigned = outer.get_bytes().map_err(|_| SyncError::Malformed)?;
+        let signature = outer
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        outer.finish().map_err(|_| SyncError::Malformed)?;
+
+        let mut d = Decoder::new(unsigned);
+        if d.get_str().map_err(|_| SyncError::Malformed)? != INVITE_JOIN_PLAN_DOMAIN {
+            return Err(SyncError::Malformed);
+        }
+        let invite = InviteToken::decode(d.get_bytes().map_err(|_| SyncError::Malformed)?)
+            .map_err(|_| SyncError::Malformed)?;
+        let inviter_peer = d
+            .get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?;
+        let count = d.get_u32().map_err(|_| SyncError::Malformed)? as usize;
+        if count == 0 || count > MAX_INVITE_SWITCHBOARDS {
+            return Err(SyncError::Malformed);
+        }
+        let mut switchboards = Vec::with_capacity(count);
+        for _ in 0..count {
+            let offer = SwitchboardOffer::decode(d.get_bytes().map_err(|_| SyncError::Malformed)?)?;
+            switchboards.push(SwitchboardRoute { offer });
+        }
+        d.finish().map_err(|_| SyncError::Malformed)?;
+        let plan = Self {
+            invite,
+            inviter_peer,
+            switchboards,
+            signature,
+        };
+        if !plan.verify() {
+            return Err(SyncError::Malformed);
+        }
+        Ok(plan)
+    }
+}
+
 /// Extract the dialable peer addresses from a [`ChannelSync::snapshot`] blob **without a full
 /// restore** (Phase 9g). Mirrors the snapshot framing
 /// (`mls ‖ routing ‖ ledger ‖ docs ‖ commit_log ‖ peer_records`); kept next to the encoders
@@ -1812,6 +2110,10 @@ const MAX_DEVICES_PER_ORIGIN: usize = 8;
 /// DoS bound: the owner queues at most this many pending Add-requests (drop-oldest, deduped on
 /// invite nonce) so a flood can't force unbounded MLS Adds or memory.
 const MAX_ADD_REQUESTS: usize = 64;
+/// Exact synchronous admission responses retained across restart. This is deliberately smaller
+/// than the live request queues because each MLS Welcome can be large and the cache is sealed in
+/// every server snapshot.
+const MAX_DIRECT_ADMIT_RESULTS: usize = 8;
 /// How often an admin re-broadcasts a pending Add-request until the owner delivers the result
 /// (driven off run_once events; notably the owner's reconnect; so an offline owner is caught
 /// up when it returns).
@@ -2040,6 +2342,34 @@ fn decode_join_req(bytes: &[u8]) -> Result<(InviteToken, Vec<u8>), SyncError> {
     Ok((invite, key_package))
 }
 
+/// Wrap a normal join body for a member helper.  The target is the rt transport identity, not a
+/// dial address: a helper may forward only over an already-established member connection.
+fn encode_join_forward(target: PeerId, join_body: &[u8], join_plan: Option<&[u8]>) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(target.as_bytes()).expect("32 fits");
+    e.put_bytes(join_body).expect("bounded join body fits");
+    e.put_bytes(join_plan.unwrap_or_default())
+        .expect("bounded join plan fits");
+    e.finish()
+}
+
+fn decode_join_forward(bytes: &[u8]) -> Result<(PeerId, Vec<u8>, Vec<u8>), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let target = PeerId::new(
+        d.get_bytes()
+            .map_err(|_| SyncError::Malformed)?
+            .try_into()
+            .map_err(|_| SyncError::Malformed)?,
+    );
+    let join_body = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    let join_plan = d.get_bytes().map_err(|_| SyncError::Malformed)?.to_vec();
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    // Decode now as well as at the inviter.  It bounds the nested fields and lets the helper apply
+    // the signed-invite/group policy before it sends anything to another peer.
+    let _ = decode_join_req(&join_body)?;
+    Ok((target, join_body, join_plan))
+}
+
 /// Synchronizes a server's documents over a [`MeshTransport`], and admits new
 /// members via single-use invites. Generic over the injected RNG `R`
 /// (e.g. `OsCryptoRng` in production, a seeded CSPRNG in tests).
@@ -2053,6 +2383,9 @@ struct PendingAdd {
 /// Owner-side: an admit the owner already finalized, cached by invite nonce so a *retransmitted*
 /// request re-delivers the same result instead of failing the (now-consumed) ledger check.
 struct CachedAdmit {
+    /// Exact KeyPackage binding. A consumed invite may replay only the same admission result; a
+    /// bearer presenting a different package under the same nonce must never receive it.
+    kp_hash: Option<[u8; 32]>,
     welcome: Vec<u8>,
     sealed_routing: Vec<u8>,
     owner_sig: [u8; 64],
@@ -2092,12 +2425,33 @@ struct OutgoingDeviceAdd {
     expires_at_ms: u64,
 }
 
+/// A staged admission that was sent through this member as a narrow handshake helper.
+///
+/// `KIND_WELCOME` does not carry the invite nonce, so only one pending join per inviter peer is
+/// permitted.  A second request is rejected instead of guessing which pre-member should receive
+/// security-sensitive MLS material.
+struct ForwardedJoin {
+    joiner: PeerId,
+    /// Roster identity encoded by the exact KeyPackage we forwarded. A helper must apply the
+    /// inviter's Add for this device before returning the Welcome, otherwise it would advertise
+    /// itself as the joiner's first sync path while still one MLS epoch behind.
+    joiner_device: DeviceId,
+    invite_nonce: [u8; 16],
+    expires_at_ms: u64,
+}
+
+#[derive(Clone)]
+struct JoinHelperCapability {
+    target: PeerId,
+    expires_at_ms: u64,
+}
+
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     transport: T,
     group: ServerGroup,
     device: MlsDevice,
     rng: R,
-    clock: Box<dyn Clock + Send>,
+    clock: Arc<dyn Clock + Send>,
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
     /// The **current** routing label's control topic (where this node publishes
@@ -2194,6 +2548,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     add_request_queue: VecDeque<PendingAdd>,
     /// Owner-side: finalized admit results by invite nonce, to re-deliver on a retransmit.
     admit_results: HashMap<[u8; 16], CachedAdmit>,
+    /// Inviter-side synchronous admissions, cached so a helper/direct response lost after the MLS
+    /// Add can be replayed exactly without consuming the invite or adding the member twice.
+    direct_admit_results: HashMap<[u8; 16], CachedAdmit>,
     /// Owner-side: `KIND_ADMIT_RESULT` pushes to deliver to requesting admins (drained in `run_once`).
     admit_result_outbox: Vec<(PeerId, Vec<u8>)>,
     /// Admin-side: Add-requests this node is driving to completion, keyed by invite nonce.
@@ -2209,6 +2566,28 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Relay-side: companion admissions this node is driving to completion (re-broadcast until
     /// the owner returns the result, then the Welcome is forwarded to the waiting device).
     outgoing_device_adds: HashMap<[u8; 16], OutgoingDeviceAdd>,
+    /// Pre-member admission handshakes currently using this node as a connection point, keyed by
+    /// the actual inviter transport peer.  Transient and intentionally absent from snapshots.
+    forwarded_joins: HashMap<PeerId, ForwardedJoin>,
+    /// Short-lived attempt counters for the pre-member forward capability.  Unlike ordinary
+    /// member request budgets this cannot key on DeviceId (the requester has not joined yet), so
+    /// it is keyed on the Noise peer plus the signed invite nonce and fails closed at its cap.
+    forwarded_join_attempts: HashMap<(PeerId, [u8; 16]), (u64, u8)>,
+    /// Identity-independent budget charged before asymmetric pre-member validation.
+    forwarded_join_pre_auth_attempts: (u64, u16),
+    /// Identity-independent aggregate budget for the expensive helper→inviter hop.
+    forwarded_join_node_attempts: (u64, u8),
+    /// Explicit user-approved helper windows installed before the reply-code dial begins. Without
+    /// this exact capability, a pre-member request is never forwarded even if it carries a real
+    /// invite.
+    join_helper_capabilities: HashMap<(PeerId, [u8; 16]), JoinHelperCapability>,
+    /// Explicit local consent to accept bounded standing join-forward requests. Persisted by the
+    /// product's per-server network record and restored through the setter; never inferred merely
+    /// from being online or reachable.
+    switchboard_offered: bool,
+    /// Fresh offers learned over live authenticated member connections. Transient and bounded by
+    /// the peer-record/member caps; snapshots retain neither presence nor expired consent.
+    switchboard_offers: HashMap<DeviceId, SwitchboardOffer>,
     /// Every **companion** device known to this node, mapped to the origin that certified it.
     ///
     /// Two sources, unioned: the shared `Devices` document (pushed down by the product layer via
@@ -2269,6 +2648,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// transport connection, so multiple connections cannot multiply the rate).
     /// Bounded by `max_known_peers`.
     pex_served_at: HashMap<DeviceId, u64>,
+    /// Per-member rate gate for the separately signed standing offer. Without it an authenticated
+    /// member could force one Ed25519 signature per request indefinitely.
+    switchboard_offer_served_at: HashMap<DeviceId, u64>,
     /// The mirror of `pex_served_at` on the **asking** side: the earliest time this node may ask
     /// each peer for records again. Set to `now + MIN_PEX_INTERVAL_MS` on every ask, so a caller
     /// driving the tick faster than intended cannot burn its budget on one peer (which would be
@@ -2356,7 +2738,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             group,
             device,
             rng,
-            clock,
+            clock: Arc::from(clock),
             file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
@@ -2385,12 +2767,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
             admit_results: HashMap::new(),
+            direct_admit_results: HashMap::new(),
             admit_result_outbox: Vec::new(),
             outgoing_add_requests: HashMap::new(),
             device_add_queue: VecDeque::new(),
             device_admit_results: HashMap::new(),
             device_admit_outbox: Vec::new(),
             outgoing_device_adds: HashMap::new(),
+            forwarded_joins: HashMap::new(),
+            forwarded_join_attempts: HashMap::new(),
+            forwarded_join_pre_auth_attempts: (0, 0),
+            forwarded_join_node_attempts: (0, 0),
+            join_helper_capabilities: HashMap::new(),
+            switchboard_offered: false,
+            switchboard_offers: HashMap::new(),
             companion_devices: HashMap::new(),
             revoked_devices: HashSet::new(),
             admitted_devices: Vec::new(),
@@ -2405,6 +2795,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer_records: HashMap::new(),
             peer_record_seen: HashMap::new(),
             pex_served_at: HashMap::new(),
+            switchboard_offer_served_at: HashMap::new(),
             pex_next_eligible: HashMap::new(),
             call_signal_budget: HashMap::new(),
             discovery_roots: BTreeMap::new(),
@@ -2479,6 +2870,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             e.put_str(addr).map_err(|_| oversize())?;
             e.put_bytes(rz).map_err(|_| oversize())?;
         }
+        // Lost-response recovery: once the ledger and MLS Add persist, the exact Welcome must
+        // persist with them or a restart between commit and delivery strands the admitted user.
+        e.put_u32(self.direct_admit_results.len() as u32);
+        for (nonce, cached) in &self.direct_admit_results {
+            e.put_bytes(nonce).map_err(|_| oversize())?;
+            e.put_bytes(
+                &cached
+                    .kp_hash
+                    .expect("direct admission cache always carries a KeyPackage hash"),
+            )
+            .map_err(|_| oversize())?;
+            e.put_bytes(&cached.welcome).map_err(|_| oversize())?;
+            e.put_bytes(&cached.sealed_routing)
+                .map_err(|_| oversize())?;
+            e.put_bytes(&cached.owner_sig).map_err(|_| oversize())?;
+        }
         Ok(Zeroizing::new(e.finish()))
     }
 
@@ -2522,8 +2929,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Item 3: the owner-local authoritative admin roster + generation. Read gracefully so a
         // pre-item-3 snapshot (no trailing bytes) loads with an empty roster (the owner re-grants;
         // old per-fp grant docs are no longer honored). A new snapshot is decoded strictly.
-        let (roster_gen, admin_roster, rendezvous_nodes) = if d.is_empty() {
-            (0u64, BTreeSet::new(), Vec::new())
+        let (roster_gen, admin_roster, rendezvous_nodes, direct_admit_results) = if d.is_empty() {
+            (0u64, BTreeSet::new(), Vec::new(), HashMap::new())
         } else {
             let gen = d.get_u64().map_err(|_| bad())?;
             let count = d.get_u32().map_err(|_| bad())?;
@@ -2543,7 +2950,42 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     nodes.push((addr, rz));
                 }
             }
-            (gen, set, nodes)
+            let mut direct = HashMap::new();
+            if !d.is_empty() {
+                let count = d.get_u32().map_err(|_| bad())? as usize;
+                if count > MAX_DIRECT_ADMIT_RESULTS {
+                    return Err(bad());
+                }
+                for _ in 0..count {
+                    let nonce = d
+                        .get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?;
+                    let kp_hash = d
+                        .get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?;
+                    let welcome = d.get_bytes().map_err(|_| bad())?.to_vec();
+                    let sealed_routing = d.get_bytes().map_err(|_| bad())?.to_vec();
+                    let owner_sig = d
+                        .get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?;
+                    direct.insert(
+                        nonce,
+                        CachedAdmit {
+                            kp_hash: Some(kp_hash),
+                            welcome,
+                            sealed_routing,
+                            owner_sig,
+                        },
+                    );
+                }
+            }
+            (gen, set, nodes, direct)
         };
         d.finish().map_err(|_| bad())?;
 
@@ -2579,6 +3021,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         this.roster_gen = roster_gen;
         this.admin_roster = admin_roster;
         this.rendezvous_nodes = rendezvous_nodes;
+        this.direct_admit_results = direct_admit_results;
         Ok(this)
     }
 
@@ -3005,7 +3448,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 ..
             }) => {
                 self.remember_peer(from);
-                let response = self.handle_request(from, &data);
+                // Ordinary control requests are intentionally small. A staged MLS Welcome is the
+                // sole exception: large rosters can produce a Welcome above 64 KiB, and dropping
+                // it here after the inviter committed would strand an admitted joiner. The route
+                // has already been reserved for this exact inviter, so retain the wider response
+                // ceiling only for that one message shape.
+                let is_forwarded_welcome =
+                    data.first() == Some(&KIND_WELCOME) && self.forwarded_joins.contains_key(&from);
+                let request_limit = if is_forwarded_welcome {
+                    MAX_CONTROL_RESPONSE
+                } else {
+                    MAX_CONTROL_REQUEST
+                };
+                if data.len() > request_limit {
+                    responder.respond(Bytes::new());
+                    return Ok(true);
+                }
+                let response = match data.split_first() {
+                    Some((&KIND_JOIN_FORWARD, body)) => self.serve_join_forward(from, body).await,
+                    Some((&KIND_WELCOME, body)) if self.forwarded_joins.contains_key(&from) => {
+                        self.forward_join_welcome(from, body).await;
+                        Vec::new()
+                    }
+                    _ => self.handle_request(from, &data),
+                };
                 // Broadcast any membership commit produced by serving the request
                 // BEFORE telling the joiner it succeeded, so a crash leaves the
                 // joiner to retry rather than the group silently missing the Add.
@@ -3654,6 +4120,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.peer_records
             .get(device)
             .map(|d| PeerId::new(d.peer_id))
+    }
+
+    /// Resolve a current member device to the transport identity from its latest self-signed peer
+    /// record. Callers that act on the result must still apply their operation-specific liveness
+    /// and exact-binding checks; helper authorization does so atomically.
+    pub fn member_transport_peer(&self, device: &DeviceId) -> Option<PeerId> {
+        self.group
+            .contains_device(device)
+            .then(|| self.transport_peer_of(device))
+            .flatten()
     }
 
     /// Queue a transport-level eviction for a removed member (P6).
@@ -4677,6 +5153,118 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(learned)
     }
 
+    /// Refresh one connected member's short-lived standing-switchboard offer. Unknown/older
+    /// peers return an empty response, which removes any cached offer for that transport identity
+    /// without affecting their v1 PEX compatibility.
+    pub async fn request_switchboard_offer(&mut self, peer: PeerId) -> Result<bool, SyncError> {
+        let (request, _) = self.build_authed_request(KIND_SWITCHBOARD_OFFER, &[])?;
+        let response = self
+            .transport
+            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
+            .await?;
+        if response.is_empty() {
+            self.switchboard_offers
+                .retain(|_, offer| offer.peer_id != *peer.as_bytes());
+            return Ok(false);
+        }
+        if response.len() > MAX_CONTROL_REQUEST {
+            return Err(SyncError::Malformed);
+        }
+        let offer = SwitchboardOffer::decode(&response)?;
+        let now = self.clock.now_ms();
+        let device = offer.device_id();
+        let Some(record) = self.peer_records.get(&device) else {
+            return Ok(false);
+        };
+        // The authenticated connection, current signed PEX record and fresh role offer must all
+        // identify the same member/transport/routes. This is the load-bearing inviter/helper
+        // binding; a different current member cannot merely claim the inviter's transport id.
+        if offer.group_id != self.group.group_id()
+            || !self.group.contains_device(&device)
+            || offer.peer_id != *peer.as_bytes()
+            || record.peer_id != offer.peer_id
+            || record.addresses != offer.addresses
+            || offer.seq != record.seq
+            || offer.expires_at_ms < now
+            || offer.expires_at_ms.saturating_sub(now) > SWITCHBOARD_OFFER_MAX_FUTURE_MS
+            || !offer.verify_self()
+        {
+            return Ok(false);
+        }
+        self.connected_peers.insert(peer);
+        self.switchboard_offers.insert(device, offer);
+        while self.switchboard_offers.len() > MAX_PEER_RECORDS {
+            let Some(victim) = self
+                .switchboard_offers
+                .iter()
+                .min_by_key(|(_, offer)| offer.expires_at_ms)
+                .map(|(device, _)| *device)
+            else {
+                break;
+            };
+            self.switchboard_offers.remove(&victim);
+        }
+        Ok(true)
+    }
+
+    /// Return only offers that are still live, connected, roster-valid and exactly bound to the
+    /// member's current self-signed PEX record. This is the authoritative set for UI status and
+    /// fresh invite construction; cached-but-stale offers never escape.
+    pub fn connected_switchboard_offers(&mut self) -> Vec<SwitchboardOffer> {
+        let now = self.clock.now_ms();
+        let own = self.device.device_id();
+        self.switchboard_offers.retain(|device, offer| {
+            *device != own
+                && offer.expires_at_ms >= now
+                && self.group.contains_device(device)
+                && self.connected_peers.contains(&PeerId::new(offer.peer_id))
+                && self.peer_records.get(device).is_some_and(|record| {
+                    record.peer_id == offer.peer_id
+                        && record.addresses == offer.addresses
+                        && record.seq == offer.seq
+                })
+        });
+        let mut offers: Vec<_> = self.switchboard_offers.values().cloned().collect();
+        offers.sort_by(|a, b| a.device_pubkey.cmp(&b.device_pubkey));
+        offers
+    }
+
+    /// Wrap an invite minted by this device in an inviter-signed direct-first join plan. The
+    /// route set is selected inside the actor from the authoritative live-offer cache, rather
+    /// than accepted from the UI bridge. With no live switchboard the original bytes are returned
+    /// unchanged for maximum compatibility.
+    pub fn wrap_invite_with_switchboards(
+        &mut self,
+        invite_bytes: &[u8],
+    ) -> Result<Vec<u8>, SyncError> {
+        let invite = InviteToken::decode(invite_bytes).map_err(|_| SyncError::Malformed)?;
+        if !invite.verify_self()
+            || invite.group_id != self.group.group_id()
+            || invite.inviter_device_id != self.device.device_id()
+        {
+            return Err(SyncError::Malformed);
+        }
+        let routes: Vec<_> = self
+            .connected_switchboard_offers()
+            .into_iter()
+            .take(MAX_INVITE_SWITCHBOARDS)
+            .map(|offer| SwitchboardRoute { offer })
+            .collect();
+        if routes.is_empty() {
+            return Ok(invite_bytes.to_vec());
+        }
+        let inviter_peer = *self.transport.local_peer().as_bytes();
+        let payload = invite_join_plan_payload(invite_bytes, &inviter_peer, &routes);
+        let signature = self.device.sign(&payload)?;
+        Ok(InviteJoinPlan {
+            invite,
+            inviter_peer,
+            switchboards: routes,
+            signature,
+        }
+        .encode())
+    }
+
     /// One steady-state peer-exchange pass: ask a bounded handful of the peers we know for
     /// their signed member records, so the address book (and with it presence, the
     /// cross-session re-dial, and the eclipse detector's reach term) actually fills.
@@ -5131,6 +5719,67 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &signature,
             &bundle,
         ))
+    }
+
+    /// Serve a freshly signed role offer only to a current member. The route set is copied from
+    /// this device's current self-signed PEX record, so role discovery can never advertise a
+    /// second, less-validated address source.
+    fn serve_switchboard_offer(&mut self, data: &[u8]) -> Option<Vec<u8>> {
+        let (_, requester_key, _) = self.authenticate_request(KIND_SWITCHBOARD_OFFER, data)?;
+        let requester = DeviceId::from_public_key_bytes(&requester_key);
+        let now = self.clock.now_ms();
+        if self
+            .switchboard_offer_served_at
+            .get(&requester)
+            .is_some_and(|last| now.saturating_sub(*last) < MIN_PEX_INTERVAL_MS)
+        {
+            return Some(Vec::new());
+        }
+        self.switchboard_offer_served_at.insert(requester, now);
+        while self.switchboard_offer_served_at.len() > self.config.max_known_peers {
+            let Some(victim) = self
+                .switchboard_offer_served_at
+                .iter()
+                .min_by_key(|(_, seen)| **seen)
+                .map(|(device, _)| *device)
+            else {
+                break;
+            };
+            self.switchboard_offer_served_at.remove(&victim);
+        }
+        if !self.switchboard_offered {
+            return Some(Vec::new());
+        }
+        let own = self.device.device_id();
+        let record = self.peer_records.get(&own)?;
+        if record.addresses.is_empty() || record.peer_id != *self.transport.local_peer().as_bytes()
+        {
+            return Some(Vec::new());
+        }
+        let expires_at_ms = now.saturating_add(SWITCHBOARD_OFFER_LIFETIME_MS);
+        let group_id = self.group.group_id();
+        let device_pubkey = self.device.public_key_bytes();
+        let payload = switchboard_offer_payload(
+            &group_id,
+            &device_pubkey,
+            &record.peer_id,
+            &record.addresses,
+            record.seq,
+            expires_at_ms,
+        );
+        let signature = self.device.sign(&payload).ok()?;
+        Some(
+            SwitchboardOffer {
+                group_id,
+                device_pubkey,
+                peer_id: record.peer_id,
+                addresses: record.addresses.clone(),
+                seq: record.seq,
+                expires_at_ms,
+                signature,
+            }
+            .encode(),
+        )
     }
 
     /// Seal this member's routing state (`L` + the retained `ns_secret_L` history)
@@ -6098,6 +6747,60 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.group.contains_device(device)
     }
 
+    /// Open one explicit, short-lived member-helper capability before dialling the joiner.
+    /// Re-applying the same reply refreshes the exact tuple; unrelated pre-members remain unable
+    /// to use this node as a forwarder.
+    pub fn authorize_join_helper(
+        &mut self,
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+        inviter: DeviceId,
+        target: PeerId,
+        expires_at_ms: u64,
+    ) -> bool {
+        let now = self.clock.now_ms();
+        self.join_helper_capabilities
+            .retain(|_, capability| capability.expires_at_ms >= now);
+        let target_is_current_inviter = self
+            .peer_records
+            .get(&inviter)
+            .is_some_and(|record| record.peer_id == *target.as_bytes())
+            && self.connected_peers.contains(&target);
+        if !target_is_current_inviter
+            || expires_at_ms < now
+            || expires_at_ms.saturating_sub(now) > JOIN_FORWARD_LIFETIME_MS
+            || (!self
+                .join_helper_capabilities
+                .contains_key(&(joiner, invite_nonce))
+                && self.join_helper_capabilities.len() >= MAX_FORWARDED_JOINS)
+        {
+            return false;
+        }
+        self.join_helper_capabilities.insert(
+            (joiner, invite_nonce),
+            JoinHelperCapability {
+                target,
+                expires_at_ms,
+            },
+        );
+        true
+    }
+
+    /// Revoke an explicit one-time helper grant immediately. User-confirmed replacement of a
+    /// reply session must call this before authorizing the new joiner; waiting for the old
+    /// capability's deadline would let both people race the same single-use invite.
+    pub fn revoke_join_helper(&mut self, joiner: PeerId, invite_nonce: [u8; 16]) {
+        self.join_helper_capabilities
+            .remove(&(joiner, invite_nonce));
+    }
+
+    /// Enable or disable the local standing switchboard role. This changes the protocol gate
+    /// immediately; the product separately republishes the signed peer record so other members
+    /// learn the same consent state.
+    pub fn set_switchboard_offered(&mut self, offered: bool) {
+        self.switchboard_offered = offered;
+    }
+
     /// The current member count (for tests/diagnostics).
     pub fn member_count(&self) -> usize {
         self.group.member_count()
@@ -6193,6 +6896,234 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.enqueue_doc_catchup(sealed.doc_type, sealed.doc_id);
     }
 
+    /// Forward one authenticated invite admission through this already-connected member.
+    ///
+    /// The helper is deliberately not an admission authority. It verifies only enough to avoid
+    /// becoming an arbitrary request proxy (signed invite, our group, connected proven-member
+    /// target, small retry budget), then returns the target's opaque response. The joiner still
+    /// verifies the Welcome under the inviter public key pinned in that invite.
+    async fn serve_join_forward(&mut self, from: PeerId, data: &[u8]) -> Vec<u8> {
+        let now = self.clock.now_ms();
+        self.forwarded_joins
+            .retain(|_, pending| pending.expires_at_ms >= now);
+        self.forwarded_join_attempts
+            .retain(|_, (started, _)| now.saturating_sub(*started) <= JOIN_FORWARD_LIFETIME_MS);
+        self.join_helper_capabilities
+            .retain(|_, capability| capability.expires_at_ms >= now);
+
+        if now.saturating_sub(self.forwarded_join_pre_auth_attempts.0)
+            > JOIN_FORWARD_PREAUTH_WINDOW_MS
+        {
+            self.forwarded_join_pre_auth_attempts = (now, 0);
+        }
+        if self.forwarded_join_pre_auth_attempts.1 >= MAX_JOIN_FORWARD_PREAUTH_ATTEMPTS {
+            return Vec::new();
+        }
+        self.forwarded_join_pre_auth_attempts.1 =
+            self.forwarded_join_pre_auth_attempts.1.saturating_add(1);
+
+        let Ok((target, join_body, join_plan)) = decode_join_forward(data) else {
+            return Vec::new();
+        };
+        let Ok((invite, kp_bytes)) = decode_join_req(&join_body) else {
+            return Vec::new();
+        };
+        if !invite.verify_self()
+            || invite.group_id != self.group.group_id()
+            || !self.group.contains_device(&invite.inviter_device_id)
+            || invite.expires_at_ms < now
+            || target == self.transport.local_peer()
+        {
+            return Vec::new();
+        }
+        let capability_key = (from, invite.invite_nonce);
+        let has_one_time_capability = self
+            .join_helper_capabilities
+            .get(&capability_key)
+            .is_some_and(|capability| {
+                capability.target == target && capability.expires_at_ms >= now
+            });
+        let has_standing_capability = self.switchboard_offered
+            && InviteJoinPlan::decode(&join_plan).is_ok_and(|plan| {
+                plan.invite.encode() == invite.encode()
+                    && plan.inviter_peer == *target.as_bytes()
+                    && plan.switchboards.iter().any(|route| {
+                        route.offer.device_id() == self.device.device_id()
+                            && route.offer.peer_id == *self.transport.local_peer().as_bytes()
+                            && route.is_fresh_for_invite(
+                                &invite.group_id,
+                                now,
+                                invite.expires_at_ms,
+                            )
+                    })
+            });
+        if !has_standing_capability && !has_one_time_capability {
+            return Vec::new();
+        }
+
+        // Bind the requested target to the invite's *named inviter*, not merely to any current
+        // member transport. Otherwise one member could substitute another live member and turn
+        // the helper into an authenticated-but-wrong request proxy.
+        let target_is_inviter = self
+            .peer_records
+            .get(&invite.inviter_device_id)
+            .is_some_and(|record| record.peer_id == *target.as_bytes());
+        if !target_is_inviter || !self.connected_peers.contains(&target) {
+            return Vec::new();
+        }
+        // The helper does not trust the KeyPackage, but it does need the leaf identity to prove
+        // that it has actually applied this exact Add before it becomes the new member's first
+        // catch-up path. Full admission validation remains exclusively the inviter's job.
+        let Ok(key_package) = self.device.parse_key_package(&kp_bytes) else {
+            return Vec::new();
+        };
+        let joiner_device =
+            DeviceId::from_public_key_bytes(&key_package_signature_key(&key_package));
+
+        let counter_key = (from, invite.invite_nonce);
+        if !self.forwarded_join_attempts.contains_key(&counter_key)
+            && self.forwarded_join_attempts.len() >= MAX_JOIN_FORWARD_COUNTERS
+        {
+            return Vec::new();
+        }
+        let counter = self
+            .forwarded_join_attempts
+            .entry(counter_key)
+            .or_insert((now, 0));
+        if now.saturating_sub(counter.0) > JOIN_FORWARD_LIFETIME_MS {
+            *counter = (now, 0);
+        }
+        if counter.1 >= MAX_JOIN_FORWARD_ATTEMPTS {
+            return Vec::new();
+        }
+        counter.1 = counter.1.saturating_add(1);
+        if now.saturating_sub(self.forwarded_join_node_attempts.0) > JOIN_FORWARD_LIFETIME_MS {
+            self.forwarded_join_node_attempts = (now, 0);
+        }
+        if self.forwarded_join_node_attempts.1 >= MAX_JOIN_FORWARD_NODE_ATTEMPTS {
+            return Vec::new();
+        }
+        self.forwarded_join_node_attempts.1 = self.forwarded_join_node_attempts.1.saturating_add(1);
+
+        // Reserve the route before sending the side-effecting admission request. If there is no
+        // capacity, the inviter must not stage/consume an invite whose Welcome we cannot route.
+        // Welcome pushes do not carry an invite nonce, hence one pending route per inviter.
+        if self.forwarded_joins.contains_key(&target)
+            || self.forwarded_joins.len() >= MAX_FORWARDED_JOINS
+        {
+            return Vec::new();
+        }
+        self.forwarded_joins.insert(
+            target,
+            ForwardedJoin {
+                joiner: from,
+                joiner_device,
+                invite_nonce: invite.invite_nonce,
+                expires_at_ms: now.saturating_add(JOIN_FORWARD_LIFETIME_MS),
+            },
+        );
+        let mut request = vec![KIND_JOIN];
+        request.extend_from_slice(&join_body);
+        let response = match futures::future::select(
+            Box::pin(
+                self.transport
+                    .request(target, ProtocolId(RR_PROTOCOL), Bytes::from(request)),
+            ),
+            self.clock.sleep(std::time::Duration::from_millis(
+                JOIN_FORWARD_HOP_TIMEOUT_MS,
+            )),
+        )
+        .await
+        {
+            futures::future::Either::Left((Ok(response), _)) => response.to_vec(),
+            futures::future::Either::Left((Err(_), _)) | futures::future::Either::Right(_) => {
+                self.forwarded_joins.remove(&target);
+                return Vec::new();
+            }
+        };
+        if response.len() > MAX_CONTROL_RESPONSE {
+            self.forwarded_joins.remove(&target);
+            return Vec::new();
+        }
+        if response.first() == Some(&JOIN_READY) {
+            // A switchboard is also the joiner's first proven member path. Do not return the
+            // Welcome while this helper is one epoch behind: every immediate document catch-up
+            // would otherwise fail authentication. The inviter caches this exact admission, so
+            // a timeout is safe to reject and retry without creating a second MLS Add.
+            if !self.converge_forwarded_member(target, joiner_device).await {
+                self.forwarded_joins.remove(&target);
+                return Vec::new();
+            }
+            self.forwarded_joins.remove(&target);
+        } else if response.first() != Some(&JOIN_PENDING) {
+            self.forwarded_joins.remove(&target);
+        }
+        response
+    }
+
+    /// Pull the inviter's just-created membership commit under a strict hop deadline. The target
+    /// is already bound to the invite's named current member before this function is reached.
+    async fn converge_forwarded_member(
+        &mut self,
+        inviter: PeerId,
+        joiner_device: DeviceId,
+    ) -> bool {
+        if self.group.contains_device(&joiner_device) {
+            return true;
+        }
+        let from_epoch = self.group.epoch();
+        let clock = Arc::clone(&self.clock);
+        let result = futures::future::select(
+            Box::pin(self.do_commit_catchup(inviter, from_epoch)),
+            clock.sleep(std::time::Duration::from_millis(
+                JOIN_FORWARD_HOP_TIMEOUT_MS,
+            )),
+        )
+        .await;
+        let completed = matches!(&result, futures::future::Either::Left((Ok(_), _)));
+        drop(result);
+        completed && self.group.contains_device(&joiner_device)
+    }
+
+    /// Pass a staged inviter Welcome back across the same narrow helper route. The forwarded
+    /// payload stays opaque; the joiner validates its inviter signature and group binding.
+    async fn forward_join_welcome(&mut self, inviter: PeerId, payload: &[u8]) {
+        if payload.len() > MAX_CONTROL_RESPONSE {
+            return;
+        }
+        let Some(pending) = self.forwarded_joins.remove(&inviter) else {
+            return;
+        };
+        let now = self.clock.now_ms();
+        if pending.expires_at_ms < now {
+            return;
+        }
+        if !self
+            .converge_forwarded_member(inviter, pending.joiner_device)
+            .await
+        {
+            return;
+        }
+        let mut request = vec![KIND_WELCOME];
+        request.extend_from_slice(payload);
+        // A disconnected or hostile pre-member cannot monopolize the group actor. The joiner can
+        // retry the same invite admission; the inviter's admission cache returns the exact signed
+        // result without a second MLS Add.
+        let _ = futures::future::select(
+            Box::pin(self.transport.request(
+                pending.joiner,
+                ProtocolId(RR_PROTOCOL),
+                Bytes::from(request),
+            )),
+            self.clock.sleep(std::time::Duration::from_millis(
+                JOIN_FORWARD_HOP_TIMEOUT_MS,
+            )),
+        )
+        .await;
+        self.forwarded_join_attempts
+            .remove(&(pending.joiner, pending.invite_nonce));
+    }
+
     /// Route an inbound request by its kind byte. Returns the response bytes (an
     /// empty response uniformly signals "nothing / rejected"). `from` is the
     /// requesting peer (needed to push a staged join's Welcome back to it).
@@ -6208,6 +7139,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.serve_commit_catchup(rest).unwrap_or_default()
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
+            Some((&KIND_SWITCHBOARD_OFFER, rest)) => {
+                self.serve_switchboard_offer(rest).unwrap_or_default()
+            }
             Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(rest).unwrap_or_default(),
             Some((&KIND_ADMIT_RESULT, rest)) => {
                 // Admin invites (Option C): the owner delivered a finalized admission; re-sign +
@@ -6440,6 +7374,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("join request with an inauthentic invite");
             return Err(JoinOutcome::BadSignature);
         }
+        let kp_hash = *Cid::of(&kp_bytes).as_bytes();
+        if let Some(cached) = self.direct_admit_results.get(&invite.invite_nonce) {
+            if cached.kp_hash != Some(kp_hash) {
+                tracing::warn!("consumed invite replay carried a different KeyPackage");
+                return Err(JoinOutcome::AlreadyUsed);
+            }
+            let mut response = vec![JOIN_READY];
+            response.extend_from_slice(&encode_join_resp(
+                &cached.welcome,
+                &cached.owner_sig,
+                &cached.sealed_routing,
+            ));
+            return Ok((JoinOutcome::Admitted, response));
+        }
         let now = self.clock.now_ms();
         // The ledger's own reason is kept rather than flattened: "already used" and "expired"
         // lead the operator to completely different actions (mint a second invite vs mint a
@@ -6502,6 +7450,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .ok_or(JoinOutcome::AdmissionFailed)?;
             let mut resp = vec![JOIN_READY];
             resp.extend_from_slice(&encode_join_resp(&welcome, &signature, &sealed_routing));
+            while self.direct_admit_results.len() >= MAX_DIRECT_ADMIT_RESULTS {
+                let Some(victim) = self.direct_admit_results.keys().next().copied() else {
+                    break;
+                };
+                self.direct_admit_results.remove(&victim);
+            }
+            self.direct_admit_results.insert(
+                invite.invite_nonce,
+                CachedAdmit {
+                    kp_hash: Some(kp_hash),
+                    welcome,
+                    sealed_routing,
+                    owner_sig: signature,
+                },
+            );
             return Ok((JoinOutcome::Admitted, resp));
         }
 
@@ -6733,6 +7696,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Already admitted this nonce (the admin missed our result and retransmitted): re-deliver
         // the cached result instead of re-admitting (the ledger has consumed the nonce).
         if let Some(cached) = self.admit_results.get(&invite.invite_nonce) {
+            if cached.kp_hash != Some(*kp_hash.as_bytes()) {
+                return;
+            }
             let payload = encode_admit_result(
                 &invite.invite_nonce,
                 &cached.welcome,
@@ -6799,6 +7765,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.admit_results.insert(
                 nonce,
                 CachedAdmit {
+                    kp_hash: Some(*Cid::of(&p.kp_bytes).as_bytes()),
                     welcome: welcome.clone(),
                     sealed_routing: sealed_routing.clone(),
                     owner_sig,
@@ -7166,6 +8133,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.device_admit_results.insert(
             bind,
             CachedAdmit {
+                kp_hash: None,
                 welcome: welcome.to_vec(),
                 sealed_routing: sealed_routing.to_vec(),
                 owner_sig,
@@ -7436,10 +8404,478 @@ pub async fn request_join<T: MeshTransport>(
             // The wall-clock bound on this wait lives at the call site (catcoms-app, which owns
             // the tokio runtime) so this crate stays runtime-agnostic; see the `request_join`
             // timeout wrapper there, so a never-finalizing owner can't wedge the joiner.
-            await_welcome_push(transport, device, invite).await
+            await_welcome_push(transport, inviter, device, invite).await
         }
         // Empty or unknown => rejected.
         _ => Err(SyncError::JoinRejected),
+    }
+}
+
+/// Join through an already-connected member that can reach the invite's named inviter.
+///
+/// The helper forwards only this bounded admission exchange. It is not trusted: the signed invite
+/// and [`finish_join`] still pin the resulting Welcome to `inviter`, and a staged Welcome is
+/// returned over the same helper connection. This path exists for a zero-owned-server launch: a
+/// third member who is already reachable can be the initial connection point without becoming an
+/// admission authority or a general traffic relay.
+pub async fn request_join_via_helper<T: MeshTransport>(
+    transport: &T,
+    helper: PeerId,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+) -> Result<(ServerGroup, RoutingState), SyncError> {
+    if !invite.verify_self() {
+        tracing::warn!("invite failed self-verification");
+        return Err(SyncError::JoinRejected);
+    }
+
+    let key_package = device.key_package_for_invite(&invite.group_id, invite.invite_nonce)?;
+    let kp_bytes = serialize_key_package(&key_package)?;
+    let join_body = encode_join_req(invite, &kp_bytes);
+    let mut payload = vec![KIND_JOIN_FORWARD];
+    payload.extend_from_slice(&encode_join_forward(inviter, &join_body, None));
+
+    tracing::debug!(?helper, "sending join request through member helper");
+    let resp = transport
+        .request(helper, ProtocolId(RR_PROTOCOL), Bytes::from(payload))
+        .await?;
+    if resp.len() > MAX_CONTROL_RESPONSE {
+        return Err(SyncError::Malformed);
+    }
+    match resp.split_first() {
+        Some((&JOIN_READY, rest)) => {
+            let (welcome, signature, sealed_routing) = decode_join_resp(rest)?;
+            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+        }
+        Some((&JOIN_PENDING, _)) => {
+            tracing::debug!(
+                ?helper,
+                "helper forwarded a staged admission; awaiting Welcome"
+            );
+            await_welcome_push(transport, helper, device, invite).await
+        }
+        _ => Err(SyncError::JoinRejected),
+    }
+}
+
+enum ReplyJoinStart {
+    Ready(Box<ServerGroup>, RoutingState),
+    Pending,
+    Rejected,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_reply_join<T: MeshTransport>(
+    transport: &T,
+    contact: PeerId,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+    join_body: &[u8],
+    clock: &dyn Clock,
+    within: std::time::Duration,
+) -> ReplyJoinStart {
+    let payload = if contact == inviter {
+        let mut payload = vec![KIND_JOIN];
+        payload.extend_from_slice(join_body);
+        payload
+    } else {
+        let mut payload = vec![KIND_JOIN_FORWARD];
+        payload.extend_from_slice(&encode_join_forward(inviter, join_body, None));
+        payload
+    };
+    let request =
+        Box::pin(transport.request(contact, ProtocolId(RR_PROTOCOL), Bytes::from(payload)));
+    let deadline = clock.sleep(within);
+    let response = match futures::future::select(request, deadline).await {
+        futures::future::Either::Left((result, _)) => match result {
+            Ok(value) => value,
+            Err(_) => return ReplyJoinStart::Rejected,
+        },
+        futures::future::Either::Right(_) => return ReplyJoinStart::Rejected,
+    };
+    if response.len() > MAX_CONTROL_RESPONSE {
+        return ReplyJoinStart::Rejected;
+    }
+    match response.split_first() {
+        Some((&JOIN_READY, body)) => {
+            let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) else {
+                return ReplyJoinStart::Rejected;
+            };
+            match finish_join(device, invite, &welcome, &signature, &sealed_routing) {
+                Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), routing),
+                Err(_) => ReplyJoinStart::Rejected,
+            }
+        }
+        Some((&JOIN_PENDING, _)) => ReplyJoinStart::Pending,
+        _ => ReplyJoinStart::Rejected,
+    }
+}
+
+/// Continue accepting reply-code dial-backs until one contact produces an inviter-authenticated
+/// Welcome or the reply window closes. A transport connection is not authentication: an invite
+/// holder can know the candidate sockets, so the first connector must never win by arrival order.
+#[allow(clippy::too_many_arguments)]
+pub async fn request_join_from_reply<T: MeshTransport>(
+    transport: &T,
+    first_contact: PeerId,
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+    reply_joiner_nonce: [u8; 16],
+    reply_joiner_peer: &[u8],
+    clock: &dyn Clock,
+    expires_at_ms: u64,
+) -> Result<(ServerGroup, RoutingState, PeerId), SyncError> {
+    if !invite.verify_self() {
+        return Err(SyncError::JoinRejected);
+    }
+    // Every contact in this reply window must carry the exact same admission request. The
+    // inviter caches a successful result by invite nonce and KeyPackage hash so a second helper
+    // can recover the Welcome if the first helper caused the Add but lost its response.
+    let key_package = device
+        .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+        .map_err(|_| SyncError::JoinRejected)?;
+    let kp_bytes = serialize_key_package(&key_package).map_err(|_| SyncError::JoinRejected)?;
+    let join_body = encode_join_req(invite, &kp_bytes);
+    let mut contacts = VecDeque::from([first_contact]);
+    let mut proven = HashSet::from([first_contact]);
+    let mut proven_helpers = HashSet::new();
+    if first_contact != inviter {
+        proven_helpers.insert(first_contact);
+    }
+    let mut attempts: HashMap<PeerId, u8> = HashMap::new();
+    let mut pending = HashSet::new();
+    loop {
+        while let Some(contact) = contacts.pop_front() {
+            // Tauri authenticated exactly this transport identity with a MAC proof derived from
+            // the reply code before handing the transport to this routine. Raw later
+            // `PeerConnected` events are not proof and must never receive the bearer invite/KP.
+            if !proven.contains(&contact) {
+                continue;
+            }
+            let attempted = attempts.entry(contact).or_default();
+            if *attempted >= MAX_JOIN_FORWARD_ATTEMPTS {
+                continue;
+            }
+            *attempted = attempted.saturating_add(1);
+            let remaining = expires_at_ms.saturating_sub(clock.now_ms());
+            if remaining == 0 {
+                return Err(SyncError::JoinRejected);
+            }
+            let attempt_ms = remaining.min(8_000);
+            match start_reply_join(
+                transport,
+                contact,
+                inviter,
+                device,
+                invite,
+                &join_body,
+                clock,
+                std::time::Duration::from_millis(attempt_ms),
+            )
+            .await
+            {
+                ReplyJoinStart::Ready(group, routing) => {
+                    return Ok((*group, routing, contact));
+                }
+                ReplyJoinStart::Pending => {
+                    pending.insert(contact);
+                }
+                ReplyJoinStart::Rejected => {}
+            }
+        }
+
+        let remaining = expires_at_ms.saturating_sub(clock.now_ms());
+        if remaining == 0 {
+            return Err(SyncError::JoinRejected);
+        }
+        let event = match futures::future::select(
+            Box::pin(transport.next_event()),
+            clock.sleep(std::time::Duration::from_millis(remaining)),
+        )
+        .await
+        {
+            futures::future::Either::Left((event, _)) => event,
+            futures::future::Either::Right(_) => return Err(SyncError::JoinRejected),
+        };
+        match event {
+            Some(TransportEvent::PeerConnected(_)) => {}
+            Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) if data.first() == Some(&JOIN_REPLY_PROOF_KIND) => {
+                let valid = verify_join_reply_dialback_proof(
+                    &invite.invite_nonce,
+                    &reply_joiner_nonce,
+                    reply_joiner_peer,
+                    expires_at_ms,
+                    from,
+                    &data[1..],
+                );
+                let admitted = valid
+                    && (from == inviter
+                        || proven.contains(&from)
+                        || proven_helpers.len() < MAX_REPLY_PROVEN_HELPERS);
+                responder.respond(if admitted {
+                    Bytes::from_static(b"ok")
+                } else {
+                    Bytes::new()
+                });
+                if admitted && proven.insert(from) {
+                    if from == inviter {
+                        contacts.push_front(from);
+                    } else {
+                        proven_helpers.insert(from);
+                        contacts.push_back(from);
+                    }
+                }
+            }
+            Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) if pending.contains(&from) && data.first() == Some(&KIND_WELCOME) => {
+                responder.respond(Bytes::new());
+                if data.len() > MAX_CONTROL_RESPONSE {
+                    continue;
+                }
+                if let Some((&JOIN_READY, body)) = data[1..].split_first() {
+                    if let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) {
+                        if let Ok((group, routing)) =
+                            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+                        {
+                            return Ok((group, routing, from));
+                        }
+                    }
+                }
+                // An empty/malformed/forged push is ignored. It cannot terminate the window ahead
+                // of an inviter-signed result from another approved contact.
+            }
+            Some(TransportEvent::Request { responder, .. }) => {
+                responder.respond(Bytes::new());
+            }
+            Some(_) => {}
+            None => return Err(SyncError::JoinRejected),
+        }
+    }
+}
+
+fn verify_join_reply_dialback_proof(
+    invite_nonce: &[u8; 16],
+    joiner_nonce: &[u8; 16],
+    joiner_peer: &[u8],
+    expires_at_ms: u64,
+    dialer: PeerId,
+    proof: &[u8],
+) -> bool {
+    let Ok(proof): Result<[u8; 32], _> = proof.try_into() else {
+        return false;
+    };
+    let expected = join_reply_dialback_proof(
+        invite_nonce,
+        joiner_nonce,
+        joiner_peer,
+        expires_at_ms,
+        dialer,
+    );
+    proof
+        .iter()
+        .zip(expected.iter())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+fn join_reply_dialback_proof(
+    invite_nonce: &[u8; 16],
+    joiner_nonce: &[u8; 16],
+    joiner_peer: &[u8],
+    expires_at_ms: u64,
+    dialer: PeerId,
+) -> [u8; 32] {
+    let key = blake3::derive_key("catcoms/join-reply/proof-key/v1", invite_nonce);
+    let mut transcript = Encoder::new();
+    if transcript
+        .put_bytes(JOIN_REPLY_PROOF_DOMAIN.as_bytes())
+        .is_err()
+    {
+        return [0; 32];
+    }
+    if transcript.put_bytes(joiner_nonce).is_err() {
+        return [0; 32];
+    }
+    if transcript.put_bytes(joiner_peer).is_err() {
+        return [0; 32];
+    }
+    if transcript.put_bytes(dialer.as_bytes()).is_err() {
+        return [0; 32];
+    }
+    transcript.put_u64(expires_at_ms);
+    *blake3::keyed_hash(&key, &transcript.finish()).as_bytes()
+}
+
+/// Try only the inviter-endorsed standing switchboards from an [`InviteJoinPlan`]. Unlike the
+/// open reply-code listener, an unrelated connection is never sent the bearer invite or
+/// KeyPackage: the allowed peer set was signed by the inviter before the join began.
+#[allow(clippy::too_many_arguments)]
+pub async fn request_join_from_switchboards<T: MeshTransport>(
+    transport: &T,
+    first_contact: PeerId,
+    allowed_contacts: &[(PeerId, u64)],
+    inviter: PeerId,
+    device: &MlsDevice,
+    invite: &InviteToken,
+    join_plan: &[u8],
+    clock: &dyn Clock,
+) -> Result<(ServerGroup, RoutingState, PeerId), SyncError> {
+    let allowed: HashMap<PeerId, u64> = allowed_contacts
+        .iter()
+        .map(|(peer, expires)| (*peer, (*expires).min(invite.expires_at_ms)))
+        .collect();
+    if !invite.verify_self() || !allowed.contains_key(&first_contact) {
+        return Err(SyncError::JoinRejected);
+    }
+    // Reuse one KeyPackage across every helper. If one helper reaches the inviter but its
+    // response is lost, another helper can retrieve the inviter's cached exact JOIN_READY
+    // instead of presenting a different package after the one-use invite was consumed.
+    let key_package = device
+        .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+        .map_err(|_| SyncError::JoinRejected)?;
+    let kp_bytes = serialize_key_package(&key_package).map_err(|_| SyncError::JoinRejected)?;
+    let join_body = encode_join_req(invite, &kp_bytes);
+    // Tauri dials the bounded route set concurrently, so several helpers can already be
+    // connected before this routine begins. Queue every endorsed live contact now instead of
+    // waiting for a second `PeerConnected` edge that may already have been consumed. The first
+    // observed helper keeps priority; caller order gives deterministic fallback after it.
+    let now = clock.now_ms();
+    let mut contacts = VecDeque::from([first_contact]);
+    let mut queued = HashSet::from([first_contact]);
+    for (contact, expires_at_ms) in allowed_contacts {
+        if *expires_at_ms >= now && queued.insert(*contact) {
+            contacts.push_back(*contact);
+        }
+    }
+    let mut attempts: HashMap<PeerId, u8> = HashMap::new();
+    let mut pending: HashMap<PeerId, u64> = HashMap::new();
+    loop {
+        while let Some(contact) = contacts.pop_front() {
+            let Some(contact_expires) = allowed.get(&contact).copied() else {
+                continue;
+            };
+            let remaining = contact_expires.saturating_sub(clock.now_ms());
+            if remaining == 0 {
+                continue;
+            }
+            let attempted = attempts.entry(contact).or_default();
+            if *attempted >= MAX_JOIN_FORWARD_ATTEMPTS {
+                continue;
+            }
+            *attempted = attempted.saturating_add(1);
+            let mut payload = vec![KIND_JOIN_FORWARD];
+            payload.extend_from_slice(&encode_join_forward(inviter, &join_body, Some(join_plan)));
+            let request =
+                Box::pin(transport.request(contact, ProtocolId(RR_PROTOCOL), Bytes::from(payload)));
+            let deadline = clock.sleep(std::time::Duration::from_millis(remaining.min(12_000)));
+            let start = match futures::future::select(request, deadline).await {
+                futures::future::Either::Left((Ok(response), _))
+                    if response.len() <= MAX_CONTROL_RESPONSE =>
+                {
+                    match response.split_first() {
+                        Some((&JOIN_READY, body)) => {
+                            match decode_join_resp(body).and_then(
+                                |(welcome, signature, sealed_routing)| {
+                                    finish_join(
+                                        device,
+                                        invite,
+                                        &welcome,
+                                        &signature,
+                                        &sealed_routing,
+                                    )
+                                },
+                            ) {
+                                Ok((group, routing)) => {
+                                    ReplyJoinStart::Ready(Box::new(group), routing)
+                                }
+                                Err(_) => ReplyJoinStart::Rejected,
+                            }
+                        }
+                        Some((&JOIN_PENDING, _)) => ReplyJoinStart::Pending,
+                        _ => ReplyJoinStart::Rejected,
+                    }
+                }
+                _ => ReplyJoinStart::Rejected,
+            };
+            match start {
+                ReplyJoinStart::Ready(group, routing) => {
+                    return Ok((*group, routing, contact));
+                }
+                ReplyJoinStart::Pending => {
+                    pending.insert(contact, contact_expires);
+                }
+                ReplyJoinStart::Rejected => {}
+            }
+        }
+
+        let remaining = allowed
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(clock.now_ms());
+        if remaining == 0 {
+            return Err(SyncError::JoinRejected);
+        }
+        let event = match futures::future::select(
+            Box::pin(transport.next_event()),
+            clock.sleep(std::time::Duration::from_millis(remaining)),
+        )
+        .await
+        {
+            futures::future::Either::Left((event, _)) => event,
+            futures::future::Either::Right(_) => return Err(SyncError::JoinRejected),
+        };
+        match event {
+            Some(TransportEvent::PeerConnected(contact))
+                if allowed
+                    .get(&contact)
+                    .is_some_and(|expires| *expires >= clock.now_ms()) =>
+            {
+                // A reconnect is a meaningful retry signal. The per-contact counter prevents a
+                // flapping/hostile helper from creating an unbounded request loop.
+                contacts.push_back(contact);
+            }
+            Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) if pending
+                .get(&from)
+                .is_some_and(|expires| *expires >= clock.now_ms())
+                && data.first() == Some(&KIND_WELCOME) =>
+            {
+                responder.respond(Bytes::new());
+                if data.len() > MAX_CONTROL_RESPONSE {
+                    continue;
+                }
+                if let Some((&JOIN_READY, body)) = data[1..].split_first() {
+                    if let Ok((welcome, signature, sealed_routing)) = decode_join_resp(body) {
+                        if let Ok((group, routing)) =
+                            finish_join(device, invite, &welcome, &signature, &sealed_routing)
+                        {
+                            return Ok((group, routing, from));
+                        }
+                    }
+                }
+            }
+            Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
+            Some(_) => {}
+            None => return Err(SyncError::JoinRejected),
+        }
     }
 }
 
@@ -7550,7 +8986,7 @@ pub async fn request_device_join<T: MeshTransport>(
         // The contact relayed to the owner; the Welcome is pushed when the owner serializes it.
         Some((&JOIN_PENDING, _)) => {
             tracing::debug!("device admission relayed to the owner; awaiting the Welcome push");
-            await_device_welcome(transport, device, certificate, owner_public_key).await
+            await_device_welcome(transport, contact, device, certificate, owner_public_key).await
         }
         _ => Err(SyncError::JoinRejected),
     }
@@ -7608,6 +9044,7 @@ fn finish_device_join(
 /// `Server::join_with_grant` applies the join timeout.
 async fn await_device_welcome<T: MeshTransport>(
     transport: &T,
+    expected: PeerId,
     device: &MlsDevice,
     certificate: &DeviceCertificate,
     owner_public_key: &[u8; 32],
@@ -7615,8 +9052,11 @@ async fn await_device_welcome<T: MeshTransport>(
     loop {
         match transport.next_event().await {
             Some(TransportEvent::Request {
-                data, responder, ..
-            }) if data.first() == Some(&KIND_WELCOME) => {
+                from,
+                data,
+                responder,
+                ..
+            }) if from == expected && data.first() == Some(&KIND_WELCOME) => {
                 responder.respond(Bytes::new()); // ack the push
                 match data[1..].split_first() {
                     Some((&JOIN_READY, body)) => {
@@ -7651,14 +9091,18 @@ async fn await_device_welcome<T: MeshTransport>(
 /// `JOIN_TIMEOUT_SECS`); anything calling this API directly must do the same.
 async fn await_welcome_push<T: MeshTransport>(
     transport: &T,
+    expected: PeerId,
     device: &MlsDevice,
     invite: &InviteToken,
 ) -> Result<(ServerGroup, RoutingState), SyncError> {
     loop {
         match transport.next_event().await {
             Some(TransportEvent::Request {
-                data, responder, ..
-            }) if data.first() == Some(&KIND_WELCOME) => {
+                from,
+                data,
+                responder,
+                ..
+            }) if from == expected && data.first() == Some(&KIND_WELCOME) => {
                 responder.respond(Bytes::new()); // ack the push
                 match data[1..].split_first() {
                     Some((&JOIN_READY, body)) => {
@@ -9212,6 +10656,158 @@ mod tests {
 
     type Member = ChannelSync<MemNetwork, ChaCha20Rng>;
 
+    /// The in-memory broker intentionally models request delivery rather than connection
+    /// lifecycle. Reply-code joining needs both, so this narrow wrapper injects deterministic
+    /// `PeerConnected` events while delegating every wire operation to the real test transport.
+    #[derive(Debug)]
+    struct ConnectedMemNetwork {
+        inner: MemNetwork,
+        connected: std::sync::Mutex<VecDeque<PeerId>>,
+    }
+
+    #[derive(Debug)]
+    struct ScriptedReplyNetwork {
+        local: PeerId,
+        response: Bytes,
+        events: std::sync::Mutex<VecDeque<TransportEvent>>,
+    }
+
+    /// A standing-join transport where the first helper rejects and a second already-connected
+    /// helper forwards to the real inviter. There are deliberately no later connection events:
+    /// the join succeeds only if the initial queue contains every endorsed helper.
+    #[derive(Debug)]
+    struct MultiHelperJoinNetwork {
+        local: PeerId,
+        rejecting: PeerId,
+        forwarding: PeerId,
+        admit_then_drop_on_rejecting: bool,
+        founder: std::sync::Mutex<Member>,
+        requested: std::sync::Mutex<Vec<PeerId>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MeshTransport for ScriptedReplyNetwork {
+        fn local_peer(&self) -> PeerId {
+            self.local
+        }
+
+        async fn subscribe(&self, _topic: Topic) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn unsubscribe(&self, _topic: Topic) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn publish(&self, _topic: Topic, _data: Bytes) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn request(
+            &self,
+            _peer: PeerId,
+            _proto: ProtocolId,
+            _data: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            Ok(self.response.clone())
+        }
+
+        async fn next_event(&self) -> Option<TransportEvent> {
+            self.events.lock().expect("event mutex").pop_front()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MeshTransport for MultiHelperJoinNetwork {
+        fn local_peer(&self) -> PeerId {
+            self.local
+        }
+
+        async fn subscribe(&self, _topic: Topic) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn unsubscribe(&self, _topic: Topic) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn publish(&self, _topic: Topic, _data: Bytes) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn request(
+            &self,
+            peer: PeerId,
+            _proto: ProtocolId,
+            data: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            self.requested.lock().expect("request mutex").push(peer);
+            if peer != self.rejecting && peer != self.forwarding {
+                return Ok(Bytes::new());
+            }
+            if peer == self.rejecting && !self.admit_then_drop_on_rejecting {
+                return Ok(Bytes::new());
+            }
+            let Some((&KIND_JOIN_FORWARD, framed)) = data.split_first() else {
+                return Ok(Bytes::new());
+            };
+            let Ok((_target, join_body, _plan)) = decode_join_forward(framed) else {
+                return Ok(Bytes::new());
+            };
+            let response = self
+                .founder
+                .lock()
+                .expect("founder mutex")
+                .serve_join(peer, &join_body)
+                .unwrap_or_default();
+            if peer == self.rejecting {
+                // The stronger failure mode models a helper that reached the inviter and caused
+                // admission, but lost the response on the final hop back to the joiner.
+                return Ok(Bytes::new());
+            }
+            Ok(Bytes::from(response))
+        }
+
+        async fn next_event(&self) -> Option<TransportEvent> {
+            None
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MeshTransport for ConnectedMemNetwork {
+        fn local_peer(&self) -> PeerId {
+            self.inner.local_peer()
+        }
+
+        async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
+            self.inner.subscribe(topic).await
+        }
+
+        async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError> {
+            self.inner.unsubscribe(topic).await
+        }
+
+        async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            self.inner.publish(topic, data).await
+        }
+
+        async fn request(
+            &self,
+            peer: PeerId,
+            proto: ProtocolId,
+            data: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            self.inner.request(peer, proto, data).await
+        }
+
+        async fn next_event(&self) -> Option<TransportEvent> {
+            if let Some(peer) = self.connected.lock().expect("event mutex").pop_front() {
+                return Some(TransportEvent::PeerConnected(peer));
+            }
+            self.inner.next_event().await
+        }
+    }
+
     /// Build a converged `n`-member group over one hub: `members[0]` is the founder
     /// (full roster), each subsequent member joins in turn (so the **last** joiner's
     /// Welcome carries the full roster). Returns the members and their device ids,
@@ -9288,6 +10884,591 @@ mod tests {
         }
         members.insert(0, founder_sync);
         (hub, members, ids)
+    }
+
+    #[test]
+    fn join_forward_codec_binds_one_transport_target_and_normal_join_body() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let node = ChannelSync::new(
+            Hub::new().join(PeerId::from_u64(1)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(91),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = node.mint_invite([7; 16], 10_000, vec![]).unwrap();
+        let joiner = MlsDevice::generate().unwrap();
+        let kp = joiner
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let body = encode_join_req(&invite, &serialize_key_package(&kp).unwrap());
+        let target = PeerId::from_u64(42);
+        let encoded = encode_join_forward(target, &body, None);
+        assert_eq!(
+            decode_join_forward(&encoded).unwrap(),
+            (target, body, Vec::new())
+        );
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(decode_join_forward(&trailing).is_err());
+    }
+
+    #[test]
+    fn assisted_invite_plan_is_signed_bounded_and_an_explicit_wire_version() {
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let invite = group
+            .mint_invite(&device, [0x31; 16], 10_000, Vec::new())
+            .unwrap();
+        let inviter_peer = *PeerId::from_u64(41).as_bytes();
+        let helper_peer = *PeerId::from_u64(42).as_bytes();
+        let helper = MlsDevice::generate().unwrap();
+        let helper_public_key = helper.public_key_bytes();
+        let helper_addresses = vec!["/ip4/203.0.113.42/tcp/22487".into()];
+        let helper_offer_payload = switchboard_offer_payload(
+            &invite.group_id,
+            &helper_public_key,
+            &helper_peer,
+            &helper_addresses,
+            7,
+            9_000,
+        );
+        let routes = vec![SwitchboardRoute {
+            offer: SwitchboardOffer {
+                group_id: invite.group_id.clone(),
+                device_pubkey: helper_public_key,
+                peer_id: helper_peer,
+                addresses: helper_addresses,
+                seq: 7,
+                expires_at_ms: 9_000,
+                signature: helper.sign(&helper_offer_payload).unwrap(),
+            },
+        }];
+        let payload = invite_join_plan_payload(&invite.encode(), &inviter_peer, &routes);
+        let plan = InviteJoinPlan {
+            invite: invite.clone(),
+            inviter_peer,
+            switchboards: routes,
+            signature: device.sign(&payload).unwrap(),
+        };
+        let encoded = plan.encode();
+        assert_eq!(InviteJoinPlan::decode(&encoded).unwrap(), plan);
+        assert!(plan.verify());
+        assert!(
+            InviteToken::decode(&encoded).is_err(),
+            "old strict invite readers must reject the explicitly-prefixed assisted envelope"
+        );
+        assert_eq!(InviteToken::decode(&invite.encode()).unwrap(), invite);
+
+        let mut forged = encoded;
+        *forged.last_mut().unwrap() ^= 1;
+        assert!(InviteJoinPlan::decode(&forged).is_err());
+
+        // The inviter may endorse or omit an offer, but cannot lengthen another member's
+        // short-lived consent even when it re-signs the outer plan correctly.
+        let mut extended = plan.clone();
+        extended.switchboards[0].offer.expires_at_ms = invite.expires_at_ms;
+        let payload = invite_join_plan_payload(
+            &invite.encode(),
+            &extended.inviter_peer,
+            &extended.switchboards,
+        );
+        extended.signature = device.sign(&payload).unwrap();
+        assert!(InviteJoinPlan::decode(&extended.encode()).is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_helper_requests_hit_a_pre_signature_node_budget() {
+        let (_hub, mut members, _ids) = build_members(1).await;
+        let attacker = PeerId::from_u64(8_000);
+        for _ in 0..MAX_JOIN_FORWARD_PREAUTH_ATTEMPTS + 10 {
+            assert!(members[0]
+                .serve_join_forward(attacker, b"not a join-forward frame")
+                .await
+                .is_empty());
+        }
+        assert_eq!(
+            members[0].forwarded_join_pre_auth_attempts.1, MAX_JOIN_FORWARD_PREAUTH_ATTEMPTS,
+            "rotating or malformed pre-member traffic must stop before signature work"
+        );
+        assert_eq!(members[0].forwarded_join_node_attempts.1, 0);
+    }
+
+    #[tokio::test]
+    async fn existing_member_forwards_only_the_inviter_signed_join_handshake() {
+        let (hub, mut members, ids) = build_members(2).await;
+        let founder_peer = PeerId::from_u64(1);
+        let helper_peer = PeerId::from_u64(2);
+        let joiner_peer = PeerId::from_u64(3);
+
+        // The helper policy requires a live, proven member target. Production earns this through
+        // a roster-verified catch-up/self-record; seed exactly that already-tested evidence here
+        // so this regression stays about the forwarding protocol rather than PEX.
+        let founder_public_key = members[0].device.public_key_bytes();
+        members[1].promote_member_peer(founder_peer);
+        members[1].connected_peers.insert(founder_peer);
+        members[1].peer_records.insert(
+            ids[0],
+            PeerDescriptor {
+                device_pubkey: founder_public_key,
+                peer_id: *founder_peer.as_bytes(),
+                addresses: Vec::new(),
+                seq: 1,
+                signature: [0; 64],
+            },
+        );
+
+        let invite = members[0]
+            .mint_invite([0x44; 16], 10_000, Vec::new())
+            .unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let joiner_net = hub.join(joiner_peer);
+        let unapproved_kp = joiner_device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let unapproved_body =
+            encode_join_req(&invite, &serialize_key_package(&unapproved_kp).unwrap());
+        let unapproved = encode_join_forward(founder_peer, &unapproved_body, None);
+        assert!(
+            members[1]
+                .serve_join_forward(joiner_peer, &unapproved)
+                .await
+                .is_empty(),
+            "a member never becomes a helper merely because a pre-member knows an invite"
+        );
+        let inviter_device = members[0].device.device_id();
+        assert!(members[1].authorize_join_helper(
+            joiner_peer,
+            invite.invite_nonce,
+            inviter_device,
+            founder_peer,
+            61_000,
+        ));
+        let (founder_slice, helper_slice) = members.split_at_mut(1);
+        let founder = &mut founder_slice[0];
+        let helper = &mut helper_slice[0];
+        let founder_service = async {
+            // One request admits; the second lets the helper fetch that signed commit before it
+            // becomes the new member's first catch-up path.
+            founder.run_once().await.unwrap();
+            founder.run_once().await.unwrap();
+        };
+        let (joined, helper_tick, _) = tokio::join!(
+            request_join_via_helper(
+                &joiner_net,
+                helper_peer,
+                founder_peer,
+                &joiner_device,
+                &invite,
+            ),
+            helper.run_once(),
+            founder_service,
+        );
+        assert!(helper_tick.unwrap());
+        let (group, _) = joined.unwrap();
+        assert!(group.contains_device(&joiner_device.device_id()));
+        assert_eq!(founder.group.epoch(), 2, "only the inviter created the Add");
+        assert_eq!(
+            helper.group.epoch(),
+            founder.group.epoch(),
+            "the helper catches up before becoming the joiner's initial sync path"
+        );
+    }
+
+    #[tokio::test]
+    async fn standing_switchboard_requires_its_live_inviter_signed_route() {
+        let (hub, mut members, ids) = build_members(2).await;
+        let founder_peer = PeerId::from_u64(1);
+        let helper_peer = PeerId::from_u64(2);
+        let joiner_peer = PeerId::from_u64(30);
+
+        let founder_public_key = members[0].device.public_key_bytes();
+        members[1].connected_peers.insert(founder_peer);
+        members[1].peer_records.insert(
+            ids[0],
+            PeerDescriptor {
+                device_pubkey: founder_public_key,
+                peer_id: *founder_peer.as_bytes(),
+                addresses: vec![],
+                seq: 1,
+                signature: [0; 64],
+            },
+        );
+        let invite = members[0]
+            .mint_invite([0x71; 16], 1_000_000, Vec::new())
+            .unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let key_package = joiner_device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
+
+        let helper_public_key = members[1].device.public_key_bytes();
+        let helper_addresses = vec!["/ip4/203.0.113.8/tcp/22487".into()];
+        let (valid_plan, expired, wrong_helper, too_far_future) = {
+            let plan = |peer_id: [u8; 32], expires_at_ms: u64| {
+                let offer_payload = switchboard_offer_payload(
+                    &invite.group_id,
+                    &helper_public_key,
+                    &peer_id,
+                    &helper_addresses,
+                    1,
+                    expires_at_ms,
+                );
+                let routes = vec![SwitchboardRoute {
+                    offer: SwitchboardOffer {
+                        group_id: invite.group_id.clone(),
+                        device_pubkey: helper_public_key.clone(),
+                        peer_id,
+                        addresses: helper_addresses.clone(),
+                        seq: 1,
+                        expires_at_ms,
+                        signature: members[1].device.sign(&offer_payload).unwrap(),
+                    },
+                }];
+                let payload =
+                    invite_join_plan_payload(&invite.encode(), founder_peer.as_bytes(), &routes);
+                InviteJoinPlan {
+                    invite: invite.clone(),
+                    inviter_peer: *founder_peer.as_bytes(),
+                    switchboards: routes,
+                    signature: members[0].device.sign(&payload).unwrap(),
+                }
+                .encode()
+            };
+            (
+                plan(*helper_peer.as_bytes(), 10_000),
+                plan(*helper_peer.as_bytes(), 999),
+                plan(*PeerId::from_u64(99).as_bytes(), 10_000),
+                plan(
+                    *helper_peer.as_bytes(),
+                    1_000 + SWITCHBOARD_OFFER_MAX_FUTURE_MS + 1,
+                ),
+            )
+        };
+        let valid_forward = encode_join_forward(founder_peer, &join_body, Some(&valid_plan));
+
+        assert!(
+            members[1]
+                .serve_join_forward(joiner_peer, &valid_forward)
+                .await
+                .is_empty(),
+            "standing help is default-off"
+        );
+        members[1].set_switchboard_offered(true);
+
+        assert!(members[1]
+            .serve_join_forward(
+                joiner_peer,
+                &encode_join_forward(founder_peer, &join_body, Some(&expired)),
+            )
+            .await
+            .is_empty());
+        assert!(members[1]
+            .serve_join_forward(
+                joiner_peer,
+                &encode_join_forward(founder_peer, &join_body, Some(&wrong_helper)),
+            )
+            .await
+            .is_empty());
+        assert!(members[1]
+            .serve_join_forward(
+                joiner_peer,
+                &encode_join_forward(founder_peer, &join_body, Some(&too_far_future)),
+            )
+            .await
+            .is_empty());
+
+        let (founder_slice, helper_slice) = members.split_at_mut(1);
+        let founder = &mut founder_slice[0];
+        let helper = &mut helper_slice[0];
+        let founder_service = async {
+            founder.run_once().await.unwrap();
+            founder.run_once().await.unwrap();
+        };
+        let (response, _) = tokio::join!(
+            helper.serve_join_forward(joiner_peer, &valid_forward),
+            founder_service,
+        );
+        assert_eq!(response.first(), Some(&JOIN_READY));
+        assert_eq!(founder.member_count(), 3);
+        assert_eq!(helper.group.epoch(), founder.group.epoch());
+        assert!(helper.group.contains_device(&joiner_device.device_id()));
+        drop(hub);
+    }
+
+    #[tokio::test]
+    async fn a_rejecting_first_switchboard_does_not_hide_an_already_connected_second() {
+        let hub = Hub::new();
+        let inviter_peer = PeerId::from_u64(1);
+        let joiner_peer = PeerId::from_u64(2);
+        let rejecting = PeerId::from_u64(3);
+        let forwarding = PeerId::from_u64(4);
+        let inviter_device = MlsDevice::generate().unwrap();
+        let inviter_group = ServerGroup::create(&inviter_device).unwrap();
+        let founder = ChannelSync::new(
+            hub.join(inviter_peer),
+            inviter_group,
+            inviter_device,
+            ChaCha20Rng::seed_from_u64(73),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = founder.mint_invite([0x73; 16], 10_000, Vec::new()).unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let transport = MultiHelperJoinNetwork {
+            local: joiner_peer,
+            rejecting,
+            forwarding,
+            admit_then_drop_on_rejecting: false,
+            founder: std::sync::Mutex::new(founder),
+            requested: std::sync::Mutex::new(Vec::new()),
+        };
+        let clock = ManualClock::new(1_000);
+        let allowed = [(rejecting, 10_000), (forwarding, 10_000)];
+
+        let (group, _, contact) = request_join_from_switchboards(
+            &transport,
+            rejecting,
+            &allowed,
+            inviter_peer,
+            &joiner_device,
+            &invite,
+            b"inviter-and-helper-signed-plan",
+            &clock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(contact, forwarding);
+        assert!(group.contains_device(&joiner_device.device_id()));
+        assert_eq!(
+            *transport.requested.lock().expect("request mutex"),
+            vec![rejecting, forwarding],
+            "the already-connected second helper is queued without waiting for another event"
+        );
+        assert_eq!(
+            transport
+                .founder
+                .lock()
+                .expect("founder mutex")
+                .member_count(),
+            2,
+            "the fallback produced exactly one admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_switchboard_recovers_the_same_welcome_after_the_first_loses_it() {
+        let hub = Hub::new();
+        let inviter_peer = PeerId::from_u64(1);
+        let joiner_peer = PeerId::from_u64(2);
+        let dropping = PeerId::from_u64(3);
+        let recovering = PeerId::from_u64(4);
+        let inviter_device = MlsDevice::generate().unwrap();
+        let inviter_group = ServerGroup::create(&inviter_device).unwrap();
+        let founder = ChannelSync::new(
+            hub.join(inviter_peer),
+            inviter_group,
+            inviter_device,
+            ChaCha20Rng::seed_from_u64(74),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = founder.mint_invite([0x74; 16], 10_000, Vec::new()).unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let transport = MultiHelperJoinNetwork {
+            local: joiner_peer,
+            rejecting: dropping,
+            forwarding: recovering,
+            admit_then_drop_on_rejecting: true,
+            founder: std::sync::Mutex::new(founder),
+            requested: std::sync::Mutex::new(Vec::new()),
+        };
+        let clock = ManualClock::new(1_000);
+        let allowed = [(dropping, 10_000), (recovering, 10_000)];
+
+        let (group, _, contact) = request_join_from_switchboards(
+            &transport,
+            dropping,
+            &allowed,
+            inviter_peer,
+            &joiner_device,
+            &invite,
+            b"inviter-and-helper-signed-plan",
+            &clock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(contact, recovering);
+        assert!(group.contains_device(&joiner_device.device_id()));
+        assert_eq!(
+            *transport.requested.lock().expect("request mutex"),
+            vec![dropping, recovering],
+            "the second helper retries the exact request after the first loses JOIN_READY"
+        );
+        assert_eq!(
+            transport
+                .founder
+                .lock()
+                .expect("founder mutex")
+                .member_count(),
+            2,
+            "the cached replay recovers one admission instead of creating a second Add"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hostile_first_reply_connector_cannot_end_the_join_window() {
+        let hub = Hub::new();
+        let inviter_peer = PeerId::from_u64(1);
+        let joiner_peer = PeerId::from_u64(2);
+        let hostile_peer = PeerId::from_u64(3);
+        let joiner_net = ConnectedMemNetwork {
+            inner: hub.join(joiner_peer),
+            connected: std::sync::Mutex::new(VecDeque::from([inviter_peer])),
+        };
+        let hostile_net = hub.join(hostile_peer);
+        let inviter_device = MlsDevice::generate().unwrap();
+        let inviter_group = ServerGroup::create(&inviter_device).unwrap();
+        let mut inviter_sync = ChannelSync::new(
+            hub.join(inviter_peer),
+            inviter_group,
+            inviter_device,
+            ChaCha20Rng::seed_from_u64(45),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = inviter_sync
+            .mint_invite([0x45; 16], 10_000, Vec::new())
+            .unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let clock = ManualClock::new(1_000);
+        let joiner_nonce = [0x91; 16];
+        let reply_joiner_peer = b"test-reply-joiner";
+
+        // The hostile peer is deliberately supplied as the first callback. It can reject the
+        // request it receives, but that transport arrival is not authentication and therefore
+        // must not prevent the already-connected named inviter from admitting afterwards.
+        let hostile = async {
+            loop {
+                if let Some(TransportEvent::Request { responder, .. }) =
+                    hostile_net.next_event().await
+                {
+                    responder.respond(Bytes::new());
+                    return;
+                }
+            }
+        };
+        let inviter = async {
+            let proof = join_reply_dialback_proof(
+                &invite.invite_nonce,
+                &joiner_nonce,
+                reply_joiner_peer,
+                10_000,
+                inviter_peer,
+            );
+            let mut request = vec![JOIN_REPLY_PROOF_KIND];
+            request.extend_from_slice(&proof);
+            assert_eq!(
+                inviter_sync
+                    .transport
+                    .request(joiner_peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
+                    .await
+                    .unwrap(),
+                Bytes::from_static(b"ok")
+            );
+            while inviter_sync.member_count() < 2 {
+                inviter_sync.run_once().await.unwrap();
+            }
+        };
+        let (joined, _, _) = tokio::join!(
+            request_join_from_reply(
+                &joiner_net,
+                hostile_peer,
+                inviter_peer,
+                &joiner_device,
+                &invite,
+                joiner_nonce,
+                reply_joiner_peer,
+                &clock,
+                10_000,
+            ),
+            hostile,
+            inviter,
+        );
+        let (group, _, contact) = joined.unwrap();
+        assert_eq!(contact, inviter_peer);
+        assert!(group.contains_device(&joiner_device.device_id()));
+    }
+
+    #[tokio::test]
+    async fn a_welcome_push_from_the_wrong_reply_contact_is_ignored() {
+        let hub = Hub::new();
+        let inviter_peer = PeerId::from_u64(1);
+        let helper_peer = PeerId::from_u64(2);
+        let attacker_peer = PeerId::from_u64(3);
+        let joiner_peer = PeerId::from_u64(4);
+        let inviter_device = MlsDevice::generate().unwrap();
+        let inviter_group = ServerGroup::create(&inviter_device).unwrap();
+        let mut inviter = ChannelSync::new(
+            hub.join(inviter_peer),
+            inviter_group,
+            inviter_device,
+            ChaCha20Rng::seed_from_u64(46),
+            Box::new(ManualClock::new(1_000)),
+        );
+        let invite = inviter.mint_invite([0x46; 16], 10_000, Vec::new()).unwrap();
+        let joiner_device = MlsDevice::generate().unwrap();
+        let key_package = joiner_device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
+        let valid_ready = inviter
+            .serve_join(joiner_peer, &join_body)
+            .expect("inviter admits synchronously");
+        assert_eq!(valid_ready.first(), Some(&JOIN_READY));
+
+        let (attacker_responder, _) = catcoms_rt::Responder::channel();
+        let (helper_responder, _) = catcoms_rt::Responder::channel();
+        let mut valid_push = vec![KIND_WELCOME];
+        valid_push.extend_from_slice(&valid_ready);
+        let transport = ScriptedReplyNetwork {
+            local: joiner_peer,
+            response: Bytes::from_static(&[JOIN_PENDING]),
+            events: std::sync::Mutex::new(VecDeque::from([
+                TransportEvent::Request {
+                    from: attacker_peer,
+                    proto: ProtocolId(RR_PROTOCOL),
+                    data: Bytes::from_static(&[KIND_WELCOME]),
+                    responder: attacker_responder,
+                },
+                TransportEvent::Request {
+                    from: helper_peer,
+                    proto: ProtocolId(RR_PROTOCOL),
+                    data: Bytes::from(valid_push),
+                    responder: helper_responder,
+                },
+            ])),
+        };
+        let clock = ManualClock::new(1_000);
+        let joiner_nonce = [0x92; 16];
+        let reply_joiner_peer = b"scripted-reply-joiner";
+        let (group, _, contact) = request_join_from_reply(
+            &transport,
+            helper_peer,
+            inviter_peer,
+            &joiner_device,
+            &invite,
+            joiner_nonce,
+            reply_joiner_peer,
+            &clock,
+            10_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(contact, helper_peer);
+        assert!(group.contains_device(&joiner_device.device_id()));
     }
 
     #[tokio::test]
@@ -11170,17 +13351,46 @@ mod tests {
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Revoked);
 
         // A genuine admission, then the very same request replayed.
-        let (_, good) = req_for(&node, [6u8; 16], u64::MAX);
+        let (good_invite, good) = req_for(&node, [6u8; 16], u64::MAX);
         let resp = node.serve_join(joiner, &good).expect("admitted");
         assert_eq!(resp.first(), Some(&JOIN_READY));
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Admitted);
         assert_eq!(node.join_attempts()[0].nonce_prefix, id_prefix(&[6u8; 16]));
 
-        assert!(
-            node.serve_join(joiner, &good).is_none(),
-            "single use: the replay is refused"
+        let epoch_after_add = node.group.epoch();
+        let members_after_add = node.member_count();
+        assert_eq!(
+            node.serve_join(joiner, &good).as_ref(),
+            Some(&resp),
+            "an exact lost-response retry replays the signed Welcome"
         );
+        assert_eq!(node.group.epoch(), epoch_after_add);
+        assert_eq!(node.member_count(), members_after_add);
+        assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::Admitted);
+
+        let different_device = MlsDevice::generate().unwrap();
+        let different_kp = different_device
+            .key_package_for_invite(&good_invite.group_id, good_invite.invite_nonce)
+            .unwrap();
+        let different_request =
+            encode_join_req(&good_invite, &serialize_key_package(&different_kp).unwrap());
+        assert!(node.serve_join(joiner, &different_request).is_none());
         assert_eq!(node.join_attempts()[0].outcome, JoinOutcome::AlreadyUsed);
+
+        let snapshot = node.snapshot().unwrap();
+        let mut restored = ChannelSync::restore(
+            &snapshot,
+            hub.join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(99),
+            Box::new(clock.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.serve_join(joiner, &good).as_ref(),
+            Some(&resp),
+            "restart must not strand an admitted joiner whose response was lost"
+        );
+        assert_eq!(restored.group.epoch(), epoch_after_add);
 
         // Time advances on the injected clock only, and the stamp follows it.
         clock.advance_ms(500);

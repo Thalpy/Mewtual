@@ -632,6 +632,7 @@ dependencies = [
  "blake3",
  "bytes",
  "catcoms-rt",
+ "either",
  "futures",
  "hex",
  "libp2p",
@@ -694,6 +695,7 @@ dependencies = [
  "catcoms-rt",
  "catcoms-storage",
  "catcoms-wire",
+ "futures",
  "thiserror 2.0.18",
  "tracing",
  "zeroize",
@@ -3958,6 +3960,7 @@ name = "mewtual-desktop"
 version = "0.1.0-alpha.1"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "catcoms-app",
  "catcoms-discovery",
  "catcoms-log",

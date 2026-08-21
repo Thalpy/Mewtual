@@ -50,6 +50,17 @@ test("visual fixture supplies the full degraded connectivity assistant state", (
   assert.equal(report.steps.length, 2);
 });
 
+test("visual fixture exposes explicit standing switchboard consent and hosts", () => {
+  const status = visualFixtureResponse("get_switchboard_status", { server: 1 }) as {
+    offered: boolean;
+    eligible: boolean;
+    online: Array<{ fingerprint: string }>;
+  };
+  assert.equal(status.offered, false);
+  assert.equal(status.eligible, true);
+  assert.equal(status.online.length, 2);
+});
+
 test("visual fixture fails loudly for an unsupported native dependency", () => {
   assert.throws(
     () => visualFixtureResponse("new_native_command"),

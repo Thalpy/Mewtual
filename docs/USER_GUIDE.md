@@ -292,6 +292,42 @@ The server's network identity and port persist across restarts. Opening **Server
 Invites** refreshes an unused invite when its reachable-address set has changed. Generate a new
 invite after the previous one is consumed, or whenever you want to deliberately replace it.
 
+### Two-way connection reply
+
+If none of the inviter's routes answers, the join screen can produce a
+`mewtual-reply-v1:` code for the next 60 seconds. Send it back through the same human chat and keep
+both applications open. The named inviter can paste it under **Server settings → Connectivity →
+One-time connection help**; an eligible current member that is already connected to that inviter
+can do the same. Mewtual validates at most four public TCP/QUIC candidates and repeatedly dials
+them. Every callback must prove possession of the code before the joiner sends its bearer invite or
+KeyPackage, and only the invite's named inviter can sign the Welcome.
+
+This is signalling and NAT punching, not a relay. It often helps QUIC through ordinary home NAT,
+but requires overlapping 60-second sessions and cannot reliably cross symmetric NAT or CGNAT.
+Anyone who saw the original bearer invite can also make a valid reply, so replacing a different
+active joiner requires explicit confirmation.
+
+### Member switchboards
+
+An established group can use a reachable current member as a short admission bridge without a
+Mewtual-operated server. Hosting is **off by default** and is enabled per device/server under
+**Server settings → Connectivity → Group hosting**. A standing host publishes a two-minute signed
+candidate offer. Fresh assisted invites can endorse up to three such members; when a recipient
+pastes one, Mewtual previews the fallback and asks permission before contacting any member after
+the direct attempt fails.
+
+The switchboard forwards only the bounded admission exchange to the invite's named inviter, then
+applies the same MLS Add before it becomes the new member's first encrypted sync path. It cannot
+admit someone or forge/read the inviter-signed Welcome. It is already a group member, so helping
+grants no additional content access, but it learns the joiner's IP address/timing and spends
+bandwidth. Assisted invite recipients learn the host's stable device/transport identities and
+advertised candidate addresses. Turning hosting off refuses new forwards immediately; cached or
+already-copied offers can remain dial-visible only until their short signed deadline.
+
+A signed offer is not proof that its address currently works. Switchboards help only once a group
+has a reachable third member. If the founder and first joiner are both unreachable, they still need
+a public IPv6/manual/router mapping, a configured relay, or another mutually reachable third party.
+
 ### Using a relay (no port-forwarding)
 
 A relay is a helper node on a reachable host that forwards **encrypted** traffic between two

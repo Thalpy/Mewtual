@@ -165,6 +165,8 @@ export type Connectivity = {
   public_direct: boolean;
   upnp: string;
   autonat: string;
+  /** Connected-peer Identify telemetry only; never an advertised/dialled listener candidate. */
+  mesh_observations?: string[];
   steps: DiagStep[];
   last_error: string;
 };
@@ -262,6 +264,19 @@ export function reachabilityEventAffectsReport(
   return report === null || report.server === eventServer;
 }
 
+/// A switchboard offer change always invalidates that server's displayed assisted invite, even
+/// when another server is active. Only the status panel itself is active-server scoped.
+export function switchboardEventRefreshDecision(
+  locked: boolean,
+  activeServer: number | null,
+  eventServer: number,
+): { refreshStatus: boolean; refreshInvite: boolean } {
+  return {
+    refreshStatus: !locked && activeServer === eventServer,
+    refreshInvite: !locked,
+  };
+}
+
 /// Ignore a connectivity snapshot from an older overlapping refresh. Route events can arrive in
 /// quick succession, and native command responses are not guaranteed to complete in request
 /// order. Applying only the latest generation prevents a pre-expiry snapshot from restoring a
@@ -275,9 +290,9 @@ export function withOrderedConnectivity(
   return completedGeneration === latestGeneration ? result : current;
 }
 
-/// Product-level status copy for the shared status line in onboarding and Settings. This does not
-/// invent switchboards or fallback nodes: those states become available only when the backend can
-/// name and prove them.
+/// Product-level direct/relay status copy for the shared status line in onboarding and Settings.
+/// Standing switchboards are rendered from the backend's separate typed, expiring offer status;
+/// they are intentionally not inferred from these diagnostic strings.
 export function connectivityStatus(c: Connectivity | null): ConnectivityStatus {
   if (!c?.action) {
     return {
@@ -331,8 +346,8 @@ export function connectivityStatus(c: Connectivity | null): ConnectivityStatus {
 }
 
 /// Compact, paste-friendly readout based only on evidence present in the bridge report. It follows
-/// the visual mockup's terminal readout without fabricating switchboard/fallback states that are
-/// not implemented yet.
+/// the visual mockup's terminal readout. Switchboard hosting is a separate typed readout because a
+/// signed candidate offer is neither a direct callback result nor a relay reservation.
 export function connectivityReadout(c: Connectivity): string {
   const direct = c.advertised.filter((a) => !a.includes("/p2p-circuit"));
   const ipv6 = direct.filter((a) => a.startsWith("/ip6/")).length;
@@ -361,6 +376,12 @@ export function formatConnectivity(c: Connectivity | null): string {
   out.push(`  ${reach.detail}`);
   out.push(`Automatic port mapping: ${c.upnp || "not attempted"}`);
   out.push(`AutoNAT: ${c.autonat || "not tested"}`);
+  out.push(
+    c.mesh_observations?.length
+      ? `Peer-observed outbound sockets (${c.mesh_observations.length}; diagnostic only, not listener routes):`
+      : "Peer-observed outbound sockets: none",
+  );
+  for (const observation of c.mesh_observations ?? []) out.push(`  ${observation}`);
   out.push(
     c.advertised.length
       ? `Addresses this node advertises (${c.advertised.length}):`

@@ -534,6 +534,7 @@ dependencies = [
  "blake3",
  "bytes",
  "catcoms-rt",
+ "either",
  "futures",
  "hex",
  "libp2p",

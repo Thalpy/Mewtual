@@ -17,22 +17,22 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use catcoms_app::store::MAX_UI_STATE_BYTES;
 use catcoms_app::{
-    channel_id, spawn, AppEvent, Cid, DeviceId, FileListing, Livery, PairingLedger, PairingSecrets,
-    PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord, ServerStore,
-    StorageHealth, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES,
-    MAX_SERVER_ICON_BYTES,
+    channel_id, spawn, AppEvent, Cid, DeviceId, FileListing, InviteJoinPlan, Livery, PairingLedger,
+    PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord,
+    ServerStore, StorageHealth, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
+    MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
     addr_is_globally_routable, addr_is_loopback, addr_is_undialable, keypair_from_seed,
     phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
-    validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, MeshHandle, MeshService,
-    PortMappingMechanism, PortMappingSnapshot, PortMappingTransport, RelayAddressSnapshot,
-    RendezvousTarget,
+    validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, JoinReply, MeshHandle,
+    MeshObservationSnapshot, MeshService, PortMappingMechanism, PortMappingSnapshot,
+    PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
-use catcoms_sync::join_namespace;
+use catcoms_sync::{join_namespace, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
@@ -45,6 +45,9 @@ use zeroize::Zeroizing;
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
     actor: ServerActor,
+    /// Stable MLS identity checks for old signed invite permits embedded in two-way reply codes.
+    group_id: Vec<u8>,
+    device_id: DeviceId,
     invite: Option<String>,
     name: String,
     /// The current reachable bootstrap addresses for this device, captured when the server was
@@ -56,12 +59,14 @@ struct ServerEntry {
     /// invite is also discovery-enabled. Empty when the server uses direct bootstrap only. Not
     /// separately persisted; on reload it is recovered from the persisted invite's `rendezvous`.
     rendezvous: Vec<String>,
-    /// A clonable handle to this server's live transport, kept so the bridge can register a
-    /// freshly-minted invite's namespace at the rendezvous *after* the `Server` was moved into its
-    /// actor. `None` for a joiner (never registers) or a server without rendezvous.
+    /// A clonable handle to this server's live transport. Besides late rendezvous registration it
+    /// lets an inviter dial a joiner's authenticated two-way reply candidates after `Server` has
+    /// moved into its actor. `None` only for legacy/companion paths without a retained transport.
     mesh: Option<MeshHandle>,
     /// Whether this group is a 1:1 DM (shown behind the DMs circle) rather than a server.
     is_dm: bool,
+    /// Persisted, explicit consent for this device to accept standing switchboard requests.
+    switchboard: bool,
     /// The next PEX peer-record sequence number this launch may publish, taken from the block
     /// `ServerNet::reserve_record_seq_block` reserved on disk before the transport came up.
     ///
@@ -80,6 +85,13 @@ struct AppState {
     /// Invite minting crosses actor and optional rendezvous awaits. Serialize it so two self-heal/
     /// explicit requests cannot finish out of order and overwrite a newer route-set token.
     invite_mint: Mutex<()>,
+    /// One bounded two-way reply session per `(server, invite nonce)`. A bearer-token holder may
+    /// refresh the same joiner key, but replacing it with a different key requires an explicit UI
+    /// confirmation so “one reply wins” cannot become a trivial invite-consumption DoS.
+    join_replies: Mutex<HashMap<(u64, [u8; 16]), ActiveJoinReply>>,
+    /// Serialize the state-map transition with the actor's revoke/authorize commands. Without
+    /// this, concurrent replacement completions can re-install a displaced helper capability.
+    join_reply_apply: Mutex<()>,
     next_id: Mutex<u64>,
     store: Mutex<Option<ServerStore>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
@@ -122,10 +134,49 @@ struct AppState {
     /// Per-server structured AutoNAT v2 evidence. Keeping every current address/server result lets
     /// the read path filter against the live advertised set and retain a second successful route.
     autonat: Mutex<HashMap<u64, AutoNatEvidence>>,
+    /// Connected peers' low-trust Identify observations of our outbound socket. Diagnostic only;
+    /// these are never folded into bootstrap, rendezvous registration or AutoNAT candidates.
+    mesh_observations: Mutex<HashMap<u64, Vec<String>>>,
     /// One integrity/inventory scan per server per process session. Health is a point-in-time
     /// observation, so file events deliberately do not invalidate it behind the user's back;
     /// explicit authenticated repair is the only operation that replaces a cached report.
     storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveJoinReply {
+    joiner: libp2p::PeerId,
+    nonces: Vec<[u8; 16]>,
+    expires_at_ms: u64,
+    generation: u64,
+}
+
+const MAX_ACTIVE_JOIN_REPLIES: usize = 64;
+
+#[derive(Debug, Clone, Serialize)]
+struct JoinReplyReady {
+    code: String,
+    expires_at_ms: u64,
+    candidate_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JoinReplyApplied {
+    joiner: String,
+    expires_at_ms: u64,
+    replaced: bool,
+    helper: bool,
+}
+
+/// Decode-only information shown before a pasted invite is allowed to contact standing helpers.
+/// Routes stay native-side: the webview learns only that the inviter endorsed a bounded fallback
+/// set and the privacy consequence of choosing it.
+#[derive(Debug, Clone, Serialize)]
+struct InvitePreview {
+    direct_routes: usize,
+    rendezvous_routes: usize,
+    switchboards: usize,
+    expires_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -226,10 +277,27 @@ struct Connectivity {
     upnp: String,
     /// The AutoNAT v2 result for `server`, likewise filled by `get_connectivity`.
     autonat: String,
+    /// Bounded connected-peer observations of this node's outbound source. These are telemetry,
+    /// not listener candidates; the frontend must retain that qualification.
+    mesh_observations: Vec<String>,
     /// What the attempt did, oldest first.
     steps: Vec<DiagStep>,
     /// The last error, verbatim, so the user can copy exactly what the code said.
     last_error: String,
+}
+
+#[derive(Serialize)]
+struct SwitchboardMember {
+    fingerprint: String,
+    addresses: usize,
+}
+
+#[derive(Serialize)]
+struct SwitchboardStatus {
+    offered: bool,
+    eligible: bool,
+    online: Vec<SwitchboardMember>,
+    reason: String,
 }
 
 /// The origin-side pending ceremony: what `pairing_read` decoded and anchored, held so
@@ -954,6 +1022,9 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::ConnectivityChanged { online } => {
                     let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
                 }
+                AppEvent::SwitchboardsChanged => {
+                    let _ = app.emit("switchboard-changed", server);
+                }
                 AppEvent::DeliveryChanged { channel, states } => {
                     let _ = app.emit(
                         "delivery-changed",
@@ -1186,12 +1257,15 @@ async fn register_server(
     state: &AppState,
     actor: ServerActor,
     events: mpsc::Receiver<AppEvent>,
+    group_id: Vec<u8>,
+    device_id: DeviceId,
     invite: Option<String>,
     name: String,
     bootstrap: Vec<String>,
     rendezvous: Vec<String>,
     mesh: Option<MeshHandle>,
     is_dm: bool,
+    switchboard: bool,
     record_seq: u64,
 ) -> u64 {
     let id = {
@@ -1205,12 +1279,15 @@ async fn register_server(
         id,
         ServerEntry {
             actor,
+            group_id,
+            device_id,
             invite,
             name,
             bootstrap,
             rendezvous,
             mesh,
             is_dm,
+            switchboard,
             record_seq,
         },
     );
@@ -1451,6 +1528,95 @@ struct Reachability {
     rz_handle: Option<MeshHandle>,
 }
 
+fn listener_summary(addresses: &[Multiaddr]) -> String {
+    let mut capabilities = Vec::new();
+    for address in addresses {
+        if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        {
+            continue;
+        }
+        let family = if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Ip4(_)))
+        {
+            "IPv4"
+        } else if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Ip6(_)))
+        {
+            "IPv6"
+        } else {
+            "other"
+        };
+        let transport = if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::QuicV1))
+        {
+            "QUIC"
+        } else if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Tcp(_)))
+        {
+            "TCP"
+        } else {
+            "transport"
+        };
+        let label = format!("{family} {transport}");
+        if !capabilities.contains(&label) {
+            capabilities.push(label);
+        }
+    }
+    capabilities.sort();
+    capabilities.join(", ")
+}
+
+/// Record only listeners the Swarm has reported live. `listen_on` returning a ListenerId means
+/// the request was accepted, but the OS bind may still fail asynchronously; presenting that as
+/// “bound IPv4 + IPv6” was a concrete Connectivity Assistant truth bug.
+async fn record_listener_evidence(
+    mesh: &MeshService,
+    accepted: &[Multiaddr],
+    steps: &mut Vec<DiagStep>,
+) {
+    let deadline = SystemClock.sleep(Duration::from_secs(3));
+    tokio::pin!(deadline);
+    let snapshot = tokio::select! {
+        value = mesh.next_listener_snapshot() => value,
+        _ = &mut deadline => None,
+    };
+    let addresses = snapshot.map(|value| value.addresses).unwrap_or_default();
+    let direct: Vec<_> = addresses
+        .into_iter()
+        .filter(|address| {
+            !address
+                .iter()
+                .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        })
+        .collect();
+    if direct.is_empty() {
+        steps.push(DiagStep::failed(
+            "listen",
+            "",
+            format!(
+                "{} listen request(s) were accepted, but no live OS listener was reported within 3s",
+                accepted.len()
+            ),
+        ));
+    } else {
+        steps.push(DiagStep::ok(
+            "listen",
+            "",
+            format!(
+                "Swarm reported {} live listener(s): {}",
+                direct.len(),
+                listener_summary(&direct)
+            ),
+        ));
+    }
+}
+
 /// Do the reachability work for a server: assemble the bootstrap list (auto-detected LAN IPv4,
 /// routable IPv6 and loopback, plus the user's advertised address), reserve a relay circuit, and
 /// connect + advertise at the rendezvous.
@@ -1470,19 +1636,13 @@ async fn establish_reachability(
     mesh: &MeshService,
     peer_id: &str,
     port: u16,
+    accepted_listeners: &[Multiaddr],
     net: &ServerNet,
     steps: &mut Vec<DiagStep>,
 ) -> (Reachability, Vec<String>) {
     let mut problems = Vec::new();
     let mut bootstrap = auto_bootstrap(port, peer_id);
-    steps.push(DiagStep::ok(
-        "listen",
-        format!("port {port}"),
-        format!(
-            "bound IPv4 + IPv6 over TCP + QUIC; {} address(es) auto-detected",
-            bootstrap.len()
-        ),
-    ));
+    record_listener_evidence(mesh, accepted_listeners, steps).await;
 
     let advertise = net.advertise.trim();
     if !advertise.is_empty() {
@@ -1651,12 +1811,12 @@ async fn connect_rendezvous(
 /// network identity so two servers cannot be correlated to the same person. Reusing it across
 /// launches is what keeps an already-issued invite (which embeds `/p2p/<id>`) redeemable.
 ///
-/// Returns the transport, the peer id, and the port actually in use (which differs from
-/// `net.port` only when the saved port had to be abandoned; the caller persists it back).
+/// Returns the transport, peer id, selected port, and listen requests accepted synchronously.
+/// Callers use the separate live-listener snapshot before claiming that an OS bind succeeded.
 fn build_transport(
     net: &ServerNet,
     dial: &[Multiaddr],
-) -> Result<(MeshService, libp2p::PeerId, u16), String> {
+) -> Result<(MeshService, libp2p::PeerId, u16, Vec<Multiaddr>), String> {
     let key = keypair_from_seed(net.key_seed).map_err(|e| e.to_string())?;
     let port = choose_port(net);
     let (mesh, libp2p_id, bound) =
@@ -1668,7 +1828,7 @@ fn build_transport(
     } else {
         bound.iter().find_map(listen_port).unwrap_or(0)
     };
-    Ok((mesh, libp2p_id, port))
+    Ok((mesh, libp2p_id, port, bound))
 }
 
 /// This server's libp2p peer id, derived from its persisted identity seed. Lets a caller that
@@ -1698,6 +1858,7 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
         advertise: advertise.trim().to_string(),
         relay: relay.trim().to_string(),
         rendezvous: rendezvous.trim().to_string(),
+        switchboard: false,
         // Reserved just below; this session gets the first block, the next launch the second.
         record_seq: 0,
     };
@@ -2087,6 +2248,45 @@ fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAd
     });
 }
 
+fn spawn_mesh_observation_fold(
+    app: AppHandle,
+    server: u64,
+    mut rx: watch::Receiver<MeshObservationSnapshot>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let snapshot = rx.borrow_and_update().clone();
+            let observations: Vec<String> = snapshot
+                .observations
+                .into_iter()
+                .map(|observation| {
+                    let peer = observation.observer.to_string();
+                    format!(
+                        "{} observed {}",
+                        peer.chars().take(12).collect::<String>(),
+                        observation.address
+                    )
+                })
+                .collect();
+            let state = app.state::<AppState>();
+            let changed = state
+                .inner()
+                .mesh_observations
+                .lock()
+                .await
+                .insert(server, observations.clone())
+                .as_ref()
+                != Some(&observations);
+            if changed {
+                let _ = app.emit("reachability-changed", server);
+            }
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
 /// How long the background connectivity collector waits for AutoNAT v2.
 ///
 /// The upstream client probes on a five-second cadence and may test several identify/manual
@@ -2230,13 +2430,163 @@ fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoN
 /// right amount for this gate: whether the inviter is a real member of the named group is decided
 /// later, on the wire, by `request_join`. What it does buy is that a token nobody signed, or one
 /// whose addresses were edited after signing, never causes a single packet.
-fn decode_and_verify_invite(invite_hex: &str) -> Result<InviteToken, String> {
-    let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
-    let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
+#[derive(Debug)]
+struct DecodedInvite {
+    token: InviteToken,
+    switchboards: Vec<catcoms_app::SwitchboardRoute>,
+    inviter_peer: Option<PeerId>,
+    assisted_plan: Option<Vec<u8>>,
+}
+
+/// Assisted invite plans are a distinct wire version. Keeping a textual prefix avoids presenting
+/// their outer envelope as an ordinary hex invite that an older client will mysteriously reject.
+/// Plain legacy invite hex remains accepted indefinitely by new clients.
+const ASSISTED_INVITE_PREFIX: &str = "mewtual-invite-v3:";
+/// Paste input is untrusted. Bound the hex before decoding so a giant clipboard value cannot
+/// force an allocation before the protocol codecs apply their own field limits.
+const MAX_INVITE_WIRE_BYTES: usize = 64 * 1024;
+
+fn decode_and_verify_invite(invite_hex: &str) -> Result<DecodedInvite, String> {
+    let value = invite_hex.trim();
+    let (wire, explicitly_assisted) = value
+        .strip_prefix(ASSISTED_INVITE_PREFIX)
+        .map_or((value, false), |rest| (rest, true));
+    if wire.len() > MAX_INVITE_WIRE_BYTES.saturating_mul(2) {
+        return Err("this invite is too large".to_string());
+    }
+    let bytes = hex::decode(wire).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_INVITE_WIRE_BYTES {
+        return Err("this invite is too large".to_string());
+    }
+    let (invite, switchboards, inviter_peer, assisted_plan) = match InviteJoinPlan::decode(&bytes) {
+        Ok(plan) => (
+            plan.invite,
+            plan.switchboards,
+            Some(PeerId::new(plan.inviter_peer)),
+            Some(bytes.clone()),
+        ),
+        Err(_) if !explicitly_assisted => (
+            InviteToken::decode(&bytes).map_err(|e| e.to_string())?,
+            Vec::new(),
+            None,
+            None,
+        ),
+        Err(_) => {
+            return Err("this assisted invite is malformed or its signature is invalid".into())
+        }
+    };
     if !invite.verify_self() {
         return Err("this invite's signature is not valid; it may have been altered or forged, so nothing was contacted".into());
     }
-    Ok(invite)
+    if let Some(expected) = inviter_peer {
+        for address in &invite.bootstrap {
+            if let Ok(address) = address.parse::<Multiaddr>() {
+                if let Some(actual) = target_peer_in_multiaddr(&address) {
+                    if phase0_peer_id(&actual) != expected {
+                        return Err(
+                            "assisted invite names a different peer in its direct route".into()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(DecodedInvite {
+        token: invite,
+        switchboards,
+        inviter_peer,
+        assisted_plan,
+    })
+}
+
+/// Select a tiny, inviter-signed standing-fallback dial set. Each address must terminate in the
+/// helper identity named by its route, and the total remains at the pre-membership four-address
+/// budget even if a malicious inviter signs the maximum route/address counts.
+fn switchboard_dial_plan(
+    routes: &[catcoms_app::SwitchboardRoute],
+    group_id: &[u8],
+    now_ms: u64,
+    invite_expires_at_ms: u64,
+) -> (HashMap<PeerId, u64>, Vec<Multiaddr>) {
+    let mut prepared = Vec::new();
+    for route in routes {
+        // `routes` came through `InviteJoinPlan::decode`, which verified both the helper's offer
+        // signature and the inviter's outer endorsement. Recheck the short helper deadline here,
+        // immediately before any dial; an hour-long invite cannot stretch two-minute consent.
+        if route.offer.group_id != group_id
+            || route.offer.expires_at_ms < now_ms
+            || route.offer.expires_at_ms > invite_expires_at_ms
+            || route.offer.expires_at_ms.saturating_sub(now_ms)
+                > catcoms_app::SWITCHBOARD_OFFER_MAX_FUTURE_MS
+        {
+            continue;
+        }
+        let peer = PeerId::new(route.offer.peer_id);
+        let mut addresses = Vec::new();
+        for raw in &route.offer.addresses {
+            let Ok(address) = raw.parse::<Multiaddr>() else {
+                continue;
+            };
+            if target_peer_in_multiaddr(&address)
+                .is_some_and(|target| phase0_peer_id(&target) == peer)
+                && !addresses.contains(&address)
+            {
+                addresses.push(address);
+            }
+        }
+        if !addresses.is_empty() {
+            // Clock skew tolerance authenticates an honest host's timestamp; it does not grant
+            // extra local dial time. As with reply codes, cap the effective session at the
+            // advertised lifetime from receipt.
+            let effective_expiry = route
+                .offer
+                .expires_at_ms
+                .min(now_ms.saturating_add(catcoms_app::SWITCHBOARD_OFFER_LIFETIME_MS));
+            prepared.push((peer, effective_expiry, addresses));
+        }
+    }
+
+    let mut allowed: HashMap<PeerId, u64> = HashMap::new();
+    let mut selected = Vec::new();
+    // Round-robin keeps a max-sized first helper from consuming the whole connect budget.
+    for address_index in 0..2 {
+        for (peer, expires_at_ms, addresses) in &prepared {
+            let Some(address) = addresses.get(address_index) else {
+                continue;
+            };
+            allowed
+                .entry(*peer)
+                .and_modify(|current| *current = (*current).max(*expires_at_ms))
+                .or_insert(*expires_at_ms);
+            selected.push(address.clone());
+            if selected.len() == 4 {
+                return (allowed, selected);
+            }
+        }
+    }
+    (allowed, selected)
+}
+
+#[tauri::command]
+async fn preview_invite(
+    state: State<'_, AppState>,
+    invite_hex: String,
+) -> Result<InvitePreview, String> {
+    require_unlocked_session(&state).await?;
+    let decoded = decode_and_verify_invite(&invite_hex)?;
+    let now = SystemClock.now_ms();
+    let (switchboards, _) = switchboard_dial_plan(
+        &decoded.switchboards,
+        &decoded.token.group_id,
+        now,
+        decoded.token.expires_at_ms,
+    );
+    Ok(InvitePreview {
+        direct_routes: dialable_bootstrap(&decoded.token.bootstrap).len(),
+        rendezvous_routes: decoded.token.rendezvous.len(),
+        switchboards: switchboards.len(),
+        expires_at_ms: decoded.token.expires_at_ms,
+    })
 }
 
 /// The discover-on-join path (no hard-coded inviter address): build a transport, dial the invite's
@@ -2247,6 +2597,7 @@ fn decode_and_verify_invite(invite_hex: &str) -> Result<InviteToken, String> {
 async fn discover_and_connect(
     invite: &InviteToken,
     net: &ServerNet,
+    expected_inviter: Option<PeerId>,
     steps: &mut Vec<DiagStep>,
 ) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
     // Invite-supplied, so attacker-controlled: the strict variant. The bootstrap half of this same
@@ -2261,7 +2612,8 @@ async fn discover_and_connect(
     // Bind the joiner's own (stable, persisted-identity) listen addresses so it is itself dialable;
     // post-join steady-state discovery has members register/discover + dial each other. Then dial
     // the rendezvous nodes.
-    let (mesh, libp2p_id, port) = build_transport(net, &rz_addrs)?;
+    let (mesh, libp2p_id, port, bound) = build_transport(net, &rz_addrs)?;
+    record_listener_evidence(&mesh, &bound, steps).await;
     // Advertise our own reachable addresses so the steady-state rendezvous registration carries a
     // dialable record: the LAN IPv4 and routable IPv6 when this host has them, loopback otherwise.
     for addr in external_addrs(&auto_bootstrap(port, &libp2p_id.to_string())) {
@@ -2315,6 +2667,9 @@ async fn discover_and_connect(
     let mut candidates: Vec<Candidate> = Vec::new();
     let _ = timeout(Duration::from_secs(20), async {
         while let Some(d) = mesh.next_discovered().await {
+            if expected_inviter.is_some_and(|expected| phase0_peer_id(&d.peer) != expected) {
+                continue;
+            }
             candidates.push(Candidate {
                 peer: d.peer.to_bytes(),
                 addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
@@ -2474,13 +2829,14 @@ async fn found_server_inner(
             .parse()
             .map_err(|e: libp2p::multiaddr::Error| format!("bad relay address: {e}"))?]
     };
-    let (mesh, libp2p_id, port) = build_transport(&net, &relay_dial)?;
+    let (mesh, libp2p_id, port, bound) = build_transport(&net, &relay_dial)?;
     net.port = port;
     let id = libp2p_id.to_string();
 
     // Everything that makes us reachable from off this machine. `reload_one` runs the very same
     // helper, so a restart reproduces this reachability instead of collapsing to loopback.
-    let (reach, problems) = establish_reachability(&mesh, &id, port, &net, &mut diag.steps).await;
+    let (reach, problems) =
+        establish_reachability(&mesh, &id, port, &bound, &net, &mut diag.steps).await;
     if !problems.is_empty() {
         // The user typed these addresses moments ago; tell them rather than founding a server that
         // silently nobody can reach.
@@ -2496,6 +2852,8 @@ async fn found_server_inner(
     let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
     let autonat_rx = mesh.take_autonat_snapshots().await;
     let relay_address_rx = mesh.take_relay_address_snapshots().await;
+    let mesh_observation_rx = mesh.take_mesh_observation_snapshots().await;
+    let mesh_handle = mesh.handle();
     diag.advertised = bootstrap.clone();
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
@@ -2552,6 +2910,8 @@ async fn found_server_inner(
     let invite_hex = hex::encode(invite.encode());
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
@@ -2560,12 +2920,15 @@ async fn found_server_inner(
         state,
         actor,
         events,
+        group_id,
+        device_id,
         Some(invite_hex),
         name,
         bootstrap,
         rz_vec,
-        rz_handle,
+        Some(mesh_handle),
         is_dm,
+        net.switchboard,
         net.record_seq,
     )
     .await;
@@ -2607,6 +2970,9 @@ async fn found_server_inner(
     if let Some(rx) = relay_address_rx {
         spawn_relay_fold(app.clone(), server_id, rx);
     }
+    if let Some(rx) = mesh_observation_rx {
+        spawn_mesh_observation_fold(app.clone(), server_id, rx);
+    }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
@@ -2617,6 +2983,85 @@ async fn found_server_inner(
 
 /// Join an existing server by pasting its invite: decode it, dial all bootstrap addresses,
 /// run the MLS join, then catch up #general / profiles / files.
+async fn wait_for_peer(mesh: &MeshService, wanted: PeerId, within: Duration) -> Result<(), ()> {
+    timeout(within, async {
+        loop {
+            match mesh.next_event().await {
+                Some(TransportEvent::PeerConnected(peer)) if peer == wanted => return,
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
+/// Wait for whichever peer answers a reply-code dial-back.  The reply candidate is public and
+/// may be applied by either the named inviter or an existing member helper; the subsequent MLS
+/// path distinguishes them and never grants the helper admission authority.
+async fn wait_for_reply_peer(
+    mesh: &MeshService,
+    reply: &JoinReply,
+    invite_nonce: &[u8; 16],
+    within: Duration,
+) -> Result<PeerId, ()> {
+    timeout(within, async {
+        loop {
+            match mesh.next_event().await {
+                Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) if data.first() == Some(&JOIN_REPLY_PROOF_KIND) => {
+                    let valid =
+                        reply.verify_dialback_proof(invite_nonce, from.as_bytes(), &data[1..]);
+                    responder.respond(if valid {
+                        bytes::Bytes::from_static(b"ok")
+                    } else {
+                        bytes::Bytes::new()
+                    });
+                    if valid {
+                        return from;
+                    }
+                }
+                Some(TransportEvent::Request { responder, .. }) => {
+                    responder.respond(bytes::Bytes::new());
+                }
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
+async fn wait_for_switchboard_peer(
+    mesh: &MeshService,
+    allowed: &HashMap<PeerId, u64>,
+    within: Duration,
+) -> Result<(PeerId, u64), ()> {
+    timeout(within, async {
+        loop {
+            match mesh.next_event().await {
+                Some(TransportEvent::PeerConnected(peer)) => {
+                    if let Some(expires_at_ms) = allowed.get(&peer).copied() {
+                        if SystemClock.now_ms() <= expires_at_ms {
+                            return (peer, expires_at_ms);
+                        }
+                    }
+                }
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
 #[tauri::command]
 async fn join_server(
     app: AppHandle,
@@ -2624,6 +3069,7 @@ async fn join_server(
     invite_hex: String,
     display_name: String,
     is_dm: bool,
+    allow_switchboards: bool,
 ) -> Result<FoundResult, String> {
     require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
@@ -2631,7 +3077,16 @@ async fn join_server(
         at: SystemClock.now_ms(),
         ..Default::default()
     };
-    let out = join_server_inner(&app, &state, invite_hex, display_name, is_dm, &mut diag).await;
+    let out = join_server_inner(
+        &app,
+        &state,
+        invite_hex,
+        display_name,
+        is_dm,
+        allow_switchboards,
+        &mut diag,
+    )
+    .await;
     if let Err(e) = &out {
         diag.last_error.clone_from(e);
     }
@@ -2647,11 +3102,29 @@ async fn join_server_inner(
     invite_hex: String,
     display_name: String,
     is_dm: bool,
+    allow_switchboards: bool,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
-    let invite = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
+    let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
         diag.steps.push(DiagStep::failed("invite", "", e.clone()));
     })?;
+    let invite = decoded.token;
+    let plan_inviter = decoded.inviter_peer;
+    let assisted_plan = decoded.assisted_plan;
+    let now = SystemClock.now_ms();
+    let (available_helpers, _) = switchboard_dial_plan(
+        &decoded.switchboards,
+        &invite.group_id,
+        now,
+        invite.expires_at_ms,
+    );
+    let available_switchboard_count = available_helpers.len();
+    let use_switchboards = allow_switchboards && available_switchboard_count > 0;
+    let switchboards = if allow_switchboards {
+        decoded.switchboards
+    } else {
+        Vec::new()
+    };
     diag.subject = hex::encode(&invite.inviter_device_id.as_bytes()[..8]);
     diag.steps.push(DiagStep::ok(
         "invite",
@@ -2662,6 +3135,22 @@ async fn join_server_inner(
             invite.rendezvous.len()
         ),
     ));
+    if use_switchboards {
+        diag.steps.push(DiagStep::ok(
+            "switchboard",
+            "",
+            format!(
+                "the inviter endorsed {} currently dialable standing member fallback(s); unexpired routes may be tried only after the direct route",
+                available_switchboard_count
+            ),
+        ));
+    } else if available_switchboard_count > 0 {
+        diag.steps.push(DiagStep::unknown(
+            "switchboard",
+            "",
+            "standing member fallbacks were present but the joiner did not consent to contact them",
+        ));
+    }
 
     // A joiner gets its own per-server identity + stable port too: it is a full member afterwards,
     // so its peer record has to keep resolving across restarts exactly like the founder's.
@@ -2669,11 +3158,40 @@ async fn join_server_inner(
 
     // If the invite points at a rendezvous, discover the inviter there (no hard-coded address);
     // otherwise dial the invite's bootstrap addresses directly (loopback / LAN / relayed).
-    let (mesh, inviter, rz_config) = if !invite.rendezvous.is_empty() {
-        let (mesh, inviter, rz_config, port) =
-            discover_and_connect(&invite, &net, &mut diag.steps).await?;
-        net.port = port;
-        (mesh, inviter, rz_config)
+    let (mesh, inviter, rz_config, needs_direct_wait, direct_already_failed) = if !invite
+        .rendezvous
+        .is_empty()
+    {
+        let targets =
+            validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
+        let fallback_rz_config: Vec<_> = targets
+            .iter()
+            .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
+            .collect();
+        match discover_and_connect(&invite, &net, plan_inviter, &mut diag.steps).await {
+            Ok((mesh, inviter, rz_config, port)) => {
+                net.port = port;
+                (mesh, inviter, rz_config, false, false)
+            }
+            Err(error) if use_switchboards => {
+                let inviter = plan_inviter.ok_or_else(|| {
+                    "assisted invite does not pin the named inviter transport".to_string()
+                })?;
+                // The discovery transport may already have spent its deadline and is dropped.
+                // Retain the stable identity/port preference but start a clean listener with no
+                // attacker-controlled initial dial so the consented helper path can proceed.
+                let (mesh, _id, port, bound) = build_transport(&net, &[])?;
+                record_listener_evidence(&mesh, &bound, &mut diag.steps).await;
+                net.port = port;
+                diag.steps.push(DiagStep::unknown(
+                    "switchboard",
+                    "",
+                    format!("direct rendezvous path failed ({error}); trying the consented member fallback"),
+                ));
+                (mesh, inviter, fallback_rz_config, true, true)
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         // Validated + capped before a single socket is opened (defect P7): an unvalidated list of
         // up to 64 author-chosen addresses is a connect flood with a paste for a trigger.
@@ -2688,15 +3206,18 @@ async fn join_server_inner(
                 format!("{dropped} address(es) in the invite were unusable and were not dialled"),
             ));
         }
-        if addrs.is_empty() {
+        if addrs.is_empty() && !use_switchboards {
             return Err("invite carries no usable bootstrap address".to_string());
         }
-        let inviter_lp = addrs
-            .iter()
-            .find_map(target_peer_in_multiaddr)
-            .ok_or_else(|| "bootstrap has no peer id".to_string())?;
-        let inviter = phase0_peer_id(&inviter_lp);
-        let (mesh, _id, port) = build_transport(&net, &addrs)?;
+        let inviter = match addrs.iter().find_map(target_peer_in_multiaddr) {
+            Some(peer) => phase0_peer_id(&peer),
+            None => plan_inviter.ok_or_else(|| {
+                "invite has neither a direct inviter route nor a pinned assisted inviter"
+                    .to_string()
+            })?,
+        };
+        let (mesh, _id, port, bound) = build_transport(&net, &addrs)?;
+        record_listener_evidence(&mesh, &bound, &mut diag.steps).await;
         net.port = port;
         // The transport dials these itself, concurrently, so a per-address outcome is not
         // observable here; what IS observable is which were tried and whether any answered.
@@ -2704,33 +3225,13 @@ async fn join_server_inner(
             diag.steps
                 .push(DiagStep::unknown("dial", a.to_string(), "dialled"));
         }
-        // Wait for the connection to the inviter before requesting the join.
-        timeout(Duration::from_secs(20), async {
-            loop {
-                if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                    if p == inviter {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            diag.steps.push(DiagStep::failed(
-                "connect",
-                "",
-                "none of the dialled addresses answered within 20s",
-            ));
-            "timed out connecting to the server".to_string()
-        })?;
-        diag.steps
-            .push(DiagStep::ok("connect", "", "connected to the server"));
-        (mesh, inviter, Vec::new())
+        let no_direct_route = addrs.is_empty();
+        (mesh, inviter, Vec::new(), true, no_direct_route)
     };
 
-    // Prepare this future member's own reachability before moving the mesh into `Server::join`.
-    // A successful join remains a full listening member, so UPnP and AutoNAT are just as useful
-    // here as for the founder; the old path silently discarded both result streams.
+    // Prepare the future member's own reachability *before* waiting on the one-way invite route.
+    // On timeout this exact transport and stable identity stay alive for a 60-second two-way reply
+    // window; dropping/rebuilding them would invalidate the NAT mapping in the code just copied.
     let local_peer_id = peer_id_of(&net)?;
     let joiner_addrs = auto_bootstrap(net.port, &local_peer_id);
     for addr in external_addrs(&joiner_addrs) {
@@ -2739,27 +3240,234 @@ async fn join_server_inner(
     let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
     let autonat_rx = mesh.take_autonat_snapshots().await;
     let relay_address_rx = mesh.take_relay_address_snapshots().await;
+    let mesh_observation_rx = mesh.take_mesh_observation_snapshots().await;
+    let mesh_handle = mesh.handle();
+
+    let mut join_contact = inviter;
+    let mut reply_expires_at_ms = None;
+    let mut reply_context: Option<JoinReply> = None;
+    let mut switchboard_expires_at_ms = None;
+    let mut switchboard_contacts = Vec::new();
+    if needs_direct_wait {
+        let direct_failed = direct_already_failed
+            || wait_for_peer(&mesh, inviter, Duration::from_secs(20))
+                .await
+                .is_err();
+        if direct_failed {
+            diag.steps.push(DiagStep::failed(
+                "connect",
+                "",
+                if direct_already_failed {
+                    "no usable direct inviter route remained"
+                } else {
+                    "none of the dialled addresses answered within 20s"
+                },
+            ));
+
+            // Direct-first is deliberate: member fallback reveals the joiner's IP/timing to an
+            // additional group member and may spend their bandwidth. Only routes separately
+            // labelled and signed by the inviter are dialled here; they were never mixed into the
+            // transport's initial bootstrap set.
+            if use_switchboards {
+                let now = SystemClock.now_ms();
+                let (allowed, candidates) = switchboard_dial_plan(
+                    &switchboards,
+                    &invite.group_id,
+                    now,
+                    invite.expires_at_ms,
+                );
+                let latest_deadline = allowed.values().copied().max().unwrap_or(now);
+                if !candidates.is_empty() {
+                    let _ = mesh.handle().dial_join_candidates(&candidates).await;
+                }
+                let remaining = latest_deadline.saturating_sub(now);
+                match wait_for_switchboard_peer(
+                    &mesh,
+                    &allowed,
+                    Duration::from_millis(remaining.min(15_000)),
+                )
+                .await
+                {
+                    Ok((helper, helper_deadline)) => {
+                        join_contact = helper;
+                        switchboard_contacts = allowed.into_iter().collect();
+                        switchboard_contacts
+                            .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+                        switchboard_expires_at_ms = Some(helper_deadline.min(invite.expires_at_ms));
+                        diag.steps.push(DiagStep::ok(
+                            "switchboard",
+                            "",
+                            "connected to an inviter-endorsed standing member fallback",
+                        ));
+                    }
+                    Err(()) => diag.steps.push(DiagStep::failed(
+                        "switchboard",
+                        "",
+                        "none of the inviter-endorsed standing fallbacks answered within 15s",
+                    )),
+                }
+            }
+
+            let mut candidates = external_addrs(&joiner_addrs);
+            if let Some(rx) = port_mapping_rx.as_ref() {
+                candidates.extend(
+                    rx.borrow()
+                        .active
+                        .iter()
+                        .map(|mapping| mapping.address.clone()),
+                );
+            }
+            candidates.sort_by_key(ToString::to_string);
+            candidates.dedup();
+            candidates.truncate(4);
+            if switchboard_expires_at_ms.is_none() && candidates.is_empty() {
+                diag.steps.push(DiagStep::failed(
+                    "reply",
+                    "",
+                    "this joiner has no public listener route to put in a two-way reply",
+                ));
+                return Err(
+                    "timed out connecting to the server; no direct reply route is available"
+                        .to_string(),
+                );
+            }
+
+            if switchboard_expires_at_ms.is_none() {
+                let joiner_peer = keypair_from_seed(net.key_seed)
+                    .map_err(|e| e.to_string())?
+                    .public()
+                    .to_peer_id();
+                let mut rng = OsCryptoRng;
+                let reply = JoinReply::mint(
+                    invite.encode(),
+                    &invite.invite_nonce,
+                    joiner_peer,
+                    candidates,
+                    &SystemClock,
+                    &mut rng,
+                )
+                .map_err(|e| e.to_string())?;
+                let ready = JoinReplyReady {
+                    code: reply.encode(),
+                    expires_at_ms: reply.expires_at_ms,
+                    candidate_count: reply.candidates.len(),
+                };
+                reply_expires_at_ms = Some(reply.expires_at_ms);
+                app.emit("join-reply-ready", &ready)
+                    .map_err(|e| e.to_string())?;
+                diag.steps.push(DiagStep::unknown(
+                "reply",
+                "",
+                format!(
+                    "generated a 60-second two-way reply with {} direct candidate(s); waiting for the inviter to dial back",
+                    ready.candidate_count
+                ),
+            ));
+
+                let remaining = reply.expires_at_ms.saturating_sub(SystemClock.now_ms());
+                join_contact = wait_for_reply_peer(
+                &mesh,
+                &reply,
+                &invite.invite_nonce,
+                Duration::from_millis(remaining),
+            )
+                .await
+                .map_err(|_| {
+                    diag.steps.push(DiagStep::failed(
+                        "reply",
+                        "",
+                        "the two-way reply window expired before the inviter connected",
+                    ));
+                    "two-way connection reply expired; generate a fresh reply and keep both apps open"
+                        .to_string()
+                })?;
+                reply_context = Some(reply);
+            }
+        }
+        let detail = if join_contact == inviter {
+            "connected to the named inviter"
+        } else if switchboard_expires_at_ms.is_some() {
+            "connected to an inviter-endorsed standing switchboard"
+        } else {
+            "connected to an existing member helper; it will forward only the admission handshake"
+        };
+        diag.steps.push(DiagStep::ok("connect", "", detail));
+    }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
     let name = display_name.clone();
-    // Past this point the transport is up, so a failure here is the MLS admission itself: the
-    // one the serving node's join log explains and this side cannot.
-    let mut server = Server::join(
-        mesh,
-        device,
-        OsCryptoRng,
-        Box::new(SystemClock),
-        display_name,
-        inviter,
-        &invite,
-    )
-    .await
+    let used_reply_path = reply_expires_at_ms.is_some();
+    let used_switchboard_path = switchboard_expires_at_ms.is_some();
+    let join = if switchboard_expires_at_ms.is_some() {
+        let join_plan = assisted_plan.as_deref().ok_or_else(|| {
+            "standing fallback was selected without its signed assisted invite plan".to_string()
+        })?;
+        Server::join_from_switchboards(
+            mesh,
+            device,
+            OsCryptoRng,
+            Box::new(SystemClock),
+            display_name,
+            join_contact,
+            &switchboard_contacts,
+            inviter,
+            &invite,
+            join_plan,
+        )
+        .await
+        .map(|(server, authenticated_contact)| {
+            join_contact = authenticated_contact;
+            server
+        })
+    } else if let Some(expires_at_ms) = reply_expires_at_ms {
+        let reply = reply_context
+            .as_ref()
+            .ok_or_else(|| "reply connection was selected without its proof context".to_string())?;
+        let reply_joiner_peer = reply.joiner.to_bytes();
+        Server::join_from_reply(
+            mesh,
+            device,
+            OsCryptoRng,
+            Box::new(SystemClock),
+            display_name,
+            join_contact,
+            inviter,
+            &invite,
+            reply.joiner_nonce,
+            &reply_joiner_peer,
+            expires_at_ms,
+        )
+        .await
+        .map(|(server, authenticated_contact)| {
+            join_contact = authenticated_contact;
+            server
+        })
+    } else {
+        Server::join(
+            mesh,
+            device,
+            OsCryptoRng,
+            Box::new(SystemClock),
+            display_name,
+            inviter,
+            &invite,
+        )
+        .await
+    };
+    let mut server = join
     .map_err(|e| {
         let msg = e.to_string();
+        let detail = if used_reply_path || used_switchboard_path {
+            format!(
+                "{msg}; no dial-back contact produced an inviter-signed Welcome before the reply window closed. A helper may have been unable to reach/prove the named inviter, so there may be no serving-node Join log entry"
+            )
+        } else {
+            format!("{msg}; the server refused the join, and only the serving node knows why: ask its operator to read Server settings / Join log")
+        };
         diag.steps.push(DiagStep::failed(
             "join",
             "",
-            format!("{msg}; the server refused the join, and only the serving node knows why: ask its operator to read Server settings / Join log"),
+            detail,
         ));
         msg
     })?;
@@ -2791,19 +3499,21 @@ async fn join_server_inner(
     }
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
-    actor.catch_up_channel_index(inviter).await;
+    actor.catch_up_channel_index(join_contact).await;
     actor.open_channel(general).await;
-    actor.catch_up(inviter, general).await;
-    actor.catch_up_profiles(inviter).await;
-    actor.catch_up_livery(inviter).await;
-    actor.catch_up_badges(inviter).await;
-    actor.catch_up_files(inviter).await;
-    actor.catch_up_status(inviter).await;
-    actor.catch_up_calendar(inviter).await;
-    actor.catch_up_wiki(inviter).await;
-    actor.catch_up_roles(inviter).await;
-    actor.catch_up_moderation(inviter).await;
+    actor.catch_up(join_contact, general).await;
+    actor.catch_up_profiles(join_contact).await;
+    actor.catch_up_livery(join_contact).await;
+    actor.catch_up_badges(join_contact).await;
+    actor.catch_up_files(join_contact).await;
+    actor.catch_up_status(join_contact).await;
+    actor.catch_up_calendar(join_contact).await;
+    actor.catch_up_wiki(join_contact).await;
+    actor.catch_up_roles(join_contact).await;
+    actor.catch_up_moderation(join_contact).await;
     let channels = ui_channels(actor.channels().await);
     // A joiner mints no invites (owner-scoped), but these addresses still drive its signed live
     // peer record. A later router mapping or relay reservation is folded into this same set.
@@ -2812,12 +3522,15 @@ async fn join_server_inner(
         state,
         actor,
         events,
+        group_id,
+        device_id,
         None,
         name,
         joiner_addrs,
         Vec::new(),
-        None,
+        Some(mesh_handle),
         is_dm,
+        net.switchboard,
         net.record_seq,
     )
     .await;
@@ -2847,12 +3560,265 @@ async fn join_server_inner(
     if let Some(rx) = relay_address_rx {
         spawn_relay_fold(app.clone(), server_id, rx);
     }
+    if let Some(rx) = mesh_observation_rx {
+        spawn_mesh_observation_fold(app.clone(), server_id, rx);
+    }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
         channels,
         is_dm,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_active_join_reply(
+    sessions: &mut HashMap<(u64, [u8; 16]), ActiveJoinReply>,
+    server: u64,
+    invite_nonce: [u8; 16],
+    joiner: libp2p::PeerId,
+    joiner_nonce: [u8; 16],
+    expires_at_ms: u64,
+    replace: bool,
+    now_ms: u64,
+) -> Result<(bool, u64, bool, Option<libp2p::PeerId>), String> {
+    sessions.retain(|_, active| active.expires_at_ms >= now_ms);
+    let key = (server, invite_nonce);
+    match sessions.get_mut(&key) {
+        Some(active) if active.joiner != joiner && !replace => Err(
+            "a different joiner is already using this invite's reply window; confirm replacement only if you intended to switch people"
+                .to_string(),
+        ),
+        Some(active) if active.joiner != joiner => {
+            let displaced = active.joiner;
+            let generation = active.generation.saturating_add(1);
+            *active = ActiveJoinReply {
+                joiner,
+                nonces: vec![joiner_nonce],
+                expires_at_ms,
+                generation,
+            };
+            Ok((true, generation, true, Some(displaced)))
+        }
+        Some(active) => {
+            if active.nonces.contains(&joiner_nonce) {
+                return Ok((false, active.generation, false, None));
+            }
+            if active.nonces.len() >= 4 {
+                active.nonces.remove(0);
+            }
+            active.nonces.push(joiner_nonce);
+            active.expires_at_ms = expires_at_ms;
+            active.generation = active.generation.saturating_add(1);
+            Ok((false, active.generation, true, None))
+        }
+        None => {
+            if sessions.len() >= MAX_ACTIVE_JOIN_REPLIES {
+                return Err("too many connection replies are active; wait for one to expire"
+                    .to_string());
+            }
+            sessions.insert(
+                key,
+                ActiveJoinReply {
+                    joiner,
+                    nonces: vec![joiner_nonce],
+                    expires_at_ms,
+                    generation: 1,
+                },
+            );
+            Ok((false, 1, true, None))
+        }
+    }
+}
+
+/// Apply a joiner's short-lived two-way reply and repeatedly race its validated TCP/QUIC
+/// candidates until the window expires. This only establishes transport: MLS admission still
+/// runs on the inviter named and signed by the embedded invite, so a helper/other member cannot
+/// admit anybody through this command.
+#[tauri::command]
+async fn apply_join_reply(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: u64,
+    code: String,
+    replace: bool,
+) -> Result<JoinReplyApplied, String> {
+    require_unlocked_session(&state).await?;
+    let reply = JoinReply::decode(&code).map_err(|e| e.to_string())?;
+    let permit = InviteToken::decode(&reply.invite_permit).map_err(|e| e.to_string())?;
+    if !permit.verify_self() {
+        return Err("connection reply contains an invalid signed invite".to_string());
+    }
+    reply
+        .verify(&permit.invite_nonce, &SystemClock)
+        .map_err(|e| e.to_string())?;
+    let now_ms = SystemClock.now_ms();
+    if permit.expires_at_ms < now_ms {
+        return Err("the invite inside this connection reply has expired".to_string());
+    }
+    // Verification tolerates modest clock skew so two honest devices do not reject one another,
+    // but that tolerance must not lengthen the local dial/helper authorization window. A bearer
+    // can edit and re-MAC the reply, so cap every local side effect to sixty seconds from receipt.
+    let effective_expires_at_ms = effective_join_reply_expiry(reply.expires_at_ms, now_ms);
+
+    let (mesh, actor, group_id, device_id) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "server not found".to_string())?;
+        (
+            entry
+                .mesh
+                .clone()
+                .ok_or_else(|| "this server has no live transport handle".to_string())?,
+            entry.actor.clone(),
+            entry.group_id.clone(),
+            entry.device_id,
+        )
+    };
+    if permit.group_id != group_id {
+        return Err("connection reply belongs to a different server".to_string());
+    }
+    if !actor.contains_member_device(permit.inviter_device_id).await {
+        return Err(
+            "the signed invite in this reply was not issued by a current server member".to_string(),
+        );
+    }
+    let helper = permit.inviter_device_id != device_id;
+    let local_peer = mesh.local_peer();
+    let inviter_peers: HashSet<libp2p::PeerId> = permit
+        .bootstrap
+        .iter()
+        .filter_map(|address| address.parse::<Multiaddr>().ok())
+        .filter_map(|address| target_peer_in_multiaddr(&address))
+        .collect();
+    if inviter_peers.len() > 1 {
+        return Err(
+            "the invite in this reply does not name one unambiguous inviter peer".to_string(),
+        );
+    }
+    let inviter_peer = if !helper {
+        local_peer
+    } else if let Some(peer) = inviter_peers.iter().next() {
+        phase0_peer_id(peer)
+    } else {
+        actor
+            .member_transport_peer(permit.inviter_device_id)
+            .await
+            .ok_or_else(|| {
+                "this member has no current signed route for the invite's named inviter".to_string()
+            })?
+    };
+    let _apply_guard = state.join_reply_apply.lock().await;
+    let mut reply_sessions = state.join_replies.lock().await;
+    let (replaced, generation, start_dial, displaced) = record_active_join_reply(
+        &mut reply_sessions,
+        server,
+        permit.invite_nonce,
+        reply.joiner,
+        reply.joiner_nonce,
+        effective_expires_at_ms,
+        replace,
+        now_ms,
+    )?;
+    drop(reply_sessions);
+    if let Some(displaced) = displaced {
+        actor
+            .revoke_join_helper(phase0_peer_id(&displaced), permit.invite_nonce)
+            .await;
+    }
+    if helper
+        && !actor
+            .authorize_join_helper(
+                phase0_peer_id(&reply.joiner),
+                permit.invite_nonce,
+                permit.inviter_device_id,
+                inviter_peer,
+                effective_expires_at_ms,
+            )
+            .await
+    {
+        let mut sessions = state.join_replies.lock().await;
+        if sessions
+            .get(&(server, permit.invite_nonce))
+            .is_some_and(|active| active.generation == generation && active.joiner == reply.joiner)
+        {
+            sessions.remove(&(server, permit.invite_nonce));
+        }
+        return Err(
+            "this member could not open a bounded helper window for that reply".to_string(),
+        );
+    }
+    let targets = reply.dial_targets();
+    let target_count = targets.len();
+    let expires_at_ms = effective_expires_at_ms;
+    let joiner = reply.joiner;
+    let proof = reply.dialback_proof(&permit.invite_nonce, local_peer.as_bytes());
+    let jitter = u64::from(u16::from_be_bytes([
+        reply.joiner_nonce[0],
+        reply.joiner_nonce[1],
+    ])) % 200;
+    if start_dial {
+        let task_app = app.clone();
+        let invite_nonce = permit.invite_nonce;
+        tauri::async_runtime::spawn(async move {
+            let clock = SystemClock;
+            let mut delay_ms = 200 + jitter;
+            while clock.now_ms() <= expires_at_ms {
+                let current = task_app
+                    .state::<AppState>()
+                    .inner()
+                    .join_replies
+                    .lock()
+                    .await
+                    .get(&(server, invite_nonce))
+                    .is_some_and(|active| {
+                        active.generation == generation && active.joiner == joiner
+                    });
+                if !current || mesh.dial_join_candidates(&targets).await.is_err() {
+                    return;
+                }
+                // A socket alone proves nothing: send the code-holder proof over the Noise
+                // connection before the retained joiner reveals its bearer invite/KeyPackage.
+                let mut proof_request = Vec::with_capacity(33);
+                proof_request.push(JOIN_REPLY_PROOF_KIND);
+                proof_request.extend_from_slice(&proof);
+                let _ = mesh
+                    .request_control(phase0_peer_id(&joiner), bytes::Bytes::from(proof_request))
+                    .await;
+                clock.sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(4_000);
+            }
+        });
+    }
+
+    {
+        let mut diag = state.diag.lock().await;
+        if diag.server == server {
+            diag.steps.push(DiagStep::unknown(
+                "reply",
+                joiner.to_string(),
+                format!(
+                    "accepted a two-way reply and started a bounded dial race across {} candidate(s){}",
+                    target_count,
+                    if helper { "; this member will only forward the admission handshake" } else { "" }
+                ),
+            ));
+        }
+    }
+    let out = JoinReplyApplied {
+        joiner: joiner.to_string(),
+        expires_at_ms,
+        replaced,
+        helper,
+    };
+    app.emit("join-reply-applied", &out)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) -> u64 {
+    encoded_expires_at_ms.min(received_at_ms.saturating_add(catcoms_net::JOIN_REPLY_LIFETIME_MS))
 }
 
 /// Leave a server: shut down its actor and drop it from the registry.
@@ -2862,6 +3828,12 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
     state.storage_health.lock().await.remove(&server);
     state.upnp.lock().await.remove(&server);
     state.autonat.lock().await.remove(&server);
+    state.mesh_observations.lock().await.remove(&server);
+    state
+        .join_replies
+        .lock()
+        .await
+        .retain(|(candidate_server, _), _| *candidate_server != server);
     if let Some(entry) = state.servers.lock().await.remove(&server) {
         entry.actor.shutdown().await;
     }
@@ -2927,26 +3899,22 @@ fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
     require_unlocked_session(&state).await?;
-    let (stored, current) = {
+    let has_invite = {
         let servers = state.servers.lock().await;
         match servers.get(&server) {
-            Some(e) => (e.invite.clone(), e.bootstrap.clone()),
+            Some(e) => e.invite.is_some(),
             None => return Ok(None),
         }
     };
-    let Some(hex_invite) = stored else {
+    if !has_invite {
         return Ok(None); // a joiner mints nothing
-    };
-    let stale = hex::decode(&hex_invite)
-        .ok()
-        .and_then(|b| InviteToken::decode(&b).ok())
-        .is_some_and(|t| invite_addresses_changed(&t.bootstrap, &current));
-    if !stale {
-        return Ok(Some(hex_invite));
     }
-    // The old token is known to name the wrong route set. If re-minting fails, surface the error;
-    // returning it as a fallback would let the UI copy a route we just withdrew.
-    match mint_and_store_invite(&state, server).await {
+    // A standing offer is intentionally short-lived and can disappear without changing our own
+    // bootstrap. Re-wrap the same still-valid inner token on every display/copy, changing only
+    // its signed helper plan. A new nonce is minted only when the inner token expired or its own
+    // direct/rendezvous routes changed; otherwise opening this panel would create bearer invites
+    // and rendezvous registrations without an explicit human action.
+    match refresh_or_mint_invite(&state, server, false).await {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
             eprintln!("get_invite: re-mint after a reachability change failed: {e}");
@@ -2993,41 +3961,79 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
 /// because a stored one went stale, belongs in [`mint_invite_fresh`] and not here; the P6
 /// eviction lift is the first such thing.
 async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, String> {
+    refresh_or_mint_invite(state, server, true).await
+}
+
+fn encode_invite_text(encoded: &[u8]) -> String {
+    if InviteJoinPlan::decode(encoded).is_ok() {
+        format!("{ASSISTED_INVITE_PREFIX}{}", hex::encode(encoded))
+    } else {
+        hex::encode(encoded)
+    }
+}
+
+/// Refresh only the short-lived helper envelope when possible. `force_new` is reserved for the
+/// explicit Generate action; automatic display/copy refresh must preserve a still-valid nonce.
+async fn refresh_or_mint_invite(
+    state: &AppState,
+    server: u64,
+    force_new: bool,
+) -> Result<String, String> {
     let _mint_guard = state.invite_mint.lock().await;
-    let (bootstrap, rendezvous, handle) = {
+    let (bootstrap, rendezvous, handle, stored_invite) = {
         let servers = state.servers.lock().await;
         let e = servers
             .get(&server)
             .ok_or_else(|| "unknown server".to_string())?;
-        (e.bootstrap.clone(), e.rendezvous.clone(), e.mesh.clone())
+        (
+            e.bootstrap.clone(),
+            e.rendezvous.clone(),
+            e.mesh.clone(),
+            e.invite.clone(),
+        )
     };
     let actor = actor_of(state, server).await?;
-    let mut nonce = [0u8; 16];
-    let mut rng = OsCryptoRng;
-    rng.fill_bytes(&mut nonce);
-    let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
-    let encoded = if rendezvous.is_empty() {
-        actor.mint_invite(nonce, expires, bootstrap.clone()).await?
+    let reusable = (!force_new)
+        .then_some(stored_invite.as_deref())
+        .flatten()
+        .and_then(|text| decode_and_verify_invite(text).ok())
+        .map(|decoded| decoded.token)
+        .filter(|token| {
+            token.expires_at_ms >= SystemClock.now_ms()
+                && !invite_addresses_changed(&token.bootstrap, &bootstrap)
+                && !invite_addresses_changed(&token.rendezvous, &rendezvous)
+        });
+    let plain_encoded = if let Some(token) = reusable {
+        token.encode()
     } else {
-        let encoded = actor
-            .mint_invite_with_rendezvous(nonce, expires, bootstrap.clone(), rendezvous.clone())
-            .await?;
-        // Register the fresh invite's namespace so the new joiner can discover us. This node's own
-        // rendezvous config (typed into the create-server form, or restored from its own sealed
-        // network record), so the operator variant: a joiner reading the invite we are about to
-        // mint validates it again on the way in, with the strict one.
-        if let (Some(handle), Some(rz)) = (
-            &handle,
-            validate_operator_rendezvous_addrs(&rendezvous)
-                .ok()
-                .and_then(|v| v.into_iter().next()),
-        ) {
-            let token = InviteToken::decode(&encoded).map_err(|e| e.to_string())?;
-            register_join_ns(handle, &token.group_id, &token.invite_nonce, &rz).await?;
+        let mut nonce = [0u8; 16];
+        let mut rng = OsCryptoRng;
+        rng.fill_bytes(&mut nonce);
+        let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
+        if rendezvous.is_empty() {
+            actor.mint_invite(nonce, expires, bootstrap.clone()).await?
+        } else {
+            let encoded = actor
+                .mint_invite_with_rendezvous(nonce, expires, bootstrap.clone(), rendezvous.clone())
+                .await?;
+            // Register the fresh invite's namespace so the new joiner can discover us. This node's own
+            // rendezvous config (typed into the create-server form, or restored from its own sealed
+            // network record), so the operator variant: a joiner reading the invite we are about to
+            // mint validates it again on the way in, with the strict one.
+            if let (Some(handle), Some(rz)) = (
+                &handle,
+                validate_operator_rendezvous_addrs(&rendezvous)
+                    .ok()
+                    .and_then(|v| v.into_iter().next()),
+            ) {
+                let token = InviteToken::decode(&encoded).map_err(|e| e.to_string())?;
+                register_join_ns(handle, &token.group_id, &token.invite_nonce, &rz).await?;
+            }
+            encoded
         }
-        encoded
     };
-    let invite_hex = hex::encode(encoded);
+    let encoded = actor.wrap_invite_with_switchboards(plain_encoded).await?;
+    let invite_hex = encode_invite_text(&encoded);
     {
         let mut servers = state.servers.lock().await;
         let e = servers
@@ -3905,7 +4911,146 @@ async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, St
         let evidence = state.autonat.lock().await.get(&diag.server).cloned();
         autonat_status(&diag.advertised, evidence.as_ref())
     };
+    diag.mesh_observations = if diag.server == 0 {
+        Vec::new()
+    } else {
+        state
+            .mesh_observations
+            .lock()
+            .await
+            .get(&diag.server)
+            .cloned()
+            .unwrap_or_default()
+    };
     Ok(diag)
+}
+
+fn switchboard_route_usable(address: &str) -> bool {
+    // A relay circuit is useful only when the relay host itself is a literal public route. The
+    // old `contains p2p-circuit` shortcut accepted LAN/DNS relay paths which the signed-offer
+    // codec later stripped, letting Settings enable a role the protocol could never advertise.
+    address
+        .parse::<Multiaddr>()
+        .is_ok_and(|addr| addr_is_globally_routable(&addr))
+}
+
+#[tauri::command]
+async fn get_switchboard_status(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<SwitchboardStatus, String> {
+    require_unlocked_session(&state).await?;
+    let (actor, offered, eligible) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        (
+            entry.actor.clone(),
+            entry.switchboard,
+            entry
+                .bootstrap
+                .iter()
+                .any(|address| switchboard_route_usable(address)),
+        )
+    };
+    let online = actor
+        .switchboard_offers()
+        .await
+        .into_iter()
+        .map(|offer| SwitchboardMember {
+            fingerprint: hex::encode(&offer.device_id().as_bytes()[..8]),
+            addresses: offer.addresses.len(),
+        })
+        .collect();
+    let reason = if eligible {
+        "This device has an advertised public or relayed candidate route it can offer. Direct reachability remains best-effort until a callback succeeds.".to_string()
+    } else {
+        "An advertised public mapping candidate, public IPv6 address, manual forward, or relay circuit is required before this device can host.".to_string()
+    };
+    Ok(SwitchboardStatus {
+        offered,
+        eligible,
+        online,
+        reason,
+    })
+}
+
+#[tauri::command]
+async fn set_switchboard_offered(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: u64,
+    offered: bool,
+) -> Result<SwitchboardStatus, String> {
+    require_unlocked_session(&state).await?;
+    let actor = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        let eligible = entry
+            .bootstrap
+            .iter()
+            .any(|address| switchboard_route_usable(address));
+        if offered && !eligible {
+            return Err("this device has no usable public or relay route to offer".to_string());
+        }
+        entry.actor.clone()
+    };
+    if !offered {
+        // Revocation is fail-safe: close the protocol gate first. Even if disk sealing fails, the
+        // current process and UI state remain off rather than silently continuing to serve.
+        actor.set_switchboard_offered(false).await?;
+        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+            entry.switchboard = false;
+        }
+    }
+    let persist_result: Result<(), String> = async {
+        let store = state.store.lock().await;
+        if let Some(store) = store.as_ref() {
+            let mut net = store
+                .load_server_net(server)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "this server has no persisted network record".to_string())?;
+            net.switchboard = offered;
+            let mut rng = OsCryptoRng;
+            store
+                .save_server_net(server, &net, &mut rng)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = persist_result {
+        return Err(if offered {
+            format!("hosting was not enabled because consent could not be saved: {error}")
+        } else {
+            format!(
+                "hosting is off for this session, but the revocation could not be saved: {error}"
+            )
+        });
+    }
+    if offered {
+        // Enabling is the reverse order: durable consent first, then the serving gate. If the
+        // actor has stopped, roll the persisted bit back so a reload cannot surprise-enable it.
+        if let Err(error) = actor.set_switchboard_offered(true).await {
+            let store = state.store.lock().await;
+            if let Some(store) = store.as_ref() {
+                if let Ok(Some(mut net)) = store.load_server_net(server) {
+                    net.switchboard = false;
+                    let mut rng = OsCryptoRng;
+                    let _ = store.save_server_net(server, &net, &mut rng);
+                }
+            }
+            return Err(error);
+        }
+        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+            entry.switchboard = true;
+        }
+    }
+    let _ = app.emit("switchboard-changed", server);
+    get_switchboard_status(state, server).await
 }
 
 fn validate_ui_state_json(json: &str) -> Result<(), String> {
@@ -4617,11 +5762,10 @@ async fn reload_one(
     // existed it is the only surviving record of which rendezvous this server used.
     let persisted_invite = (!record.invite.is_empty())
         .then(|| {
-            hex::decode(&record.invite)
+            decode_and_verify_invite(&record.invite)
                 .ok()
-                .map(|b| InviteToken::decode(&b).ok())
+                .map(|decoded| decoded.token)
         })
-        .flatten()
         .flatten();
     let invite_rendezvous = persisted_invite
         .as_ref()
@@ -4634,14 +5778,15 @@ async fn reload_one(
     let mut net = load_or_init_server_net(state, record.id, &invite_rendezvous).await;
     let saved_port = net.port;
     let relay_dial: Vec<Multiaddr> = net.relay.parse().into_iter().collect();
-    let (mesh, libp2p_id, port) = build_transport(&net, &relay_dial)?;
+    let (mesh, libp2p_id, port, bound) = build_transport(&net, &relay_dial)?;
     net.port = port;
 
     // Re-run the founder's reachability work verbatim: the advertise address, the UPnP probe, the
     // relay-circuit reservation and the rendezvous registration. Before this, a reload rebuilt a
     // loopback-only bootstrap and every invite minted afterwards was same-machine only.
     let id = libp2p_id.to_string();
-    let (reach, problems) = establish_reachability(&mesh, &id, port, &net, &mut Vec::new()).await;
+    let (reach, problems) =
+        establish_reachability(&mesh, &id, port, &bound, &net, &mut Vec::new()).await;
     for p in &problems {
         // Unlike founding, a reload never fails over this: the user is not standing at a form, and
         // a server that loads with reduced reach still reads its history and re-dials its peers.
@@ -4658,6 +5803,8 @@ async fn reload_one(
     let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
     let autonat_rx = mesh.take_autonat_snapshots().await;
     let relay_address_rx = mesh.take_relay_address_snapshots().await;
+    let mesh_observation_rx = mesh.take_mesh_observation_snapshots().await;
+    let mesh_handle = mesh.handle();
 
     // Re-register the persisted invite's own (nonce-keyed) namespace, so the invite that is about
     // to be re-presented in the UI still resolves for whoever is holding it. (`rz_handle` is `Some`
@@ -4691,6 +5838,7 @@ async fn reload_one(
     if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
         eprintln!("reload: publishing the peer record failed: {e}");
     }
+    server.set_switchboard_offered(net.switchboard);
     // Restore the cross-session address cache: the previously-proven members this node can offer
     // the dial policy immediately, before any rendezvous has had a chance to answer with Sybils.
     // Best-effort; a missing, unreadable or tamper-detected cache just means no cached candidates.
@@ -4748,6 +5896,8 @@ async fn reload_one(
     };
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
@@ -4757,12 +5907,15 @@ async fn reload_one(
         record.id,
         ServerEntry {
             actor,
+            group_id,
+            device_id,
             invite: presented_invite,
             name: record.display_name.clone(),
             bootstrap,
             rendezvous: rz_vec,
-            mesh: rz_handle,
+            mesh: Some(mesh_handle),
             is_dm: record.is_dm,
+            switchboard: net.switchboard,
             record_seq: net.record_seq,
         },
     );
@@ -4792,6 +5945,9 @@ async fn reload_one(
     }
     if let Some(rx) = relay_address_rx {
         spawn_relay_fold(app.clone(), record.id, rx);
+    }
+    if let Some(rx) = mesh_observation_rx {
+        spawn_mesh_observation_fold(app.clone(), record.id, rx);
     }
     Ok(())
 }
@@ -5882,6 +7038,7 @@ async fn join_one_grant(
         .ok_or_else(|| "grant address has no peer id".to_string())?;
     let contact = phase0_peer_id(&contact_lp);
     let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
+    let mesh_handle = mesh.handle();
     timeout(Duration::from_secs(20), async {
         loop {
             if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
@@ -5939,6 +7096,8 @@ async fn join_one_grant(
     }
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
     actor.catch_up_channel_index(contact).await;
@@ -5969,11 +7128,14 @@ async fn join_one_grant(
         state,
         actor,
         events,
+        group_id,
+        device_id,
         None,
         name,
         Vec::new(),
         Vec::new(),
-        None,
+        Some(mesh_handle),
+        false,
         false,
         0,
     )
@@ -6132,7 +7294,9 @@ pub fn run() {
             lock_session,
             unlock,
             found_server,
+            preview_invite,
             join_server,
+            apply_join_reply,
             leave_server,
             open_channel,
             get_channels,
@@ -6195,6 +7359,8 @@ pub fn run() {
             resolve_kick_case,
             get_join_attempts,
             get_connectivity,
+            get_switchboard_status,
+            set_switchboard_offered,
             get_ui_state,
             save_ui_state,
             create_backup,
@@ -6235,6 +7401,276 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_libp2p_peer(n: u8) -> libp2p::PeerId {
+        let mut seed = [21; 32];
+        seed[0] = n;
+        keypair_from_seed(seed).unwrap().public().to_peer_id()
+    }
+
+    #[test]
+    fn listener_summary_reports_only_the_transports_actually_observed() {
+        let addresses = vec![
+            "/ip4/0.0.0.0/tcp/22487".parse().unwrap(),
+            "/ip6/::/udp/22487/quic-v1".parse().unwrap(),
+            "/ip4/203.0.113.7/tcp/4001/p2p/12D3KooWF8W6GDyoRR93iGs7VjVQ7jH1mDbGKiqd28KxoM6qQjTq/p2p-circuit"
+                .parse()
+                .unwrap(),
+        ];
+        assert_eq!(listener_summary(&addresses), "IPv4 TCP, IPv6 QUIC");
+        assert_eq!(listener_summary(&addresses[2..]), "");
+    }
+
+    #[test]
+    fn join_reply_refresh_is_idempotent_and_key_replacement_needs_confirmation() {
+        let mut sessions = HashMap::new();
+        let invite = [7; 16];
+        let first = test_libp2p_peer(1);
+        let other = test_libp2p_peer(2);
+
+        assert_eq!(
+            record_active_join_reply(
+                &mut sessions,
+                4,
+                invite,
+                first,
+                [1; 16],
+                61_000,
+                false,
+                1_000,
+            ),
+            Ok((false, 1, true, None))
+        );
+        // Exact replay is harmless and does not grow the nonce ledger.
+        assert_eq!(
+            record_active_join_reply(
+                &mut sessions,
+                4,
+                invite,
+                first,
+                [1; 16],
+                62_000,
+                false,
+                2_000,
+            ),
+            Ok((false, 1, false, None))
+        );
+        assert_eq!(sessions[&(4, invite)].nonces.len(), 1);
+
+        let refused = record_active_join_reply(
+            &mut sessions,
+            4,
+            invite,
+            other,
+            [2; 16],
+            63_000,
+            false,
+            3_000,
+        )
+        .unwrap_err();
+        assert!(refused.contains("confirm replacement"));
+        assert_eq!(sessions[&(4, invite)].joiner, first);
+
+        assert_eq!(
+            record_active_join_reply(
+                &mut sessions,
+                4,
+                invite,
+                other,
+                [2; 16],
+                63_000,
+                true,
+                3_000,
+            ),
+            Ok((true, 2, true, Some(first)))
+        );
+        assert_eq!(sessions[&(4, invite)].joiner, other);
+    }
+
+    #[test]
+    fn expired_join_reply_sessions_are_pruned_and_refreshes_are_bounded() {
+        let mut sessions = HashMap::new();
+        let peer = test_libp2p_peer(3);
+        for nonce in 0..6u8 {
+            record_active_join_reply(
+                &mut sessions,
+                9,
+                [4; 16],
+                peer,
+                [nonce; 16],
+                100_000,
+                false,
+                1_000,
+            )
+            .unwrap();
+        }
+        assert_eq!(sessions[&(9, [4; 16])].nonces.len(), 4);
+
+        record_active_join_reply(
+            &mut sessions,
+            10,
+            [5; 16],
+            peer,
+            [9; 16],
+            200_000,
+            false,
+            100_001,
+        )
+        .unwrap();
+        assert!(!sessions.contains_key(&(9, [4; 16])));
+    }
+
+    #[test]
+    fn active_join_reply_windows_have_a_global_bound() {
+        let mut sessions = HashMap::new();
+        let peer = test_libp2p_peer(4);
+        for server in 0..MAX_ACTIVE_JOIN_REPLIES as u64 {
+            record_active_join_reply(
+                &mut sessions,
+                server,
+                [server as u8; 16],
+                peer,
+                [server as u8; 16],
+                100_000,
+                false,
+                1_000,
+            )
+            .unwrap();
+        }
+        let error = record_active_join_reply(
+            &mut sessions,
+            MAX_ACTIVE_JOIN_REPLIES as u64,
+            [0xff; 16],
+            peer,
+            [0xff; 16],
+            100_000,
+            false,
+            1_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("too many connection replies"));
+        assert_eq!(sessions.len(), MAX_ACTIVE_JOIN_REPLIES);
+    }
+
+    #[test]
+    fn clock_skew_never_extends_a_received_join_reply_past_sixty_seconds() {
+        let now = 1_000_000;
+        assert_eq!(
+            effective_join_reply_expiry(now + 90_000, now),
+            now + catcoms_net::JOIN_REPLY_LIFETIME_MS
+        );
+        assert_eq!(effective_join_reply_expiry(now + 20_000, now), now + 20_000);
+    }
+
+    #[test]
+    fn switchboard_dial_plan_skips_expired_or_mismatched_routes_and_caps_total_dials() {
+        let now = 1_000;
+        let group_id = vec![9; 16];
+        let first = test_libp2p_peer(50);
+        let second = test_libp2p_peer(51);
+        let first_phase = phase0_peer_id(&first);
+        let second_phase = phase0_peer_id(&second);
+        let routes = vec![
+            catcoms_app::SwitchboardRoute {
+                offer: catcoms_app::SwitchboardOffer {
+                    group_id: group_id.clone(),
+                    device_pubkey: vec![1; 32],
+                    peer_id: *first_phase.as_bytes(),
+                    addresses: vec![
+                        format!("/ip4/45.79.12.34/tcp/22487/p2p/{first}"),
+                        format!("/ip4/45.79.12.34/udp/22487/quic-v1/p2p/{first}"),
+                        format!("/ip4/45.79.12.34/tcp/9/p2p/{second}"),
+                    ],
+                    seq: 1,
+                    expires_at_ms: 3_000,
+                    signature: [0; 64],
+                },
+            },
+            catcoms_app::SwitchboardRoute {
+                offer: catcoms_app::SwitchboardOffer {
+                    group_id: group_id.clone(),
+                    device_pubkey: vec![2; 32],
+                    peer_id: *second_phase.as_bytes(),
+                    addresses: vec![
+                        format!("/ip4/8.8.8.8/tcp/22487/p2p/{second}"),
+                        format!("/ip4/8.8.8.8/udp/22487/quic-v1/p2p/{second}"),
+                    ],
+                    seq: 1,
+                    expires_at_ms: 4_000,
+                    signature: [0; 64],
+                },
+            },
+            catcoms_app::SwitchboardRoute {
+                offer: catcoms_app::SwitchboardOffer {
+                    group_id: group_id.clone(),
+                    device_pubkey: vec![3; 32],
+                    peer_id: *phase0_peer_id(&test_libp2p_peer(52)).as_bytes(),
+                    addresses: vec![format!(
+                        "/ip4/1.1.1.1/tcp/22487/p2p/{}",
+                        test_libp2p_peer(52)
+                    )],
+                    seq: 1,
+                    expires_at_ms: 999,
+                    signature: [0; 64],
+                },
+            },
+        ];
+
+        let (allowed, addresses) = switchboard_dial_plan(&routes, &group_id, now, 10_000);
+        assert_eq!(addresses.len(), 4);
+        assert_eq!(allowed.len(), 2);
+        assert_eq!(allowed.get(&first_phase), Some(&3_000));
+        assert_eq!(allowed.get(&second_phase), Some(&4_000));
+        assert!(addresses.iter().all(|address| {
+            target_peer_in_multiaddr(address).is_some_and(|peer| peer == first || peer == second)
+        }));
+    }
+
+    #[test]
+    fn switchboard_host_eligibility_requires_a_public_literal_even_for_relays() {
+        let relay = test_libp2p_peer(70);
+        let client = test_libp2p_peer(71);
+        assert!(switchboard_route_usable(&format!(
+            "/ip4/8.8.8.8/tcp/22487/p2p/{relay}/p2p-circuit/p2p/{client}"
+        )));
+        assert!(!switchboard_route_usable(&format!(
+            "/ip4/192.168.1.2/tcp/22487/p2p/{relay}/p2p-circuit/p2p/{client}"
+        )));
+        assert!(!switchboard_route_usable(&format!(
+            "/dns4/relay.example/tcp/22487/p2p/{relay}/p2p-circuit/p2p/{client}"
+        )));
+    }
+
+    #[test]
+    fn switchboard_clock_skew_never_grants_more_than_two_local_minutes() {
+        let now = 1_000_000;
+        let group_id = vec![0x44; 16];
+        let peer = test_libp2p_peer(72);
+        let phase_peer = phase0_peer_id(&peer);
+        let routes = vec![catcoms_app::SwitchboardRoute {
+            offer: catcoms_app::SwitchboardOffer {
+                group_id: group_id.clone(),
+                device_pubkey: vec![4; 32],
+                peer_id: *phase_peer.as_bytes(),
+                addresses: vec![format!("/ip4/8.8.4.4/tcp/22487/p2p/{peer}")],
+                seq: 1,
+                expires_at_ms: now + catcoms_app::SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+                signature: [0; 64],
+            },
+        }];
+
+        let (allowed, addresses) = switchboard_dial_plan(
+            &routes,
+            &group_id,
+            now,
+            now + catcoms_app::SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+        );
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(
+            allowed.get(&phase_peer),
+            Some(&(now + catcoms_app::SWITCHBOARD_OFFER_LIFETIME_MS))
+        );
+    }
 
     #[test]
     fn port_mapping_diagnostics_distinguish_waiting_unavailable_and_live_transports() {
@@ -6781,6 +8217,7 @@ mod tests {
             advertise: String::new(),
             relay: String::new(),
             rendezvous: String::new(),
+            switchboard: false,
             record_seq: 0,
         };
         // Nothing is holding the derived port on a test machine, so that is what gets chosen, and
@@ -6886,6 +8323,11 @@ mod tests {
         // Garbage in the box is refused too, rather than panicking.
         assert!(decode_and_verify_invite("not hex").is_err());
         assert!(decode_and_verify_invite("00ff00ff").is_err());
+        assert!(
+            decode_and_verify_invite(&"00".repeat(MAX_INVITE_WIRE_BYTES + 1))
+                .unwrap_err()
+                .contains("too large")
+        );
     }
 
     #[test]

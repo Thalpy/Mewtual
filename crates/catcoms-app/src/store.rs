@@ -72,6 +72,9 @@ pub struct ServerNet {
     pub relay: String,
     /// The rendezvous node multiaddr to register at, empty if none.
     pub rendezvous: String,
+    /// Explicit per-server consent for this device to act as a standing member switchboard.
+    /// False for every pre-v2 record; reachability is checked again before the role is offered.
+    pub switchboard: bool,
     /// The highest **peer-record sequence number** this server may already have published; see
     /// [`ServerNet::reserve_record_seq_block`].
     pub record_seq: u64,
@@ -143,23 +146,26 @@ impl Drop for ServerNet {
 /// trailing-block trick was explicitly single-shot (see [`encode_registry`]); this record starts
 /// with an explicit version so it can actually grow later.
 const SERVER_NET_V1: u8 = 1;
+const SERVER_NET_V2: u8 = 2;
 
 fn encode_server_net(net: &ServerNet) -> Vec<u8> {
     let mut e = Encoder::new();
-    e.put_u8(SERVER_NET_V1);
+    e.put_u8(SERVER_NET_V2);
     e.put_bytes(&net.key_seed).expect("seed fits");
     e.put_u16(net.port);
     e.put_str(&net.advertise).expect("advertise fits");
     e.put_str(&net.relay).expect("relay fits");
     e.put_str(&net.rendezvous).expect("rendezvous fits");
     e.put_u64(net.record_seq);
+    e.put_u8(u8::from(net.switchboard));
     e.finish()
 }
 
 fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     let bad = || AppError::Io("corrupt server net record".into());
     let mut d = Decoder::new(bytes);
-    if d.get_u8().map_err(|_| bad())? != SERVER_NET_V1 {
+    let version = d.get_u8().map_err(|_| bad())?;
+    if version != SERVER_NET_V1 && version != SERVER_NET_V2 {
         return Err(AppError::Io("unknown server net record version".into()));
     }
     let seed = d.get_bytes().map_err(|_| bad())?;
@@ -169,6 +175,15 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
     let relay = d.get_str().map_err(|_| bad())?.to_string();
     let rendezvous = d.get_str().map_err(|_| bad())?.to_string();
     let record_seq = d.get_u64().map_err(|_| bad())?;
+    let switchboard = if version >= SERVER_NET_V2 {
+        match d.get_u8().map_err(|_| bad())? {
+            0 => false,
+            1 => true,
+            _ => return Err(bad()),
+        }
+    } else {
+        false
+    };
     d.finish().map_err(|_| bad())?;
     Ok(ServerNet {
         key_seed,
@@ -177,6 +192,7 @@ fn decode_server_net(bytes: &[u8]) -> Result<ServerNet, AppError> {
         relay,
         rendezvous,
         record_seq,
+        switchboard,
     })
 }
 
@@ -678,6 +694,7 @@ mod tests {
             advertise: "203.0.113.7:47123".into(),
             relay: "/ip4/198.51.100.1/tcp/4000/p2p/RELAY".into(),
             rendezvous: "/ip4/198.51.100.2/tcp/5000/p2p/RZ".into(),
+            switchboard: true,
             record_seq: 131_072,
         };
 
@@ -710,6 +727,7 @@ mod tests {
             advertise: String::new(),
             relay: String::new(),
             rendezvous: String::new(),
+            switchboard: false,
             record_seq: 0,
         };
         let store = ServerStore::open(dir.path(), b"pw", &mut rng).unwrap();
@@ -762,6 +780,7 @@ mod tests {
             advertise: "1.2.3.4".into(),
             relay: String::new(),
             rendezvous: String::new(),
+            switchboard: false,
             record_seq: u64::MAX - 1,
         };
         assert_eq!(decode_server_net(&encode_server_net(&net)).unwrap(), net);
@@ -775,6 +794,7 @@ mod tests {
             advertise: String::new(),
             relay: String::new(),
             rendezvous: String::new(),
+            switchboard: false,
             record_seq: 0,
         };
         // Same seed, same port: this is what a port-forward and a UPnP mapping depend on.
@@ -845,6 +865,7 @@ mod tests {
             advertise: String::new(),
             relay: String::new(),
             rendezvous: String::new(),
+            switchboard: false,
             record_seq: 0,
         };
 

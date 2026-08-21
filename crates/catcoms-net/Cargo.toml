@@ -10,6 +10,7 @@ catcoms-rt = { path = "../catcoms-rt" }
 thiserror.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+either = "1"
 bytes.workspace = true
 tracing.workspace = true
 blake3 = "1"

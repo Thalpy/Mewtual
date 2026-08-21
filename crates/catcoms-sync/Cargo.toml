@@ -15,6 +15,7 @@ catcoms-wire = { path = "../catcoms-wire" }
 catcoms-discovery = { path = "../catcoms-discovery" }
 thiserror.workspace = true
 bytes.workspace = true
+futures.workspace = true
 tracing.workspace = true
 blake3 = "1"
 automerge = "0.10"
@@ -31,7 +32,6 @@ rand_chacha = "0.3"
 rand_core = "0.6"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 libp2p = { version = "0.56", features = ["tokio"] }
-futures.workspace = true
 
 [lints]
 workspace = true

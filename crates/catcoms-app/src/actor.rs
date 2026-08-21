@@ -24,8 +24,8 @@ use catcoms_storage::Cid;
 use crate::{
     ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView,
     InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats,
-    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, WikiPendingEdit,
-    WikiRevision,
+    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
+    WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -154,6 +154,37 @@ pub enum AppCommand {
     /// Query the roster (member fingerprints + which one is self).
     Members {
         reply: oneshot::Sender<Vec<MemberView>>,
+    },
+    /// Query whether an exact DeviceId is in the live MLS roster.
+    ContainsMemberDevice {
+        device: DeviceId,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Resolve a current roster device through its self-signed PEX record.
+    MemberTransportPeer {
+        device: DeviceId,
+        reply: oneshot::Sender<Option<PeerId>>,
+    },
+    /// Open one explicit, expiring pre-member handshake-helper capability.
+    AuthorizeJoinHelper {
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+        inviter: DeviceId,
+        target: PeerId,
+        expires_at_ms: u64,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Revoke a replaced one-time helper capability before authorizing its successor.
+    RevokeJoinHelper {
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+    },
+    /// Enable/disable the local standing protocol gate; persistence and record publication are
+    /// coordinated by the bridge.
+    SetSwitchboardOffered { offered: bool },
+    /// Query only fresh, connected and record-bound standing offers.
+    SwitchboardOffers {
+        reply: oneshot::Sender<Vec<SwitchboardOffer>>,
     },
     /// Set this member's own profile (name + styling).
     SetProfile { profile: Profile },
@@ -474,6 +505,12 @@ pub enum AppCommand {
         rendezvous: Vec<String>,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
     },
+    /// Wrap a just-minted plain token with the inviter-signed live switchboard plan. The actor
+    /// chooses the offers; the bridge cannot inject routes.
+    WrapInviteWithSwitchboards {
+        invite: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
     /// Lift every outstanding transport eviction (P6). Owner/admin only. Wired **only** to the
     /// explicit "Generate new invite" action: minting is also reached automatically by the
     /// invite panel's self-heal, and lifting there would silently re-admit every removed member.
@@ -561,6 +598,9 @@ pub enum AppEvent {
     /// The set of members reachable right now (a live connection) changed; `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
+    /// The fresh, connected standing-switchboard offer set changed or expired. The UI should
+    /// re-fetch its typed status instead of retaining an old host indefinitely.
+    SwitchboardsChanged,
     /// Delivery state changed for this device's recent messages in `channel` (oldest first).
     /// Recomputed at most once a second per channel and emitted only on a real change, so a UI
     /// can render it directly without polling.
@@ -1057,6 +1097,89 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn contains_member_device(&self, device: DeviceId) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ContainsMemberDevice { device, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn member_transport_peer(&self, device: DeviceId) -> Option<PeerId> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MemberTransportPeer { device, reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn authorize_join_helper(
+        &self,
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+        inviter: DeviceId,
+        target: PeerId,
+        expires_at_ms: u64,
+    ) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::AuthorizeJoinHelper {
+                joiner,
+                invite_nonce,
+                inviter,
+                target,
+                expires_at_ms,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn revoke_join_helper(&self, joiner: PeerId, invite_nonce: [u8; 16]) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::RevokeJoinHelper {
+                joiner,
+                invite_nonce,
+            })
+            .await;
+    }
+
+    pub async fn set_switchboard_offered(&self, offered: bool) -> Result<(), String> {
+        self.cmd_tx
+            .send(AppCommand::SetSwitchboardOffered { offered })
+            .await
+            .map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn switchboard_offers(&self) -> Vec<SwitchboardOffer> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SwitchboardOffers { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Set this member's own profile (a `ProfilesUpdated` event follows).
     pub async fn set_profile(&self, profile: Profile) {
         let _ = self.cmd_tx.send(AppCommand::SetProfile { profile }).await;
@@ -1092,6 +1215,15 @@ impl ServerActor {
         {
             return Err("server stopped".into());
         }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn wrap_invite_with_switchboards(&self, invite: Vec<u8>) -> Result<Vec<u8>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::WrapInviteWithSwitchboards { invite, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
@@ -2188,6 +2320,7 @@ where
         let mut last_moderation = server.moderation_state();
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
+        let mut last_switchboards = server.connected_switchboard_offers();
         let mut last_dm_requests = server.dm_requests();
         // Per channel: when delivery state was last recomputed, and what it was; the throttle
         // plus the change detector for `DeliveryChanged`.
@@ -2396,6 +2529,38 @@ where
                     }
                     Some(AppCommand::Members { reply }) => {
                         let _ = reply.send(server.members_view());
+                    }
+                    Some(AppCommand::ContainsMemberDevice { device, reply }) => {
+                        let _ = reply.send(server.contains_member_device(&device));
+                    }
+                    Some(AppCommand::MemberTransportPeer { device, reply }) => {
+                        let _ = reply.send(server.member_transport_peer(&device));
+                    }
+                    Some(AppCommand::AuthorizeJoinHelper {
+                        joiner,
+                        invite_nonce,
+                        inviter,
+                        target,
+                        expires_at_ms,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.authorize_join_helper(
+                            joiner,
+                            invite_nonce,
+                            inviter,
+                            target,
+                            expires_at_ms,
+                        ));
+                    }
+                    Some(AppCommand::RevokeJoinHelper {
+                        joiner,
+                        invite_nonce,
+                    }) => server.revoke_join_helper(joiner, invite_nonce),
+                    Some(AppCommand::SetSwitchboardOffered { offered }) => {
+                        server.set_switchboard_offered(offered);
+                    }
+                    Some(AppCommand::SwitchboardOffers { reply }) => {
+                        let _ = reply.send(server.connected_switchboard_offers());
                     }
                     Some(AppCommand::SetProfile { profile }) => {
                         if let Err(e) = server.set_profile(profile).await {
@@ -2945,7 +3110,16 @@ where
                             )
                             .await
                             {
-                                Ok(Ok(_)) => {}
+                                Ok(Ok(_)) => {
+                                    // The role offer uses its own additive request kind so old
+                                    // peers remain PEX-compatible. It is best-effort and bounded
+                                    // by the same per-peer deadline as PEX.
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_millis(PEX_REQUEST_MS),
+                                        server.request_switchboard_offer(peer),
+                                    )
+                                    .await;
+                                }
                                 Ok(Err(e)) => {
                                     tracing::trace!(error = %e, "PEX request failed");
                                     server.note_pex_failure(peer);
@@ -2958,6 +3132,11 @@ where
                         }
                         server.dial_cached_peers().await;
                         server.cache_known_records();
+                        let switchboards = server.connected_switchboard_offers();
+                        if switchboards != last_switchboards {
+                            last_switchboards = switchboards;
+                            let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
+                        }
                     }
                     Some(AppCommand::PublishSelfRecord { addresses, seq }) => {
                         if let Err(e) = server.publish_self_record(addresses, seq) {
@@ -2983,6 +3162,12 @@ where
                             .map(|t| t.encode())
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
+                    }
+                    Some(AppCommand::WrapInviteWithSwitchboards { invite, reply }) => {
+                        let result = server
+                            .wrap_invite_with_switchboards(&invite)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
                     }
                     Some(AppCommand::ReadmitEvictedPeers { reply }) => {
                         let res = server.readmit_evicted_peers().map_err(|e| e.to_string());
@@ -3063,6 +3248,11 @@ where
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
                                 .await;
+                        }
+                        let switchboards = server.connected_switchboard_offers();
+                        if switchboards != last_switchboards {
+                            last_switchboards = switchboards;
+                            let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
                         }
                         // Delivery: a peer's inbound op may be the evidence that it received one of
                         // our messages. Recomputing walks the channel's change graph, so it is

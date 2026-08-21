@@ -119,8 +119,9 @@ enum Command {
         external: Vec<String>,
         #[command(flatten)]
         ws: WsArgs,
-        /// Also serve AutoNAT v2 dial-backs. Experimental and off by default: upstream bounds
-        /// concurrent work but does not expose per-peer request-rate/target policy yet.
+        /// Also serve guarded AutoNAT v2 dial-backs. Experimental and off by default: exact
+        /// source-IP target checks and node/prefix/peer limits bound, but do not erase, metadata
+        /// and same-NAT port-probe exposure.
         #[arg(long)]
         enable_autonat: bool,
         /// Concurrent reservations (how many NAT'd nodes can be reachable at once).
@@ -183,8 +184,9 @@ enum Command {
         external: Vec<String>,
         #[command(flatten)]
         ws: WsArgs,
-        /// Also serve AutoNAT v2 dial-backs. Experimental and off by default: upstream bounds
-        /// concurrent work but does not expose per-peer request-rate/target policy yet.
+        /// Also serve guarded AutoNAT v2 dial-backs. Experimental and off by default: exact
+        /// source-IP target checks and node/prefix/peer limits bound, but do not erase, metadata
+        /// and same-NAT port-probe exposure.
         #[arg(long)]
         enable_autonat: bool,
         /// Registrations the table may hold. Also the ceiling on a single census response.
@@ -509,7 +511,7 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
     println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
     if limits.enable_autonat {
         println!(
-            "[relay] EXPERIMENTAL AutoNAT enabled: concurrency is capped, but request-rate and target policy are not yet enforceable"
+            "[relay] EXPERIMENTAL AutoNAT enabled: callbacks require exact source-IP targets and are capped per peer, source prefix, node, and concurrency"
         );
     }
     node.run().await?; // runs until the process is killed
@@ -608,7 +610,7 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
     println!("[rendezvous] members register/discover under blinded namespaces; Ctrl-C to stop");
     if limits.enable_autonat {
         println!(
-            "[rendezvous] EXPERIMENTAL AutoNAT enabled: concurrency is capped, but request-rate and target policy are not yet enforceable"
+            "[rendezvous] EXPERIMENTAL AutoNAT enabled: callbacks require exact source-IP targets and are capped per peer, source prefix, node, and concurrency"
         );
     }
     node.run().await?; // runs until the process is killed

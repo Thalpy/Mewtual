@@ -63,8 +63,12 @@ Implementations:
     latest `AutoNatResult` for each candidate/server pair. Results remain scoped to one candidate,
     server and test, are pruned when that route is withdrawn, and are accepted only while the
     address has a live configured or router-mapping owner. Relay/rendezvous swarms can serve v2
-    dial-backs only after the operator's
-    experimental `--enable-autonat` opt-in; ordinary members never do.
+    dial-backs only after the operator's experimental `--enable-autonat` opt-in; ordinary members
+    never do. `GuardedAutoNatServer` tags every upstream callback dial before the derived
+    behaviour sees it. Its first-declared guard rejects peer-less/non-direct/DNS/circuit/private
+    targets, requires the target literal to equal the exact inbound-connection source IP, and
+    charges bounded node/source-prefix/peer buckets before a transport socket is opened.
+    Connection-scoped source observations are refreshed by requests and removed on close.
     Router mapping is coalesced current state: `next_port_mapping_snapshot()` or the
     single-consumer `take_port_mapping_snapshots()` yields a bounded `PortMappingSnapshot` of live
     leases and scoped failures labelled by UPnP, PCP or NAT-PMP and TCP or UDP/QUIC. A slow/late
@@ -75,6 +79,11 @@ Implementations:
     updates the live bootstrap/peer record and re-mints the next displayed invite after any set
     change.
     Already copied signed invite strings are immutable and cannot be rewritten after lease loss.
+    `next_listener_snapshot()` reports only concrete listener addresses accepted by Swarm.
+    `take_mesh_observation_snapshots()` exposes bounded per-connected-peer Identify observations
+    for diagnostics only. Those outbound-source observations never enter invites, peer records,
+    AutoNAT candidate sets or dial plans: TCP source ports are normally ephemeral and a peer can
+    lie.
   - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
     `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
@@ -195,6 +204,13 @@ pub struct InviteLedger;  new(); revoke(nonce); is_consumed(&nonce); is_revoked(
   check(&InviteToken, now_ms) -> Result<(),InviteError>;  consume(nonce) -> Result<(),InviteError>;
 ```
 
+`catcoms-net::JoinReply` is the short-lived return channel for a failed one-way dial. Its
+`mewtual-reply-v1:` text embeds the complete signed `InviteToken` permit, the joiner's transport
+PeerId, a fresh joiner nonce, absolute expiry, at most four direct public TCP/QUIC candidates and
+an invite-nonce-derived MAC. Decode/verify is size-, shape-, identity- and clock-bounded before
+any dial; candidate `/p2p` suffixes are reconstructed from the authenticated joiner PeerId rather
+than accepted from text.
+
 ---
 
 ## 4. Encrypted CRDT replication  *(catcoms-replication)*
@@ -260,6 +276,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
+                        target:PeerId, expires_at_ms:u64) -> bool;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
 
 // 6e-3d-9 free fn: the pre-join rendezvous namespace, derivable from the invite ALONE
@@ -286,6 +304,26 @@ pub struct RoutingState;
 
 pub async fn request_join<T: MeshTransport>(transport:&T, inviter:PeerId, device:&MlsDevice, invite:&InviteToken)
     -> Result<(ServerGroup, RoutingState), SyncError>;  // join over the wire; authenticates the inviter (binds the sealed routing transfer) + rechecks group_id
+pub async fn request_join_from_reply<T: MeshTransport>(transport:&T, first_contact:PeerId, inviter:PeerId,
+    device:&MlsDevice, invite:&InviteToken, reply_joiner_nonce:[u8;16], reply_joiner_peer:&[u8],
+    clock:&dyn Clock, expires_at_ms:u64)
+    -> Result<(ServerGroup, RoutingState, PeerId), SyncError>;  // proves each contact before disclosing the bearer invite; ignores hostile contacts until an inviter-signed Welcome arrives
+pub async fn request_join_from_switchboards<T: MeshTransport>(transport:&T, first_contact:PeerId,
+    allowed_contacts:&[(PeerId,u64)], inviter:PeerId, device:&MlsDevice, invite:&InviteToken,
+    signed_join_plan:&[u8], clock:&dyn Clock)
+    -> Result<(ServerGroup, RoutingState, PeerId), SyncError>;
+
+// Additive standing-assistance wire types. PeerDescriptor v1 remains byte-for-byte strict.
+pub struct SwitchboardOffer { group_id, device_pubkey, peer_id, addresses, seq, expires_at_ms, signature }
+pub struct SwitchboardRoute { offer:SwitchboardOffer }
+pub struct InviteJoinPlan { invite:InviteToken, inviter_peer, switchboards, signature }
+// The desktop labels the outer envelope `mewtual-invite-v3:`. New clients accept both that form
+// and plain invite hex; old strict readers reject v3 rather than silently confusing helpers with
+// the inviter. Each route retains the helper's own signed two-minute offer under the inviter's
+// outer endorsement, so the inviter cannot replace its addresses or extend consent. A helper
+// requires local opt-in plus a live exact inviter peer record, checks both signatures and the
+// deadline, forwards only KIND_JOIN/KIND_WELCOME, and applies the resulting Add before returning
+// the inviter-signed Welcome.
 ```
 
 **Recovery internals (private to `catcoms-sync`, for orientation):** `commit_log`

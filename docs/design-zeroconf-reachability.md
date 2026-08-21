@@ -5,7 +5,7 @@ substantially rewritten the same day after three adversarial reviews (privacy / 
 abuse-and-adoption) refuted several claims in v1. Sections marked **[v1 RETRACTED]** record
 what the first draft asserted and why it was wrong, so the mistake is not re-made.
 
-**Where it stands (2026-08-20):** the invite path is fixed, the two deployment-blocking
+**Where it stands (2026-08-21):** the invite path is fixed, the two deployment-blocking
 CRITICALs are closed, and **every defect P1 to P14 has been worked to a conclusion**. Nine are
 closed outright; P3 is deferred by decision (census rate-limited, not prevented); P5, P6 and P10
 are partial with their remaining gaps named in the board; and P9 is **closed as a decision**, its
@@ -13,13 +13,13 @@ premise having turned out to be false (the tag is keyed on the same secret as th
 it never defended P8's attacker, and "P9 blocks P8" was wrong).
 
 **Section 1c is the status board** and is the answer to "is P-whatever fixed". **Section 9**
-tracks the ladder. Stable direct listeners plus UPnP/PCP/NAT-PMP mapping are built, and AutoNAT v2
-now has a mesh client, opt-in relay/rendezvous servers, per-address diagnostics and regression
-coverage. AutoNAT is still only
-**partial as a product rung**: no public infrastructure node is deployed, it does not yet drive
-automatic escalation, and pairwise reachability is not a persistent model. mDNS, concurrent rung
-racing, the two-way invite code, switchboards, the port-forwarding wizard and hosted mode are all
-still to come. **Section 11** carries the loose ends that are not defects. Nothing here is deployed.
+tracks the ladder. Stable direct listeners, UPnP/PCP/NAT-PMP mapping, guarded AutoNAT v2,
+two-way 60-second reply codes, and opt-in member switchboards are built with live diagnostics and
+regression coverage. AutoNAT is still only **partial as a product rung**: Mewtual deploys no owned
+public infrastructure, it does not yet drive automatic escalation, and pairwise reachability is not
+a persistent model. mDNS, concurrent rung racing, the port-forwarding wizard, hosted mode and a
+public DHT remain. **Section 11** carries the loose ends that are not defects. No Mewtual-operated
+service is deployed or required by default.
 
 Extends [`ARCHITECTURE.md`](ARCHITECTURE.md), [`design-6e-rendezvous.md`](design-6e-rendezvous.md),
 [`design-6e-relay.md`](design-6e-relay.md). Touches the boundary tracked in
@@ -326,8 +326,8 @@ It is still not a menu. A choice is surfaced only when everything in flight has 
 | 0a | mDNS (same LAN) | none | none | n/a | n/a |
 | 0b | UPnP/PCP/NAT-PMP on a per-install port, IPv6, QUIC | none | none | only where the controlled gateway can map the upstream path | yes |
 | 0c | AutoNAT (the sensor everything branches on) | none | **yes, a dial-back peer** | n/a | n/a |
-| 1 | Two-way invite code | one paste back | STUN only | yes | no |
-| 2 | Switchboard members (transport relay only) | none | none | inherits | inherits |
+| 1 | Two-way invite code | one paste back; both apps overlap for 60s | human chat only | no | no |
+| 2 | Switchboard member (admission bridge) | joiner consent; host opt-in | reachable current member | only when that member is reachable | inherits the member's route |
 | 3 | Guided port forwarding | router config, once | none | yes | yes |
 | 4 | Bootstrap node, including a TCP/443 listener | none (a toggle) | yes | yes | yes |
 | 5 | Self-hosted node / hosted mode | operator setup | own | yes | yes |
@@ -385,11 +385,12 @@ stable member listener an anonymous public probe service would add a resource an
 Only explicitly enabled relay/rendezvous infrastructure serves. V2 is used instead of the legacy
 aggregate-status protocol: the client accepts success only after receiving the callback nonce from
 a fresh connection, and the requester uploads 30--100 KiB before the smaller callback, reducing
-false positives and reflection amplification. Infra swarms additionally cap pending outbound
-callbacks at 64 and total established connections accordingly. That bounds concurrency, not a
-sustained requester on one connection: upstream exposes neither per-peer request-rate nor target
-policy. Serving is therefore experimental and **off by default** until that deployment blocker is
-closed.
+false positives and reflection amplification. A first-declared pre-socket guard now requires one
+canonical direct public target at the request connection's exact source IP, rejects relayed/DNS/
+circuit/private targets, and charges peer, source-prefix, whole-node and concurrency limits before
+the transport dial. Serving remains experimental and **off by default** because same-public-IP or
+CGNAT co-tenants can still request bounded probes of other ports and the observer learns metadata;
+the missing target/rate-policy deployment blocker itself is closed.
 
 A result remains **per address, server and moment**. A bounded snapshot retains the newest
 observation for each address/server pair (with a fixed global cap), ranks public success above
@@ -421,10 +422,15 @@ The founder sends an invite; the joiner's app emits a short **reply code** carry
 public address; the joiner pastes it back into the same chat; both dial repeatedly until the
 punch lands. **The humans are the signalling channel**, and that costs nothing.
 
-**Simultaneity is not required, and v1 wrongly said it was.** Offline Add-request queuing is
-already implemented and reviewed: a signed request parks on the control topic until the other
-party is next online. The same pattern removes the "both at their keyboards" constraint, which
-was the single largest human failure in this rung.
+**Built (2026-08-21), with an important limit:** both applications must keep overlapping
+60-second sessions. The joiner retains its listener/transport after direct failure and emits a
+`mewtual-reply-v1` code; the inviter validates at most four direct public TCP/QUIC candidates and
+runs a bounded backoff dial session. A Noise connection is not enough: every callback peer must
+prove possession of the invite-derived reply channel before it receives the bearer invite or
+KeyPackage. Exact replay is idempotent, changing the joiner identity requires confirmation, and
+the local verifier never authorizes longer than 60 seconds even when clocks differ. This is human
+signalling, not STUN and not a relay. It mainly helps QUIC/NAT punching; no TCP simultaneous-open
+guarantee is claimed, and symmetric NAT/CGNAT can still defeat it.
 
 **The reply code must be authenticated.** The founder holds no key for the joiner before the
 join, so the only pre-existing shared secret is `invite_nonce`. Minimum binding: a MAC keyed on
@@ -452,18 +458,41 @@ connect flood against a target, sourced from clean residential addresses.
 
 ### Rung 2: switchboard members
 
-A directly-reachable member serves as the group's relay and noticeboard.
+A directly-reachable, opted-in member can bridge the bounded admission exchange to the invite's
+named inviter. This is now built as two explicit consent depths: a one-time reply-code helper grant,
+or a per-server standing role. Standing offers are self-signed, live for two minutes, and remain
+separate from strict `PeerDescriptor` v1. A fresh, explicitly prefixed `mewtual-invite-v3` envelope
+carries each helper's complete signed offer and lets the inviter endorse at most three without
+altering its identity, routes, sequence or expiry. The joiner always tries direct/rendezvous
+routes first and must consent before helper dials. The helper verifies that the plan endorses its
+exact device/transport identity, that it has a current record-bound live connection to the named
+inviter, and that the short route has not expired. It forwards only bounded `JOIN`/`WELCOME` frames,
+never chooses/adopts the Welcome, and catches up the exact MLS Add before becoming the joiner's
+first member sync path. Pre-signature, per-requester, aggregate-node and frame-size limits bound the
+public surface.
 
-**A switchboard is a transport relay only. It never admits a join.** `serve_join` hard-rejects
-any request that did not name *this* device as inviter, so a joiner routed to a switchboard that
-is not the inviter is refused outright, reproducing the original symptom with a different error
-string. Making switchboards admit would require the joiner to accept a Welcome signed by any
-current member, and the joiner **has no roster before joining**, which is the entire premise of
-the 6c fix. Accepting any signer **reopens the group-substitution HIGH in full**: a hostile
-admitter adds the joiner's (non-secret) KeyPackage to a group it controls, and `group_id` does
-not save you because it is plaintext in the invite. If a pinned multi-admitter set is genuinely
-wanted it is a separate design with its own adversarial pass, and it must not become an argument
-for raising `max_committer_rank` above 0.
+This is deliberately **not** a general circuit relay or long-term traffic switch. Once admitted,
+the retained helper connection is an ordinary encrypted member link and may carry normal sync;
+the helper already has member access, learns the joiner's IP/timing and spends bandwidth. Fresh
+invite recipients learn the helper's stable device/transport identities and candidate addresses.
+Turning hosting off refuses new forwards immediately, but cached or already-copied offers remain
+dial-visible until their signed short expiry. Signed public candidates are endorsements, not proof
+of address ownership/reachability. The feature helps an established group only: if the founder and
+first joiner are mutually unreachable and no third party/public route exists, no signalling format
+can carry their traffic.
+
+**[v1 RETRACTED]** The original section described a general transport relay/noticeboard and then
+placed discovery only at rendezvous. The shipped zero-owned-server slice instead uses inviter-signed
+short offers inside a separately labelled assisted invite, because a pre-member with no reachable
+rendezvous otherwise has no live helper-discovery path.
+
+**A switchboard never admits a join.** The implemented helper path forwards the bounded admission
+request to the exact named inviter and returns only the inviter-signed Welcome. The joiner verifies
+that original signature; the helper cannot substitute itself as an admission authority. Accepting
+a Welcome signed by any current member would still **reopen the group-substitution HIGH in full**:
+the joiner has no roster before joining, and `group_id` is plaintext in the invite. If a pinned
+multi-admitter set is genuinely wanted it is a separate design with its own adversarial pass, and
+must not become an argument for raising `max_committer_rank` above 0.
 
 **[v1 RETRACTED] The switchboard set must NOT ride in the invite.** `InviteToken` binds every
 field under one signature, which is good crypto and exactly the problem: the set is **frozen at
@@ -473,14 +502,19 @@ only path, still able to see the joiner's IP and silently drop the join. Removal
 routing secret but touches no outstanding invite, and changing the set needs a new nonce, hence
 a new invite, hence revoking the old one.
 
-Instead: switchboards **register at the rendezvous under the member-only namespace**, which is
-live, self-updating, TTL-bounded by the server, and automatically excludes a removed member the
-instant the routing label rotates. The invite keeps only the *infrastructure* rendezvous set,
-which is operator-stable. This also fixes liveness: a `PeerDescriptor` capability bit is a
-**monotonic counter with no expiry**, so a claim never ages out and a member whose router closed
-the mapping keeps advertising until it notices and republishes.
+The discarded rendezvous-only alternative had switchboards register under the member namespace.
+That cannot bootstrap a pre-member when the rendezvous itself is absent/unreachable, which is the
+zero-owned-server case this slice targets. The shipped short signed offer plus explicit v3 envelope
+accepts a bounded two-minute address-disclosure window; it does not add a never-expiring capability
+bit to `PeerDescriptor`.
 
-**A switchboard is a gossipsub hub, not just an IP observer.** In the topology this rung exists
+**General transport switchboards remain unbuilt.** If the role later becomes a gossipsub/circuit
+hub rather than the shipped admission bridge, it is not just an IP observer. In that topology it
+would be the group's mesh peer, and gossipsub is signed, so for every message it forwards it sees
+publisher, topic, sequence, timestamp and exact size. Payloads stay sealed; the activity graph does
+not. The original analysis follows because it remains the gate for that deeper opt-in role.
+
+In the topology this deeper rung exists
 to serve, it is the group's mesh peer, and gossipsub is signed, so for every message it forwards
 it sees publisher, topic, sequence, timestamp and exact size. Payloads stay sealed; the activity
 graph does not. That yields per-message attribution, **selective censorship by publisher and
@@ -690,9 +724,13 @@ Pre-join switchboard disclosure also costs a click: join becomes paste, preview,
 
 Each needs a line in [`THREAT-MODEL.md`](THREAT-MODEL.md):
 
-1. **Switchboards see other members' IPs, carry their traffic, and as gossipsub hubs get
-   per-message publisher/topic/size attribution and selective-drop capability.** IP visibility is
-   **not revoked by removal** for connections already established (P6).
+1. **Admission switchboards see the joiner's IP/timing, spend bandwidth, and disclose their own
+   stable identities/candidate addresses to invite recipients.** The current feature forwards the
+   admission exchange and then retains an ordinary encrypted member connection; it is not a
+   general gossipsub/circuit hub. Opt-out refuses new admission forwards immediately; a later MLS
+   removal closes the retained ordinary member path best-effort once that commit propagates. An
+   already-observed IP cannot be forgotten, and signed candidate addresses remain dial-visible
+   until their two-minute expiry.
 2. **Hosted mode**: the operator learns membership at peer-id level plus, via identify, private
    addresses, public addresses and ports; and gains silent censorship and partition power.
 3. **The bootstrap node** sees the membership partition under a slowly-rotating label and can
@@ -741,12 +779,12 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 |---|---:|---|---|---|
 | **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
 | **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Started P8; P8 is now **closed** without P9, which is closed as a decision rather than built: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
-| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, experimental opt-in server on relay/rendezvous, scoped live diagnostics, and UPnP/PCP/NAT-PMP mapping are built; request/target policy, mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | light |
+| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, guarded opt-in server on relay/rendezvous, scoped live diagnostics, and UPnP/PCP/NAT-PMP mapping are built; mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | adversarial guard review complete |
 | **[~]** | 3 | Shared live status line/readout/diagnosis is built; concurrent rung racing, failure messaging and pre-flight self-test remain | needs 0-2 | none |
 | **[~]** | 4 | Settings / Connectivity and onboarding share the live evidence panel; the create-server mode/Advanced redesign remains | needs UI pass | none |
-| **[ ]** | 5 | Two-way invite code: MAC binding, 60s life, address validation, async join via the existing offline queue | needs 0-2 | yes |
+| **[x]** | 5 | Two-way invite code: MAC binding, local 60s cap, four public direct candidates, retained pending join, proof before bearer disclosure, idempotent admission/replacement | needs 0-2 | adversarial review complete |
 | **[~]** | 6 | Node capacity fixes (P2, P3), TCP/443 listener, jittered discovery (P11), relay external-address misconfig (P12), bootstrap address validation (P7) | **blocks any public deployment** | yes |
-| **[ ]** | 7 | Switchboards: rendezvous-registered capability, relay-only never admit, aggregate egress budget, `Disconnect` plus deny list (P6), consent flow | needs 1, 2, 6 | **mandatory** |
+| **[~]** | 7 | Opt-in admission switchboards: two-minute signed offers, inviter-endorsed v3 plan, direct-first joiner consent, exact live inviter binding, bounded forwarding and Add convergence are built. General circuit relay, monthly host budget and proactive one-time-help popups remain separate work. | needs 1, 2 | **mandatory; adversarial review complete for admission slice** |
 | **[ ]** | 8 | Bootstrap node deployed, default on, live hysteretic expiry | needs 6, 7 | yes |
 | **[ ]** | 9 | Port-forwarding wizard | needs 0 | none |
 | **[ ]** | 10 | Hosted mode | **blocked on O1 and O4** | **mandatory** |
@@ -784,11 +822,11 @@ describe the tag as a pending prerequisite for anything.
   handle is a self-minted peer id). It must disclose that the operator learns the membership set
   and the traffic graph, and that the operator can silently withhold or delay a member's messages.
   The "you can change your mind later" line must go until a mode migration is actually designed.
-- **O2.** Resolved in favour of the third option: the switchboard capability is a
-  `DiscoveryPolicy` **ranking input**, never a promotion, and it lives in a TTL-bounded
-  rendezvous registration rather than an unexpiring record. Require live corroboration (an actual
-  successful inbound connection observed by another member) before counting a member toward the
-  health number.
+- **O2. RESOLVED (2026-08-21).** Standing assistance is a separate two-minute self-signed offer,
+  never a `PeerDescriptor` bit or membership promotion. The inviter endorses fresh offers inside
+  the explicitly labelled v3 join plan. The helper accepts a forward only while its local opt-in is
+  on and it has a live, exact record-bound route to the named inviter; no rendezvous is required.
+  Offer addresses remain best-effort candidates rather than health/reachability proof.
 - **O3.** Bootstrap node default on. Argued in rung 4, with the honest note that v1's
   justification was weaker than stated.
 - **O4.** If a node holds a ban list it is a **second authority**, and the two provably diverge,
@@ -814,13 +852,12 @@ to pick up cold. Keep it current; delete an entry when it lands or is deliberate
 
 ### Blocks an honest answer somewhere
 
-- **AutoNAT (rung 0c) is only a scoped sensor so far.** The v2 client, opt-in public-infrastructure
-  server and diagnostics exist, but serving is off by default pending request-rate/target policy,
-  and there is no default deployed server, recurring/pairwise model
+- **AutoNAT (rung 0c) is only a scoped sensor so far.** The v2 client, guarded opt-in infrastructure
+  server and diagnostics exist, but there is no default deployed server, recurring/pairwise model
   or automatic escalation into relay/hole-punch rungs. The panel can prove one address from one
   server at one moment; it correctly remains unknown without that candidate/server pair. Turning
-  those observations into the escalation trigger and switchboard-eligibility signal remains the
-  highest-leverage reachability work.
+  those observations into the escalation trigger remains high-leverage work. Serving stays off by
+  default because the guard bounds but cannot erase probe metadata, egress, or same-NAT port probes.
 - **Per-dial outcomes are not observable.** `MeshService` races a dial set and only the winner
   surfaces, so the panel shows per-address results as unknown rather than inventing them. Needs
   per-dial event plumbing out of the transport.

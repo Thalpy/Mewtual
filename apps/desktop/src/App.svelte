@@ -54,7 +54,7 @@
   import {
     type Connectivity, type JoinAttempt, describeOutcome, formatConnectivity, formatJoinLog,
     connectivityReadout, connectivityStatus, reachabilityEventAffectsReport, reachabilitySummary,
-    withOrderedConnectivity, withOrderedRefreshedInvite,
+    switchboardEventRefreshDecision, withOrderedConnectivity, withOrderedRefreshedInvite,
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
@@ -95,6 +95,10 @@
     sigilBits as sigilBitsOf, normalizeWord, MAX_SIGIL_EMOJI, SIGIL_COLORS, COLOR_NAMES,
     coloredCount, ringGlyphs, ringPoints, ringPathD,
   } from "./sigil";
+  import {
+    assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
+    withOrderedSwitchboardStatus,
+  } from "./joinreply";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -1682,6 +1686,24 @@
     typeof localStorage !== "undefined" ? (localStorage.getItem("catcoms.rendezvous") ?? "") : ""
   );
   let joinInvite = $state(""); // pasted invite (joiner)
+  type InvitePreview = {
+    direct_routes: number;
+    rendezvous_routes: number;
+    switchboards: number;
+    expires_at_ms: number;
+  };
+  let joinPreview = $state<InvitePreview | null>(null);
+  let joinPreviewCode = $state("");
+  let joinSwitchboardConsent = $state(false);
+  type JoinReplyReady = { code: string; expires_at_ms: number; candidate_count: number };
+  let joinReplyReady = $state<JoinReplyReady | null>(null);
+  let joinReplyNow = $state(Date.now());
+  let joinReplyExpired = $derived(
+    joinReplyReady !== null && joinReplyIsExpired(joinReplyReady.expires_at_ms, joinReplyNow),
+  );
+  let joinReplyInput = $state("");
+  let joinReplyApplying = $state(false);
+  let joinReplyNeedsReplace = $state(false);
   let copied = $state(false);
   let newChannel = $state("");
 
@@ -4230,16 +4252,61 @@
   async function join() {
     busy = true;
     error = "";
+    joinReplyReady = null;
     try {
       const { hex, turn } = unwrapInvite(joinInvite);
-      const r = await invoke<Found>("join_server", { inviteHex: hex, displayName, isDm: false });
+      const previewMatchesCode = joinPreviewCode === hex;
+      if (!previewMatchesCode) {
+        joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
+        joinPreviewCode = hex;
+        joinSwitchboardConsent = false;
+      }
+      const assistedAction = assistedJoinAction(
+        previewMatchesCode,
+        joinPreview?.switchboards ?? 0,
+        joinSwitchboardConsent,
+      );
+      // Do not let the click that first reveals the extra-member privacy boundary also cross it.
+      if (assistedAction === "preview") return;
+      const r = await invoke<Found>("join_server", {
+        inviteHex: hex,
+        displayName,
+        isDm: false,
+        allowSwitchboards: assistedAction === "switchboard",
+      });
       if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
       addServer(r, displayName);
       joinInvite = "";
+      joinPreview = null;
+      joinPreviewCode = "";
+      joinSwitchboardConsent = false;
+      joinReplyReady = null;
     } catch (e) {
+      joinReplyReady = null;
       error = String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  async function applyJoinReply(replace = false) {
+    const server = activeServerId;
+    if (server === null || !joinReplyInput.trim()) return;
+    joinReplyApplying = true;
+    joinReplyNeedsReplace = false;
+    error = "";
+    try {
+      const applied = await invoke<{ helper: boolean }>("apply_join_reply", { server, code: joinReplyInput.trim(), replace });
+      notice = applied.helper
+        ? "Connection reply accepted. Dialling as a member helper; only the admission handshake will be forwarded."
+        : "Connection reply accepted. Dialling the joiner now; keep both apps open.";
+      joinReplyInput = "";
+    } catch (e) {
+      const message = String(e);
+      if (joinReplyNeedsReplacement(message)) joinReplyNeedsReplace = true;
+      error = message;
+    } finally {
+      joinReplyApplying = false;
     }
   }
 
@@ -4269,7 +4336,7 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: name, isDm: true });
+      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: name, isDm: true, allowSwitchboards: false });
       addServer(r, name);
       dmName = "";
       dmInvite = "";
@@ -4341,7 +4408,7 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: req.from_name, isDm: true });
+      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: req.from_name, isDm: true, allowSwitchboards: false });
       addServer(r, req.from_name);
       await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
       dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
@@ -4861,6 +4928,15 @@
   let joinAttempts = $state<JoinAttempt[]>([]);
   let joinLogCopied = $state(false);
   let connectivity = $state<Connectivity | null>(null);
+  type SwitchboardStatus = {
+    offered: boolean;
+    eligible: boolean;
+    online: { fingerprint: string; addresses: number }[];
+    reason: string;
+  };
+  let switchboardStatus = $state<SwitchboardStatus | null>(null);
+  let switchboardBusy = $state(false);
+  const switchboardRefreshGeneration = new Map<number, number>();
   let connectivityRefreshGeneration = 0;
   let connCopied = $state(false);
   let debugLog = $state<{ enabled: boolean; active: boolean; dir: string; file: string } | null>(null);
@@ -4894,6 +4970,53 @@
         generation,
         connectivityRefreshGeneration,
       );
+    }
+  }
+  async function refreshSwitchboards() {
+    const server = activeServerId;
+    if (server === null) {
+      switchboardStatus = null;
+      return;
+    }
+    const generation = (switchboardRefreshGeneration.get(server) ?? 0) + 1;
+    switchboardRefreshGeneration.set(server, generation);
+    try {
+      const status = await invoke<SwitchboardStatus>("get_switchboard_status", { server });
+      switchboardStatus = withOrderedSwitchboardStatus(
+        switchboardStatus,
+        activeServerId,
+        server,
+        status,
+        generation,
+        switchboardRefreshGeneration.get(server) ?? 0,
+      );
+    } catch (e) {
+      error = String(e);
+    }
+  }
+  async function toggleSwitchboard() {
+    const server = activeServerId;
+    if (server === null || switchboardBusy) return;
+    switchboardBusy = true;
+    const generation = (switchboardRefreshGeneration.get(server) ?? 0) + 1;
+    switchboardRefreshGeneration.set(server, generation);
+    try {
+      const status = await invoke<SwitchboardStatus>("set_switchboard_offered", {
+        server,
+        offered: !switchboardStatus?.offered,
+      });
+      switchboardStatus = withOrderedSwitchboardStatus(
+        switchboardStatus,
+        activeServerId,
+        server,
+        status,
+        generation,
+        switchboardRefreshGeneration.get(server) ?? 0,
+      );
+    } catch (e) {
+      error = String(e);
+    } finally {
+      switchboardBusy = false;
     }
   }
   async function refreshDebugLog() {
@@ -5006,7 +5129,7 @@
     if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
     if (v === "moderation") refreshModeration();
     if (v === "storage" || v === "downloads") refreshStorageHealth();
-    if (v === "connectivity") refreshConnectivity();
+    if (v === "connectivity") void Promise.all([refreshConnectivity(), refreshSwitchboards()]);
   }
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
@@ -11038,6 +11161,13 @@
           refreshFiles(); // a peer came/went: re-evaluate the availability hint (has_peers)
         }
       }),
+      listen<JoinReplyReady>("join-reply-ready", (e) => {
+        // The native join command deliberately remains pending while its listener and NAT mapping
+        // stay alive. This event gives the human the return signalling channel without moving the
+        // punch deadline into a throttled webview timer.
+        joinReplyReady = e.payload;
+        notice = "Send the connection reply back to the inviter now; keep this app open.";
+      }),
       listen<number>("reachability-changed", (e) => {
         // Router mapping and AutoNAT settle after founding/joining returns. Both onboarding and
         // Settings use this same report. Refresh that server's cached invite too: the event can
@@ -11045,7 +11175,13 @@
         // mapping or relay route.
         if (locked) return;
         if (reachabilityEventAffectsReport(connectivity, e.payload)) refreshConnectivity();
+        if (e.payload === activeServerId && view === "connectivity") refreshSwitchboards();
         void refreshInviteFor(e.payload);
+      }),
+      listen<number>("switchboard-changed", (e) => {
+        const decision = switchboardEventRefreshDecision(locked, activeServerId, e.payload);
+        if (decision.refreshStatus) refreshSwitchboards();
+        if (decision.refreshInvite) void refreshInviteFor(e.payload);
       }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
@@ -11271,7 +11407,10 @@
     }, 60_000);
     // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
     // clock drives that freshness check; it does not poll the network or alter transfer state.
-    const transferTick = setInterval(() => (transferNow = Date.now()), 1_000);
+    const transferTick = setInterval(() => {
+      transferNow = Date.now();
+      joinReplyNow = transferNow;
+    }, 1_000);
     // One slow blink about every half minute, and only while somebody is actually looking.
     const blink = setInterval(() => {
       if (!windowFocused || locked) return;
@@ -11361,6 +11500,15 @@
     <p class="muted small">{c.upnp || "not attempted"}</p>
     <h4>Remote dial-back (AutoNAT)</h4>
     <p class="muted small">{c.autonat || "not tested"}</p>
+    <h4>What connected peers observed ({c.mesh_observations?.length ?? 0})</h4>
+    {#if c.mesh_observations?.length}
+      <ul class="conn-addrs">
+        {#each c.mesh_observations as observation, i (i)}<li class="fp">{observation}</li>{/each}
+      </ul>
+      <p class="muted small">Diagnostic only. These are outbound source sockets reported by peers, not verified listener addresses; Mewtual never puts them in an invite or dials them.</p>
+    {:else}
+      <p class="muted small">No connected peer has reported an outbound source address yet.</p>
+    {/if}
     <h4>Addresses this device offers ({c.advertised.length})</h4>
     {#if c.advertised.length}
       <ul class="conn-addrs">
@@ -13637,11 +13785,95 @@
       </button>
       <hr />
       <p class="muted">…or join an existing server with an invite:</p>
-      <textarea class="invite-code" bind:value={joinInvite} rows="3" placeholder="paste invite here"></textarea>
+      <textarea
+        class="invite-code"
+        bind:value={joinInvite}
+        oninput={() => {
+          joinPreview = null;
+          joinPreviewCode = "";
+          joinSwitchboardConsent = false;
+        }}
+        rows="3"
+        placeholder="paste invite here"
+      ></textarea>
+      {#if joinPreview?.switchboards}
+        <section class="repair-card switchboard-consent">
+          <div>
+            <h3>Direct first; member fallback only with your permission</h3>
+            <p class="muted small">
+              This signed invite offers {joinPreview.switchboards} standing switchboard{joinPreview.switchboards === 1 ? "" : "s"}.
+              Mewtual will try the named inviter directly first. If that fails, a switchboard can
+              forward the admission handshake and remain your first encrypted group connection.
+              That member learns your IP address and connection timing and may carry encrypted
+              catch-up traffic. It already has ordinary member access, but helping grants no
+              additional content access, and it cannot admit you itself.
+            </p>
+            <label class="check-row">
+              <input type="checkbox" bind:checked={joinSwitchboardConsent} />
+              Allow the signed member fallback after the direct attempt fails
+            </label>
+            <p class="muted small">Leave this off to try direct routes only. You can retry with fallback later.</p>
+          </div>
+        </section>
+      {/if}
       <div class="pc-actions">
-        <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
-        <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => { if (t) joinInvite = t; })}>⛶ Scan invite QR</button>
+        <button onclick={join} disabled={busy || !joinInvite.trim()}>
+          {joinPreview?.switchboards
+            ? joinSwitchboardConsent
+              ? "Join with fallback"
+              : "Join directly"
+            : "Join"}
+        </button>
+        <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
+          if (t) {
+            joinInvite = t;
+            joinPreview = null;
+            joinPreviewCode = "";
+            joinSwitchboardConsent = false;
+          }
+        })}>⛶ Scan invite QR</button>
       </div>
+      {#if joinReplyReady && !joinReplyExpired}
+        <section class="repair-card reply-card">
+          <div>
+            <h3>The inviter needs to dial you back</h3>
+            <p class="muted small">
+              The invite's routes did not answer. Send this authenticated reply to the inviter,
+              or to a member whose app confirms a current live route to the named inviter, within
+              60 seconds and keep both apps open. It offers {joinReplyCandidateLabel(joinReplyReady.candidate_count)};
+              it is not a
+              relay and cannot cross symmetric NAT/CGNAT on its own.
+            </p>
+            <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+          </div>
+          <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+        </section>
+      {:else if joinReplyReady}
+        <section class="repair-card reply-card">
+          <div><h3>Connection reply expired</h3><p class="muted small">Start the join again to mint a fresh 60-second route. The expired code is no longer copyable.</p></div>
+        </section>
+      {/if}
+      {#if servers.length && activeServerId !== null}
+        <details class="conn-panel reply-apply">
+          <summary>I received a connection reply</summary>
+          <p class="muted small">
+            Paste the reply from the person joining <b>{cur?.name ?? "the active server"}</b>.
+            Their app must still be waiting. If this device did not issue the invite, it acts only
+            as a handshake helper; the named inviter and normal MLS admission rules still decide.
+          </p>
+          <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
+          <div class="pc-actions">
+            <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>
+              {joinReplyApplying ? "Dialling…" : "Dial joiner"}
+            </button>
+            {#if joinReplyNeedsReplace}
+              <button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>
+                Confirm different joiner
+              </button>
+            {/if}
+          </div>
+        </details>
+      {/if}
       <details open={syncIntent}>
         <summary>Link this device to another device you own</summary>
         <p class="muted small">
@@ -14741,9 +14973,59 @@
             <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={refreshConnectivity}>Refresh</button></header>
             {#if connectivity?.action}
               {@render connDetail(connectivity)}
-              <p class="muted small connect-peer-count">{Math.max(onlineCount - 1, 0)} of {Math.max(members - 1, 0)} other members connected now.</p>
               <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
             {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            <section class="connection-hosting" aria-labelledby="connection-hosting-title">
+              <header>
+                <div>
+                  <h3 id="connection-hosting-title">GROUP HOSTING</h3>
+                  <p><b>{Math.max(onlineCount - 1, 0)}</b> of <b>{Math.max(members - 1, 0)}</b> other members are connected now.</p>
+                </div>
+                <span class="hosting-state" data-ready={(switchboardStatus?.online.length ?? 0) > 0}>{switchboardStatus?.online.length ?? 0} SWITCHBOARD{switchboardStatus?.online.length === 1 ? "" : "S"} ONLINE</span>
+              </header>
+              <div class="hosting-depths">
+                <article>
+                  <span class="hosting-depth">ONE-TIME</span>
+                  <div><b>Help with this join</b><p>An eligible member may approve one short reply window. It forwards only the inviter's admission handshake, then remains the joiner's first live group path.</p></div>
+                  <span class="ok-t">available below</span>
+                </article>
+                <article>
+                  <span class="hosting-depth">STANDING</span>
+                  <div><b>Switchboard role</b><p>Fresh invites may advertise opted-in, connected members as reusable fallbacks after the inviter's direct route fails. No device is enrolled silently.</p></div>
+                  <button class="ghost small" class:danger-btn={switchboardStatus?.offered} disabled={switchboardBusy || (!switchboardStatus?.offered && !switchboardStatus?.eligible)} title={switchboardStatus?.reason ?? "Reading this device's route eligibility"} onclick={toggleSwitchboard}>{switchboardBusy ? "Saving…" : switchboardStatus?.offered ? "Stop hosting" : "Offer to host from this device"}</button>
+                </article>
+              </div>
+              {#if switchboardStatus?.online.length}
+                <ul class="switchboard-list">
+                  {#each switchboardStatus.online as host}
+                    <li><span class="switchboard-badge">⇄ switchboard</span><b>{nameOf(host.fingerprint)}</b><span>{host.addresses} advertised candidate route{host.addresses === 1 ? "" : "s"}</span></li>
+                  {/each}
+                </ul>
+              {/if}
+              <p class="muted small hosting-disclosure">A switchboard is already a group member, so it gains no new content access, but carrying a connection uses its bandwidth and exposes the joiner's IP address and timing. Fresh assisted invites disclose this host's stable device fingerprint, transport identity, and advertised public or relay candidate addresses to their recipients. Admission still requires the invite's named inviter to sign the Welcome. Turning hosting off refuses new forwards immediately; an already-cached signed offer can remain visible in newly copied invites, and already-copied invites can retain the old address, only until that offer's short deadline.</p>
+            </section>
+            <section class="connection-fallback" aria-labelledby="connection-fallback-title">
+              <div>
+                <h3 id="connection-fallback-title">FALLBACK NODE</h3>
+                <b>No Mewtual-operated fallback required</b>
+                <p class="muted small">Mewtual starts without an owned service. A group can use direct routes and opted-in member switchboards, or configure its own relay/rendezvous address. The first two mutually unreachable people still need a public route, router mapping, or third party.</p>
+              </div>
+              <button class="ghost small" onclick={() => openSettings("network")}>Configure your own</button>
+            </section>
+            {#if activeServerId !== null}
+              <section class="repair-card reply-card">
+                <div>
+                  <h3>One-time connection help</h3>
+                  <p class="muted small">If a joiner sent back a <code>mewtual-reply-v1</code> code, paste it here. The assistant validates the original signed invite and dials only the reply's claimed public TCP/QUIC routes for the remaining 60-second window; Noise still requires the claimed peer identity. The named inviter admits directly. Another current member may help only when it is already connected to that inviter: it forwards the admission handshake and keeps the resulting member connection alive, but it never makes the admission decision.</p>
+                  <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste connection reply"></textarea>
+                  {#if joinReplyNeedsReplace}<p class="muted small fail-t">This invite already has a different active joiner. Replace it only if you deliberately switched people.</p>{/if}
+                </div>
+                <div class="connect-actions">
+                  <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>{joinReplyApplying ? "Dialling…" : "Dial joiner"}</button>
+                  {#if joinReplyNeedsReplace}<button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>Confirm replacement</button>{/if}
+                </div>
+              </section>
+            {/if}
           </div>
         {:else if view === "files"}
           <div class="files-head">

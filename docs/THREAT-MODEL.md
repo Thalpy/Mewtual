@@ -25,13 +25,34 @@ table with the commit that closed it.
   serves AutoNAT v2 learns the requester's source address, candidate addresses, peer id and probe
   timing, and can withhold service or cause a false negative. It cannot forge a v2 positive merely
   by claiming success: the client accepts success only after the fresh callback returns its nonce.
-  Ordinary members do not serve anonymous probes. Relay/rendezvous nodes cap pending callback
-  connections, but upstream v2 exposes no hook for per-peer request-rate or target-address policy:
-  one connected client could otherwise sustain egress/port-scan work. AutoNAT serving is therefore
-  **experimental, disabled by default, and requires the operator's `--enable-autonat` opt-in**.
+  Ordinary members do not serve anonymous probes. The relay/rendezvous wrapper tags the upstream
+  callback and a first-declared pre-socket guard accepts only one direct public TCP/QUIC literal
+  whose IP exactly matches the request connection's source; it charges peer, source-prefix, node
+  and concurrency limits before opening a socket. Exact-IP matching still permits bounded probes
+  of other ports on the requester's shared NAT/CGNAT address, and the service retains metadata and
+  egress cost, so it remains **experimental, disabled by default, and operator opt-in**.
   A successful callback proves only that the configured observer reached that exact candidate at
   that moment. Operator configuration also permits LAN/private infrastructure, so the product does
   not turn that result into the broader claim “reachable from the internet”.
+- **Member switchboards are consented, bounded admission paths, not new authorities.** A standing
+  host explicitly opts in per server; its complete two-minute self-signed offer is carried under
+  the invite's named inviter endorsement, so the inviter cannot substitute routes or lengthen the
+  helper's consent. A joiner explicitly consents before any helper address is dialled.
+  The helper must be a current member with a live record-bound connection to that exact inviter.
+  It forwards only bounded `JOIN`/`WELCOME` frames, applies the resulting Add before serving as the
+  joiner's first sync path, and cannot forge the inviter-signed Welcome. It already has normal
+  member plaintext access; helping grants no additional content authority. The host learns the
+  joiner's IP/timing and spends bandwidth, while invite recipients learn the host's stable device
+  and transport identities plus candidate addresses. Opt-out refuses new forwards immediately,
+  but cached/already-copied signed offers remain dial-visible until their short expiry. A malicious
+  member may sign an arbitrary *public* candidate: shape/total-dial caps bound the resulting scan
+  surface, but the signature does not prove address ownership or live reachability.
+- **Two-way replies authenticate possession of the bearer invite, not a person.** Candidates are
+  public direct literals, capped at four and live for at most 60 seconds from receipt. Every callback
+  contact proves the invite-derived reply channel before seeing the invite/KeyPackage; replacing a
+  different joiner needs confirmation. Anyone who obtained the original invite can still form a
+  valid reply or redeem it. Both apps must remain open during an overlapping window, and symmetric
+  NAT/CGNAT can still make punching impossible.
 - **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP can expose this
   app's stable TCP and UDP/QUIC listeners and can return a wrong or stale public socket. Noise and
   connection limits still protect the listener; AutoNAT is the independent test before the UI

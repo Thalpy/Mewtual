@@ -35,10 +35,13 @@ use catcoms_storage::{BlobStore, FileManifest, FileRef};
 // verifies a reassembled download against it.
 pub use catcoms_storage::Cid;
 use catcoms_sync::{
-    fingerprint, read_published_roster, request_device_join, request_join, ChannelSync, SyncError,
-    ROLES_DOC,
+    fingerprint, read_published_roster, request_device_join, request_join, request_join_from_reply,
+    request_join_from_switchboards, request_join_via_helper, ChannelSync, SyncError, ROLES_DOC,
 };
-pub use catcoms_sync::{peer_addrs_from_snapshot, JoinAttempt, JoinOutcome};
+pub use catcoms_sync::{
+    peer_addrs_from_snapshot, InviteJoinPlan, JoinAttempt, JoinOutcome, SwitchboardOffer,
+    SwitchboardRoute, SWITCHBOARD_OFFER_LIFETIME_MS, SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+};
 use catcoms_wire::DocType;
 use thiserror::Error;
 
@@ -2379,6 +2382,165 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             own_message_changes: HashMap::new(),
             devices_sig: None,
         })
+    }
+
+    /// Join through a reachable existing member when the inviter could not accept a direct dial.
+    /// The helper carries only the admission handshake; the inviter named by the signed invite
+    /// remains the sole Welcome authority.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn join_via_helper(
+        transport: T,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        helper: PeerId,
+        inviter: PeerId,
+        invite: &InviteToken,
+    ) -> Result<Self, AppError> {
+        let device_id = device.device_id();
+        let (group, routing) = tokio::time::timeout(
+            std::time::Duration::from_secs(JOIN_TIMEOUT_SECS),
+            request_join_via_helper(&transport, helper, inviter, &device, invite),
+        )
+        .await
+        .map_err(|_| AppError::JoinTimeout)??;
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        // Both are only candidates until a roster-verified catch-up proves them. The helper is the
+        // currently reachable bootstrap; retaining the inviter as well lets discovery recover the
+        // direct topology as soon as its route works.
+        sync.note_candidate_peer(inviter);
+        sync.note_candidate_peer(helper);
+        Ok(Self {
+            sync,
+            display_name: display_name.into(),
+            device_id,
+            own_message_changes: HashMap::new(),
+            devices_sig: None,
+        })
+    }
+
+    /// Complete the short-lived reply-code path without trusting the first connector. Rejected,
+    /// stalled, or forged helpers are skipped until one contact returns an inviter-signed Welcome.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn join_from_reply(
+        transport: T,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        first_contact: PeerId,
+        inviter: PeerId,
+        invite: &InviteToken,
+        reply_joiner_nonce: [u8; 16],
+        reply_joiner_peer: &[u8],
+        expires_at_ms: u64,
+    ) -> Result<(Self, PeerId), AppError> {
+        let device_id = device.device_id();
+        let (group, routing, contact) = request_join_from_reply(
+            &transport,
+            first_contact,
+            inviter,
+            &device,
+            invite,
+            reply_joiner_nonce,
+            reply_joiner_peer,
+            &*clock,
+            expires_at_ms,
+        )
+        .await?;
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.note_candidate_peer(inviter);
+        sync.note_candidate_peer(contact);
+        Ok((
+            Self {
+                sync,
+                display_name: display_name.into(),
+                device_id,
+                own_message_changes: HashMap::new(),
+                devices_sig: None,
+            },
+            contact,
+        ))
+    }
+
+    /// Join through only the inviter-endorsed standing switchboards carried in the outer plan.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn join_from_switchboards(
+        transport: T,
+        device: MlsDevice,
+        rng: R,
+        clock: Box<dyn Clock + Send>,
+        display_name: impl Into<String>,
+        first_contact: PeerId,
+        allowed_contacts: &[(PeerId, u64)],
+        inviter: PeerId,
+        invite: &InviteToken,
+        join_plan: &[u8],
+    ) -> Result<(Self, PeerId), AppError> {
+        let device_id = device.device_id();
+        let join = request_join_from_switchboards(
+            &transport,
+            first_contact,
+            allowed_contacts,
+            inviter,
+            &device,
+            invite,
+            join_plan,
+            &*clock,
+        );
+        let (group, routing, contact) = tokio::select! {
+            result = join => result?,
+            _ = clock.sleep(std::time::Duration::from_secs(JOIN_TIMEOUT_SECS)) => {
+                return Err(AppError::JoinTimeout);
+            }
+        };
+        let mut sync = ChannelSync::new_joined(transport, group, device, rng, clock, routing);
+        sync.note_candidate_peer(inviter);
+        sync.note_candidate_peer(contact);
+        Ok((
+            Self {
+                sync,
+                display_name: display_name.into(),
+                device_id,
+                own_message_changes: HashMap::new(),
+                devices_sig: None,
+            },
+            contact,
+        ))
+    }
+
+    /// Whether a device is in this server's current MLS roster.
+    pub fn contains_member_device(&self, device: &DeviceId) -> bool {
+        self.sync.contains_member(device)
+    }
+
+    /// Resolve a roster device through its current self-signed peer record.
+    pub fn member_transport_peer(&self, device: &DeviceId) -> Option<PeerId> {
+        self.sync.member_transport_peer(device)
+    }
+
+    /// Install the explicit ephemeral capability required before this member forwards a join.
+    pub fn authorize_join_helper(
+        &mut self,
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+        inviter: DeviceId,
+        target: PeerId,
+        expires_at_ms: u64,
+    ) -> bool {
+        self.sync
+            .authorize_join_helper(joiner, invite_nonce, inviter, target, expires_at_ms)
+    }
+
+    /// Revoke a replaced one-time helper grant immediately.
+    pub fn revoke_join_helper(&mut self, joiner: PeerId, invite_nonce: [u8; 16]) {
+        self.sync.revoke_join_helper(joiner, invite_nonce);
+    }
+
+    /// Apply this device's explicit standing-switchboard consent at the protocol gate.
+    pub fn set_switchboard_offered(&mut self, offered: bool) {
+        self.sync.set_switchboard_offered(offered);
     }
 
     /// Join a server as a **companion device**, presenting a [`PerServerGrant`] from a grant
@@ -5362,6 +5524,22 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         seq: u64,
     ) -> Result<(), AppError> {
         Ok(self.sync.publish_self_record(addresses, seq)?)
+    }
+
+    /// Refresh a connected member's separate, backward-compatible switchboard offer.
+    pub async fn request_switchboard_offer(&mut self, peer: PeerId) -> Result<bool, AppError> {
+        Ok(self.sync.request_switchboard_offer(peer).await?)
+    }
+
+    pub fn connected_switchboard_offers(&mut self) -> Vec<SwitchboardOffer> {
+        self.sync.connected_switchboard_offers()
+    }
+
+    pub fn wrap_invite_with_switchboards(
+        &mut self,
+        invite_bytes: &[u8],
+    ) -> Result<Vec<u8>, AppError> {
+        Ok(self.sync.wrap_invite_with_switchboards(invite_bytes)?)
     }
 
     /// Ask a bounded handful of known peers for their member records (one PEX pass). Returns the

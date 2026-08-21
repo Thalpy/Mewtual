@@ -79,11 +79,12 @@ use libp2p::core::upgrade::Version;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
 use libp2p::{
-    autonat, connection_limits, identify, noise, ping, rendezvous, yamux, Multiaddr, Swarm,
-    SwarmBuilder, Transport,
+    connection_limits, identify, noise, ping, rendezvous, yamux, Multiaddr, Swarm, SwarmBuilder,
+    Transport,
 };
 
 use crate::admission::{AddrPrefix, Admission, AdmissionConfig};
+use crate::autonat_server::{guarded_autonat_server, AutoNatDialGuard, GuardedAutoNatServer};
 use crate::fdlimit::check_open_file_limit;
 use crate::identify_config;
 use crate::infra_transport::{
@@ -95,8 +96,10 @@ use crate::NetError;
 /// Deliberate, operator-tunable sizing for a rendezvous node.
 #[derive(Debug, Clone)]
 pub struct RendezvousLimits {
-    /// Opt in to the public AutoNAT v2 dial-back service. Disabled by default until a wrapper can
-    /// enforce per-peer request-rate and target policy around the upstream server behaviour.
+    /// Opt in to the guarded AutoNAT v2 dial-back service. Disabled by default because serving
+    /// still reveals probe metadata and permits bounded probes of other ports sharing the
+    /// requester's public NAT address. A first-declared pre-dial guard enforces exact-source-IP
+    /// targets plus node/source-prefix/peer rate and concurrency limits.
     pub enable_autonat: bool,
     /// Registrations the table may hold. This is the ceiling on the census a single successful
     /// namespace-less `Discover` can return, so it is also the amplification ceiling: at roughly
@@ -311,6 +314,9 @@ impl RendezvousLimits {
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct RendezvousBehaviour {
+    /// AutoNAT callback target/rate gate. This is intentionally first: it consumes the wrapped
+    /// server's callback tag even when a later connection-limit behaviour refuses the dial.
+    pub autonat_guard: AutoNatDialGuard,
     /// Connection caps run before protocol behaviours so a refused connection allocates no
     /// rendezvous or AutoNAT handler state.
     pub connection_limits: connection_limits::Behaviour,
@@ -322,11 +328,9 @@ pub struct RendezvousBehaviour {
     pub identify: identify::Behaviour,
     /// Keep-alive.
     pub ping: ping::Behaviour,
-    /// Optional AutoNAT v2 dial-back service. A connected client can have this public node test one
-    /// of its external-address candidates without making ordinary group members public probe
-    /// servers. It is disabled unless the operator explicitly accepts the upstream server's
-    /// missing per-peer request-rate and target-address policy hooks.
-    pub autonat_server: Toggle<autonat::v2::server::Behaviour<OsCryptoRng>>,
+    /// Optional AutoNAT v2 dial-back service. The first-declared guard restricts callbacks to the
+    /// requester's observed public IP and applies node/peer/source-prefix windows before dialing.
+    pub autonat_server: Toggle<GuardedAutoNatServer<OsCryptoRng>>,
 }
 
 pub(crate) fn rendezvous_behaviour(key: &libp2p::identity::Keypair) -> RendezvousBehaviour {
@@ -337,17 +341,23 @@ fn rendezvous_behaviour_with(
     key: &libp2p::identity::Keypair,
     limits: &RendezvousLimits,
 ) -> RendezvousBehaviour {
+    rendezvous_behaviour_with_policy(key, limits, false)
+}
+
+fn rendezvous_behaviour_with_policy(
+    key: &libp2p::identity::Keypair,
+    limits: &RendezvousLimits,
+    allow_memory_for_tests: bool,
+) -> RendezvousBehaviour {
+    let (autonat_guard, autonat_server) = guarded_autonat_server(allow_memory_for_tests);
     RendezvousBehaviour {
+        autonat_guard,
         connection_limits: connection_limits::Behaviour::new(limits.to_connection_limits()),
         admission: Admission::new(limits.admission.clone(), 0),
         rendezvous: rendezvous::server::Behaviour::new(limits.to_server_config()),
         identify: identify::Behaviour::new(identify_config(key)),
         ping: ping::Behaviour::default(),
-        autonat_server: Toggle::from(
-            limits
-                .enable_autonat
-                .then(|| autonat::v2::server::Behaviour::new(OsCryptoRng)),
-        ),
+        autonat_server: Toggle::from(limits.enable_autonat.then_some(autonat_server)),
     }
 }
 
@@ -402,7 +412,7 @@ pub fn build_memory_rendezvous_swarm() -> Swarm<RendezvousBehaviour> {
                 enable_autonat: true,
                 ..Default::default()
             };
-            rendezvous_behaviour_with(key, &limits)
+            rendezvous_behaviour_with_policy(key, &limits, true)
         })
         .expect("rendezvous behaviour")
         .build()
@@ -509,6 +519,10 @@ impl RendezvousNode {
 
     /// Replace the clock (tests drive the sweep with a `ManualClock`).
     pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.swarm
+            .behaviour_mut()
+            .autonat_guard
+            .set_clock(clock.clone());
         self.clock = clock;
         self
     }

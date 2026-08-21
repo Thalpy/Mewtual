@@ -283,6 +283,17 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
         ],
         last_error: "",
       });
+    case "get_switchboard_status":
+    case "set_switchboard_offered":
+      return clone({
+        offered: false,
+        eligible: true,
+        online: [
+          { fingerprint: JUNIPER, addresses: 2 },
+          { fingerprint: MOSS, addresses: 1 },
+        ],
+        reason: "This device has an advertised public or relayed candidate route it can offer.",
+      });
     case "get_channels":
       return server === 1
         ? clone([
