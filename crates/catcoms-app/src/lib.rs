@@ -1952,7 +1952,7 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 /// exact size stops leaking through its tail. Pinned by
 /// `the_chunk_size_is_the_padding_ladders_ceiling`; if the two ever drift, a full chunk starts
 /// paying a whole bucket step and the product's bulk traffic doubles.
-const CHUNK_BYTES: usize = catcoms_storage::CHUNK_PAD_CEILING;
+pub const CHUNK_BYTES: usize = catcoms_storage::CHUNK_PAD_CEILING;
 
 /// One window of a shared file's plaintext, as served to the media protocol.
 #[derive(Debug, Clone)]

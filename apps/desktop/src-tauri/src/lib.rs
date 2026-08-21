@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -20,7 +21,7 @@ use catcoms_app::store::MAX_UI_STATE_BYTES;
 use catcoms_app::{
     channel_id, spawn, AppEvent, Cid, DeviceId, FileListing, InviteJoinPlan, Livery, PairingLedger,
     PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord,
-    ServerStore, StorageHealth, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
+    ServerStore, StorageHealth, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
     MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
@@ -102,11 +103,27 @@ struct ServerEntry {
     record_seq: u64,
 }
 
+/// One decrypted chunk, kept so a player reading a track sequentially does not re-fetch and
+/// re-decrypt the same 8 MiB for every window it asks for. Plaintext, so it is dropped whenever
+/// the vault locks, exactly like every other decrypted thing this process holds.
+struct MediaChunk {
+    server: u64,
+    cid: String,
+    index: usize,
+    bytes: Arc<Vec<u8>>,
+    total_size: u64,
+    mime: String,
+}
+
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
+    /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
+    /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
+    /// boundary and a short seek backwards, which is all the locality there is to exploit.
+    media_cache: Mutex<Vec<MediaChunk>>,
     /// Invite minting crosses actor and optional rendezvous awaits. Serialize it so two self-heal/
     /// explicit requests cannot finish out of order and overwrite a newer route-set token.
     invite_mint: Mutex<()>,
@@ -5594,39 +5611,48 @@ async fn serve_media(
         return deny(http::StatusCode::BAD_REQUEST);
     };
 
-    // One probing read establishes the total size, so a Range can be resolved against it. Asking
-    // for a single byte keeps the probe to one chunk.
-    let probe = match actor.read_file_range(raw.clone(), 0, 1).await {
-        Ok(probe) => probe,
-        Err(_) => return deny(http::StatusCode::NOT_FOUND),
+    // Reads are chunk-aligned and cached, which is not an optimisation but a correctness
+    // requirement for the actor: it processes one command at a time, so every chunk fetched here
+    // is time the server cannot answer get_messages or get_channels. Serving a 2 MiB window out
+    // of an 8 MiB chunk meant decrypting the same chunk four times over during ordinary
+    // playback, which stalled the deck and made the whole server look like it was still loading.
+    let (total, declared, _) = match media_chunk(state, &actor, server, &cid, &raw, 0).await {
+        Some(head) => head,
+        None => return deny(http::StatusCode::NOT_FOUND),
     };
-    let total = probe.total_size;
-    let mime = safe_media_mime(&probe.mime);
+    let mime = safe_media_mime(&declared);
 
     let (start, len) = match range.as_deref().and_then(|r| parse_range_header(r, total)) {
         Some(parsed) => parsed,
         None if range.is_some() => return deny(http::StatusCode::RANGE_NOT_SATISFIABLE),
         None => (0, MEDIA_WINDOW_BYTES),
     };
-    if start > total {
+    if start >= total {
         return http::Response::builder()
             .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
             .header("Content-Range", format!("bytes */{total}"))
             .body(Vec::new())
             .expect("static response builds");
     }
-    let window = match actor.read_file_range(raw, start, len).await {
-        Ok(window) => window,
-        Err(_) => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
+    // Never serve across a chunk boundary: one response is at most one chunk, so a sequential
+    // reader asks for the next chunk next rather than making us touch two.
+    let index = (start / CHUNK_BYTES as u64) as usize;
+    let base = index as u64 * CHUNK_BYTES as u64;
+    let bytes = match media_chunk(state, &actor, server, &cid, &raw, index).await {
+        Some((_, _, bytes)) => bytes,
+        None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
     };
-    let end = start + window.bytes.len() as u64;
+    let lo = (start - base).min(bytes.len() as u64) as usize;
+    let hi = (lo + len).min(bytes.len());
+    let body = bytes[lo..hi].to_vec();
+    let end = start + body.len() as u64;
     // Always a 206 with an explicit Content-Range: the response is a window by construction, and
     // claiming 200 for a partial body is what makes a player think the file is truncated.
     http::Response::builder()
         .status(http::StatusCode::PARTIAL_CONTENT)
         .header("Content-Type", mime)
         .header("Accept-Ranges", "bytes")
-        .header("Content-Length", window.bytes.len().to_string())
+        .header("Content-Length", body.len().to_string())
         .header(
             "Content-Range",
             format!("bytes {start}-{}/{total}", end.saturating_sub(1).max(start)),
@@ -5636,8 +5662,64 @@ async fn serve_media(
         .header("Cache-Control", "no-store")
         .header("Access-Control-Allow-Origin", "null")
         .header("X-Content-Type-Options", "nosniff")
-        .body(window.bytes)
+        .body(body)
         .expect("response builds")
+}
+
+/// Fetch one whole decrypted chunk, from the cache when possible.
+///
+/// Returns `(total plaintext size, declared mime, the chunk's bytes)`. The cache exists because
+/// the actor is single-threaded: every miss is time the server spends not answering anything
+/// else, so a player walking a track must not make us re-read a chunk it has already been served.
+async fn media_chunk(
+    state: &AppState,
+    actor: &ServerActor,
+    server: u64,
+    cid: &str,
+    raw: &[u8],
+    index: usize,
+) -> Option<(u64, String, Arc<Vec<u8>>)> {
+    {
+        let cache = state.media_cache.lock().await;
+        if let Some(hit) = cache
+            .iter()
+            .find(|c| c.server == server && c.cid == cid && c.index == index)
+        {
+            return Some((hit.total_size, hit.mime.clone(), Arc::clone(&hit.bytes)));
+        }
+    }
+    let start = index as u64 * CHUNK_BYTES as u64;
+    let range = actor
+        .read_file_range(raw.to_vec(), start, CHUNK_BYTES)
+        .await
+        .ok()?;
+    // A read past the end is how the caller learns the file is shorter than it guessed; it is not
+    // worth a cache entry, but the size and type it carries are still the truth.
+    if range.bytes.is_empty() && start > 0 {
+        return Some((range.total_size, range.mime, Arc::new(Vec::new())));
+    }
+    let bytes = Arc::new(range.bytes);
+    let mut cache = state.media_cache.lock().await;
+    // A different track displaces the whole cache: nothing about the old one will be asked for
+    // again, and holding two tracks' plaintext to serve one is the wrong trade.
+    if cache.iter().any(|c| c.cid != cid || c.server != server) {
+        cache.clear();
+    }
+    cache.retain(|c| c.index != index);
+    cache.push(MediaChunk {
+        server,
+        cid: cid.to_string(),
+        index,
+        bytes: Arc::clone(&bytes),
+        total_size: range.total_size,
+        mime: range.mime.clone(),
+    });
+    // Two chunks: enough for the straddle at a boundary and a short seek back, and no more
+    // decrypted plaintext resident than that.
+    while cache.len() > 2 {
+        cache.remove(0);
+    }
+    Some((range.total_size, range.mime, bytes))
 }
 
 /// Constrain what a shared file's declared MIME may become on a media response. The value is
@@ -7196,6 +7278,9 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
         Ok(())
     };
     *state.session_resumable.lock().await = false;
+    // The media cache holds decrypted chunks of shared files. Locking must drop them along with
+    // the rest of the session's plaintext, not leave a film resident until something evicts it.
+    state.media_cache.lock().await.clear();
     save_result
 }
 

@@ -9895,6 +9895,7 @@
   // pull with a percentage. Fed by the same download-progress events the Downloads surface uses.
   let jukeFetch = $state<FetchPhase | null>(null);
   let jukeBuffering = $state(false); // the element ran out of data mid-track
+  let bufferTimer: ReturnType<typeof setTimeout> | undefined; // debounce for the chip above
   let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
   // declared type when the share is the one in view.
@@ -9935,14 +9936,32 @@
     el.addEventListener("error", () => {
       if (jukeNow?.cid) jukeFail(jukeNow.cid);
     });
-    // Ran dry mid-track. Distinct from the initial pull, and worth showing, because on a slow
-    // peer it is the difference between "this is loading" and "this has stalled".
-    el.addEventListener("waiting", () => (jukeBuffering = true));
+    // `waiting` fires constantly and harmlessly while streaming: every chunk boundary and every
+    // seek raises it, and it clears again in milliseconds. Only a stall long enough for a person
+    // to notice is worth a chip, so this waits before saying anything and any progress cancels
+    // it. Announcing the raw event made an ordinary playing track claim it had run dry.
+    el.addEventListener("waiting", () => {
+      clearTimeout(bufferTimer);
+      bufferTimer = setTimeout(() => {
+        if (jukeAudio && jukeAudio.readyState < 3 && !jukeAudio.paused) jukeBuffering = true;
+      }, 1200);
+    });
     el.addEventListener("playing", () => {
+      clearTimeout(bufferTimer);
       jukeBuffering = false;
       jukeFetch = null;
     });
-    el.addEventListener("canplay", () => (jukeBuffering = false));
+    el.addEventListener("canplay", () => {
+      clearTimeout(bufferTimer);
+      jukeBuffering = false;
+    });
+    // Progress of any kind means it is not stalled, whatever `waiting` claimed a moment ago.
+    el.addEventListener("timeupdate", () => {
+      if (jukeBuffering) {
+        clearTimeout(bufferTimer);
+        jukeBuffering = false;
+      }
+    });
     document.body.appendChild(el);
     jukeAudio = el;
     return el;
@@ -10189,6 +10208,7 @@
     jukeAdopted = null;
     jukeStale = false;
     jukeFetch = null;
+    clearTimeout(bufferTimer);
     jukeBuffering = false;
     jukeNudging = false;
     jukeDur = 0;
