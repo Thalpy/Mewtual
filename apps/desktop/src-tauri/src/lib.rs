@@ -5330,6 +5330,163 @@ async fn set_switchboard_offered(
     get_switchboard_status(state, server).await
 }
 
+/// Pull the globally-routable IP literals out of a set of advertised multiaddrs, newest-family
+/// first. A relay circuit names the *relay's* address, never this node's, so circuits are
+/// dropped: reporting one here would tell the media plane it is directly reachable when the
+/// only working path runs through somebody else's host.
+fn routable_media_hosts(advertised: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for address in advertised {
+        let Ok(parsed) = address.parse::<Multiaddr>() else {
+            continue;
+        };
+        if parsed
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        {
+            continue;
+        }
+        if !addr_is_globally_routable(&parsed) {
+            continue;
+        }
+        for protocol in parsed.iter() {
+            match protocol {
+                Protocol::Ip4(ip) => {
+                    let literal = ip.to_string();
+                    if !v4.contains(&literal) {
+                        v4.push(literal);
+                    }
+                }
+                Protocol::Ip6(ip) => {
+                    let literal = ip.to_string();
+                    if !v6.contains(&literal) {
+                        v6.push(literal);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (v4, v6)
+}
+
+/// One member this device could hand its media to when a direct path cannot be built.
+#[derive(Serialize)]
+struct CallBridge {
+    /// Short fingerprint, matching the identifier the call UI already renders for a peer.
+    fingerprint: String,
+    /// How many routes the helper published. More routes is a better bet, not a guarantee.
+    addresses: usize,
+    /// True when at least one published route is a literal public address rather than a circuit.
+    /// A helper reachable only through *another* relay is a poor media bridge: it inherits that
+    /// relay's latency and its liveness.
+    direct: bool,
+}
+
+/// What the media plane should do for this server, derived entirely from what the mesh already
+/// proved. The frontend owns ICE; this is the evidence it has never had access to.
+///
+/// The two planes are otherwise disjoint by construction: the libp2p transport's PCP/UPnP/PCPv6
+/// mappings cover the *mesh* socket, and the webview's ICE agent binds its own ephemeral ports,
+/// so none of that traversal work has ever applied to a call. What does transfer is the
+/// *knowledge*: whether this node is directly reachable, whether it has a global IPv6 route, and
+/// which members have proven they can host for others.
+#[derive(Serialize)]
+struct CallTransport {
+    /// Whether this node advertises at least one non-circuit, globally routable address.
+    public_direct: bool,
+    /// The AutoNAT verdict verbatim, so the call UI can quote evidence rather than assert.
+    autonat: String,
+    /// Public IPv4 literals this node is known at. Diagnostic only: the media plane cannot turn
+    /// these into ICE candidates, because the webview's ports are not the mesh's ports.
+    public_ipv4: Vec<String>,
+    /// Public IPv6 literals. These matter more than IPv4: IPv6 has no NAT to traverse, so a
+    /// direct media path needs only a firewall pinhole rather than a mapping.
+    public_ipv6: Vec<String>,
+    /// Members currently offering to host, best candidates first.
+    bridges: Vec<CallBridge>,
+    /// Whether a third-party relay is likely to be required for this node to be heard at all.
+    relay_likely_required: bool,
+    /// One line the call UI can show verbatim when a link will not come up.
+    advice: String,
+}
+
+#[tauri::command]
+async fn get_call_transport(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<CallTransport, String> {
+    require_unlocked_session(&state).await?;
+    let (actor, advertised) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        (entry.actor.clone(), entry.bootstrap.clone())
+    };
+    let public_direct = advertised.iter().any(|address| {
+        address
+            .parse::<Multiaddr>()
+            .is_ok_and(|addr| addr_is_globally_routable(&addr))
+            && !address.contains("/p2p-circuit")
+    });
+    let autonat = {
+        let evidence = state.autonat.lock().await.get(&server).cloned();
+        autonat_status(&advertised, evidence.as_ref())
+    };
+    let (public_ipv4, public_ipv6) = routable_media_hosts(&advertised);
+
+    // Reuse the switchboard's consent-gated offer pool: a member who has already agreed to carry
+    // somebody else's traffic is exactly the member who should be asked to carry their media.
+    // Sorting puts literal-route helpers first so the picker never prefers a relayed helper.
+    let mut bridges: Vec<CallBridge> = actor
+        .switchboard_offers()
+        .await
+        .into_iter()
+        .map(|offer| {
+            let direct = offer
+                .addresses
+                .iter()
+                .any(|address| switchboard_route_usable(address));
+            CallBridge {
+                fingerprint: hex::encode(&offer.device_id().as_bytes()[..8]),
+                addresses: offer.addresses.len(),
+                direct,
+            }
+        })
+        .collect();
+    bridges.sort_by(|a, b| {
+        b.direct
+            .cmp(&a.direct)
+            .then_with(|| b.addresses.cmp(&a.addresses))
+    });
+
+    let relay_likely_required = !public_direct && public_ipv6.is_empty();
+    let advice = if public_direct {
+        "This device is directly reachable, so a call should connect without a relay. A peer that still fails is behind the stricter NAT.".to_string()
+    } else if !public_ipv6.is_empty() {
+        "This device has a public IPv6 route but no verified IPv4 path. Calls will connect directly to IPv6 peers once the router permits inbound UDP to the app; IPv4-only peers will need a relay.".to_string()
+    } else if bridges.is_empty() {
+        "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay: ask a member with a public route to enable hosting, or set a TURN server in Settings, Calls.".to_string()
+    } else {
+        format!(
+            "This device is behind NAT. {} member(s) are offering to host, so a relayed path is available.",
+            bridges.len()
+        )
+    };
+
+    Ok(CallTransport {
+        public_direct,
+        autonat,
+        public_ipv4,
+        public_ipv6,
+        bridges,
+        relay_likely_required,
+        advice,
+    })
+}
+
 fn validate_ui_state_json(json: &str) -> Result<(), String> {
     if json.len() > MAX_UI_STATE_BYTES {
         return Err("UI continuity state is too large".into());
@@ -7645,6 +7802,7 @@ pub fn run() {
             resolve_kick_case,
             get_join_attempts,
             get_connectivity,
+            get_call_transport,
             get_switchboard_status,
             set_switchboard_offered,
             get_ui_state,
@@ -7705,6 +7863,67 @@ mod tests {
         ];
         assert_eq!(listener_summary(&addresses), "IPv4 TCP, IPv6 QUIC");
         assert_eq!(listener_summary(&addresses[2..]), "");
+    }
+
+    #[test]
+    fn media_hosts_report_only_this_node_s_own_public_literals() {
+        let advertised = vec![
+            // Loopback and RFC1918: never a media host.
+            "/ip4/127.0.0.1/udp/22487/quic-v1".to_string(),
+            "/ip4/192.168.1.40/tcp/22487".to_string(),
+            // A real mapped IPv4 and a real global IPv6.
+            "/ip4/93.184.216.34/udp/22487/quic-v1".to_string(),
+            "/ip6/2606:2800:220:1:248:1893:25c8:1946/udp/22487/quic-v1".to_string(),
+            // A circuit names the RELAY's address, not ours. Reporting it would tell the media
+            // plane this node is directly reachable when it is only reachable through a host.
+            "/ip4/198.41.0.4/tcp/4001/p2p/12D3KooWF8W6GDyoRR93iGs7VjVQ7jH1mDbGKiqd28KxoM6qQjTq/p2p-circuit"
+                .to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert_eq!(v4, vec!["93.184.216.34".to_string()]);
+        assert_eq!(
+            v6,
+            vec!["2606:2800:220:1:248:1893:25c8:1946".to_string()]
+        );
+    }
+
+    #[test]
+    fn media_hosts_reject_documentation_ranges() {
+        // RFC 5737 / RFC 3849 addresses appear in copy-pasted manual-forward configuration and
+        // in test fixtures. They parse and they look public; they route nowhere. Offering one to
+        // the media plane would advertise a direct path that can never carry a call.
+        let advertised = vec![
+            "/ip4/198.51.100.9/udp/22487/quic-v1".to_string(),
+            "/ip4/203.0.113.7/udp/22487/quic-v1".to_string(),
+            "/ip6/2001:db8::5/udp/22487/quic-v1".to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert!(v4.is_empty(), "documentation IPv4 must not be offered");
+        assert!(v6.is_empty(), "documentation IPv6 must not be offered");
+    }
+
+    #[test]
+    fn media_hosts_deduplicate_across_transports_of_the_same_address() {
+        // TCP and QUIC listeners on one address must not read as two separate routes.
+        let advertised = vec![
+            "/ip4/93.184.216.34/tcp/22487".to_string(),
+            "/ip4/93.184.216.34/udp/22487/quic-v1".to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert_eq!(v4, vec!["93.184.216.34".to_string()]);
+        assert!(v6.is_empty());
+    }
+
+    #[test]
+    fn media_hosts_are_empty_when_only_circuits_are_advertised() {
+        // The NAT'd case that motivates bridge election: nothing of our own is routable, even
+        // though the relay we are reachable through has a perfectly good public address.
+        let advertised = vec![
+            "/ip4/198.41.0.4/tcp/4001/p2p/12D3KooWF8W6GDyoRR93iGs7VjVQ7jH1mDbGKiqd28KxoM6qQjTq/p2p-circuit"
+                .to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert!(v4.is_empty() && v6.is_empty());
     }
 
     #[test]
