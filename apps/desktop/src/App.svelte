@@ -33,6 +33,14 @@
     nearScrollBottom, reconcileChatWindow, revealNewer, revealOlder, windowAround,
     type ChatWindow,
   } from "./chat-performance";
+  import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
+  import {
+    WIKI_REVIEW_UNKNOWN,
+    mayEditWikiStructure,
+    mayPublishLivery,
+    moderationSurfaceOpen,
+    scopeCurrent,
+  } from "./viewscope";
   import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
   import { scheduleNewsChime } from "./news-chime";
   import { acceptTickerReceipt, messageTickerId } from "./ticker";
@@ -166,7 +174,7 @@
   // a move away, and the server id catches a read issued for a different group at the same
   // generation (event-driven refreshes do not bump anything).
   function viewCurrent(gen: number, server: number | null): boolean {
-    return gen === viewGeneration && server === activeServerId;
+    return scopeCurrent({ generation: gen, server }, { generation: viewGeneration, server: activeServerId });
   }
   // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
   // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
@@ -659,9 +667,7 @@
   }
   async function publishLivery() {
     if (activeServerId === null) return;
-    // An unseeded draft is the empty livery, which is exactly what removeLivery sends. Publishing
-    // one the user never authored would erase this server's branding for everybody.
-    if (!liveryLoaded || liveryDraftFor !== activeServerId) {
+    if (!mayPublishLivery(liveryLoaded, liveryDraftFor, activeServerId)) {
       toast("Still reading this server's theme: try again in a moment", "info", 3000);
       return;
     }
@@ -2238,7 +2244,7 @@
   }
 
   function activeMessageScope(): string {
-    return activeServerId !== null && cur?.active ? `${activeServerId}:${cur.active}` : "";
+    return activeServerId !== null && cur?.active ? chatScopeKey(activeServerId, cur.active) : "";
   }
   function messageDomKey(message: Msg, index: number): string {
     // Persisted messages have immutable ids. The fallback is only for legacy rows which predate
@@ -2448,7 +2454,7 @@
   }
   function chanKey(): string | null {
     if (activeServerId === null || !cur?.active) return null;
-    return `${activeServerId}:${cur.active}`;
+    return chatScopeKey(activeServerId, cur.active);
   }
   function captureDivider() {
     const k = chanKey();
@@ -2827,12 +2833,6 @@
   let moderation = $state<ModerationState>({ events: [], votes: [] });
   let moderationMessages = $state<TimelineMessage[]>([]);
   let moderationLoading = $state(false);
-  // Selected AND rendered. `view` alone only says which tab is selected: openInbox and the orbit
-  // view replace the whole sidebar+main without touching it, so a moderator sitting in the inbox
-  // would otherwise re-sweep every channel of the server behind it on every incoming message.
-  function moderationSurfaceOpen(): boolean {
-    return view === "moderation" && !inboxView && !spaceOpen;
-  }
   let moderationReason = $state("");
   let moderationSelected = $state<Set<string>>(new Set());
   let moderationAnchor = $state("");
@@ -2885,7 +2885,7 @@
   // message corpus behind the privileged timeline is every message in every channel, and only the
   // moderation surface reads it, so it loads with that surface. `withCorpus` defaults to whether
   // the surface is actually open, which is the right answer at every existing call site.
-  async function refreshModeration(withCorpus = moderationSurfaceOpen()) {
+  async function refreshModeration(withCorpus = moderationSurfaceOpen(view, inboxView, spaceOpen)) {
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null || cur?.isDm) {
@@ -3060,7 +3060,7 @@
   // --- wiki history + edit review (11x) ---
   type UiWikiRev = { id: string; author: string; ts: number; body: string; kind: string; actor: string; note: string };
   type UiWikiPending = { id: string; page: string; author: string; ts: number; expires_ts: number; body: string };
-  let wikiReviewDays = $state(0); // server setting: 0 = edits publish immediately, -1 = not yet read
+  let wikiReviewDays = $state(WIKI_REVIEW_UNKNOWN); // server setting: 0 = edits publish immediately
   let wikiPending = $state<UiWikiPending[]>([]); // the live review queue (whole server)
   let wikiHistory = $state<UiWikiRev[]>([]); // the open page's revisions, oldest first
   let showWikiHistory = $state(false); // the history browser replaces the article body
@@ -4831,10 +4831,7 @@
     wikiMap = {}; // name -> body: the previous server's page CONTENT, not just its names
     wikiMapFor = null;
     wikiPending = [];
-    // -1, not 0: zero MEANS "edits publish immediately", so clearing to it would hand every member
-    // the rename/delete controls and the eager-create path on a review-gated server. Unknown must
-    // fail closed until this server's own policy is read.
-    wikiReviewDays = -1;
+    wikiReviewDays = WIKI_REVIEW_UNKNOWN; // NOT 0: see the constant, zero is a real policy
     wikiHistory = [];
     showWikiHistory = false;
     wikiHistorySel = "";
@@ -5020,7 +5017,17 @@
       const s = servers.find((x) => x.id === server);
       if (!s || !channels.length) return;
       s.channels = channels;
-      if (!channels.some((c) => c.id === s.active)) s.active = channels[0].id;
+      const next = reconcileActiveChannel(channels, s.active);
+      if (!next.changed) return;
+      if (server === activeServerId) {
+        // switchTo owns the move for the group on screen: reassigning `active` on its own would
+        // leave the previous channel's messages, topic, delivery ticks and draft sitting under the
+        // new channel's name. Not awaited here, and `s.active` is deliberately NOT set first:
+        // switchTo stashes the outgoing draft under the channel being left.
+        void switchTo(next.active);
+      } else {
+        s.active = next.active; // not on screen: there is no loaded state to reconcile
+      }
     } catch {
       // Older backend: retain the locally-known list.
     }
@@ -5104,7 +5111,7 @@
       const next = await invoke<Msg[]>("get_messages", { server, channel });
       // A slow response from the conversation we just left must never populate the new one.
       if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
-      const nextScope = `${server}:${channel}`;
+      const nextScope = chatScopeKey(server, channel);
       const nextWindow = reconcileChatWindow(
         previousMessages,
         next,
@@ -6793,7 +6800,7 @@
       // With review on, a member's save queues as a proposal; creating the page eagerly here
       // would queue an EMPTY proposal that eventually auto-creates a blank page. So members
       // under review just open the editor; their first real save becomes the proposal.
-      if (!wikiPages.includes(name) && (wikiReviewDays === 0 || canModerate)) {
+      if (!wikiPages.includes(name) && mayEditWikiStructure(wikiReviewDays, canModerate)) {
         await invoke("save_wiki_page", { server: activeServerId, name, body: "" });
         await refreshWiki();
       }
@@ -8337,8 +8344,12 @@
   // Does `msgs` contain a message newer than the channel's read mark that targets me (and isn't
   // mine)? Used to flag a channel and to decide whether an arrival deserves a mention chime.
   function targetsMe(channel: string, msgs: Msg[]): boolean {
-    if (!myFp) return false;
-    const seen = readMarks[`${activeServerId}:${channel}`] ?? 0;
+    // No active server means no read mark to measure against. The sole caller already requires
+    // server === activeServerId, and its documented fallback is an ordinary-message notification,
+    // which is what false gives it. The old key built `null:channel`, which said the same thing
+    // by accident rather than on purpose.
+    if (!myFp || activeServerId === null) return false;
+    const seen = readMarks[chatScopeKey(activeServerId, channel)] ?? 0;
     const byId = new Map(msgs.map((m) => [m.id, m] as const));
     return msgs.some(
       (m) =>
@@ -8384,7 +8395,7 @@
   // An inbox entry is "unseen" until you've read past it in that channel (the same read marks that
   // drive jump-to-unread); resolved against the entry's own server, not the active one.
   function inboxUnseen(it: InboxEntry): boolean {
-    return it.ts > (readMarks[`${it.server}:${it.channel}`] ?? 0);
+    return it.ts > (readMarks[chatScopeKey(it.server, it.channel)] ?? 0);
   }
   let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
   // The entry's channel name, resolved from the server's known channel list (names are a UI concern).
@@ -10952,7 +10963,7 @@
       reply_to,
       pinned: false,
     }];
-    const nextScope = `${server}:${channel}`;
+    const nextScope = chatScopeKey(server, channel);
     chatStickToBottom = true;
     messages = nextMessages;
     messageWindow = reconcileChatWindow(
@@ -11794,6 +11805,15 @@
             // You're looking at this channel: only notify if the window isn't focused. The same
             // stable message id gates its sound and its clickable ticker receipt exactly once.
             if (document.hasFocus()) return;
+            // request() hands back ONE promise for the whole drain, so this can resolve after a
+            // pass that loaded a different conversation: reading the shared array then would
+            // headline THIS channel with ANOTHER one's text, and the ticker click would try to
+            // land a foreign message id here and silently do nothing. Fetch our own rows in that
+            // case, exactly as the non-active-channel branch below always does.
+            if (!scopeHoldsConversation(messageWindowScope, server, channel)) {
+              void notifyLatestChannelMessage(server, channel, "detect");
+              return;
+            }
             const last = messages[messages.length - 1];
             const forMe =
               last &&
@@ -13929,7 +13949,7 @@
       <label class="wiki-review-days">
         <span>review window</span>
         <select
-          value={wikiReviewDays}
+          value={Math.max(wikiReviewDays, 0)}
           title="How long a member's edit waits for review before it auto-accepts; off publishes edits immediately"
           onchange={(e) => setWikiReviewWindow(Number(e.currentTarget.value))}
         >
@@ -16107,7 +16127,7 @@
                   <div class="wiki-head-tools">
                     {#if !wikiRenaming && wikiPages.includes(activeWikiPage)}
                       <button class="ghost small" class:active={showWikiHistory} title="Every revision of this page: who changed what, when; restore any of them" onclick={() => (showWikiHistory ? (showWikiHistory = false) : openWikiHistory())}>history</button>
-                      {#if wikiReviewDays === 0 || canModerate}
+                      {#if mayEditWikiStructure(wikiReviewDays, canModerate)}
                         <button class="ghost small" title="Rename this page (links to the old name go red; they aren't rewritten)" onclick={startWikiRename}>rename</button>
                         {#if wikiDeleteArmed}
                           <button class="ghost small wiki-del armed" title="This deletes the page for every member" onclick={() => deleteWikiPage(activeWikiPage)}>confirm delete</button>

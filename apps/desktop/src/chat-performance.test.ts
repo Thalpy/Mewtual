@@ -119,3 +119,34 @@ test("bursty invalidations serialize into one active refresh and one merged foll
   await first;
   assert.deepEqual(calls, [false, true]);
 });
+
+test("a waiter is released by the last pass, whatever that pass loaded", async () => {
+  // The hazard that scopeHoldsConversation exists to catch. Every requester shares ONE promise for
+  // the whole drain, so the pass that releases a waiter need not be the pass it asked for: a
+  // waiter that reads shared state in its .then() can be reading a different subject's result.
+  const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const loaded: string[] = [];
+  const releases: (() => void)[] = [];
+  let subject = "a";
+  const coalescer = new CoalescedAsyncRefresh(async () => {
+    const pass = subject; // each pass loads whatever is current when it starts, as refresh() does
+    await new Promise<void>((resolve) => releases.push(resolve));
+    loaded.push(pass);
+  });
+
+  const waitingForA = coalescer.request();
+  let released = false;
+  void waitingForA.then(() => (released = true));
+  subject = "b"; // the user moves to another conversation
+  coalescer.request(); // its notification joins the same drain
+
+  releases.shift()?.(); // the pass that loaded "a" finishes
+  await flush();
+  assert.deepEqual(loaded, ["a"]);
+  assert.equal(released, false, "a queued pass holds every waiter open, including earlier ones");
+
+  releases.shift()?.(); // the pass that loaded "b" finishes
+  await waitingForA;
+  assert.deepEqual(loaded, ["a", "b"]);
+  assert.equal(released, true); // released by "b"'s pass, having asked about "a"
+});
