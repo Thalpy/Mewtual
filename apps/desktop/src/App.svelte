@@ -8131,6 +8131,38 @@
   // True while the user is looking at a different server from the one the call is on. The dock
   // uses it to say where the call actually is instead of silently implying "here".
   let callElsewhere = $derived(inCall && callServer !== null && callServer !== activeServerId);
+  // The room's server name. Prefer the live rail entry so a rename mid-call lands; fall back to
+  // the name captured at join, which is all we have if the server leaves the rail under us.
+  let callSrvLabel = $derived(
+    callServer !== null
+      ? (servers.find((s) => s.id === callServer)?.name ?? callServerName)
+      : "",
+  );
+  // Which dock slot the voice chrome occupies. Two slots rather than free dragging: the dock is
+  // a fixed centred overlay, and a freely draggable surface near the top edge would fight the
+  // titlebar's own drag region for no real gain.
+  let callDockTop = $state(loadCallSetting("dock", "top") !== "bottom");
+  function toggleDockSlot() {
+    callDockTop = !callDockTop;
+    try {
+      localStorage.setItem("catcoms.call.dock", callDockTop ? "top" : "bottom");
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  // Per-peer media path. Absent means "not known yet": still negotiating, or getStats has not
+  // answered. An unknown path renders as nothing at all, never as a guess.
+  let peerTransport = $state<Record<string, "direct" | "relayed">>({});
+  let secInfoOpen = $state(false); // the "what a relay can see" fold-out in the stage
+  // The room folds to the weakest path present: one relayed leg means a relay learns that much
+  // of who is talking to whom.
+  let roomPath = $derived.by(() => {
+    const known = callParticipants
+      .map((fp) => peerTransport[fp])
+      .filter((t): t is "direct" | "relayed" => !!t);
+    if (!known.length) return "";
+    return known.includes("relayed") ? "relayed" : "direct";
+  });
   let localStream: MediaStream | null = null;
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
@@ -9943,6 +9975,46 @@
     }
   }
 
+  // Ask the ICE agent which candidate pair actually won, and classify the media path from it.
+  // A "relay" candidate on either end means a TURN carries the media: still ciphertext, but a
+  // third party now sees who is talking to whom, when, and from which address. That is a real
+  // difference in what leaks and the room deserves to be told, so it is surfaced rather than
+  // averaged away. Best-effort throughout: on any miss the badge stays unknown, which is an
+  // honest answer, where guessing "direct" would not be.
+  async function sniffTransport(fp: string, pc: RTCPeerConnection) {
+    try {
+      const stats = await pc.getStats();
+      let pairId = "";
+      stats.forEach((s) => {
+        const t = s as RTCStats & { selectedCandidatePairId?: string };
+        if (t.type === "transport" && t.selectedCandidatePairId) pairId = t.selectedCandidatePairId;
+      });
+      if (!pairId) {
+        // Firefox and older Chromium never fill selectedCandidatePairId; the nominated,
+        // succeeded pair is the same fact spelled the other way.
+        stats.forEach((s) => {
+          const p = s as RTCStats & { state?: string; nominated?: boolean };
+          if (p.type === "candidate-pair" && p.state === "succeeded" && p.nominated) pairId = p.id;
+        });
+      }
+      const pair = pairId
+        ? (stats.get(pairId) as (RTCStats & { localCandidateId?: string; remoteCandidateId?: string }) | undefined)
+        : undefined;
+      if (!pair) return;
+      const local = pair.localCandidateId
+        ? (stats.get(pair.localCandidateId) as (RTCStats & { candidateType?: string }) | undefined)
+        : undefined;
+      const remote = pair.remoteCandidateId
+        ? (stats.get(pair.remoteCandidateId) as (RTCStats & { candidateType?: string }) | undefined)
+        : undefined;
+      if (!local && !remote) return;
+      const relayed = local?.candidateType === "relay" || remote?.candidateType === "relay";
+      peerTransport = { ...peerTransport, [fp]: relayed ? "relayed" : "direct" };
+    } catch {
+      /* stats are best-effort: an unknown path renders as no badge at all */
+    }
+  }
+
   function createPeer(fp: string): CallPeer | null {
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
@@ -10002,6 +10074,7 @@
     };
     pc.onconnectionstatechange = () => {
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
+      if (pc.connectionState === "connected") void sniffTransport(fp, pc);
       if (pc.connectionState === "failed") recoverPeer(peer);
       else if (pc.connectionState === "closed") removePeer(fp);
     };
@@ -10020,6 +10093,8 @@
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
     callPeerStates = rest;
+    const { [fp]: _path, ...paths } = peerTransport;
+    peerTransport = paths;
     // Silence and forget anything they were sounding; a dead edge must not drone on.
     stopAllFrom(fp);
     const { [fp]: _h, ...rh } = remoteHeld;
@@ -10229,6 +10304,11 @@
         broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0 });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
+        // Re-read the winning candidate pair: an ICE restart can migrate a live call from
+        // direct to relayed (or back) with no connection-state change to notice it by.
+        for (const [fp, p] of Object.entries(callPeers)) {
+          if (p.pc.connectionState === "connected") void sniffTransport(fp, p.pc);
+        }
       }
     }, 5000);
   }
@@ -10270,6 +10350,8 @@
     callServerName = "";
     callSelfFp = "";
     callProfiles = {};
+    peerTransport = {};
+    secInfoOpen = false;
     for (const fp of Object.keys(waitingIce)) delete waitingIce[fp];
   }
   function toggleMute() {
@@ -11848,6 +11930,37 @@
 {/snippet}
 
 <!--
+  The call's own address: which server the room is on, and which channel. Rendered by both dock
+  shapes. While the viewed server IS the call's server the channel alone is unambiguous, so the
+  server name is dropped to keep the bar tight; the moment they diverge the full identity
+  appears and becomes the way back. Advisory gold, not danger: nothing is wrong, you are just
+  looking somewhere else.
+-->
+{#snippet callServerTag()}
+  {#if callElsewhere}
+    <button
+      class="call-srv away"
+      title={`This call is on ${callSrvLabel}: click to go back to it`}
+      onclick={() => { if (callServer !== null) switchServer(callServer); }}
+    >
+      {#if callServer !== null && serverIcons[callServer]}
+        <img class="call-srv-ico" src={imgSrc(serverIcons[callServer])} alt="" />
+      {/if}
+      <span class="call-srv-nm">{callSrvLabel}</span>
+      <span class="call-srv-ch">#{callChannelName}</span>
+    </button>
+    <span class="stage-chip away-chip">VIEWING ELSEWHERE</span>
+  {:else}
+    <span class="call-srv">
+      {#if callServer !== null && serverIcons[callServer]}
+        <img class="call-srv-ico" src={imgSrc(serverIcons[callServer])} alt="" />
+      {/if}
+      <span class="call-srv-ch">#{callChannelName}</span>
+    </span>
+  {/if}
+{/snippet}
+
+<!--
   Call-surface twins of nameTag/avatarTag. Identical rendering, different lookup: these resolve
   through the room server's profile map so switching servers mid-call cannot rename the room.
 -->
@@ -12985,6 +13098,15 @@
 {#snippet icoChevDown()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M6 9.2 12 15.2l6-6" />
+  </svg>
+{/snippet}
+
+<!-- Dock slot: a frame with one edge weighted, so the glyph reads as "which end it sits at".
+     The CSS flips it vertically when the dock is already at the top. -->
+{#snippet icoDock()}
+  <svg class="ico ico-dock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="4" y="4" width="16" height="16" rx="2.5" />
+    <path d="M4 15.5h16" fill="none" />
   </svg>
 {/snippet}
 
@@ -15910,10 +16032,19 @@
       danger treatment plus an empty meter in both shapes.
     -->
     {#if inCall && !stageOpen && !focusOpen}
-      <div class="call-bar">
+      <div class="call-bar" class:top={callDockTop} class:away={callElsewhere}>
         <span class="call-dot">{@render icoSpeaker()}</span>
-        <span class="call-title">Voice · #{callChannelName}</span>
+        <span class="call-title">Voice</span>
+        {@render callServerTag()}
         <span class="call-status">{callStatusText}</span>
+        {#if roomPath}
+          <span
+            class="stage-path {roomPath}"
+            title={roomPath === "relayed"
+              ? "Relayed: end to end encrypted, but a relay carries it and sees who, when, and from which IP"
+              : "Direct: peer to peer, nobody in the media path"}
+          >{roomPath === "relayed" ? "RLY" : "P2P"}</span>
+        {/if}
         <div class="call-avatars">
           {@render callAvatarTag(callSelfFp)}
           {#each callParticipants as fp}{@render callAvatarTag(fp)}{/each}
@@ -15924,16 +16055,27 @@
         {/if}
         <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
         <button class="call-hangup btn-ico" title="Leave voice" onclick={leaveVoice}>{@render icoHangup()} Leave</button>
-        <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{@render icoChevUp()}</button>
+        <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{#if callDockTop}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
       </div>
     {/if}
 
     {#if inCall && stageOpen && !focusOpen}
-      <div class="stage">
+      <div class="stage" class:top={callDockTop} class:away={callElsewhere}>
         <header class="stage-head">
           <span class="stage-live"></span>
-          <span class="stage-label">VOICE · #{callChannelName}</span>
+          <span class="stage-label">VOICE</span>
+          {@render callServerTag()}
           <span class="stage-spacer"></span>
+          {#if roomPath}
+            <button
+              class="ghost stage-sec {roomPath}"
+              aria-expanded={secInfoOpen}
+              title={roomPath === "relayed"
+                ? "At least one leg goes through a relay: click for what that means"
+                : "Every leg is peer to peer"}
+              onclick={() => (secInfoOpen = !secInfoOpen)}
+            >E2E · {roomPath === "relayed" ? "RELAY" : "DIRECT"}</button>
+          {/if}
           {#if callParticipants.length === 0}
             <span class="stage-tally solo">solo</span>
           {:else}
@@ -15944,8 +16086,22 @@
           {#if videoAnnounced}
             <button class="ghost focus-chip" title="Open the video focus view" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
           {/if}
-          <button class="ghost stage-chev" title="Collapse to the call bar" aria-label="Collapse to the call bar" onclick={() => (stageOpen = false)}>{@render icoChevDown()}</button>
+          <button
+            class="ghost stage-chev"
+            title={callDockTop ? "Dock the voice bar at the bottom" : "Dock the voice bar at the top"}
+            aria-label={callDockTop ? "Dock the voice bar at the bottom" : "Dock the voice bar at the top"}
+            onclick={toggleDockSlot}
+          >{@render icoDock()}</button>
+          <button class="ghost stage-chev" title="Collapse to the call bar" aria-label="Collapse to the call bar" onclick={() => (stageOpen = false)}>{#if callDockTop}{@render icoChevUp()}{:else}{@render icoChevDown()}{/if}</button>
         </header>
+
+        {#if secInfoOpen}
+          <p class="stage-secinfo">
+            Media is end to end encrypted on every path; no relay or server can hear or decrypt it.
+            A relayed leg passes through a TURN relay, which can see who is talking to whom, when,
+            and from which IP address. A direct leg has nobody in the path at all.
+          </p>
+        {/if}
 
         {#if callParticipants.length === 0}
           <div class="stage-solo">
@@ -15970,6 +16126,14 @@
                   {/if}
                   {#if peerMeta[fp]?.inst}
                     <span class="stage-chip struck" title="They have muted incoming instruments: they can't hear you play">INST</span>
+                  {/if}
+                  {#if link === "est" && peerTransport[fp]}
+                    <span
+                      class="stage-path {peerTransport[fp]}"
+                      title={peerTransport[fp] === "relayed"
+                        ? "Relayed: end to end encrypted, but a relay carries it and sees who, when, and from which IP"
+                        : "Direct: peer to peer, nobody in the media path"}
+                    >{peerTransport[fp] === "relayed" ? "RLY" : "P2P"}</span>
                   {/if}
                   <span class="stage-link {link}" title={`Link: ${callPeerStates[fp] ?? "new"}`}>{link === "est" ? "EST" : link === "neg" ? "NEG" : "LOST"}</span>
                 </div>

@@ -29,6 +29,7 @@
   --ok-brd: color-mix(in oklab, var(--ok) 40%, var(--panel));
   --warn: #d8a657;        /* mentions · pings · advisories        */
   --warn-dim: color-mix(in oklab, var(--warn) 16%, var(--panel));
+  --warn-brd: color-mix(in oklab, var(--warn) 40%, var(--panel));
   --warn-faint: color-mix(in oklab, var(--warn) 8%, transparent);
   --danger: #e0574b;      /* destructive · failures · live        */
   --danger-hi: #ef6f63;
@@ -12689,4 +12690,131 @@ button.fx-order {
   .text-fx-key-name { grid-column: 2 / -1; }
   .text-fx-keylist kbd { grid-column: 2; justify-self: start; }
   .text-fx-grid { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   Voice dock: slot, call-server identity, media-path badges.
+   --------------------------------------------------------------------------------------------- */
+
+/* Dock slot. The same overlay anchored under the titlebar instead of over the statusbar.
+   z-index stays at the dock's 60, below the titlebar, and the offset clears the drag region so
+   a top-docked bar never competes with window dragging. */
+.call-bar.top,
+.stage.top {
+  top: calc(var(--titlebar-h) + 10px);
+  bottom: auto;
+}
+.stage.top {
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+}
+/* The slot glyph points at the edge the dock would MOVE to, not the one it is on. */
+.ico-dock {
+  transform: scaleY(-1);
+}
+.call-bar.top .ico-dock,
+.stage.top .ico-dock {
+  transform: none;
+}
+
+/* The call's own address: server icon, server name, channel. Always the call's server, never
+   the viewed one; that distinction is the entire point of this block. */
+.call-srv {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.call-srv-ico {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: none;
+}
+.call-srv-nm {
+  font-weight: 600;
+  font-size: 0.8rem;
+  max-width: 11ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.call-srv-ch {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+/* Away: the address becomes the way back. Advisory gold, not danger: the call is fine, you are
+   simply looking at a different server. */
+button.call-srv.away {
+  padding: 2px 7px;
+  background: var(--warn-dim);
+  border: 1px solid var(--warn-brd);
+  border-radius: var(--r);
+  color: var(--text);
+  cursor: pointer;
+}
+button.call-srv.away:hover {
+  border-color: var(--warn);
+}
+.stage-chip.away-chip {
+  color: var(--warn);
+  border-color: var(--warn-brd);
+}
+.call-bar.away {
+  background: var(--warn-dim);
+  border-color: var(--warn-brd);
+}
+.call-bar.away .call-dot {
+  color: var(--warn);
+}
+.stage.away .stage-head {
+  background: var(--warn-dim);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+}
+
+/* Media path. Qualifies the link glyph beside it, in the same mono voice. P2P is green (nobody
+   in the path); RLY is advisory gold (a relay sees the envelope, never the contents). Neither
+   is "insecure": both paths are end to end encrypted, which is why neither uses --danger. */
+.stage-path {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  flex: none;
+  text-align: right;
+}
+.stage-path.direct {
+  color: var(--ok);
+}
+.stage-path.relayed {
+  color: var(--warn);
+}
+
+/* Room summary: the weakest path present, folding out the honest explanation. */
+button.stage-sec {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--ok);
+  flex: none;
+}
+button.stage-sec.relayed {
+  color: var(--warn);
+  border-color: var(--warn-brd);
+}
+button.stage-sec:hover {
+  background: var(--bg-elev);
+}
+.stage-secinfo {
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--muted);
 }
