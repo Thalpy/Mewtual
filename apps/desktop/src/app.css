@@ -12857,3 +12857,77 @@ button.juke-play.mini {
 .juke-bar.slim {
   height: 2px;
 }
+
+/* Jukebox media: the one deck element, and the surfaces that borrow it. */
+
+/* Idle home. The element lives on the body between adopters so playback survives a surface
+   change; it is only visible once a surface re-parents it. */
+body > #jukebox-media {
+  display: none;
+}
+
+/* Kind chip: video names itself in the queue and the folded row. Audio stays bare, because it is
+   the default and a chip on every row would be noise. */
+.juke-kind {
+  font-family: var(--mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.06em;
+  padding: 1px 4px;
+  border-radius: var(--r);
+  color: var(--transfer);
+  border: 1px solid color-mix(in oklab, var(--transfer) 40%, var(--panel));
+  flex: none;
+}
+
+/* Arrival, as distinct from playback. Blue is the app's "bytes are moving" colour, and a local
+   read is dimmer than a peer pull because it is the case you rarely need to watch. */
+.juke-bar.load .juke-bar-fill {
+  background: var(--transfer);
+}
+.juke-bar.load.local .juke-bar-fill {
+  background: color-mix(in oklab, var(--transfer) 55%, var(--panel));
+}
+
+/* The shared screen in the focus view. */
+.focus-deck {
+  position: relative;
+  width: 100%;
+  background: #000;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-height: 62vh;
+  flex: none;
+}
+.focus-deck :global(video) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.focus-deck-load {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: min(320px, 70%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  border-radius: var(--r);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+}
+/* Faces yield to the shared screen rather than competing with it. */
+.focus-grid.strip {
+  --focus-cols: 6;
+  max-height: 128px;
+  flex: none;
+}
+/* Video reads differently from audio in the picker, at a glance, before the name is read. */
+.juke-ext.vid {
+  color: var(--transfer);
+  border-color: color-mix(in oklab, var(--transfer) 40%, var(--panel));
+}

@@ -48,6 +48,10 @@
   } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
+    driftAction, fetchPhase, mediaKind, mediaUrl, nudgeRate,
+    type FetchPhase, type MediaKind,
+  } from "./jukebox";
+  import {
     TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
     type TransferPiece,
   } from "./transfer-visual";
@@ -9502,8 +9506,6 @@
   let jukeNow = $state<{ entry: string; cid: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
   let jukeDur = $state(0); // 0 until loadedmetadata knows
-  let jukeFetching = $state(""); // the cid currently being pulled off the share
-  let jukeReady = $state<Record<string, boolean>>({}); // cid -> already fetched
   let jukeVol = $state(loadJukeVol());
   // Dock fold, shared by both call surfaces because the deck is one deck. What stays is the
   // room's shared state (track, time, transport, DJ, sync chip); what folds is the queue, which
@@ -9517,14 +9519,23 @@
       /* storage unavailable */
     }
   }
-  const jukeUrls: Record<string, string> = {}; // cid -> the fetched blob's url
   const jukeFailed = new Set<string>(); // cids nobody would serve: the DJ's auto-advance skips them
   // The transport we currently follow. `seq`/`fromFp` decide who wins a race, `off`/`at` anchor the
   // position to the local clock. Plain `let`: identity, not reactivity, is what the races need.
   let jukeSeq = 0; // my own monotonic press counter
   let jukeAdopted: { seq: number; fromFp: string; off: number; at: number } | null = null;
   let jukeHeard = 0; // performance.now() of the last frame from the DJ we follow
-  let jukeAudio: HTMLAudioElement | null = null;
+  let jukeAudio: HTMLVideoElement | null = null;
+  // How the current track is coming in: null once it is playing, otherwise local read or peer
+  // pull with a percentage. Fed by the same download-progress events the Downloads surface uses.
+  let jukeFetch = $state<FetchPhase | null>(null);
+  let jukeBuffering = $state(false); // the element ran out of data mid-track
+  let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
+  // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
+  // declared type when the share is the one in view.
+  let jukeKind = $derived<MediaKind>(
+    jukeNow ? mediaKind(jukeNow.name, files.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
+  );
   const JUKE_DJ_GONE_MS = 15000; // silence longer than three pings means the DJ walked away
 
   function loadJukeVol(): number {
@@ -9537,17 +9548,36 @@
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
-  function jukeEl(): HTMLAudioElement {
+  // One <video> element for both kinds. A video element plays audio perfectly well, and building
+  // one element means the transport, drift and race logic below never has to care which kind is
+  // loaded; only the surfaces care, and they adopt this element by re-parenting it rather than
+  // creating their own, so folding the dock or moving to the focus view never restarts playback.
+  function jukeEl(): HTMLVideoElement {
     if (jukeAudio) return jukeAudio;
-    const el = document.createElement("audio");
-    el.id = "jukebox-audio";
+    const el = document.createElement("video");
+    el.id = "jukebox-media";
     el.volume = jukeVol;
     el.muted = callDeafened;
+    el.playsInline = true;
+    el.preload = "auto";
     el.addEventListener("loadedmetadata", () => {
       jukeDur = Number.isFinite(el.duration) ? el.duration : 0;
       jukeSettle(); // the seek the src swap could not take yet
     });
     el.addEventListener("ended", () => jukeEnded());
+    // Streaming moves the failure from a thrown fetch to the element: a track nobody can serve,
+    // or one the webview cannot decode, both land here.
+    el.addEventListener("error", () => {
+      if (jukeNow?.cid) jukeFail(jukeNow.cid);
+    });
+    // Ran dry mid-track. Distinct from the initial pull, and worth showing, because on a slow
+    // peer it is the difference between "this is loading" and "this has stalled".
+    el.addEventListener("waiting", () => (jukeBuffering = true));
+    el.addEventListener("playing", () => {
+      jukeBuffering = false;
+      jukeFetch = null;
+    });
+    el.addEventListener("canplay", () => (jukeBuffering = false));
     document.body.appendChild(el);
     jukeAudio = el;
     return el;
@@ -9633,45 +9663,68 @@
     const now = jukeNow;
     if (!now || !now.cid) return;
     const cid = now.cid;
-    const entry = now.entry;
-    let url = jukeUrls[cid];
-    if (!url) {
-      if (jukeFetching === cid) return; // already in flight; the ping after it re-syncs
-      const server = callServer;
-      if (server === null) return;
-      jukeFetching = cid;
-      try {
-        const mime = safeMime(files.find((f) => f.cid === cid)?.mime ?? "") || "audio/mpeg";
-        url = await loadBlobUrl(cid, mime, server);
-      } catch {
-        jukeFailed.add(cid); // nobody is sharing it: the deck cannot sit here
-        jukeFetching = "";
-        if (jukeNow?.cid === cid && jukeIsDj()) jukeSkip();
-        return;
-      }
-      jukeFetching = "";
-      jukeUrls[cid] = url;
-      jukeReady = { ...jukeReady, [cid]: true };
-      if (jukeNow?.cid !== cid || jukeNow?.entry !== entry) return; // a newer press landed mid-fetch
-      sameTrack = false; // seek to the target as recomputed NOW, not the one we started with
-    }
+    const server = callServer;
+    if (server === null) return;
+    // The element streams straight out of the vault, so there is no fetch-then-play step any
+    // more: playback starts on the first chunk instead of the last, and a seek costs one chunk.
+    // A track nobody can serve now surfaces as an element error rather than a thrown fetch,
+    // which is what jukeFail below is for.
+    const url = mediaUrl(server, cid);
     const el = jukeEl();
     if (!sameTrack || el.src !== url) {
       if (el.src !== url) {
         el.src = url;
         jukeDur = 0;
+        jukeFetch = null;
+        jukeNudging = false;
+        el.playbackRate = 1;
       }
       jukeSettle();
       return;
     }
-    // Same track, so this is a ping or a play/pause: only a real drift is worth a jarring snap.
+    // Same track, so this is a ping or a play/pause. Video cannot hide a snap the way audio can,
+    // so a small gap is eased out by playing slightly fast or slow and only a large one is
+    // snapped; audio keeps snap-or-nothing, because a rate change is audible where a seek is not.
     const target = jukePos();
-    if (el.readyState > 0 && Math.abs(el.currentTime - target) > 2) {
-      try { el.currentTime = target; } catch { /* not seekable yet */ }
+    if (el.readyState > 0) {
+      const drift = target - el.currentTime;
+      const action = driftAction(drift, jukeKind);
+      if (action === "seek") {
+        try { el.currentTime = target; } catch { /* not seekable yet */ }
+        jukeNudging = false;
+        el.playbackRate = 1;
+      } else if (action === "nudge") {
+        el.playbackRate = nudgeRate(drift);
+        jukeNudging = true;
+      } else if (jukeNudging) {
+        el.playbackRate = 1;
+        jukeNudging = false;
+      }
     }
     const live = jukeNow;
     if (!live || live.paused) el.pause();
     else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
+  }
+  /**
+   * Hand the one deck element to whichever surface currently wants to show it. Re-parenting keeps
+   * playback running (a media element survives being moved in the DOM), which is the whole reason
+   * there is one element rather than one per surface: folding the dock or opening focus must never
+   * restart the room's film. On teardown it goes back to the body, still playing, still audible.
+   */
+  function jukeHost(node: HTMLElement) {
+    const el = jukeEl();
+    node.appendChild(el);
+    return {
+      destroy() {
+        if (jukeAudio === el) document.body.appendChild(el);
+      },
+    };
+  }
+  /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
+  function jukeFail(cid: string) {
+    jukeFailed.add(cid);
+    jukeFetch = null;
+    if (jukeNow?.cid === cid && jukeIsDj()) jukeSkip();
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
@@ -9759,22 +9812,20 @@
     jukeStale = true; // anyone's next press claims the deck
     jukeAudio?.pause();
   }
-  // Leaving the room takes the deck with it, blobs included (each one is a whole decrypted track).
+  // Leaving the room takes the deck with it. There are no blobs to release any more: the element
+  // streamed from the vault rather than holding a decrypted copy of the track.
   function jukeReset() {
     jukeStop();
     jukeAudio?.remove();
     jukeAudio = null;
-    for (const c of Object.keys(jukeUrls)) {
-      try { URL.revokeObjectURL(jukeUrls[c]); } catch { /* a data: url has nothing to revoke */ }
-      delete jukeUrls[c];
-    }
     jukeFailed.clear();
-    jukeReady = {};
     jukeQueue = [];
     jukeNow = null;
     jukeAdopted = null;
     jukeStale = false;
-    jukeFetching = "";
+    jukeFetch = null;
+    jukeBuffering = false;
+    jukeNudging = false;
     jukeDur = 0;
   }
 
@@ -9791,7 +9842,8 @@
   });
   // The queue as the DJ will actually play it, minus whatever is already on the deck.
   let jukeUpNext = $derived(jukePlayable().filter((e) => e.id !== jukeNow?.entry));
-  let jukeAudioFiles = $derived(files.filter((f) => f.mime.startsWith("audio/")));
+  // Anything the deck can play: audio and video both, since one element handles both.
+  let jukeAudioFiles = $derived(files.filter((f) => mediaKind(f.name, f.mime) !== "other"));
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
   // expiring, the picker itself) is gated on this rather than lying about another server's share.
@@ -11438,6 +11490,10 @@
         network_bytes_done: number;
         provider: string | null;
       }>("download-progress", (e) => {
+        // The deck reads the same events the Downloads surface does. It has no download of its
+        // own to key off: the media element pulls ranges, and the backend emits progress for the
+        // chunks it needs, so this is the only view the deck gets of how a track is coming in.
+        if (jukeNow?.cid === e.payload.cid) jukeFetch = fetchPhase(e.payload);
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
         if (!d) return; // only track explicitly-initiated downloads
         const now = Date.now();
@@ -13260,9 +13316,20 @@
     <div class="juke-head">
       <span class="juke-head-ico">{@render icoNote()}</span>
       <span class="stage-label">JUKEBOX</span>
-      <!-- One chip, in the order that matters: a pull in flight beats a dead DJ beats "we agree". -->
-      {#if jukeFetching}
-        <span class="juke-chip info" title="Pulling the track off the share">FETCHING</span>
+      <!-- One chip, in the order that matters: bytes in flight beats a dead DJ beats "we agree".
+           Reading a held file off this disk and pulling one off a peer feel completely different
+           to wait through, so they are named differently rather than both being "FETCHING". -->
+      {#if jukeFetch}
+        <span
+          class="juke-chip info"
+          title={jukeFetch.source === "network"
+            ? `Pulling this track off ${jukeFetch.provider ? callNameOf(jukeFetch.provider) : "a peer"}`
+            : "Reading this track from your vault"}
+        >{jukeFetch.source === "network" ? "PULLING" : "LOADING"} {jukeFetch.percent}%</span>
+      {:else if jukeBuffering}
+        <span class="juke-chip warn" title="The deck ran out of data mid-track">BUFFERING</span>
+      {:else if jukeNudging}
+        <span class="juke-chip info" title="Easing playback back onto the DJ's clock">SYNCING</span>
       {:else if jukeStale}
         <span class="juke-chip warn" title="The DJ went quiet: the deck is frozen until someone presses">DECK STALE</span>
       {:else if jukeNow}
@@ -13316,7 +13383,15 @@
           <span class="juke-now-nm" title={jukeNow.name}>{jukeNow.name}</span>
           <span class="juke-time">{jukeElapsed(jukePaint)} / {jukeDur > 0 ? jukeClock(jukeDur) : "?:??"}</span>
         </div>
-        <div class="juke-bar"><i class="juke-bar-fill" style={`width:${jukePct(jukePaint)}%`}></i></div>
+        <!-- Two bars, never at once: how much of the track has arrived, then where the room is
+             in it. Showing the play head over a track that has not arrived would be a lie. -->
+        {#if jukeFetch}
+          <div class="juke-bar load {jukeFetch.source}" title={jukeFetch.source === "network" ? "Coming off a peer" : "Coming off your vault"}>
+            <i class="juke-bar-fill" style={`width:${jukeFetch.percent}%`}></i>
+          </div>
+        {:else}
+          <div class="juke-bar"><i class="juke-bar-fill" style={`width:${jukePct(jukePaint)}%`}></i></div>
+        {/if}
         <div class="juke-transport">
           <!-- No previous: the transport has no rewind, and a fake one would desync the room. -->
           <button
@@ -13361,8 +13436,11 @@
           <li class="juke-row" class:gone>
             <span class="juke-dot" style={`background:${instColor(e.author)}`} title={`Queued by ${callNameOf(e.author)}`}></span>
             <button class="juke-nm" title={gone ? `${e.name} is no longer in the share` : `Play ${e.name} for the room`} onclick={() => jukePlayEntry(e.id)}>{e.name}</button>
-            {#if jukeFetching === e.cid}
-              <span class="juke-chip info">FETCHING</span>
+            {#if jukeFetch && jukeNow?.cid === e.cid}
+              <span class="juke-chip info">{jukeFetch.percent}%</span>
+            {/if}
+            {#if mediaKind(e.name) === "video"}
+              <span class="juke-kind" title="A video: it plays on the focus view">VID</span>
             {/if}
             {#if gone}
               <span class="juke-chip gone" title="Nobody is sharing this any more">GONE</span>
@@ -16302,11 +16380,40 @@
               {linksUp}/{callParticipants.length} links up
             </span>
           {/if}
-          <span class="focus-e2e" title="Every frame rides the same end-to-end encrypted peer link as the voice">MLS·E2E</span>
+          <!-- Says what is actually true. The media key is derived but the frame layer that would
+               use it is not implemented, so today's guarantee is DTLS-SRTP plus signalling that
+               cannot be MITM'd, which is E2E but is not MLS-keyed media. -->
+          {#if roomPath}
+            <span
+              class="focus-e2e {roomPath}"
+              title={roomPath === "relayed"
+                ? "End to end encrypted. At least one leg goes through a relay, which sees who and when, never the frames"
+                : "End to end encrypted, peer to peer, nobody in the media path"}
+            >E2E · {roomPath === "relayed" ? "RELAY" : "DIRECT"}</span>
+          {:else}
+            <span class="focus-e2e" title="Every frame rides an end-to-end encrypted peer link">E2E</span>
+          {/if}
           <button class="ghost focus-exit" title="Leave focus: back to chat and the voice dock" aria-label="Leave focus" onclick={exitFocus}>{@render icoFocusOut()}</button>
         </header>
 
-        <div class="focus-grid" style={`--focus-cols:${focusCols}`}>
+        <!-- The shared screen: a video the room is watching together gets the top band, and the
+             faces drop to a filmstrip underneath rather than competing with it. -->
+        {#if jukeNow && jukeKind === "video"}
+          <div class="focus-deck" use:jukeHost>
+            {#if jukeFetch}
+              <div class="focus-deck-load">
+                <span class="stage-label">
+                  {jukeFetch.source === "network" ? "PULLING" : "LOADING"} {jukeFetch.percent}%
+                </span>
+                <div class="juke-bar load {jukeFetch.source}">
+                  <i class="juke-bar-fill" style={`width:${jukeFetch.percent}%`}></i>
+                </div>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="focus-grid" class:strip={jukeNow && jukeKind === "video"} style={`--focus-cols:${focusCols}`}>
           {#each focusTiles as fp (fp)}
             {@const me = fp === callSelfFp}
             {@const vid = me ? (myVideo === "screen" ? 2 : myVideo === "cam" ? 1 : 0) : peerMeta[fp]?.vid ?? 0}
@@ -16381,13 +16488,13 @@
           </header>
           <div class="overlay-body">
             {#if jukeAudioFiles.length === 0}
-              <p class="juke-pick-empty">no audio in this server's share yet: drop a file in chat or the Files surface to share it</p>
+              <p class="juke-pick-empty">no audio or video in this server's share yet: drop a file in chat or the Files surface to share it</p>
             {:else}
               <ul class="juke-pick-list">
                 {#each jukeAudioFiles as f (f.cid + "|" + f.path)}
                   {@const days = jukeExpiryDays(f.cid)}
                   <li class="juke-pick-row">
-                    <span class="juke-ext">{jukeExt(f)}</span>
+                    <span class="juke-ext" class:vid={mediaKind(f.name, f.mime) === "video"}>{jukeExt(f)}</span>
                     <span class="juke-pick-main">
                       <span class="juke-pick-nm" title={f.name}>{f.name}</span>
                       <span class="juke-pick-sub">{fmtSize(f.size)} · shared by {nameOf(f.author)}</span>
