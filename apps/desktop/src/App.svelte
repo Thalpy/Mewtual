@@ -150,6 +150,24 @@
 
   let servers = $state<ServerState[]>([]);
   let activeServerId = $state<number | null>(null);
+  // Bumped by every move that changes WHICH group the panes show. An async refresh captures it
+  // on entry and re-checks after its awaits: a slow answer from the group you just left must
+  // never paint over the one you moved to. Channel-scoped reads pair this with the channel id,
+  // which switchTo changes without changing the group.
+  let viewGeneration = 0;
+  // True from the moment a group's panes are emptied until its first batch of reads lands. Panes
+  // whose empty state makes a CLAIM ("No messages yet", "No matching members") must consult this:
+  // an empty collection mid-switch means "not read yet", not "there is nothing".
+  let groupLoading = $state(false);
+  function beginViewSwitch(): number {
+    return ++viewGeneration;
+  }
+  // Is the captured context still the one on screen? Both halves matter: the generation catches
+  // a move away, and the server id catches a read issued for a different group at the same
+  // generation (event-driven refreshes do not bump anything).
+  function viewCurrent(gen: number, server: number | null): boolean {
+    return gen === viewGeneration && server === activeServerId;
+  }
   // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
   // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
   let dmHome = $state(false);
@@ -325,7 +343,7 @@
         return;
       }
       showSettings = false;
-      openServerSettings(null, target.slice("server:".length));
+      void openServerSettings(null, target.slice("server:".length));
       return;
     }
     if (target.startsWith("surface:")) {
@@ -365,14 +383,21 @@
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
     const targetServer = id ?? activeServerId;
-    if (id !== null && id !== activeServerId) switchServer(id);
+    // switchServer runs synchronously as far as its first await, so `cur` below already names the
+    // target. It also empties `livery` on the way past and refills it a round-trip later, which is
+    // why the editor draft is seeded from liveryLoaded rather than from `livery` directly.
+    if (id !== null && id !== activeServerId) void switchServer(id);
     serverNameDraft = cur?.name ?? "";
-    // The draft never carries the images: set_livery ignores them (set_server_icon /
-    // set_server_cursor own those fields).
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
     serverSettingsPage = page;
     setSearch = "";
     showServerSettings = true;
+    // The draft never carries the images: set_livery ignores them (set_server_icon /
+    // set_server_cursor own those fields). It is seeded ONLY from a livery we have read: the
+    // wrench is reachable mid-switch, and seeding from an unread livery would present the default
+    // theme as this server's own, one Publish away from erasing the real one for every member.
+    liveryDraft = emptyLivery();
+    liveryDraftFor = null;
+    if (liveryLoaded && targetServer !== null) seedLiveryDraft(targetServer);
     if (page === "invites" && targetServer !== null) void refreshInviteFor(targetServer);
   }
   async function renameServer() {
@@ -504,6 +529,21 @@
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
   let serverIcons = $state<Record<number, string>>({});
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
+  // Whether `livery` holds an answer we actually read for the active server, as opposed to the
+  // empty value a switch leaves behind. An empty livery is byte-for-byte the payload that REMOVES
+  // a server's branding for every member, so nothing may publish a draft without this.
+  let liveryLoaded = $state(false);
+  let liveryDraftFor = $state<number | null>(null); // which server liveryDraft was seeded from
+  // Each server's published branding, remembered for the session: a revisit repaints once, to the
+  // right brand, instead of default-then-brand a round-trip later.
+  const liveryCache = new Map<number, Livery>();
+  // Fill an unseeded livery editor from the loaded livery. Never overwrites a seeded draft: once
+  // the editor has this server's values in it, the buffer belongs to the user.
+  function seedLiveryDraft(server: number) {
+    if (!showServerSettings || liveryDraftFor === server) return;
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
+    liveryDraftFor = server;
+  }
   const LIVERY_TOKENS = [
     "--bg-0", "--panel", "--bg-elev", "--border", "--border-soft",
     "--text", "--text-2", "--muted", "--faint", "--accent", "--accent-hi",
@@ -587,20 +627,44 @@
     liveryActive && !liveryOptOut && !dmHome && !inboxView && activeServerId !== null,
   );
   async function refreshLivery() {
-    if (activeServerId === null || cur?.isDm) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null || cur?.isDm) {
       livery = emptyLivery();
+      liveryCursorUrl = "";
+      liveryLoaded = server !== null; // a DM has no livery, and that is a read answer
       return;
     }
     try {
-      livery = sanitizeLivery(await invoke<Livery>("get_livery", { server: activeServerId }));
-      liveryCursorUrl = await validateCursor(livery.cursor);
+      const next = sanitizeLivery(await invoke<Livery>("get_livery", { server }));
+      if (!viewCurrent(gen, server)) return; // a late theme repaints the app in the wrong brand
+      // The brand lands before the cursor image decodes. Waiting on the decode would leave the app
+      // unbranded for its duration, and a decode that never settles would hang the whole switch.
+      liveryCache.set(server, next);
+      livery = next;
+      liveryLoaded = true;
+      seedLiveryDraft(server);
+      // Deliberately not awaited. The cursor is decoration that arrives when it arrives, whereas
+      // this function sits inside the switch barrier: validateCursor resolves an image with no
+      // timeout, so awaiting it would let one undecodable cursor hold the entire switch open.
+      void validateCursor(next.cursor).then((cursor) => {
+        if (viewCurrent(gen, server)) liveryCursorUrl = cursor;
+      });
     } catch {
+      if (!viewCurrent(gen, server)) return;
       livery = emptyLivery(); // failed/malformed reads degrade to "no livery", never an error
       liveryCursorUrl = "";
+      liveryLoaded = false; // a failed read is not "this server has no theme": refuse to publish
     }
   }
   async function publishLivery() {
     if (activeServerId === null) return;
+    // An unseeded draft is the empty livery, which is exactly what removeLivery sends. Publishing
+    // one the user never authored would erase this server's branding for everybody.
+    if (!liveryLoaded || liveryDraftFor !== activeServerId) {
+      toast("Still reading this server's theme: try again in a moment", "info", 3000);
+      return;
+    }
     try {
       await invoke("set_livery", {
         server: activeServerId,
@@ -2763,6 +2827,12 @@
   let moderation = $state<ModerationState>({ events: [], votes: [] });
   let moderationMessages = $state<TimelineMessage[]>([]);
   let moderationLoading = $state(false);
+  // Selected AND rendered. `view` alone only says which tab is selected: openInbox and the orbit
+  // view replace the whole sidebar+main without touching it, so a moderator sitting in the inbox
+  // would otherwise re-sweep every channel of the server behind it on every incoming message.
+  function moderationSurfaceOpen(): boolean {
+    return view === "moderation" && !inboxView && !spaceOpen;
+  }
   let moderationReason = $state("");
   let moderationSelected = $state<Set<string>>(new Set());
   let moderationAnchor = $state("");
@@ -2810,18 +2880,25 @@
     moderationAnchor = "";
     moderationDeleteArmed = false;
   }
-  async function refreshModeration() {
-    if (activeServerId === null || cur?.isDm) {
+  // Two reads of very different cost sit behind this one name. The case/vote state is small and
+  // EVERYONE needs it, because a community vote renders in chat: it loads on every switch. The
+  // message corpus behind the privileged timeline is every message in every channel, and only the
+  // moderation surface reads it, so it loads with that surface. `withCorpus` defaults to whether
+  // the surface is actually open, which is the right answer at every existing call site.
+  async function refreshModeration(withCorpus = moderationSurfaceOpen()) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null || cur?.isDm) {
       moderation = { events: [], votes: [] };
       moderationMessages = [];
       return;
     }
+    const wantCorpus = withCorpus && canModerate;
     moderationLoading = true;
     try {
-      const server = activeServerId;
       const [state, channelRows] = await Promise.all([
         invoke<ModerationState>("get_moderation", { server }),
-        canModerate
+        wantCorpus
           ? Promise.all((cur?.channels ?? []).map(async (channel) => {
               const rows = await invoke<Msg[]>("get_messages", { server, channel: channel.id });
               return rows.map((message): TimelineMessage => ({
@@ -2831,22 +2908,31 @@
             }))
           : Promise.resolve([] as TimelineMessage[][]),
       ]);
+      if (!viewCurrent(gen, server)) return;
       moderation = state;
-      moderationMessages = channelRows.flat();
+      // Only a corpus read may replace the corpus: a light refresh must not blank the timeline out
+      // from under an open moderation surface. Losing moderator authority is the exception, and the
+      // one case the old unconditional assignment used to cover: the corpus goes with the role.
+      if (wantCorpus) moderationMessages = channelRows.flat();
+      else if (!canModerate) moderationMessages = [];
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
     } finally {
-      moderationLoading = false;
+      // A stale call must not clear the flag for the live one; clearServerView resets it on switch.
+      if (viewCurrent(gen, server)) moderationLoading = false;
     }
   }
   async function warnModerationSelection() {
-    if (activeServerId === null || !moderationReason.trim()) return;
+    // Captured once, not re-read per iteration: the channel and message ids come from THIS
+    // server's corpus, so a switch mid-loop would address the rest of them to a different server.
+    const server = activeServerId;
+    if (server === null || !moderationReason.trim()) return;
     const selected = selectedModerationMessages();
     if (!selected.length) return;
     try {
       for (const message of selected) {
         await invoke("warn_message", {
-          server: activeServerId, channel: message.channel,
+          server, channel: message.channel,
           messageId: message.id, reason: moderationReason.trim(),
         });
       }
@@ -2858,7 +2944,8 @@
     } catch (e) { error = String(e); }
   }
   async function deleteModerationSelection() {
-    if (activeServerId === null) return;
+    const server = activeServerId; // as above: the ids belong to this server's corpus
+    if (server === null) return;
     const selected = selectedModerationMessages();
     if (!selected.length) return;
     if (!moderationDeleteArmed) {
@@ -2868,7 +2955,7 @@
     try {
       for (const message of selected) {
         await invoke("delete_message", {
-          server: activeServerId, channel: message.channel, msgId: message.id,
+          server, channel: message.channel, msgId: message.id,
         });
       }
       moderationSelected = new Set();
@@ -2915,6 +3002,25 @@
     return q ? wikiPages.filter((p) => p.toLowerCase().includes(q)) : wikiPages;
   });
   let wikiMap = $state<Record<string, string>>({}); // name -> body (backlinks + link existence)
+  // Which server wikiMap holds. Deliberately NOT $state: ensureWikiMap is called from the ref-card
+  // effect, and a reactive read-then-write of this inside that effect would re-trigger it forever.
+  let wikiMapFor: number | null = null;
+  // The ref cards in chat summarise a page out of wikiMap, so it is not wiki-tab-only state. It is
+  // every page's full body though, far too big for the switch barrier, so it loads once per server
+  // the first time a pane that can render cards is live. The ref-card effect tracks wikiMap, so
+  // the cards re-resolve themselves when it lands.
+  async function ensureWikiMap() {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null || wikiMapFor === server) return;
+    wikiMapFor = server; // claimed up front: the effect can re-run before the read returns
+    try {
+      const map = await invoke<Record<string, string>>("get_wiki_map", { server });
+      if (viewCurrent(gen, server)) wikiMap = map;
+    } catch {
+      if (wikiMapFor === server) wikiMapFor = null; // let a later pass retry
+    }
+  }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
   let wikiBody = $state("");
@@ -2954,7 +3060,7 @@
   // --- wiki history + edit review (11x) ---
   type UiWikiRev = { id: string; author: string; ts: number; body: string; kind: string; actor: string; note: string };
   type UiWikiPending = { id: string; page: string; author: string; ts: number; expires_ts: number; body: string };
-  let wikiReviewDays = $state(0); // server setting: 0 = edits publish immediately
+  let wikiReviewDays = $state(0); // server setting: 0 = edits publish immediately, -1 = not yet read
   let wikiPending = $state<UiWikiPending[]>([]); // the live review queue (whole server)
   let wikiHistory = $state<UiWikiRev[]>([]); // the open page's revisions, oldest first
   let showWikiHistory = $state(false); // the history browser replaces the article body
@@ -3621,15 +3727,18 @@
   let evImageBusy = $state(false);
   let confirmDeleteEventId = $state("");
   async function refreshEvents() {
-    if (activeServerId === null) {
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) {
       events = [];
       return;
     }
     try {
       const knownEvents = new Set(events.map((e) => e.id));
       const hadEvents = events.length > 0;
-      const srv = activeServerId;
-      events = await invoke<UiEvent[]>("get_events", { server: activeServerId });
+      const next = await invoke<UiEvent[]>("get_events", { server: srv });
+      if (!viewCurrent(gen, srv)) return;
+      events = next;
       if (hadEvents) {
         for (const ev of events) {
           if (knownEvents.has(ev.id)) continue;
@@ -3637,7 +3746,7 @@
         }
       }
     } catch {
-      events = [];
+      if (viewCurrent(gen, srv)) events = [];
     }
   }
   async function createEvent() {
@@ -3706,7 +3815,11 @@
   let newsItems = $state<NewsItem[]>([]);
   let newsLoading = $state(false);
   let newsUnseen = $state(false);
+  let newsGeneration = 0;
   async function loadNews() {
+    // The News tab button, "status-updated" and "events-changed" all call this, so concurrent
+    // loads are routine: without a generation the first to finish clears the spinner for the rest.
+    const generation = ++newsGeneration;
     newsLoading = true;
     const items: NewsItem[] = [];
     const now = Date.now();
@@ -3727,8 +3840,10 @@
         }
       }),
     );
-    newsItems = items;
+    if (generation !== newsGeneration) return; // a later load owns the list and the spinner
     newsLoading = false;
+    if (locked) return; // as loadInbox: the lock cleared this, and it is cross-server text
+    newsItems = items;
   }
   let newsUpcoming = $derived(newsItems.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
   let newsFeed = $derived(newsItems.filter((n) => n.kind === "status").sort((a, b) => b.ts - a.ts).slice(0, 30));
@@ -3746,14 +3861,18 @@
   type UiDevice = { origin: string; name: string };
   let deviceMap = $state<Record<string, UiDevice>>({});
   async function refreshDevices() {
-    if (activeServerId === null) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) {
       deviceMap = {};
       return;
     }
     try {
-      deviceMap = await invoke<Record<string, UiDevice>>("get_devices", { server: activeServerId });
+      const next = await invoke<Record<string, UiDevice>>("get_devices", { server });
+      if (!viewCurrent(gen, server)) return; // companion attribution is per-server
+      deviceMap = next;
     } catch {
-      deviceMap = {};
+      if (viewCurrent(gen, server)) deviceMap = {};
     }
   }
   // Revoke one of YOUR OWN linked devices (M5 "lost phone"). Origin-only: the backend refuses a
@@ -3851,12 +3970,15 @@
     return { label, color };
   }
   async function refreshBadges() {
-    if (activeServerId === null) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) {
       badges = {};
       return;
     }
     try {
-      const raw = await invoke<Record<string, MemberBadge>>("get_badges", { server: activeServerId });
+      const raw = await invoke<Record<string, MemberBadge>>("get_badges", { server });
+      if (!viewCurrent(gen, server)) return; // a badge is granted by one server, not carried between
       const map: Record<string, MemberBadge> = {};
       for (const [fp, b] of Object.entries(raw)) {
         const ok = sanitizeBadge(b);
@@ -3864,7 +3986,7 @@
       }
       badges = map;
     } catch {
-      badges = {};
+      if (viewCurrent(gen, server)) badges = {};
     }
   }
   // The badge editor row in Server settings (admin-only affordance).
@@ -4039,7 +4161,9 @@
   $effect(() => {
     void activeServerId;
     eclipseCaution = false;
-    onlineMembers = new Set();
+    // onlineMembers is NOT cleared here: clearServerView already drops it synchronously on every
+    // switch, and this effect flushes after the switch's reads may have resolved, so clearing it
+    // again here could discard a roster that had already landed.
     onlineSince = {};
     lastSeen = {};
   });
@@ -4066,6 +4190,7 @@
     void events; // a card for an event that has only just synced
     void wikiPages;
     void wikiMap;
+    void ensureWikiMap(); // fills the page summaries the wiki cards below want
     void profiles; // cards name the author, so a renamed member re-reads
     void view; // switching tabs destroys + recreates this DOM (fresh, unresolved placeholders)
     void inboxView; // returning from the inbox recreates the chat DOM too
@@ -4395,19 +4520,14 @@
     tickerItems = []; // and so is anything the ticker was naming
     tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
     servers = [];
+    beginViewSwitch(); // a read still in flight must not land behind the lock
     activeServerId = null;
     dmHome = false;
     inboxView = false;
-    messages = [];
-    roster = [];
-    profiles = {};
-    files = [];
-    statuses = [];
-    moderation = { events: [], votes: [] };
-    moderationMessages = [];
-    storageHealth = null;
-    events = [];
-    wikiPages = [];
+    // One definition of "every window onto a group's contents", not two that drift. The hand-rolled
+    // list here used to miss the sanitized message-render cache and wikiMap, both of which hold
+    // plaintext, along with roles, livery, badges and the rest.
+    clearServerView();
     inboxItems = [];
     newsItems = [];
     serverIcons = {};
@@ -4663,16 +4783,22 @@
     menu = null;
     showNewDm = false;
     showAddFriend = false;
-    refreshAllDmRequests();
     refreshDmStats();
-    if (dmList.length) switchServer(dmList[0].id);
-    else {
+    if (dmList.length) {
+      // Sequenced, not raced: switchServer merges the target DM's own requests in, so running the
+      // cross-server aggregate first would have it replaced or not depending on IPC timing.
+      void switchServer(dmList[0].id).then(refreshAllDmRequests);
+    } else {
+      refreshAllDmRequests();
+      beginViewSwitch();
       activeServerId = null;
       clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
     }
   }
-  // Reset the per-server display collections (used when there is no active group, so nothing from a
-  // previously-active server lingers behind the empty DM-home placeholder).
+  // Reset every collection the panes render for the active group, synchronously. Called when there
+  // is no active group (the empty DM-home placeholder) and at the top of every switch: without it
+  // the previous group's messages, roster, files and branding stay on screen for the whole
+  // round-trip, which reads as the switch not having taken.
   function clearServerView() {
     view = "chat";
     moderationSelected = new Set();
@@ -4687,53 +4813,56 @@
     messageWindow = { start: 0, end: 0 };
     messageWindowScope = "";
     chatStickToBottom = true;
+    channelTopic = "";
+    delivery = {};
     roster = [];
     members = 0;
+    onlineMembers = new Set();
+    profiles = {};
+    // Roles gate the privileged surfaces, so the empty map is the safe transient: unprivileged
+    // until this group's own roles resolve.
+    roles = {};
+    badges = {};
+    deviceMap = {};
     files = [];
+    hasPeers = false;
+    wikiPinned = new Set();
+    wikiPages = [];
+    wikiMap = {}; // name -> body: the previous server's page CONTENT, not just its names
+    wikiMapFor = null;
+    wikiPending = [];
+    // -1, not 0: zero MEANS "edits publish immediately", so clearing to it would hand every member
+    // the rename/delete controls and the eager-create path on a review-gated server. Unknown must
+    // fail closed until this server's own policy is read.
+    wikiReviewDays = -1;
+    wikiHistory = [];
+    showWikiHistory = false;
+    wikiHistorySel = "";
     statuses = [];
+    events = [];
     moderation = { events: [], votes: [] };
     moderationMessages = [];
-    onlineMembers = new Set();
-  }
-  function openNewDm() {
-    showNewDm = true;
-    showAddFriend = false;
-    dmName = "";
-  }
-  function openAddFriend() {
-    showAddFriend = true;
-    showNewDm = false;
-    dmName = "";
-    dmInvite = "";
-  }
-
-  async function switchServer(id: number) {
-    saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
-    // Drop plaintext render artifacts and window anchors before changing trust/context scope.
-    messageRenderCache.clear();
-    messageWindow = { start: 0, end: 0 };
-    messageWindowScope = "";
-    chatStickToBottom = true;
-    activeServerId = id;
-    inboxView = false;
-    spaceOpen = false; // navigating anywhere leaves the orbit view behind
-    const s = servers.find((x) => x.id === id);
-    if (s) s.dot = false;
-    dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
-    showNewDm = false;
-    showAddFriend = false;
-    if (showSearch) closeSearch();
-    notice = "";
-    refreshDmRequests(id); // pick up any friend request that arrived over this server
-    // Each server has its own wiki + fileshare; reset per-server view state.
-    view = "chat";
-    moderationSelected = new Set();
-    moderationDeleteArmed = false;
-    moderationAnchor = "";
-    caseEvidence = new Set();
-    moderationUserFilter = "";
-    storageHealth = storageHealthCache.get(id) ?? null;
-    storageRepairNote = "";
+    moderationLoading = false;
+    groupLoading = false; // a clear with no load behind it (no active group) is not "loading"
+    // Livery is server branding: leaving it up paints the group you left over the one you opened.
+    // followLiveryNow already drops to the default theme for DM-home and the inbox, so the brief
+    // default between servers is that same transition rather than a new kind of flicker.
+    livery = emptyLivery();
+    liveryCursorUrl = "";
+    liveryLoaded = false;
+    liveryDraftFor = null;
+    // Surfaces that render one server's data but were never closed on a switch: the settings
+    // takeover would keep rendering server A's pages against server B, and the wiki review queue
+    // would open on B still asserting A's (now empty) backlog.
+    showServerSettings = false;
+    wikiReviewOpen = false;
+    // Custom emoji are per-server but emojiUrls is keyed by CODE, so two servers defining the same
+    // :code: would show the first one's image on the second.
+    emojiUrls = {};
+    joinAttempts = []; // who tried to join THIS server: never carried to the next one
+    // The wiki editor and the chat/fileshare affordances below used to be reset only by
+    // switchServer, so the paths that end with no active group (leaving your last server, empty
+    // DM-home, locking) kept a page body and its drafts in memory as plaintext.
     activeWikiPage = "";
     wikiBody = "";
     wikiDirty = false;
@@ -4752,6 +4881,46 @@
     mentionQuery = null;
     showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
+  }
+  function openNewDm() {
+    showNewDm = true;
+    showAddFriend = false;
+    dmName = "";
+  }
+  function openAddFriend() {
+    showAddFriend = true;
+    showNewDm = false;
+    dmName = "";
+    dmInvite = "";
+  }
+
+  async function switchServer(id: number) {
+    saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
+    const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
+    activeServerId = id;
+    inboxView = false;
+    spaceOpen = false; // navigating anywhere leaves the orbit view behind
+    // Drop the previous group's plaintext render artifacts, window anchors and every collection
+    // the panes render, synchronously, before the scope of trust changes.
+    clearServerView();
+    groupLoading = true;
+    const s = servers.find((x) => x.id === id);
+    if (s) s.dot = false;
+    // A brand already read this session repaints once, straight to the right one, instead of
+    // default-then-brand a round-trip later. refreshLivery still confirms it below.
+    const cachedLivery = s && !s.isDm ? liveryCache.get(id) : undefined;
+    if (cachedLivery) {
+      livery = cachedLivery;
+      liveryLoaded = true;
+    }
+    dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
+    showNewDm = false;
+    showAddFriend = false;
+    if (showSearch) closeSearch();
+    notice = "";
+    refreshDmRequests(id); // pick up any friend request that arrived over this server
+    // Each server has its own wiki + fileshare; clearServerView above dropped the previous one's.
+    storageHealth = storageHealthCache.get(id) ?? null; // a cached report shows without re-probing
     acceptCallsHere = loadAccept(id); // this server's call-notification preference
     loadServerSoundPreferences(id); // local message/mention/news overrides for this server
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
@@ -4759,6 +4928,14 @@
     loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
+    // One barrier, not two. refreshModeration used to be awaited AFTER this batch because it read
+    // the privileged message corpus and so had to see this server's roles first; it now fetches
+    // only the case/vote state everyone needs in chat, and the corpus loads with the surface that
+    // uses it, so it joins the batch and the switch loses a whole serial round-trip.
+    // The roles-first guarantee still holds, but it now rests on clearServerView having set
+    // `view = "chat"` and `roles = {}` above: withCorpus is false here, so the corpus is
+    // structurally unreachable during a switch. Anything that later keeps the moderation surface
+    // open ACROSS a switch must restore the explicit ordering rather than rely on that.
     await Promise.all([
       refresh(),
       refreshMembers(),
@@ -4773,12 +4950,11 @@
       refreshBadges(),
       refreshEvents(),
       refreshDevices(),
+      refreshModeration(),
+      refreshWikiPages(),
     ]);
-    // Roles are server-scoped. Resolve them before touching moderation so a member never loads
-    // the privileged plane using the role left over from the server they just left.
-    // Everyone receives case/vote state so a community vote can appear in chat, but only a
-    // moderator loads the server-wide message corpus needed by the privileged timeline plane.
-    await refreshModeration();
+    if (!viewCurrent(gen, id)) return; // moved on while this group was loading
+    groupLoading = false;
     syncProfileEditor();
   }
 
@@ -4817,7 +4993,11 @@
     servers = servers.filter((s) => s.id !== id);
     if (activeServerId === id) {
       if (servers.length) switchServer(servers[0].id);
-      else activeServerId = null;
+      else {
+        beginViewSwitch();
+        activeServerId = null;
+        clearServerView(); // leaving the last one must not leave its messages on screen
+      }
     }
   }
 
@@ -4851,10 +5031,15 @@
   async function switchTo(id: string, keepSearch = false) {
     if (!cur) return;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
+    // Channel-scoped content, dropped before the move rather than when the read returns: the
+    // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
+    messages = [];
     messageRenderCache.clear();
     messageWindow = { start: 0, end: 0 };
     messageWindowScope = "";
     chatStickToBottom = true;
+    channelTopic = "";
+    delivery = {};
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
     cur.unread = cur.unread.filter((c) => c !== id);
@@ -4878,13 +5063,19 @@
   let editingTopic = $state(false);
   let topicDraft = $state("");
   async function refreshTopic() {
-    if (activeServerId === null || !cur?.active) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) {
       channelTopic = "";
       return;
     }
     try {
-      channelTopic = await invoke<string>("get_channel_topic", { server: activeServerId, channel: cur.active });
+      const topic = await invoke<string>("get_channel_topic", { server, channel });
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
+      channelTopic = topic;
     } catch {
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       channelTopic = "";
     }
   }
@@ -4948,16 +5139,21 @@
   type DeliveryState = { id: string; delivered: number; reachable: number };
   let delivery = $state<Record<string, DeliveryState>>({});
   async function refreshDelivery() {
-    if (activeServerId === null || !cur?.active) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) {
       delivery = {};
       return;
     }
     try {
-      const list = await invoke<DeliveryState[]>("get_delivery", { server: activeServerId, channel: cur.active });
+      const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       const map: Record<string, DeliveryState> = {};
       for (const s of list) map[s.id] = s;
       delivery = map;
     } catch {
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       delivery = {}; // older backend or closed actor: ticks simply don't render
     }
   }
@@ -5010,28 +5206,37 @@
     return { g: t.g, label, cls: t.cls, tip: t.tip };
   }
   async function refreshMembers() {
+    const gen = viewGeneration;
     const id = activeServerId;
     if (id === null) return;
     try {
-      const r = await invoke<Member[]>("get_members", { server: id });
-      const online = await invoke<string[]>("get_online_members", { server: id });
-      if (activeServerId !== id) return; // server switched mid-fetch: drop stale results
+      // Two independent reads, so they go together; the roster is the source of myFp, which half
+      // of canModerate derives from, so this is the one that most needs the generation and not
+      // just the id: an A -> B -> A hop passes an id-only check with an older snapshot.
+      const [r, online] = await Promise.all([
+        invoke<Member[]>("get_members", { server: id }),
+        invoke<string[]>("get_online_members", { server: id }),
+      ]);
+      if (!viewCurrent(gen, id)) return;
       roster = r;
       members = r.length;
       onlineMembers = new Set(online);
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, id)) error = String(e);
     }
   }
   async function refreshProfiles() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      const list = await invoke<Prof[]>("get_profiles", { server: activeServerId });
+      const list = await invoke<Prof[]>("get_profiles", { server });
+      if (!viewCurrent(gen, server)) return; // names and avatars from the group you left
       const map: Record<string, Prof> = {};
       for (const p of list) map[p.fingerprint] = p;
       profiles = map;
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
     }
   }
   // The call surfaces' own copy of the room server's profiles. Deliberately a separate fetch
@@ -5052,21 +5257,28 @@
     }
   }
   async function refreshFiles() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      const v = await invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", {
-        server: activeServerId,
-      });
-      files = v.files;
-      hasPeers = v.has_peers;
-      // Wiki-pinned content addresses, derived fresh from the wiki on the backend each call: a
-      // file embedded in a live page never drops out of circulation, whatever its expiry says.
-      // One extra round-trip per refresh, so the Files tab and Properties can say so instantly.
-      wikiPinned = new Set(
-        await invoke<string[]>("get_wiki_pinned_cids", { server: activeServerId })
-      );
+      // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
+      // file embedded in a live page never drops out of circulation, whatever its expiry says. It
+      // is a second round-trip, so it rides alongside the listing rather than after it.
+      const [listing, pinned] = await Promise.allSettled([
+        invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
+        invoke<string[]>("get_wiki_pinned_cids", { server }),
+      ]);
+      if (!viewCurrent(gen, server)) return; // another group's shared files
+      // Applied independently: a failing pin lookup must not blank the listing it only decorates.
+      if (listing.status === "fulfilled") {
+        files = listing.value.files;
+        hasPeers = listing.value.has_peers;
+      } else {
+        error = String(listing.reason);
+      }
+      if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
     }
   }
   async function refreshStorageHealth() {
@@ -5083,9 +5295,11 @@
       storageHealthCache.set(server, report);
       if (activeServerId === server) storageHealth = report;
     } catch (e) {
-      error = String(e);
+      if (activeServerId === server) error = String(e);
     } finally {
-      storageChecking = false;
+      // Keyed: a late probe from the server you left must not clear the spinner for the one you
+      // opened, which is still reading.
+      if (activeServerId === server) storageChecking = false;
     }
   }
   async function repairStorage() {
@@ -5134,12 +5348,17 @@
     return { cls: "offline", icon: "○", label: "No peers online" };
   }
   async function refreshStatuses() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) return;
     try {
+      // Read the "what we already knew" set before the await, and note that a switch empties it:
+      // arriving at a server must not announce its whole status wall as if it had just landed.
       const knownStatuses = new Set(statuses.map((s) => s.id));
       const hadStatuses = statuses.length > 0;
-      const srv = activeServerId;
-      statuses = await invoke<Msg[]>("get_statuses", { server: activeServerId });
+      const next = await invoke<Msg[]>("get_statuses", { server: srv });
+      if (!viewCurrent(gen, srv)) return;
+      statuses = next;
       if (hadStatuses) {
         for (const st of statuses) {
           if (knownStatuses.has(st.id)) continue;
@@ -5149,7 +5368,7 @@
         }
       }
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, srv)) error = String(e);
     }
   }
   // --- Diagnostics: the join log, the connectivity report, and the debug log ---------------
@@ -5176,11 +5395,15 @@
   let debugLogBusy = $state(false);
 
   async function refreshJoinAttempts() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      joinAttempts = await invoke<JoinAttempt[]>("get_join_attempts", { server: activeServerId });
+      const next = await invoke<JoinAttempt[]>("get_join_attempts", { server });
+      if (!viewCurrent(gen, server)) return; // fingerprints of people who tried to join elsewhere
+      joinAttempts = next;
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
     }
   }
   async function refreshConnectivity() {
@@ -5311,14 +5534,20 @@
   });
 
   async function refreshRoles() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      roles = await invoke<Record<string, string>>("get_roles", { server: activeServerId });
+      const next = await invoke<Record<string, string>>("get_roles", { server });
+      // The sharpest of the stale writes: canModerate derives from this map, so a late answer
+      // from the server you left would hand you moderator chrome on the one you opened.
+      if (!viewCurrent(gen, server)) return;
+      roles = next;
       // A demotion closes the privileged surface immediately; hiding only the sidebar entry
       // would leave a stale moderation page reachable through history/navigation.
       if (!canModerate && view === "moderation") switchView("chat");
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
     }
   }
   async function setAdmin(fp: string, admin: boolean) {
@@ -5360,6 +5589,8 @@
     view = v;
     if (v === "wiki") refreshWiki();
     if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "status") refreshStatuses(); // a read that failed during the switch gets a retry here
+    if (v === "events") refreshEvents();
     if (v === "moderation") refreshModeration();
     if (v === "storage" || v === "downloads") refreshStorageHealth();
     if (v === "connectivity") void Promise.all([refreshConnectivity(), refreshSwitchboards()]);
@@ -5382,6 +5613,15 @@
     if (im && !im.closest("a[href],[data-wikilink]")) {
       e.preventDefault();
       openLightbox(im);
+      return;
+    }
+    // The inbox and news lists render text from every server, but a [[link]] or a file/event/status
+    // chip inside rendered text carries no server with it: resolving one against whatever group
+    // happens to sit behind the overlay opens the WRONG server's wiki or fileshare, and a wiki page
+    // that server lacks opens its editor. Jump to the item's own server first.
+    if (inboxView && target?.closest("[data-wikilink],[data-file-cid],[data-event-id],[data-status-id]")) {
+      e.preventDefault();
+      toast("Open the item's server first to follow its links", "info", 4000);
       return;
     }
     const el = target?.closest("[data-wikilink]") as HTMLElement | null;
@@ -6076,7 +6316,7 @@
   function serverMenu(s: ServerState): MenuItem[] {
     const items: MenuItem[] = [];
     if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => void copyFreshInvite(s.id) });
-    items.push({ label: "Server settings", icon: "⚙", onSelect: () => openServerSettings(s.id) });
+    items.push({ label: "Server settings", icon: "⚙", onSelect: () => void openServerSettings(s.id) });
     items.push({ divider: true });
     items.push({
       label: "Leave server",
@@ -6164,34 +6404,82 @@
       openMenu(e, items);
     }
   }
-  async function refreshWiki() {
-    if (activeServerId === null) return;
+  // Just the page names, and they belong to every switch rather than only to opening the wiki tab.
+  // Two things outside that tab read them: the ref cards in chat, which say "not created yet" for a
+  // name the list lacks, and openWikiPage, which opens a page in EDIT mode when the list lacks it.
+  // An empty list therefore does not merely look wrong, it drops a [[link]] click into the editor.
+  async function refreshWikiPages() {
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) return;
     try {
       const knownPages = wikiPages;
-      const srv = activeServerId;
-      wikiPages = await invoke<string[]>("get_wiki_pages", { server: activeServerId });
+      // The review policy rides along with the page list. It gates the rename/delete controls and
+      // the eager-create path, both of which are reachable from a [[link]] in chat without the
+      // wiki tab ever being opened, so it cannot wait for refreshWiki.
+      const [listed, reviewDays] = await Promise.allSettled([
+        invoke<string[]>("get_wiki_pages", { server: srv }),
+        invoke<number>("get_wiki_review_days", { server: srv }),
+      ]);
+      if (!viewCurrent(gen, srv)) return;
+      if (reviewDays.status === "fulfilled") wikiReviewDays = reviewDays.value;
+      if (listed.status !== "fulfilled") {
+        error = String(listed.reason);
+        return;
+      }
+      const next = listed.value;
+      wikiPages = next;
       // A page list arriving for the first time is not news, it is just the list; only pages that
-      // appear against a list we already had get announced.
+      // appear against a list we already had get announced. A switch empties the list, so arriving
+      // at a server never announces its whole wiki.
       if (knownPages.length) {
-        for (const pg of wikiPages) {
+        for (const pg of next) {
           if (knownPages.includes(pg)) continue;
           pushTicker("wiki", srv, `wiki:${srv}:${pg}`, pg, () => void goWikiPage(srv, pg));
         }
       }
-      wikiMap = await invoke<Record<string, string>>("get_wiki_map", { server: activeServerId });
-      wikiMeta = await invoke<Record<string, string>>("get_wiki_meta", { server: activeServerId });
-      wikiReviewDays = await invoke<number>("get_wiki_review_days", { server: activeServerId });
-      wikiPending = await invoke<UiWikiPending[]>("get_wiki_pending", { server: activeServerId });
-      // Reload the open page only if it still exists and the user isn't mid-edit.
-      if (activeWikiPage && !wikiDirty && wikiPages.includes(activeWikiPage)) {
-        wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name: activeWikiPage });
+    } catch (e) {
+      if (viewCurrent(gen, srv)) error = String(e);
+    }
+  }
+  async function refreshWiki() {
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) return;
+    await refreshWikiPages();
+    if (!viewCurrent(gen, srv)) return;
+    // Four independent reads, applied independently: one failing (an older backend without
+    // get_wiki_review_days, say) must not discard the three that answered.
+    const [map, meta, reviewDays, pending] = await Promise.allSettled([
+      invoke<Record<string, string>>("get_wiki_map", { server: srv }),
+      invoke<Record<string, string>>("get_wiki_meta", { server: srv }),
+      invoke<number>("get_wiki_review_days", { server: srv }),
+      invoke<UiWikiPending[]>("get_wiki_pending", { server: srv }),
+    ]);
+    if (!viewCurrent(gen, srv)) return;
+    if (map.status === "fulfilled") {
+      wikiMap = map.value;
+      wikiMapFor = srv;
+    }
+    if (meta.status === "fulfilled") wikiMeta = meta.value;
+    if (reviewDays.status === "fulfilled") wikiReviewDays = reviewDays.value;
+    if (pending.status === "fulfilled") wikiPending = pending.value;
+    try {
+      // Reload the open page only if it still exists and the user isn't mid-edit. Re-checked after
+      // the read as well as before it: an edit begun while the body was in flight owns the buffer.
+      const page = activeWikiPage;
+      if (page && !wikiDirty && wikiPages.includes(page)) {
+        const body = await invoke<string>("get_wiki_page", { server: srv, name: page });
+        if (viewCurrent(gen, srv) && activeWikiPage === page && !wikiDirty) wikiBody = body;
       }
-      // Keep an open history browser current (an approval elsewhere adds a revision).
-      if (showWikiHistory && activeWikiPage) {
-        wikiHistory = await invoke<UiWikiRev[]>("get_wiki_history", { server: activeServerId, page: activeWikiPage });
+      // Keep an open history browser current (an approval elsewhere adds a revision). Reached even
+      // when the body reload above was skipped or its answer discarded.
+      if (showWikiHistory && page) {
+        const history = await invoke<UiWikiRev[]>("get_wiki_history", { server: srv, page });
+        if (viewCurrent(gen, srv) && activeWikiPage === page) wikiHistory = history;
       }
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, srv)) error = String(e);
     }
   }
 
@@ -6286,11 +6574,13 @@
   // a [[link]] away from a half-edited page stashes the draft; coming back restores it.
   const wikiDrafts = new Map<string, string>();
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}) {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     if (wikiDirty && activeWikiPage && activeWikiPage !== name) wikiDrafts.set(activeWikiPage, wikiBody);
     if (showInsert && insertTarget === "wiki") closeInsert();
     try {
-      let body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+      let body = await invoke<string>("get_wiki_page", { server, name });
       // Follow #REDIRECT [[Target]] pages Wikipedia-style (bounded; only to pages that exist),
       // remembering where we came from so the notice can link back to the redirect itself.
       let from = "";
@@ -6300,9 +6590,14 @@
           if (!target || target === name || !wikiPages.includes(target)) break;
           from = from || name;
           name = target;
-          body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+          if (!viewCurrent(gen, server)) return; // do not follow one server's redirect into another
+          body = await invoke<string>("get_wiki_page", { server, name });
         }
       }
+      // The whole point of the guard: without it this page's text lands in the editor of whatever
+      // server you moved to, and because that server's wikiPages lacks the name it opens in EDIT
+      // mode, one Ctrl+S from publishing one server's wiki content into another's.
+      if (!viewCurrent(gen, server)) return;
       wikiRedirectedFrom = from;
       wikiBody = body;
       activeWikiPage = name;
@@ -7212,6 +7507,9 @@
   function wikiCardSpec(page: string): CardSpec | null {
     const exists = wikiPages.includes(page);
     const body = wikiMap[page] ?? "";
+    // Whether `body` is an answer at all. Without this an unread map reads as "every page is
+    // empty", which is a claim about the server rather than about what we have loaded.
+    const mapped = wikiMapFor === activeServerId;
     // A page nobody has written yet is still worth a card: it says so, and clicking it starts one.
     if (!exists && !body) {
       return { kind: "wiki", icon: "⊞", kicker: "Wiki page", title: page, sub: "not created yet", missing: true };
@@ -7223,7 +7521,7 @@
       kicker: "Wiki page",
       title: page,
       sub: target ? `redirects to ${target}` : undefined,
-      body: target ? undefined : plainSummary(body, 220) || "(empty page)",
+      body: target ? undefined : plainSummary(body, 220) || (mapped ? "(empty page)" : undefined),
       thumb: firstEmbedCid(body),
     };
   }
@@ -8055,7 +8353,9 @@
     if (locked) return;
     inboxLoading = true;
     try {
-      inboxItems = await invoke<InboxEntry[]>("get_inbox");
+      const next = await invoke<InboxEntry[]>("get_inbox");
+      if (locked) return; // the lock cleared this list; it carries message text from every server
+      inboxItems = next;
     } catch (e) {
       error = String(e);
     } finally {
@@ -9926,7 +10226,8 @@
   }
   // The share no longer carries this track: the deck can still name it, but nobody can serve it.
   function jukeGone(cid: string): boolean {
-    return jukeShareInView && !files.some((f) => f.cid === cid);
+    // Never while the file index is still being read: an unread index is not proof of withdrawal.
+    return jukeShareInView && !groupLoading && !files.some((f) => f.cid === cid);
   }
   // The mono tag on a picker row: the file's own extension, or the mime subtype when it has none.
   function jukeExt(f: UiFile): string {
@@ -11687,8 +11988,12 @@
       listen<{ server: number }>("server-closed", (e) => {
         servers = servers.filter((s) => s.id !== e.payload.server);
         if (activeServerId === e.payload.server) {
-          activeServerId = servers.length ? servers[0].id : null;
-          if (activeServerId !== null) switchServer(activeServerId);
+          if (servers.length) void switchServer(servers[0].id);
+          else {
+            beginViewSwitch();
+            activeServerId = null;
+            clearServerView();
+          }
         }
       }),
     ];
@@ -15301,7 +15606,7 @@
                 </div>
               </li>
             {:else}
-              <li class="muted">No messages yet: say hello.</li>
+              <li class="muted">{groupLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
             {/each}
             {#if messageWindow.end < messages.length}
               <li class="message-window-edge">
@@ -15407,7 +15712,7 @@
               <button type="submit" disabled={uploading || sending}>Send</button>
             </form>
           </div>
-        {:else if view === "moderation"}
+        {:else if view === "moderation" && canModerate}
           <div class="moderation-pane tab-pane">
             <header class="ops-head">
               <div>
@@ -15415,7 +15720,7 @@
                 <h2>Moderation plane</h2>
                 <p class="muted small">A public, signed history. Warnings preserve what was seen; kick votes advise the owner and never bypass MLS authorization.</p>
               </div>
-              <button class="ghost small" disabled={moderationLoading} onclick={refreshModeration}>{moderationLoading ? "Loading…" : "Refresh"}</button>
+              <button class="ghost small" disabled={moderationLoading} onclick={() => refreshModeration(true)}>{moderationLoading ? "Loading…" : "Refresh"}</button>
             </header>
             {#if canModerate}
               <section class="mod-batch">
@@ -16152,7 +16457,7 @@
             <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
           {/if}
           {#if !filteredRoster.length}
-            <p class="muted small">No matching members.</p>
+            <p class="muted small">{groupLoading ? "Loading members…" : rosterFilter.trim() ? "No matching members." : "No members to show."}</p>
           {/if}
           {#if onlineRoster.length}
             <h3><span>online: {onlineRoster.length}</span></h3>
