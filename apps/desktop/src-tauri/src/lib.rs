@@ -115,6 +115,36 @@ struct MediaChunk {
     mime: String,
 }
 
+/// Process-wide, coalesced notification that the operating system's interfaces or routes changed.
+/// A `watch` generation is deliberately used instead of a queued broadcast: every running server
+/// needs to refresh once, but retaining one item per noisy DHCP/route callback would be both
+/// wasteful and unbounded. A server created after a generation uses a fresh route sample during
+/// startup and therefore does not need historical notifications.
+#[derive(Debug, Clone)]
+struct NetworkChangeSignal {
+    generation: watch::Sender<u64>,
+}
+
+impl Default for NetworkChangeSignal {
+    fn default() -> Self {
+        let (generation, _initial_receiver) = watch::channel(0);
+        Self { generation }
+    }
+}
+
+impl NetworkChangeSignal {
+    fn subscribe(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+
+    fn notify(&self) {
+        // Wrapping cannot make a notification invisible: even u64::MAX -> 0 differs from the
+        // receiver's last generation, and reaching it would require centuries of callback spam.
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+}
+
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
@@ -183,6 +213,9 @@ struct AppState {
     /// observation, so file events deliberately do not invalidate it behind the user's back;
     /// explicit authenticated repair is the only operation that replaces a cached report.
     storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
+    /// One native monitor fans a coalesced generation out to every per-server discovery loop.
+    /// Polling remains active, so monitor initialization failure affects latency, not correctness.
+    network_changes: NetworkChangeSignal,
 }
 
 #[derive(Debug, Clone)]
@@ -959,6 +992,10 @@ const DISCOVERY_JITTER_MS: u64 = 15_000;
 /// a freshly-founded server looking dead for up to a minute. A few seconds is enough to stop the
 /// servers in one process from ticking in unison.
 const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
+/// Extra quiet window above the platform monitor's own short coalescing delay. DHCP, route and
+/// IPv6 privacy-address changes commonly arrive as a burst; publishing a signed peer-record epoch
+/// for every callback would waste sequence numbers and make members redial transient routes.
+const NETWORK_CHANGE_DEBOUNCE_MS: u64 = 750;
 
 /// A uniformly random delay in `[base_ms, base_ms + spread_ms)`, drawn from the injected OS RNG
 /// seam (`catcoms_rt::OsCryptoRng`) rather than an ambient randomness helper, so this file keeps to
@@ -971,6 +1008,62 @@ fn jittered_delay(base_ms: u64, spread_ms: u64) -> Duration {
         rng.next_u64() % spread_ms
     };
     Duration::from_millis(base_ms.saturating_add(offset))
+}
+
+/// Turn a platform interface-state watcher into one bounded process-wide generation stream.
+/// `Watcher` itself retains only the latest state; calling `get` after the quiet window consumes
+/// every intermediate callback, so one burst wakes each server once. The clock is injected to keep
+/// the debounce contract deterministic in tests.
+async fn forward_network_changes<W, C>(mut changes: W, signal: NetworkChangeSignal, clock: C)
+where
+    W: n0_watcher::Watcher + Send,
+    C: Clock,
+{
+    loop {
+        if changes.updated().await.is_err() {
+            return;
+        }
+        // This is a trailing-edge debounce, not a fixed aggregation window. If another route
+        // update arrives just before the deadline, restart the quiet period; otherwise we could
+        // sample an intermediate DHCP state, consume the final callback, and wait a minute to
+        // notice the stable address.
+        loop {
+            tokio::select! {
+                biased;
+                changed = changes.updated() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                _ = clock.sleep(Duration::from_millis(NETWORK_CHANGE_DEBOUNCE_MS)) => {
+                    break;
+                }
+            }
+        }
+        signal.notify();
+    }
+}
+
+/// Start the one native route/interface watcher for this desktop process. The monitor uses the
+/// platform's route notification API on Windows, netlink on Linux/Android and SystemConfiguration
+/// route sockets on Apple/BSD platforms. Failure is deliberately non-fatal: the roughly-minute
+/// poll in every discovery loop remains the portable correctness path.
+fn spawn_network_monitor(app: &AppHandle) {
+    let signal = app.state::<AppState>().network_changes.clone();
+    tauri::async_runtime::spawn(async move {
+        let monitor = match netwatch::netmon::Monitor::new().await {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                tracing::warn!(%error, "native network monitor unavailable; periodic polling remains active");
+                return;
+            }
+        };
+        let changes = monitor.interface_state();
+        // Keep `monitor` alive for as long as its watcher is being forwarded; dropping it cancels
+        // and unregisters the platform callbacks.
+        forward_network_changes(changes, signal, SystemClock).await;
+        tracing::warn!("native network monitor stopped; periodic polling remains active");
+    });
 }
 
 /// Poll the route-selected IPv4/IPv6 source addresses and publish one new authoritative address
@@ -1036,11 +1129,22 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
 /// re-finds itself after a restart and members keep exchanging peer records. Exits once the actor
 /// stops (`drive_discovery` errors).
 fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
+    // Subscribe before spawning so a network change between server registration and the task's
+    // first poll cannot be lost. The current startup sample is already authoritative; only future
+    // generations wake this server early.
+    let mut network_changes = app.state::<AppState>().network_changes.subscribe();
     tokio::spawn(async move {
         // A short randomised start offset, then an independently randomised period each round.
         let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
-            SystemClock.sleep(delay).await;
+            tokio::select! {
+                _ = SystemClock.sleep(delay) => {}
+                changed = network_changes.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
             // Poll before PEX/rendezvous so a new interface address receives a fresh signed epoch
             // and can be shared in this same discovery pass.
             refresh_interface_routes(&app, server).await;
@@ -5528,6 +5632,11 @@ async fn get_call_transport(
 /// one response comfortably inside a single sealed chunk.
 const MEDIA_WINDOW_BYTES: usize = 2 * 1024 * 1024;
 
+/// A response must fit inside one chunk. Checked at compile time because both sides are
+/// constants: a runtime assertion on them is optimised out and proves nothing. Raising the window
+/// above the chunk size is exactly the regression that made one response need two decrypts.
+const _: () = assert!(MEDIA_WINDOW_BYTES <= CHUNK_BYTES);
+
 /// The custom scheme the webview plays shared media through: `catcoms-media://a/<server>/<cid>`.
 /// Windows rewrites this to `http://catcoms-media.localhost/...`, so the host is never parsed;
 /// only the path is.
@@ -5634,16 +5743,13 @@ async fn serve_media(
             .body(Vec::new())
             .expect("static response builds");
     }
-    // Never serve across a chunk boundary: one response is at most one chunk, so a sequential
-    // reader asks for the next chunk next rather than making us touch two.
-    let index = (start / CHUNK_BYTES as u64) as usize;
-    let base = index as u64 * CHUNK_BYTES as u64;
-    let bytes = match media_chunk(state, &actor, server, &cid, &raw, index).await {
+    let plan = media_window(start, len);
+    let bytes = match media_chunk(state, &actor, server, &cid, &raw, plan.index).await {
         Some((_, _, bytes)) => bytes,
         None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
     };
-    let lo = (start - base).min(bytes.len() as u64) as usize;
-    let hi = (lo + len).min(bytes.len());
+    let lo = plan.offset.min(bytes.len());
+    let hi = (lo + plan.len).min(bytes.len());
     let body = bytes[lo..hi].to_vec();
     let end = start + body.len() as u64;
     // Always a 206 with an explicit Content-Range: the response is a window by construction, and
@@ -5664,6 +5770,38 @@ async fn serve_media(
         .header("X-Content-Type-Options", "nosniff")
         .body(body)
         .expect("response builds")
+}
+
+/// Which chunk a read starts in, and how much of it may be served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaWindow {
+    /// Index of the chunk containing `start`.
+    index: usize,
+    /// Byte offset of `start` within that chunk.
+    offset: usize,
+    /// How many bytes may be taken, never past the end of this chunk.
+    len: usize,
+}
+
+/// Plan one media response.
+///
+/// The invariant that matters, and the one this exists to hold: **a response never spans more
+/// than one chunk.** The first version of this served a fixed 2 MiB window out of an 8 MiB
+/// chunk, so sequential playback decrypted every chunk four times over; because the actor
+/// handles one command at a time, those redundant reads were also time the server could not
+/// answer anything else, and the whole app looked like it was still loading during a call.
+/// Clamping to the chunk end makes a sequential reader ask for the next chunk next, which is
+/// exactly one decrypt per chunk.
+fn media_window(start: u64, len: usize) -> MediaWindow {
+    let chunk = CHUNK_BYTES as u64;
+    let index = (start / chunk) as usize;
+    let offset = (start % chunk) as usize;
+    let remaining = CHUNK_BYTES - offset;
+    MediaWindow {
+        index,
+        offset,
+        len: len.min(remaining),
+    }
 }
 
 /// Fetch one whole decrypted chunk, from the cache when possible.
@@ -7888,7 +8026,19 @@ struct DebugLogging {
 /// Never fails the caller: an unreadable app data directory reads as the default rather than
 /// erroring, since a preference lookup must not be able to stop the app starting.
 fn debug_logging_enabled(app: &AppHandle) -> bool {
-    debug_flag_path(app).map(|p| !p.exists()).unwrap_or(true)
+    debug_flag_path(app)
+        .map(|p| debug_enabled_from_flag(p.exists()))
+        .unwrap_or(true)
+}
+
+/// The preference, from whether the opt-out file exists.
+///
+/// Split out because the sense is inverted from the obvious one and inverted flags are exactly
+/// what a later reader "corrects" back. Presence of the file means the user turned logging OFF;
+/// absence means the alpha default, which is ON. Getting this backwards would either lose every
+/// bug report or write a log for someone who explicitly asked not to have one.
+fn debug_enabled_from_flag(opt_out_exists: bool) -> bool {
+    !opt_out_exists
 }
 
 /// Whether this process installed a debug-log file layer, and which file it is writing. Set once
@@ -8048,6 +8198,7 @@ pub fn run() {
                 active: enabled,
                 dir,
             });
+            spawn_network_monitor(&handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -8172,6 +8323,50 @@ mod tests {
         keypair_from_seed(seed).unwrap().public().to_peer_id()
     }
 
+    #[tokio::test]
+    async fn native_network_bursts_become_one_bounded_generation() {
+        let source = n0_watcher::Watchable::new(0u8);
+        let watcher = source.watch();
+        let signal = NetworkChangeSignal::default();
+        let mut generations = signal.subscribe();
+        let clock = catcoms_rt::ManualClock::new(1_000);
+
+        // Make the first update observable before the forwarding task starts, then let it reach
+        // the injected debounce sleep before delivering a second callback in the same burst.
+        source.set(1).unwrap();
+        let task = tokio::spawn(forward_network_changes(watcher, signal, clock.clone()));
+        tokio::task::yield_now().await;
+        clock.advance_ms(500);
+        source.set(2).unwrap();
+        tokio::task::yield_now().await;
+
+        // A trailing debounce restarts from the second callback; the first callback's original
+        // deadline must not publish an intermediate epoch.
+        clock.advance_ms(NETWORK_CHANGE_DEBOUNCE_MS - 1);
+        tokio::task::yield_now().await;
+        assert!(!generations.has_changed().unwrap());
+        clock.advance_ms(1);
+        generations.changed().await.unwrap();
+        assert_eq!(*generations.borrow_and_update(), 1);
+
+        // The second source state was consumed by the first quiet window, not left queued as a
+        // second signed epoch. Advancing another whole window must therefore remain silent.
+        tokio::task::yield_now().await;
+        clock.advance_ms(NETWORK_CHANGE_DEBOUNCE_MS);
+        tokio::task::yield_now().await;
+        assert!(!generations.has_changed().unwrap());
+
+        // A genuinely later change still reaches every subscriber exactly once.
+        source.set(3).unwrap();
+        tokio::task::yield_now().await;
+        clock.advance_ms(NETWORK_CHANGE_DEBOUNCE_MS);
+        generations.changed().await.unwrap();
+        assert_eq!(*generations.borrow_and_update(), 2);
+
+        drop(source);
+        task.await.unwrap();
+    }
+
     #[test]
     fn listener_summary_reports_only_the_transports_actually_observed() {
         let addresses = vec![
@@ -8183,6 +8378,105 @@ mod tests {
         ];
         assert_eq!(listener_summary(&addresses), "IPv4 TCP, IPv6 QUIC");
         assert_eq!(listener_summary(&addresses[2..]), "");
+    }
+
+    // --- Regression: the media window that stalled the whole app -----------------------------
+    // A fixed 2 MiB window over an 8 MiB chunk meant every chunk was fetched and decrypted four
+    // times during ordinary playback. Because the actor handles one command at a time, those
+    // redundant reads were also time the server could not answer anything else: joining a call
+    // and moving around it left the app looking like it was still loading. The invariant these
+    // pin is that one response never spans more than one chunk.
+
+    #[test]
+    fn a_media_response_never_spans_more_than_one_chunk() {
+        // Every offset in the file, at a few sizes, must stay inside the chunk it starts in.
+        for start in [
+            0u64,
+            1,
+            CHUNK_BYTES as u64 - 1,
+            CHUNK_BYTES as u64,
+            CHUNK_BYTES as u64 + 1,
+            CHUNK_BYTES as u64 * 3 + 4242,
+        ] {
+            for len in [
+                1usize,
+                4096,
+                MEDIA_WINDOW_BYTES,
+                CHUNK_BYTES,
+                CHUNK_BYTES * 4,
+            ] {
+                let w = media_window(start, len);
+                assert!(w.offset < CHUNK_BYTES, "offset must land inside its chunk");
+                assert!(
+                    w.offset + w.len <= CHUNK_BYTES,
+                    "start={start} len={len} would read past the end of chunk {}",
+                    w.index
+                );
+                assert_eq!(
+                    w.index,
+                    (start / CHUNK_BYTES as u64) as usize,
+                    "the window must serve the chunk the read starts in"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_media_window_is_truncated_at_the_chunk_boundary_rather_than_split() {
+        // Ten bytes before the boundary, asking for a thousand: it serves the ten and lets the
+        // reader come back for the next chunk. Splitting the read across two chunks here is the
+        // shape that made playback touch every chunk twice.
+        let start = CHUNK_BYTES as u64 - 10;
+        let w = media_window(start, 1000);
+        assert_eq!(w.index, 0);
+        assert_eq!(w.offset, CHUNK_BYTES - 10);
+        assert_eq!(w.len, 10);
+
+        // The very next read is the whole of the next chunk's head, not a continuation.
+        let next = media_window(CHUNK_BYTES as u64, 1000);
+        assert_eq!(next.index, 1);
+        assert_eq!(next.offset, 0);
+        assert_eq!(next.len, 1000);
+    }
+
+    #[test]
+    fn sequential_playback_walks_chunks_forward_and_never_returns_to_one() {
+        // A player asking for the default window makes several requests per chunk, and that is
+        // fine: the chunk cache means only the first of them decrypts anything. What must hold is
+        // that the walk only ever moves forward, so a chunk that has been left is never needed
+        // again and the two-entry cache is always big enough. A planner that ping-ponged across a
+        // boundary would defeat the cache and put every one of those reads back on the actor.
+        let total = CHUNK_BYTES as u64 * 3 + 4242;
+        let mut order = Vec::new();
+        let mut at = 0u64;
+        while at < total {
+            let w = media_window(at, MEDIA_WINDOW_BYTES);
+            assert!(w.len > 0, "a window must always make progress");
+            if order.last() != Some(&w.index) {
+                order.push(w.index);
+            }
+            at += w.len as u64;
+        }
+        // Every chunk, in order, each entered exactly once.
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3],
+            "the walk must be forward-only and skip nothing"
+        );
+    }
+
+    #[test]
+    fn the_debug_log_opt_out_is_not_accidentally_inverted() {
+        // On by default for alpha, off only when the user asked. Inverting this either loses
+        // every bug report or writes a log for someone who explicitly declined one.
+        assert!(
+            debug_enabled_from_flag(false),
+            "no opt-out file means logging is on"
+        );
+        assert!(
+            !debug_enabled_from_flag(true),
+            "the opt-out file must actually opt out"
+        );
     }
 
     #[test]

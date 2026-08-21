@@ -1245,6 +1245,18 @@ fn autonat_candidate_is_current(
 /// Automatic discovery must pass the global classifier, while an explicit caller assertion is an
 /// independent owner and may intentionally be a LAN-only route. This distinction is load-bearing
 /// when a broken gateway returns the exact private socket an operator configured manually.
+/// Whether a "router mapping unavailable" answer is worth an info line, or is the same answer
+/// this probe already gave.
+///
+/// A router with no PCP/NAT-PMP re-answers "no" on every discovery cycle, for every mechanism,
+/// transport and interface. Logged unconditionally, that was 356 of one real debug log's 601
+/// lines: the same sentence as eighteen seconds earlier, burying everything worth reading. The
+/// first answer for a probe is news; an identical repeat is not; a *changed* detail is news
+/// again, because that is a router whose behaviour actually moved.
+fn mapping_unavailable_is_news(previous: Option<&str>, detail: &str) -> bool {
+    previous != Some(detail)
+}
+
 fn external_address_is_allowed(configured: &HashSet<Multiaddr>, address: &Multiaddr) -> bool {
     configured.contains(address) || addr_is_globally_routable(address)
 }
@@ -2542,7 +2554,7 @@ impl Actor {
                 let previous = self
                     .port_mapping_unavailable
                     .insert((*mechanism, *transport, *local_address), detail.clone());
-                if previous.as_deref() == Some(detail.as_str()) {
+                if !mapping_unavailable_is_news(previous.as_deref(), detail) {
                     tracing::debug!(%mechanism, %transport, %detail, "router mapping still unavailable");
                 } else {
                     tracing::info!(%mechanism, %transport, %detail, "router mapping unavailable");
@@ -4428,6 +4440,76 @@ mod tests {
         assert_eq!(
             mapped_multiaddr(public, PortMappingTransport::Udp).to_string(),
             "/ip4/203.0.113.7/udp/22487/quic-v1"
+        );
+    }
+
+    #[test]
+    fn a_repeated_router_answer_is_not_news_twice() {
+        // Regression: a router with no PCP/NAT-PMP re-answers "no" every discovery cycle, for
+        // every mechanism, transport and interface. Logged unconditionally that was 356 of one
+        // real debug log's 601 lines, burying the sixty-odd entries that actually mattered.
+        let detail = "no compatible gateway answered the probe";
+
+        // The first answer for a probe is worth saying.
+        assert!(mapping_unavailable_is_news(None, detail));
+        // Saying it again eighteen seconds later is not.
+        assert!(!mapping_unavailable_is_news(Some(detail), detail));
+        // A router whose answer actually changed is news again: that is behaviour moving, which
+        // is exactly what someone reading the log is looking for.
+        assert!(mapping_unavailable_is_news(
+            Some(detail),
+            "the UPnP IGD gateway answered discovery"
+        ));
+        // ...and the new answer then goes quiet in its turn.
+        assert!(!mapping_unavailable_is_news(
+            Some("the UPnP IGD gateway answered discovery"),
+            "the UPnP IGD gateway answered discovery"
+        ));
+    }
+
+    #[test]
+    fn different_probes_do_not_suppress_each_other() {
+        // Suppression is per probe, keyed by mechanism, transport and interface. If one probe's
+        // answer could silence another's, a genuinely new failure would vanish because an
+        // unrelated one had already reported the same string.
+        let mut seen: HashMap<(&str, &str), String> = HashMap::new();
+        let detail = "no compatible gateway answered the probe".to_string();
+        for probe in [("PCP", "UDP"), ("NAT-PMP", "UDP"), ("PCP", "TCP")] {
+            let previous = seen.insert(probe, detail.clone());
+            assert!(
+                mapping_unavailable_is_news(previous.as_deref(), &detail),
+                "{probe:?} is a distinct probe and its first answer is news"
+            );
+        }
+        // Second time around, every one of them has already said it.
+        for probe in [("PCP", "UDP"), ("NAT-PMP", "UDP"), ("PCP", "TCP")] {
+            let previous = seen.insert(probe, detail.clone());
+            assert!(!mapping_unavailable_is_news(previous.as_deref(), &detail));
+        }
+    }
+
+    #[test]
+    fn a_quiet_router_costs_one_line_per_probe_rather_than_one_per_cycle() {
+        // The shape of the original bug, counted: twenty cycles over four probes was 80 lines.
+        let detail = "no compatible gateway answered the probe".to_string();
+        let mut seen: HashMap<(&str, &str), String> = HashMap::new();
+        let mut lines = 0;
+        for _cycle in 0..20 {
+            for probe in [
+                ("PCP", "UDP"),
+                ("NAT-PMP", "UDP"),
+                ("PCP", "TCP"),
+                ("NAT-PMP", "TCP"),
+            ] {
+                let previous = seen.insert(probe, detail.clone());
+                if mapping_unavailable_is_news(previous.as_deref(), &detail) {
+                    lines += 1;
+                }
+            }
+        }
+        assert_eq!(
+            lines, 4,
+            "one line per probe for the whole session, not one per cycle"
         );
     }
 

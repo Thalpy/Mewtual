@@ -56,8 +56,8 @@
   } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
-    driftAction, fetchPhase, mediaKind, mediaUrl, nudgeRate,
-    type FetchPhase, type MediaKind,
+    driftAction, fetchPhase, isStalled, mediaKind, mediaUrl, nudgeRate, resolveCallName,
+    STALL_ANNOUNCE_MS, type FetchPhase, type MediaKind,
   } from "./jukebox";
   import { installUiLogging } from "./uilog";
   import {
@@ -3653,7 +3653,7 @@
     );
   }
   function callNameOf(fp: string): string {
-    return callProfileFor(fp)?.name?.trim() || fp;
+    return resolveCallName(fp, callProfiles, profiles, (id) => deviceMap[id]?.origin);
   }
   // Two-letter mono monogram for a rail circle (one letter for a one-character name).
   function monogram(name: string): string {
@@ -9968,8 +9968,8 @@
     el.addEventListener("waiting", () => {
       clearTimeout(bufferTimer);
       bufferTimer = setTimeout(() => {
-        if (jukeAudio && jukeAudio.readyState < 3 && !jukeAudio.paused) jukeBuffering = true;
-      }, 1200);
+        if (jukeAudio && isStalled(jukeAudio)) jukeBuffering = true;
+      }, STALL_ANNOUNCE_MS);
     });
     el.addEventListener("playing", () => {
       clearTimeout(bufferTimer);

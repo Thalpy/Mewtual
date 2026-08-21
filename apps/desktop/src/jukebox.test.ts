@@ -8,6 +8,10 @@ import {
   mediaKind,
   mediaUrl,
   nudgeRate,
+  isStalled,
+  resolveCallName,
+  HAVE_FUTURE_DATA,
+  STALL_ANNOUNCE_MS,
 } from "./jukebox.ts";
 
 const progress = (over: Partial<Parameters<typeof fetchPhase>[0]> = {}) => ({
@@ -50,10 +54,15 @@ test("a queue entry with no mime falls back to its extension", () => {
   assert.equal(mediaKind(""), "other");
 });
 
-test("a mime that is not media at all does not become media by its extension", () => {
-  // A file the backend will serve as application/octet-stream must not be queued as playable
-  // just because somebody named it .mp4.
+test("a non-media mime still falls through to the extension, and that is safe", () => {
+  // The name of this test used to claim the opposite of what it asserted. The behaviour is that
+  // a mime naming neither audio nor video is treated as "no useful mime" and the extension
+  // decides, which is what makes queue entries work at all (they carry no mime).
   assert.equal(mediaKind("payload.mp4", "text/html"), "video");
+  // It is safe because kind only decides which surface to draw. The backend independently
+  // refuses to serve a non-media declared type as one (safe_media_mime hands back
+  // application/octet-stream), so such a file fails to decode and the deck skips it rather than
+  // the webview being handed something it might treat as script.
 });
 
 test("video eases small drift out and snaps only large drift", () => {
@@ -111,4 +120,52 @@ test("progress percent is derived and clamped", () => {
 test("progress carries the serving peer through for attribution", () => {
   assert.equal(fetchPhase(progress({ provider: "d465c67a" })).provider, "d465c67a");
   assert.equal(fetchPhase(progress()).provider, "");
+});
+
+// --- Regressions ------------------------------------------------------------------------------
+
+test("a chunk boundary is not a stall", () => {
+  // `waiting` fires constantly while streaming. Announcing it raw made a playing track claim it
+  // had run dry; the element's own readyState is the arbiter.
+  assert.equal(isStalled({ readyState: HAVE_FUTURE_DATA, paused: false }), false);
+  assert.equal(isStalled({ readyState: 4, paused: false }), false);
+});
+
+test("a genuine stall is still reported", () => {
+  assert.equal(isStalled({ readyState: 0, paused: false }), true);
+  assert.equal(isStalled({ readyState: 2, paused: false }), true);
+});
+
+test("a paused deck is not buffering, however little it has loaded", () => {
+  // Otherwise pausing on an unbuffered track sits there claiming to be stalled forever.
+  assert.equal(isStalled({ readyState: 0, paused: true }), false);
+});
+
+test("the stall announcement waits long enough for a person to notice", () => {
+  assert.ok(STALL_ANNOUNCE_MS >= 1000, "shorter than this and ordinary streaming trips it");
+});
+
+test("a call name resolves against the room's server, not the one being viewed", () => {
+  // The regression: switching servers mid-call renamed every participant, including you.
+  const inRoom = { a1: { name: "Sillycats" } };
+  const inView = { a1: { name: "someone else entirely" } };
+  assert.equal(resolveCallName("a1", inRoom, inView), "Sillycats");
+});
+
+test("the viewed server is a fallback only for a peer the room does not know", () => {
+  assert.equal(resolveCallName("b2", {}, { b2: { name: "Known Elsewhere" } }), "Known Elsewhere");
+});
+
+test("an unknown peer renders as its fingerprint rather than a wrong name", () => {
+  assert.equal(resolveCallName("c3", {}, {}), "c3");
+  // A blank or whitespace-only profile name must not render as an empty label.
+  assert.equal(resolveCallName("c3", { c3: { name: "   " } }, {}), "c3");
+});
+
+test("a companion device renders under its origin's name from the room's server", () => {
+  const inRoom = { origin1: { name: "Bam" } };
+  assert.equal(
+    resolveCallName("dev9", inRoom, {}, (fp) => (fp === "dev9" ? "origin1" : undefined)),
+    "Bam",
+  );
 });

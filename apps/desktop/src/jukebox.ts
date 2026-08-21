@@ -121,3 +121,42 @@ export function fetchPhase(e: ProgressEvent): FetchPhase {
     provider: e.provider ?? "",
   };
 }
+
+/**
+ * Whether a media element that just fired `waiting` is genuinely stalled.
+ *
+ * `waiting` is not a problem report: it fires at every chunk boundary and every seek while
+ * streaming, and clears again in milliseconds. Announcing it raw made an ordinary playing track
+ * claim it had run dry. A stall is only worth saying when it has lasted long enough for a person
+ * to notice AND the element still has nothing to play.
+ *
+ * `readyState` is the element's own verdict: HAVE_FUTURE_DATA (3) or better means it can keep
+ * going, whatever the event said a moment ago.
+ */
+export const STALL_ANNOUNCE_MS = 1200;
+export const HAVE_FUTURE_DATA = 3;
+
+export function isStalled(state: { readyState: number; paused: boolean }): boolean {
+  return !state.paused && state.readyState < HAVE_FUTURE_DATA;
+}
+
+/**
+ * Resolve a display name for a call surface.
+ *
+ * The room's server wins, always. `profiles` is scoped to the server being *viewed* and is
+ * replaced wholesale on every switch, so resolving a call participant through it renamed
+ * everyone (and re-badged you) the moment you clicked another server in the rail, making the dock
+ * read as though the call had moved with you. The viewed map is only a fallback for a peer the
+ * room's map has not heard of yet, and a fingerprint is a better answer than a wrong name.
+ */
+export function resolveCallName(
+  fp: string,
+  callProfiles: Record<string, { name?: string } | undefined>,
+  profiles: Record<string, { name?: string } | undefined>,
+  deviceOrigin?: (fp: string) => string | undefined,
+): string {
+  const origin = deviceOrigin?.(fp);
+  const found =
+    callProfiles[fp] ?? (origin ? callProfiles[origin] : undefined) ?? profiles[fp];
+  return found?.name?.trim() || fp;
+}
