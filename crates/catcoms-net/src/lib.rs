@@ -38,6 +38,7 @@ pub mod fdlimit;
 pub mod infra_transport;
 pub mod join_reply;
 pub mod metering;
+mod pcp_ipv6;
 pub mod relay_node;
 pub mod rendezvous_node;
 
@@ -65,7 +66,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
-use std::net::SocketAddrV4;
+use std::net::{IpAddr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use std::num::NonZeroU16;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -74,8 +75,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_rt::{
-    Clock, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId, Responder, SystemClock,
-    Topic, TransportError, TransportEvent,
+    Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId,
+    Responder, SystemClock, Topic, TransportError, TransportEvent,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
@@ -96,6 +97,7 @@ use libp2p::{
     rendezvous, request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
@@ -231,6 +233,9 @@ pub enum PortMappingEvent {
         mechanism: PortMappingMechanism,
         /// TCP or UDP/QUIC.
         transport: PortMappingTransport,
+        /// Exact local address whose listener owns this lease. `None` identifies the legacy
+        /// IPv4/default-gateway owner used by UPnP, PCPv4 and NAT-PMP.
+        local_address: Option<IpAddr>,
         /// The public multiaddr, without this node's `/p2p/<peer-id>` suffix.
         address: Multiaddr,
     },
@@ -240,6 +245,8 @@ pub enum PortMappingEvent {
         mechanism: PortMappingMechanism,
         /// TCP or UDP/QUIC.
         transport: PortMappingTransport,
+        /// Exact local address whose attempt failed, or `None` for the IPv4/default-gateway path.
+        local_address: Option<IpAddr>,
         /// Scoped diagnostic; callers must not interpret one protocol's failure as every mapping
         /// mechanism having failed.
         detail: String,
@@ -251,6 +258,8 @@ pub enum PortMappingEvent {
         mechanism: PortMappingMechanism,
         /// TCP or UDP/QUIC.
         transport: PortMappingTransport,
+        /// Exact local address whose lease ended, or `None` for the IPv4/default-gateway path.
+        local_address: Option<IpAddr>,
         /// The public address that is no longer known to be mapped.
         address: Multiaddr,
     },
@@ -263,6 +272,9 @@ pub struct ActivePortMapping {
     pub mechanism: PortMappingMechanism,
     /// TCP or UDP/QUIC.
     pub transport: PortMappingTransport,
+    /// Exact local address that owns the lease. IPv6 pinholes need this to coexist with IPv4 and
+    /// with another interface's IPv6 lease.
+    pub local_address: Option<IpAddr>,
     /// Public multiaddr, without this node's peer-id suffix.
     pub address: Multiaddr,
 }
@@ -274,6 +286,8 @@ pub struct PortMappingFailure {
     pub mechanism: PortMappingMechanism,
     /// TCP or UDP/QUIC.
     pub transport: PortMappingTransport,
+    /// Exact local address whose attempt failed, or `None` for the IPv4/default-gateway path.
+    pub local_address: Option<IpAddr>,
     /// Bounded upstream/context detail.
     pub detail: String,
 }
@@ -286,7 +300,7 @@ pub struct PortMappingFailure {
 /// or resurrect an expired route.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PortMappingSnapshot {
-    /// All live leases, one per mechanism/transport owner.
+    /// All live leases, one per mechanism/transport/local-address owner.
     pub active: Vec<ActivePortMapping>,
     /// Latest failures for keys that do not currently have a live lease.
     pub unavailable: Vec<PortMappingFailure>,
@@ -1098,10 +1112,68 @@ type InboundResponses = FuturesUnordered<
 #[derive(Debug)]
 struct PortMapperTask {
     port: NonZeroU16,
-    handle: JoinHandle<()>,
+    generation: u64,
+    handle: Option<JoinHandle<()>>,
+    /// IPv6 PCP can explicitly delete its lease when a listener disappears. IPv4's retained
+    /// `portmapper` implementation has no equivalent cancellation API, so those tasks are simply
+    /// aborted and their library-managed bounded lease expires.
+    stop: Option<oneshot::Sender<()>>,
 }
 
-type PortMappingKey = (PortMappingMechanism, PortMappingTransport);
+/// One independently managed listener/router path. IPv4 protocols discover their default route
+/// internally and retain their historical single owner; PCPv6 must bind the exact GUA so two
+/// interfaces and IPv4 can coexist without overwriting each other's lease state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum PortMappingTarget {
+    Ipv4,
+    Ipv6(Ipv6Addr),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PortMapperTaskKey {
+    transport: PortMappingTransport,
+    target: PortMappingTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortMappingEndpoint {
+    key: PortMapperTaskKey,
+    port: NonZeroU16,
+}
+
+/// Private worker envelope used to reject buffered events from a stopped/replaced listener. The
+/// public snapshot deliberately does not expose this process-local generation.
+#[derive(Debug)]
+struct PortMapperReport {
+    key: PortMapperTaskKey,
+    port: NonZeroU16,
+    generation: u64,
+    event: PortMappingEvent,
+}
+
+#[derive(Debug, Clone)]
+struct PortMapperReporter {
+    tx: mpsc::Sender<PortMapperReport>,
+    key: PortMapperTaskKey,
+    port: NonZeroU16,
+    generation: u64,
+}
+
+impl PortMapperReporter {
+    async fn send(&self, event: PortMappingEvent) -> Result<(), ()> {
+        self.tx
+            .send(PortMapperReport {
+                key: self.key,
+                port: self.port,
+                generation: self.generation,
+                event,
+            })
+            .await
+            .map_err(|_| ())
+    }
+}
+
+type PortMappingKey = (PortMappingMechanism, PortMappingTransport, Option<IpAddr>);
 
 /// AutoNAT servers and identify candidates are network input. Retaining one observation for every
 /// peer/address ever seen would let churn grow a long-lived node without bound, even though the
@@ -1205,37 +1277,77 @@ fn expire_port_mapping(
 
 impl Drop for PortMapperTask {
     fn drop(&mut self) {
-        self.handle.abort();
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
     }
 }
 
-/// Extract the mapping-relevant endpoint from a concrete local IPv4 listen address. The current
-/// `portmapper` client discovers an IPv4 default gateway and produces NAT44 mappings, so an
-/// IPv6-only socket is not evidence that the resulting IPv4 mapping would have a listener behind
-/// it. Relayed listen addresses are also excluded: their TCP/UDP ports belong to the relay, not to
-/// this node, and replacing a local mapping worker with one of those ports would advertise a dead
-/// route.
-fn port_mapping_endpoint(addr: &Multiaddr) -> Option<(PortMappingTransport, NonZeroU16)> {
+impl PortMapperTask {
+    /// Withdraw product state before calling this; deletion at the router is best effort and must
+    /// never delay removal from invites. Give PCPv6 a short grace period to send lifetime zero.
+    fn stop_gracefully(mut self) {
+        let sent_stop = self.stop.take().is_some_and(|stop| stop.send(()).is_ok());
+        let Some(mut handle) = self.handle.take() else {
+            return;
+        };
+        if !sent_stop {
+            handle.abort();
+            return;
+        }
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = &mut handle => {}
+                _ = SystemClock.sleep(Duration::from_secs(1)) => handle.abort(),
+            }
+        });
+    }
+}
+
+/// Extract the mapping-relevant endpoint from a concrete direct listen address. IPv4 is handled by
+/// the established `portmapper` client; an exact global IPv6 listener gets an independent PCP MAP
+/// firewall-pinhole worker. Wildcard, loopback and relay routes must never alter the user's router.
+fn port_mapping_endpoint(addr: &Multiaddr) -> Option<PortMappingEndpoint> {
     if is_relayed(addr) {
         return None;
     }
 
     let mut protocols = addr.iter();
-    let mut has_ipv4_listener = false;
+    let mut target = None;
     while let Some(protocol) = protocols.next() {
         match protocol {
             Protocol::Ip4(ip) => {
                 // Mapping the route-selected LAN interface cannot make a socket that is bound
                 // only to localhost accept the forwarded packets.
-                has_ipv4_listener = !ip.is_loopback();
+                target =
+                    (!ip.is_loopback() && !ip.is_unspecified()).then_some(PortMappingTarget::Ipv4);
             }
-            Protocol::Tcp(port) if has_ipv4_listener => {
-                return NonZeroU16::new(port).map(|p| (PortMappingTransport::Tcp, p));
+            Protocol::Ip6(ip) => {
+                target = crate::addr::ipv6_is_pcp_pinhole_candidate(&ip)
+                    .then_some(PortMappingTarget::Ipv6(ip));
+            }
+            Protocol::Tcp(port) if target.is_some() => {
+                return NonZeroU16::new(port).map(|port| PortMappingEndpoint {
+                    key: PortMapperTaskKey {
+                        transport: PortMappingTransport::Tcp,
+                        target: target.expect("guarded above"),
+                    },
+                    port,
+                });
             }
             Protocol::Udp(port)
-                if has_ipv4_listener && protocols.any(|p| matches!(p, Protocol::QuicV1)) =>
+                if target.is_some() && protocols.any(|p| matches!(p, Protocol::QuicV1)) =>
             {
-                return NonZeroU16::new(port).map(|p| (PortMappingTransport::Udp, p));
+                return NonZeroU16::new(port).map(|port| PortMappingEndpoint {
+                    key: PortMapperTaskKey {
+                        transport: PortMappingTransport::Udp,
+                        target: target.expect("guarded above"),
+                    },
+                    port,
+                });
             }
             _ => {}
         }
@@ -1243,9 +1355,118 @@ fn port_mapping_endpoint(addr: &Multiaddr) -> Option<(PortMappingTransport, NonZ
     None
 }
 
+/// Extract only the transport/port from a router result. Unlike `port_mapping_endpoint`, this
+/// deliberately accepts a non-public result so the actor can turn it into a truthful scoped
+/// failure instead of silently discarding the gateway response.
+fn port_mapping_transport(addr: &Multiaddr) -> Option<(PortMappingTransport, NonZeroU16)> {
+    let mut protocols = addr.iter();
+    while let Some(protocol) = protocols.next() {
+        match protocol {
+            Protocol::Tcp(port) => {
+                return NonZeroU16::new(port).map(|port| (PortMappingTransport::Tcp, port));
+            }
+            Protocol::Udp(port) if protocols.any(|p| matches!(p, Protocol::QuicV1)) => {
+                return NonZeroU16::new(port).map(|port| (PortMappingTransport::Udp, port));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn desired_port_mapping_endpoints(
+    listeners: &HashSet<Multiaddr>,
+) -> HashMap<PortMapperTaskKey, NonZeroU16> {
+    const MAX_IPV6_TARGETS: usize = 2;
+    let mut endpoints: Vec<_> = listeners.iter().filter_map(port_mapping_endpoint).collect();
+    endpoints.sort_by_key(|endpoint| (endpoint.key, endpoint.port));
+    let ipv6_candidates: Vec<_> = endpoints
+        .iter()
+        .filter_map(|endpoint| match endpoint.key.target {
+            PortMappingTarget::Ipv6(address) => Some(address),
+            PortMappingTarget::Ipv4 => None,
+        })
+        .collect();
+    let ipv6_targets = select_ipv6_mapping_targets(ipv6_candidates, MAX_IPV6_TARGETS, |address| {
+        pcp_ipv6::discover_gateway(address).is_ok()
+    });
+    let mut desired = HashMap::new();
+    for endpoint in endpoints {
+        if let PortMappingTarget::Ipv6(address) = endpoint.key.target {
+            if !ipv6_targets.contains(&address) {
+                continue;
+            }
+        }
+        desired.entry(endpoint.key).or_insert(endpoint.port);
+    }
+    desired
+}
+
+/// Bound interface churn without letting unrouted VPN/privacy addresses crowd out the actual
+/// default-route interface. If no candidate currently has a PCP route, deterministic fallbacks
+/// still get workers so their retry loops can observe a later network change.
+fn select_ipv6_mapping_targets(
+    mut candidates: Vec<Ipv6Addr>,
+    limit: usize,
+    mut has_gateway: impl FnMut(Ipv6Addr) -> bool,
+) -> HashSet<Ipv6Addr> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut ranked: Vec<_> = candidates
+        .into_iter()
+        .map(|address| (has_gateway(address), address))
+        .collect();
+    ranked.sort_by_key(|(routed, address)| (!*routed, *address));
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, address)| address)
+        .collect()
+}
+
+fn port_mapper_report_is_current(
+    tasks: &HashMap<PortMapperTaskKey, PortMapperTask>,
+    report: &PortMapperReport,
+) -> bool {
+    tasks
+        .get(&report.key)
+        .is_some_and(|task| task.port == report.port && task.generation == report.generation)
+}
+
+/// A retired listener generation must leave neither a lease nor a failure behind. Failures are
+/// current-state diagnostics, not history: retaining a removed privacy address grows the map and
+/// keeps telling the user a worker that no longer exists is "retrying".
+fn clear_retired_port_mapping_failures(
+    unavailable: &mut HashMap<PortMappingKey, String>,
+    key: PortMapperTaskKey,
+) -> bool {
+    let local_address = match key.target {
+        PortMappingTarget::Ipv4 => None,
+        PortMappingTarget::Ipv6(address) => Some(IpAddr::V6(address)),
+    };
+    let mechanisms: &[PortMappingMechanism] = match key.target {
+        PortMappingTarget::Ipv4 => &[PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp],
+        PortMappingTarget::Ipv6(_) => &[PortMappingMechanism::Pcp],
+    };
+    let before = unavailable.len();
+    for &mechanism in mechanisms {
+        unavailable.remove(&(mechanism, key.transport, local_address));
+    }
+    unavailable.len() != before
+}
+
 /// Convert a router's IPv4 socket into the transport-specific libp2p address other peers dial.
 fn mapped_multiaddr(addr: SocketAddrV4, transport: PortMappingTransport) -> Multiaddr {
     let base = Multiaddr::empty().with(Protocol::Ip4(*addr.ip()));
+    match transport {
+        PortMappingTransport::Tcp => base.with(Protocol::Tcp(addr.port())),
+        PortMappingTransport::Udp => base.with(Protocol::Udp(addr.port())).with(Protocol::QuicV1),
+    }
+}
+
+/// Convert an IPv6 PCP MAP result into the exact libp2p route peers should dial.
+fn mapped_ipv6_multiaddr(addr: SocketAddrV6, transport: PortMappingTransport) -> Multiaddr {
+    let base = Multiaddr::empty().with(Protocol::Ip6(*addr.ip()));
     match transport {
         PortMappingTransport::Tcp => base.with(Protocol::Tcp(addr.port())),
         PortMappingTransport::Udp => base.with(Protocol::Udp(addr.port())).with(Protocol::QuicV1),
@@ -1291,7 +1512,7 @@ fn mapping_lease_action(previous: SocketAddrV4, next: Option<SocketAddrV4>) -> M
 async fn run_port_mapper_attempt(
     transport: PortMappingTransport,
     port: NonZeroU16,
-    tx: &mpsc::Sender<PortMappingEvent>,
+    tx: &PortMapperReporter,
 ) -> Result<(), ()> {
     let protocol = match transport {
         PortMappingTransport::Tcp => portmapper::Protocol::Tcp,
@@ -1316,6 +1537,7 @@ async fn run_port_mapper_attempt(
                     .send(PortMappingEvent::Unavailable {
                         mechanism,
                         transport,
+                        local_address: None,
                         detail: detail.clone(),
                     })
                     .await
@@ -1333,6 +1555,7 @@ async fn run_port_mapper_attempt(
                     .send(PortMappingEvent::Unavailable {
                         mechanism,
                         transport,
+                        local_address: None,
                         detail: detail.clone(),
                     })
                     .await
@@ -1352,6 +1575,7 @@ async fn run_port_mapper_attempt(
                 .send(PortMappingEvent::Unavailable {
                     mechanism,
                     transport,
+                    local_address: None,
                     detail: "no compatible gateway answered the probe".to_string(),
                 })
                 .await
@@ -1390,6 +1614,7 @@ async fn run_port_mapper_attempt(
             tx.send(PortMappingEvent::Unavailable {
                 mechanism,
                 transport,
+                local_address: None,
                 detail: format!(
                     "gateway answered discovery but did not grant a mapping within {}s",
                     ACQUIRE_WITHIN.as_secs()
@@ -1403,6 +1628,7 @@ async fn run_port_mapper_attempt(
         tx.send(PortMappingEvent::Mapped {
             mechanism,
             transport,
+            local_address: None,
             address: mapped_multiaddr(first, transport),
         })
         .await
@@ -1416,6 +1642,7 @@ async fn run_port_mapper_attempt(
                     tx.send(PortMappingEvent::Expired {
                         mechanism,
                         transport,
+                        local_address: None,
                         address: mapped_multiaddr(previous, transport),
                     })
                     .await
@@ -1428,6 +1655,7 @@ async fn run_port_mapper_attempt(
                     tx.send(PortMappingEvent::Expired {
                         mechanism,
                         transport,
+                        local_address: None,
                         address: mapped_multiaddr(previous, transport),
                     })
                     .await
@@ -1435,6 +1663,7 @@ async fn run_port_mapper_attempt(
                     tx.send(PortMappingEvent::Mapped {
                         mechanism,
                         transport,
+                        local_address: None,
                         address: mapped_multiaddr(next, transport),
                     })
                     .await
@@ -1446,6 +1675,7 @@ async fn run_port_mapper_attempt(
         tx.send(PortMappingEvent::Expired {
             mechanism,
             transport,
+            local_address: None,
             address: mapped_multiaddr(previous, transport),
         })
         .await
@@ -1462,7 +1692,7 @@ async fn run_port_mapper_attempt(
 async fn run_port_mapper(
     transport: PortMappingTransport,
     port: NonZeroU16,
-    tx: mpsc::Sender<PortMappingEvent>,
+    tx: PortMapperReporter,
 ) {
     const RETRY_AFTER: Duration = Duration::from_secs(60);
     loop {
@@ -1470,6 +1700,488 @@ async fn run_port_mapper(
             return;
         }
         SystemClock.sleep(RETRY_AFTER).await;
+    }
+}
+
+/// Result of one bounded PCPv6 acquisition. Cancellation is distinct from a gateway failure so a
+/// listener removal does not leave a misleading "unavailable" status behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PcpIpv6Acquire {
+    Lease(pcp_ipv6::MapLease),
+    Stopped,
+}
+
+async fn acquire_pcp_ipv6_lease(
+    socket: &UdpSocket,
+    local_ip: Ipv6Addr,
+    local_port: NonZeroU16,
+    protocol: pcp_ipv6::MapProtocol,
+    nonce: [u8; 12],
+    stop: &mut oneshot::Receiver<()>,
+    clock: &impl Clock,
+) -> Result<PcpIpv6Acquire, pcp_ipv6::PcpIpv6Error> {
+    const RETRANSMIT_AFTER: Duration = Duration::from_secs(3);
+    const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
+    let request = pcp_ipv6::encode_map_request(
+        local_ip,
+        local_port,
+        protocol,
+        nonce,
+        pcp_ipv6::REQUESTED_LIFETIME_SECONDS,
+        None,
+    );
+    socket
+        .send(&request)
+        .await
+        .map_err(|error| pcp_ipv6::PcpIpv6Error::Io(error.to_string()))?;
+    let started = clock.monotonic_ms();
+    let deadline = started.saturating_add(ACQUIRE_WITHIN.as_millis() as u64);
+    let mut next_send = started.saturating_add(RETRANSMIT_AFTER.as_millis() as u64);
+    let mut packet = [0u8; pcp_ipv6::RECEIVE_BUFFER_SIZE];
+    loop {
+        let now = clock.monotonic_ms();
+        if now >= deadline {
+            return Err(pcp_ipv6::PcpIpv6Error::Timeout);
+        }
+        let wake_at = next_send.min(deadline);
+        let wait = Duration::from_millis(wake_at.saturating_sub(now));
+        tokio::select! {
+            received = socket.recv(&mut packet) => {
+                let length = received
+                    .map_err(|error| pcp_ipv6::PcpIpv6Error::Io(error.to_string()))?;
+                match pcp_ipv6::decode_response(&packet[..length])
+                    .and_then(|response| {
+                        pcp_ipv6::validate_map_response(response, nonce, protocol, local_port)
+                    })
+                {
+                    Ok(lease) => return Ok(PcpIpv6Acquire::Lease(lease)),
+                    // A connected UDP socket already pins the gateway source. Still ignore
+                    // unrelated/malformed datagrams rather than allowing them to end acquisition.
+                    Err(pcp_ipv6::PcpIpv6Error::NonceMismatch
+                        | pcp_ipv6::PcpIpv6Error::ProtocolMismatch
+                        | pcp_ipv6::PcpIpv6Error::PortMismatch
+                        | pcp_ipv6::PcpIpv6Error::Malformed(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            _ = clock.sleep(wait) => {
+                if wake_at == next_send && next_send < deadline {
+                    // RFC 6887 requires retransmission with the exact same nonce. Reusing the
+                    // encoded packet also guarantees every other request field remains identical.
+                    socket
+                        .send(&request)
+                        .await
+                        .map_err(|error| pcp_ipv6::PcpIpv6Error::Io(error.to_string()))?;
+                    next_send = deadline;
+                }
+            }
+            _ = &mut *stop => return Ok(PcpIpv6Acquire::Stopped),
+        }
+    }
+}
+
+async fn delete_pcp_ipv6_lease(
+    socket: &UdpSocket,
+    local_ip: Ipv6Addr,
+    local_port: NonZeroU16,
+    protocol: pcp_ipv6::MapProtocol,
+    nonce: [u8; 12],
+) {
+    // Publication is withdrawn synchronously by the actor before this best-effort packet is sent.
+    // Zero suggested fields avoid accidentally creating or extending a replacement socket.
+    let request = pcp_ipv6::encode_map_request(local_ip, local_port, protocol, nonce, 0, None);
+    let _ = socket.send(&request).await;
+}
+
+/// Maintain one IPv6 PCP firewall pinhole. The UDP socket is bound to the exact global listener
+/// address and connected to that interface's scoped default router, which enforces both the PCP
+/// Client IP and response-source invariants at the operating-system boundary.
+async fn run_ipv6_port_mapper(
+    local_ip: Ipv6Addr,
+    transport: PortMappingTransport,
+    local_port: NonZeroU16,
+    tx: PortMapperReporter,
+    stop: oneshot::Receiver<()>,
+) {
+    run_ipv6_port_mapper_with(
+        local_ip,
+        transport,
+        local_port,
+        tx,
+        stop,
+        Ipv6MapperDeps {
+            clock: SystemClock,
+            random: OsCryptoRng,
+            discover_gateway: pcp_ipv6::discover_gateway,
+        },
+    )
+    .await;
+}
+
+/// Injected runtime boundary for the PCPv6 worker. Grouping these dependencies keeps the worker's
+/// protocol inputs readable while allowing deterministic clock, nonce and route tests.
+struct Ipv6MapperDeps<C, R, D> {
+    clock: C,
+    random: R,
+    discover_gateway: D,
+}
+
+async fn run_ipv6_port_mapper_with<C, R, D>(
+    local_ip: Ipv6Addr,
+    transport: PortMappingTransport,
+    local_port: NonZeroU16,
+    tx: PortMapperReporter,
+    mut stop: oneshot::Receiver<()>,
+    deps: Ipv6MapperDeps<C, R, D>,
+) where
+    C: Clock,
+    R: CryptoRngCore + Send,
+    D: FnMut(Ipv6Addr) -> Result<SocketAddrV6, pcp_ipv6::PcpIpv6Error> + Send,
+{
+    let Ipv6MapperDeps {
+        clock,
+        mut random,
+        mut discover_gateway,
+    } = deps;
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    let protocol = match transport {
+        PortMappingTransport::Tcp => pcp_ipv6::MapProtocol::Tcp,
+        PortMappingTransport::Udp => pcp_ipv6::MapProtocol::Udp,
+    };
+    let local_address = Some(IpAddr::V6(local_ip));
+    let mut gateway_and_nonce = None::<(SocketAddrV6, [u8; 12])>;
+
+    loop {
+        let gateway = match discover_gateway(local_ip) {
+            Ok(gateway) => gateway,
+            Err(error) => {
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism: PortMappingMechanism::Pcp,
+                        transport,
+                        local_address,
+                        detail: format!("IPv6 firewall pinhole unavailable: {error}"),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::select! {
+                    _ = clock.sleep(RETRY_AFTER) => continue,
+                    _ = &mut stop => return,
+                }
+            }
+        };
+        let nonce = if let Some((previous_gateway, nonce)) = gateway_and_nonce {
+            if previous_gateway == gateway {
+                nonce
+            } else {
+                let mut nonce = [0u8; 12];
+                random.fill_bytes(&mut nonce);
+                gateway_and_nonce = Some((gateway, nonce));
+                nonce
+            }
+        } else {
+            let mut nonce = [0u8; 12];
+            random.fill_bytes(&mut nonce);
+            gateway_and_nonce = Some((gateway, nonce));
+            nonce
+        };
+        let socket = match UdpSocket::bind(SocketAddrV6::new(local_ip, 0, 0, 0)).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                let detail = format!("IPv6 firewall pinhole source bind failed: {error}");
+                let _ = tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism: PortMappingMechanism::Pcp,
+                        transport,
+                        local_address,
+                        detail,
+                    })
+                    .await;
+                tokio::select! {
+                    _ = clock.sleep(RETRY_AFTER) => continue,
+                    _ = &mut stop => return,
+                }
+            }
+        };
+        if let Err(error) = socket.connect(gateway).await {
+            let _ = tx
+                .send(PortMappingEvent::Unavailable {
+                    mechanism: PortMappingMechanism::Pcp,
+                    transport,
+                    local_address,
+                    detail: format!("IPv6 PCP gateway connection failed: {error}"),
+                })
+                .await;
+            tokio::select! {
+                _ = clock.sleep(RETRY_AFTER) => continue,
+                _ = &mut stop => return,
+            }
+        }
+
+        let mut lease = match acquire_pcp_ipv6_lease(
+            &socket, local_ip, local_port, protocol, nonce, &mut stop, &clock,
+        )
+        .await
+        {
+            Ok(PcpIpv6Acquire::Lease(lease)) => lease,
+            Ok(PcpIpv6Acquire::Stopped) => {
+                delete_pcp_ipv6_lease(&socket, local_ip, local_port, protocol, nonce).await;
+                return;
+            }
+            Err(error) => {
+                let retry_after = match &error {
+                    pcp_ipv6::PcpIpv6Error::ServerResult {
+                        retry_after_seconds,
+                        ..
+                    } if *retry_after_seconds > 0 => {
+                        Duration::from_secs(u64::from(*retry_after_seconds))
+                    }
+                    _ => RETRY_AFTER,
+                };
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism: PortMappingMechanism::Pcp,
+                        transport,
+                        local_address,
+                        detail: format!("IPv6 firewall pinhole unavailable: {error}"),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::select! {
+                    _ = clock.sleep(retry_after) => continue,
+                    _ = &mut stop => return,
+                }
+            }
+        };
+        let mut address = mapped_ipv6_multiaddr(
+            SocketAddrV6::new(lease.external_ip, lease.external_port.get(), 0, 0),
+            transport,
+        );
+        // Start the monotonic lease timer at acceptance, before awaiting downstream publication.
+        // A slow UI/snapshot consumer must not extend router state.
+        let granted_at_ms = clock.monotonic_ms();
+        let mut previous_epoch = lease.epoch;
+        let mut previous_received_ms = granted_at_ms;
+        let first_jitter = (random.next_u32() & 0xff) as u8;
+        let mut schedule =
+            pcp_ipv6::LeaseSchedule::new(granted_at_ms, lease.lifetime_seconds, first_jitter);
+        if tx
+            .send(PortMappingEvent::Mapped {
+                mechanism: PortMappingMechanism::Pcp,
+                transport,
+                local_address,
+                address: address.clone(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut packet = [0u8; pcp_ipv6::RECEIVE_BUFFER_SIZE];
+        let ended_with_error = loop {
+            let now = clock.monotonic_ms();
+            let expires_at_ms = schedule.expires_at_ms();
+            if schedule.is_expired(now) {
+                break Some("IPv6 PCP firewall pinhole lease expired; retrying".to_string());
+            }
+            let wake_at = schedule.next_wake_ms();
+            tokio::select! {
+                _ = &mut stop => {
+                    delete_pcp_ipv6_lease(
+                        &socket, local_ip, local_port, protocol, nonce,
+                    ).await;
+                    break None;
+                }
+                _ = clock.sleep(Duration::from_millis(wake_at.saturating_sub(now))) => {
+                    if wake_at >= expires_at_ms {
+                        break Some("IPv6 PCP firewall pinhole lease expired; retrying".to_string());
+                    }
+                    let renew = pcp_ipv6::encode_map_request(
+                        local_ip,
+                        local_port,
+                        protocol,
+                        nonce,
+                        pcp_ipv6::REQUESTED_LIFETIME_SECONDS,
+                        Some((lease.external_ip, lease.external_port)),
+                    );
+                    if let Err(error) = socket.send(&renew).await {
+                        tracing::debug!(%error, %local_ip, %transport, "IPv6 PCP renewal send failed");
+                    }
+                    schedule.renewal_sent(now);
+                }
+                received = socket.recv(&mut packet) => {
+                    let length = match received {
+                        Ok(length) => length,
+                        Err(error) => {
+                            // A broken local receive path prevents further renewal, but it does
+                            // not revoke the lease the router already granted. Keep the address
+                            // published through that lease's monotonic deadline.
+                            let detail = format!(
+                                "IPv6 PCP socket failed; existing pinhole retained until expiry: {error}"
+                            );
+                            let remaining = Duration::from_millis(
+                                schedule.expires_at_ms().saturating_sub(clock.monotonic_ms()),
+                            );
+                            tokio::select! {
+                                _ = clock.sleep(remaining) => break Some(detail),
+                                _ = &mut stop => {
+                                    delete_pcp_ipv6_lease(
+                                        &socket, local_ip, local_port, protocol, nonce,
+                                    ).await;
+                                    break None;
+                                }
+                            }
+                        },
+                    };
+                    let response = match pcp_ipv6::decode_response(&packet[..length]) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            tracing::debug!(%error, %local_ip, %transport, "ignored malformed IPv6 PCP response");
+                            continue;
+                        }
+                    };
+                    if let pcp_ipv6::DecodedResponse::Announce { result_code, .. } = response {
+                        let received_ms = clock.monotonic_ms();
+                        if result_code == 0 && pcp_ipv6::epoch_may_have_reset(
+                            previous_epoch,
+                            previous_received_ms,
+                            response.epoch(),
+                            received_ms,
+                        ) {
+                            // Randomize rapid recovery so a restarted gateway does not receive a
+                            // synchronized burst from every client on the link. This worker owns
+                            // one lease; the documented narrow-client limitation is that sibling
+                            // transport leases learn the epoch independently.
+                            let delay = Duration::from_millis(u64::from(random.next_u32() % 5_001));
+                            schedule.renew_after(received_ms, delay);
+                        }
+                        previous_epoch = response.epoch();
+                        previous_received_ms = received_ms;
+                        if result_code != 0 {
+                            tracing::debug!(
+                                %local_ip,
+                                %transport,
+                                result_code,
+                                "ignored unsuccessful IPv6 PCP ANNOUNCE"
+                            );
+                        }
+                        continue;
+                    }
+                    let received_epoch = response.epoch();
+                    let received_ms = clock.monotonic_ms();
+                    let renewed = match pcp_ipv6::validate_map_response(
+                        response, nonce, protocol, local_port,
+                    ) {
+                        Ok(renewed) => renewed,
+                        Err(pcp_ipv6::PcpIpv6Error::NonceMismatch
+                            | pcp_ipv6::PcpIpv6Error::ProtocolMismatch
+                            | pcp_ipv6::PcpIpv6Error::PortMismatch
+                            | pcp_ipv6::PcpIpv6Error::Malformed(_)) => continue,
+                        Err(pcp_ipv6::PcpIpv6Error::ServerResult {
+                            retry_after_seconds,
+                            reason,
+                            code,
+                        }) => {
+                            // A renewal refusal is not a deletion: the previously granted lease
+                            // remains router state through its original deadline. Honor a nonzero
+                            // retry horizon while never moving that deadline.
+                            if retry_after_seconds > 0 {
+                                schedule.defer_retry(
+                                    received_ms,
+                                    Duration::from_secs(u64::from(retry_after_seconds)),
+                                );
+                            }
+                            previous_epoch = received_epoch;
+                            previous_received_ms = received_ms;
+                            tracing::debug!(
+                                %local_ip,
+                                %transport,
+                                code,
+                                reason,
+                                retry_after_seconds,
+                                "IPv6 PCP renewal refused; retaining existing lease until expiry"
+                            );
+                            continue;
+                        }
+                        Err(error) => break Some(format!("IPv6 PCP renewal failed: {error}")),
+                    };
+                    let renewed_address = mapped_ipv6_multiaddr(
+                        SocketAddrV6::new(
+                            renewed.external_ip,
+                            renewed.external_port.get(),
+                            0,
+                            0,
+                        ),
+                        transport,
+                    );
+                    if renewed_address != address {
+                        if tx.send(PortMappingEvent::Expired {
+                            mechanism: PortMappingMechanism::Pcp,
+                            transport,
+                            local_address,
+                            address: address.clone(),
+                        }).await.is_err() {
+                            return;
+                        }
+                        if tx.send(PortMappingEvent::Mapped {
+                            mechanism: PortMappingMechanism::Pcp,
+                            transport,
+                            local_address,
+                            address: renewed_address.clone(),
+                        }).await.is_err() {
+                            return;
+                        }
+                        address = renewed_address;
+                    }
+                    lease = renewed;
+                    let granted_at_ms = clock.monotonic_ms();
+                    previous_epoch = lease.epoch;
+                    previous_received_ms = granted_at_ms;
+                    let jitter = (random.next_u32() & 0xff) as u8;
+                    schedule.renewed(granted_at_ms, lease.lifetime_seconds, jitter);
+                }
+            }
+        };
+
+        if tx
+            .send(PortMappingEvent::Expired {
+                mechanism: PortMappingMechanism::Pcp,
+                transport,
+                local_address,
+                address,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(detail) = ended_with_error else {
+            return;
+        };
+        if tx
+            .send(PortMappingEvent::Unavailable {
+                mechanism: PortMappingMechanism::Pcp,
+                transport,
+                local_address,
+                detail,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        // The old gateway may have disappeared. Discovery on the next pass decides whether this
+        // remains the same nonce generation or a new router needs a fresh nonce.
+        tokio::select! {
+            _ = clock.sleep(RETRY_AFTER) => {}
+            _ = &mut stop => return,
+        }
     }
 }
 
@@ -1486,14 +2198,17 @@ struct Actor {
     /// addresses into invites/peer records and removes them again on lease expiry.
     port_mapping_tx: watch::Sender<PortMappingSnapshot>,
     /// PCP/NAT-PMP workers report back here so the swarm actor alone mutates external addresses.
-    port_mapper_tx: mpsc::Sender<PortMappingEvent>,
-    port_mapper_rx: mpsc::Receiver<PortMappingEvent>,
-    /// At most one worker per IP transport, even though the swarm reports IPv4 and IPv6 listeners
-    /// separately. A changed bound port replaces (and aborts) the old worker.
-    port_mapper_tasks: HashMap<PortMappingTransport, PortMapperTask>,
-    /// Router-lease ownership by mechanism and transport. Libp2p stores external addresses as a
-    /// set, so this layer supplies the reference counting needed when UPnP and PCP map the same
-    /// socket.
+    port_mapper_tx: mpsc::Sender<PortMapperReport>,
+    port_mapper_rx: mpsc::Receiver<PortMapperReport>,
+    /// One worker for each transport and independently routed address family/interface. The exact
+    /// key is load-bearing: a PCPv6/TCP lease must not overwrite PCPv4/TCP or another GUA.
+    port_mapper_tasks: HashMap<PortMapperTaskKey, PortMapperTask>,
+    /// Monotonic task identity. A listener can disappear and reappear with the same address/port;
+    /// buffered events from its former worker must not become ownership for the new generation.
+    next_port_mapper_generation: u64,
+    /// Router-lease ownership by mechanism, transport and local-address generation. Libp2p stores
+    /// external addresses as a set, so this layer supplies reference counting when mechanisms or
+    /// families expose the same dial address.
     active_port_mappings: HashMap<PortMappingKey, Multiaddr>,
     /// Latest scoped failure for keys without a live lease. Coalesced with the active map into a
     /// watch snapshot so an idle/non-UI `MeshService` does not accumulate diagnostic events.
@@ -1583,8 +2298,17 @@ impl Actor {
                 event = self.swarm.select_next_some() => {
                     self.on_swarm_event(event, &mut inbound).await;
                 }
-                Some(event) = self.port_mapper_rx.recv() => {
-                    self.on_port_mapping_event(event);
+                Some(report) = self.port_mapper_rx.recv() => {
+                    let current = port_mapper_report_is_current(&self.port_mapper_tasks, &report);
+                    if current {
+                        self.on_port_mapping_event(report.event);
+                    } else {
+                        tracing::debug!(
+                            ?report.key,
+                            generation = report.generation,
+                            "ignoring stale router-mapping worker event"
+                        );
+                    }
                 }
                 Some((channel, resp)) = inbound.next(), if !inbound.is_empty() => {
                     if let Some(bytes) = resp {
@@ -1599,38 +2323,104 @@ impl Actor {
         }
     }
 
-    /// Start one PCP/NAT-PMP mapping worker for this transport, or replace it if the actual bound
-    /// port changed. The ordinary steady-state path reports four listeners on one saved port, so
-    /// the equality guard prevents four gateway probes from one launch.
-    fn ensure_port_mapper(&mut self, transport: PortMappingTransport, port: NonZeroU16) {
-        let unchanged_and_running = self
-            .port_mapper_tasks
-            .get(&transport)
-            .is_some_and(|task| task.port == port && !task.handle.is_finished());
-        if unchanged_and_running {
-            return;
-        }
+    /// Reconcile router workers from the authoritative live listener set. This runs for both
+    /// `NewListenAddr` and `ExpiredListenAddr`; start-only lifecycle management leaves a router
+    /// pinhole and advertised route behind after an interface disappears.
+    fn reconcile_port_mappers(&mut self) {
+        // Bound privacy-address/interface churn. Select at most two distinct GUAs, then keep both
+        // TCP and QUIC workers for those chosen interfaces.
+        let desired = desired_port_mapping_endpoints(&self.active_listeners);
 
-        // A changed port makes the old route dead immediately even if its router lease has time
-        // left. A finished worker is treated the same way: it can no longer renew the lease.
-        self.port_mapper_tasks.remove(&transport);
-        for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
-            if let Some(address) = self
-                .active_port_mappings
-                .get(&(mechanism, transport))
-                .cloned()
-            {
-                self.on_port_mapping_event(PortMappingEvent::Expired {
-                    mechanism,
-                    transport,
-                    address,
-                });
+        let stale: Vec<_> = self
+            .port_mapper_tasks
+            .iter()
+            .filter_map(|(key, task)| {
+                let running = task
+                    .handle
+                    .as_ref()
+                    .is_some_and(|handle| !handle.is_finished());
+                (desired.get(key) != Some(&task.port) || !running).then_some(*key)
+            })
+            .collect();
+        for key in stale {
+            if let Some(task) = self.port_mapper_tasks.remove(&key) {
+                let local_address = match key.target {
+                    PortMappingTarget::Ipv4 => None,
+                    PortMappingTarget::Ipv6(address) => Some(IpAddr::V6(address)),
+                };
+                let mechanisms: &[PortMappingMechanism] = match key.target {
+                    PortMappingTarget::Ipv4 => {
+                        &[PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp]
+                    }
+                    PortMappingTarget::Ipv6(_) => &[PortMappingMechanism::Pcp],
+                };
+                // Router deletion is best effort, but live product state is not: withdraw every
+                // owner before asking the worker to stop so a late packet cannot keep a stale
+                // route in an invite.
+                for &mechanism in mechanisms {
+                    if let Some(address) = self
+                        .active_port_mappings
+                        .get(&(mechanism, key.transport, local_address))
+                        .cloned()
+                    {
+                        self.on_port_mapping_event(PortMappingEvent::Expired {
+                            mechanism,
+                            transport: key.transport,
+                            local_address,
+                            address,
+                        });
+                    }
+                }
+                // `Expired` normally records "retrying" and an unavailable-only worker has no
+                // active owner to expire at all. This task is being retired, so remove both forms
+                // of stale failure before publishing the final coalesced state.
+                if clear_retired_port_mapping_failures(&mut self.port_mapping_unavailable, key) {
+                    self.publish_port_mapping_snapshot();
+                }
+                task.stop_gracefully();
             }
         }
-        let tx = self.port_mapper_tx.clone();
-        let handle = tokio::spawn(run_port_mapper(transport, port, tx));
-        self.port_mapper_tasks
-            .insert(transport, PortMapperTask { port, handle });
+
+        for (key, port) in desired {
+            if self.port_mapper_tasks.contains_key(&key) {
+                continue;
+            }
+            let generation = self.next_port_mapper_generation;
+            self.next_port_mapper_generation = self.next_port_mapper_generation.wrapping_add(1);
+            let tx = PortMapperReporter {
+                tx: self.port_mapper_tx.clone(),
+                key,
+                port,
+                generation,
+            };
+            let (handle, stop) = match key.target {
+                PortMappingTarget::Ipv4 => {
+                    (tokio::spawn(run_port_mapper(key.transport, port, tx)), None)
+                }
+                PortMappingTarget::Ipv6(local_ip) => {
+                    let (stop_tx, stop_rx) = oneshot::channel();
+                    (
+                        tokio::spawn(run_ipv6_port_mapper(
+                            local_ip,
+                            key.transport,
+                            port,
+                            tx,
+                            stop_rx,
+                        )),
+                        Some(stop_tx),
+                    )
+                }
+            };
+            self.port_mapper_tasks.insert(
+                key,
+                PortMapperTask {
+                    port,
+                    generation,
+                    handle: Some(handle),
+                    stop,
+                },
+            );
+        }
     }
 
     /// Apply a mapper event to the swarm before surfacing it. Successful mappings become AutoNAT
@@ -1644,6 +2434,7 @@ impl Actor {
             PortMappingEvent::Mapped {
                 mechanism,
                 transport,
+                local_address,
                 address,
             } if !addr_is_globally_routable(&address) => {
                 // libp2p-UPnP may already have promoted the address before its behaviour event is
@@ -1655,18 +2446,20 @@ impl Actor {
                 }
                 if let Some(old) = self
                     .active_port_mappings
-                    .get(&(mechanism, transport))
+                    .get(&(mechanism, transport, local_address))
                     .cloned()
                 {
                     self.on_port_mapping_event(PortMappingEvent::Expired {
                         mechanism,
                         transport,
+                        local_address,
                         address: old,
                     });
                 }
                 PortMappingEvent::Unavailable {
                     mechanism,
                     transport,
+                    local_address,
                     detail: format!(
                         "gateway returned non-public address {address} (likely CGNAT or double NAT)"
                     ),
@@ -1678,6 +2471,7 @@ impl Actor {
             PortMappingEvent::Mapped {
                 mechanism,
                 transport,
+                local_address,
                 address,
             } => {
                 tracing::info!(
@@ -1688,11 +2482,11 @@ impl Actor {
                 );
                 let (remove_old, add_new) = activate_port_mapping(
                     &mut self.active_port_mappings,
-                    (*mechanism, *transport),
+                    (*mechanism, *transport, *local_address),
                     address.clone(),
                 );
                 self.port_mapping_unavailable
-                    .remove(&(*mechanism, *transport));
+                    .remove(&(*mechanism, *transport, *local_address));
                 if let Some(old) = remove_old {
                     if !self.configured_external_addrs.contains(&old) {
                         self.swarm.remove_external_address(&old);
@@ -1706,29 +2500,42 @@ impl Actor {
                         }),
                     );
                     self.swarm.add_external_address(address.clone());
+                } else if local_address.is_some() {
+                    // An IPv6 listener can already be a configured candidate before its firewall
+                    // pinhole exists. Re-offer it after a new PCP lease so stale pre-pinhole
+                    // AutoNAT evidence cannot be the only observation for this ownership epoch.
+                    self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                        FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate {
+                            addr: address,
+                        }),
+                    );
                 }
                 self.flush_pending_registers();
             }
             PortMappingEvent::Unavailable {
                 mechanism,
                 transport,
+                local_address,
                 detail,
             } => {
                 self.port_mapping_unavailable
-                    .insert((*mechanism, *transport), detail.clone());
+                    .insert((*mechanism, *transport, *local_address), detail.clone());
                 tracing::info!(%mechanism, %transport, %detail, "router mapping unavailable");
             }
             PortMappingEvent::Expired {
                 mechanism,
                 transport,
+                local_address,
                 address,
             } => {
                 tracing::info!(%mechanism, %transport, %address, "router port mapping expired");
                 let matched =
-                    self.active_port_mappings.get(&(*mechanism, *transport)) == Some(address);
+                    self.active_port_mappings
+                        .get(&(*mechanism, *transport, *local_address))
+                        == Some(address);
                 let last_mapping_owner = expire_port_mapping(
                     &mut self.active_port_mappings,
-                    (*mechanism, *transport),
+                    (*mechanism, *transport, *local_address),
                     address,
                 );
                 let still_owned = self
@@ -1747,9 +2554,14 @@ impl Actor {
                 }
                 if matched {
                     self.port_mapping_unavailable.insert(
-                        (*mechanism, *transport),
+                        (*mechanism, *transport, *local_address),
                         format!("previous mapping {address} expired; retrying"),
                     );
+                    if local_address.is_some() {
+                        // A direct callback result observed before a firewall pinhole ended is not
+                        // evidence for a future lease, even when the GUA itself remains configured.
+                        self.forget_autonat_address(address);
+                    }
                 }
             }
         }
@@ -1762,30 +2574,44 @@ impl Actor {
         let mut active: Vec<_> = self
             .active_port_mappings
             .iter()
-            .map(|(&(mechanism, transport), address)| ActivePortMapping {
-                mechanism,
-                transport,
-                address: address.clone(),
-            })
+            .map(
+                |(&(mechanism, transport, local_address), address)| ActivePortMapping {
+                    mechanism,
+                    transport,
+                    local_address,
+                    address: address.clone(),
+                },
+            )
             .collect();
         active.sort_by(|a, b| {
-            (a.mechanism, a.transport, a.address.to_string()).cmp(&(
-                b.mechanism,
-                b.transport,
-                b.address.to_string(),
-            ))
+            (
+                a.mechanism,
+                a.transport,
+                a.local_address,
+                a.address.to_string(),
+            )
+                .cmp(&(
+                    b.mechanism,
+                    b.transport,
+                    b.local_address,
+                    b.address.to_string(),
+                ))
         });
         let mut unavailable: Vec<_> = self
             .port_mapping_unavailable
             .iter()
             .filter(|(key, _)| !self.active_port_mappings.contains_key(key))
-            .map(|(&(mechanism, transport), detail)| PortMappingFailure {
-                mechanism,
-                transport,
-                detail: detail.clone(),
-            })
+            .map(
+                |(&(mechanism, transport, local_address), detail)| PortMappingFailure {
+                    mechanism,
+                    transport,
+                    local_address,
+                    detail: detail.clone(),
+                },
+            )
             .collect();
-        unavailable.sort_by_key(|failure| (failure.mechanism, failure.transport));
+        unavailable
+            .sort_by_key(|failure| (failure.mechanism, failure.transport, failure.local_address));
         self.port_mapping_tx.send_replace(PortMappingSnapshot {
             active,
             unavailable,
@@ -2236,9 +3062,7 @@ impl Actor {
                 self.listener_snapshot_tx
                     .send_replace(ListenerSnapshot { addresses });
                 if self.enable_port_mapping {
-                    if let Some((transport, port)) = port_mapping_endpoint(&address) {
-                        self.ensure_port_mapper(transport, port);
-                    }
+                    self.reconcile_port_mappers();
                 }
                 // A granted relay-circuit reservation is how a NAT'd node becomes
                 // reachable; confirm it as an external address so rendezvous
@@ -2260,6 +3084,9 @@ impl Actor {
                     addresses.sort_by_key(ToString::to_string);
                     self.listener_snapshot_tx
                         .send_replace(ListenerSnapshot { addresses });
+                    if self.enable_port_mapping {
+                        self.reconcile_port_mappers();
+                    }
                 }
                 if self.relay_addresses.remove(&address) {
                     self.swarm.remove_external_address(&address);
@@ -2505,10 +3332,11 @@ impl Actor {
             // expiry all have identical semantics.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
                 libp2p::upnp::Event::NewExternalAddr(addr) => {
-                    if let Some((transport, _)) = port_mapping_endpoint(&addr) {
+                    if let Some((transport, _)) = port_mapping_transport(&addr) {
                         self.on_port_mapping_event(PortMappingEvent::Mapped {
                             mechanism: PortMappingMechanism::Upnp,
                             transport,
+                            local_address: None,
                             address: addr,
                         });
                     } else {
@@ -2516,10 +3344,11 @@ impl Actor {
                     }
                 }
                 libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
-                    if let Some((transport, _)) = port_mapping_endpoint(&addr) {
+                    if let Some((transport, _)) = port_mapping_transport(&addr) {
                         self.on_port_mapping_event(PortMappingEvent::Expired {
                             mechanism: PortMappingMechanism::Upnp,
                             transport,
+                            local_address: None,
                             address: addr,
                         });
                     } else {
@@ -2532,6 +3361,7 @@ impl Actor {
                         self.on_port_mapping_event(PortMappingEvent::Unavailable {
                             mechanism: PortMappingMechanism::Upnp,
                             transport,
+                            local_address: None,
                             detail: "no UPnP IGD gateway answered discovery".to_string(),
                         });
                     }
@@ -2541,6 +3371,7 @@ impl Actor {
                         self.on_port_mapping_event(PortMappingEvent::Unavailable {
                             mechanism: PortMappingMechanism::Upnp,
                             transport,
+                            local_address: None,
                             detail:
                                 "UPnP gateway is not internet-routable (likely CGNAT or double NAT)"
                                     .to_string(),
@@ -2679,6 +3510,7 @@ impl MeshService {
             port_mapper_tx,
             port_mapper_rx,
             port_mapper_tasks: HashMap::new(),
+            next_port_mapper_generation: 1,
             active_port_mappings: HashMap::new(),
             port_mapping_unavailable: HashMap::new(),
             configured_external_addrs: HashSet::new(),
@@ -3186,6 +4018,32 @@ impl MeshTransport for MeshService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catcoms_rt::rng::RngError;
+    use catcoms_rt::{CryptoRng, ManualClock, RngCore};
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedRng(u8);
+
+    impl RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(self.0);
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for FixedRng {}
 
     /// A helper peer id distinct per `n`.
     fn ev_peer(n: u64) -> PeerId {
@@ -3200,10 +4058,12 @@ mod tests {
 
     #[test]
     fn router_mapping_uses_the_tcp_and_quic_listen_ports_only() {
-        let tcp: Multiaddr = "/ip4/0.0.0.0/tcp/22487".parse().unwrap();
-        let quic: Multiaddr = "/ip4/0.0.0.0/udp/22487/quic-v1".parse().unwrap();
+        let tcp: Multiaddr = "/ip4/192.168.1.4/tcp/22487".parse().unwrap();
+        let quic: Multiaddr = "/ip4/192.168.1.4/udp/22487/quic-v1".parse().unwrap();
+        let ipv6_tcp: Multiaddr = "/ip6/2606:4700::10/tcp/22487".parse().unwrap();
         let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/22487".parse().unwrap();
         let plain_udp: Multiaddr = "/ip4/0.0.0.0/udp/22487".parse().unwrap();
+        let wildcard: Multiaddr = "/ip4/0.0.0.0/tcp/22487".parse().unwrap();
         let ipv6_only: Multiaddr = "/ip6/::/udp/22487/quic-v1".parse().unwrap();
         let relayed: Multiaddr = "/ip4/198.51.100.8/tcp/4001/p2p/12D3KooWJvFzZpCWKjQbGvYQ8uY4rMw1qQznfKqcxpN6qjHVVqUd/p2p-circuit"
             .parse()
@@ -3212,17 +4072,159 @@ mod tests {
 
         assert_eq!(
             port_mapping_endpoint(&tcp),
-            Some((PortMappingTransport::Tcp, NonZeroU16::new(22487).unwrap()))
+            Some(PortMappingEndpoint {
+                key: PortMapperTaskKey {
+                    transport: PortMappingTransport::Tcp,
+                    target: PortMappingTarget::Ipv4,
+                },
+                port: NonZeroU16::new(22487).unwrap(),
+            })
         );
         assert_eq!(
             port_mapping_endpoint(&quic),
-            Some((PortMappingTransport::Udp, NonZeroU16::new(22487).unwrap()))
+            Some(PortMappingEndpoint {
+                key: PortMapperTaskKey {
+                    transport: PortMappingTransport::Udp,
+                    target: PortMappingTarget::Ipv4,
+                },
+                port: NonZeroU16::new(22487).unwrap(),
+            })
+        );
+        assert_eq!(
+            port_mapping_endpoint(&ipv6_tcp),
+            Some(PortMappingEndpoint {
+                key: PortMapperTaskKey {
+                    transport: PortMappingTransport::Tcp,
+                    target: PortMappingTarget::Ipv6("2606:4700::10".parse().unwrap()),
+                },
+                port: NonZeroU16::new(22487).unwrap(),
+            })
         );
         assert_eq!(port_mapping_endpoint(&plain_udp), None);
+        assert_eq!(port_mapping_endpoint(&wildcard), None);
         assert_eq!(port_mapping_endpoint(&loopback), None);
         assert_eq!(port_mapping_endpoint(&ipv6_only), None);
         assert_eq!(port_mapping_endpoint(&relayed), None);
         assert_eq!(port_mapping_endpoint(&memory), None);
+    }
+
+    #[test]
+    fn desired_mapping_workers_bound_ipv6_interfaces_and_follow_listener_loss() {
+        let listeners: HashSet<Multiaddr> = [
+            "/ip4/192.168.1.4/tcp/22487",
+            "/ip4/192.168.1.4/udp/22487/quic-v1",
+            "/ip6/2001:569::1/tcp/22487",
+            "/ip6/2001:569::1/udp/22487/quic-v1",
+            "/ip6/2606:4700::1/tcp/22487",
+            "/ip6/2606:4700::1/udp/22487/quic-v1",
+            "/ip6/2a00:1450::1/tcp/22487",
+            "/ip6/2a00:1450::1/udp/22487/quic-v1",
+        ]
+        .into_iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+        let desired = desired_port_mapping_endpoints(&listeners);
+        assert_eq!(desired.len(), 6, "two IPv4 and at most four IPv6 workers");
+        let selected_v6: HashSet<_> = desired
+            .keys()
+            .filter_map(|key| match key.target {
+                PortMappingTarget::Ipv6(address) => Some(address),
+                PortMappingTarget::Ipv4 => None,
+            })
+            .collect();
+        assert_eq!(selected_v6.len(), 2);
+
+        let remaining: HashSet<_> = listeners
+            .into_iter()
+            .filter(|address| !address.to_string().contains("2001:569::1"))
+            .collect();
+        let reconciled = desired_port_mapping_endpoints(&remaining);
+        assert!(!reconciled
+            .keys()
+            .any(|key| { key.target == PortMappingTarget::Ipv6("2001:569::1".parse().unwrap()) }));
+    }
+
+    #[test]
+    fn retired_ipv6_listener_clears_mapped_and_unavailable_state() {
+        let local: Ipv6Addr = "2606:4700::10".parse().unwrap();
+        let local_owner = Some(IpAddr::V6(local));
+        let task = PortMapperTaskKey {
+            transport: PortMappingTransport::Tcp,
+            target: PortMappingTarget::Ipv6(local),
+        };
+        let owner = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            local_owner,
+        );
+        let mapped: Multiaddr = "/ip6/2606:4700::10/tcp/22487".parse().unwrap();
+        let unrelated = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Udp,
+            Some(IpAddr::V6("2a00:1450::10".parse().unwrap())),
+        );
+        let mut active = HashMap::from([(owner, mapped.clone())]);
+        let mut unavailable = HashMap::from([
+            (owner, "previous mapping expired; retrying".to_string()),
+            (unrelated, "no IPv6 PCP target discovered".to_string()),
+        ]);
+
+        assert!(expire_port_mapping(&mut active, owner, &mapped));
+        assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
+        assert!(!active.contains_key(&owner));
+        assert!(!unavailable.contains_key(&owner));
+        assert!(unavailable.contains_key(&unrelated));
+
+        unavailable.insert(owner, "no IPv6 PCP target discovered".to_string());
+        assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
+        assert!(!unavailable.contains_key(&owner));
+    }
+
+    #[test]
+    fn routed_ipv6_interfaces_win_the_bounded_worker_slots() {
+        let routed: Ipv6Addr = "2a00:1450::1".parse().unwrap();
+        let selected = select_ipv6_mapping_targets(
+            vec![
+                "2001:569::1".parse().unwrap(),
+                "2606:4700::1".parse().unwrap(),
+                routed,
+            ],
+            2,
+            |candidate| candidate == routed,
+        );
+        assert!(selected.contains(&routed));
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_mapping_worker_cannot_replay_buffered_events() {
+        let key = PortMapperTaskKey {
+            transport: PortMappingTransport::Tcp,
+            target: PortMappingTarget::Ipv6("2606:4700::10".parse().unwrap()),
+        };
+        let port = NonZeroU16::new(22487).unwrap();
+        let tasks = HashMap::from([(
+            key,
+            PortMapperTask {
+                port,
+                generation: 8,
+                handle: Some(tokio::spawn(std::future::pending())),
+                stop: None,
+            },
+        )]);
+        let report = |generation| PortMapperReport {
+            key,
+            port,
+            generation,
+            event: PortMappingEvent::Unavailable {
+                mechanism: PortMappingMechanism::Pcp,
+                transport: PortMappingTransport::Tcp,
+                local_address: Some(IpAddr::V6("2606:4700::10".parse().unwrap())),
+                detail: "test".to_string(),
+            },
+        };
+        assert!(port_mapper_report_is_current(&tasks, &report(8)));
+        assert!(!port_mapper_report_is_current(&tasks, &report(7)));
     }
 
     #[test]
@@ -3349,7 +4351,7 @@ mod tests {
         assert!(results.is_empty());
         assert!(order.is_empty());
 
-        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp);
+        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None);
         let reacquired = HashMap::from([(pcp, address.clone())]);
         assert!(
             autonat_candidate_is_current(&HashSet::new(), &reacquired, &address,),
@@ -3378,8 +4380,8 @@ mod tests {
     fn router_mapping_ownership_keeps_shared_addresses_until_the_last_lease() {
         let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
         let replacement: Multiaddr = "/ip4/9.9.9.9/tcp/22487".parse().unwrap();
-        let upnp = (PortMappingMechanism::Upnp, PortMappingTransport::Tcp);
-        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp);
+        let upnp = (PortMappingMechanism::Upnp, PortMappingTransport::Tcp, None);
+        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None);
         let mut active = HashMap::new();
 
         assert_eq!(
@@ -3412,6 +4414,245 @@ mod tests {
             external_address_is_allowed(&HashSet::from([private.clone()]), &private),
             "a rejected private router result cannot remove an identical manual LAN route"
         );
+
+        let v6_owner = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            Some(IpAddr::V6("2606:4700::10".parse().unwrap())),
+        );
+        activate_port_mapping(
+            &mut active,
+            v6_owner,
+            "/ip6/2606:4700::10/tcp/22487".parse().unwrap(),
+        );
+        assert!(active.contains_key(&pcp));
+        assert!(active.contains_key(&v6_owner));
+        assert_eq!(
+            active.len(),
+            2,
+            "PCPv4 and PCPv6/TCP are independent lease owners"
+        );
+    }
+
+    fn pcp_map_response(
+        request: &[u8],
+        result_code: u8,
+        lifetime_seconds: u32,
+        external_ip: Ipv6Addr,
+        external_port: u16,
+        epoch: u32,
+    ) -> [u8; 60] {
+        assert_eq!(request.len(), 60);
+        let mut response = [0u8; 60];
+        response[0] = 2;
+        response[1] = 0x80 | 1;
+        response[3] = result_code;
+        response[4..8].copy_from_slice(&lifetime_seconds.to_be_bytes());
+        response[8..12].copy_from_slice(&epoch.to_be_bytes());
+        response[24..36].copy_from_slice(&request[24..36]);
+        response[36] = request[36];
+        response[40..42].copy_from_slice(&request[40..42]);
+        response[42..44].copy_from_slice(&external_port.to_be_bytes());
+        response[44..60].copy_from_slice(&external_ip.octets());
+        response
+    }
+
+    #[tokio::test]
+    async fn ipv6_pcp_worker_retains_failed_renewal_replaces_and_expires_monotonically() {
+        let server = UdpSocket::bind("[::1]:0").await.unwrap();
+        let server_addr = match server.local_addr().unwrap() {
+            std::net::SocketAddr::V6(address) => address,
+            std::net::SocketAddr::V4(_) => unreachable!("bound IPv6 loopback"),
+        };
+        let local_ip = Ipv6Addr::LOCALHOST;
+        let external_ip: Ipv6Addr = "2606:4700::20".parse().unwrap();
+        let port = NonZeroU16::new(22487).unwrap();
+        let key = PortMapperTaskKey {
+            transport: PortMappingTransport::Udp,
+            target: PortMappingTarget::Ipv6(local_ip),
+        };
+        let (report_tx, mut report_rx) = mpsc::channel(16);
+        let reporter = PortMapperReporter {
+            tx: report_tx,
+            key,
+            port,
+            generation: 11,
+        };
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let clock = ManualClock::new(10_000);
+        let worker_clock = clock.clone();
+        let worker = tokio::spawn(run_ipv6_port_mapper_with(
+            local_ip,
+            PortMappingTransport::Udp,
+            port,
+            reporter,
+            stop_rx,
+            Ipv6MapperDeps {
+                clock: worker_clock,
+                random: FixedRng(0x42),
+                discover_gateway: move |_| Ok(server_addr),
+            },
+        ));
+
+        let mut request = [0u8; 60];
+        let (length, client) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!(length, 60);
+        server
+            .send_to(
+                &pcp_map_response(&request, 0, 10, external_ip, port.get(), 100),
+                client,
+            )
+            .await
+            .unwrap();
+        let first = report_rx.recv().await.unwrap();
+        assert_eq!(first.generation, 11);
+        assert!(matches!(first.event, PortMappingEvent::Mapped { .. }));
+
+        // The first renewal is at half the ten-second grant with deterministic zero jitter.
+        clock.advance_ms(5_000);
+        let (length, renewal_client) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!((length, renewal_client), (60, client));
+        server
+            .send_to(
+                &pcp_map_response(&request, 8, 2, external_ip, port.get(), 105),
+                client,
+            )
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            report_rx.try_recv().is_err(),
+            "a renewal refusal must not withdraw a still-live lease"
+        );
+
+        clock.advance_ms(1_999);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(server.try_recv_from(&mut request).is_err());
+        clock.advance_ms(1);
+        let (length, _) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!(length, 60);
+        let replacement_port = port.get() + 1;
+        server
+            .send_to(
+                &pcp_map_response(&request, 0, 4, external_ip, replacement_port, 107),
+                client,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Expired { .. }
+        ));
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Mapped { ref address, .. }
+                if address.to_string().contains(&format!("/{replacement_port}"))
+        ));
+
+        // A wall-clock correction cannot extend the replacement's four-second router lease.
+        clock.set_wall_ms(1);
+        clock.advance_ms(2_000);
+        let (length, _) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!(length, 60);
+        server
+            .send_to(
+                &pcp_map_response(&request, 8, 100, external_ip, replacement_port, 109),
+                client,
+            )
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(report_rx.try_recv().is_err());
+        clock.advance_ms(2_000);
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Expired { .. }
+        ));
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Unavailable { ref detail, .. }
+                if detail.contains("expired")
+        ));
+
+        let _ = stop_tx.send(());
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ipv6_pcp_adapter_sends_exact_map_and_best_effort_delete() {
+        let server = UdpSocket::bind("[::1]:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let local_ip: Ipv6Addr = "2606:4700::10".parse().unwrap();
+        let external_ip: Ipv6Addr = "2606:4700::20".parse().unwrap();
+        let port = NonZeroU16::new(22487).unwrap();
+        let nonce = [0x42; 12];
+        let gateway = tokio::spawn(async move {
+            let mut packet = [0u8; pcp_ipv6::MAX_PACKET_SIZE];
+            let (length, from) = server.recv_from(&mut packet).await.unwrap();
+            assert_eq!(length, 60);
+            assert_eq!(&packet[8..24], &local_ip.octets());
+            assert_eq!(&packet[24..36], &nonce);
+            assert_eq!(packet[36], 17);
+            assert_eq!(
+                u16::from_be_bytes(packet[40..42].try_into().unwrap()),
+                22487
+            );
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                pcp_ipv6::REQUESTED_LIFETIME_SECONDS
+            );
+
+            let mut response = [0u8; 60];
+            response[0] = 2;
+            response[1] = 0x80 | 1;
+            response[4..8].copy_from_slice(&300u32.to_be_bytes());
+            response[8..12].copy_from_slice(&91u32.to_be_bytes());
+            response[24..36].copy_from_slice(&nonce);
+            response[36] = 17;
+            response[40..42].copy_from_slice(&22487u16.to_be_bytes());
+            response[42..44].copy_from_slice(&22487u16.to_be_bytes());
+            response[44..60].copy_from_slice(&external_ip.octets());
+            server.send_to(&response, from).await.unwrap();
+
+            let (delete_length, delete_from) = server.recv_from(&mut packet).await.unwrap();
+            assert_eq!(delete_from, from);
+            assert_eq!(delete_length, 60);
+            assert_eq!(u32::from_be_bytes(packet[4..8].try_into().unwrap()), 0);
+            assert_eq!(&packet[24..36], &nonce);
+            assert_eq!(&packet[42..60], &[0u8; 18]);
+        });
+        let client = UdpSocket::bind("[::1]:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        let (_stop_tx, mut stop_rx) = oneshot::channel();
+        let clock = ManualClock::new(1_000);
+        let acquired = acquire_pcp_ipv6_lease(
+            &client,
+            local_ip,
+            port,
+            pcp_ipv6::MapProtocol::Udp,
+            nonce,
+            &mut stop_rx,
+            &clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            acquired,
+            PcpIpv6Acquire::Lease(pcp_ipv6::MapLease {
+                external_ip,
+                external_port: port,
+                lifetime_seconds: 300,
+                epoch: 91,
+            })
+        );
+        delete_pcp_ipv6_lease(&client, local_ip, port, pcp_ipv6::MapProtocol::Udp, nonce).await;
+        gateway.await.unwrap();
     }
 
     /// The eviction deny list is bounded, and the bound drops the **oldest** eviction.

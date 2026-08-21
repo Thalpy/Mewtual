@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import {
   OUTCOME_COPY,
+  automaticMappingUnavailable,
   connectivityReadout,
   connectivityStatus,
   describeOutcome,
@@ -135,6 +136,15 @@ test("reachability distinguishes a real AutoNAT callback from weaker evidence", 
   assert.match(mapped.detail, /PCP TCP/);
   assert.match(mapped.detail, /candidate route/);
 
+  const pcpv6 = reachabilitySummary({
+    ...emptyReport,
+    upnp:
+      "mapped via PCP IPv6 pinhole UDP/QUIC (2606:4700::10): /ip6/2606:4700::10/udp/22487/quic-v1",
+  });
+  assert.equal(pcpv6.verdict, "mapping obtained (not verified)");
+  assert.match(pcpv6.detail, /IPv6 pinhole/);
+  assert.doesNotMatch(pcpv6.detail, /reachable directly/);
+
   const tested = reachabilitySummary({
     ...emptyReport,
     autonat: "reachable /ip4/45.79.12.34/tcp/9000 (verified by AutoNAT server 12D3KooWTest)",
@@ -163,10 +173,20 @@ test("reachability distinguishes a real AutoNAT callback from weaker evidence", 
   assert.equal(directAndRelay.verdict, "direct callback succeeded");
 });
 
+test("a partial mapping failure does not hide a live automatic route", () => {
+  assert.equal(
+    automaticMappingUnavailable(
+      "mapped via PCP IPv6 pinhole TCP (2606:4700::10): /ip6/2606:4700::10/tcp/22487; other attempts: PCP IPv4 unavailable",
+    ),
+    false,
+  );
+  assert.equal(automaticMappingUnavailable("PCP IPv6 pinhole unavailable: no gateway"), true);
+});
+
 test("the shared connectivity helper exposes honest status-line states and a real readout", () => {
   assert.equal(connectivityStatus(null).tone, "pending");
   assert.equal(
-    connectivityStatus({ ...emptyReport, upnp: "waiting for router mapping (UPnP, PCP, NAT-PMP)" }).key,
+    connectivityStatus({ ...emptyReport, upnp: "waiting for router mapping (UPnP, PCP/PCPv6, NAT-PMP)" }).key,
     "CHECKING…",
   );
   assert.equal(

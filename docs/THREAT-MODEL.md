@@ -53,10 +53,16 @@ table with the commit that closed it.
   different joiner needs confirmation. Anyone who obtained the original invite can still form a
   valid reply or redeem it. Both apps must remain open during an overlapping window, and symmetric
   NAT/CGNAT can still make punching impossible.
-- **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP can expose this
-  app's stable TCP and UDP/QUIC listeners and can return a wrong or stale public socket. Noise and
-  connection limits still protect the listener; AutoNAT is the independent test before the UI
-  calls the route verified. A malicious gateway can still cause denial of service or dead invites.
+- **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP and PCPv6 firewall
+  pinholes can expose this app's stable TCP and UDP/QUIC listeners and can return a wrong or stale
+  public socket. PCPv6 accepts only a request-matched Global Unicast result from the exact scoped
+  default router, but the pinhole remains open to arbitrary Internet sources because invite peers
+  are not known in advance. Noise and connection limits still protect the listener; AutoNAT is the
+  independent test before the UI calls the route verified. A malicious gateway can still cause
+  denial of service or dead invites. The client requests five minutes but honors a larger
+  router-assigned lifetime up to a 24-hour sanity cap; a crash can therefore leave the pinhole
+  until that grant expires. Publishing a global IPv6 privacy address also makes that
+  device/address visible to invite recipients, peers and the configured AutoNAT observer.
 - **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
   native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
   the main-window capability reduce injection reach; the native command gate is the enforcement

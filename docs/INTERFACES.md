@@ -13,9 +13,12 @@ test impls (in-memory, deterministic) or production impls (OS / libp2p).
 
 ### `Clock`; injected time  *(catcoms-rt)*
 ```rust
-pub trait Clock: Send + Sync + Debug { fn now_ms(&self) -> u64; }
+pub trait Clock: Send + Sync + Debug {
+    fn now_ms(&self) -> u64;       // signed/absolute Unix time
+    fn monotonic_ms(&self) -> u64; // elapsed-time leases and retries
+}
 pub struct SystemClock;                         // the ONLY OS-clock reader
-pub struct ManualClock;  fn new(start_ms) -> Self;  advance_ms(delta)->u64;  set_ms(v);
+pub struct ManualClock;  fn new(start_ms) -> Self;  advance_ms(delta)->u64;  set_ms(v);  set_wall_ms(v);
 ```
 Rule: no other code reads the OS clock. Pass `&dyn Clock` / `Box<dyn Clock + Send>`.
 
@@ -71,13 +74,26 @@ Implementations:
     Connection-scoped source observations are refreshed by requests and removed on close.
     Router mapping is coalesced current state: `next_port_mapping_snapshot()` or the
     single-consumer `take_port_mapping_snapshots()` yields a bounded `PortMappingSnapshot` of live
-    leases and scoped failures labelled by UPnP, PCP or NAT-PMP and TCP or UDP/QUIC. A slow/late
+    leases and scoped failures labelled by UPnP, PCP or NAT-PMP, TCP or UDP/QUIC, and an optional
+    exact local-address owner. `None` is the legacy IPv4/default-gateway path; `Some(IpV6)` is an
+    independently managed PCPv6 firewall pinhole, so IPv4 and multiple interfaces cannot collide.
+    PCPv6 uses an internal narrow RFC 6887 MAP client because pinned `portmapper` 0.18 is
+    IPv4-only: it sends an exact 60-byte MAP request, accepts aligned option-bearing responses up
+    to the protocol bound, binds the exact global listener address, and selects the scoped default
+    router from the operating system's IPv6 route table and native interface index. It requests
+    five-minute TCP/UDP leases, honors the router-assigned lifetime up to a 24-hour sanity cap,
+    renews on an injected monotonic clock with the same 96-bit nonce, and sends a best-effort
+    lifetime-zero delete on listener removal. A slow/late
     consumer may skip intermediate retries but cannot resurrect an expired current route. Only
     globally routable mappings are offered to AutoNAT/the swarm; duplicate mapping and
-    manual-forward owners are reference-counted. `take_relay_address_snapshots()` similarly
+    manual-forward owners are reference-counted. Worker generations make buffered events from a
+    removed/replaced listener inert. `take_relay_address_snapshots()` similarly
     exposes the live circuit-listener set so reservation expiry is withdrawn. The product layer
     updates the live bootstrap/peer record and re-mints the next displayed invite after any set
     change.
+    PCPv6 tracks Epoch for every response and randomizes rapid renewal after a restart signal, but
+    each transport/interface worker observes that signal independently; it is not a full
+    gateway-wide RFC ANNOUNCE coordinator.
     Already copied signed invite strings are immutable and cannot be rewritten after lease loss.
     `next_listener_snapshot()` reports only concrete listener addresses accepted by Swarm.
     `take_mesh_observation_snapshots()` exposes bounded per-connected-peer Identify observations

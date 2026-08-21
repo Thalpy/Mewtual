@@ -183,7 +183,7 @@ export function reachabilitySummary(c: Connectivity | null): {
   detail: string;
 } {
   // The bridge field retains its original `upnp` name for command compatibility, but its value is
-  // now the unified UPnP/PCP/NAT-PMP mapping status.
+  // now the unified UPnP/PCPv4/PCPv6/NAT-PMP mapping status.
   const portMapping = c?.upnp ?? "";
   const autonat = c?.autonat ?? "";
   const relayed = (c?.advertised ?? []).some((a) => a.includes("p2p-circuit"));
@@ -225,6 +225,13 @@ export type ConnectivityStatus = {
   key: string;
   sentence: string;
 };
+
+/** Whether the mapping status says every automatic route attempt failed. Mixed snapshots retain
+ * per-family failures after a success, so a raw `includes("unavailable")` check is misleading. */
+export function automaticMappingUnavailable(status: string): boolean {
+  const active = status.startsWith("mapped via ") || status.startsWith("/");
+  return !active && (status.includes("unavailable") || status.includes("no mapping obtained"));
+}
 
 /// Apply an async invite refresh to the server it was requested for, even if the user switched
 /// servers while the native command was in flight. Non-target entries retain identity so Svelte

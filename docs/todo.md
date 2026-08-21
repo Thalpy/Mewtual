@@ -93,7 +93,7 @@ rendezvous namespace and so never defended the attacker P8 was filed about. The 
 in [`design-zeroconf-reachability.md`](design-zeroconf-reachability.md) section 1c is
 authoritative; section 11 carries the loose ends that are not defects.
 
-**Higher ladder status.** Stable direct ports, UPnP/PCP/NAT-PMP, scoped AutoNAT v2, the live
+**Higher ladder status.** Stable direct ports, UPnP/PCP/NAT-PMP plus PCPv6 firewall pinholes, scoped AutoNAT v2, the live
 Connectivity assistant, 60-second two-way replies and opt-in member admission switchboards now
 exist. The AutoNAT server has pre-socket exact-source target policy plus peer/prefix/node limits,
 but remains experimental/off by default because metadata, egress and same-NAT port probes remain.

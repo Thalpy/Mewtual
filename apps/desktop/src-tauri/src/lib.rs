@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -188,7 +189,7 @@ struct AutoNatEvidence {
 /// Automatic mapping has not started (no durable transport retained its event stream).
 const PORT_MAPPING_NOT_ATTEMPTED: &str = "not attempted";
 /// Mapping probes are out and the router has not answered yet.
-const PORT_MAPPING_WAITING: &str = "waiting for router mapping (UPnP, PCP, NAT-PMP)";
+const PORT_MAPPING_WAITING: &str = "waiting for router mapping (UPnP, PCP/PCPv6, NAT-PMP)";
 /// None of the enabled router protocols produced a mapping inside the initial diagnostic window.
 const PORT_MAPPING_TIMED_OUT: &str = "no mapping obtained within 25s";
 const PORT_MAPPING_INACTIVE: &str = "no active router mapping";
@@ -1922,22 +1923,42 @@ async fn load_or_init_server_net(
 /// Deterministically summarize the live router mappings for the Connectivity assistant. Failed
 /// probes are kept per mechanism/transport: one unavailable UDP mapping must not be broadened into
 /// "PCP failed" while its TCP probe is still in flight.
+type PortMappingStatusKey = (PortMappingMechanism, PortMappingTransport, Option<IpAddr>);
+
+fn port_mapping_label(
+    mechanism: PortMappingMechanism,
+    transport: PortMappingTransport,
+    local_address: Option<IpAddr>,
+) -> String {
+    match local_address {
+        Some(IpAddr::V6(address)) => {
+            format!("{mechanism} IPv6 pinhole {transport} ({address})")
+        }
+        Some(IpAddr::V4(address)) => format!("{mechanism} IPv4 {transport} ({address})"),
+        None => format!("{mechanism} {transport}"),
+    }
+}
+
 fn port_mapping_status(
-    active: &HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
-    unavailable: &HashMap<(PortMappingMechanism, PortMappingTransport), String>,
+    active: &HashMap<PortMappingStatusKey, Multiaddr>,
+    unavailable: &HashMap<PortMappingStatusKey, String>,
     waiting: bool,
 ) -> String {
-    if !active.is_empty() {
+    let mapped = if active.is_empty() {
+        None
+    } else {
         let mut mappings: Vec<String> = active
             .iter()
-            .map(|((mechanism, transport), addr)| format!("{mechanism} {transport}: {addr}"))
+            .map(|((mechanism, transport, local_address), addr)| {
+                format!(
+                    "{}: {addr}",
+                    port_mapping_label(*mechanism, *transport, *local_address)
+                )
+            })
             .collect();
         mappings.sort_unstable();
-        return format!("mapped via {}", mappings.join("; "));
-    }
-    if waiting {
-        return PORT_MAPPING_WAITING.to_string();
-    }
+        Some(format!("mapped via {}", mappings.join("; ")))
+    };
 
     let mut absent = Vec::new();
     for mechanism in [
@@ -1945,8 +1966,8 @@ fn port_mapping_status(
         PortMappingMechanism::Pcp,
         PortMappingMechanism::NatPmp,
     ] {
-        let tcp = unavailable.get(&(mechanism, PortMappingTransport::Tcp));
-        let udp = unavailable.get(&(mechanism, PortMappingTransport::Udp));
+        let tcp = unavailable.get(&(mechanism, PortMappingTransport::Tcp, None));
+        let udp = unavailable.get(&(mechanism, PortMappingTransport::Udp, None));
         match (tcp, udp) {
             (Some(tcp), Some(udp)) if tcp == udp => {
                 absent.push(format!("{mechanism} unavailable: {tcp}"));
@@ -1963,6 +1984,29 @@ fn port_mapping_status(
             (None, None) => {}
         }
     }
+    let mut scoped: Vec<_> = unavailable
+        .iter()
+        .filter_map(|(&(mechanism, transport, local_address), detail)| {
+            local_address.map(|local_address| {
+                format!(
+                    "{} unavailable: {detail}",
+                    port_mapping_label(mechanism, transport, Some(local_address))
+                )
+            })
+        })
+        .collect();
+    scoped.sort_unstable();
+    absent.extend(scoped);
+    if let Some(mapped) = mapped {
+        return if absent.is_empty() {
+            mapped
+        } else {
+            format!("{mapped}; other attempts: {}", absent.join("; "))
+        };
+    }
+    if waiting {
+        return PORT_MAPPING_WAITING.to_string();
+    }
     if absent.is_empty() {
         PORT_MAPPING_TIMED_OUT.to_string()
     } else {
@@ -1977,15 +2021,15 @@ fn port_mapping_status(
 /// makes the address stale. Kept pure so the duplicate-lease edge case is regression tested.
 #[cfg(test)]
 fn retire_port_mapping(
-    active: &mut HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
     mechanism: PortMappingMechanism,
     transport: PortMappingTransport,
     address: &Multiaddr,
 ) -> bool {
-    if active.get(&(mechanism, transport)) != Some(address) {
+    if active.get(&(mechanism, transport, None)) != Some(address) {
         return false;
     }
-    active.remove(&(mechanism, transport));
+    active.remove(&(mechanism, transport, None));
     !active.values().any(|candidate| candidate == address)
 }
 
@@ -1995,12 +2039,12 @@ fn retire_port_mapping(
 /// address; otherwise the old route would survive forever in invites and peer records.
 #[cfg(test)]
 fn replace_port_mapping(
-    active: &mut HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
+    active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
     mechanism: PortMappingMechanism,
     transport: PortMappingTransport,
     address: Multiaddr,
 ) -> Option<Multiaddr> {
-    let previous = active.insert((mechanism, transport), address.clone());
+    let previous = active.insert((mechanism, transport, None), address.clone());
     previous.filter(|old| old != &address && !active.values().any(|candidate| candidate == old))
 }
 
@@ -2079,8 +2123,8 @@ async fn fold_bootstrap_entry(app: &AppHandle, server: u64, entry: &str, add: bo
 async fn store_port_mapping_status(
     app: &AppHandle,
     server: u64,
-    active: &HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
-    unavailable: &HashMap<(PortMappingMechanism, PortMappingTransport), String>,
+    active: &HashMap<PortMappingStatusKey, Multiaddr>,
+    unavailable: &HashMap<PortMappingStatusKey, String>,
     waiting: bool,
 ) {
     let state = app.state::<AppState>();
@@ -2105,15 +2149,11 @@ async fn apply_port_mapping_snapshot(
     server: u64,
     peer_id: &str,
     snapshot: PortMappingSnapshot,
-    active: &mut HashMap<(PortMappingMechanism, PortMappingTransport), Multiaddr>,
-    unavailable: &mut HashMap<(PortMappingMechanism, PortMappingTransport), String>,
+    active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
+    unavailable: &mut HashMap<PortMappingStatusKey, String>,
     mapping_owned: &mut HashSet<Multiaddr>,
 ) {
-    let next: HashMap<_, _> = snapshot
-        .active
-        .into_iter()
-        .map(|entry| ((entry.mechanism, entry.transport), entry.address))
-        .collect();
+    let (next, next_unavailable) = port_mapping_snapshot_state(snapshot);
 
     // Remove a replaced/expired address only if no new lease still names it. Multiple protocols
     // can own the same socket, and a baseline manual address is absent from `mapping_owned`.
@@ -2133,16 +2173,38 @@ async fn apply_port_mapping_snapshot(
         }
     }
     *active = next;
-    *unavailable = snapshot
+    *unavailable = next_unavailable;
+}
+
+/// Convert the public snapshot into family/interface-aware maps. Kept pure because accidentally
+/// collecting by only `(mechanism, transport)` silently discards either PCPv4 or PCPv6.
+fn port_mapping_snapshot_state(
+    snapshot: PortMappingSnapshot,
+) -> (
+    HashMap<PortMappingStatusKey, Multiaddr>,
+    HashMap<PortMappingStatusKey, String>,
+) {
+    let active = snapshot
+        .active
+        .into_iter()
+        .map(|entry| {
+            (
+                (entry.mechanism, entry.transport, entry.local_address),
+                entry.address,
+            )
+        })
+        .collect();
+    let unavailable = snapshot
         .unavailable
         .into_iter()
         .map(|failure| {
             (
-                (failure.mechanism, failure.transport),
+                (failure.mechanism, failure.transport, failure.local_address),
                 failure.detail.chars().take(240).collect(),
             )
         })
         .collect();
+    (active, unavailable)
 }
 
 /// Watch UPnP, PCP and NAT-PMP in the background and fold live public mappings into the server's
@@ -2201,11 +2263,10 @@ fn spawn_port_mapping_fold(
                     &mut mapping_owned,
                 )
                 .await;
-                // All three mechanisms have answered for both transports, so no-result is known
-                // without making the user wait for the full diagnostic window.
-                if active.is_empty() && unavailable.len() == 6 {
-                    waiting = false;
-                }
+                // Failure entries are scoped by mechanism, transport and (for PCPv6) local
+                // interface. Their cardinality therefore says nothing about whether every
+                // expected worker has settled. Keep the initial window open until its deadline;
+                // live mappings still appear immediately through `active`.
             }
             store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
         }
@@ -7687,7 +7748,7 @@ mod tests {
 
         // A single failed transport is scoped and does not claim the whole mechanism failed.
         unavailable.insert(
-            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
             "no gateway answered".to_string(),
         );
         assert_eq!(
@@ -7695,7 +7756,7 @@ mod tests {
             "no active router mapping (PCP TCP unavailable: no gateway answered)"
         );
         unavailable.insert(
-            (PortMappingMechanism::Pcp, PortMappingTransport::Udp),
+            (PortMappingMechanism::Pcp, PortMappingTransport::Udp, None),
             "no gateway answered".to_string(),
         );
         assert_eq!(
@@ -7703,18 +7764,131 @@ mod tests {
             "no active router mapping (PCP unavailable: no gateway answered)"
         );
 
+        unavailable.remove(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None));
         active.insert(
-            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
             "/ip4/203.0.113.7/tcp/22487".parse().unwrap(),
         );
         active.insert(
-            (PortMappingMechanism::NatPmp, PortMappingTransport::Udp),
+            (
+                PortMappingMechanism::NatPmp,
+                PortMappingTransport::Udp,
+                None,
+            ),
             "/ip4/203.0.113.7/udp/22487/quic-v1".parse().unwrap(),
         );
         assert_eq!(
             port_mapping_status(&active, &unavailable, false),
-            "mapped via NAT-PMP UDP/QUIC: /ip4/203.0.113.7/udp/22487/quic-v1; PCP TCP: /ip4/203.0.113.7/tcp/22487"
+            "mapped via NAT-PMP UDP/QUIC: /ip4/203.0.113.7/udp/22487/quic-v1; PCP TCP: /ip4/203.0.113.7/tcp/22487; other attempts: PCP UDP/QUIC unavailable: no gateway answered"
         );
+
+        active.insert(
+            (
+                PortMappingMechanism::Pcp,
+                PortMappingTransport::Udp,
+                Some("2606:4700::10".parse().unwrap()),
+            ),
+            "/ip6/2606:4700::10/udp/22487/quic-v1".parse().unwrap(),
+        );
+        assert!(port_mapping_status(&active, &unavailable, false).contains(
+            "PCP IPv6 pinhole UDP/QUIC (2606:4700::10): /ip6/2606:4700::10/udp/22487/quic-v1"
+        ));
+    }
+
+    #[test]
+    fn scoped_ipv6_failures_do_not_end_the_initial_mapping_window() {
+        let first: IpAddr = "2606:4700::10".parse().unwrap();
+        let second: IpAddr = "2a00:1450::10".parse().unwrap();
+        let active = HashMap::new();
+        let unavailable = HashMap::from([
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Tcp,
+                    Some(first),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Udp,
+                    Some(first),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Tcp,
+                    Some(second),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Udp,
+                    Some(second),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+                "IPv4 PCP unavailable".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::NatPmp,
+                    PortMappingTransport::Tcp,
+                    None,
+                ),
+                "NAT-PMP unavailable".to_string(),
+            ),
+        ]);
+
+        assert_eq!(unavailable.len(), 6);
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, true),
+            PORT_MAPPING_WAITING,
+            "six scoped failures are not proof that the remaining IPv4 workers have settled"
+        );
+    }
+
+    #[test]
+    fn mapping_snapshot_keeps_ipv4_and_ipv6_pcp_owners_separate() {
+        let local_v6: IpAddr = "2606:4700::10".parse().unwrap();
+        let (active, unavailable) = port_mapping_snapshot_state(PortMappingSnapshot {
+            active: vec![
+                catcoms_net::ActivePortMapping {
+                    mechanism: PortMappingMechanism::Pcp,
+                    transport: PortMappingTransport::Tcp,
+                    local_address: None,
+                    address: "/ip4/8.8.8.8/tcp/22487".parse().unwrap(),
+                },
+                catcoms_net::ActivePortMapping {
+                    mechanism: PortMappingMechanism::Pcp,
+                    transport: PortMappingTransport::Tcp,
+                    local_address: Some(local_v6),
+                    address: "/ip6/2606:4700::10/tcp/22487".parse().unwrap(),
+                },
+            ],
+            unavailable: vec![catcoms_net::PortMappingFailure {
+                mechanism: PortMappingMechanism::Pcp,
+                transport: PortMappingTransport::Udp,
+                local_address: Some(local_v6),
+                detail: "IPv6 firewall pinhole unavailable: no gateway".to_string(),
+            }],
+        });
+        assert_eq!(active.len(), 2);
+        assert!(active.contains_key(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None)));
+        assert!(active.contains_key(&(
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            Some(local_v6)
+        )));
+        assert_eq!(unavailable.len(), 1);
+        assert!(port_mapping_status(&active, &unavailable, false).starts_with("mapped via "));
     }
 
     #[test]
@@ -7722,11 +7896,11 @@ mod tests {
         let address: Multiaddr = "/ip4/203.0.113.7/tcp/22487".parse().unwrap();
         let mut active = HashMap::from([
             (
-                (PortMappingMechanism::Upnp, PortMappingTransport::Tcp),
+                (PortMappingMechanism::Upnp, PortMappingTransport::Tcp, None),
                 address.clone(),
             ),
             (
-                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
                 address.clone(),
             ),
         ]);
@@ -7749,7 +7923,7 @@ mod tests {
         let old: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
         let replacement: Multiaddr = "/ip4/9.9.9.9/tcp/22487".parse().unwrap();
         active.insert(
-            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp),
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
             old.clone(),
         );
         assert_eq!(
@@ -7763,7 +7937,7 @@ mod tests {
             "a replacement event retires its unshared predecessor without a separate expiry"
         );
         assert_eq!(
-            active.get(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp)),
+            active.get(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None)),
             Some(&replacement)
         );
     }

@@ -53,7 +53,8 @@
   import { extractInfobox, infoboxTemplate } from "./infobox";
   import {
     type Connectivity, type JoinAttempt, describeOutcome, formatConnectivity, formatJoinLog,
-    connectivityReadout, connectivityStatus, reachabilityEventAffectsReport, reachabilitySummary,
+    automaticMappingUnavailable, connectivityReadout, connectivityStatus,
+    reachabilityEventAffectsReport, reachabilitySummary,
     switchboardEventRefreshDecision, withOrderedConnectivity, withOrderedRefreshedInvite,
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
@@ -11487,7 +11488,7 @@
     {#if status.tone === "warn"}
       <div class="conn-diagnosis">
         <b>No outside route is proven yet.</b>
-        {#if c.upnp.includes("unavailable") || c.upnp.includes("no mapping obtained")}
+        {#if automaticMappingUnavailable(c.upnp)}
           This router did not provide an automatic mapping. A manual port forward, a known public
           address, or a relay can provide the missing route.
         {:else}

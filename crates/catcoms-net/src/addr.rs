@@ -116,6 +116,31 @@ pub fn ipv6_is_globally_routable(ip: &Ipv6Addr) -> bool {
     true
 }
 
+/// Whether an IPv6 address is safe to publish as the result of a router-created PCP pinhole.
+///
+/// This is intentionally narrower than [`ipv6_is_globally_routable`]. A PCP server is a local,
+/// partially trusted device returning an address that this process will advertise globally, so a
+/// syntactically non-private literal is not enough. Require Global Unicast Address space
+/// (`2000::/3`) and reject the IANA special-purpose blocks that sit inside it. Ordinary assigned
+/// addresses such as `2001:569::/32` and `2606:4700::/32` remain eligible.
+pub(crate) fn ipv6_is_pcp_pinhole_candidate(ip: &Ipv6Addr) -> bool {
+    let s = ip.segments();
+    if !ipv6_is_globally_routable(ip) || (s[0] & 0xe000) != 0x2000 {
+        return false;
+    }
+    // 2001::/23 is IETF protocol-assignment space. A few individual anycast addresses in it are
+    // globally reachable, but none can legitimately be the unicast address assigned to this
+    // listener by a home router. Rejecting the whole block keeps the publication boundary simple.
+    if s[0] == 0x2001 && s[1] < 0x0200 {
+        return false;
+    }
+    // 3fff::/20 is documentation space (RFC 9637).
+    if s[0] == 0x3fff && s[1] < 0x1000 {
+        return false;
+    }
+    true
+}
+
 /// Whether a multiaddr names an address that means nothing outside this machine or this LAN:
 /// loopback, RFC1918 private space, the RFC6598 CGNAT block, IPv4 link-local, IPv6 unique-local
 /// (`fc00::/7`) or IPv6 link-local (`fe80::/10`), plus the unspecified addresses.
@@ -285,5 +310,26 @@ mod tests {
         assert!(!addr_is_globally_routable(
             &a("/ip4/45.79.12.34/tcp/9").with(Protocol::Dns4("rz.example.org".into()))
         ));
+    }
+
+    #[test]
+    fn pcp_pinhole_candidates_are_strict_global_unicast_addresses() {
+        for accepted in ["2001:569:b920:f600::1", "2606:4700::1111"] {
+            assert!(ipv6_is_pcp_pinhole_candidate(&accepted.parse().unwrap()));
+        }
+        for refused in [
+            "::1",
+            "64:ff9b::1",
+            "100::1",
+            "2001:1::1",
+            "2001:20::1",
+            "2001:db8::1",
+            "2002::1",
+            "3fff::1",
+            "fc00::1",
+            "fe80::1",
+        ] {
+            assert!(!ipv6_is_pcp_pinhole_candidate(&refused.parse().unwrap()));
+        }
     }
 }

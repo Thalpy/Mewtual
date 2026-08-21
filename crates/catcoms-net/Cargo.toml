@@ -19,10 +19,14 @@ hex = "0.4"
 # newer/Apple-style mapping protocols instead. Pin 0.18 because it is the maintained release whose
 # declared MSRV still matches this workspace's Rust 1.89 baseline (0.19 requires Rust 1.91).
 portmapper = { version = "=0.18.0", default-features = false }
+# `portmapper` 0.18 exposes only an IPv4 client. `getifs` preserves the IPv6 route's native
+# interface index (including Windows' IPv6-specific index), letting the PCP socket bind the exact
+# global listener and scoped default gateway instead of guessing from an IPv4-oriented snapshot.
+getifs = { version = "=0.6.1", default-features = false }
 # PEM decoding for the operator-supplied TCP/443 TLS certificate. Already in the tree via
 # rustls (QUIC + libp2p-tls), so this adds no new crate, only a direct edge to it.
 rustls-pki-types = { version = "1.14", features = ["std"] }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 libp2p = { version = "0.56", features = [
     "tokio",
     "gossipsub",

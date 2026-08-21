@@ -4,11 +4,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-/// A source of wall-clock time in milliseconds since the Unix epoch.
+/// A source of both absolute wall time and non-decreasing elapsed time.
 ///
 /// Inject a `Clock` wherever time is needed (expiry horizons, MLS lifetimes,
 /// retry backoff, CRDT timestamps) instead of reading the OS clock, so behaviour
@@ -16,6 +16,13 @@ use tokio::sync::Notify;
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// Milliseconds since the Unix epoch.
     fn now_ms(&self) -> u64;
+
+    /// Milliseconds from a process-local origin that never moves backwards.
+    ///
+    /// Use this for elapsed-time protocol state such as leases and retry schedules. Wall time is
+    /// still the right source for signed absolute expiries, but an operating-system clock
+    /// correction must never extend a router lease beyond the time the router granted.
+    fn monotonic_ms(&self) -> u64;
 
     /// Wait for a duration using this clock's notion of time.
     ///
@@ -28,6 +35,10 @@ pub trait Clock: Send + Sync + std::fmt::Debug {
 impl<T: Clock + ?Sized> Clock for Arc<T> {
     fn now_ms(&self) -> u64 {
         (**self).now_ms()
+    }
+
+    fn monotonic_ms(&self) -> u64 {
+        (**self).monotonic_ms()
     }
 
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
@@ -49,6 +60,18 @@ impl Clock for SystemClock {
             .unwrap_or(0)
     }
 
+    fn monotonic_ms(&self) -> u64 {
+        use std::sync::OnceLock;
+
+        static PROCESS_ORIGIN: OnceLock<Instant> = OnceLock::new();
+        PROCESS_ORIGIN
+            .get_or_init(Instant::now)
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(tokio::time::sleep(duration))
     }
@@ -58,7 +81,8 @@ impl Clock for SystemClock {
 /// share the same underlying time.
 #[derive(Debug, Default, Clone)]
 pub struct ManualClock {
-    now_ms: Arc<AtomicU64>,
+    wall_ms: Arc<AtomicU64>,
+    monotonic_ms: Arc<AtomicU64>,
     wake: Arc<Notify>,
 }
 
@@ -66,33 +90,53 @@ impl ManualClock {
     /// A manual clock starting at `start_ms`.
     pub fn new(start_ms: u64) -> Self {
         Self {
-            now_ms: Arc::new(AtomicU64::new(start_ms)),
+            wall_ms: Arc::new(AtomicU64::new(start_ms)),
+            monotonic_ms: Arc::new(AtomicU64::new(start_ms)),
             wake: Arc::new(Notify::new()),
         }
     }
 
     /// Advance time by `delta_ms` and return the new value.
     pub fn advance_ms(&self, delta_ms: u64) -> u64 {
-        let now = self.now_ms.fetch_add(delta_ms, Ordering::SeqCst) + delta_ms;
+        let now = self.wall_ms.fetch_add(delta_ms, Ordering::SeqCst) + delta_ms;
+        self.monotonic_ms.fetch_add(delta_ms, Ordering::SeqCst);
         self.wake.notify_waiters();
         now
     }
 
-    /// Set the absolute time.
+    /// Set wall time and advance elapsed time to at least the same value.
+    ///
+    /// Moving the wall clock backwards is useful in tests, but the monotonic half of the seam
+    /// must preserve the [`Clock`] invariant. Callers that need to move only wall time can use
+    /// [`Self::set_wall_ms`] explicitly.
     pub fn set_ms(&self, value_ms: u64) {
-        self.now_ms.store(value_ms, Ordering::SeqCst);
+        self.wall_ms.store(value_ms, Ordering::SeqCst);
+        self.monotonic_ms.fetch_max(value_ms, Ordering::SeqCst);
+        self.wake.notify_waiters();
+    }
+
+    /// Set wall time without changing elapsed time.
+    ///
+    /// This models an NTP/administrator clock correction and is intentionally separate from
+    /// `set_ms`, whose compatibility contract advances both test timelines together.
+    pub fn set_wall_ms(&self, value_ms: u64) {
+        self.wall_ms.store(value_ms, Ordering::SeqCst);
         self.wake.notify_waiters();
     }
 }
 
 impl Clock for ManualClock {
     fn now_ms(&self) -> u64 {
-        self.now_ms.load(Ordering::SeqCst)
+        self.wall_ms.load(Ordering::SeqCst)
+    }
+
+    fn monotonic_ms(&self) -> u64 {
+        self.monotonic_ms.load(Ordering::SeqCst)
     }
 
     fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         let target = self
-            .now_ms()
+            .monotonic_ms()
             .saturating_add(duration.as_millis().try_into().unwrap_or(u64::MAX));
         Box::pin(async move {
             loop {
@@ -101,7 +145,7 @@ impl Clock for ManualClock {
                 let advanced = self.wake.notified();
                 tokio::pin!(advanced);
                 advanced.as_mut().enable();
-                if self.now_ms() >= target {
+                if self.monotonic_ms() >= target {
                     return;
                 }
                 advanced.await;
@@ -118,10 +162,19 @@ mod tests {
     fn manual_clock_advances_and_sets() {
         let c = ManualClock::new(1_000);
         assert_eq!(c.now_ms(), 1_000);
+        assert_eq!(c.monotonic_ms(), 1_000);
         assert_eq!(c.advance_ms(500), 1_500);
         assert_eq!(c.now_ms(), 1_500);
+        assert_eq!(c.monotonic_ms(), 1_500);
         c.set_ms(42);
         assert_eq!(c.now_ms(), 42);
+        assert_eq!(c.monotonic_ms(), 1_500);
+        c.set_wall_ms(7);
+        assert_eq!(c.now_ms(), 7);
+        assert_eq!(c.monotonic_ms(), 1_500);
+        c.set_ms(2_000);
+        assert_eq!(c.now_ms(), 2_000);
+        assert_eq!(c.monotonic_ms(), 2_000);
     }
 
     #[test]
@@ -136,6 +189,7 @@ mod tests {
     fn clock_is_object_safe() {
         let c: Box<dyn Clock> = Box::new(ManualClock::new(7));
         assert_eq!(c.now_ms(), 7);
+        assert_eq!(c.monotonic_ms(), 7);
     }
 
     #[tokio::test]
@@ -153,5 +207,20 @@ mod tests {
         assert!(!task.is_finished());
         clock.advance_ms(1);
         assert_eq!(task.await.unwrap(), 1_060);
+    }
+
+    #[tokio::test]
+    async fn wall_clock_rollback_does_not_extend_elapsed_sleep() {
+        let clock = ManualClock::new(10_000);
+        let sleeper = clock.clone();
+        let task = tokio::spawn(async move {
+            sleeper.sleep(Duration::from_millis(50)).await;
+            sleeper.monotonic_ms()
+        });
+        tokio::task::yield_now().await;
+        clock.set_wall_ms(1);
+        clock.advance_ms(50);
+        assert_eq!(task.await.unwrap(), 10_050);
+        assert_eq!(clock.now_ms(), 51);
     }
 }

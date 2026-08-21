@@ -347,7 +347,7 @@ A **per-install** fixed port (see O6), IPv6 listening, QUIC alongside TCP.
 generally ship a default-deny inbound IPv6 firewall, and the `libp2p-upnp` behaviour is
 IGD-based and **IPv4-only by construction**: there is no code path that opens an IPv6 pinhole.
 
-**Built for IPv4 gateways (2026-08-20).** Separate actor-owned `portmapper` clients probe and
+**Built for IPv4 mappings and IPv6 firewall pinholes (2026-08-21).** Separate actor-owned `portmapper` clients probe and
 maintain PCP or NAT-PMP mappings for both the stable TCP port and UDP/QUIC port, while libp2p keeps
 owning UPnP IGD so the implementations do not duplicate one another's leases. A unified bounded
 snapshot labels mechanism + transport, rejects non-public/CGNAT results as unusable while preserving
@@ -357,9 +357,19 @@ consumer sees authoritative current state rather than an unbounded event backlog
 or MAP attempts retry after 60 seconds. The next displayed invite is re-minted
 when the live address set changes, although an already copied signed code is immutable. `portmapper`
 0.18 is pinned because it matches the
-workspace's Rust 1.89 baseline; its high-level gateway/address path is IPv4-only. RFC 6887 supports
-IPv6 firewall pinholes, but **this implementation does not**, so the original IPv6 limitation is
-only partly closed. IPv6 also **does not compose with an IPv4-only peer**,
+workspace's Rust 1.89 baseline; its high-level gateway/address path is IPv4-only. A narrow internal
+PCPv6 MAP client supplies the missing firewall-pinhole path: it discovers the scoped default router
+for the exact global listener address from the operating system IPv6 route table, binds that
+address as the PCP client, validates the full request identity and Global Unicast result, and
+maintains independent TCP and UDP/QUIC leases on monotonic deadlines. It requests five minutes but
+honors the router-assigned lifetime, sanity-capped to 24 hours. Listener/interface loss withdraws
+lease evidence and mapping-derived/NPTv6 addresses immediately and attempts a lifetime-zero delete;
+an identical baseline GUA remains an unverified listener candidate after its pinhole expires. Task
+generations make late worker events inert. The client accepts aligned response options it does not
+understand, as RFC 6887 requires. Its rapid-recovery handling is deliberately per worker rather
+than a complete gateway-wide ANNOUNCE coordinator. This is a mapping candidate, not a
+reachability proof: the host/upstream firewall or the remote peer's IPv6 path can still fail, so
+only address-scoped AutoNAT may mark it tested. IPv6 also **does not compose with an IPv4-only peer**,
 and the model has no notion of *pairwise* reachability, only per-node. Keep IPv6, downgrade the
 claim to "free when it works, silently absent otherwise", and make reachability pairwise in the
 model, which is also the right input to switchboard selection.
@@ -768,7 +778,8 @@ Each needs a line in [`THREAT-MODEL.md`](THREAT-MODEL.md):
 - **Not** that hosted mode hides your address from a determined member.
 - Not that the two-way invite code works everywhere. Symmetric NAT defeats it.
 - Not that the bootstrap node is trustless. It is low-trust and swappable, which is weaker.
-- Not that IPv6 is reachable by default. Nothing here opens an IPv6 pinhole.
+- Not that IPv6 is reachable by default. PCPv6 now requests a pinhole when the exact listener and
+  scoped gateway can be discovered, but a grant is not proof of end-to-end reachability.
 
 ## 9. Build order
 
@@ -779,7 +790,7 @@ phase at the end: batching it is how unreviewed work reached `main` twice on 202
 |---|---:|---|---|---|
 | **[x]** | 0 | Fix pass 1a: identity, port, reload pipeline, UPnP window, IPv6+QUIC, `verify_self` in the join path, persisted `seq`, identify hardening | prerequisite for everything | yes, key persistence |
 | **[x]** | 1 | **Wire PEX and `AddressCache` end to end** (P1). Also fixes presence and the permanent eclipse false positive. Started P8; P8 is now **closed** without P9, which is closed as a decision rather than built: see the note below | prerequisite for rungs 2, 4, 5 | **yes**: discovery and membership surface |
-| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, guarded opt-in server on relay/rendezvous, scoped live diagnostics, and UPnP/PCP/NAT-PMP mapping are built; mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | adversarial guard review complete |
+| **[~]** | 2 | AutoNAT v2 client in `MeshBehaviour`, guarded opt-in server on relay/rendezvous, scoped live diagnostics, UPnP/PCP/NAT-PMP mapping and PCPv6 firewall pinholes are built; mDNS, recurring/pairwise reachability and escalation wiring remain | prerequisite for rungs 1, 2 | adversarial review complete |
 | **[~]** | 3 | Shared live status line/readout/diagnosis is built; concurrent rung racing, failure messaging and pre-flight self-test remain | needs 0-2 | none |
 | **[~]** | 4 | Settings / Connectivity and onboarding share the live evidence panel; the create-server mode/Advanced redesign remains | needs UI pass | none |
 | **[x]** | 5 | Two-way invite code: MAC binding, local 60s cap, four public direct candidates, retained pending join, proof before bearer disclosure, idempotent admission/replacement | needs 0-2 | adversarial review complete |
