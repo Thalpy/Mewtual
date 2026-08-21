@@ -456,6 +456,14 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
 - **Instruments** opens an on-screen keyboard that also accepts computer-keyboard or Web MIDI
   input; notes are shared live with the room. The **Jukebox** queues audio already circulating in
   the server's Files area, so it does not upload a second copy.
+- A hardware **MIDI controller** is set up under **Settings → Devices → MIDI controllers**. That
+  panel lists every input the system reports, says which ones are routed, shows the messages
+  arriving in a live monitor, and carries step-by-step setup and troubleshooting help. Controllers
+  often publish several ports and only one carries the keys, so **input routing** can pin a single
+  port; every connected input is the default. Devices may be plugged in at any time, and
+  **Rescan** covers a controller that was still enumerating when the app asked. The same
+  controller plays the **melody unlock lock**; the sustain pedal is honoured for the call
+  instrument only, because the lock's secret depends on how notes were held.
 - Media uses a peer-to-peer WebRTC mesh with authenticated signalling. STUN is configured under
   **Settings → Voice & Calls**; optional personal or server-provided TURN relays still-encrypted
   media when a direct media path cannot be made. Large rooms multiply every sender's upload, so

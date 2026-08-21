@@ -95,6 +95,12 @@
     STAFF_TOP, STAFF_BOT, HEAD_RX, HEAD_RY, buildSheet, scoreText,
   } from "./melody";
   import {
+    MIDI_FIXES, MIDI_SETUP_STEPS, describeMidiMessage, deviceRows, isMonitorWorthy, isPortRouted,
+    midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine, releaseAllNotes,
+    routeMidi, routedDevices,
+    type MidiDeviceRow, type MidiMonitorLine, type MidiPermission,
+  } from "./midi";
+  import {
     SIGIL_VIEW, SIGIL_C, R_INNER, R_OUTER, R_TEXT, R_EMOJI, NODE_R, LATTICE, nodeLabel, hitNode,
     appendHit, classifyGesture, encodeSigil, encodeSigilPath, segmentCount,
     sigilBits as sigilBitsOf, normalizeWord, MAX_SIGIL_EMOJI, SIGIL_COLORS, COLOR_NAMES,
@@ -279,6 +285,7 @@
     { group: "People & trust", title: "Vault & lock", detail: "Lock the visible session, use a passphrase, sigil or played melody, and atomically change that local vault secret after authenticating the current one.", where: "Settings → Vault & Lock", shortcut: "Ctrl+L", target: "settings:vault" },
     { group: "Voice & play", title: "Voice, camera & screen share", detail: "Join a channel voice room, switch devices live, share a camera or screen and control each peer locally.", where: "Chat channel header → Join voice", target: "surface:chat" },
     { group: "Voice & play", title: "Instruments & jukebox", detail: "Play the call-stage instrument from screen, keyboard or MIDI and queue shared server audio for the room.", where: "Voice stage → Instruments / Jukebox", target: "surface:chat" },
+    { group: "Voice & play", title: "MIDI controllers", detail: "Connect a music keyboard for the melody lock and the call instrument: live device list, per-port routing, a message monitor and setup help.", where: "Settings → Devices", target: "settings:devices" },
     { group: "Community", title: "Members, roles & badges", detail: "Inspect presence and devices; owners manage admins and removals, while moderators assign display badges.", where: "Right-click server → Server settings → Members / Badges", target: "server:members" },
     { group: "Community", title: "Moderation plane", detail: "Owners/admins inspect a per-user activity graph and signed detail timeline, issue warnings, and build evidence-backed kick cases; members vote from focused chat cards.", where: "Owner/admin: server sidebar → Moderation", target: "surface:moderation" },
     { group: "Community", title: "Invites", detail: "Generate single-use, device-bound invites; admin admissions are serialized by the owner to avoid group forks.", where: "Right-click server → Server settings → Invites", target: "server:invites" },
@@ -1374,46 +1381,205 @@
   let sheetW = $state(560);
   let sheet = $derived(buildSheet(melodySeq, melodyRhythm, sheetW));
   let sheetText = $derived(scoreText(melodySeq, melodyRhythm));
-  // Web MIDI (Chromium/WebView2): a connected controller feeds the same pitch-class handler,
-  // so you can literally play your unlock tune. Feature-detected; denied/absent is fine.
-  let midiName = $state("");
-  let midiTried = false;
-  async function initMidi() {
-    if (midiTried) return;
-    midiTried = true;
-    try {
-      const nav = navigator as Navigator & { requestMIDIAccess?: () => Promise<MIDIAccess> };
-      if (!nav.requestMIDIAccess) return;
-      const access = await nav.requestMIDIAccess();
-      const wire = () => {
-        let name = "";
-        for (const input of access.inputs.values()) {
-          name = input.name ?? "MIDI device";
-          input.onmidimessage = (m: MIDIMessageEvent) => {
-            const d = m.data;
-            if (!d || d.length < 3) return;
-            const status = d[0] & 0xf0;
-            // Note-off is either 0x80 or a 0x90 with zero velocity: controllers disagree.
-            const isOn = status === 0x90 && d[2] > 0;
-            const isOff = status === 0x80 || (status === 0x90 && d[2] === 0);
-            // Route by surface: the melody lock while locked, the call instrument drawer while
-            // in a call. Never both, and never anywhere else.
-            if (locked && unlockMethod === "melody") {
-              if (isOn) noteOn(d[1]);
-              else if (isOff) noteOff(d[1]);
-            } else if (inCall && instOpen) {
-              if (isOn) instNoteOn(d[1]);
-              else if (isOff) instNoteOff(d[1]);
-            }
-          };
-        }
-        midiName = name;
-      };
-      access.onstatechange = wire;
-      wire();
-    } catch {
-      midiName = ""; // permission denied or no MIDI subsystem: on-screen keys remain
+  // Web MIDI (Chromium/WebView2): a connected controller feeds the same note handlers the
+  // on-screen keys do, so you can literally play your unlock tune, or the call instrument.
+  // Feature-detected; absent or refused is survivable and Settings says which it was.
+  //
+  // Everything below exists because "I plugged it in and nothing happened" was the old failure
+  // mode, and it had four separate causes:
+  //   * the request was one-shot. A dismissed prompt, a driver still enumerating, or a keyboard
+  //     plugged in a minute after launch left the whole session deaf until the app restarted.
+  //   * only the LAST input in the map kept a handler. Controllers routinely publish two or three
+  //     ports and the keys come out of exactly one of them, so it was a coin toss.
+  //   * ports reporting "disconnected" counted as the connected device, so the badge could name
+  //     hardware that had already been unplugged.
+  //   * nothing was recorded when no surface wanted the notes, so there was no way to tell
+  //     "not listening" apart from "listening, and the controller is silent".
+  // Parsing and routing themselves live in midi.ts so they can be tested; this half is the
+  // browser plumbing and the surface routing.
+  const MIDI_INPUT_KEY = "catcoms.midi.input";
+  let midiSupported = $state(typeof navigator !== "undefined" && "requestMIDIAccess" in navigator);
+  let midiAccess: MIDIAccess | null = null;
+  let midiRequested = $state(false); // access has been asked for at least once this session
+  let midiBusy = $state(false);
+  let midiFailure = $state(""); // why the last request was rejected, "" when it was not
+  let midiPermission = $state<MidiPermission>("unknown");
+  let midiDevices = $state<MidiDeviceRow[]>([]);
+  // "" routes every connected input, which is right for almost everyone. Pinning one port is the
+  // escape hatch for a controller whose second or third port is the one carrying the keys.
+  let midiInput = $state(
+    typeof localStorage !== "undefined" ? localStorage.getItem(MIDI_INPUT_KEY) ?? "" : "",
+  );
+  let midiMonitor = $state<MidiMonitorLine[]>([]); // last few messages, for the Settings monitor
+  let midiLastAt = $state(0); // when anything at all last arrived
+  let midiRealtime = $state(0); // clock/sensing packets: a live cable that is sending no notes
+  let midiSeq = 0;
+  const midiRouter = newMidiRouter();
+  let midiStat = $derived(
+    midiStatus({
+      supported: midiSupported,
+      requested: midiRequested,
+      busy: midiBusy,
+      failure: midiFailure,
+      permission: midiPermission,
+      devices: midiDevices,
+    }),
+  );
+  // The drawer and lock badges want one name: the first input actually allowed to play.
+  let midiName = $derived(routedDevices(midiDevices)[0]?.label ?? "");
+
+  /** Which surface MIDI notes belong to right now, or "" when nothing is listening for them. */
+  function midiTarget(): "melody" | "instrument" | "" {
+    if (locked && unlockMethod === "melody") return "melody";
+    if (inCall && instOpen) return "instrument";
+    return "";
+  }
+  function onMidiMessage(port: MIDIInput, event: MIDIMessageEvent) {
+    const msg = parseMidiMessage(event.data);
+    if (!msg) return;
+    const routed = isPortRouted(port, midiInput);
+    midiLastAt = Date.now();
+    if (isMonitorWorthy(msg)) {
+      midiMonitor = pushMonitorLine(midiMonitor, {
+        seq: ++midiSeq,
+        port: midiPortLabel(port),
+        text: describeMidiMessage(msg),
+        routed,
+      });
+    } else {
+      midiRealtime++; // proof of life for a cable whose keys are not reaching us
     }
+    // Filtering happens AFTER the monitor on purpose: watching the port you did not pin light up
+    // is how anyone works out which of a controller's ports carries the keys. It is applied here
+    // rather than by leaving that port unwired, so it stays listed, keeps proving itself, and can
+    // be switched to without a rescan. The router only ever sees the routed port, so a port being
+    // ignored cannot corrupt its held-note bookkeeping.
+    if (!routed) return;
+    // The router is fed even when no surface wants the notes, so held state stays truthful across
+    // a surface change. Sustain is enabled ONLY for the call instrument: see routeMidi, where the
+    // melody lock's secret would otherwise change under a held pedal.
+    const target = midiTarget();
+    for (const { note, on } of routeMidi(midiRouter, msg, target === "instrument")) {
+      if (target === "melody") {
+        if (on) noteOn(note);
+        else noteOff(note);
+      } else if (target === "instrument") {
+        if (on) instNoteOn(note);
+        else instNoteOff(note);
+      }
+    }
+  }
+  /** Lift everything MIDI believes is sounding: an unplug, a surface change, or the panic button. */
+  function releaseMidiNotes() {
+    const target = midiTarget();
+    for (const { note } of releaseAllNotes(midiRouter)) {
+      if (target === "melody") noteOff(note);
+      else if (target === "instrument") instNoteOff(note);
+    }
+  }
+  /** Wire every input we can see and rebuild the device list. Safe to call as often as we like. */
+  function wireMidi() {
+    const access = midiAccess;
+    if (!access) {
+      midiDevices = [];
+      return;
+    }
+    const wasConnected = new Set(midiDevices.filter((d) => d.connected).map((d) => d.id));
+    for (const input of access.inputs.values()) {
+      // Assigning the handler implicitly opens the port. A port whose device is currently absent
+      // stays pending and starts delivering by itself the moment that device returns, which is
+      // what makes replugging work without a rescan.
+      input.onmidimessage = (event: MIDIMessageEvent) => onMidiMessage(input, event);
+    }
+    midiDevices = deviceRows(access.inputs.values(), midiInput);
+    // A controller yanked mid-note never gets to send its note-offs. Lift them here rather than
+    // leaving a tone sounding until something else happens to clear it.
+    const lost = [...wasConnected].some((id) => !midiDevices.some((d) => d.connected && d.id === id));
+    if (lost) releaseMidiNotes();
+  }
+  /**
+   * Ask for MIDI access, or just rescan when we already have it. Retryable on purpose: the old
+   * one-shot guard is exactly why a controller connected after launch never worked.
+   */
+  async function initMidi(force = false): Promise<void> {
+    if (!midiSupported || midiBusy) return;
+    if (midiAccess && !force) {
+      wireMidi();
+      return;
+    }
+    midiBusy = true;
+    midiFailure = "";
+    try {
+      const nav = navigator as Navigator & {
+        requestMIDIAccess?: (options?: { sysex?: boolean }) => Promise<MIDIAccess>;
+      };
+      if (!nav.requestMIDIAccess) {
+        midiSupported = false;
+        return;
+      }
+      // sysex stays off: nothing here sends a device anything, and asking for it would turn a
+      // routine permission into a much scarier one for no gain.
+      const access = await nav.requestMIDIAccess({ sysex: false });
+      midiAccess = access;
+      access.onstatechange = () => wireMidi(); // hot-plug: ports appear and vanish under us
+      wireMidi();
+    } catch (e) {
+      // Refused, or no MIDI subsystem at all. Deliberately not sticky: granting it later and
+      // pressing Rescan has to work without restarting the app.
+      midiFailure = String((e as Error)?.message ?? e);
+    } finally {
+      midiRequested = true;
+      midiBusy = false;
+      void refreshMidiPermission();
+    }
+  }
+  /**
+   * Track the permission separately from the request. It can be granted or revoked outside the
+   * app, so knowing it lets the panel say "refused" instead of showing a vague failure, and lets
+   * an already-granted permission wire itself up without prompting anyone.
+   */
+  async function refreshMidiPermission(): Promise<void> {
+    try {
+      const perms = navigator.permissions as Permissions | undefined;
+      const status = await perms?.query({ name: "midi" } as PermissionDescriptor);
+      if (!status) return;
+      midiPermission = status.state as MidiPermission;
+      status.onchange = () => {
+        midiPermission = status.state as MidiPermission;
+        if (status.state === "granted") void initMidi();
+      };
+    } catch {
+      midiPermission = "unknown"; // the query is Chromium-only; not knowing is not a failure
+    }
+  }
+  /**
+   * Startup: if MIDI is already granted, connect without asking anyone anything. This is what
+   * makes an already-plugged-in keyboard play the lock screen straight away, instead of only
+   * after the instrument drawer has been opened once to trigger the old lazy request.
+   */
+  async function primeMidi(): Promise<void> {
+    if (!midiSupported) return;
+    await refreshMidiPermission();
+    if (midiPermission === "granted") void initMidi();
+  }
+  // Opening Settings → Devices rescans an existing grant so the list is never stale by the time
+  // it is looked at. It deliberately never prompts: an unasked permission stays behind the
+  // explicit button, because a permission popup nobody asked for is how people end up denying it.
+  // untrack because the rescan reads and rewrites `midiDevices`; without it the effect would
+  // depend on its own output and re-run itself until Svelte gave up. Opening the page is the
+  // trigger, nothing else.
+  $effect(() => {
+    if (showSettings && settingsPage === "devices") {
+      untrack(() => {
+        if (midiAccess) void initMidi();
+      });
+    }
+  });
+  function setMidiInput(id: string) {
+    releaseMidiNotes(); // a note held on a port that is about to stop being routed would hang
+    midiInput = id;
+    try { localStorage.setItem(MIDI_INPUT_KEY, id); } catch { /* ignore */ }
+    wireMidi(); // recompute which rows are routed
   }
   function unlockSecret(): string {
     return unlockMethod === "pass" ? passphrase : unlockMethod === "sigil" ? sigilSecret : melodySecret;
@@ -9946,6 +10112,9 @@
     return state === "failed" || state === "disconnected" || state === "closed" ? "lost" : "neg";
   }
   function toggleInstDrawer() {
+    // Lift MIDI notes while the drawer is still their target, otherwise closing it mid-hold
+    // strands a tone that nothing is left to release.
+    if (instOpen) releaseMidiNotes();
     instOpen = !instOpen;
     if (instOpen) void initMidi(); // only ask for MIDI once a keyboard is actually on screen
   }
@@ -11026,6 +11195,9 @@
 
   onMount(() => {
     syncMaximized();
+    // Reconnect a controller that was already granted and already plugged in, silently. Waiting
+    // for the instrument drawer to be opened once was half of why MIDI felt like a coin toss.
+    void primeMidi();
     // Look for a new release shortly after launch rather than during it: the first seconds
     // belong to unlocking and reconnecting, and nothing here is urgent.
     const updateTimer = setTimeout(() => void checkForUpdate(), 4000);
@@ -13511,7 +13683,7 @@
           Passphrase <span class="ul-rec">recommended</span>
         </button>
         <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "sigil"} aria-selected={unlockMethod === "sigil"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "sigil"; }}>Sigil</button>
-        <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; initMidi(); }}>Melody</button>
+        <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; void initMidi(); }}>Melody</button>
       </div>
       {#if unlockMethod === "pass"}
         <label class="field">
@@ -16593,14 +16765,103 @@
               <div class="stx-crumb">SETTINGS // ACCOUNT // DEVICES</div>
               <h1>Devices</h1>
               <section class="set-section">
+                <h3>Linked devices</h3>
                 <p class="muted small">
                   Link another device to your identity. The new device gets its own key: nothing
                   is copied: and nothing at all happens until you approve it here on this device.
                 </p>
                 <button class="ghost" onclick={() => (showLinkDevice = true)}>⛓ Link a new device…</button>
+                <p class="muted small">Your linked devices are listed per server (each server sees its own identity): find them under a server's Settings → Devices.</p>
+              </section>
+              <!--
+                MIDI hardware, deliberately on the same page as linked devices: from where the user
+                stands both are "things I plugged into Mewtual". Nothing here touches identity, and
+                the panel says so, because a keyboard listed next to key-bearing companions would
+                otherwise read as something that can see your messages.
+              -->
+              <section class="set-section">
+                <h3>MIDI controllers</h3>
+                <p class="muted small">
+                  A USB or Bluetooth music keyboard plays the melody unlock lock and the instrument
+                  in a voice call. It is input hardware only: it carries no identity, joins no
+                  server, and Mewtual never sends it anything. Notes reach other people only when
+                  you are in a call, mixed the same way your voice is.
+                </p>
+                <div class="midi-status" data-level={midiStat.level}>
+                  <span class="midi-dot" aria-hidden="true"></span>
+                  <span class="midi-verdict">
+                    <strong>{midiStat.title}</strong>
+                    <small class="muted">{midiStat.detail}</small>
+                  </span>
+                  <button
+                    type="button"
+                    class="ghost small"
+                    disabled={midiBusy || !midiSupported}
+                    onclick={() => void initMidi(true)}
+                  >{midiBusy ? "Scanning…" : midiRequested ? "Rescan" : "Turn on MIDI input"}</button>
+                </div>
+                {#if midiDevices.length}
+                  <ul class="dev-panel midi-list">
+                    {#each midiDevices as d (d.id)}
+                      <li class:gone={!d.connected} title={d.id}>
+                        <span class="midi-live" class:on={d.connected && d.routed} aria-hidden="true"></span>
+                        <span class="midi-nm">{d.label}</span>
+                        {#if d.maker}<span class="dev-tag">· {d.maker}</span>{/if}
+                        <span class="stage-spacer"></span>
+                        <span class="midi-state">{#if !d.connected}unplugged{:else if !d.routed}filtered out{:else if d.listening}routed{:else}opening{/if}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+                <label class="field midi-route">
+                  <span class="muted small">
+                    Input routing: leave this on every input unless one specific port is the one
+                    carrying your keys.
+                  </span>
+                  <select value={midiInput} onchange={(e) => setMidiInput(e.currentTarget.value)}>
+                    <option value="">Every connected input</option>
+                    {#each midiDevices as d (d.id)}
+                      <option value={d.id}>{d.label}{d.connected ? "" : " (not connected)"}</option>
+                    {/each}
+                    <!-- A pinned port saved by name, or one that has since vanished entirely: keep
+                         it selectable so the picker never looks empty and can always be undone. -->
+                    {#if midiInput && !midiDevices.some((d) => d.id === midiInput)}
+                      <option value={midiInput}>{midiInput} (saved, not found)</option>
+                    {/if}
+                  </select>
+                </label>
+                <div class="midi-mon" role="log" aria-live="polite" aria-label="Incoming MIDI messages">
+                  {#if midiMonitor.length}
+                    {#each midiMonitor as line (line.seq)}
+                      <span class="midi-mon-line" class:ignored={!line.routed}>
+                        <b>{line.port}</b><i>{line.text}</i>{#if !line.routed}<em>filtered out</em>{/if}
+                      </span>
+                    {/each}
+                  {:else if midiRealtime}
+                    <span class="muted">The cable is alive ({midiRealtime} timing messages) but no notes have arrived. Play a key, and check nothing else is holding the port.</span>
+                  {:else}
+                    <span class="muted">Play a key on the controller: everything it sends shows up here, whether or not anything is listening for it.</span>
+                  {/if}
+                </div>
+                <div class="midi-actions">
+                  <button type="button" class="ghost small" onclick={releaseMidiNotes}>Release stuck notes</button>
+                  <button type="button" class="ghost small" onclick={() => { midiMonitor = []; midiRealtime = 0; }}>Clear monitor</button>
+                  {#if midiLastAt}<span class="muted small">last message {relTime(Math.max(0, nowTick - midiLastAt))} ago</span>{/if}
+                </div>
               </section>
               <section class="set-section">
-                <p class="muted small">Your linked devices are listed per server (each server sees its own identity): find them under a server's Settings → Devices.</p>
+                <h3>Setting up a controller</h3>
+                <ol class="midi-help">
+                  {#each MIDI_SETUP_STEPS as step (step.title)}
+                    <li><strong>{step.title}</strong><span class="muted small">{step.detail}</span></li>
+                  {/each}
+                </ol>
+                <h4 class="midi-subhead">When it does not work</h4>
+                <ul class="midi-help fixes">
+                  {#each MIDI_FIXES as fix (fix.title)}
+                    <li><strong>{fix.title}</strong><span class="muted small">{fix.detail}</span></li>
+                  {/each}
+                </ul>
               </section>
             {:else if settingsPage === "vault"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
@@ -17042,6 +17303,8 @@
               <section class="set-section">
                 <h3>Devices</h3>
                 <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
+                <p class="muted small">A MIDI keyboard for the call instrument is set up in Settings → Devices, along with a monitor for checking one that is not behaving.</p>
+                <button type="button" class="ghost small" onclick={() => (settingsPage = "devices")}>Open Devices</button>
               </section>
               <section class="set-section">
                 <h3>NAT traversal</h3>

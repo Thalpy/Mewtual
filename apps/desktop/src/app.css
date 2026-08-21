@@ -5886,6 +5886,140 @@ button.you-panel:hover {
 .pair-results li.ok { color: var(--ok); }
 .pair-results li.err { color: var(--danger); }
 
+/* --- MIDI controllers (Settings → Devices) ---
+   Hardware rather than identity, but it sits on the same page because that is where a user goes
+   looking for "things I plugged in". It borrows the linked-device row shape so the page still
+   reads as one list, and takes its tint from the semantic status colours rather than the accent:
+   every state here is a diagnosis, and diagnoses should not be brand-coloured. */
+.midi-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0 2px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--muted);
+  border-radius: var(--r);
+  background: var(--bg-0);
+}
+.midi-status[data-level="ok"] { border-left-color: var(--ok); }
+.midi-status[data-level="warn"] { border-left-color: var(--warn); }
+.midi-status[data-level="bad"] { border-left-color: var(--danger); }
+.midi-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.midi-status[data-level="ok"] .midi-dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 55%, transparent);
+}
+.midi-status[data-level="warn"] .midi-dot { background: var(--warn); }
+.midi-status[data-level="bad"] .midi-dot { background: var(--danger); }
+.midi-verdict {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.midi-verdict strong { font-size: 0.8rem; }
+.midi-verdict small { font-size: 0.72rem; line-height: 1.4; }
+.midi-status button { flex: none; }
+
+.midi-list li.gone { opacity: 0.55; }
+.midi-live {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--border);
+}
+.midi-live.on { background: var(--ok); }
+.midi-nm {
+  font-size: 0.82rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.midi-state {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: none;
+}
+.midi-route { margin-top: 8px; }
+.midi-route select { width: 100%; }
+/* The monitor is the whole "is it actually sending anything" answer, so it keeps its height even
+   while empty: a box that collapses to nothing reads as a box that is not working. */
+.midi-mon {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 7px 9px;
+  min-height: 4.5rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
+.midi-mon-line { display: flex; gap: 8px; }
+.midi-mon-line b {
+  color: var(--muted);
+  font-weight: 400;
+  flex: none;
+  max-width: 11em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.midi-mon-line i { color: var(--info); font-style: normal; }
+.midi-mon-line:first-child i { color: var(--ok); } /* newest on top: one key press is visibly live */
+/* A port the filter is dropping still appears, dimmed and labelled: seeing the other port light
+   up is how you find the one carrying the keys. */
+.midi-mon-line.ignored { opacity: 0.6; }
+.midi-mon-line.ignored i { color: var(--muted); }
+.midi-mon-line em {
+  color: var(--warn);
+  font-style: normal;
+  white-space: nowrap;
+}
+.midi-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.midi-subhead {
+  margin: 12px 0 0;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.midi-help {
+  margin: 6px 0 0;
+  padding-left: 1.15rem;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.midi-help strong { display: block; font-size: 0.8rem; }
+.midi-help span { display: block; line-height: 1.4; }
+
 /* ============================================================
    Wiki overhaul; per-page md/wikitext, auto-contents, page tools.
    The article view borrows Wikipedia's bones (title rule, contents

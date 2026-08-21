@@ -61,8 +61,11 @@
 Features/things in stack:
 1. Draw a waveform or shared visualizer for MIDI/instruments in voice chat (fun; decide whether
    this stays a toy or becomes a small collaborative music surface).
-2. Add better MIDI settings: device routing, velocity curve, sustain handling and per-instrument
-   receive controls.
+2. Add better MIDI settings: ~~device routing~~, velocity curve, ~~sustain handling~~ and
+   per-instrument receive controls. Settings → Devices now carries the controller panel (live
+   device list, per-port routing, message monitor, panic, setup/troubleshooting help) and the
+   pedal is handled for the call instrument. Velocity is parsed and shown in the monitor but not
+   yet mapped to loudness, and per-instrument receive controls are untouched.
 3. Explicit settings gaps: vault re-key, keybind remapping, notification granularity, and the
    protocol-backed Security / Server Nodes pages.
 4. The agreed experimental queue — **Campfire rooms, Promote conversation to wiki, Memory
