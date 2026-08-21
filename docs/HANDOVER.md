@@ -6,7 +6,7 @@ Authoritative current-state document. Read this first, then
 [`THREAT-MODEL.md`](THREAT-MODEL.md) tracks what a modified ("hacked") client can/can't do;
 the protocol- vs honest-client-enforced boundary and the hardening backlog.
 
-## Status (as of 2026-08-21)
+## Status (as of 2026-08-22)
 
 - **Phases 0 → 10 COMPLETE. The live work is the desktop client's real-time layer;
   group voice (phases 1–3 shipped; see [§ Voice](#voice-group-calls)).**
@@ -302,10 +302,11 @@ TCP** (verified, incl. through a relay).
 
 The historical 8… row still ends with “AddressCache persistence” in its original remaining list.
 That item is now complete: the desktop seals an integrity-tagged cache beside the server snapshot
-and re-verifies it on load. Ordinary interface refresh is also live: the roughly-minute discovery
-pass polls route-selected IPv4/IPv6 sources, reconciles per-source address ownership, updates
-libp2p external addresses, and publishes one newer signed record before PEX. Native OS change
-events remain a latency refinement. Current discovery follow-ups are pairwise reachability
+and re-verifies it on load. Ordinary interface refresh is also live: one process-wide native
+route/interface monitor debounces platform events and wakes every server to poll route-selected
+IPv4/IPv6 sources, reconcile per-source address ownership, update libp2p external addresses, and
+publish one newer signed record before PEX. The roughly-minute discovery poll remains the repair
+path when native monitoring is unavailable or misses an event. Current discovery follow-ups are pairwise reachability
 evidence, reciprocal-dial signalling, swarm-style indirect probes/views, typed member health, and
 TTL-aware rendezvous scheduling; see the checked backlog in `design-postjoin-discovery.md`.
 

@@ -95,8 +95,10 @@ Implementations:
     owner while preserving an identical active router-mapping owner. The desktop's discovery timer
     uses this with a route-source poll: changed raw IPv4/IPv6 entries update the aggregate
     owner map, AutoNAT/rendezvous external set, Connectivity, and one new signed peer-record epoch
-    before that pass's PEX. Native OS network-change events remain a latency refinement; polling is
-    the portable recovery path.
+    before that pass's PEX. One process-wide `netwatch` monitor wakes every server after a bounded
+    debounce when the native route/interface state changes. It uses platform notifications rather
+    than a second fast poll; the normal discovery poll remains the recovery path if monitoring is
+    unavailable or misses an event.
     PCPv6 tracks Epoch for every response and randomizes rapid renewal after a restart signal, but
     each transport/interface worker observes that signal independently; it is not a full
     gateway-wide RFC ANNOUNCE coordinator.

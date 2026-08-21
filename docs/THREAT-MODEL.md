@@ -68,8 +68,9 @@ table with the commit that closed it.
   Failed current epochs retry with monotonic exponential backoff and jitter; a newly signed epoch
   is tried immediately. Each discovery pass also asks the local kernel which IPv4/IPv6 source it
   would route toward documentation-only destinations (UDP `connect` sends no packet), then
-  republishes a changed raw route set. Exact ownership preserves an identical manual/mapping/relay
-  route; without native network-change notifications the update can lag by roughly one period.
+  republishes a changed raw route set. A process-wide native route/interface monitor normally
+  triggers that operation after a short debounce; the discovery-period poll repairs a missed event
+  or unavailable monitor. Exact ownership preserves an identical manual/mapping/relay route.
   The cache intentionally replaces rather than permanently unions withdrawn
   public IPs: an ISP may reassign an old address, and Noise authentication prevents impersonation
   but not the metadata/connection cost of probing its new holder. PEX success proves one live

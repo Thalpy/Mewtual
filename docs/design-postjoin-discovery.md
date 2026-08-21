@@ -1,6 +1,6 @@
 # Design; post-join steady-state rendezvous discovery
 
-Status: **implemented; self-healing retry hardened 2026-08-21.** After joining, a member periodically re-registers itself
+Status: **implemented; self-healing retry hardened 2026-08-22.** After joining, a member periodically re-registers itself
 at the rendezvous under its rotation-aware namespaces and discovers + dials *other members* there;
 so members re-find each other after a restart / address change with **no fresh invite**. Built on
 the 6e-3d primitives (`rendezvous_namespaces`, the `DiscoveryPolicy`, PEX), driven by the per-server
@@ -18,7 +18,7 @@ See also: [`design-6e-rendezvous.md`](design-6e-rendezvous.md), [`design-rendezv
 - [x] Poll the route-selected IPv4/IPv6 interfaces on the discovery cadence; publish one fresh
   signed epoch and withdraw vanished raw routes without removing identical manual/mapping/relay
   ownership.
-- [ ] Subscribe to native OS network-change events for lower latency; retain polling as the
+- [x] Subscribe to native OS network-change events for lower latency; retain polling as the
   portable repair path and debounce event bursts into one signed epoch.
 - [ ] Add an optional, tightly bounded previous-address-epoch grace window (one record, minutes,
   current routes first); never build an indefinite address history.
@@ -139,16 +139,48 @@ the invite); steady-state adds the rotation-aware namespaces on top.
   remains a storage-engine refinement.
 - **Re-registration cadence:** a fixed interval (re-register every tick) rather than TTL-driven; a
   TTL-aware schedule is a refinement.
-- **Ordinary interface churn; polling DONE, native notification deferred:** every discovery pass
-  re-samples the kernel's route-selected IPv4/IPv6 sources. A changed set updates external-address
-  ownership, the live bootstrap, Connectivity, and one new signed peer-record epoch before PEX in
-  that same pass. Exact ownership prevents a disappearing raw GUA from removing an identical live
-  PCPv6/manual route. Native platform notifications would reduce the current roughly one-minute
-  detection latency; they must be debounced and polling must remain the portable repair path.
+- **Ordinary interface churn; DONE:** one process-wide native monitor consumes Windows route/IP
+  notifications, Linux/Android netlink, and Apple/BSD route notifications. Callback bursts are
+  coalesced before every running server re-samples the kernel's route-selected IPv4/IPv6 sources.
+  A changed set updates external-address ownership, the live bootstrap, Connectivity, and one new
+  signed peer-record epoch before PEX in that same pass. Exact ownership prevents a disappearing
+  raw GUA from removing an identical live PCPv6/manual route. The roughly-minute discovery poll
+  remains active as the portable repair path if platform monitoring fails or misses an event.
 - **Pairwise reachability and reciprocal dial signalling:** not yet represented. A connected member
   can distribute signed records, but it does not yet carry a bounded, authenticated “please dial
   this member's fresh candidate now” signal or report which address/transport worked from its own
   vantage point.
+
+## Reciprocal-dial candidate for adversarial review
+
+The smallest zero-server design is a **targeted member-control gossip**, not a new public service.
+If A has B's current signed record but cannot establish a direct link, A publishes a request on the
+existing member-only control topic. Any already-connected overlay path may carry it, but only B is
+named to act. A simultaneously retries B's current candidates; B dials A's authenticated candidates
+when the request arrives. The overlap is useful for QUIC/NAT punching. It does not claim general TCP
+simultaneous-open and cannot help when A has no surviving group connection at all.
+
+The proposed frame binds `(domain, group, target device, requester PeerDescriptor hash, issued_at,
+nonce)` under A's device signature. B must verify that A and B are current members, the embedded
+descriptor is A's own valid newer-or-equal record, the request is fresh, and every route passes the
+existing PEX shape/peer-id/global-address checks. The signal then enters an actor-owned dial queue;
+it must not dial synchronously in the gossip handler or bypass `DiscoveryPolicy`, connection limits,
+the retry ledger, or the transport peer suffix.
+
+Before implementation, an adversarial pass needs to settle these boundaries:
+
+- a per-requester, per-target and whole-node budget, plus a bounded nonce/dedupe ledger;
+- whether embedding a newer descriptor is safe or the signal must reference a record already
+  learned through PEX;
+- how one member's self-signed public endpoints can be prevented from becoming a distributed port
+  scanner beyond the existing address validation and dial budgets;
+- whether targeted control gossip leaks unacceptable pairwise-attempt metadata to other current or
+  grandfathered-topic members, and whether an addressed one-hop helper protocol is worth its extra
+  state and blocking surface;
+- the automatic trigger: at most a small number of due disconnected peers per discovery pass, with
+  a fresh signed epoch/disconnect allowed to bypass ordinary delay but never create a dial storm;
+- deterministic proof that unknown old clients ignore the additive control tag, relaying survives
+  A→C→B, repeated requests coalesce, and removal/label rotation immediately ends authorization.
 
 ## Address-history policy
 

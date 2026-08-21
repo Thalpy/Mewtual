@@ -30,6 +30,10 @@ catcoms-rt = { path = "../../../crates/catcoms-rt" }
 catcoms-sync = { path = "../../../crates/catcoms-sync" }
 catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
 catcoms-log = { path = "../../../crates/catcoms-log" }
+# The router-mapping stack already pins this monitor transitively. Declare it directly because the
+# desktop owns the process-wide OS route/interface watcher used by post-join self-healing.
+netwatch = "=0.18.0"
+n0-watcher = "=1.0.0-rc.0"
 # The bridge emits its own spans now: log_ui carries what the webview saw into the same file.
 tracing = "0.1"
 tauri-plugin-updater = "2"

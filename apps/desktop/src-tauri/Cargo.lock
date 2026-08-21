@@ -4047,6 +4047,8 @@ dependencies = [
  "catcoms-sync",
  "hex",
  "libp2p",
+ "n0-watcher",
+ "netwatch",
  "serde",
  "serde_json",
  "tauri",

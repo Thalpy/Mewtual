@@ -307,9 +307,10 @@ A newly signed address update is tried immediately. Any reachable member can sup
 records for the rest of the group, so reconnecting through one member is enough to start healing
 the address book and catching up missed messages. “Offline” in the roster means this device has no
 live authenticated connection from your current vantage point; another member may still reach it.
-About once per discovery cycle, Mewtual also rechecks the IPv4/IPv6 addresses selected by the local
-network. Moving between networks or receiving a new dynamic address therefore republishes a fresh
-signed record without restarting the app, although detection may take roughly a minute.
+Mewtual also watches the operating system for route and IPv4/IPv6 interface changes. Moving between
+networks or receiving a new dynamic address normally republishes a fresh signed record after a
+short settling delay, without restarting the app. A roughly-minute check remains active in case the
+operating system notification is unavailable or missed.
 
 Mewtual does not keep probing every historical public IP forever. Dynamic addresses can be
 reassigned to another subscriber, so the latest signed record replaces withdrawn addresses while
