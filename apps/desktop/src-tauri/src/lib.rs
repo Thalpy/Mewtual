@@ -3031,7 +3031,11 @@ async fn discover_and_connect(
 /// reaches us through the relay with **no port-forward** (zero-config NAT traversal).
 /// `rendezvous` is an optional zero-knowledge rendezvous multiaddr; when given, we register at it
 /// so a joiner can discover us with **no hard-coded address at all** (just the pasted invite).
+/// `server_name` is an optional local display label for the server/DM rail entry; if omitted or
+/// empty, it defaults to `display_name` (preserving backwards compatibility). `display_name` is
+/// used to initialize the user's MLS profile in the group.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn found_server(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -3040,6 +3044,7 @@ async fn found_server(
     relay: String,
     rendezvous: String,
     is_dm: bool,
+    server_name: Option<String>,
 ) -> Result<FoundResult, String> {
     require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
@@ -3056,6 +3061,7 @@ async fn found_server(
         relay,
         rendezvous,
         is_dm,
+        server_name,
         &mut diag,
     )
     .await;
@@ -3079,6 +3085,7 @@ async fn found_server_inner(
     relay: String,
     rendezvous: String,
     is_dm: bool,
+    server_name: Option<String>,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     // This server's own network identity + stable port, minted once here and sealed to disk, so
@@ -3122,7 +3129,11 @@ async fn found_server_inner(
     diag.advertised = bootstrap.clone();
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
-    let name = display_name.clone();
+    // `server_name` is the local rail label (DM: friend's name). If omitted/empty, fall back to
+    // `display_name` (user's profile name) for backwards compatibility.
+    let name = server_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| display_name.clone());
     let mut server = Server::found(
         mesh,
         device,
@@ -3340,6 +3351,7 @@ async fn join_server(
     display_name: String,
     is_dm: bool,
     allow_switchboards: bool,
+    server_name: Option<String>,
 ) -> Result<FoundResult, String> {
     require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
@@ -3354,6 +3366,7 @@ async fn join_server(
         display_name,
         is_dm,
         allow_switchboards,
+        server_name,
         &mut diag,
     )
     .await;
@@ -3366,6 +3379,7 @@ async fn join_server(
 
 /// The body of [`join_server`], split out so every exit records the attempt for the connectivity
 /// panel (the exits that used to say nothing are the whole reason that panel exists).
+#[allow(clippy::too_many_arguments)]
 async fn join_server_inner(
     app: &AppHandle,
     state: &AppState,
@@ -3373,6 +3387,7 @@ async fn join_server_inner(
     display_name: String,
     is_dm: bool,
     allow_switchboards: bool,
+    server_name: Option<String>,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
@@ -3665,7 +3680,11 @@ async fn join_server_inner(
     }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
-    let name = display_name.clone();
+    // `server_name` is the local rail label (DM: friend's name). If omitted/empty, fall back to
+    // `display_name` (user's profile name) for backwards compatibility.
+    let name = server_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| display_name.clone());
     let used_reply_path = reply_expires_at_ms.is_some();
     let used_switchboard_path = switchboard_expires_at_ms.is_some();
     let join = if switchboard_expires_at_ms.is_some() {
@@ -9408,5 +9427,67 @@ mod tests {
             copy_backup_tree(&source, &destination).is_err(),
             "an existing backup directory must never be merged into or overwritten"
         );
+    }
+
+    #[test]
+    fn found_server_server_name_falls_back_to_display_name_when_empty() {
+        // When server_name is None or empty, the server entry name should fall back to display_name
+        // This preserves backwards compatibility for standard server creation
+        let display_name = "My Server".to_string();
+        let server_name: Option<String> = None;
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "My Server");
+
+        let server_name = Some("".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "My Server");
+
+        let server_name = Some("   ".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "My Server");
+    }
+
+    #[test]
+    fn found_server_server_name_used_when_provided() {
+        // When server_name is provided and non-empty, it should be used for the server entry name
+        let display_name = "My Profile Name".to_string();
+        let server_name = Some("Friend's Server".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "Friend's Server");
+    }
+
+    #[test]
+    fn join_server_server_name_falls_back_to_display_name_when_empty() {
+        // Same logic for join_server
+        let display_name = "Joiner's Profile".to_string();
+        let server_name: Option<String> = None;
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "Joiner's Profile");
+
+        let server_name = Some("".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "Joiner's Profile");
+    }
+
+    #[test]
+    fn join_server_server_name_used_when_provided() {
+        let display_name = "Joiner's Profile".to_string();
+        let server_name = Some("DM with Friend".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "DM with Friend");
     }
 }

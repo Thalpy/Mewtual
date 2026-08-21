@@ -4314,6 +4314,7 @@
     void loadUiContinuity(continuityGeneration).finally(() => {
       if (continuityGeneration === uiStateLoadGeneration && !locked && firstServer) void switchServer(firstServer.id);
     });
+    refreshAllDmRequests();
     loadInbox();
     refreshAllServerIcons();
   }
@@ -4506,7 +4507,9 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("found_server", { displayName: name, advertise, relay, rendezvous, isDm: true });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || name).trim() || "me";
+      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
       addServer(r, name);
       dmName = "";
       showNewDm = false;
@@ -4524,7 +4527,9 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: name, isDm: true, allowSwitchboards: false });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || name).trim() || "me";
+      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
       addServer(r, name);
       dmName = "";
       dmInvite = "";
@@ -4560,7 +4565,9 @@
     notice = "";
     menu = null;
     try {
-      const r = await invoke<Found>("found_server", { displayName: name, advertise, relay, rendezvous, isDm: true });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || name).trim() || "me";
+      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
@@ -4591,12 +4598,32 @@
     }
   }
 
+  // Refresh pending DM requests across all non-DM servers (for inbox aggregation).
+  async function refreshAllDmRequests() {
+    try {
+      const allReqs: DmRequest[] = [];
+      for (const s of servers.filter((s) => !s.isDm)) {
+        try {
+          const reqs = await invoke<{ from_fp: string; from_name: string; invite: string }[]>("get_dm_requests", { server: s.id });
+          allReqs.push(...reqs.map((r) => ({ server: s.id, ...r })));
+        } catch {
+          /* a server that's gone / mid-shutdown: ignore */
+        }
+      }
+      dmRequests = allReqs;
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Accept a friend request: join the DM group, then clear the request on the carrying server.
   async function acceptDmRequest(req: DmRequest) {
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: req.from_name, isDm: true, allowSwitchboards: false });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || req.from_name).trim() || "me";
+      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
       addServer(r, req.from_name);
       await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
       dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
@@ -4636,6 +4663,7 @@
     menu = null;
     showNewDm = false;
     showAddFriend = false;
+    refreshAllDmRequests();
     refreshDmStats();
     if (dmList.length) switchServer(dmList[0].id);
     else {
@@ -14674,7 +14702,13 @@
                         {#if it.mention}<span class="inbox-tag mention-tag">@ mention</span>{/if}
                         {#if it.reply}<span class="inbox-tag reply-tag">↰ reply</span>{/if}
                       </span>
-                      <span class="inbox-where">{it.is_dm ? "Direct message" : it.server_name} · #{inboxChannelName(it)}</span>
+                      <span class="inbox-where">
+                        {#if it.is_dm}
+                          Direct message · @{it.server_name}
+                        {:else}
+                          {it.server_name} · #{inboxChannelName(it)}
+                        {/if}
+                      </span>
                       <span class="inbox-time" title={new Date(it.ts).toLocaleString()}>{fmtTime(it.ts)}</span>
                     </div>
                     <div class="inbox-body">
@@ -14837,7 +14871,11 @@
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->
           <h2 class="chan-head">
-            <span class="chan-title"><span class="ch-hash">#</span>{activeName()}</span>
+            {#if cur?.isDm}
+              <span class="chan-title"><span class="ch-hash">@</span>{cur.name}</span>
+            {:else}
+              <span class="chan-title"><span class="ch-hash">#</span>{activeName()}</span>
+            {/if}
             {#if editingTopic}
               <!-- svelte-ignore a11y_autofocus -->
               <input
