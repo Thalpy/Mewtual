@@ -37,7 +37,7 @@ use catcoms_sync::{join_namespace, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{http, AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
@@ -5487,6 +5487,157 @@ async fn get_call_transport(
     })
 }
 
+/// How much plaintext one media response may carry. A player asks for the window it is about to
+/// show; this bounds what a hostile or buggy `Range` can make the app allocate at once, and keeps
+/// one response comfortably inside a single sealed chunk.
+const MEDIA_WINDOW_BYTES: usize = 2 * 1024 * 1024;
+
+/// The custom scheme the webview plays shared media through: `catcoms-media://a/<server>/<cid>`.
+/// Windows rewrites this to `http://catcoms-media.localhost/...`, so the host is never parsed;
+/// only the path is.
+const MEDIA_SCHEME: &str = "catcoms-media";
+
+/// Parse `/<server>/<cid>` out of a media URI path. Deliberately strict: the server id must be a
+/// plain integer and the cid lowercase hex of exactly 32 bytes, so nothing resembling a path
+/// traversal or a foreign identifier reaches the file index.
+fn parse_media_path(path: &str) -> Option<(u64, String)> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    let server: u64 = parts.next()?.parse().ok()?;
+    let cid = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if cid.len() != 64 || !cid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((server, cid.to_ascii_lowercase()))
+}
+
+/// Parse a single-range `bytes=start-[end]` header into a start offset and a length cap.
+///
+/// Only the first range of a possibly-multi-range header is honoured, and a multipart response is
+/// never produced: media elements ask for one range at a time, and answering a multi-range request
+/// with the first range is a legal (if partial) response, where mis-assembling a multipart body
+/// would corrupt playback silently.
+fn parse_range_header(raw: &str, total: u64) -> Option<(u64, usize)> {
+    let spec = raw.trim().strip_prefix("bytes=")?;
+    let first = spec.split(',').next()?.trim();
+    let (from, to) = first.split_once('-')?;
+    if from.is_empty() {
+        // A suffix range ("-500") means the LAST n bytes, not the first n.
+        let n: u64 = to.parse().ok()?;
+        let n = n.min(total);
+        return Some((
+            total.saturating_sub(n),
+            n.min(MEDIA_WINDOW_BYTES as u64) as usize,
+        ));
+    }
+    let start: u64 = from.parse().ok()?;
+    let len = if to.is_empty() {
+        MEDIA_WINDOW_BYTES
+    } else {
+        let end: u64 = to.parse().ok()?;
+        // `bytes=0-0` is one byte: the range is inclusive at both ends.
+        end.saturating_sub(start)
+            .saturating_add(1)
+            .min(MEDIA_WINDOW_BYTES as u64) as usize
+    };
+    Some((start, len))
+}
+
+/// Serve one media request. Split out from the protocol registration so the whole path is
+/// testable and so every failure returns a status rather than panicking inside the webview's
+/// scheme handler.
+async fn serve_media(
+    state: &AppState,
+    path: &str,
+    range: Option<String>,
+) -> http::Response<Vec<u8>> {
+    let deny = |code: http::StatusCode| {
+        http::Response::builder()
+            .status(code)
+            .header("Access-Control-Allow-Origin", "null")
+            .body(Vec::new())
+            .expect("static response builds")
+    };
+    let Some((server, cid)) = parse_media_path(path) else {
+        return deny(http::StatusCode::BAD_REQUEST);
+    };
+    // The same boundary every native command sits behind: a locked vault serves no plaintext,
+    // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
+    if require_unlocked_session(state).await.is_err() {
+        return deny(http::StatusCode::FORBIDDEN);
+    }
+    let Ok(actor) = actor_of(state, server).await else {
+        return deny(http::StatusCode::NOT_FOUND);
+    };
+    let Ok(raw) = hex::decode(&cid) else {
+        return deny(http::StatusCode::BAD_REQUEST);
+    };
+
+    // One probing read establishes the total size, so a Range can be resolved against it. Asking
+    // for a single byte keeps the probe to one chunk.
+    let probe = match actor.read_file_range(raw.clone(), 0, 1).await {
+        Ok(probe) => probe,
+        Err(_) => return deny(http::StatusCode::NOT_FOUND),
+    };
+    let total = probe.total_size;
+    let mime = safe_media_mime(&probe.mime);
+
+    let (start, len) = match range.as_deref().and_then(|r| parse_range_header(r, total)) {
+        Some(parsed) => parsed,
+        None if range.is_some() => return deny(http::StatusCode::RANGE_NOT_SATISFIABLE),
+        None => (0, MEDIA_WINDOW_BYTES),
+    };
+    if start > total {
+        return http::Response::builder()
+            .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
+            .header("Content-Range", format!("bytes */{total}"))
+            .body(Vec::new())
+            .expect("static response builds");
+    }
+    let window = match actor.read_file_range(raw, start, len).await {
+        Ok(window) => window,
+        Err(_) => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let end = start + window.bytes.len() as u64;
+    // Always a 206 with an explicit Content-Range: the response is a window by construction, and
+    // claiming 200 for a partial body is what makes a player think the file is truncated.
+    http::Response::builder()
+        .status(http::StatusCode::PARTIAL_CONTENT)
+        .header("Content-Type", mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", window.bytes.len().to_string())
+        .header(
+            "Content-Range",
+            format!("bytes {start}-{}/{total}", end.saturating_sub(1).max(start)),
+        )
+        // Plaintext from an encrypted vault: never cached to disk by the webview, and never
+        // readable by anything the page might embed.
+        .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", "null")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(window.bytes)
+        .expect("response builds")
+}
+
+/// Constrain what a shared file's declared MIME may become on a media response. The value is
+/// author-controlled, and `nosniff` only helps once the type itself is one we chose: an attacker
+/// who could name `text/html` here would have a same-origin script vector.
+fn safe_media_mime(declared: &str) -> String {
+    let lowered = declared.trim().to_ascii_lowercase();
+    let base = lowered.split(';').next().unwrap_or("").trim().to_string();
+    let ok = matches!(base.split('/').next(), Some("audio" | "video" | "image"))
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'+' | b'.'));
+    if ok {
+        base
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 fn validate_ui_state_json(json: &str) -> Result<(), String> {
     if json.len() > MAX_UI_STATE_BYTES {
         return Err("UI continuity state is too large".into());
@@ -7714,6 +7865,22 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
+        // Shared media plays straight out of the vault instead of crossing the IPC bridge as a
+        // base64 string. The handler answers Range requests, so a player starts on the first
+        // chunk and a seek costs one chunk, and the bytes never become a JS string at all.
+        .register_asynchronous_uri_scheme_protocol(MEDIA_SCHEME, |app, request, responder| {
+            let handle = app.app_handle().clone();
+            let path = request.uri().path().to_string();
+            let range = request
+                .headers()
+                .get(http::header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                responder.respond(serve_media(&state, &path, range).await);
+            });
+        })
         // Install the tracing subscriber before anything interesting happens. Until this landed
         // the desktop app had **no** subscriber at all, so every `tracing::warn!` in the whole
         // protocol stack (including the five distinct reasons a join can be refused) was
@@ -7866,6 +8033,80 @@ mod tests {
     }
 
     #[test]
+    fn a_media_path_accepts_only_a_server_id_and_a_full_cid() {
+        let cid = "a".repeat(64);
+        assert_eq!(
+            parse_media_path(&format!("/7/{cid}")),
+            Some((7, cid.clone()))
+        );
+        // Uppercase hex is normalised rather than refused: the index is keyed lowercase.
+        assert_eq!(
+            parse_media_path(&format!("/7/{}", "A".repeat(64))),
+            Some((7, "a".repeat(64)))
+        );
+        // Anything that is not exactly <server>/<64 hex> is refused before it can reach the file
+        // index: traversal, extra segments, short or non-hex ids, missing parts.
+        assert_eq!(parse_media_path("/7/../../etc/passwd"), None);
+        assert_eq!(parse_media_path(&format!("/7/{cid}/extra")), None);
+        assert_eq!(parse_media_path(&format!("/7/{}", "a".repeat(63))), None);
+        assert_eq!(parse_media_path(&format!("/7/{}", "z".repeat(64))), None);
+        assert_eq!(parse_media_path(&format!("/{cid}")), None);
+        assert_eq!(parse_media_path("/notanumber/".to_string().as_str()), None);
+    }
+
+    #[test]
+    fn a_range_header_is_read_inclusively_and_capped() {
+        let total = 10_000u64;
+        // Both ends inclusive: bytes=0-0 is one byte, not zero.
+        assert_eq!(parse_range_header("bytes=0-0", total), Some((0, 1)));
+        assert_eq!(parse_range_header("bytes=100-199", total), Some((100, 100)));
+        // An open-ended range is answered with a window, not the rest of the file.
+        assert_eq!(
+            parse_range_header("bytes=0-", total),
+            Some((0, MEDIA_WINDOW_BYTES))
+        );
+        // A greedy range cannot make the app allocate more than one window.
+        assert_eq!(
+            parse_range_header("bytes=0-99999999", total),
+            Some((0, MEDIA_WINDOW_BYTES))
+        );
+        // A suffix range is the LAST n bytes; reading it as the first n would play the wrong part.
+        assert_eq!(parse_range_header("-500", total), None);
+        assert_eq!(parse_range_header("bytes=-500", total), Some((9_500, 500)));
+        assert_eq!(parse_range_header("bytes=-99999", total), Some((0, 10_000)));
+        // Only the first range of a multi-range request is honoured.
+        assert_eq!(parse_range_header("bytes=0-9,20-29", total), Some((0, 10)));
+        // Junk is refused rather than guessed at.
+        assert_eq!(parse_range_header("items=0-9", total), None);
+        assert_eq!(parse_range_header("bytes=abc-def", total), None);
+        assert_eq!(parse_range_header("", total), None);
+    }
+
+    #[test]
+    fn a_declared_mime_cannot_become_a_script_vector() {
+        // The value is author-controlled. Only media types survive; everything else is served as
+        // an opaque download type, so a file claiming text/html cannot become same-origin script.
+        assert_eq!(safe_media_mime("video/mp4"), "video/mp4");
+        assert_eq!(safe_media_mime("AUDIO/MPEG"), "audio/mpeg");
+        assert_eq!(safe_media_mime("image/svg+xml"), "image/svg+xml");
+        // Parameters are stripped rather than echoed.
+        assert_eq!(safe_media_mime("video/mp4; codecs=\"avc1\""), "video/mp4");
+        for hostile in [
+            "text/html",
+            "application/javascript",
+            "video/mp4\r\nX-Injected: 1",
+            "",
+            "../../etc/passwd",
+        ] {
+            assert_eq!(
+                safe_media_mime(hostile),
+                "application/octet-stream",
+                "{hostile} must not be served as its declared type"
+            );
+        }
+    }
+
+    #[test]
     fn media_hosts_report_only_this_node_s_own_public_literals() {
         let advertised = vec![
             // Loopback and RFC1918: never a media host.
@@ -7881,10 +8122,7 @@ mod tests {
         ];
         let (v4, v6) = routable_media_hosts(&advertised);
         assert_eq!(v4, vec!["93.184.216.34".to_string()]);
-        assert_eq!(
-            v6,
-            vec!["2606:2800:220:1:248:1893:25c8:1946".to_string()]
-        );
+        assert_eq!(v6, vec!["2606:2800:220:1:248:1893:25c8:1946".to_string()]);
     }
 
     #[test]
