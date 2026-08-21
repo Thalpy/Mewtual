@@ -30,6 +30,8 @@ catcoms-rt = { path = "../../../crates/catcoms-rt" }
 catcoms-sync = { path = "../../../crates/catcoms-sync" }
 catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
 catcoms-log = { path = "../../../crates/catcoms-log" }
+# The bridge emits its own spans now: log_ui carries what the webview saw into the same file.
+tracing = "0.1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 

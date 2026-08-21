@@ -11,6 +11,10 @@ export const TAURI_COMMAND_GROUPS = {
     commands: [
       "vault_exists", "resume_session", "lock_session", "unlock", "get_ui_state", "save_ui_state",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
+      // Writes a frontend line to the local debug log and nothing else. Deliberately outside the
+      // unlocked-session gate: the errors most worth capturing are the ones from startup and from
+      // unlock itself failing, which happen before there is a session to check.
+      "log_ui",
     ],
   },
   server_lifecycle_and_membership: {

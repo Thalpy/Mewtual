@@ -78,8 +78,11 @@ impl std::fmt::Debug for LogGuard {
 /// `catcoms_net`/`libp2p` at `debug` narrate every connection, stream and address the node ever
 /// sees, which is both the bulk of the volume and the most identifying part of it. Someone
 /// chasing a transport bug can still set `RUST_LOG`.
-pub const APP_FILE_FILTER: &str =
-    "info,catcoms_app=debug,catcoms_sync=debug,catcoms_mls=debug,catcoms_discovery=debug";
+/// `catcoms_ui` is the webview's own target (the desktop bridge's `log_ui` command). It sits at
+/// `debug` with our other product layers, because half the app runs in the webview and a log that
+/// cannot see its errors is a log of half the app.
+pub const APP_FILE_FILTER: &str = "info,catcoms_app=debug,catcoms_sync=debug,catcoms_mls=debug,\
+     catcoms_discovery=debug,catcoms_ui=debug";
 
 /// Install console logging and, when `debug` is true, also a verbose debug log at
 /// `<dir>/debug_log_<timestamp>.txt`. Returns a guard that must be kept alive

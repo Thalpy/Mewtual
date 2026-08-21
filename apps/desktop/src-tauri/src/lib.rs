@@ -7855,10 +7855,11 @@ fn log_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .join("logs"))
 }
 
-/// The preference file. Its **presence** is the setting: a flag with no parser cannot be
-/// corrupted into an unreadable state that silently turns logging on.
+/// The opt-**out** file. Its presence means "no log"; a flag with no parser cannot be corrupted
+/// into an unreadable state, and the sense is inverted from the obvious one on purpose: see
+/// [`debug_logging_enabled`].
 fn debug_flag_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(log_dir(app)?.join("debug-logging-enabled"))
+    Ok(log_dir(app)?.join("debug-logging-disabled"))
 }
 
 /// The state of the debug log, as shown in Settings.
@@ -7876,10 +7877,18 @@ struct DebugLogging {
     file: String,
 }
 
-/// Read the debug-logging preference. Never fails the caller: an unreadable app data directory
-/// means "off", which is the safe answer for a privacy tool.
+/// Read the debug-logging preference.
+///
+/// **On by default while the product is in alpha**, which is a deliberate reversal of the usual
+/// answer for a privacy tool. A bug report without a log costs a round trip and usually a second
+/// reproduction, and at this stage nearly every session is a test session. The opt-out is one
+/// click in Settings and is honoured permanently once taken; see `catcoms_log`'s module docs for
+/// exactly what an enabled log may contain. Revisit this default before a general release.
+///
+/// Never fails the caller: an unreadable app data directory reads as the default rather than
+/// erroring, since a preference lookup must not be able to stop the app starting.
 fn debug_logging_enabled(app: &AppHandle) -> bool {
-    debug_flag_path(app).map(|p| p.exists()).unwrap_or(false)
+    debug_flag_path(app).map(|p| !p.exists()).unwrap_or(true)
 }
 
 /// Whether this process installed a debug-log file layer, and which file it is writing. Set once
@@ -7952,13 +7961,52 @@ async fn set_debug_logging(
     require_unlocked_session(&state).await?;
     let dir = log_dir(&app)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // The file records the opt-OUT, so enabling removes it. Inverted from the obvious mapping
+    // because the default is on for alpha, and a default that depends on a file being written at
+    // first launch would silently turn itself off on any install that could not write one.
     let flag = debug_flag_path(&app)?;
     if enabled {
-        std::fs::write(&flag, b"on").map_err(|e| e.to_string())?;
-    } else if flag.exists() {
-        std::fs::remove_file(&flag).map_err(|e| e.to_string())?;
+        if flag.exists() {
+            std::fs::remove_file(&flag).map_err(|e| e.to_string())?;
+        }
+    } else {
+        std::fs::write(&flag, b"off").map_err(|e| e.to_string())?;
     }
     get_debug_logging(app, state).await
+}
+
+/// How much of one frontend log line is kept. Long enough for a stack frame and a message,
+/// short enough that a runaway loop cannot fill the disk one line at a time.
+const MAX_UI_LOG_BYTES: usize = 2000;
+
+/// Record something the webview saw.
+///
+/// Until this existed the log was Rust-only, so every `console.warn` in the voice path (failed
+/// signals, rejected ICE candidates, offer handling that threw) went to a devtools console nobody
+/// had open and was gone. Half the app is in the webview; a log that cannot see it is a log of
+/// half the app.
+///
+/// Deliberately not gated on an unlocked session, unlike almost every other command: the errors
+/// most worth having are the ones from unlock failing and from startup, which happen before there
+/// is a session to check. It writes only to the local log file, and only when logging is on.
+#[tauri::command]
+async fn log_ui(app: AppHandle, level: String, message: String) {
+    if !app.state::<LogState>().active {
+        return;
+    }
+    let mut text = message;
+    if text.len() > MAX_UI_LOG_BYTES {
+        text.truncate(MAX_UI_LOG_BYTES);
+        text.push_str(" [truncated]");
+    }
+    // The webview chooses the level, so it is matched against a known set rather than parsed:
+    // an unrecognised one becomes info instead of being dropped.
+    match level.as_str() {
+        "error" => tracing::error!(target: "catcoms_ui", "{text}"),
+        "warn" => tracing::warn!(target: "catcoms_ui", "{text}"),
+        "debug" => tracing::debug!(target: "catcoms_ui", "{text}"),
+        _ => tracing::info!(target: "catcoms_ui", "{text}"),
+    }
 }
 
 /// Build and run the Tauri application.
@@ -7988,8 +8036,8 @@ pub fn run() {
         // Install the tracing subscriber before anything interesting happens. Until this landed
         // the desktop app had **no** subscriber at all, so every `tracing::warn!` in the whole
         // protocol stack (including the five distinct reasons a join can be refused) was
-        // discarded and there was no log file anywhere. Off by default: see `DebugLogging`, and
-        // `catcoms_log`'s module docs for what an enabled log may contain.
+        // discarded and there was no log file anywhere. On by default while in alpha: see
+        // `debug_logging_enabled`, and `catcoms_log`'s module docs for what a log may contain.
         .setup(|app| {
             let handle = app.handle().clone();
             let enabled = debug_logging_enabled(&handle);
@@ -8082,6 +8130,7 @@ pub fn run() {
             change_vault_secret,
             get_debug_logging,
             set_debug_logging,
+            log_ui,
             set_admin,
             remove_member,
             revoke_device,

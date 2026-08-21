@@ -59,6 +59,7 @@
     driftAction, fetchPhase, mediaKind, mediaUrl, nudgeRate,
     type FetchPhase, type MediaKind,
   } from "./jukebox";
+  import { installUiLogging } from "./uilog";
   import {
     TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
     type TransferPiece,
@@ -11779,6 +11780,17 @@
   const syncMaximized = () => void appWindow.isMaximized().then((m) => (winMaximized = m));
 
   onMount(() => {
+    // First thing, before anything can fail: from here on, what the webview sees reaches the
+    // debug log rather than a devtools console nobody has open. The native side drops these when
+    // logging is off, so this costs nothing when the user has opted out.
+    installUiLogging(
+      (level, message) => {
+        void invoke("log_ui", { level, message }).catch(() => {
+          /* the log is not worth an error of its own */
+        });
+      },
+      { console: globalThis.console, addEventListener: window.addEventListener.bind(window) },
+    );
     syncMaximized();
     // Reconnect a controller that was already granted and already plugged in, silently. Waiting
     // for the instrument drawer to be opened once was half of why MIDI felt like a coin toss.

@@ -2533,9 +2533,20 @@ impl Actor {
                 local_address,
                 detail,
             } => {
-                self.port_mapping_unavailable
+                // A router with no PCP/NAT-PMP re-answers "no" on every discovery cycle, for
+                // every mechanism, transport and interface. Logged unconditionally that was 356
+                // of one debug log's 601 lines: the single most common message, saying the same
+                // thing it said eighteen seconds earlier, burying everything worth reading.
+                // The first answer for a given probe is news and stays at info; an identical
+                // repeat drops to debug. A *changed* detail is news again.
+                let previous = self
+                    .port_mapping_unavailable
                     .insert((*mechanism, *transport, *local_address), detail.clone());
-                tracing::info!(%mechanism, %transport, %detail, "router mapping unavailable");
+                if previous.as_deref() == Some(detail.as_str()) {
+                    tracing::debug!(%mechanism, %transport, %detail, "router mapping still unavailable");
+                } else {
+                    tracing::info!(%mechanism, %transport, %detail, "router mapping unavailable");
+                }
             }
             PortMappingEvent::Expired {
                 mechanism,
