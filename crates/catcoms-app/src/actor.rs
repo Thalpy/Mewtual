@@ -24,9 +24,8 @@ use catcoms_storage::{Cid, FileRef};
 use crate::{
     ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange,
     FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView,
-    MessageStats,
-    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
-    WikiPendingEdit, WikiRevision,
+    MessageStats, ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair,
+    SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -4024,7 +4023,10 @@ mod tests {
         assert!(!change.messages_appended, "a reaction is not an arrival");
         assert!(change.messages_changed, "but the log still re-renders");
 
-        actor.edit_message(GENERAL, id, "hi there!".into()).await.unwrap();
+        actor
+            .edit_message(GENERAL, id, "hi there!".into())
+            .await
+            .unwrap();
         let change = next_change(&mut events, GENERAL).await;
         assert!(!change.messages_appended, "an edit is not an arrival");
         assert!(change.messages_changed);
