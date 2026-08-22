@@ -19,6 +19,12 @@ hex = "0.4"
 # newer/Apple-style mapping protocols instead. Pin 0.18 because it is the maintained release whose
 # declared MSRV still matches this workspace's Rust 1.89 baseline (0.19 requires Rust 1.91).
 portmapper = { version = "=0.18.0", default-features = false }
+# The bound-interface UPnP fallback. libp2p's behaviour searches from an unbound socket and the
+# OS can egress the multicast M-SEARCH out a virtual adapter (WSL vEthernet, VirtualBox host-only),
+# so a second IGD search runs bound to the default-route interface; both feed one event path,
+# keyed apart by `local_address`. Pinned to the exact version libp2p-upnp already builds so this
+# adds no second copy of the crate.
+igd-next = { version = "=0.16.2", features = ["aio_tokio"] }
 # `portmapper` 0.18 exposes only an IPv4 client. `getifs` preserves the IPv6 route's native
 # interface index (including Windows' IPv6-specific index), letting the PCP socket bind the exact
 # global listener and scoped default gateway instead of guessing from an IPv4-oriented snapshot.

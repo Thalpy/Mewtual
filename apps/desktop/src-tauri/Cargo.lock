@@ -659,6 +659,7 @@ dependencies = [
  "futures",
  "getifs",
  "hex",
+ "igd-next 0.16.2",
  "libp2p",
  "portmapper",
  "rustls-pki-types",

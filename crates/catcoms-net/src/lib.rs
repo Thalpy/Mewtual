@@ -66,7 +66,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::future::Future;
 use std::io;
-use std::net::{IpAddr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::num::NonZeroU16;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -180,9 +180,14 @@ pub struct AutoNatResult {
 
 /// The router protocol that produced (or failed to produce) an inbound port mapping.
 ///
-/// libp2p supplies UPnP IGD. The separate `portmapper` clients deliberately have UPnP disabled so
-/// the two implementations do not race to manage the same mapping; they probe PCP first and then
-/// NAT-PMP, and report which protocol the gateway actually advertised.
+/// UPnP IGD has two cooperating sources: libp2p's behaviour (unbound discovery socket, the OS
+/// picks the multicast egress interface) and this crate's bound worker, which repeats the search
+/// from the default-route interface because the OS routinely picks a virtual adapter (WSL
+/// vEthernet, VirtualBox host-only) and the router never hears the unbound search. Their events
+/// share this mechanism but are keyed apart by `local_address` (`None` = libp2p, `Some(v4)` =
+/// bound), and a shared lease renewed by both is idempotent at the gateway. The separate
+/// `portmapper` clients keep UPnP disabled; they probe PCP first and then NAT-PMP, and report
+/// which protocol the gateway actually advertised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PortMappingMechanism {
     /// Universal Plug and Play Internet Gateway Device protocol.
@@ -1118,6 +1123,9 @@ struct PortMapperTask {
     port: NonZeroU16,
     generation: u64,
     handle: Option<JoinHandle<()>>,
+    /// The bound-interface UPnP worker running alongside the IPv4 PCP/NAT-PMP worker (`None` for
+    /// PCPv6 tasks). Same key, port and generation; its events differ only by `local_address`.
+    companion: Option<JoinHandle<()>>,
     /// IPv6 PCP can explicitly delete its lease when a listener disappears. IPv4's retained
     /// `portmapper` implementation has no equivalent cancellation API, so those tasks are simply
     /// aborted and their library-managed bounded lease expires.
@@ -1310,13 +1318,33 @@ impl Drop for PortMapperTask {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
+        if let Some(companion) = self.companion.take() {
+            companion.abort();
+        }
     }
 }
 
 impl PortMapperTask {
+    /// Whether every worker this task spawned is still alive. A dead half (either the PCP/NAT-PMP
+    /// worker or its bound-UPnP companion) retires the whole task so both respawn together.
+    fn is_fully_running(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+            && self
+                .companion
+                .as_ref()
+                .is_none_or(|companion| !companion.is_finished())
+    }
+
     /// Withdraw product state before calling this; deletion at the router is best effort and must
     /// never delay removal from invites. Give PCPv6 a short grace period to send lifetime zero.
     fn stop_gracefully(mut self) {
+        // The companion has no stop channel and no lease-deletion API; abort it and let its
+        // bounded lease expire, the same policy as the IPv4 portmapper worker.
+        if let Some(companion) = self.companion.take() {
+            companion.abort();
+        }
         let sent_stop = self.stop.take().is_some_and(|stop| stop.send(()).is_ok());
         let Some(mut handle) = self.handle.take() else {
             return;
@@ -1478,6 +1506,15 @@ fn clear_retired_port_mapping_failures(
     let before = unavailable.len();
     for &mechanism in mechanisms {
         unavailable.remove(&(mechanism, key.transport, local_address));
+    }
+    // The IPv4 task's bound-UPnP companion keys its failures by the concrete interface address;
+    // sweep those too so a retired worker stops claiming it is "retrying".
+    if key.target == PortMappingTarget::Ipv4 {
+        unavailable.retain(|&(mechanism, transport, local_address), _| {
+            !(mechanism == PortMappingMechanism::Upnp
+                && transport == key.transport
+                && matches!(local_address, Some(IpAddr::V4(_))))
+        });
     }
     unavailable.len() != before
 }
@@ -1724,6 +1761,189 @@ async fn run_port_mapper(
     const RETRY_AFTER: Duration = Duration::from_secs(60);
     loop {
         if run_port_mapper_attempt(transport, port, &tx).await.is_err() {
+            return;
+        }
+        SystemClock.sleep(RETRY_AFTER).await;
+    }
+}
+
+/// How long a bound-search UPnP lease asks for. Bounded so an aborted worker's mapping dies on
+/// its own; renewal at half-life keeps a live one continuous.
+const UPNP_BOUND_LEASE_SECS: u32 = 2 * 60 * 60;
+/// One IGD search from the bound socket. A router answers the multicast within a second on a
+/// sane LAN; three seconds keeps the retry loop responsive without spamming discovery.
+const UPNP_BOUND_SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The IPv4 source address the kernel would route toward the public internet, learned by
+/// "connecting" an unbound UDP socket to a documentation address (RFC 5737; nothing is sent, the
+/// kernel just resolves the route). This names the interface whose LAN hosts the default
+/// gateway, i.e. the only interface where an IGD search can possibly be answered.
+fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
+}
+
+/// One bound-interface UPnP IGD attempt: search from the default-route interface, create the
+/// mapping, then hold and renew it for the lifetime of the worker.
+///
+/// This exists because libp2p's UPnP behaviour searches from an unbound `0.0.0.0` socket and
+/// lets the OS choose the multicast egress interface. On a machine with virtual adapters (WSL
+/// vEthernet, VirtualBox host-only) the OS routinely picks one of those, the router never hears
+/// the M-SEARCH, and diagnostics report "no gateway" while the router's UPnP is fine. (Proven
+/// live 2026-08-22: the identical SSDP search bound to the LAN interface was answered while the
+/// unbound one was not, correlating across twenty debug logs with whether the WSL adapter was
+/// up.) Both implementations run and feed one event path, keyed apart by `local_address`
+/// (`None` = libp2p, `Some(v4)` = this worker), so whichever hears the gateway supplies the
+/// route; a shared lease renewed by both is an idempotent AddPortMapping at the gateway.
+async fn run_upnp_bound_mapper_attempt(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: &PortMapperReporter,
+) -> Result<(), ()> {
+    let Some(local_ip) = default_route_ipv4() else {
+        // No IPv4 default route: nothing to bind to. Stay silent rather than write over the
+        // unbound behaviour's diagnostic key; it reports its own status for this state.
+        return Ok(());
+    };
+    let local_address = Some(IpAddr::V4(local_ip));
+    let unavailable = |detail: String| PortMappingEvent::Unavailable {
+        mechanism: PortMappingMechanism::Upnp,
+        transport,
+        local_address,
+        detail,
+    };
+    let gateway = match igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
+        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            tx.send(unavailable(format!(
+                "no IGD gateway answered a search bound to {local_ip}: {error}"
+            )))
+            .await
+            .map_err(|_| ())?;
+            return Ok(());
+        }
+    };
+    let protocol = match transport {
+        PortMappingTransport::Tcp => igd_next::PortMappingProtocol::TCP,
+        PortMappingTransport::Udp => igd_next::PortMappingProtocol::UDP,
+    };
+    let add_lease = || {
+        gateway.add_port(
+            protocol,
+            port.get(),
+            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
+            UPNP_BOUND_LEASE_SECS,
+            "Mewtual",
+        )
+    };
+    if let Err(error) = add_lease().await {
+        tx.send(unavailable(format!("gateway refused the mapping: {error}")))
+            .await
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    // The gateway's own answer, over the interface that demonstrably reaches it; a CGNAT/double-
+    // NAT private answer is converted to an honest Unavailable by the actor's event fold.
+    let external = match gateway.get_external_ip().await {
+        Ok(IpAddr::V4(ip)) => ip,
+        Ok(IpAddr::V6(ip)) => {
+            tx.send(unavailable(format!(
+                "gateway reported an IPv6 external address ({ip}) for an IPv4 mapping"
+            )))
+            .await
+            .map_err(|_| ())?;
+            return Ok(());
+        }
+        Err(error) => {
+            tx.send(unavailable(format!(
+                "gateway granted the mapping but the external-address query failed: {error}"
+            )))
+            .await
+            .map_err(|_| ())?;
+            return Ok(());
+        }
+    };
+    let mut current = mapped_multiaddr(SocketAddrV4::new(external, port.get()), transport);
+    tx.send(PortMappingEvent::Mapped {
+        mechanism: PortMappingMechanism::Upnp,
+        transport,
+        local_address,
+        address: current.clone(),
+    })
+    .await
+    .map_err(|_| ())?;
+    loop {
+        SystemClock
+            .sleep(Duration::from_secs(u64::from(UPNP_BOUND_LEASE_SECS / 2)))
+            .await;
+        // Renewal is the same AddPortMapping. A failure (router rebooted, moved networks, lease
+        // slot reclaimed) expires the route and returns to the outer retry, which rediscovers
+        // the gateway and recomputes the default-route interface.
+        let renewed = match add_lease().await {
+            Ok(()) => gateway.get_external_ip().await.ok(),
+            Err(_) => None,
+        };
+        match renewed {
+            Some(IpAddr::V4(ip)) => {
+                let address = mapped_multiaddr(SocketAddrV4::new(ip, port.get()), transport);
+                if address != current {
+                    tx.send(PortMappingEvent::Expired {
+                        mechanism: PortMappingMechanism::Upnp,
+                        transport,
+                        local_address,
+                        address: current,
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    tx.send(PortMappingEvent::Mapped {
+                        mechanism: PortMappingMechanism::Upnp,
+                        transport,
+                        local_address,
+                        address: address.clone(),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    current = address;
+                }
+            }
+            _ => {
+                tx.send(PortMappingEvent::Expired {
+                    mechanism: PortMappingMechanism::Upnp,
+                    transport,
+                    local_address,
+                    address: current,
+                })
+                .await
+                .map_err(|_| ())?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// The bound-interface UPnP companion to [`run_port_mapper`], with the same retry cadence and
+/// the same laptop rationale: the first search may run before Wi-Fi has a default route.
+async fn run_upnp_bound_mapper(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: PortMapperReporter,
+) {
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    loop {
+        if run_upnp_bound_mapper_attempt(transport, port, &tx)
+            .await
+            .is_err()
+        {
             return;
         }
         SystemClock.sleep(RETRY_AFTER).await;
@@ -2362,11 +2582,8 @@ impl Actor {
             .port_mapper_tasks
             .iter()
             .filter_map(|(key, task)| {
-                let running = task
-                    .handle
-                    .as_ref()
-                    .is_some_and(|handle| !handle.is_finished());
-                (desired.get(key) != Some(&task.port) || !running).then_some(*key)
+                (desired.get(key) != Some(&task.port) || !task.is_fully_running())
+                    .then_some(*key)
             })
             .collect();
         for key in stale {
@@ -2398,6 +2615,30 @@ impl Actor {
                         });
                     }
                 }
+                // The IPv4 task's bound-UPnP companion keys its routes by the concrete interface
+                // address, which the actor does not track; withdraw whatever it published.
+                if key.target == PortMappingTarget::Ipv4 {
+                    let scoped: Vec<_> = self
+                        .active_port_mappings
+                        .iter()
+                        .filter(|((mechanism, transport, local_address), _)| {
+                            *mechanism == PortMappingMechanism::Upnp
+                                && *transport == key.transport
+                                && matches!(local_address, Some(IpAddr::V4(_)))
+                        })
+                        .map(|(&(mechanism, transport, local_address), address)| {
+                            (mechanism, transport, local_address, address.clone())
+                        })
+                        .collect();
+                    for (mechanism, transport, local_address, address) in scoped {
+                        self.on_port_mapping_event(PortMappingEvent::Expired {
+                            mechanism,
+                            transport,
+                            local_address,
+                            address,
+                        });
+                    }
+                }
                 // `Expired` normally records "retrying" and an unavailable-only worker has no
                 // active owner to expire at all. This task is being retired, so remove both forms
                 // of stale failure before publishing the final coalesced state.
@@ -2420,10 +2661,12 @@ impl Actor {
                 port,
                 generation,
             };
-            let (handle, stop) = match key.target {
-                PortMappingTarget::Ipv4 => {
-                    (tokio::spawn(run_port_mapper(key.transport, port, tx)), None)
-                }
+            let (handle, companion, stop) = match key.target {
+                PortMappingTarget::Ipv4 => (
+                    tokio::spawn(run_port_mapper(key.transport, port, tx.clone())),
+                    Some(tokio::spawn(run_upnp_bound_mapper(key.transport, port, tx))),
+                    None,
+                ),
                 PortMappingTarget::Ipv6(local_ip) => {
                     let (stop_tx, stop_rx) = oneshot::channel();
                     (
@@ -2434,6 +2677,7 @@ impl Actor {
                             tx,
                             stop_rx,
                         )),
+                        None,
                         Some(stop_tx),
                     )
                 }
@@ -2444,6 +2688,7 @@ impl Actor {
                     port,
                     generation,
                     handle: Some(handle),
+                    companion,
                     stop,
                 },
             );
@@ -4247,6 +4492,43 @@ mod tests {
         assert!(!unavailable.contains_key(&owner));
     }
 
+    /// The IPv4 task owns three diagnostic keys: PCP and NAT-PMP under `None`, plus the
+    /// bound-UPnP companion under its concrete interface address. Retiring the task must sweep
+    /// all three, while libp2p-UPnP's own `None`-keyed entry and other transports survive.
+    #[test]
+    fn retired_ipv4_task_sweeps_the_bound_upnp_companion_failures() {
+        let task = PortMapperTaskKey {
+            transport: PortMappingTransport::Tcp,
+            target: PortMappingTarget::Ipv4,
+        };
+        let bound = (
+            PortMappingMechanism::Upnp,
+            PortMappingTransport::Tcp,
+            Some(IpAddr::V4("192.168.0.231".parse().unwrap())),
+        );
+        let unbound_upnp = (PortMappingMechanism::Upnp, PortMappingTransport::Tcp, None);
+        let other_transport = (
+            PortMappingMechanism::Upnp,
+            PortMappingTransport::Udp,
+            Some(IpAddr::V4("192.168.0.231".parse().unwrap())),
+        );
+        let mut unavailable = HashMap::from([
+            (
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+                "no compatible gateway answered the probe".to_string(),
+            ),
+            (bound, "no IGD gateway answered a search".to_string()),
+            (unbound_upnp, "no UPnP IGD gateway answered discovery".to_string()),
+            (other_transport, "no IGD gateway answered a search".to_string()),
+        ]);
+        assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
+        assert!(!unavailable.contains_key(&bound));
+        // libp2p's own UPnP diagnostics are not this task's to clear, and the UDP task's
+        // companion entry belongs to the UDP retirement.
+        assert!(unavailable.contains_key(&unbound_upnp));
+        assert!(unavailable.contains_key(&other_transport));
+    }
+
     #[test]
     fn routed_ipv6_interfaces_win_the_bounded_worker_slots() {
         let routed: Ipv6Addr = "2a00:1450::1".parse().unwrap();
@@ -4276,6 +4558,7 @@ mod tests {
                 port,
                 generation: 8,
                 handle: Some(tokio::spawn(std::future::pending())),
+                companion: None,
                 stop: None,
             },
         )]);
