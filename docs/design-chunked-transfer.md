@@ -1,7 +1,9 @@
 # Design; chunked large-file transfer
 
-Status: **design approved, implementing.** Removes the ~16 MiB file ceiling by splitting a file
-into chunks, each transferred as its own content-addressed blob, described by a manifest.
+Status: **done, including streaming** (see § Streaming). Removes the ~16 MiB file ceiling by
+splitting a file into chunks, each transferred as its own content-addressed blob, described by a
+manifest; and moves those chunks across the desktop bridge one at a time so a transfer never
+occupies the webview or the server actor for longer than a chunk.
 
 See also: [`HANDOVER.md`](HANDOVER.md) fileshare; the 8l blob layer.
 
@@ -53,18 +55,144 @@ with a **fixed-window bytes budget** per requester: allow up to `BLOB_BUDGET_BYT
   CID re-hash, and the response-size cap unchanged. Only the throttle accounting changes.
 The per-requester map stays bounded (`max_known_peers`), now holding `(window_start, bytes)`.
 
+## Streaming (the two deferred items above, now done)
+
+The two "deferred" notes below turned out to be the same bug, and it was not a slow transfer: it
+was the app hanging. Sharing a ~17 MiB file stuck the progress bar at 10% and froze everything
+around it, because a transfer occupied **both** single-threaded surfaces end to end.
+
+- **The webview.** `add_file` took the whole file as one base64 `invoke` argument. A 17 MiB file is
+  a 23 MB JS string, serialized whole on the main thread; 256 MiB (the declared cap) is 341 MB.
+- **The server actor.** `catcoms-app`'s actor is one `select!` loop over `(commands, sync_once)`,
+  biased to commands, and each command runs to completion inline. Sealing every chunk inside one
+  `AddFile` meant that for the whole upload the server drained no inbound sync and answered no
+  other command, so every other UI call for that server queued behind the transfer.
+
+Both are now bounded by a chunk instead of by the file:
+
+- **Upload.** `begin_file_upload` → N × `push_file_chunk` → `finish_file_upload` (+
+  `cancel_file_upload`). The IPC unit is a **slice** (`UPLOAD_SLICE_BYTES`, 1 MiB, mirrored as
+  `TRANSFER_SLICE_BYTES` in the frontend) and the seal unit stays the **chunk** (`CHUNK_BYTES`,
+  8 MiB); the bridge buffers slices until it has a chunk, which is why a slice must divide a chunk
+  exactly (uniform chunks are what the media reader's `offset / CHUNK_BYTES` depends on). Each
+  chunk is sealed by its own actor command (`Server::seal_upload_chunk`), so the actor returns to
+  its loop between chunks. `Server::publish_upload` writes the manifest at the end. Slices are
+  offset-addressed and must arrive in order, exactly once, full-size until the file ends; a
+  violation fails the upload, because the running whole-file address (`CidHasher`, streaming
+  BLAKE3) cannot be rewound. Dedup therefore lands *after* sealing, so `publish_upload` collects
+  the redundant chunks it just wrote (`discard_upload_chunks`, dedup-safe like `delete_file`'s GC).
+- **Download.** Already one chunk per actor command (`file_download_plan` + `fetch_file_chunk`).
+  What remained was the saved-file path: `download_file` returned the whole file as base64 and the
+  webview handed it straight back to `save_download`, crossing the bridge twice whole.
+  `save_group_file` replaces both: the bridge reserves the Downloads name, streams chunk to file,
+  verifies the whole-file address, and reveals it. The plaintext never enters the webview.
+  `download_file` remains for the small in-page cases (embeds, emoji, previews).
+
+## The manifest layout invariant (security-critical)
+
+`total_size` and `chunks` are two member-authored fields describing one thing, and originally
+nothing tied them together: the declared size bounded the file and drove the UI, while the chunk
+count decided how much a reader fetched, decrypted and wrote. A member could therefore declare one
+byte and attach 32 full chunks; the reader did 256 MiB of work for a file its own UI called one
+byte, and the end-to-end address check did not catch it because the author simply computed that
+address over the expansion. (`MAX_CHUNKS` was 4096, so the ceiling was ~32 GiB.)
+
+So the layout is an **equality**, not a range: for a file of `total_size` there is exactly one legal
+chunk list. `FileManifest::validate_layout` requires `chunks.len() == max(1, ceil(total_size /
+CHUNK_BYTES))`, every non-final chunk to declare exactly `CHUNK_BYTES` and the last the remainder,
+and it runs inside `FileManifest::decode` so no reader can forget it. `MAX_CHUNKS` is now the
+product's true maximum (32), static-asserted against `MAX_FILE_BYTES` in `catcoms-app`.
+`publish_upload` validates before it posts, so this node never authors a listing its own reader
+would reject. Underneath, `open_file` holds a decrypted chunk to the length its `FileRef` declared,
+because `size` is the field the layout is made of. And both readers (`save_group_file`, the
+all-in-one `download_file`) still bound actual bytes against the declared total independently.
+
+The legacy un-chunked entry (one `FileRef`, no tag) predates chunking and is the one shape allowed
+a chunk larger than `CHUNK_BYTES`; it is bounded at one blob-fetch response, so it cannot amplify.
+
+## Upload identity and lifecycle
+
+- **A generation, not the caller's id.** Sealing releases the bridge's upload-map lock across an
+  actor round-trip, and the completion has to find its upload again afterwards. Keyed by the public
+  upload id, a caller that restarted that id meanwhile would have the earlier generation's chunk
+  attached to the new one: silent, and it produces a listing whose chunks are not the file its
+  address names. `begin_file_upload` mints a fresh token and returns it in an `UploadTicket`; the
+  map is keyed by it, and a completion is attached only if that generation is still waiting for
+  exactly that chunk index. Anything else and the sealed blob is collected.
+- **One contract, stated once.** The ticket also carries `chunk_total` and `slice_bytes`, so the
+  frontend never recomputes them from its own copy of the protocol's constants. Two languages
+  holding the same numbers is a drift neither language's tests can see.
+- **Lock is re-checked after every await** that could have run across it: before each write of
+  decrypted bytes, before the final rename/reveal, and before the irreversible index post.
+- **Bounded by bytes, not just entries.** `MAX_PENDING_UPLOADS` bounds map growth;
+  `MAX_STAGED_UPLOAD_BYTES` bounds the sealed-but-unpublished data itself, and an idle timeout
+  collects uploads whose caller vanished (a webview reload loses the ids while the native side
+  keeps running). Discard is an acknowledged actor command: cancel and lock report cleanup, so
+  they must not return while deletion is merely queued.
+
+## Staging: an upload's chunks are not held content
+
+An upload's chunks used to be written straight into the blob store, where the only record that they
+were unpublished was a map in memory. A hard exit between sealing and publishing therefore left
+blobs indistinguishable from real ones: no manifest named them, and the storage-health pass walks
+only what the file index references, so nothing could ever find them again.
+
+The blob store now has a second namespace. `BlobStore::put_staged` writes into a `staging/`
+subdirectory that `get`, `has` and `cids` do not see, so a staged chunk is on disk without being
+*held*. `seal_upload_chunk` stages; `publish_upload` calls `promote_staged` (a rename, so a 256 MiB
+file costs a directory entry rather than a rewrite); everything else drops them. Cancelling is then
+safe by construction rather than by check: a staged blob is referenced by nothing, so there is no
+dedup question to get wrong.
+
+`clear_staging` runs once per server at startup, from `attach_blob_store`, before anything can
+stage something new. Whatever is in staging at that moment belonged to an upload that did not
+survive the last process, and the only thing that knew what it was for died with that process, so
+it is unambiguously garbage. That is what makes this a sweep the store can perform on its own,
+where a whole-store mark-and-sweep would have had to enumerate every blob owner and could delete
+live data by missing one.
+
+**Ordering:** promote, then post. The remaining crash window is between those two, and this
+direction makes it strand orphans (blobs nothing names, collected by nothing but costing only
+space) rather than a published listing whose chunks are still in staging, which the next startup
+sweep would delete out from under the only device that holds them.
+
+## Reading a file inline is bounded
+
+`download_file` returns a whole file as one base64 string, which is the same shape that froze the
+app on upload: cost scales with the file, and the webview serializes it whole on its main thread.
+It was reachable without any deliberate action, because embeds, custom emoji, event posters, card
+thumbnails and file previews all went through it, so scrolling past a message containing a large
+file was enough.
+
+Everything visual now renders from the `catcoms-media:` protocol instead (`sharedMediaUrl`), which
+answers Range requests off the vault and fetches missing chunks from peers exactly as before, so
+the element streams and the bytes never become a JS string. `download_file` keeps one caller, the
+text reader, which genuinely needs bytes in JS; it is bounded by a 2 MiB soft cap in the UI and by
+`MAX_INLINE_DOWNLOAD_BYTES` (16 MiB) natively, so no "read it anyway" button can pull a 256 MiB
+listing into the window. The native bound is meaningful only because the manifest layout check
+above makes a listing's declared size trustworthy.
+
+## Saving is staged
+
+`save_group_file` reserves the final Downloads name, writes into a sibling `.part`, verifies size
+and whole-file address, and only then renames. The peer-chosen filename never exists holding bytes
+this device has not authenticated, so a crash or kill mid-transfer leaves a `.part` rather than
+something that looks like the finished file.
+
 ## Scope / deferred
 
-- **Actor-blocking:** `download_file` stays a synchronous command; a 256 MiB download (~a few
-  seconds at the new budget) blocks that server's actor for its duration. A background/streaming
-  download with progress events, GB-scale files, multi-holder fan-out, and a holder index are
-  follow-ups. 256 MiB covers typical photos/video/docs.
 - **No transport-protocol change:** the per-blob RR codec, signing, member gate, and CID re-verify
   are unchanged; chunking is additive above them.
-- **No bridge/frontend change:** `add_file`/`download_file` keep their signatures (the cid is passed
-  opaquely), so chunking is transparent to the desktop app. The Tauri IPC still moves the whole file
-  as one base64 buffer, so practical desktop limits are bounded by IPC/RAM, not the protocol;
-  streaming the chunks across IPC (and a progress bar) is the same background-download follow-up.
+- **Still one holder at a time:** multi-holder fan-out, a holder index, GB-scale files and
+  resumable-across-restart transfers are follow-ups. 256 MiB covers typical photos/video/docs.
+- **Sealing is still on the async runtime:** a chunk's AEAD + blob write runs on the actor's
+  thread rather than `spawn_blocking`. At 8 MiB that is tens of milliseconds per chunk, which the
+  loop absorbs; it only matters if `CHUNK_BYTES` grows.
+- **The promote/post window (small, open).** A crash between promoting an upload's chunks and
+  posting its index entry leaves those chunks held but unnamed. Unlike the pre-staging behaviour
+  this is a window of milliseconds rather than the whole upload, and it costs space rather than
+  correctness; closing it entirely needs the index post and the promotion to be one atomic step,
+  which they cannot be while one is a CRDT operation and the other is a filesystem rename.
 
 ## Security
 

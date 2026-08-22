@@ -1,17 +1,18 @@
 {
   "name": "mewtual-desktop",
   "private": true,
-  "version": "0.3.0-alpha.3",
+  "version": "0.3.0-alpha.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "test": "node --experimental-strip-types --import ./scripts/test-dom.mjs --test src/*.test.ts",
     "test:flows": "node scripts/flow-check.mjs",
     "tauri": "tauri",
-    "fix-brick": "node scripts/fix-brick.mjs"
+    "fix-brick": "node scripts/fix-brick.mjs",
+    "notices": "node scripts/gen-notices.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
@@ -27,6 +28,7 @@
     "@tauri-apps/cli": "^2",
     "@tsconfig/svelte": "^5",
     "@types/qrcode": "^1.5.6",
+    "jsdom": "^29.1.1",
     "svelte": "^5",
     "svelte-check": "^4",
     "typescript": "^5",

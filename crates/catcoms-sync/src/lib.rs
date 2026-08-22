@@ -6593,6 +6593,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(self.blobs.put(bytes)?)
     }
 
+    /// Write a blob into the store's **staging** area: content that exists on disk but belongs to
+    /// nothing yet, and is invisible to `get_blob`/`has_blob` until promoted. Used by a multi-chunk
+    /// upload, whose chunks are only real once its manifest names them.
+    pub fn put_staged_blob(&mut self, bytes: &[u8]) -> Result<Cid, SyncError> {
+        Ok(self.blobs.put_staged(bytes)?)
+    }
+
+    /// Move a staged blob into the store proper. `Ok(false)` if it was not staged.
+    pub fn promote_staged_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
+        Ok(self.blobs.promote_staged(cid)?)
+    }
+
+    /// Discard one staged blob. Cannot touch held content.
+    pub fn drop_staged_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
+        Ok(self.blobs.drop_staged(cid)?)
+    }
+
+    /// Discard every staged blob, returning how many went. Run at startup: staged content that
+    /// outlived the process that staged it can never be claimed.
+    pub fn clear_staged_blobs(&mut self) -> Result<usize, SyncError> {
+        Ok(self.blobs.clear_staging()?)
+    }
+
     /// Fetch a locally-held blob by content address (`None` if not held).
     pub fn get_blob(&self, cid: &Cid) -> Option<Vec<u8>> {
         self.blobs.get(cid).ok().flatten()

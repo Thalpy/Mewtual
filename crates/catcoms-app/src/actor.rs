@@ -19,13 +19,13 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use catcoms_storage::Cid;
+use catcoms_storage::{Cid, FileRef};
 
 use crate::{
-    ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange, FileUsage,
-    FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats,
-    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
-    WikiPendingEdit, WikiRevision,
+    ChannelHead, ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange,
+    FileUsage, FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView,
+    MessageStats, ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair,
+    SwitchboardOffer, WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -144,6 +144,10 @@ pub enum AppCommand {
         channel: u128,
         reply: oneshot::Sender<MessageStats>,
     },
+    /// Query one activity head per channel, for rebuilding unread state after a lock or restart.
+    ChannelHeads {
+        reply: oneshot::Sender<Vec<ChannelHead>>,
+    },
     /// Query this server's mention/reply inbox (newest first, capped at `limit`).
     Inbox {
         limit: usize,
@@ -241,6 +245,28 @@ pub enum AppCommand {
         progress: Option<mpsc::Sender<(usize, usize)>>,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Seal + store ONE chunk of a streamed upload; replies with the chunk's [`FileRef`].
+    SealUploadChunk {
+        bytes: Vec<u8>,
+        mime: String,
+        reply: oneshot::Sender<Result<FileRef, String>>,
+    },
+    /// Publish the index entry for a streamed upload whose chunks are already sealed and stored;
+    /// replies with the file's content-address hex, or an error.
+    PublishUpload {
+        name: String,
+        mime: String,
+        path: String,
+        plaintext_cid: [u8; 32],
+        total_size: u64,
+        chunks: Vec<FileRef>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Drop the sealed chunk blobs of a streamed upload that will never be published.
+    DiscardUpload {
+        chunks: Vec<FileRef>,
+        reply: oneshot::Sender<()>,
+    },
     /// Query the shared file list.
     Files {
         reply: oneshot::Sender<Vec<FileEntry>>,
@@ -302,6 +328,12 @@ pub enum AppCommand {
         cid: Vec<u8>,
         idx: usize,
         reply: oneshot::Sender<ChunkResult>,
+    },
+    /// The size and declared type of a listed file, read from the index without decrypting any
+    /// of it: what the media protocol needs before it can answer a `Range` request at all.
+    FileHead {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Option<(u64, String)>>,
     },
     /// Read one window of a file's plaintext, for the media protocol: whole-file reads do not fit
     /// a player that wants to start on the first chunk and seek by the second.
@@ -568,15 +600,49 @@ pub enum AppCommand {
     Shutdown,
 }
 
+/// Which part of a channel document moved, carried by [`AppEvent::ChannelUpdated`].
+///
+/// One channel document holds the message log, the topic and the jukebox queue, and every one of
+/// them renders. A single "it changed" signal is therefore ambiguous exactly where the UI needs
+/// certainty: only a genuine arrival may raise an unread badge, while an edit, a reaction or a
+/// queue add should refresh the view and nothing else.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChannelChange {
+    /// At least one message id is present that was not there before: a real arrival. This is the
+    /// only flag that may create unread state. Deliberately not inferred from the message count,
+    /// which a concurrent append+delete batch (or a catch-up merge) can leave untouched.
+    pub messages_appended: bool,
+    /// The rendered message list moved without an arrival: an edit, a delete, a reaction or a pin.
+    pub messages_changed: bool,
+    /// The channel topic changed.
+    pub topic: bool,
+    /// The jukebox queue changed (an add or a remove).
+    pub jukebox: bool,
+}
+
+impl ChannelChange {
+    /// Did anything at all move? A delta with nothing set is never emitted.
+    pub fn any(&self) -> bool {
+        self.messages_appended || self.messages_changed || self.topic || self.jukebox
+    }
+}
+
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     /// The shared channel directory changed; the UI should re-fetch it (`channels`).
     ChannelsUpdated,
-    /// A channel's message list changed; the UI should re-fetch it (`messages`). Using
+    /// A channel's rendered content changed; the UI should re-fetch it (`messages`). Using
     /// a re-fetch signal (rather than diffed deltas) keeps ordering robust under CRDT
     /// merges of concurrent messages.
-    ChannelUpdated { channel: u128 },
+    ///
+    /// `change` says WHAT moved. The event used to carry only the channel id, so the UI had to
+    /// read every mutation of the document as "a message arrived": a reaction, a topic edit or a
+    /// jukebox add then raised an unread badge for a channel nobody had written to.
+    ChannelUpdated {
+        channel: u128,
+        change: ChannelChange,
+    },
     /// The roster size changed (a member joined or was removed).
     MembersChanged { count: usize },
     /// A member profile changed; the UI should re-fetch profiles (`profiles`).
@@ -918,6 +984,20 @@ impl ServerActor {
             .is_err()
         {
             return MessageStats::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch one activity head per channel (no message text), for rebuilding unread state.
+    pub async fn channel_heads(&self) -> Vec<ChannelHead> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ChannelHeads { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
         }
         rx.await.unwrap_or_default()
     }
@@ -1388,6 +1468,74 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// Seal + store ONE chunk of a streamed upload, returning the chunk's [`FileRef`] for the
+    /// manifest [`publish_upload`](Self::publish_upload) writes at the end.
+    ///
+    /// One chunk per command is the point: a whole-file `add_file` holds this actor for the entire
+    /// upload, so the server stops syncing and every other command for it queues behind the
+    /// transfer. Between these the actor returns to its loop and interleaves everything else.
+    pub async fn seal_upload_chunk(&self, bytes: Vec<u8>, mime: String) -> Result<FileRef, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SealUploadChunk { bytes, mime, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Publish the index entry for a streamed upload whose chunks are already stored; returns the
+    /// file's content-address hex.
+    pub async fn publish_upload(
+        &self,
+        name: String,
+        mime: String,
+        path: String,
+        plaintext_cid: [u8; 32],
+        total_size: u64,
+        chunks: Vec<FileRef>,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::PublishUpload {
+                name,
+                mime,
+                path,
+                plaintext_cid,
+                total_size,
+                chunks,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Drop the sealed chunk blobs of a streamed upload that was abandoned or failed, so an
+    /// interrupted transfer does not leave bytes on disk no manifest names.
+    ///
+    /// Waits for the deletion rather than for the command to be queued. Cancel and lock tell the
+    /// caller the upload has been cleaned up, and a queued deletion is not a deletion: the process
+    /// can exit between the two and strand exactly the blobs that were reported gone.
+    pub async fn discard_upload(&self, chunks: Vec<FileRef>) {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::DiscardUpload { chunks, reply })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+    }
+
     /// Fetch the shared file list.
     pub async fn files(&self) -> Vec<FileEntry> {
         let (reply, rx) = oneshot::channel();
@@ -1589,6 +1737,20 @@ impl ServerActor {
             return Err("server stopped".into());
         }
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// The size and declared type of a listed file. See [`AppCommand::FileHead`].
+    pub async fn file_head(&self, cid: Vec<u8>) -> Option<(u64, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FileHead { cid, reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
     }
 
     /// Read one window of a file's plaintext. See [`AppCommand::ReadFileRange`].
@@ -2264,9 +2426,10 @@ where
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<AppCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<AppEvent>(256);
     let handle = tokio::spawn(async move {
-        // Per open channel: a content signature of its messages (see `channel_changed`), so an
-        // edit/delete/add all surface a `ChannelUpdated`.
-        let mut counts: HashMap<u128, u64> = HashMap::new();
+        // Per open channel: a content signature of its messages, topic and jukebox (see
+        // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
+        // of the three it was.
+        let mut counts: HashMap<u128, ChannelSignature> = HashMap::new();
         let mut members = server.member_count();
         // The directory itself is shared. Seed `general` for legacy/new servers, then open every
         // known message document so later gossip and reconnect catch-up have somewhere to land.
@@ -2281,7 +2444,7 @@ where
             if let Err(e) = server.open_channel(channel).await {
                 tracing::warn!(error = %e, channel, "open listed channel failed");
             }
-            channel_changed(&server, channel, &mut counts);
+            channel_delta(&server, channel, &mut counts);
         }
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
@@ -2402,10 +2565,9 @@ where
                         }
                         // Seed (and start tracking) the channel's current content signature WITHOUT
                         // emitting; the UI fetches messages on open (switchTo → refresh); only a
-                        // later add/edit/delete should fire ChannelUpdated. (A non-empty channel's
-                        // signature is non-zero, so the old `or_insert(0)` would have spuriously
-                        // signalled "changed" on open under the content-hash detector.)
-                        channel_changed(&server, channel, &mut counts);
+                        // later add/edit/delete should fire ChannelUpdated. `channel_delta` reports
+                        // nothing on first sight for exactly this reason.
+                        channel_delta(&server, channel, &mut counts);
                         let _ = ack.send(());
                     }
                     Some(AppCommand::SendMessage {
@@ -2421,10 +2583,15 @@ where
                         if let Err(e) = &res {
                             tracing::warn!(error = %e, channel, "send_message failed");
                         }
-                        let changed = res.is_ok() && channel_changed(&server, channel, &mut counts);
+                        let change = res
+                            .is_ok()
+                            .then(|| channel_delta(&server, channel, &mut counts))
+                            .flatten();
                         let _ = reply.send(res);
-                        if changed {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = change {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::EditMessage {
@@ -2438,8 +2605,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::DeleteMessage { channel, id, reply }) => {
@@ -2448,8 +2617,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::ToggleReaction {
@@ -2463,8 +2634,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::SetPin {
@@ -2478,8 +2651,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::SetChannelTopic {
@@ -2492,8 +2667,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::ChannelTopic { channel, reply }) => {
@@ -2510,8 +2687,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::JukeboxRemove {
@@ -2524,8 +2703,10 @@ where
                             .await
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::Jukebox { channel, reply }) => {
@@ -2535,16 +2716,20 @@ where
                         if let Err(e) = server.request_channel_catchup(peer, channel).await {
                             tracing::warn!(error = %e, channel, "catch-up failed");
                         }
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::CatchUpAny { channel }) => {
                         if let Err(e) = server.request_channel_catchup_any(channel).await {
                             tracing::warn!(error = %e, channel, "any-peer catch-up failed");
                         }
-                        if channel_changed(&server, channel, &mut counts) {
-                            let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                        if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                            let _ = event_tx
+                                .send(AppEvent::ChannelUpdated { channel, change })
+                                .await;
                         }
                     }
                     Some(AppCommand::Messages { channel, reply }) => {
@@ -2552,6 +2737,9 @@ where
                     }
                     Some(AppCommand::MessageStats { channel, reply }) => {
                         let _ = reply.send(server.message_stats(channel));
+                    }
+                    Some(AppCommand::ChannelHeads { reply }) => {
+                        let _ = reply.send(server.channel_heads());
                     }
                     Some(AppCommand::Inbox { limit, reply }) => {
                         let _ = reply.send(server.inbox(limit));
@@ -2692,6 +2880,42 @@ where
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
                     }
+                    Some(AppCommand::SealUploadChunk { bytes, mime, reply }) => {
+                        let res = server
+                            .seal_upload_chunk(&bytes, &mime)
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::PublishUpload {
+                        name,
+                        mime,
+                        path,
+                        plaintext_cid,
+                        total_size,
+                        chunks,
+                        reply,
+                    }) => {
+                        let res = server
+                            .publish_upload(
+                                &name,
+                                &mime,
+                                &path,
+                                Cid::from_bytes(plaintext_cid),
+                                total_size,
+                                chunks,
+                            )
+                            .await
+                            .map(|cid| cid.to_hex())
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::DiscardUpload { chunks, reply }) => {
+                        server.discard_upload_chunks(&chunks);
+                        let _ = reply.send(());
+                    }
                     Some(AppCommand::Files { reply }) => {
                         let _ = reply.send(server.files());
                     }
@@ -2770,6 +2994,12 @@ where
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);
+                    }
+                    Some(AppCommand::FileHead { cid, reply }) => {
+                        let head = <[u8; 32]>::try_from(cid.as_slice())
+                            .ok()
+                            .and_then(|arr| server.file_head(&Cid::from_bytes(arr)));
+                        let _ = reply.send(head);
                     }
                     Some(AppCommand::ReadFileRange {
                         cid,
@@ -3253,8 +3483,10 @@ where
                         )
                         .await;
                         for channel in counts.keys().copied().collect::<Vec<_>>() {
-                            if channel_changed(&server, channel, &mut counts) {
-                                let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
+                            if let Some(change) = channel_delta(&server, channel, &mut counts) {
+                                let _ = event_tx
+                                    .send(AppEvent::ChannelUpdated { channel, change })
+                                    .await;
                             }
                         }
                         let mc = server.member_count();
@@ -3355,7 +3587,7 @@ where
 async fn sync_channels<T, R>(
     server: &mut Server<T, R>,
     last: &mut Vec<ChannelInfo>,
-    sigs: &mut HashMap<u128, u64>,
+    sigs: &mut HashMap<u128, ChannelSignature>,
     event_tx: &mpsc::Sender<AppEvent>,
     catchup_peer: Option<PeerId>,
     locally_created: Option<u128>,
@@ -3386,58 +3618,99 @@ async fn sync_channels<T, R>(
                 );
             }
         }
-        channel_changed(server, channel.id, sigs);
+        channel_delta(server, channel.id, sigs);
     }
     *last = next;
     let _ = event_tx.send(AppEvent::ChannelsUpdated).await;
 }
 
-/// Whether a channel's rendered content (its messages, its topic or its jukebox) changed since
-/// last seen (updating the record).
+/// The last-seen fingerprint of one channel's rendered content, kept per open channel so a change
+/// can be classified rather than merely detected. The three signatures are separate because they
+/// answer separate questions, and `ids` is the set of message ids: an arrival is "an id we have
+/// never seen", which is the one definition a concurrent append+delete cannot fool.
+#[derive(Default)]
+struct ChannelSignature {
+    topic: u64,
+    jukebox: u64,
+    messages: u64,
+    ids: std::collections::HashSet<u64>,
+}
+
+fn hash_of(value: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher as _;
+    // `DefaultHasher::new()` has a fixed seed, so the same content hashes the same across ticks.
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut h);
+    h.finish()
+}
+
+/// Classify what moved in a channel since it was last seen (updating the record). `None` means
+/// nothing did, so no event is worth emitting.
+///
 /// Synchronous; the `&Server` borrow ends before the caller awaits the event send, so
 /// the actor future stays `Send` (a `&Server` held across an await would require
 /// `Server: Sync`, which it is not).
-fn channel_changed<T, R>(
+fn channel_delta<T, R>(
     server: &Server<T, R>,
     channel: u128,
-    sigs: &mut HashMap<u128, u64>,
-) -> bool
+    sigs: &mut HashMap<u128, ChannelSignature>,
+) -> Option<ChannelChange>
 where
     T: MeshTransport,
     R: CryptoRngCore,
 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::{Hash as _, Hasher as _};
+    // The topic and the jukebox queue ride the same channel document and the same rendered header,
+    // so a peer's edit still has to reach the UI; it just no longer claims to be a message.
+    let topic = hash_of(server.channel_topic(channel));
+    let jukebox = {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for e in &server.jukebox(channel) {
+            e.id.hash(&mut h);
+            e.name.hash(&mut h);
+        }
+        h.finish()
+    };
     // A content signature (not just the count) so an EDIT; which doesn't change the count; is
-    // detected too, both locally and when a peer's edit arrives. `DefaultHasher::new()` has a fixed
-    // seed, so the same content hashes the same across ticks. Cheap over a channel's message list.
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    // The topic is part of the channel's rendered state, so a peer's topic change refreshes the
-    // UI through the same `ChannelUpdated` the message list uses.
-    server.channel_topic(channel).hash(&mut h);
-    // The jukebox queue rides the same channel document and the same rendered header, so a
-    // peer's add/remove refreshes the UI through this `ChannelUpdated` too.
-    for e in &server.jukebox(channel) {
-        e.id.hash(&mut h);
-        e.name.hash(&mut h);
-    }
+    // detected too, both locally and when a peer's edit arrives. Cheap over a channel's message
+    // list, which this actor already materializes on every sync tick.
+    let mut messages_hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut ids = std::collections::HashSet::new();
     for m in &server.messages(channel) {
-        m.id.hash(&mut h);
-        m.text.hash(&mut h);
-        m.edited.hash(&mut h);
-        m.pinned.hash(&mut h);
+        m.id.hash(&mut messages_hasher);
+        m.text.hash(&mut messages_hasher);
+        m.edited.hash(&mut messages_hasher);
+        m.pinned.hash(&mut messages_hasher);
         // Reactions change the rendered message too (count unchanged), so fold them in.
         for r in &m.reactions {
-            r.emoji.hash(&mut h);
-            r.by.hash(&mut h);
+            r.emoji.hash(&mut messages_hasher);
+            r.by.hash(&mut messages_hasher);
         }
+        ids.insert(hash_of(&m.id));
     }
-    let sig = h.finish();
-    if sigs.get(&channel).copied() != Some(sig) {
-        sigs.insert(channel, sig);
-        true
-    } else {
-        false
-    }
+    let messages = messages_hasher.finish();
+
+    let next = ChannelSignature {
+        topic,
+        jukebox,
+        messages,
+        ids,
+    };
+    let Some(previous) = sigs.get(&channel) else {
+        // First sight of this channel: seed the record and report nothing. The UI fetches messages
+        // when it opens a channel, so a "changed" here would be a spurious badge on every open.
+        sigs.insert(channel, next);
+        return None;
+    };
+    let appended = next.ids.iter().any(|id| !previous.ids.contains(id));
+    let change = ChannelChange {
+        messages_appended: appended,
+        messages_changed: !appended && next.messages != previous.messages,
+        topic: next.topic != previous.topic,
+        jukebox: next.jukebox != previous.jukebox,
+    };
+    sigs.insert(channel, next);
+    change.any().then_some(change)
 }
 
 /// Whether the shared file count changed since last seen (updating the record).
@@ -3709,6 +3982,107 @@ mod tests {
         .unwrap()
     }
 
+    /// Drain events until the next `ChannelUpdated` for `channel`, returning what it says moved.
+    async fn next_change(events: &mut mpsc::Receiver<AppEvent>, channel: u128) -> ChannelChange {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Some(AppEvent::ChannelUpdated { channel: c, change }) if c == channel => {
+                        return change
+                    }
+                    Some(_) => continue,
+                    None => panic!("actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("no channel update arrived")
+    }
+
+    /// One channel document holds messages, the topic and the jukebox queue. The UI raises unread
+    /// badges from arrivals only, so each of those has to be distinguishable at the event: an
+    /// untyped "it changed" is what made a jukebox add look like an unread chat message.
+    #[tokio::test]
+    async fn a_channel_update_says_which_part_of_the_document_moved() {
+        let hub = Hub::new();
+        let (actor, mut events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+        actor.open_channel(GENERAL).await;
+
+        actor.send_message(GENERAL, "hi there").await;
+        let change = next_change(&mut events, GENERAL).await;
+        assert!(change.messages_appended, "a new message is an arrival");
+        assert!(!change.messages_changed && !change.topic && !change.jukebox);
+
+        let id = actor.messages(GENERAL).await[0].id.clone();
+
+        actor
+            .toggle_reaction(GENERAL, id.clone(), "🐈".into())
+            .await
+            .unwrap();
+        let change = next_change(&mut events, GENERAL).await;
+        assert!(!change.messages_appended, "a reaction is not an arrival");
+        assert!(change.messages_changed, "but the log still re-renders");
+
+        actor
+            .edit_message(GENERAL, id, "hi there!".into())
+            .await
+            .unwrap();
+        let change = next_change(&mut events, GENERAL).await;
+        assert!(!change.messages_appended, "an edit is not an arrival");
+        assert!(change.messages_changed);
+
+        actor
+            .set_channel_topic(GENERAL, "cats only".into())
+            .await
+            .unwrap();
+        let change = next_change(&mut events, GENERAL).await;
+        assert!(change.topic);
+        assert!(!change.messages_appended && !change.messages_changed);
+
+        actor
+            .jukebox_add(GENERAL, "ab".into(), "purr.mp3".into())
+            .await
+            .unwrap();
+        let change = next_change(&mut events, GENERAL).await;
+        assert!(change.jukebox, "queue edits still reach the UI");
+        assert!(
+            !change.messages_appended,
+            "but a jukebox add must never read as a new message"
+        );
+
+        actor.shutdown().await;
+        let _ = handle.await;
+    }
+
+    /// Unread state has to survive an explicit lock and a restart, neither of which the live event
+    /// stream covers. The heads are the state it gets rebuilt from, so own messages must not count.
+    #[tokio::test]
+    async fn channel_heads_report_the_newest_message_somebody_else_wrote() {
+        let hub = Hub::new();
+        let (actor, _events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+        // The heads cover the shared channel directory, which is what the UI lists, so this uses
+        // the directory's own id for `general` rather than the bare doc id the other tests open.
+        let general = crate::channel_id("general");
+        actor.open_channel(general).await;
+        actor.send_message(general, "only mine").await;
+
+        let heads = actor.channel_heads().await;
+        let head = heads
+            .iter()
+            .find(|h| h.channel == general)
+            .expect("general has a head");
+        assert_eq!(head.count, 1);
+        assert!(head.latest_ts > 0, "the message has a timestamp");
+        assert_eq!(
+            head.latest_incoming_ts, 0,
+            "my own message can never make my own channel unread"
+        );
+        assert!(head.latest_incoming_id.is_empty());
+
+        actor.shutdown().await;
+        let _ = handle.await;
+    }
+
     #[tokio::test]
     async fn the_actor_signals_a_channel_update_on_send_and_serves_queries() {
         let hub = Hub::new();
@@ -3721,7 +4095,16 @@ mod tests {
             .await
             .expect("event timeout")
             .expect("actor closed");
-        assert_eq!(ev, AppEvent::ChannelUpdated { channel: GENERAL });
+        assert_eq!(
+            ev,
+            AppEvent::ChannelUpdated {
+                channel: GENERAL,
+                change: ChannelChange {
+                    messages_appended: true,
+                    ..ChannelChange::default()
+                },
+            }
+        );
 
         let msgs = actor.messages(GENERAL).await;
         assert_eq!(msgs.len(), 1);
@@ -3791,7 +4174,11 @@ mod tests {
         timeout(Duration::from_secs(60), async {
             loop {
                 match bob_events.recv().await {
-                    Some(AppEvent::ChannelUpdated { channel }) if channel == GENERAL => break,
+                    Some(AppEvent::ChannelUpdated { channel, change })
+                        if channel == GENERAL && change.messages_appended =>
+                    {
+                        break
+                    }
                     Some(_) => continue,
                     None => panic!("bob actor closed"),
                 }

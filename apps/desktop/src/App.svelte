@@ -52,17 +52,31 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupDownload, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
-    driftAction, fetchPhase, isStalled, mediaKind, mediaUrl, nudgeRate, resolveCallName,
-    STALL_ANNOUNCE_MS, type FetchPhase, type MediaKind,
+    bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
+    VIDEO_BITRATE, type SlotDirection, type VideoKind,
+  } from "./voice-signaling";
+  import {
+    deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
+    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, resolveCallName, stallChip,
+    validJukeSeq, STALL_ANNOUNCE_MS,
+    type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
+  import {
+    CLOCK_SKEW_GRACE_MS, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
+    unreadFromHeads, type ChannelHead,
+  } from "./unread";
+  import {
+    deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
+    type DeliveryEvidence,
+  } from "./delivery";
   import { installUiLogging } from "./uilog";
   import {
-    TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
-    type TransferPiece,
+    TRANSFER_CHUNK_BYTES,
+    formatBytes, formatRate, sampleRate, transferPieces,
+    type TransferPiece, type UploadTicket,
   } from "./transfer-visual";
   import { plainSummary } from "./wikitext";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
@@ -123,7 +137,7 @@
     assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
     withOrderedSwitchboardStatus,
   } from "./joinreply";
-  import { callBarStatus, mappableIcePort, routerMappedCandidate, type MappedPort } from "./callroutes";
+  import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -152,9 +166,11 @@
     name: string;
     channels: Channel[];
     active: string; // active channel id
-    unread: string[]; // channel ids with unread
+    // Channel ids with unread. The ONE record of this server's outstanding activity: the rail's
+    // badge, the orbit view's glow and the DM circle's dot all read it, so none of them can
+    // disagree with the channel list about whether there is anything to see.
+    unread: string[];
     invite: string; // founder's invite ("" for a joiner)
-    dot: boolean; // activity while not the active server
     isDm: boolean; // a 1:1 DM (shown behind the DMs circle) rather than a server
   };
 
@@ -252,6 +268,7 @@
   type SetPage = { id: string; label: string; cat: string; danger?: boolean };
   const USER_SET_PAGES: SetPage[] = [
     { id: "guide", label: "Feature Guide", cat: "Help" },
+    { id: "about", label: "About & Licences", cat: "Help" },
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
@@ -2480,22 +2497,40 @@
     const k = chanKey();
     dividerTs = k ? (readMarks[k] ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
   }
+  // The newest timestamp in the loaded conversation this machine is willing to believe. A message
+  // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
+  // choosing the value) parks the read mark years ahead and every later message silently counts as
+  // already read. Recomputed only when the rows change, so it is stable while a channel is open.
+  let readTsCeiling = $derived(readCeiling(messages.map((m) => m.ts), Date.now()));
+  // A row's timestamp as read state may use it. Display still shows what the sender wrote.
+  function readTs(m: Msg): number {
+    return effectiveTs(m.ts, readTsCeiling);
+  }
   function advanceReadMark() {
     const k = chanKey();
     if (!k || !messages.length) return;
-    const latest = messages.reduce((a, m) => Math.max(a, m.ts), 0);
+    const latest = messages.reduce((a, m) => Math.max(a, readTs(m)), 0);
     if ((readMarks[k] ?? 0) < latest) {
       readMarks[k] = latest;
       scheduleUiStateSave();
     }
   }
+  // Is there a message here from somebody else that this device has not read past yet? Measured
+  // against the saved mark rather than `dividerTs`, which is deliberately frozen at the value the
+  // channel was opened with so the "new messages" line stays put while you read.
+  function activeChannelHasUnseen(): boolean {
+    const k = chanKey();
+    if (!k) return false;
+    const mark = readMarks[k] ?? 0;
+    return messages.some((m) => m.author !== myFp && readTs(m) > mark);
+  }
   // Index of the first message newer than the read boundary (-1 if all read).
   // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
-  let firstUnreadIdx = $derived(messages.findIndex((m) => m.ts > dividerTs && m.author !== myFp));
+  let firstUnreadIdx = $derived(messages.findIndex((m) => effectiveTs(m.ts, readTsCeiling) > dividerTs && m.author !== myFp));
   // How many messages sit past that boundary; the divider and the header jump both name it.
   let unreadCount = $derived(firstUnreadIdx < 0 ? 0 : messages.slice(firstUnreadIdx).filter((m) => m.author !== myFp).length);
   // Is this row one of the unread ones? Own messages never count (you just sent them).
-  const isUnread = (m: Msg) => firstUnreadIdx >= 0 && m.ts > dividerTs && m.author !== myFp;
+  const isUnread = (m: Msg) => firstUnreadIdx >= 0 && readTs(m) > dividerTs && m.author !== myFp;
 
   // Day dividers in the log ("thu 2026-08-14" between messages from different days).
   function sameDay(a: number, b: number): boolean {
@@ -2570,8 +2605,6 @@
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
   let statusEl = $state<HTMLUListElement | undefined>(undefined);
-  // Cache of resolved embed media: ciphertext-CID hex -> data: URL (avoids re-fetching).
-  const embedCache = new Map<string, string>();
 
   // Custom emoji (10f): files under the "emoji" folder. code -> cid, and resolved code -> URL.
   let emojiUrls = $state<Record<string, string>>({});
@@ -3968,7 +4001,7 @@
         const channel = await invoke<string>("open_channel", { server: r.server, name: "general" });
         servers = [
           ...servers,
-          { id: r.server, name: r.name, channels: [{ id: channel, name: "general" }], active: channel, unread: [], invite: "", dot: false, isDm: false },
+          { id: r.server, name: r.name, channels: [{ id: channel, name: "general" }], active: channel, unread: [], invite: "", isDm: false },
         ];
       }
       const first = results.find((r) => r.ok && r.server !== undefined && r.server !== null);
@@ -4347,23 +4380,14 @@
     void files;
     if (activeServerId === null) return;
     for (const [code, cid] of Object.entries(emojiMap)) {
-      if (!emojiUrls[code]) void loadEmoji(code, cid);
+      if (!emojiUrls[code]) loadEmoji(code, cid);
     }
   });
-  async function loadEmoji(code: string, cid: string) {
+  // Custom emoji stream like every other shared image, so a "custom emoji" that is really a
+  // 200 MB file cannot be turned into a JS string by the act of rendering a message.
+  function loadEmoji(code: string, cid: string) {
     if (activeServerId === null) return;
-    try {
-      let url = embedCache.get(cid);
-      if (!url) {
-        const base64 = await invoke<string>("download_file", { server: activeServerId, cid });
-        const file = files.find((f) => f.cid === cid);
-        url = `data:${safeMime(file?.mime ?? "") || "image/png"};base64,${base64}`;
-        embedCache.set(cid, url);
-      }
-      emojiUrls = { ...emojiUrls, [code]: url };
-    } catch {
-      /* leave unresolved; retry on next files change */
-    }
+    emojiUrls = { ...emojiUrls, [code]: sharedMediaUrl(cid, activeServerId) };
   }
 
   function resolveEmoji(container: HTMLElement | undefined) {
@@ -4453,7 +4477,6 @@
       active: r.channel,
       unread: [],
       invite: r.invite,
-      dot: false,
       isDm: r.is_dm,
     }));
     locked = false;
@@ -4463,7 +4486,14 @@
     // snapshots its divider. The native actors are already running, so this is only local UI state.
     const continuityGeneration = ++uiStateLoadGeneration;
     void loadUiContinuity(continuityGeneration).finally(() => {
-      if (continuityGeneration === uiStateLoadGeneration && !locked && firstServer) void switchServer(firstServer.id);
+      if (continuityGeneration !== uiStateLoadGeneration || locked) return;
+      if (firstServer) void switchServer(firstServer.id);
+      // Unread badges start empty here because nothing durable holds them. Anything that arrived
+      // while the vault was locked (the native bridge drops those events on purpose) or while the
+      // app was closed has no event left to raise a badge, so rebuild them from each channel's
+      // activity head against the read marks that just loaded. Without this pass, a message
+      // received during a lock or across a restart is silently lost from the indicators.
+      rebuildAllUnread();
     });
     refreshAllDmRequests();
     loadInbox();
@@ -4695,7 +4725,7 @@
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     servers = [
       ...servers,
-      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
+      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm },
     ];
     showAdd = false;
     // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
@@ -4721,7 +4751,7 @@
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
-        { id: r.server, name, channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
+        { id: r.server, name, channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", isDm: true },
       ];
       const invite = (await invoke<string | null>("get_invite", { server: r.server })) ?? "";
       const sent = invite
@@ -4932,7 +4962,9 @@
     clearServerView();
     groupLoading = true;
     const s = servers.find((x) => x.id === id);
-    if (s) s.dot = false;
+    // Nothing is cleared here. Arriving at a server is not reading its channels, and the rail's
+    // badge is derived from the unread channel list rather than kept beside it, so opening one
+    // channel can no longer blank the evidence that the other eleven have something in them.
     // A brand already read this session repaints once, straight to the right one, instead of
     // default-then-brand a round-trip later. refreshLivery still confirms it below.
     const cachedLivery = s && !s.isDm ? liveryCache.get(id) : undefined;
@@ -4983,6 +5015,10 @@
     if (!viewCurrent(gen, id)) return; // moved on while this group was loading
     groupLoading = false;
     syncProfileEditor();
+    // The channel list is only certain now. Rebuilding here as well as at unlock is what makes the
+    // badges right for a server whose directory was still a stub when the session started, and for
+    // anything that arrived in a channel this session has never opened.
+    void rebuildUnread(id);
   }
 
   // Populate the Profile tab's editor from this member's own saved profile (so the tab shows
@@ -5079,17 +5115,15 @@
     delivery = {};
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
-    cur.unread = cur.unread.filter((c) => c !== id);
     if (showSearch && !keepSearch) closeSearch();
     reactionPickerFor = "";
     replyingTo = "";
     mentionQuery = null;
     showPinned = false;
-    if (mentionChannels.has(id)) {
-      mentionChannels = new Set(mentionChannels);
-      mentionChannels.delete(id); // reading the channel clears its mention badge
-    }
-    captureDivider(); // snapshot the read boundary before refresh advances the mark
+    captureDivider(); // snapshot the read boundary before the load can advance the mark
+    // Badges are NOT cleared here. Navigating to a channel is a request to read it, not proof of
+    // having read it: a failed `get_messages` used to leave the channel selected, empty and
+    // marked read. `settleReadState` inside refresh clears them once the rows are actually up.
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
     refreshTopic();
     refreshDelivery();
@@ -5157,10 +5191,124 @@
         // acknowledged, server-assigned id from replaying the entrance a second time.
         markMessageArrivals(next.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
       }
-      advanceReadMark();
+      // Loading rows is not reading them. `settleReadState` decides which this was.
+      settleReadState();
     } catch (e) {
       error = String(e);
     }
+  }
+
+  // Overlays that take the window whole. The channel stays selected behind every one of them, and
+  // a message that lands behind one was never seen.
+  function chatCoveredByOverlay(): boolean {
+    return (
+      showSettings || showServerSettings || showFeedback || showQuickSwitch || showLinkDevice ||
+      showAdd || !!lightbox
+    );
+  }
+  function chatSurfaceState(atBottom: boolean) {
+    return {
+      locked,
+      view,
+      inboxView,
+      dmPlaceholder: dmHome && !cur,
+      spaceOpen,
+      callFocusOpen: focusOpen,
+      overlayOpen: chatCoveredByOverlay(),
+      windowFocused,
+      documentVisible,
+      atBottom,
+    };
+  }
+  /**
+   * Is the message log actually in front of a person right now?
+   *
+   * Selecting a channel is not reading it, and neither is a `get_messages` completing. The app has
+   * a dozen surfaces that cover the log entirely (files, the wiki, settings, the inbox, the orbit
+   * view, a call taking the window), and it can be scrolled up in the middle of its own history.
+   * Treating any of those as "seen" is what let messages arrive already read.
+   */
+  function chatObservedNow(): boolean {
+    return chatIsObserved(chatSurfaceState(chatStickToBottom));
+  }
+  /**
+   * Is the log on screen at all, wherever it happens to be scrolled to?
+   *
+   * The looser question, and the right one for deciding whether to make noise. Reading back
+   * through history is not seeing what just landed at the bottom, so it must not clear the badge;
+   * but the channel IS in front of the reader, so a chime and a ticker for every arrival would be
+   * shouting about something already visible a scroll away.
+   */
+  function chatOnScreenNow(): boolean {
+    return chatIsObserved(chatSurfaceState(true));
+  }
+  /**
+   * Reconcile the active conversation's indicators with what is actually on screen.
+   *
+   * Observed: the read mark moves to the newest loaded row and the channel's badges clear.
+   * Not observed: an arrival marks the channel unread exactly as an inactive one would, so
+   * walking off to another surface with a channel still selected cannot swallow a message.
+   */
+  function settleReadState() {
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) return;
+    // Only ever act on rows that actually loaded for THIS conversation. A failed or superseded
+    // read leaves the stamp elsewhere, and clearing a badge off it would drop a real message.
+    if (!scopeHoldsConversation(messageWindowScope, server, channel)) return;
+    if (chatObservedNow()) {
+      advanceReadMark();
+      clearChannelIndicators(server, channel);
+    } else if (activeChannelHasUnseen()) {
+      markChannelUnread(server, channel);
+    }
+  }
+  /** This channel has something new from somebody else; raise its badge (and its server's). */
+  function markChannelUnread(server: number, channel: string) {
+    const s = servers.find((x) => x.id === server);
+    if (!s || !s.channels.some((c) => c.id === channel)) return;
+    if (!s.unread.includes(channel)) s.unread.push(channel);
+  }
+  /** Reading a channel clears its badges. The server rail derives its own from these. */
+  function clearChannelIndicators(server: number, channel: string) {
+    const s = servers.find((x) => x.id === server);
+    if (s) s.unread = s.unread.filter((c) => c !== channel);
+    if (server === activeServerId && mentionChannels.has(channel)) {
+      mentionChannels = new Set(mentionChannels);
+      mentionChannels.delete(channel);
+    }
+  }
+  /**
+   * Rebuild one server's unread badges from durable state.
+   *
+   * The live event stream is deliberately dropped at the native boundary while the vault is
+   * locked, and a restart begins with no event history at all, so anything that arrived in the
+   * meantime has no event left to raise its badge. Comparing each channel's activity head with
+   * this device's own read marks recovers it. Unioned rather than assigned: an event that lands
+   * while the scan is in flight must not be thrown away by its answer.
+   */
+  async function rebuildUnread(server: number) {
+    try {
+      const heads = await invoke<ChannelHead[]>("get_channel_heads", { server });
+      if (locked) return;
+      const s = servers.find((x) => x.id === server);
+      if (!s) return;
+      const known = new Set(s.channels.map((c) => c.id));
+      const rebuilt = unreadFromHeads(
+        heads,
+        (channel) => readMarks[chatScopeKey(server, channel)] ?? 0,
+        Date.now(),
+        (channel) => known.has(channel),
+      );
+      if (rebuilt.length) s.unread = [...new Set([...s.unread, ...rebuilt])];
+      // The conversation on screen is the one exception: it is being looked at right now.
+      if (server === activeServerId && cur?.active) settleReadState();
+    } catch {
+      // An older backend or a closed actor: this session still has its live events.
+    }
+  }
+  function rebuildAllUnread() {
+    for (const s of servers) void rebuildUnread(s.id);
   }
 
   // A single network merge can emit several channel notifications. Serialize and coalesce their
@@ -5173,7 +5321,7 @@
   // bounds: a member is counted only once it has provably built on the message, so counts
   // only rise and 0 means "no proof yet", never "failed". Red is reserved for the one true
   // negative signal we have: no peers reachable at all.
-  type DeliveryState = { id: string; delivered: number; reachable: number };
+  type DeliveryState = { id: string; delivered: number; reachable: number; any_peer: boolean };
   let delivery = $state<Record<string, DeliveryState>>({});
   async function refreshDelivery() {
     const gen = viewGeneration;
@@ -5187,60 +5335,53 @@
       const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       const map: Record<string, DeliveryState> = {};
-      for (const s of list) map[s.id] = s;
+      for (const s of list) map[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
       delivery = map;
     } catch {
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       delivery = {}; // older backend or closed actor: ticks simply don't render
     }
   }
-  // The gutter tick for one of your messages: ✕ no peers · ◌ no proof yet · ~ partial ·
-  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed.
-  function deliveryTick(m: Msg): { g: string; cls: string; tip: string } | null {
-    if (m.author !== myFp || !m.id) return null;
-    if (m.id.startsWith("pending:"))
-      return { g: "◌", cls: "d-pending", tip: "Saving this message locally…" };
-    const total = Math.max(members - 1, 0);
-    if (total === 0) return null; // alone here: nothing to deliver to
-    const d = delivery[m.id];
-    const del = d?.delivered ?? 0;
-    const reach = d?.reachable ?? Math.max(onlineCount - 1, 0);
-    if (del >= total)
-      return { g: "✓✓", cls: "d-all", tip: `Delivered to everyone: all ${total} other member${total === 1 ? "" : "s"} proved they hold this message.` };
-    if (reach === 0)
-      return { g: "✕", cls: "d-none", tip: "No peers reachable: queued; it gossips automatically when members reconnect. Not lost." };
-    if (del >= reach)
-      return { g: "✓", cls: "d-ok", tip: `Delivered to all ${reach} reachable member${reach === 1 ? "" : "s"} (${del}/${total} confirmed overall). Confirmation is proof-based: silent receivers may also have it.` };
-    if (del > 0)
-      return { g: "~", cls: "d-part", tip: `Delivering: ${del} of ${reach} reachable confirmed (${total} members in total). Members confirm by building on the message.` };
-    return { g: "◌", cls: "d-wait", tip: `Sent: no confirmations yet from ${reach} reachable member${reach === 1 ? "" : "s"}. Silent receipt isn't visible; the count only rises.` };
-  }
-  // Index of your most recent message in the log (-1 if none): the receipt line's anchor.
+  // Index of your most recent message in the log (-1 if none): the one message whose state is
+  // still plausibly in flight, and the receipt line's anchor.
   let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? i : acc), -1));
-  // The spelled-out receipt under one of your messages. Same evidence as the gutter tick, in
-  // words. Shown on your latest message (the state you actually care about) and on any older
-  // one that hasn't settled yet; a delivered-and-superseded message stays quiet.
-  function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
-    if (mi !== lastOwnIdx) return null;
-    const t = deliveryTick(m);
-    if (!t || !m.id) return null;
-    if (t.cls === "d-pending") return { g: t.g, label: "sending…", cls: t.cls, tip: t.tip };
-    if ((t.cls === "d-all" || t.cls === "d-ok") && mi !== lastOwnIdx) return null;
+  // What is actually known about one of your messages. `delivered`/`reachable` are null when the
+  // actor has reported nothing for it, which is deliberately distinct from reporting zero: the
+  // absence of a measurement is not evidence that nobody is out there.
+  function deliveryEvidence(m: Msg, mi: number): DeliveryEvidence {
     const d = delivery[m.id];
-    const total = Math.max(members - 1, 0);
-    const del = d?.delivered ?? 0;
-    const reach = d?.reachable ?? Math.max(onlineCount - 1, 0);
-    const label =
-      t.cls === "d-none"
-        ? "queued · no peers reachable"
-        : t.cls === "d-wait"
-          ? "sending…"
-          : t.cls === "d-part"
-            ? `delivering · ${del}/${reach} peers`
-            : t.cls === "d-ok"
-              ? `delivered · ${del} peer${del === 1 ? "" : "s"}`
-              : `delivered · all ${total} member${total === 1 ? "" : "s"}`;
-    return { g: t.g, label, cls: t.cls, tip: t.tip };
+    return {
+      others: Math.max(members - 1, 0),
+      delivered: d ? d.delivered : null,
+      reachable: d ? d.reachable : null,
+      anyPeer: d ? d.any_peer : null,
+      pending: m.id.startsWith("pending:"),
+      latest: mi === lastOwnIdx,
+    };
+  }
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ partial ·
+  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed. Shown on EVERY message of yours
+  // the actor still has evidence for, not only the newest: the point of a per-message tick is to
+  // be able to look back up the log and see which ones landed.
+  function deliveryTick(m: Msg, mi: number): { g: string; cls: string; tip: string } | null {
+    if (m.author !== myFp || !m.id) return null;
+    const e = deliveryEvidence(m, mi);
+    const verdict = deliveryVerdict(e);
+    if (!verdict) return null;
+    return { g: deliveryGlyph(verdict), cls: deliveryClass(verdict), tip: deliveryTip(verdict, e) };
+  }
+  // The spelled-out receipt under your latest message. Same evidence as the gutter tick, in words.
+  function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
+    if (mi !== lastOwnIdx || !m.id || m.author !== myFp) return null;
+    const e = deliveryEvidence(m, mi);
+    const verdict = deliveryVerdict(e);
+    if (!verdict) return null;
+    return {
+      g: deliveryGlyph(verdict),
+      label: deliveryLabel(verdict, e),
+      cls: deliveryClass(verdict),
+      tip: deliveryTip(verdict, e),
+    };
   }
   async function refreshMembers() {
     const gen = viewGeneration;
@@ -7096,16 +7237,14 @@
     }
   }
 
-  // Read a File as raw base64 (strips the data: prefix), reporting the browser-side read before
-  // the backend starts sealing/storing chunks. The Transfers UI reserves its first 10% for this.
-  function readBase64(
-    file: File,
-    onProgress: ((done: number, total: number) => void) | undefined = undefined,
-  ): Promise<string> {
+  // Read a Blob as raw base64 (strips the data: prefix). Deliberately a Blob and not a File: a
+  // streamed upload reads one slice at a time (the size the native ticket asks for), so the whole
+  // file never becomes a JS string. FileReader decodes off the main thread, which is why this is
+  // not a btoa loop over the bytes.
+  function readBase64(file: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(new Error("could not read file"));
-      reader.onprogress = (e) => onProgress?.(e.loaded, e.lengthComputable ? e.total : file.size);
       reader.onload = () => {
         const r = reader.result;
         resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
@@ -7191,6 +7330,18 @@
 
   // The one upload path used by files, embeds, wiki attachments, event art and custom emoji.
   // Keeping it central means every group upload gets the same progress and terminal state.
+  //
+  // The file is streamed a slice at a time: read the slice, hand it to the backend, repeat.
+  // Sending a whole file in one invoke turned it into a single base64 string the size of the file,
+  // and the native side then sealed the lot inside one actor command, so a large share froze the
+  // webview and stopped the server syncing until it finished. A slice at a time bounds both: the
+  // UI keeps painting between slices, and the native side seals a chunk at a time so the server
+  // actor keeps running between them.
+  //
+  // begin_file_upload states the whole contract for this upload: the slice size to send, how many
+  // chunks it becomes, and the token every later call carries. None of those are recomputed here.
+  // The token in particular is not the uploadId: the native side needs an identity for the work
+  // that a restart of the same visible transfer cannot collide with.
   async function addSharedFile(
     file: File,
     path: string,
@@ -7215,21 +7366,37 @@
       updatedAt: started,
       ts: started,
     };
+    let ticket: UploadTicket | undefined;
     try {
-      const data = await readBase64(file, (done, total) => {
+      ticket = await invoke<UploadTicket>("begin_file_upload", {
+        server,
+        uploadId,
+        mime,
+        size: file.size,
+      });
+      const { token, chunkTotal, sliceBytes } = ticket;
+      if (uploads[key]) uploads[key].total = chunkTotal;
+      // Publishing the index entry is the step after the last chunk, so the bar is chunkTotal + 1
+      // spans wide. The native upload-progress event lands once per sealed chunk; between those,
+      // this loop fills the bar from the bytes it has actually handed over, so a single-chunk file
+      // still shows movement.
+      const spans = chunkTotal + 1;
+      for (let offset = 0; offset < file.size; offset += sliceBytes) {
+        const end = Math.min(file.size, offset + sliceBytes);
+        const data = await readBase64(file.slice(offset, end));
         const u = uploads[key];
         if (u && u.status === "reading") {
-          u.progress = total > 0 ? 0.1 * done / total : 0;
+          u.status = "uploading";
           u.updatedAt = Date.now();
         }
-      });
-      const u = uploads[key];
-      if (u) {
-        u.status = "uploading";
-        u.progress = Math.max(u.progress, 0.1);
-        u.updatedAt = Date.now();
+        await invoke("push_file_chunk", { server, token, offset, data });
+        const sent = uploads[key];
+        if (sent && sent.status !== "done" && sent.status !== "failed") {
+          sent.progress = Math.max(sent.progress, (end / file.size) * (chunkTotal / spans));
+          sent.updatedAt = Date.now();
+        }
       }
-      const cid = await invoke<string>("add_file", { server, name, mime, path, data, uploadId });
+      const cid = await invoke<string>("finish_file_upload", { server, token, name, path });
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
@@ -7238,6 +7405,16 @@
       }
       return cid;
     } catch (e) {
+      // Release the native reservation and let it garbage-collect whatever was already sealed;
+      // an upload left open holds a slot until the session is locked. Nothing to release if
+      // begin_file_upload is what failed.
+      if (ticket) {
+        try {
+          await invoke("cancel_file_upload", { server, token: ticket.token });
+        } catch {
+          // Cancelling a failed upload is best-effort: the original error is the one to report.
+        }
+      }
       if (uploads[key]) {
         uploads[key].status = "failed";
         uploads[key].error = String(e);
@@ -7349,46 +7526,32 @@
     return b;
   }
 
-  // The decrypted blob behind `cid` as a `data:` URL, from the cache or over the wire. Throws if
-  // the file cannot be fetched right now (not held locally and no peer sharing it), which every
-  // caller treats as "show something else" rather than as an error worth surfacing.
-  async function loadBlobUrl(cid: string, mime: string, server: number): Promise<string> {
-    const hit = embedCache.get(cid);
-    if (hit) return hit;
-    const base64 = await invoke<string>("download_file", { server, cid });
-    const url = `data:${mime};base64,${base64}`;
-    embedCache.set(cid, url);
-    // Bound the cache (each entry is a full decrypted blob): FIFO-evict the oldest.
-    if (embedCache.size > 48) {
-      const oldest = embedCache.keys().next().value;
-      if (oldest !== undefined) embedCache.delete(oldest);
-    }
-    return url;
+  // Shared media renders straight from the catcoms-media: protocol rather than being pulled into
+  // the webview first. The old path fetched the whole decrypted file over IPC, turned it into a
+  // base64 data: URL, and kept up to 48 of those alive at once: one embedded 200 MB video was
+  // enough to freeze the window, and no user action was needed beyond scrolling past the message.
+  // The protocol handler answers Range requests off the vault (fetching from a peer when a chunk
+  // is missing, exactly as before), so the element streams and the bytes never become a JS string.
+  function sharedMediaUrl(cid: string, server: number): string {
+    return mediaUrl(server, cid);
   }
 
-  // Blobs for markup that binds a `src` (the events tab's poster images) rather than building its
-  // own element the way the embed/card resolvers do. Keyed by cid, filled in the background.
+  // Stream URLs for markup that binds a `src` (the events tab's poster images) rather than
+  // building its own element the way the embed/card resolvers do. Keyed by cid. Filling these is
+  // now just address arithmetic: the element streams from the protocol handler, so there is
+  // nothing to fetch here and nothing to fail. A poster only needs to be a listed media file.
   let mediaUrls = $state<Record<string, string>>({});
-  const mediaLoading = new Set<string>();
-  async function ensureMedia(cid: string) {
-    if (!cid || mediaUrls[cid] || mediaLoading.has(cid) || activeServerId === null) return;
+  function ensureMedia(cid: string) {
+    if (!cid || mediaUrls[cid] || activeServerId === null) return;
     const file = files.find((f) => f.cid === cid);
-    const mime = safeMime(file?.mime ?? "");
-    if (!file || !mime) return; // not in the file index yet: retried when `files` updates
-    mediaLoading.add(cid);
-    try {
-      mediaUrls = { ...mediaUrls, [cid]: await loadBlobUrl(cid, mime, activeServerId) };
-    } catch {
-      /* nobody is sharing it right now: the event just shows without its picture */
-    } finally {
-      mediaLoading.delete(cid);
-    }
+    if (!file || !safeMime(file.mime)) return; // not in the file index yet: retried on update
+    mediaUrls = { ...mediaUrls, [cid]: sharedMediaUrl(cid, activeServerId) };
   }
   $effect(() => {
     const wanted = [...events.map((e) => e.image), evImage].filter(Boolean);
     void files; // a poster may only become fetchable once the index lists it
     untrack(() => {
-      for (const cid of wanted) void ensureMedia(cid);
+      for (const cid of wanted) ensureMedia(cid);
     });
   });
 
@@ -7414,11 +7577,7 @@
         span.replaceWith(downloadChip(file));
         continue;
       }
-      try {
-        span.replaceWith(buildMediaEl(mime, await loadBlobUrl(cid, mime, server), alt, cid));
-      } catch {
-        span.replaceWith(downloadChip(file));
-      }
+      span.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), alt, cid));
     }
   }
 
@@ -7588,23 +7747,22 @@
     };
   }
 
-  /** Hang an image on a card once its blob arrives; a card without one just reads as text. */
+  /** Hang an image on a card; a card whose picture cannot be fetched just reads as text. */
   function attachCardThumb(card: HTMLElement, cid: string, server: number) {
     const mime = safeMime(files.find((f) => f.cid === cid)?.mime ?? "");
     if (!mime.startsWith("image/")) return;
-    void loadBlobUrl(cid, mime, server)
-      .then((url) => {
-        if (!card.isConnected) return; // the surface re-rendered while the blob was in flight
-        const img = document.createElement("img");
-        img.className = "ref-card-thumb";
-        img.src = url;
-        img.alt = "";
-        card.appendChild(img);
-        card.classList.add("has-thumb");
-      })
-      .catch(() => {
-        /* nobody is sharing it: no picture, same card */
-      });
+    const img = document.createElement("img");
+    img.className = "ref-card-thumb";
+    img.src = sharedMediaUrl(cid, server);
+    img.alt = "";
+    // The element does the fetching now, so a picture nobody is sharing fails here rather than in
+    // a rejected promise: drop it and leave the card as text, which is what it did before.
+    img.onerror = () => {
+      img.remove();
+      card.classList.remove("has-thumb");
+    };
+    card.appendChild(img);
+    card.classList.add("has-thumb");
   }
 
   /**
@@ -7700,8 +7858,7 @@
       ts: started,
     };
     try {
-      const base64 = await invoke<string>("download_file", { server, cid: f.cid });
-      const saved = await saveGroupDownload(invoke, f.name, base64);
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name);
       if (downloads[key]) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
@@ -7999,17 +8156,11 @@
     } catch {
       if (fileInfo?.cid === f.cid) fileInfoAvail = false;
     }
-    // Fetch an inline preview for media types (bounded by the backend's max file size).
+    // Media previews stream from the protocol handler, so opening the properties of a large file
+    // costs a first chunk rather than the whole file as a string. The element reports its own
+    // failure through `on:error`, which is where "nobody is sharing this" now surfaces.
     if (safeMime(f.mime) && fileInfo?.cid === f.cid) {
-      try {
-        const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
-        // Guard against a race where the pane was closed/switched while fetching.
-        if (fileInfo?.cid === f.cid) fileInfoPreview = `data:${f.mime};base64,${base64}`;
-      } catch {
-        // The fetch failed (not held locally + no peer sharing it): surface that instead of
-        // leaving "Loading preview…" up forever.
-        if (fileInfo?.cid === f.cid) fileInfoPreviewError = true;
-      }
+      fileInfoPreview = sharedMediaUrl(f.cid, id);
     }
     // Documents, config and source read inline the same way media plays inline.
     if (fileTextKind && fileInfo?.cid === f.cid) await loadFileText(f);
@@ -8068,9 +8219,10 @@
   const fileTextHtml = $derived(fileTextRendered ? renderTextDocument(fileText) : "");
 
   /**
-   * Fetch and decode a text share for the reader. Files over the inline cap are not pulled at all
-   * until `force` (the "Read it anyway" button): `download_file` returns the whole blob in one
-   * base64 string, and a listing may declare up to 256 MiB.
+   * Fetch and decode a text share for the reader. This is the one surface that genuinely needs the
+   * bytes in JS, so it is the one place `download_file` is still called: everything visual streams
+   * instead. Files over the soft cap wait for `force` ("Read it anyway"), and even then the native
+   * side refuses past its own hard limit, so no button can pull a 256 MiB listing into the window.
    */
   async function loadFileText(f: UiFile, force = false) {
     const id = activeServerId;
@@ -8405,10 +8557,13 @@
     // by accident rather than on purpose.
     if (!myFp || activeServerId === null) return false;
     const seen = readMarks[chatScopeKey(activeServerId, channel)] ?? 0;
+    // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
+    // decide, either way, whether something addressed to me still counts as unseen.
+    const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
     const byId = new Map(msgs.map((m) => [m.id, m] as const));
     return msgs.some(
       (m) =>
-        m.ts > seen &&
+        effectiveTs(m.ts, ceiling) > seen &&
         m.author !== myFp &&
         (mentionsMe(m.text) || (!!m.reply_to && byId.get(m.reply_to)?.author === myFp)),
     );
@@ -8422,11 +8577,33 @@
       const next = await invoke<InboxEntry[]>("get_inbox");
       if (locked) return; // the lock cleared this list; it carries message text from every server
       inboxItems = next;
+      restoreMentionBadges();
     } catch (e) {
       error = String(e);
     } finally {
       inboxLoading = false;
     }
+  }
+  /**
+   * Re-raise the active server's mention badges from the inbox.
+   *
+   * `mentionChannels` is per-session memory of "someone said your name here", so it is empty after
+   * a lock or a restart even though the mention itself is still sitting there unread. The inbox is
+   * the durable native scan of the same fact, measured against the same read marks, so it can put
+   * the badges back. The conversation actually on screen is left alone: `settleReadState` owns it.
+   */
+  function restoreMentionBadges() {
+    if (activeServerId === null || !cur) return;
+    const observed = chatObservedNow() ? cur.active : "";
+    const known = new Set(cur.channels.map((c) => c.id));
+    const next = new Set(mentionChannels);
+    const before = next.size;
+    for (const it of inboxItems) {
+      if (it.server !== activeServerId || it.channel === observed) continue;
+      if (!known.has(it.channel) || !inboxUnseen(it)) continue;
+      next.add(it.channel);
+    }
+    if (next.size !== before) mentionChannels = next;
   }
   let inboxTimer: ReturnType<typeof setTimeout> | undefined;
   let inboxIdle: number | undefined;
@@ -8450,6 +8627,9 @@
   // An inbox entry is "unseen" until you've read past it in that channel (the same read marks that
   // drive jump-to-unread); resolved against the entry's own server, not the active one.
   function inboxUnseen(it: InboxEntry): boolean {
+    // An entry timestamped beyond any believable clock skew cannot be measured against a read mark
+    // honestly, and calling it unseen would hand it a badge that reading can never clear.
+    if (!Number.isFinite(it.ts) || it.ts > Date.now() + CLOCK_SKEW_GRACE_MS) return false;
     return it.ts > (readMarks[chatScopeKey(it.server, it.channel)] ?? 0);
   }
   let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
@@ -8506,6 +8686,9 @@
     makingOffer: boolean;
     ignoreOffer: boolean;
     lastRetry: number;
+    // This peer's one video slot. Held rather than looked up, because once a video stops the
+    // sender has no track to recognise it by and searching for one finds nothing.
+    vidSender: RTCRtpSender | null;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
@@ -8788,7 +8971,10 @@
     if (!track) return;
     track.enabled = !callMuted; // a hot swap must never quietly un-mute you
     for (const p of Object.values(callPeers)) {
-      const s = p.pc.getSenders().find((x) => x.track?.kind === "audio") ?? p.pc.getSenders()[0];
+      // An empty sender is a fair target (a swap while muted), but never the video slot: parked
+      // or not, handing it an audio track is a kind mismatch that throws.
+      const s = p.pc.getSenders().find((x) => x.track?.kind === "audio")
+        ?? p.pc.getSenders().find((x) => !x.track && x !== p.vidSender);
       if (s) { try { await s.replaceTrack(track); } catch { /* edge gone */ } }
     }
     if (localStream) for (const t of localStream.getTracks()) t.stop();
@@ -8922,12 +9108,18 @@
     b.tokens -= 1;
     return true;
   }
+  // Which video slot I am filling, in the wire's own vocabulary. One function, because the same
+  // number has to go out on the data channel AND on every room heartbeat: a heartbeat that omits
+  // it is read as a retraction by the peer that folds it in.
+  function myVid(): number {
+    return myVideo === "cam" ? 1 : myVideo === "screen" ? 2 : 0;
+  }
   function instState(): string {
     return JSON.stringify({
       t: "s",
       mic: callMuted ? 1 : 0,
       inst: instRxMuted ? 1 : 0,
-      vid: myVideo === "cam" ? 1 : myVideo === "screen" ? 2 : 0,
+      vid: myVid(),
     });
   }
   function pushInstState() {
@@ -8940,7 +9132,7 @@
     let m: Record<string, unknown>;
     try { m = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
     if (m.t === "s") {
-      peerMeta = { ...peerMeta, [fp]: { mic: m.mic === 1, inst: m.inst === 1, vid: typeof m.vid === "number" ? m.vid : 0 } };
+      peerMeta = { ...peerMeta, [fp]: mergePeerState(peerMeta[fp], m) };
       return;
     }
     if (m.t !== "n") return;
@@ -9920,8 +10112,9 @@
   // the server's file share, every listener fetches the whole blob and plays it through ONE hidden
   // element. Transport (what / where / paused) rides the call signalling as "juke" frames, and
   // whoever pressed last is the DJ. Receivers never trust a wall clock: they anchor the DJ's offset
-  // to their own performance.now() reading, so nobody has to agree on the time of day.
-  type JukeEntry = { id: string; cid: string; name: string; author: string; added_ms: number };
+  // to their own performance.now() reading, so nobody has to agree on the time of day. The DJ is
+  // the exception, and has to be: its own element is the position it announces, or a stall becomes
+  // a place it says the room is and has never played.
   let jukeQueue = $state<JukeEntry[]>([]);
   let jukeNow = $state<{ entry: string; cid: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
@@ -9950,6 +10143,10 @@
   // pull with a percentage. Fed by the same download-progress events the Downloads surface uses.
   let jukeFetch = $state<FetchPhase | null>(null);
   let jukeBuffering = $state(false); // the element ran out of data mid-track
+  // Local playback health, kept apart from the room's transport on purpose: the room can be
+  // perfectly in sync while THIS machine is silent, and the deck has to be able to say which.
+  let jukeBlocked = $state(false); // the webview refuses to start audio without a gesture
+  let jukeLocalFail = $state(""); // this listener could not fetch or decode the current track
   let bufferTimer: ReturnType<typeof setTimeout> | undefined; // debounce for the chip above
   let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
@@ -9989,7 +10186,10 @@
     // Streaming moves the failure from a thrown fetch to the element: a track nobody can serve,
     // or one the webview cannot decode, both land here.
     el.addEventListener("error", () => {
-      if (jukeNow?.cid) jukeFail(jukeNow.cid);
+      // Only for the track the element is actually holding: an aborted load from the src we just
+      // swapped away from must not blacklist the track we swapped to.
+      const cid = jukeNow?.cid;
+      if (cid && jukeElOn(cid)) jukeFail(cid);
     });
     // `waiting` fires constantly and harmlessly while streaming: every chunk boundary and every
     // seek raises it, and it clears again in milliseconds. Only a stall long enough for a person
@@ -9997,26 +10197,19 @@
     // it. Announcing the raw event made an ordinary playing track claim it had run dry.
     el.addEventListener("waiting", () => {
       clearTimeout(bufferTimer);
+      jukeBuffering = stallChip(jukeBuffering, "waiting", el);
       bufferTimer = setTimeout(() => {
-        if (jukeAudio && isStalled(jukeAudio)) jukeBuffering = true;
+        if (jukeAudio) jukeBuffering = stallChip(jukeBuffering, "deadline", jukeAudio);
       }, STALL_ANNOUNCE_MS);
     });
-    el.addEventListener("playing", () => {
-      clearTimeout(bufferTimer);
-      jukeBuffering = false;
-      jukeFetch = null;
-    });
-    el.addEventListener("canplay", () => {
-      clearTimeout(bufferTimer);
-      jukeBuffering = false;
-    });
     // Progress of any kind means it is not stalled, whatever `waiting` claimed a moment ago.
-    el.addEventListener("timeupdate", () => {
-      if (jukeBuffering) {
+    for (const ev of ["playing", "canplay", "timeupdate", "seeked"]) {
+      el.addEventListener(ev, () => {
         clearTimeout(bufferTimer);
-        jukeBuffering = false;
-      }
-    });
+        jukeBuffering = stallChip(jukeBuffering, "progress", el);
+        if (ev === "playing") jukeFetch = null;
+      });
+    }
     document.body.appendChild(el);
     jukeAudio = el;
     return el;
@@ -10025,30 +10218,68 @@
   function jukeIsDj(): boolean {
     return !!jukeAdopted && !!callSelfFp && jukeAdopted.fromFp === callSelfFp;
   }
-  // Where the deck should be right now: the adopted offset plus locally measured elapsed time,
-  // frozen while paused or stale. The progress UI reads this.
+  // The deck element, but only while it actually holds this track. The comparison is against the
+  // attribute we set rather than `el.src`, which is the resolved URL and need not come back the
+  // same string it went in as.
+  function jukeElOn(cid: string): HTMLVideoElement | null {
+    const el = jukeAudio;
+    if (!el || !cid || callServer === null) return null;
+    return el.getAttribute("src") === mediaUrl(callServer, cid) ? el : null;
+  }
+  // Where the deck is right now. As DJ that is my own element (see deckPosition: projecting a
+  // wall clock over a buffering element is what made a pressed track chase itself and never
+  // play); as a listener it is the DJ's offset aged on my own clock.
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
-    if (jukeNow.paused || jukeStale) return jukeAdopted.off;
-    return jukeAdopted.off + (performance.now() - jukeAdopted.at) / 1000;
+    return deckPosition({
+      isDj: jukeIsDj(),
+      paused: jukeNow.paused,
+      stale: jukeStale,
+      off: jukeAdopted.off,
+      since: performance.now() - jukeAdopted.at,
+      element: jukeElOn(jukeNow.cid),
+    });
+  }
+  // Where a load should land. The DJ starts exactly where it pressed; a listener has to age that
+  // offset by however long its own load took, or it starts behind the room.
+  function jukeTarget(): number {
+    if (!jukeAdopted) return 0;
+    return jukeIsDj() ? jukeAdopted.off : jukePos();
   }
   // Queue order (added_ms, id as the tiebreak so every machine agrees), minus the unfetchable.
   function jukePlayable(): JukeEntry[] {
-    return [...jukeQueue]
-      .sort((a, b) => a.added_ms - b.added_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .filter((e) => !jukeFailed.has(e.cid));
+    return playableQueue(jukeQueue, jukeFailed);
+  }
+  // A room generation, exactly as the message view has one: several places ask for the queue
+  // (joining, a local edit, every jukebox event), and a slow answer from the room we just left
+  // must never land in the one we are in now.
+  let jukeQueueGeneration = 0;
+  let jukeQueueStale = $state(false); // the last read failed: what is shown is the last known list
+  /** Is this answer still about the room we are in? */
+  function jukeQueueCurrent(generation: number, server: number, channel: string): boolean {
+    return (
+      generation === jukeQueueGeneration && inCall && callServer === server && callChannel === channel
+    );
   }
   async function refreshJukebox() {
     const server = callServer;
     const channel = callChannel;
+    const generation = ++jukeQueueGeneration;
     if (!inCall || server === null || !channel) {
       jukeQueue = [];
+      jukeQueueStale = false;
       return;
     }
     try {
-      jukeQueue = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
+      const next = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
+      if (!jukeQueueCurrent(generation, server, channel)) return;
+      jukeQueue = next;
+      jukeQueueStale = false;
     } catch {
-      jukeQueue = []; // no jukebox on this peer's build: an empty deck, not an error worth showing
+      if (!jukeQueueCurrent(generation, server, channel)) return;
+      // "The read failed" is not "the queue is empty". Blanking it here made a closed actor or a
+      // dropped call look exactly like a room whose playlist somebody had just cleared.
+      jukeQueueStale = true;
     }
   }
   async function jukeAddTrack(cid: string, name: string) {
@@ -10078,15 +10309,40 @@
   // path a receiver does, so the DJ is never a special case in the player.
   function jukeSend(entry: string, cid: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
-    jukeSeq = Math.max(jukeSeq, jukeAdopted?.seq ?? 0) + 1;
+    jukeSeq = nextJukeSeq(jukeSeq, jukeAdopted?.seq ?? null);
     jukeAdopt(jukeSeq, callSelfFp, entry, cid, name, off, paused);
     broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, name, off, paused });
+  }
+  /**
+   * Tell one peer what is playing, right now.
+   *
+   * Transport is ephemeral: it lives in the DJ's webview and nowhere else, so somebody who joins a
+   * second after a press has nothing to read. Waiting for the next five-second re-announce meant a
+   * newcomer sat in silence in front of a queue everyone else was already listening to, and if the
+   * DJ left before that tick they never learned the room was playing at all. A "hello" is now
+   * answered with the current state directly, which also skips the online roster the periodic
+   * broadcast filters through and which is exactly what is stale for someone who just arrived.
+   */
+  function jukeAnnounceTo(server: number, targetFp: string) {
+    if (!jukeIsDj() || !jukeAdopted || !jukeNow || !callChannel) return;
+    void sendSignal(server, targetFp, {
+      callId: callChannel,
+      type: "juke",
+      seq: jukeAdopted.seq,
+      entry: jukeNow.entry,
+      cid: jukeNow.cid,
+      name: jukeNow.name,
+      off: jukePos(),
+      paused: jukeNow.paused,
+    });
   }
   function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
     const same = jukeNow?.entry === entry && jukeNow?.cid === cid;
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
+    // Local health is per track: moving the room on clears whatever this machine could not play.
+    if (!same) jukeLocalFail = "";
     jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
     if (!jukeNow) {
       jukeDur = 0;
@@ -10110,8 +10366,8 @@
     // which is what jukeFail below is for.
     const url = mediaUrl(server, cid);
     const el = jukeEl();
-    if (!sameTrack || el.src !== url) {
-      if (el.src !== url) {
+    if (!sameTrack || el.getAttribute("src") !== url) {
+      if (el.getAttribute("src") !== url) {
         el.src = url;
         jukeDur = 0;
         jukeFetch = null;
@@ -10124,8 +10380,10 @@
     // Same track, so this is a ping or a play/pause. Video cannot hide a snap the way audio can,
     // so a small gap is eased out by playing slightly fast or slow and only a large one is
     // snapped; audio keeps snap-or-nothing, because a rate change is audible where a seek is not.
+    // Only a listener corrects: the DJ's element is the clock, so correcting it against itself is
+    // how a slow track used to seek forward once per ping instead of playing.
     const target = jukePos();
-    if (el.readyState > 0) {
+    if (!jukeIsDj() && el.readyState > 0) {
       const drift = target - el.currentTime;
       const action = driftAction(drift, jukeKind);
       if (action === "seek") {
@@ -10141,8 +10399,37 @@
       }
     }
     const live = jukeNow;
-    if (!live || live.paused) el.pause();
-    else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
+    if (!live || live.paused) jukePause(el);
+    else void jukeStart(el);
+  }
+  /**
+   * Start the deck, and remember if the webview would not let us.
+   *
+   * A rejected `play()` is exactly how an autoplay policy or a gesture requirement arrives. It was
+   * swallowed, so the dock went on showing a healthy, progressing, synchronised track while this
+   * machine sat silent: the listener saw "the jukebox is out of sync" when the truth was "this
+   * webview will not start audio until you click something". Now it says so, and offers the click.
+   */
+  async function jukeStart(el: HTMLVideoElement) {
+    try {
+      await el.play();
+      jukeBlocked = false;
+    } catch (e) {
+      // Still loading is fine and transient; refusing to start is not. Only the second is a state
+      // worth showing, and `el.paused` against an unpaused transport is what tells them apart.
+      jukeBlocked = !!jukeNow && !jukeNow.paused && el.paused;
+      if (jukeBlocked) console.warn("the webview would not start shared playback", String(e));
+    }
+  }
+  function jukePause(el: HTMLVideoElement) {
+    el.pause();
+    jukeBlocked = false; // a deck that is meant to be silent is not a deck being held back
+  }
+  /** The user's click, which is the one thing an autoplay policy is waiting for. */
+  function jukeUnblock() {
+    const el = jukeAudio;
+    if (!el) return;
+    void jukeStart(el);
   }
   // True window fullscreen, distinct from the focus view. Focus is a layout (the call takes the
   // app); fullscreen is the window losing its chrome. They are separate wishes and either can be
@@ -10204,29 +10491,50 @@
     node.appendChild(el);
     return {
       destroy() {
-        if (jukeAudio === el) document.body.appendChild(el);
+        // Only if this node still holds it. Handing the film from the dock to the focus view (or
+        // back) mounts the new host before the old one tears down, and a teardown that re-homed
+        // unconditionally would snatch the element straight back out of the surface that had just
+        // adopted it, leaving a black box behind.
+        if (jukeAudio === el && el.parentElement === node) document.body.appendChild(el);
       },
     };
   }
   /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
   function jukeFail(cid: string) {
+    const onDeck = jukeNow?.cid === cid;
+    const advance = onDeck && jukeIsDj();
+    // Read the order BEFORE blacklisting this cid, or the track we are leaving is already out of
+    // the list and "the one after it" would be the top of the queue again.
+    const list = jukePlayable();
     jukeFailed.add(cid);
     jukeFetch = null;
-    if (jukeNow?.cid === cid && jukeIsDj()) jukeSkip();
+    // Nobody heard it, and whoever holds the file may come back: it stays on the queue.
+    if (advance) {
+      jukeAdvance(false, list);
+      return;
+    }
+    // A listener cannot move the room: only the DJ decides what plays. But every listener fetches
+    // the track through its own vault and network path, so one of them can lack a provider or fail
+    // to decode while the rest carry on. Saying so is the difference between a broken jukebox and
+    // a track this machine could not get.
+    if (onDeck) jukeLocalFail = jukeNow?.name || cid;
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
   function jukeSettle() {
     const el = jukeAudio;
     if (!el || !jukeNow) return;
-    const target = jukeDur > 0 ? Math.min(jukePos(), jukeDur) : jukePos();
+    const want = jukeTarget();
+    const target = jukeDur > 0 ? Math.min(want, jukeDur) : want;
     if (Math.abs(el.currentTime - target) > 0.25) {
       try { el.currentTime = target; } catch { /* not seekable yet */ }
     }
-    if (jukeNow.paused) el.pause();
-    else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
+    if (jukeNow.paused) jukePause(el);
+    else void jukeStart(el);
   }
   function jukeStop() {
+    jukeBlocked = false; // nothing is loaded: there is no playback being held back
+    jukeLocalFail = "";
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -10251,18 +10559,29 @@
     // A press on a stale deck resumes it (and claims it) rather than pausing an already dead DJ.
     jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
   }
-  function jukeSkip() {
-    const list = jukePlayable();
-    const i = list.findIndex((e) => e.id === jukeNow?.entry);
-    const next = list[i + 1]; // i is -1 with nothing playing, so this starts at the top
+  /**
+   * Move the room on to the next track.
+   *
+   * `played` says the track being left was heard rather than given up on, and a heard track comes
+   * off the shared queue: it is a playlist, not a library, and the transport only ever moves
+   * forwards, so a spent entry left in place would sit above the play head where nothing can ever
+   * reach it again. Whoever presses is the DJ by definition, so the removal is sent once by the
+   * one machine that pressed rather than once per listener.
+   */
+  function jukeAdvance(played: boolean, list = jukePlayable()) {
+    const { next, drop } = deckAdvance(list, jukeNow?.entry ?? "", played);
     if (next) jukeSend(next.id, next.cid, next.name, 0, false);
     else jukeSend("", "", "", 0, true); // queue exhausted: everyone stops
+    if (drop) void jukeRemoveTrack(drop);
+  }
+  function jukeSkip() {
+    jukeAdvance(true);
   }
   // Only the DJ advances. Everyone else's element just stops and waits for the broadcast, so the
   // room can never fan out into per-listener playlists.
   function jukeEnded() {
     if (!inCall || !jukeIsDj()) return;
-    jukeSkip();
+    jukeAdvance(true);
   }
   // A transport frame off the wire. Peer input, so it is validated hard, then adopted only if it
   // beats what we follow: a higher seq, or the same seq from a higher fingerprint so a simultaneous
@@ -10274,16 +10593,18 @@
     const name = msg.name;
     const off = msg.off;
     const paused = msg.paused;
-    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) return;
+    // The revision has to be a number this deck can still count PAST, not merely a whole one.
+    // `1e308` is an integer to JavaScript, survives JSON, and satisfies `1e308 + 1 === 1e308`, so
+    // adopting one left every honest press unable to outrank it and froze the deck where it was.
+    if (!validJukeSeq(seq)) return;
     if (typeof entry !== "string" || entry.length > 200) return;
     if (typeof cid !== "string" || (cid !== "" && !/^[0-9a-f]{1,128}$/.test(cid))) return;
     if (typeof name !== "string") return;
     if (typeof off !== "number" || !Number.isFinite(off) || off < 0) return;
     if (typeof paused !== "boolean") return;
-    const cur = jukeAdopted;
-    const newer = !cur || seq > cur.seq || (seq === cur.seq && fromFp > cur.fromFp);
-    // Not newer, but a ping from the DJ we already follow: it keeps the deck alive and re-syncs it.
-    if (!newer && !(cur && seq === cur.seq && fromFp === cur.fromFp)) return;
+    // Newest press wins; a tie goes to the higher fingerprint so every machine agrees. A frame
+    // that is not newer is still taken from the DJ we already follow: that is the re-announce.
+    if (!jukeClaimWins(jukeAdopted, { seq, fromFp })) return;
     jukeAdopt(seq, fromFp, entry, cid, name.slice(0, 200), off, paused);
   }
   // Rides the 5s presence ping rather than owning a timer: as DJ I re-announce the transport (same
@@ -10298,6 +10619,7 @@
     if (jukeNow.paused || jukeStale || performance.now() - jukeHeard <= JUKE_DJ_GONE_MS) return;
     jukeAdopted = { ...jukeAdopted, off: jukePos(), at: performance.now() }; // freeze where we got to
     jukeStale = true; // anyone's next press claims the deck
+    jukeBlocked = false; // a frozen deck is not one the webview is refusing to start
     jukeAudio?.pause();
   }
   // Leaving the room takes the deck with it. There are no blobs to release any more: the element
@@ -10308,10 +10630,17 @@
     jukeAudio = null;
     jukeFailed.clear();
     jukeQueue = [];
+    jukeQueueGeneration++; // a queue read still in flight belongs to the room being left
+    jukeQueueStale = false;
     jukeNow = null;
     jukeAdopted = null;
+    // My own press counter goes with the room. It is scoped to a room session, and carrying a
+    // high one into the next room would let this machine outrank presses it never heard.
+    jukeSeq = 0;
     jukeStale = false;
     jukeFetch = null;
+    jukeBlocked = false;
+    jukeLocalFail = "";
     clearTimeout(bufferTimer);
     jukeBuffering = false;
     jukeNudging = false;
@@ -10331,8 +10660,24 @@
   });
   // The queue as the DJ will actually play it, minus whatever is already on the deck.
   let jukeUpNext = $derived(jukePlayable().filter((e) => e.id !== jukeNow?.entry));
-  // Anything the deck can play: audio and video both, since one element handles both.
-  let jukeAudioFiles = $derived(files.filter((f) => mediaKind(f.name, f.mime) !== "other"));
+  // What the picker offers: anything the deck can play (audio and video both, since one element
+  // handles both), narrowed to the kind being asked for, each piece of content listed once. The
+  // share can list one content address several times over (two folders, or a concurrent double
+  // add), and to the deck those are all one track.
+  const JUKE_PICK_KINDS: { key: MediaFilter; label: string }[] = [
+    { key: "all", label: "ALL" },
+    { key: "audio", label: "AUDIO" },
+    { key: "video", label: "VIDEO" },
+  ];
+  let jukePickKind = $state<MediaFilter>("all");
+  let jukePickFiles = $derived(mediaChoices(files, jukePickKind));
+  // Counts on the toggle, so an empty list is legible as "none of that kind" rather than as a
+  // broken picker, and so switching to a kind that has nothing is a choice you can decline.
+  let jukePickCounts = $derived({
+    all: mediaChoices(files, "all").length,
+    audio: mediaChoices(files, "audio").length,
+    video: mediaChoices(files, "video").length,
+  });
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
   // expiring, the picker itself) is gated on this rather than lying about another server's share.
@@ -10373,9 +10718,11 @@
   }
 
   // --- Video (camera / screen share) ----------------------------------------------------------
-  // One video slot per person: the camera and a screen share swap through the same sender via
-  // replaceTrack, so only the FIRST video ever renegotiates. Mesh reality check: every sender
-  // uploads its video once per peer, so this is for small rooms; the SFU hookup is the scale path.
+  // One video slot per person, for the life of the peer connection: the camera and a screen share
+  // swap through the same sender via replaceTrack, and stopping a video parks that sender rather
+  // than retiring it, so a stop/start cycle costs nothing but a direction flip. Mesh reality
+  // check: every sender uploads its video once per peer, so this is for small rooms; the SFU
+  // hookup is the scale path.
   let camStream: MediaStream | null = null; // whatever the slot currently captures
   let myVideo = $state<"" | "cam" | "screen">("");
   let localVideoStream = $state<MediaStream | null>(null); // the self-preview tile reads this
@@ -10405,26 +10752,74 @@
     localVideoStream = s;
     myVideo = kind;
     track.onended = () => stopVideo(); // the browser's own "stop sharing" chrome ends the track
-    for (const p of Object.values(callPeers)) {
-      const vidSender = p.pc.getSenders().find((sn) => sn.track?.kind === "video");
-      if (vidSender) void vidSender.replaceTrack(track); // same m-line: no renegotiation
-      else {
-        const sn = p.pc.addTrack(track, s); // first video: onnegotiationneeded takes it from here
-        try {
-          const prm = sn.getParameters();
-          prm.encodings = [{ maxBitrate: kind === "cam" ? 500_000 : 1_200_000 }];
-          void sn.setParameters(prm);
-        } catch { /* pre-negotiation: the constraints above still cap it */ }
-      }
-    }
+    for (const p of Object.values(callPeers)) fillVideoSlot(p, track, s, kind);
     if (old) for (const t of old.getTracks()) t.stop();
     pushInstState(); // vid state rides the same channel as the mute states
+  }
+  // The transceiver carrying a peer's video slot, and what direction it is currently in. A slot
+  // whose transceiver has gone, or whose connection has closed under it, reads as stopped: that
+  // sends the caller down the "open a fresh one" path rather than throwing on a corpse.
+  function vidSlot(p: CallPeer): { tr: RTCRtpTransceiver | null; direction: SlotDirection } {
+    if (!p.vidSender) return { tr: null, direction: "stopped" };
+    try {
+      const tr = p.pc.getTransceivers().find((t) => t.sender === p.vidSender) ?? null;
+      if (!tr || tr.currentDirection === "stopped") return { tr, direction: "stopped" };
+      return { tr, direction: tr.direction };
+    } catch {
+      return { tr: null, direction: "stopped" };
+    }
+  }
+  // Hold one peer's video to its budget. Re-applied on every swap, because cam and screen ride the
+  // same sender and the two do not cost the same. Mapping over the existing encodings rather than
+  // replacing them keeps whatever else negotiation put there; before the first negotiation there
+  // is nothing to map, and the capture constraints still bound it either way.
+  function capVideo(sender: RTCRtpSender, kind: VideoKind) {
+    try {
+      const prm = sender.getParameters();
+      prm.encodings = prm.encodings?.length
+        ? prm.encodings.map((e) => ({ ...e, maxBitrate: VIDEO_BITRATE[kind] }))
+        : [{ maxBitrate: VIDEO_BITRATE[kind] }];
+      void sender.setParameters(prm);
+    } catch { /* pre-negotiation, or an edge closing: the constraints above still cap it */ }
+  }
+  // Put a track into one peer's video slot: reuse the slot if it still exists, open one if not.
+  // Reuse is the common path and costs no renegotiation at all; the direction flip only happens
+  // when the slot was parked by a previous stopVideo, which is exactly when the far end needs to
+  // be told the m-line is sending again.
+  function fillVideoSlot(p: CallPeer, track: MediaStreamTrack, stream: MediaStream, kind: VideoKind) {
+    const slot = vidSlot(p);
+    const plan = videoSlotPlan({ hasSender: !!p.vidSender, direction: slot.direction });
+    try {
+      if (plan.action === "reuse" && p.vidSender) {
+        // Same m-line: a cam/screen swap never renegotiates. replaceTrack rejects rather than
+        // throwing when the edge has gone under us, so the failure is caught on the promise.
+        p.vidSender.replaceTrack(track).catch((e: unknown) =>
+          console.warn("voice: video swap was refused", { peer: p.fp, error: String(e) }));
+        if (plan.direction && slot.tr) slot.tr.direction = plan.direction;
+        capVideo(p.vidSender, kind);
+        return;
+      }
+      const sn = p.pc.addTrack(track, stream); // first video: onnegotiationneeded takes it from here
+      p.vidSender = sn;
+      capVideo(sn, kind);
+    } catch (e) {
+      console.warn("voice: could not put video on this edge", { peer: p.fp, error: String(e) });
+    }
   }
   function stopVideo() {
     if (!camStream) return;
     for (const p of Object.values(callPeers)) {
-      const sender = p.pc.getSenders().find((sn) => sn.track?.kind === "video");
-      if (sender) { try { p.pc.removeTrack(sender); } catch { /* edge closing */ } }
+      if (!p.vidSender) continue;
+      // Park the slot, never removeTrack it. removeTrack retires the transceiver for good (addTrack
+      // will not reuse one that has sent), so restarting a share would add a second video section
+      // to the SDP each time. replaceTrack(null) stops the frames; dropping the send half is what
+      // tells the far end the track is gone, so their tile clears instead of freezing on a frame.
+      try {
+        p.vidSender.replaceTrack(null).catch(() => { /* edge closing: the slot goes with it */ });
+        const slot = vidSlot(p);
+        const idle = directionIdle(slot.direction);
+        if (idle && slot.tr) slot.tr.direction = idle;
+      } catch { /* edge closing: the slot goes with it */ }
     }
     for (const t of camStream.getTracks()) t.stop();
     camStream = null;
@@ -10471,6 +10866,13 @@
     focusOpen = false;
     focusDismissed = true; // otherwise the effect above re-opens it on the next frame
   }
+  // Where a shared film's picture goes. One deck element, adopted by re-parenting, so exactly one
+  // surface may claim it: the focus view when it is up, the deck's own screen in the stage
+  // otherwise, and nowhere at all for audio (which is heard from the hidden element in the body).
+  // A jukebox video deliberately does NOT auto-enter focus the way a camera does: a track someone
+  // queued must not seize the window from whoever is reading chat, so the dock shows it in place
+  // and the expand button is the way up.
+  let jukeScreen = $derived(deckSurface(jukeKind, !!jukeNow, focusOpen, jukeOpen));
   // Self first, then peers: one tile per person, and nothing else on the grid.
   let focusTiles = $derived([callSelfFp, ...callParticipants]);
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
@@ -10584,11 +10986,13 @@
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
     if (!mappableIcePort(c)) return;
+    const policy = mappingAddressPolicy(c.address);
+    if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
     if (!mappedCallPorts.has(port)) {
       mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
       try {
-        const granted = await invoke<MappedPort>("map_call_port", { port });
+        const granted = await invoke<MappedPort>("map_call_port", { port, address: policy.claim });
         mappedCallPorts.set(port, granted);
         callMappedRoutes += 1;
         console.info("voice: router mapped the media port", {
@@ -10635,9 +11039,16 @@
       makingOffer: false,
       ignoreOffer: false,
       lastRetry: 0,
+      vidSender: null,
     };
     if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
-    if (camStream) for (const t of camStream.getTracks()) pc.addTrack(t, camStream); // joiner while my video is live
+    // A joiner arriving while my video is live gets it in the very first offer. It goes through
+    // the same slot bookkeeping as everyone else's, so their edge is capped and reusable from the
+    // start rather than being the one edge that behaves differently.
+    if (camStream && myVideo) {
+      const vt = camStream.getVideoTracks()[0];
+      if (vt) fillVideoSlot(peer, vt, camStream, myVideo);
+    }
     // The instrument channel: negotiated (same id on both ends) and created BEFORE the offer, so
     // the SCTP section rides the first SDP exchange and nothing ever renegotiates for it. An old
     // build just never opens its end; notes then go nowhere, which degrades cleanly.
@@ -10906,11 +11317,13 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0 }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid() }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0 });
+        // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
+        // a data-channel state message that never arrived, and the video tile is gated on it.
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid() });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
@@ -11002,10 +11415,12 @@
       const wasActive = roomMembers(server, cid).length > 0;
       recordPresence(server, cid, fromFp);
       maybeNotifyRoom(server, cid, wasActive);
-      // Broadcast mute states ride the presence pings (the data channel also carries them, but
-      // pings cover the window before it opens). Only my own room's states matter to the UI.
+      // Broadcast states ride the presence pings (the data channel also carries them, but pings
+      // cover the window before it opens, and repair one that was dropped). Only my own room's
+      // states matter to the UI. mergePeerState is what keeps an older build's ping, which has
+      // no `vid` field at all, from reading as "they stopped sharing".
       if (currentRoom && typeof msg.mic === "number") {
-        peerMeta = { ...peerMeta, [fromFp]: { mic: msg.mic === 1, inst: msg.inst === 1, vid: typeof msg.vid === "number" ? msg.vid : 0 } };
+        peerMeta = { ...peerMeta, [fromFp]: mergePeerState(peerMeta[fromFp], msg) };
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];
@@ -11034,6 +11449,10 @@
       return;
     }
     if (type === "hello") {
+      // Answer with the transport before anything else. Whoever just arrived has the queue (it is
+      // in the channel document) but no idea what is playing, and the periodic re-announce is up
+      // to five seconds away, if the DJ is still here to send it at all.
+      jukeAnnounceTo(server, fromFp);
       if (callPeers[fromFp]) { recoverPeer(callPeers[fromFp]); return; }
       playBlip(79); // audible arrival: there is no lobby, so the room itself says someone joined
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
@@ -11307,6 +11726,42 @@
     } catch (e) {
       updateBusy = false;
       toast(`Update failed: ${e}`, "err", 9000);
+    }
+  }
+
+  // --- third-party notices -----------------------------------------------------------------
+  // Most of the licences Mewtual's dependencies ship under (MIT, BSD, ISC, Apache, MPL) require
+  // their text to travel with the binary, so scripts/gen-notices.mjs bakes it into a file vite
+  // copies next to the app. It is over half a megabyte: fetched on demand, never inlined into
+  // the bundle, so the app does not carry it in memory for the 99% of sessions nobody asks.
+  let noticesText = $state("");
+  let noticesBusy = $state(false);
+  let noticesError = $state("");
+
+  // Hands the URL to the user's browser. Never a plain anchor: navigating this webview away
+  // from the app replaces the whole UI and leaves the window softlocked.
+  async function openRepo() {
+    try {
+      await invoke("open_external_url", { url: "https://github.com/Thalpy/Mewtual" });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function loadNotices() {
+    if (noticesBusy || noticesText) return;
+    noticesBusy = true;
+    noticesError = "";
+    try {
+      const res = await fetch("THIRD-PARTY-NOTICES.txt");
+      if (!res.ok) throw new Error(`${res.status}`);
+      noticesText = await res.text();
+    } catch (e) {
+      // A source build that skipped "npm run notices" has no such file. Say what is missing
+      // rather than showing a bare fetch error.
+      noticesError = `Could not load the notices file (${e}). Official builds ship it; a build from source generates it with "npm run notices".`;
+    } finally {
+      noticesBusy = false;
     }
   }
 
@@ -11747,6 +12202,23 @@
   // so the rule for it is: colour and shape may persist, named content may not.
   const APP_VERSION = __APP_VERSION__;
   let windowFocused = $state(true);
+  // A focused window can still be invisible: minimised, or on another virtual desktop. Focus alone
+  // said "the user is reading this", which is how messages arrived already marked read.
+  let documentVisible = $state(typeof document === "undefined" || document.visibilityState === "visible");
+  // Whether the conversation counts as SEEN is a function of the whole app's state, not of any one
+  // event. Re-settle it whenever any input moves: opening the chat tab, coming back to the window,
+  // scrolling to the bottom and closing a takeover all mean "and now it is being looked at", and
+  // each of them has to be able to clear an indicator the same way arriving there does.
+  $effect(() => {
+    void [
+      locked, view, inboxView, dmHome, spaceOpen, focusOpen, windowFocused, documentVisible,
+      chatStickToBottom, activeServerId, cur?.active, messages, messageWindowScope,
+      showSettings, showServerSettings, showFeedback, showQuickSwitch, showLinkDevice, showAdd,
+      lightbox,
+    ];
+    // Untracked so the read mark and badge writes below cannot feed back into this effect's deps.
+    untrack(() => settleReadState());
+  });
   // The hairline carries the active server's published accent: an ambient "which world am I in"
   // that costs no space and, being a colour rather than a name, survives a screenshot.
   let tbEdge = $derived(locked || !followLiveryNow ? "" : livery.accent);
@@ -12116,22 +12588,40 @@
       listen<{ server: number }>("channels-changed", (e) => {
         void refreshChannels(e.payload.server);
       }),
-      listen<{ server: number; channel: string }>("channel-updated", (e) => {
+      listen<{
+        server: number;
+        channel: string;
+        messages_appended: boolean;
+        messages_changed: boolean;
+        topic: boolean;
+        jukebox: boolean;
+      }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // One channel document holds the message log, the topic and the jukebox queue, so the
+        // event says which of them moved. Only an arrival may raise an unread badge or ring:
+        // reacting to an old message, renaming the topic and queueing a track all used to look
+        // exactly like somebody talking.
+        const change = readChannelChange(e.payload);
         spaceActivityAt[server] = Date.now();
         if (server === activeServerId && view === "moderation") void refreshModeration();
-        // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
-        scheduleInboxReload();
+        // A new or edited message may be addressed to me → the cross-server inbox may have a new
+        // entry (debounced). A queue or topic edit can never add one.
+        if (change.messagesAppended || change.messagesChanged) scheduleInboxReload();
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
-        if (dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
-        // Jukebox edits ride the same event, and the room I'm listening in need not be the one I'm looking at.
-        if (inCall && server === callServer && channel === callChannel) void refreshJukebox();
+        if (change.messagesAppended && dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
+        // The room I'm listening in need not be the one I'm looking at.
+        if (change.jukebox && inCall && server === callServer && channel === callChannel) void refreshJukebox();
         if (server === activeServerId && channel === cur?.active) {
-          refreshTopic(); // topic edits ride the same channel-updated event
+          if (change.topic) refreshTopic();
+          if (!change.messagesAppended && !change.messagesChanged) return; // nothing in the log moved
           channelEventRefresh.request(true).then(() => {
-            // You're looking at this channel: only notify if the window isn't focused. The same
-            // stable message id gates its sound and its clickable ticker receipt exactly once.
-            if (document.hasFocus()) return;
+            // The refresh settles read state for us: seen if the log is genuinely on screen,
+            // unread if this channel is merely selected behind something else.
+            if (!change.messagesAppended) return; // an edit or a reaction never announces itself
+            // Announce unless the log is on screen. Focus alone was not enough: the window can be
+            // focused with Files, the wiki or a call surface over the channel. Scrolled-up counts
+            // as on screen, so reading history stays quiet even though it stays unread.
+            if (chatOnScreenNow()) return;
             // request() hands back ONE promise for the whole drain, so this can resolve after a
             // pass that loaded a different conversation: reading the shared array then would
             // headline THIS channel with ANOTHER one's text, and the ticker click would try to
@@ -12150,10 +12640,12 @@
           });
           return;
         }
+        // Everything below raises an indicator for a channel nobody is looking at, so it is for
+        // arrivals only. A jukebox add in #music is not an unread message in #music.
+        if (!change.messagesAppended) return;
         const s = servers.find((x) => x.id === server);
         if (s && s.channels.some((c) => c.id === channel)) {
-          if (!s.unread.includes(channel)) s.unread.push(channel);
-          if (server !== activeServerId) s.dot = true;
+          markChannelUnread(server, channel);
           if (server !== activeServerId) {
             // Another server: its profile identity is not loaded, so this is an ordinary-message
             // alert, but its own server sound override still applies.
@@ -12264,7 +12756,9 @@
       }),
       listen<{ server: number; channel: string; states: DeliveryState[] }>("delivery-changed", (e) => {
         if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
-        for (const s of e.payload.states) delivery[s.id] = s;
+        // Merged, not assigned: a report that happens to see fewer holders has not unproved the
+        // ones already counted, and letting it overwrite them is what made a settled tick flicker.
+        for (const s of e.payload.states) delivery[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
       }),
       listen<{ server: number }>("badges-changed", (e) => {
         if (e.payload.server === activeServerId) refreshBadges();
@@ -12545,6 +13039,11 @@
       if (e.button === 3) navBack();
       else navForward();
     };
+    // Minimised, or on another virtual desktop: the window can hold focus and still show nobody
+    // anything, and read state must not treat that as having read the log.
+    const onVisibility = () => (documentVisible = document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibility);
+    onVisibility();
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
@@ -12587,6 +13086,7 @@
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mousedown", onMouseNav);
+      document.removeEventListener("visibilitychange", onVisibility);
       stopTextEffects();
       releaseAll();
       stopPlayback();
@@ -14036,10 +14536,21 @@
     <div class="juke-head">
       <span class="juke-head-ico">{@render icoNote()}</span>
       <span class="stage-label">JUKEBOX</span>
-      <!-- One chip, in the order that matters: bytes in flight beats a dead DJ beats "we agree".
-           Reading a held file off this disk and pulling one off a peer feel completely different
-           to wait through, so they are named differently rather than both being "FETCHING". -->
-      {#if jukeFetch}
+      <!-- One chip, in the order that matters: what is wrong HERE beats bytes in flight beats a
+           dead DJ beats "we agree". The two local states come first because the room can be
+           perfectly in sync while this machine is silent, and "SYNCED" over silence is the one
+           thing the chip must never say. Reading a held file off this disk and pulling one off a
+           peer feel completely different to wait through, so they are named differently rather
+           than both being "FETCHING". -->
+      {#if jukeBlocked}
+        <button
+          class="juke-chip warn juke-chip-btn"
+          title="This webview will not start audio until you interact with it. Click to start playing."
+          onclick={jukeUnblock}
+        >ENABLE PLAYBACK</button>
+      {:else if jukeLocalFail}
+        <span class="juke-chip gone" title={`This device could not fetch or decode "${jukeLocalFail}". The room is still playing it.`}>NOT PLAYABLE HERE</span>
+      {:else if jukeFetch}
         <span
           class="juke-chip info"
           title={jukeFetch.source === "network"
@@ -14057,6 +14568,9 @@
       {/if}
       {#if !jukeOpen && jukeUpNext.length}
         <span class="stage-label juke-qn" title={`${jukeUpNext.length} queued`}>Q{jukeUpNext.length}</span>
+      {/if}
+      {#if jukeQueueStale}
+        <span class="juke-chip warn" title="The queue could not be re-read; this is the last list this device saw">QUEUE STALE</span>
       {/if}
       <span class="stage-spacer"></span>
       {#if jukeNow}
@@ -14082,6 +14596,29 @@
         onclick={toggleJukeOpen}
       >{#if jukeOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
     </div>
+
+    <!--
+      The deck's own screen. A shared film used to have nowhere to be outside the focus view: the
+      element played on, hidden in the body, so the room heard a video nobody could see unless
+      somebody thought to open focus. It sits above the transport because it IS the thing being
+      transported, and it hands the element back to the focus view the moment that opens.
+    -->
+    {#if jukeScreen === "dock"}
+      <div class="juke-screen" use:jukeHost>
+        <button
+          class="ghost juke-expand"
+          title="Watch it full size: the call takes the window"
+          aria-label="Watch full size"
+          onclick={openFocus}
+        >{@render icoFullscreen()}</button>
+        {#if jukeFetch}
+          <div class="juke-screen-load">
+            <span class="stage-label">{jukeFetch.source === "network" ? "PULLING" : "LOADING"} {jukeFetch.percent}%</span>
+            <div class="juke-bar load {jukeFetch.source}"><i class="juke-bar-fill" style={`width:${jukeFetch.percent}%`}></i></div>
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#if jukeNow && !jukeOpen}
       <!-- Folded: one line of the room's shared state, plus a hairline of progress. -->
@@ -14128,9 +14665,19 @@
         </div>
       </div>
     {:else}
+      <!-- Idle still gets a transport. Without one the only way to start the room was to click a
+           named track, so a deck that had reached the end of its queue (or had just been joined)
+           had no play button anywhere on it. -->
       <div class="juke-idle">
+        <button
+          class="juke-play"
+          disabled={!jukeUpNext.length}
+          title={jukeUpNext.length ? "Play the queue for the room" : "Queue a track first"}
+          aria-label="Play"
+          onclick={jukeToggle}
+        >{@render icoPlay()}</button>
         <span class="stage-label">deck idle</span>
-        <span class="juke-idle-hint">queue something and press play</span>
+        <span class="juke-idle-hint">{jukeUpNext.length ? "press play to start the queue" : "queue something and press play"}</span>
       </div>
     {/if}
 
@@ -14160,7 +14707,7 @@
               <span class="juke-chip info">{jukeFetch.percent}%</span>
             {/if}
             {#if mediaKind(e.name) === "video"}
-              <span class="juke-kind" title="A video: it plays on the focus view">VID</span>
+              <span class="juke-kind" title="A video: it plays on the deck's screen, and full size in the focus view">VID</span>
             {/if}
             {#if gone}
               <span class="juke-chip gone" title="Nobody is sharing this any more">GONE</span>
@@ -15323,7 +15870,7 @@
             {@render icoDm()}
             {#if dmRequests.length}
               <span class="rail-badge">{dmRequests.length}</span>
-            {:else if dmList.some((d) => d.unread.length || d.dot)}
+            {:else if dmList.some((d) => d.unread.length)}
               <span class="rail-dot">●</span>
             {/if}
           </button>
@@ -15356,8 +15903,6 @@
               {/if}
               {#if s.unread.length}
                 <span class="rail-badge">{s.unread.length}</span>
-              {:else if s.dot}
-                <span class="rail-dot">●</span>
               {/if}
             </button>
           {/each}
@@ -15873,7 +16418,7 @@
                 : DEFAULT_MESSAGE_FRAME}
               {@const arrival = arrivalMotion(m.author, m.id)}
               {@const arrivalVars = arrivalStyle(m.author)}
-              {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
+              {@const tick = deliveryTick(m, mi)}
               {@const ident = identityOf(m.author)}
               {@const warning = warningFor(cur?.active ?? "", m.id)}
               <li
@@ -15905,11 +16450,15 @@
                   </span>
                 {:else}
                   <!-- Header rows: the avatar owns the gutter (dead space anyway) and the time
-                       moves inline after the name, so the picture runs bigger for free. -->
-                  <span class="t">
+                       moves inline after the name, so the picture runs bigger for free. The tick
+                       does NOT follow the time inline: a delivery state belongs in one column you
+                       can run your eye down, not on the left of some rows and the right of others,
+                       so it sits under the avatar and stays in the gutter on every row. -->
+                  <span class="t t-head">
                     <button class="gutter-avatar" type="button" title="View profile" onclick={() => showProfile(ident.fp)}>
                       {@render avatarTag(ident.fp)}
                     </button>
+                    {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}
                   </span>
                 {/if}
                 <div class="m-body">
@@ -15944,9 +16493,7 @@
                       {@const b = badges[m.author]}
                       <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
                     {/if}
-                    <span class="time" title={new Date(m.ts).toLocaleString()}>
-                      {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}{fmtTime(m.ts)}
-                    </span>
+                    <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                     {#if m.pinned}<span class="pin-mark" title="Pinned message">{@render icoPin()}</span>{/if}
                   </span>
                 {:else if m.pinned}
@@ -17283,7 +17830,7 @@
 
         <!-- The shared screen: a video the room is watching together gets the top band, and the
              faces drop to a filmstrip underneath rather than competing with it. -->
-        {#if jukeNow && jukeKind === "video"}
+        {#if jukeScreen === "focus"}
           <div class="focus-deck" use:jukeHost>
             {#if jukeFetch}
               <div class="focus-deck-load">
@@ -17298,7 +17845,7 @@
           </div>
         {/if}
 
-        <div class="focus-grid" class:strip={jukeNow && jukeKind === "video"} style={`--focus-cols:${focusCols}`}>
+        <div class="focus-grid" class:strip={jukeScreen === "focus"} style={`--focus-cols:${focusCols}`}>
           {#each focusTiles as fp (fp)}
             {@const me = fp === callSelfFp}
             {@const vid = me ? (myVideo === "screen" ? 2 : myVideo === "cam" ? 1 : 0) : peerMeta[fp]?.vid ?? 0}
@@ -17372,11 +17919,28 @@
             <button class="ghost" title="Close (Esc)" onclick={() => (jukePickerOpen = false)}>✕</button>
           </header>
           <div class="overlay-body">
-            {#if jukeAudioFiles.length === 0}
-              <p class="juke-pick-empty">no audio or video in this server's share yet: drop a file in chat or the Files surface to share it</p>
+            <!-- Audio and video are two different plans for the room (one plays in the background,
+                 the other asks everyone to watch), so the picker lets you ask for one of them. -->
+            <div class="juke-pick-tabs" role="tablist" aria-label="Kind of media">
+              {#each JUKE_PICK_KINDS as k (k.key)}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={jukePickKind === k.key}
+                  class:active={jukePickKind === k.key}
+                  onclick={() => (jukePickKind = k.key)}
+                >{k.label} <span class="juke-pick-n">{jukePickCounts[k.key]}</span></button>
+              {/each}
+            </div>
+            {#if jukePickFiles.length === 0}
+              <p class="juke-pick-empty">
+                {jukePickKind === "all"
+                  ? "no audio or video in this server's share yet: drop a file in chat or the Files surface to share it"
+                  : `no ${jukePickKind} in this server's share yet: share one, or ask for a different kind above`}
+              </p>
             {:else}
               <ul class="juke-pick-list">
-                {#each jukeAudioFiles as f (f.cid + "|" + f.path)}
+                {#each jukePickFiles as f (f.cid)}
                   {@const days = jukeExpiryDays(f.cid)}
                   <li class="juke-pick-row">
                     <span class="juke-ext" class:vid={mediaKind(f.name, f.mime) === "video"}>{jukeExt(f)}</span>
@@ -17748,10 +18312,10 @@
               {@const online = spaceOnlineCounts[it.s.id] ?? 1}
               {@const mentions = spaceMentionCounts[it.s.id] ?? 0}
               {@const voice = spaceVoiceCount(it.s.id)}
-              {@const recent = it.s.dot || it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
+              {@const recent = it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
               <button
                 class="sp-srv"
-                class:sp-unread={it.s.unread.length > 0 || it.s.dot}
+                class:sp-unread={it.s.unread.length > 0}
                 class:sp-recent={recent}
                 class:sp-carried={it.carried}
                 class:sp-enter-target={spaceEntering === it.s.id}
@@ -18755,6 +19319,46 @@
                   <span class="muted small">Current version: {APP_VERSION}</span>
                 </div>
               </section>
+            {:else if settingsPage === "about"}
+              <div class="stx-crumb">SETTINGS // HELP // ABOUT &amp; LICENCES</div>
+              <h1>About &amp; Licences</h1>
+              <section class="set-section">
+                <h3>Mewtual {APP_VERSION}</h3>
+                <p class="muted small">
+                  Peer-to-peer, end-to-end encrypted communities with no accounts and no company
+                  in the middle. This is alpha software: it has not had an independent security
+                  audit, so use it for testing with people you trust.
+                </p>
+                <p class="muted small">
+                  Mewtual is source-available under the Mewtual Combined Licence Terms 1.0.
+                  In short: noncommercial use, no use for training or operating AI systems, and
+                  anyone you pass a build to must be able to get its complete source under those
+                  same terms. The binding text is the LICENSE file in the source, not this summary.
+                </p>
+                <div class="invite-actions">
+                  <button type="button" class="ghost" onclick={() => openRepo()}>Open the project repository</button>
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Third-party notices</h3>
+                <p class="muted small">
+                  Mewtual is built on open-source components, and each one stays governed by its
+                  own licence rather than by Mewtual's. Their licence texts and copyright notices
+                  are reproduced here in full, which is what most of those licences ask of anyone
+                  distributing a build.
+                </p>
+                {#if noticesText}
+                  <pre class="notices-text">{noticesText}</pre>
+                {:else}
+                  <div class="invite-actions">
+                    <button type="button" class="ghost" disabled={noticesBusy} onclick={loadNotices}>
+                      {noticesBusy ? "Loading…" : "Show notices"}
+                    </button>
+                    <span class="muted small">About half a megabyte of licence text</span>
+                  </div>
+                {/if}
+                {#if noticesError}<p class="muted small">{noticesError}</p>{/if}
+              </section>
             {/if}
           </div>
           {#if settingsPage === "appearance"}
@@ -19453,12 +20057,12 @@
                 {:else if !fileInfoPreview}
                   <p class="muted small">Loading preview…</p>
                 {:else if previewKind === "image"}
-                  <img src={fileInfoPreview} alt={fileInfo.name} />
+                  <img src={fileInfoPreview} alt={fileInfo.name} onerror={() => (fileInfoPreviewError = true)} />
                 {:else if previewKind === "video"}
                   <!-- svelte-ignore a11y_media_has_caption -->
-                  <video controls src={fileInfoPreview}></video>
+                  <video controls src={fileInfoPreview} onerror={() => (fileInfoPreviewError = true)}></video>
                 {:else if previewKind === "audio"}
-                  <audio controls src={fileInfoPreview}></audio>
+                  <audio controls src={fileInfoPreview} onerror={() => (fileInfoPreviewError = true)}></audio>
                 {/if}
               </div>
             {/if}

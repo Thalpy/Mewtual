@@ -30,6 +30,36 @@ jobs:
         with:
           workspaces: apps/desktop/src-tauri -> target
 
+      # Nothing in this workflow increments the version: it builds whatever is committed, and the
+      # bump is step 1 of docs/RELEASING.md. Both ways that goes wrong are silent and cost a
+      # twenty-minute build to discover, so check them in the first few seconds instead.
+      #
+      #   - A half-done bump still builds. package.json is what the UI displays, so the installer
+      #     can ship announcing a different version than its own filename.
+      #   - Rebuilding a published version produces a draft that cannot be published (the tag is
+      #     taken) and that no install would accept anyway, an update being strictly newer.
+      - name: Check the version is consistent and unpublished
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          conf=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          pkg=$(node -p "require('./apps/desktop/package.json').version")
+          lock=$(node -p "require('./apps/desktop/package-lock.json').version")
+          crate=$(grep -m1 '^version = ' apps/desktop/src-tauri/Cargo.toml | cut -d'"' -f2)
+          clock=$(grep -A1 'name = "mewtual-desktop"' apps/desktop/src-tauri/Cargo.lock | grep -m1 '^version = ' | cut -d'"' -f2)
+          echo "tauri.conf.json=$conf package.json=$pkg package-lock.json=$lock Cargo.toml=$crate Cargo.lock=$clock"
+          for got in "$pkg" "$lock" "$crate" "$clock"; do
+            if [ "$got" != "$conf" ]; then
+              echo "::error::Version mismatch: tauri.conf.json says $conf but another file disagrees. Bump all five (docs/RELEASING.md step 1)."
+              exit 1
+            fi
+          done
+          if [ "$(gh release view "v$conf" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = "false" ]; then
+            echo "::error::v$conf is already published, and nothing here bumps the version. Bump it first (docs/RELEASING.md step 1)."
+            exit 1
+          fi
+
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: npm ci

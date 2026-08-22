@@ -4,7 +4,7 @@ import {
   completedDownload,
   downloadSavedNotice,
   guideSavedNotice,
-  saveGroupDownload,
+  saveGroupFile,
   saveSpaceGuide,
   type NativeInvoker,
   type SavedFileResult,
@@ -19,18 +19,21 @@ function mockInvoker(response: unknown) {
   return { invoke, calls };
 }
 
-test("group downloads use the native save command with the original name and bytes", async () => {
+test("saving a shared file addresses it natively and never carries its bytes", async () => {
   const response: SavedFileResult = {
     path: String.raw`C:\Users\cat\Downloads\notes (2).txt`,
     displayed: true,
   };
   const mock = mockInvoker(response);
 
-  assert.deepEqual(await saveGroupDownload(mock.invoke, "notes.txt", "Y2F0"), response);
+  assert.deepEqual(await saveGroupFile(mock.invoke, 3, "ab12", "notes.txt"), response);
   assert.deepEqual(mock.calls, [{
-    command: "save_download",
-    args: { name: "notes.txt", dataBase64: "Y2F0" },
+    command: "save_group_file",
+    args: { server: 3, cid: "ab12", name: "notes.txt" },
   }]);
+  // The point of the command: the file is addressed, not carried. A bytes-shaped argument here
+  // would mean the plaintext had come back through the webview to be saved.
+  assert.deepEqual(Object.keys(mock.calls[0].args ?? {}).sort(), ["cid", "name", "server"]);
 });
 
 test("the image guide uses its constrained native command", async () => {
@@ -89,13 +92,13 @@ test("saved notices distinguish a visible folder from a reveal warning", () => {
 test("malformed native responses cannot falsely mark a download done", async () => {
   const missingPath = mockInvoker({ displayed: true });
   await assert.rejects(
-    saveGroupDownload(missingPath.invoke, "cat.png", "Y2F0"),
+    saveGroupFile(missingPath.invoke, 1, "ab12", "cat.png"),
     /invalid save result/,
   );
 
   const badWarning = mockInvoker({ path: "/Downloads/cat.png", displayed: false, warning: 7 });
   await assert.rejects(
-    saveGroupDownload(badWarning.invoke, "cat.png", "Y2F0"),
+    saveGroupFile(badWarning.invoke, 1, "ab12", "cat.png"),
     /invalid save result/,
   );
 });

@@ -2084,6 +2084,26 @@ button.primary:hover:not(:disabled) {
 
 .invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Third-party licence text: half a megabyte of it, so it scrolls in its own box rather than
+   turning the settings pane into an endless page. Selectable, because someone checking a
+   licence obligation needs to be able to copy the clause. */
+.notices-text {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 /* The pre-mint route check: a thin bar that fills across the router-mapping window (finishing
    early when a shareable route lands), then an honest verdict beside the fresh code. */
 .invite-check {
@@ -5339,6 +5359,14 @@ button.you-panel:hover {
   justify-content: flex-end;
   gap: 4px;
 }
+/* A header row's gutter holds the avatar, so the tick goes under it rather than following the
+   time inline after the name. The delivery column then reads top to bottom in one place. */
+.messages li > .t.t-head {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  padding-top: 2px;
+}
 .dtick {
   font-size: 0.62rem;
   line-height: 1;
@@ -7982,6 +8010,10 @@ a.ref-card:hover {
   flex-direction: column;
   background: var(--bg-0);
   z-index: 70;
+  /* The column must never be taller than the window it is fixed to. Without this the shared
+     screen, the filmstrip and the dock could each claim their maximum and push the last of them
+     off the bottom edge, which is what a wide fullscreen window did every time. */
+  overflow: hidden;
 }
 
 .focus-head {
@@ -8750,6 +8782,16 @@ button.focus-leave:hover {
   color: var(--faint);
   text-decoration: line-through;
 }
+/* A chip that is also the fix: the webview wants a gesture before it will start audio, so the
+   thing that says so is the thing you click. It has to read as pressable, not as a label. */
+.juke-chip-btn {
+  cursor: pointer;
+  font-weight: 600;
+}
+.juke-chip-btn:hover,
+.juke-chip-btn:focus-visible {
+  background: color-mix(in oklab, var(--warn) 28%, transparent);
+}
 
 /* Now playing: the audible truth, then the two presses that can change it. */
 .juke-now {
@@ -8848,12 +8890,20 @@ button.juke-tbtn:hover {
   text-overflow: ellipsis;
 }
 
-/* Nothing on the deck: say so once, quietly, and say what to do about it. */
+/* Nothing on the deck: say so once, quietly, say what to do about it, and still offer the press
+   that does it. Centre rather than baseline alignment, because the row now carries a round
+   button as well as two lines of type. */
 .juke-idle {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 7px;
   padding: 1px 0;
+}
+button.juke-play:disabled,
+button.juke-play:disabled:hover {
+  background: var(--panel);
+  border-color: var(--border-soft);
+  color: var(--faint);
 }
 .juke-idle-hint {
   font-size: 0.7rem;
@@ -9074,6 +9124,97 @@ button.juke-q:hover {
   font-size: 0.78rem;
   line-height: 1.5;
   color: var(--muted);
+}
+/* Kind toggle: the same tab idiom the insert panel uses, because it is the same gesture. The
+   count rides each tab so an empty list reads as "none of that kind" and not as a broken picker. */
+.juke-pick-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.juke-pick-tabs button[role="tab"] {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.3rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  cursor: pointer;
+}
+.juke-pick-tabs button[role="tab"]:hover {
+  color: var(--text);
+  background: transparent;
+}
+.juke-pick-tabs button[role="tab"].active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.juke-pick-n {
+  color: var(--faint);
+}
+.juke-pick-tabs button[role="tab"].active .juke-pick-n {
+  color: var(--accent);
+}
+
+/* The deck's own screen, for a film outside the focus view. Same shape as the focus band, sized
+   to the dock: the picture is the point, so it takes the dock's full width. */
+.juke-screen {
+  position: relative;
+  width: 100%;
+  margin: 4px 0 6px;
+  background: #000;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-height: 34vh;
+}
+.juke-screen :global(video) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+button.juke-expand {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
+}
+button.juke-expand:hover {
+  background: rgba(0, 0, 0, 0.78);
+  border-color: #fff;
+  color: #fff;
+}
+.juke-screen-load {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  width: min(260px, 78%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 9px;
+  border-radius: var(--r);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
 }
 
 /* --- update card: rides the toast column so both share one corner --- */
@@ -13145,15 +13286,18 @@ body > #jukebox-media {
 }
 
 /* The shared screen in the focus view. */
+/* The shared screen takes whatever height the column has left rather than claiming a shape of
+   its own. A fixed 16/9 box sized off the full width overflowed the window on any display wide
+   enough that width * 9/16 exceeded the space the filmstrip and the dock had not already taken;
+   the film letterboxes itself inside this band instead, which is what object-fit is for. */
 .focus-deck {
   position: relative;
   width: 100%;
   background: #000;
   border-radius: var(--r-lg);
   overflow: hidden;
-  aspect-ratio: 16 / 9;
-  max-height: 62vh;
-  flex: none;
+  flex: 1 1 auto;
+  min-height: 120px;
 }
 .focus-deck :global(video) {
   display: block;

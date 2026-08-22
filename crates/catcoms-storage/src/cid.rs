@@ -36,6 +36,45 @@ impl Cid {
     }
 }
 
+/// Incremental [`Cid`] computation for content that arrives in pieces.
+///
+/// A streamed upload never holds the whole file at once, so it cannot call [`Cid::of`]; it feeds
+/// each chunk through here as the chunk arrives and finishes with the same address [`Cid::of`]
+/// would have produced over the concatenation.
+#[derive(Clone)]
+pub struct CidHasher(blake3::Hasher);
+
+impl CidHasher {
+    /// A hasher over no bytes yet.
+    pub fn new() -> Self {
+        Self(blake3::Hasher::new())
+    }
+
+    /// Absorb the next run of bytes.
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    /// The content address of everything absorbed so far (the hasher stays usable).
+    pub fn cid(&self) -> Cid {
+        Cid(*self.0.finalize().as_bytes())
+    }
+}
+
+impl Default for CidHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Manual Debug: the partial hash state says nothing useful and printing it invites treating an
+// intermediate digest as an address.
+impl fmt::Debug for CidHasher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CidHasher(..)")
+    }
+}
+
 impl fmt::Debug for Cid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -60,6 +99,21 @@ mod tests {
     fn content_address_is_deterministic_and_distinguishing() {
         assert_eq!(Cid::of(b"hello"), Cid::of(b"hello"));
         assert_ne!(Cid::of(b"hello"), Cid::of(b"world"));
+    }
+
+    #[test]
+    fn streaming_matches_the_one_shot_address() {
+        let whole = b"the quick brown fox jumps over the lazy dog";
+        let mut h = CidHasher::new();
+        for piece in whole.chunks(7) {
+            h.update(piece);
+        }
+        assert_eq!(h.cid(), Cid::of(whole));
+    }
+
+    #[test]
+    fn an_empty_stream_addresses_the_empty_input() {
+        assert_eq!(CidHasher::new().cid(), Cid::of(b""));
     }
 
     #[test]

@@ -13,15 +13,41 @@ export type MediaKind = "audio" | "video" | "other";
 /** The custom scheme the webview plays shared media through. */
 export const MEDIA_SCHEME = "catcoms-media";
 
+/** The user agent, where there is one to read (a unit test runs without a webview). */
+function ua(): string {
+  return typeof navigator === "undefined" ? "" : navigator.userAgent;
+}
+
+/**
+ * The origin a shared file is served from, which is not the same string on every platform.
+ *
+ * macOS and Linux register `catcoms-media:` in the webview as a real scheme, so a URL in that
+ * scheme reaches the handler. Windows (and Android) cannot: WebView2 has no custom schemes, so
+ * the toolkit instead intercepts `http://<scheme>.localhost/...` and nothing else. A
+ * `catcoms-media://` request there is an unknown scheme, so it never reaches the backend at all:
+ * the element fails to load, the deck reads that as a track nobody will serve, and every track in
+ * the queue fails the same way the moment it is pressed. That is the whole of "the jukebox is
+ * broken" on Windows, and no amount of backend correctness could have shown through it.
+ *
+ * The host segment is a constant placeholder either way: the backend routes on the path alone,
+ * because the Windows form makes the host `catcoms-media.localhost` and it stops being ours to
+ * choose.
+ */
+export function mediaOrigin(userAgent: string = ua()): string {
+  return /Windows|Android/i.test(userAgent)
+    ? `http://${MEDIA_SCHEME}.localhost`
+    : `${MEDIA_SCHEME}://a`;
+}
+
 /**
  * The URL a media element loads a shared file from.
  *
- * The host segment is a constant placeholder: the backend routes on the path alone, because
- * Windows rewrites the whole thing to `http://catcoms-media.localhost/...` and the host stops
- * being ours to choose.
+ * This mirrors what Tauri's own `convertFileSrc` does per platform. It is not simply called
+ * because that helper percent-encodes the whole path into one segment, and the backend routes on
+ * `/<server>/<cid>` as two.
  */
-export function mediaUrl(server: number, cid: string): string {
-  return `${MEDIA_SCHEME}://a/${server}/${encodeURIComponent(cid)}`;
+export function mediaUrl(server: number, cid: string, userAgent: string = ua()): string {
+  return `${mediaOrigin(userAgent)}/${server}/${encodeURIComponent(cid)}`;
 }
 
 const VIDEO_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "ogv"]);
@@ -44,6 +70,66 @@ export function mediaKind(name: string, mime = ""): MediaKind {
   if (VIDEO_EXT.has(ext)) return "video";
   if (AUDIO_EXT.has(ext)) return "audio";
   return "other";
+}
+
+/** What the "add from share" picker is currently listing. */
+export type MediaFilter = "all" | "audio" | "video";
+
+/** The least a file has to say for the picker to place it. */
+export type MediaChoice = { cid: string; name: string; mime: string };
+
+/**
+ * The share's media, as the picker offers it: the kinds asked for, each piece of content once.
+ *
+ * The de-duplication is the load-bearing half. A file index is an append-only list and `add_file`
+ * re-lists content it already holds rather than storing it twice, so one piece of content can
+ * appear several times over: in two folders, or twice in one folder after a concurrent double
+ * add. The deck plays a content address, so those listings are all the same track to it, and a
+ * keyed list that assumed otherwise crashed the whole app with `each_key_duplicate` the moment a
+ * share held one. First listing wins, so the order the share reports is preserved.
+ */
+export function mediaChoices<T extends MediaChoice>(
+  files: readonly T[],
+  filter: MediaFilter = "all",
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const f of files) {
+    const kind = mediaKind(f.name, f.mime);
+    if (kind === "other") continue;
+    if (filter !== "all" && kind !== filter) continue;
+    if (seen.has(f.cid)) continue;
+    seen.add(f.cid);
+    out.push(f);
+  }
+  return out;
+}
+
+/** Which surface holds the deck element: see [`deckSurface`]. */
+export type DeckSurface = "focus" | "dock" | "none";
+
+/**
+ * Where a playing track's picture goes.
+ *
+ * There is exactly one deck element and the surfaces adopt it by re-parenting, so at most one of
+ * them may claim it at a time: two claims means one surface shows an empty box and the other
+ * steals the frame back on the next render. Hence one function rather than a condition written
+ * twice.
+ *
+ * Audio never claims a surface (there is nothing to see, and the element is hidden in the body
+ * where the room can still hear it), the focus view outranks the dock because it is the surface
+ * asked for by name, and a folded dock is one line by definition: the picture is what the focus
+ * view is for.
+ */
+export function deckSurface(
+  kind: MediaKind,
+  playing: boolean,
+  focusOpen: boolean,
+  dockOpen: boolean,
+): DeckSurface {
+  if (!playing || kind !== "video") return "none";
+  if (focusOpen) return "focus";
+  return dockOpen ? "dock" : "none";
 }
 
 /** Below this, a listener is close enough to the DJ that correcting would be worse than drifting. */
@@ -77,6 +163,127 @@ export function driftAction(drift: number, kind: MediaKind): DriftAction {
 export function nudgeRate(drift: number): number {
   if (Math.abs(drift) < DRIFT_HOLD_S) return 1;
   return drift > 0 ? 1.05 : 0.95;
+}
+
+/** One entry in a channel's shared queue, as the backend hands it over. */
+export type JukeEntry = {
+  id: string;
+  cid: string;
+  name: string;
+  author: string;
+  added_ms: number;
+};
+
+/**
+ * The queue in the order the deck will play it: when it was added, with the id as the tiebreak so
+ * two machines that received the same two adds in different orders still agree. Tracks nobody
+ * would serve are dropped, so the deck does not stop on one.
+ */
+export function playableQueue(
+  entries: readonly JukeEntry[],
+  failed: ReadonlySet<string>,
+): JukeEntry[] {
+  return [...entries]
+    .sort((a, b) => a.added_ms - b.added_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .filter((e) => !failed.has(e.cid));
+}
+
+/**
+ * What the deck does when it leaves a track: which entry plays next, and which entry comes off
+ * the shared queue.
+ *
+ * The queue is a playlist, not a library. A track the room has heard is spent, so it is dropped
+ * rather than left sitting above the play head where it can never be reached again (the transport
+ * only ever moves forwards). `played` is false for a track the deck gave up on: nobody heard it,
+ * and whoever holds the file may come back, so it stays queued for a later retry.
+ *
+ * `queue` is already the playable order. A `currentId` that is not in it (nothing playing, or a
+ * track that just failed out of it) starts from the top, which is what makes pressing play on an
+ * idle deck work.
+ */
+export function deckAdvance(
+  queue: readonly JukeEntry[],
+  currentId: string,
+  played: boolean,
+): { next: JukeEntry | null; drop: string } {
+  const i = queue.findIndex((e) => e.id === currentId);
+  return { next: queue[i + 1] ?? null, drop: played && i >= 0 ? currentId : "" };
+}
+
+/**
+ * The largest transport revision the protocol will carry, well inside the range JavaScript can
+ * still count in whole numbers.
+ *
+ * The revision decides who owns the deck: a press adopts `max(mine, heard) + 1`. Any peer-supplied
+ * value that arithmetic cannot move past therefore freezes control wherever it happens to be. A
+ * `Number.isInteger` check is not enough, because `1e308` passes it, survives JSON, and satisfies
+ * `1e308 + 1 === 1e308`. Two to the fortieth is a trillion presses: unreachable by use, and a
+ * decade of headroom below `Number.MAX_SAFE_INTEGER` for the increment to stay exact.
+ */
+export const MAX_JUKE_SEQ = 2 ** 40;
+
+/** Is a peer-supplied transport revision one this deck can safely order and increment past? */
+export function validJukeSeq(seq: unknown): seq is number {
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0 && seq <= MAX_JUKE_SEQ;
+}
+
+/** The transport currently being followed, as far as deciding who wins is concerned. */
+export type JukeClaim = { seq: number; fromFp: string };
+
+/**
+ * Should an incoming transport frame be adopted?
+ *
+ * "newer" is a higher revision, or the same revision from a higher fingerprint so two people
+ * pressing at the same moment resolve identically on every machine. A frame that is not newer is
+ * still adopted when it comes from the DJ already being followed: that is the five-second
+ * re-announce, which keeps the deck alive and corrects drift.
+ */
+export function jukeClaimWins(current: JukeClaim | null, incoming: JukeClaim): boolean {
+  if (!validJukeSeq(incoming.seq)) return false;
+  if (!current) return true;
+  if (incoming.seq > current.seq) return true;
+  if (incoming.seq < current.seq) return false;
+  return incoming.fromFp >= current.fromFp;
+}
+
+/** The revision a press claims. Bounded, so a poisoned value cannot wedge the deck forever. */
+export function nextJukeSeq(mine: number, adopted: number | null): number {
+  const floor = Math.max(validJukeSeq(mine) ? mine : 0, validJukeSeq(adopted) ? adopted : 0);
+  return Math.min(floor + 1, MAX_JUKE_SEQ);
+}
+
+/** Everything the deck's position depends on. `element` is null unless it holds the live track. */
+export type DeckClock = {
+  /** Whether the transport being followed is my own press. */
+  isDj: boolean;
+  paused: boolean;
+  /** The DJ went quiet: the deck is frozen where it got to. */
+  stale: boolean;
+  /** The offset the followed transport named. */
+  off: number;
+  /** Milliseconds measured locally since that offset was adopted. */
+  since: number;
+  element: { currentTime: number; readyState: number } | null;
+};
+
+/**
+ * Where the deck is in the current track.
+ *
+ * The DJ's own element **is** the room's clock. Projecting a wall clock for the DJ as well was
+ * what broke playback: the projection ran on while the element sat waiting for bytes, so the DJ
+ * seeked itself forward to a place it had never played, announced that place to the room, and did
+ * it again at the next ping. A track that took a moment to arrive could never get going, and
+ * every pause/resume jumped forward by the accumulated gap. While the element has no track loaded
+ * the DJ's position is simply the offset it pressed: a slow load must not eat the head of a track.
+ *
+ * A listener has no such element to read, because its element is chasing the DJ rather than
+ * leading. For a listener the offset is somebody else's and ageing it locally is the only honest
+ * way to use it, which is the whole reason nobody has to agree on the time of day.
+ */
+export function deckPosition(c: DeckClock): number {
+  if (c.isDj) return c.element && c.element.readyState > 0 ? c.element.currentTime : c.off;
+  if (c.paused || c.stale) return c.off;
+  return c.off + c.since / 1000;
 }
 
 /** A `download-progress` event, as the backend emits it. */
@@ -138,6 +345,40 @@ export const HAVE_FUTURE_DATA = 3;
 
 export function isStalled(state: { readyState: number; paused: boolean }): boolean {
   return !state.paused && state.readyState < HAVE_FUTURE_DATA;
+}
+
+/**
+ * What moved the deck's buffering chip.
+ *
+ * `waiting` is the element saying it has run out for the moment, `progress` is any evidence to
+ * the contrary (it started playing, it can play, its time moved), and `deadline` is
+ * [`STALL_ANNOUNCE_MS`] having passed since the last `waiting` with nothing since.
+ */
+export type StallSignal = "waiting" | "progress" | "deadline";
+
+/**
+ * Whether the deck should be claiming it has run dry, after one signal.
+ *
+ * Worth stating as a rule rather than as three event handlers, because the interesting case is
+ * the one that reads wrong: a track streaming perfectly well fires `waiting` at every chunk
+ * boundary and every seek. Announcing that raw made an ordinary playing track claim it had
+ * stalled, so the chip waits out the deadline and then asks the element, whose `readyState` is
+ * the only witness that matters. Anything that proves progress clears the chip immediately,
+ * whatever the last `waiting` claimed.
+ *
+ * Note what this cannot tell you: **local is not the same as instant.** The deck streams out of
+ * the vault a window at a time, and every window is a sealed chunk that has to be opened by the
+ * single-threaded server actor before a byte of it can be served. A file entirely on this disk
+ * can still make a player wait, so a stall is never by itself proof that a peer is missing.
+ */
+export function stallChip(
+  announced: boolean,
+  signal: StallSignal,
+  el: { readyState: number; paused: boolean },
+): boolean {
+  if (signal === "progress") return false;
+  if (signal === "deadline") return isStalled(el);
+  return announced; // `waiting` only starts the clock; the deadline is what speaks
 }
 
 /**

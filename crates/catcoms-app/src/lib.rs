@@ -30,10 +30,10 @@ use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
-use catcoms_storage::{BlobStore, FileManifest, FileRef};
+use catcoms_storage::{BlobStore, FileManifest};
 // Re-export the content-address type: it's part of the app's public file surface, and the bridge
 // verifies a reassembled download against it.
-pub use catcoms_storage::Cid;
+pub use catcoms_storage::{Cid, CidHasher, FileRef, SealedBlob};
 use catcoms_sync::{
     fingerprint, read_published_roster, request_device_join, request_join, request_join_from_reply,
     request_join_from_switchboards, request_join_via_helper, ChannelSync, SyncError, ROLES_DOC,
@@ -123,6 +123,27 @@ pub struct Reaction {
     pub emoji: String,
     /// Fingerprints of the members who added this reaction (deduped; order not significant).
     pub by: Vec<String>,
+}
+
+/// The newest activity in one channel, without its text. Enough for a client to rebuild unread
+/// state from its own durable read marks after an explicit lock, a restart or an offline
+/// catch-up, none of which can be reconstructed from a live event stream that was not running.
+/// See [`Server::channel_heads`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChannelHead {
+    /// The channel this head describes.
+    pub channel: u128,
+    /// Total messages in the channel.
+    pub count: u64,
+    /// Newest message timestamp of any author (epoch-millis), or `0` if the channel is empty.
+    pub latest_ts: u64,
+    /// Newest timestamp among messages this device did NOT write, or `0` if there are none.
+    /// Own messages never make a channel unread, so this is the value a read mark is measured
+    /// against.
+    pub latest_incoming_ts: u64,
+    /// The id of the message `latest_incoming_ts` came from (empty when there is none, or when
+    /// the message predates stable ids).
+    pub latest_incoming_id: String,
 }
 
 /// Lightweight activity stats over a conversation (no message text), for the friends-list
@@ -1954,6 +1975,10 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 /// paying a whole bucket step and the product's bulk traffic doubles.
 pub const CHUNK_BYTES: usize = catcoms_storage::CHUNK_PAD_CEILING;
 
+// A manifest's chunk count is a hostile-input parse guard set to the product's true maximum, so
+// raising the file-size limit without raising it would make the largest legal file undecodable.
+const _: () = assert!(MAX_FILE_BYTES.div_ceil(CHUNK_BYTES) <= catcoms_storage::MAX_CHUNKS as usize);
+
 /// One window of a shared file's plaintext, as served to the media protocol.
 #[derive(Debug, Clone)]
 pub struct FileRange {
@@ -2328,6 +2353,14 @@ pub struct DeliveryState {
     /// indicators ([`Server::online_members`]). Independent of `delivered`, which can exceed it
     /// (a member that received the message and has since gone offline still holds it).
     pub reachable: usize,
+    /// Whether this node has **any** transport peer connected at all.
+    ///
+    /// Deliberately separate from `reachable`, and the only honest basis for a "nothing can leave
+    /// this device" claim. `reachable` resolves connections to member fingerprints through signed
+    /// peer records, so a peer whose record has not arrived (or whose peer id changed) is missing
+    /// from it while ops still gossip to it perfectly well. Counting that as "no peers reachable"
+    /// painted a red failure on messages that had already been received.
+    pub any_peer: bool,
 }
 
 /// A UI-facing view of one member: a short device-id **fingerprint** (display names are
@@ -3215,38 +3248,196 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let mut chunks = Vec::new();
         for (i, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
-            let (file_ref, ciphertext) = self.sync.seal_file(chunk, mime)?;
-            self.sync.put_blob(&ciphertext)?;
-            chunks.push(file_ref);
+            chunks.push(self.seal_upload_chunk(chunk, mime)?);
             if let Some(p) = progress {
                 let _ = p.send((i + 1, total_steps)).await;
             }
         }
         if chunks.is_empty() {
             // An empty file is still one (empty) chunk, so the manifest always has >= 1.
-            let (file_ref, ciphertext) = self.sync.seal_file(&[], mime)?;
-            self.sync.put_blob(&ciphertext)?;
-            chunks.push(file_ref);
+            chunks.push(self.seal_upload_chunk(&[], mime)?);
             if let Some(p) = progress {
                 let _ = p.send((1, total_steps)).await;
             }
         }
+        // The dedup fast path above already returned, so this publishes the fresh manifest.
+        let cid = self
+            .publish_upload(name, mime, path, plaintext_cid, bytes.len() as u64, chunks)
+            .await?;
+        if let Some(p) = progress {
+            let _ = p.send((total_steps, total_steps)).await;
+        }
+        Ok(cid)
+    }
+
+    /// Seal + store **one** chunk of a *streamed* upload, returning the [`FileRef`] that the final
+    /// [`publish_upload`](Self::publish_upload) records in the file's manifest.
+    ///
+    /// This is the upload twin of [`fetch_file_chunk`](Self::fetch_file_chunk). Sealing a whole
+    /// file in one call occupies the server actor for the entire upload: nothing else that server
+    /// does (inbound sync, presence, every other UI command) runs meanwhile, and the caller has to
+    /// hold every byte at once as well. Driving one of these per chunk keeps the longest
+    /// uninterruptible unit of upload work at one chunk, and lets a caller stream a file it never
+    /// holds whole.
+    ///
+    /// `bytes` must be exactly [`CHUNK_BYTES`] for every chunk except the last: the media reader
+    /// maps a byte offset to a chunk index by dividing, so a manifest's chunks are uniformly sized
+    /// by construction. The caller owns that ordering; this call is deliberately stateless.
+    ///
+    /// The chunk lands in the blob store's **staging** area, not the store proper. An upload's
+    /// chunks are not held content until its manifest names them, and staging is what makes that
+    /// distinction survive a crash: written straight into the store, an upload that never finished
+    /// left blobs indistinguishable from real ones, which no sweep could safely reclaim.
+    /// [`publish_upload`](Self::publish_upload) promotes them; anything else collects them.
+    pub fn seal_upload_chunk(&mut self, bytes: &[u8], mime: &str) -> Result<FileRef, AppError> {
+        if bytes.len() > CHUNK_BYTES {
+            return Err(AppError::Invalid(format!(
+                "upload chunk too large: {} bytes (max {CHUNK_BYTES})",
+                bytes.len()
+            )));
+        }
+        if !self.sync.has_file_key() {
+            return Err(AppError::Invalid(
+                "no group file key yet (still joining?)".into(),
+            ));
+        }
+        let (file_ref, ciphertext) = self.sync.seal_file(bytes, mime)?;
+        self.sync.put_staged_blob(&ciphertext)?;
+        Ok(file_ref)
+    }
+
+    /// Drop every staged blob this server holds, returning how many went.
+    ///
+    /// Run once at startup. Staging holds the chunks of uploads that were in flight, and the only
+    /// thing that knew what any of them was for was the process that staged it: nothing can claim
+    /// them now, so they are unambiguously garbage. This is what closes the crash window that a
+    /// purely in-memory record of pending uploads could not.
+    pub fn clear_staged_uploads(&mut self) -> usize {
+        self.sync.clear_staged_blobs().unwrap_or(0)
+    }
+
+    /// Publish the file-index entry for an upload whose chunks are already sealed and stored,
+    /// making it visible to the group. `plaintext_cid` is the address of the **whole** file (a
+    /// streaming caller accumulates it with [`CidHasher`](catcoms_storage::CidHasher)) and becomes
+    /// the file's identity, exactly as in [`add_file`](Self::add_file).
+    ///
+    /// Content dedup works the same way, with one difference forced by streaming: a streamed
+    /// upload only learns its whole-file address after its last chunk, so the twin check lands
+    /// *after* sealing rather than before it. When a twin is found the new listing reuses the
+    /// twin's ref (or is skipped entirely, for an identical name + folder) and the chunk blobs
+    /// this upload just wrote are garbage-collected, so a dedup still ends with exactly one sealed
+    /// copy of the content rather than a second, byte-different one.
+    pub async fn publish_upload(
+        &mut self,
+        name: &str,
+        mime: &str,
+        path: &str,
+        plaintext_cid: Cid,
+        total_size: u64,
+        chunks: Vec<FileRef>,
+    ) -> Result<Cid, AppError> {
+        if total_size > MAX_FILE_BYTES as u64 {
+            return Err(AppError::Invalid(format!(
+                "file too large: {total_size} bytes (max {MAX_FILE_BYTES})"
+            )));
+        }
+        if chunks.is_empty() {
+            return Err(AppError::Invalid("an upload has at least one chunk".into()));
+        }
+        if !self.sync.has_file_key() {
+            return Err(AppError::Invalid(
+                "no group file key yet (still joining?)".into(),
+            ));
+        }
+        let author = self.my_fingerprint();
+        let folder = normalize_path(path);
+        // Clock-injected (never ambient): the default one-month circulation deadline.
+        let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
+        let listed = self.files();
+        let twin = listed
+            .iter()
+            .find(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
+            .map(|e| {
+                (
+                    e.file_ref.clone(),
+                    listed
+                        .iter()
+                        .any(|o| o.cid == e.cid && o.name == name && o.path == folder),
+                )
+            });
+        if let Some((twin_ref, already_here)) = twin {
+            self.discard_upload_chunks(&chunks);
+            if already_here {
+                return Ok(plaintext_cid); // already shared under this exact name + folder
+            }
+            // Same content, new name/folder: list it again against the SAME sealed blobs; but
+            // with its own fresh deadline, not the twin's.
+            self.sync
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                    write_file_entry(d, name, &author, &folder, &twin_ref, expires)
+                })
+                .await?;
+            return Ok(plaintext_cid);
+        }
         let manifest = FileManifest {
             plaintext_cid,
-            total_size: bytes.len() as u64,
+            total_size,
             mime: mime.to_string(),
             chunks,
         };
+        // Never publish a listing this node's own reader would reject. A streamed upload assembles
+        // its chunks across many commands, so this is also where a caller that mis-sliced the file
+        // is caught, rather than every peer discovering it at download time.
+        manifest
+            .validate_layout()
+            .map_err(|_| AppError::Invalid("the upload's chunk layout is invalid".into()))?;
+        // Promote before posting, never after. The window between the two is the only one left in
+        // which a crash strands anything, and this ordering makes that window strand *orphans*
+        // (blobs nothing names, harmless) rather than a *published listing whose chunks are still
+        // in staging*, which the next startup sweep would delete out from under the only device
+        // that holds them.
+        for chunk in &manifest.chunks {
+            self.sync.promote_staged_blob(&chunk.ciphertext_cid)?;
+        }
         let ref_bytes = manifest.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
                 write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
             })
             .await?;
-        if let Some(p) = progress {
-            let _ = p.send((total_steps, total_steps)).await;
-        }
         Ok(plaintext_cid)
+    }
+
+    /// Drop the chunk blobs of an upload that will never be published: an abandoned or failed
+    /// streamed upload, or one whose content the dedup in
+    /// [`publish_upload`](Self::publish_upload) found already held.
+    ///
+    /// Safe by construction, not by check: an unpublished upload's chunks live in the staging
+    /// area, which nothing references, so dropping them cannot take storage a shared file depends
+    /// on. (The held-content path is still swept dedup-safely, for the case of a caller handing
+    /// back refs that were already promoted.)
+    pub fn discard_upload_chunks(&mut self, chunks: &[FileRef]) {
+        let mut unstaged: Vec<&FileRef> = Vec::new();
+        for chunk in chunks {
+            match self.sync.drop_staged_blob(&chunk.ciphertext_cid) {
+                Ok(true) => {}             // staged: gone, and it was never held
+                _ => unstaged.push(chunk), // already promoted, or never written
+            }
+        }
+        if unstaged.is_empty() {
+            return;
+        }
+        let live: HashSet<Cid> = self
+            .files()
+            .iter()
+            .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
+            .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
+            .collect();
+        for chunk in unstaged {
+            if !live.contains(&chunk.ciphertext_cid) {
+                let _ = self.sync.delete_blob(&chunk.ciphertext_cid);
+            }
+        }
     }
 
     /// The shared files listed in the index (metadata only; bytes are fetched on download).
@@ -3363,6 +3554,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             return None;
         }
         Some((manifest.chunks.len(), manifest.total_size))
+    }
+
+    /// The plaintext size and declared type of a listed file, from the index alone.
+    ///
+    /// The media protocol needs both before it can answer anything: a suffix range, a
+    /// past-the-end probe and the `Content-Range` total are all relative to the size, and the
+    /// type decides what the player is even willing to decode. It used to learn them by reading
+    /// **chunk 0** of the file on every single response, which is a whole 8 MiB fetch-and-open on
+    /// the single-threaded actor to discover two numbers the manifest already carries. With a
+    /// two-chunk plaintext cache that read also evicted the chunk being played, so a player
+    /// walking a long track re-read chunk 0, dropped the chunk it was playing, and re-read that
+    /// too: a file every byte of which was already on this disk could still stall the deck. This
+    /// touches no blob, no disk and no network.
+    pub fn file_head(&self, cid: &Cid) -> Option<(u64, String)> {
+        let entry = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
+        // The same guard `read_file_range` applies: a member authors the manifest, so an absurd
+        // declared size must not become a `Content-Range` the player then chases.
+        if manifest.total_size > MAX_FILE_BYTES as u64 {
+            return None;
+        }
+        Some((manifest.total_size, entry.mime))
     }
 
     /// Read a byte range of a listed file's plaintext.
@@ -3652,6 +3868,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         };
         let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
         let reachable = self.online_members().len();
+        let any_peer = self.sync.has_connected_peer();
         let holders = self
             .sync
             .peers_with_changes(DocType::Channel, channel, &changes);
@@ -3661,6 +3878,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 id,
                 delivered: peers.len(),
                 reachable,
+                any_peer,
             })
             .collect()
     }
@@ -5372,6 +5590,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .doc(DocType::Channel, channel)
             .map(|d| read_messages(d.doc()))
             .unwrap_or_default()
+    }
+
+    /// One activity head per known channel: what the newest message is, and what the newest
+    /// message somebody ELSE wrote is, with no text attached.
+    ///
+    /// This is the projection unread state is rebuilt from. A live `ChannelUpdated` stream only
+    /// reports what happened while the UI was listening, so an explicit lock, a restart or an
+    /// offline catch-up all lose outstanding indicators; comparing these heads against the
+    /// client's durable read marks recovers them from state rather than from event history.
+    pub fn channel_heads(&self) -> Vec<ChannelHead> {
+        let me = self.my_fingerprint();
+        self.channels()
+            .into_iter()
+            .map(|c| {
+                let msgs = self.messages(c.id);
+                let mut head = ChannelHead {
+                    channel: c.id,
+                    count: msgs.len() as u64,
+                    ..ChannelHead::default()
+                };
+                for m in &msgs {
+                    head.latest_ts = head.latest_ts.max(m.ts);
+                    // `>=` so that among equal timestamps the last one materialized wins, which is
+                    // the same row the UI shows at the bottom of the log.
+                    if m.author != me && m.ts >= head.latest_incoming_ts {
+                        head.latest_incoming_ts = m.ts;
+                        head.latest_incoming_id = m.id.clone();
+                    }
+                }
+                head
+            })
+            .collect()
     }
 
     /// Lightweight activity stats over a channel's messages; total count, first/last wall-clock
@@ -9024,6 +9274,234 @@ mod tests {
         assert_eq!(rx.recv().await, Some((2, 3)));
         assert_eq!(rx.recv().await, Some((3, 3)));
         assert_eq!(alice.files().len(), 1, "100% means the listing is visible");
+    }
+
+    /// Push `data` through the streaming upload path one chunk at a time, exactly as the desktop
+    /// bridge does: seal each `CHUNK_BYTES` slice on its own, accumulate the whole-file address,
+    /// then publish the manifest.
+    async fn stream_upload(
+        server: &mut Server<MemNetwork, ChaCha20Rng>,
+        name: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Cid {
+        let mime = "application/octet-stream";
+        let mut address = catcoms_storage::CidHasher::new();
+        let mut chunks = Vec::new();
+        for chunk in data.chunks(CHUNK_BYTES) {
+            address.update(chunk);
+            chunks.push(server.seal_upload_chunk(chunk, mime).unwrap());
+        }
+        if chunks.is_empty() {
+            chunks.push(server.seal_upload_chunk(&[], mime).unwrap());
+        }
+        server
+            .publish_upload(name, mime, path, address.cid(), data.len() as u64, chunks)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_streamed_upload_is_identical_to_a_whole_file_one() {
+        // The bridge streams a file chunk by chunk so neither the webview nor the actor is ever
+        // occupied for a whole transfer. The result must be indistinguishable from add_file's:
+        // same identity, same chunk boundaries, and it reassembles byte-for-byte.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let n = CHUNK_BYTES * 2 + 77;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+
+        let cid = stream_upload(&mut alice, "streamed.bin", "", &data).await;
+
+        assert_eq!(
+            cid,
+            Cid::of(&data),
+            "the identity is the whole-file address"
+        );
+        let entry = alice
+            .files()
+            .into_iter()
+            .find(|e| e.cid == cid.as_bytes().to_vec())
+            .expect("the streamed file is listed");
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        assert_eq!(manifest.chunks.len(), 3, "one chunk per CHUNK_BYTES slice");
+        assert_eq!(manifest.total_size, n as u64);
+        assert!(alice.file_available(&cid), "every chunk is held locally");
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn an_empty_streamed_upload_still_publishes_one_chunk() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let cid = stream_upload(&mut alice, "empty.bin", "", &[]).await;
+        assert_eq!(cid, Cid::of(b""));
+        assert_eq!(alice.download_file(&cid).await.unwrap(), Vec::<u8>::new());
+    }
+
+    #[tokio::test]
+    async fn a_streamed_upload_of_already_shared_content_dedups_and_drops_its_chunks() {
+        // A streamed upload only learns its whole-file address after the last chunk, so its dedup
+        // check lands after sealing. The second listing must reuse the first's ref and the blobs
+        // the second upload sealed must be gone: dedup that left a second sealed copy behind
+        // would defeat the point of dedup.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data: Vec<u8> = (0..CHUNK_BYTES + 9).map(|i| (i % 251) as u8).collect();
+
+        let first = stream_upload(&mut alice, "twin.bin", "", &data).await;
+        let after_first = alice.sync().blob_cids().len();
+
+        let second = stream_upload(&mut alice, "twin.bin", "elsewhere", &data).await;
+
+        assert_eq!(second, first, "identical content keeps one identity");
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            after_first,
+            "the redundant sealed chunks were collected"
+        );
+        let listings: Vec<FileEntry> = alice
+            .files()
+            .into_iter()
+            .filter(|e| e.cid == first.as_bytes().to_vec())
+            .collect();
+        assert_eq!(listings.len(), 2, "both folders list the content");
+        assert_eq!(
+            listings[0].file_ref, listings[1].file_ref,
+            "the second listing names the first upload's blobs"
+        );
+        assert_eq!(alice.download_file(&first).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn re_streaming_the_same_name_and_folder_changes_nothing() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![3u8; 4096];
+        let first = stream_upload(&mut alice, "same.bin", "docs", &data).await;
+        let blobs = alice.sync().blob_cids().len();
+
+        let again = stream_upload(&mut alice, "same.bin", "docs", &data).await;
+
+        assert_eq!(again, first);
+        assert_eq!(alice.files().len(), 1, "no duplicate listing");
+        assert_eq!(alice.sync().blob_cids().len(), blobs, "nothing new sealed");
+    }
+
+    #[tokio::test]
+    async fn a_sealed_chunk_is_not_held_content_until_its_upload_publishes() {
+        // The distinction staging exists to make. A chunk on disk that no manifest names must not
+        // look like a chunk this device holds: that is what let an interrupted upload leave blobs
+        // indistinguishable from real ones, which no sweep could then safely reclaim.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let staged = alice
+            .seal_upload_chunk(b"in flight", "application/octet-stream")
+            .unwrap();
+        assert!(
+            !alice.sync().has_blob(&staged.ciphertext_cid),
+            "staged, so not held"
+        );
+        assert!(
+            !alice.sync().blob_cids().contains(&staged.ciphertext_cid),
+            "and not in the store's inventory"
+        );
+
+        // Publishing is what makes it real.
+        let data = b"in flight".to_vec();
+        alice
+            .publish_upload(
+                "f.bin",
+                "application/octet-stream",
+                "",
+                Cid::of(&data),
+                data.len() as u64,
+                vec![staged.clone()],
+            )
+            .await
+            .unwrap();
+        assert!(alice.sync().has_blob(&staged.ciphertext_cid), "now held");
+        assert_eq!(alice.download_file(&Cid::of(&data)).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn a_restart_drops_the_chunks_of_uploads_that_never_finished() {
+        // The crash window an in-memory record of pending uploads could not close: the process
+        // that knew what these chunks were for is gone, so nothing can ever claim them.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let published = stream_upload(&mut alice, "kept.bin", "", &vec![5u8; 2048]).await;
+        let held_before = alice.sync().blob_cids().len();
+        alice
+            .seal_upload_chunk(b"upload interrupted here", "application/octet-stream")
+            .unwrap();
+        alice
+            .seal_upload_chunk(b"and here", "application/octet-stream")
+            .unwrap();
+
+        assert_eq!(alice.clear_staged_uploads(), 2, "both staged chunks went");
+
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            held_before,
+            "and the sweep touched nothing that was published"
+        );
+        assert_eq!(
+            alice.download_file(&published).await.unwrap(),
+            vec![5u8; 2048]
+        );
+        assert_eq!(alice.clear_staged_uploads(), 0, "a second sweep is a no-op");
+    }
+
+    #[tokio::test]
+    async fn discarding_an_abandoned_upload_keeps_chunks_a_listed_file_still_needs() {
+        // Cancelling an upload collects what it sealed, and cannot take storage a shared file
+        // depends on: an unpublished chunk is staged, which nothing references by construction.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![5u8; 2048];
+        let cid = stream_upload(&mut alice, "kept.bin", "", &data).await;
+        let listed = alice
+            .files()
+            .into_iter()
+            .find(|e| e.cid == cid.as_bytes().to_vec())
+            .unwrap();
+        let live = FileManifest::decode_or_legacy(&listed.file_ref)
+            .unwrap()
+            .chunks;
+
+        // An upload that got one chunk in and was then abandoned.
+        let orphan = alice
+            .seal_upload_chunk(b"never published", "application/octet-stream")
+            .unwrap();
+
+        let mut both = live.clone();
+        both.push(orphan.clone());
+        alice.discard_upload_chunks(&both);
+
+        assert!(
+            !alice.sync().has_blob(&orphan.ciphertext_cid),
+            "the abandoned chunk was collected"
+        );
+        for chunk in &live {
+            assert!(
+                alice.sync().has_blob(&chunk.ciphertext_cid),
+                "a chunk the listed file references is kept"
+            );
+        }
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn a_streamed_upload_refuses_an_oversized_chunk() {
+        // Chunks are uniform by construction (the media reader divides a byte offset by
+        // CHUNK_BYTES to get an index), so an over-long chunk is rejected rather than sealed.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let too_big = vec![0u8; CHUNK_BYTES + 1];
+        assert!(alice
+            .seal_upload_chunk(&too_big, "application/octet-stream")
+            .is_err());
     }
 
     #[tokio::test]

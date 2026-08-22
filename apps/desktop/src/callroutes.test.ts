@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callBarStatus, mappableIcePort, routerMappedCandidate } from "./callroutes.ts";
+import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate } from "./callroutes.ts";
 
 const host = {
   type: "host",
   protocol: "udp",
+  address: "192.168.0.231",
   port: 54321,
   foundation: "1234567890",
   component: "rtp",
@@ -64,6 +65,22 @@ test("the rtcp component number is 2", () => {
 test("priority clamps at 1 so a zero-priority host candidate cannot go negative", () => {
   const out = routerMappedCandidate({ ...host, priority: 0 }, { ip: "203.0.113.9", port: 9 });
   assert.equal(Number((out.candidate ?? "").split(" ")[3]), 1);
+});
+
+test("a candidate's address decides whether and what to claim to the router", () => {
+  // A real IPv4 travels as a claim the native side checks against the default-route interface.
+  assert.deepEqual(mappingAddressPolicy("192.168.0.231"), { map: true, claim: "192.168.0.231" });
+  // mDNS obfuscation and a missing address prove nothing: map permissively, claim nothing.
+  // A liveness probe is NOT the fallback here; the firewall's ICMP is indistinguishable from a
+  // dead socket and a probe vetoed every mapping in the field.
+  assert.deepEqual(mappingAddressPolicy("d9f2e-4a.local"), { map: true, claim: null });
+  assert.deepEqual(mappingAddressPolicy(null), { map: true, claim: null });
+  assert.deepEqual(mappingAddressPolicy(undefined), { map: true, claim: null });
+  assert.deepEqual(mappingAddressPolicy("  "), { map: true, claim: null });
+  // An IPv6 or hostname socket is not what an IPv4 mapping reaches: skip entirely.
+  assert.deepEqual(mappingAddressPolicy("fe80::1"), { map: false, claim: null });
+  assert.deepEqual(mappingAddressPolicy("2001:db8::5"), { map: false, claim: null });
+  assert.deepEqual(mappingAddressPolicy("example.net"), { map: false, claim: null });
 });
 
 test("the call bar says which half of the path is missing", () => {

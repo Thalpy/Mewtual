@@ -27,12 +27,21 @@ function checkedResult(value: unknown): SavedFileResult {
   };
 }
 
-export async function saveGroupDownload(
+/**
+ * Save a shared file to Downloads.
+ *
+ * The bytes are never handed to the webview: the native side fetches the file chunk by chunk and
+ * writes it straight to disk, reporting the same download-progress events the Transfers panel
+ * already listens for. Pulling a whole file into JS just to hand it back for saving moved it
+ * across the IPC bridge twice, which is what made large transfers freeze the app.
+ */
+export async function saveGroupFile(
   invoke: NativeInvoker,
+  server: number,
+  cid: string,
   name: string,
-  dataBase64: string,
 ): Promise<SavedFileResult> {
-  return checkedResult(await invoke<unknown>("save_download", { name, dataBase64 }));
+  return checkedResult(await invoke<unknown>("save_group_file", { server, cid, name }));
 }
 
 export async function saveSpaceGuide(
