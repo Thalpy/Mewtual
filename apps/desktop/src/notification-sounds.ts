@@ -4,7 +4,10 @@
 export const NOTIFICATION_SOUND_KINDS = ["message", "mention", "news"] as const;
 export type NotificationSoundKind = (typeof NOTIFICATION_SOUND_KINDS)[number];
 export type SoundOverride = "inherit" | "on" | "off";
-export type ToneOverride = "inherit" | "default" | "custom";
+// "crunch" is the second built-in: the paper-scrunch synth, selectable anywhere the
+// default chime is. Built-ins stay asset-free; only "custom" carries a stored file.
+export type BuiltInTone = "default" | "crunch";
+export type ToneOverride = "inherit" | "default" | "crunch" | "custom";
 
 export const MAX_CUSTOM_TONE_BYTES = 384 * 1024;
 export const MAX_CUSTOM_TONE_SECONDS = 8;
@@ -17,7 +20,7 @@ export type StoredTone = {
 
 export type GlobalSoundPrefs = Record<NotificationSoundKind, {
   enabled: boolean;
-  tone: "default" | "custom";
+  tone: BuiltInTone | "custom";
   custom: StoredTone | null;
 }>;
 
@@ -30,6 +33,7 @@ export type ServerSoundPrefs = Record<NotificationSoundKind, {
 export type ResolvedSound = {
   enabled: boolean;
   custom: StoredTone | null;
+  builtIn: BuiltInTone;
   source: "built-in" | "global custom" | "server custom";
 };
 
@@ -121,6 +125,8 @@ export function parseGlobalSoundPrefs(raw: string | null): GlobalSoundPrefs {
       if (custom) out[kind].custom = custom;
       if (candidate.tone === "custom" && custom) {
         out[kind].tone = "custom";
+      } else if (candidate.tone === "crunch") {
+        out[kind].tone = "crunch";
       }
     }
   } catch {
@@ -142,7 +148,7 @@ export function parseServerSoundPrefs(raw: string | null): ServerSoundPrefs {
         out[kind].enabled = candidate.enabled;
       }
       const custom = validStoredTone(candidate.custom);
-      if (candidate.tone === "default" || candidate.tone === "inherit") out[kind].tone = candidate.tone;
+      if (candidate.tone === "default" || candidate.tone === "crunch" || candidate.tone === "inherit") out[kind].tone = candidate.tone;
       else if (candidate.tone === "custom" && custom) out[kind].tone = "custom";
       if (custom) out[kind].custom = custom;
     }
@@ -165,14 +171,16 @@ export function resolveNotificationSound(
     : local?.enabled === "off"
       ? false
       : global[kind].enabled;
-  if (!masterEnabled || !categoryEnabled) return { enabled: false, custom: null, source: "built-in" };
+  if (!masterEnabled || !categoryEnabled) return { enabled: false, custom: null, builtIn: "default", source: "built-in" };
 
   if (local?.tone === "custom" && local.custom) {
-    return { enabled: true, custom: local.custom, source: "server custom" };
+    return { enabled: true, custom: local.custom, builtIn: "default", source: "server custom" };
   }
-  if (local?.tone === "default") return { enabled: true, custom: null, source: "built-in" };
+  if (local?.tone === "default" || local?.tone === "crunch") {
+    return { enabled: true, custom: null, builtIn: local.tone, source: "built-in" };
+  }
   if (global[kind].tone === "custom" && global[kind].custom) {
-    return { enabled: true, custom: global[kind].custom, source: "global custom" };
+    return { enabled: true, custom: global[kind].custom, builtIn: "default", source: "global custom" };
   }
-  return { enabled: true, custom: null, source: "built-in" };
+  return { enabled: true, custom: null, builtIn: global[kind].tone === "crunch" ? "crunch" : "default", source: "built-in" };
 }

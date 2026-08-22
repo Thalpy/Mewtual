@@ -62,11 +62,11 @@ test("resolution applies master, enable, and tone precedence", () => {
   global.news.custom = tone;
 
   assert.deepEqual(resolveNotificationSound(true, global, server, "news"), {
-    enabled: true, custom: tone, source: "global custom",
+    enabled: true, custom: tone, builtIn: "default", source: "global custom",
   });
   server.news.tone = "default";
   assert.deepEqual(resolveNotificationSound(true, global, server, "news"), {
-    enabled: true, custom: null, source: "built-in",
+    enabled: true, custom: null, builtIn: "default", source: "built-in",
   });
   server.news.tone = "custom";
   server.news.custom = { ...tone, name: "server.mp3" };
@@ -77,4 +77,27 @@ test("resolution applies master, enable, and tone precedence", () => {
   global.news.enabled = false;
   assert.equal(resolveNotificationSound(true, global, server, "news").enabled, true);
   assert.equal(resolveNotificationSound(false, global, server, "news").enabled, false);
+});
+
+test("the crunch built-in survives persistence and wins tone precedence like default does", () => {
+  const global = parseGlobalSoundPrefs(JSON.stringify({
+    message: { enabled: true, tone: "crunch" },
+  }));
+  assert.equal(global.message.tone, "crunch");
+
+  // Global crunch reaches resolution when no server override intervenes.
+  assert.deepEqual(resolveNotificationSound(true, global, null, "message"), {
+    enabled: true, custom: null, builtIn: "crunch", source: "built-in",
+  });
+
+  // A server-level crunch overrides a global custom tone, same as "default" does.
+  global.message.tone = "custom";
+  global.message.custom = tone;
+  const server = parseServerSoundPrefs(JSON.stringify({
+    message: { enabled: "inherit", tone: "crunch" },
+  }));
+  assert.equal(server.message.tone, "crunch");
+  assert.deepEqual(resolveNotificationSound(true, global, server, "message"), {
+    enabled: true, custom: null, builtIn: "crunch", source: "built-in",
+  });
 });

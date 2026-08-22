@@ -4957,14 +4957,29 @@ button.you-panel:hover {
   container-type: inline-size;
 }
 
+/* The textarea and its keyboard hint share a positioning context, so the hint can
+   overlay the input's right edge instead of stealing row width from it. */
+.composer .composer-entry {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+
+/* Overlaid, not flowed: the hint never changes the composer's size, and the markup
+   removes it as soon as the box holds any text (it only ever sits over one empty row). */
 .composer .c-hint {
+  position: absolute;
+  right: 0.55rem;
+  top: 50%;
+  transform: translateY(-50%);
   font-family: var(--mono);
   font-size: 0.58rem;
   letter-spacing: 0.06em;
   color: var(--faint);
-  align-self: center;
   white-space: nowrap;
   user-select: none;
+  pointer-events: none;
 }
 
 /* Hide the hint when the composer box itself is cramped (narrow pane or window),
@@ -6827,6 +6842,75 @@ button.you-panel:hover {
 .start {
   max-height: 100%;
   overflow-y: auto;
+}
+
+/* --- Start-surface tabs (join / found): .stx-seg's language scaled up to a primary
+   control. The join tab leads because pasting an invite is the common case. --- */
+.start-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+  background: var(--bg-0);
+}
+
+/* One tab: strip the app's default button chrome, stack label over hint. */
+.start-tabs button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.55rem 0.75rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.start-tabs button + button {
+  border-left: 1px solid var(--border-soft);
+}
+
+.start-tabs button:hover {
+  color: var(--text-2);
+  background: var(--bg-elev);
+}
+
+/* Active tab: accent tint plus the stx-seg inset underline. */
+.start-tabs button[aria-selected="true"] {
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Keyboard focus ring, drawn inward so overflow:hidden cannot clip it. */
+.start-tabs button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The one-line hint under each tab label, in the UI face at whisper volume. */
+.start-tabs .st-hint {
+  font-family: var(--ui);
+  font-size: 0.68rem;
+  letter-spacing: normal;
+  color: var(--faint);
+}
+
+.start-tabs button[aria-selected="true"] .st-hint {
+  color: var(--muted);
+}
+
+/* A tab panel: restores the .start column rhythm inside the wrapper div. */
+.start-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
 /* --- Brand mark: logo + wordmark + one line of context for the screen it fronts. --- */
@@ -10586,6 +10670,68 @@ a:hover .mod-node { filter: brightness(1.35); }
   z-index: 40; /* above the app, below the titlebar (1000) and toasts */
   display: flex;
   background: var(--panel);
+  /* Settings prose is chrome, not content: clicking toggles must not smear a text
+     selection across the page. Anything worth copying opts back in below. */
+  user-select: none;
+}
+
+.stx input,
+.stx textarea,
+.stx select,
+.stx code,
+.stx kbd,
+.stx .fp,
+.stx .readout {
+  user-select: text;
+}
+
+/* Settings tickboxes render as rocker switches: the same input and events, restyled.
+   Scoped to the settings takeover so in-flow checkboxes elsewhere keep their look. */
+.stx .toggle input[type="checkbox"] {
+  appearance: none;
+  flex: none;
+  width: 2.05rem;
+  height: 1.1rem;
+  margin: 0;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  position: relative;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.stx .toggle input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 0.78rem;
+  height: 0.78rem;
+  border-radius: 50%;
+  background: var(--muted);
+  transform: translateY(-50%);
+  transition: left 0.15s ease, background 0.15s ease;
+}
+
+.stx .toggle input[type="checkbox"]:checked {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.stx .toggle input[type="checkbox"]:checked::before {
+  left: calc(100% - 0.78rem - 2px);
+  background: var(--accent);
+}
+
+.stx .toggle input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.stx .toggle input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .stx-nav-zone {

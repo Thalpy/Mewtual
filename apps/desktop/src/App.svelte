@@ -211,6 +211,14 @@
     return arr.sort((a, b) => key(b.id) - key(a.id));
   });
   let showAdd = $state(false); // showing the found/join form to add a server
+  let startTab = $state<"join" | "found">("join"); // which start-surface tab is open; join is the common case
+  // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
+  function startTabArrows(e: KeyboardEvent) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    startTab = startTab === "join" ? "found" : "join";
+    document.getElementById(startTab === "join" ? "start-tab-join" : "start-tab-found")?.focus();
+  }
   let showNewDm = $state(false); // the "New DM" composer (friend name → friend code to share)
   let showAddFriend = $state(false); // the "Add friend" composer (paste a friend code)
   let dmName = $state(""); // the friend's name for a new/accepted DM
@@ -487,7 +495,7 @@
     globalSoundPrefs[kind].enabled = enabled;
     saveGlobalSoundPrefs();
   }
-  function setGlobalToneMode(kind: NotificationSoundKind, tone: "default" | "custom") {
+  function setGlobalToneMode(kind: NotificationSoundKind, tone: "default" | "crunch" | "custom") {
     if (tone === "custom" && !globalSoundPrefs[kind].custom) return;
     globalSoundPrefs[kind].tone = tone;
     saveGlobalSoundPrefs();
@@ -3231,8 +3239,11 @@
     pBubble = encodeMessageFrame({ ...pFrame, ...patch });
   }
   function selectFrameEffect(id: MessageFrameEffectId) {
-    if (pFrame.effects.some((layer) => layer.id === id)) {
+    const existing = pFrame.effects.find((layer) => layer.id === id);
+    if (existing) {
+      // Same toggle contract as the name-effect tiles: off keeps the layer's settings.
       collapsedFrameEffects[id] = false;
+      setFrameEffectEnabled(id, !existing.enabled);
       return;
     }
     updateFrame({ effects: [...pFrame.effects, defaultMessageFrameLayer(id)] });
@@ -3340,7 +3351,10 @@
 
   function selectNameEffect(id: NameEffectId) {
     if (effectConfigured(pEffects, id)) {
+      // A second click on a lit tile is a toggle, not a no-op: off keeps every saved
+      // setting, and on re-enables them (kicking out any exclusive sibling).
       collapsedEffects[id] = false;
+      setNameEffectEnabled(id, !effectEnabled(pEffects, id));
       return;
     }
     // Both fill effects stay configured, but only one can be enabled at a time. Switching
@@ -11555,7 +11569,8 @@
     const policy = soundPolicy(kind, server);
     if (!policy.enabled) return;
     const builtIn = () => {
-      if (kind === "message") playSynthChime([880, 1318.5]);
+      if (policy.builtIn === "crunch") playCrunch();
+      else if (kind === "message") playSynthChime([880, 1318.5]);
       else if (kind === "mention") playSynthChime([987.8, 1318.5, 1760]);
       else {
         try {
@@ -11947,6 +11962,67 @@
       /* no Web Audio here: the cat purrs silently */
     }
   }
+
+  // A crunch: three quick bites of band-passed noise, each pitched a little lower and
+  // softer than the last, which reads as paper being scrunched rather than as static.
+  // Same lazily-created context as the chimes, gated by the same sound preference.
+  function playCrunch() {
+    if (!soundOn) return;
+    try {
+      audioCtx = audioCtx ?? new AudioContext();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") void ctx.resume();
+      const now = ctx.currentTime;
+      const len = Math.floor(ctx.sampleRate * 0.1);
+      const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      [0, 0.07, 0.15].forEach((offset, i) => {
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.playbackRate.value = 1 - i * 0.22;
+        const filt = ctx.createBiquadFilter();
+        filt.type = "bandpass";
+        filt.Q.value = 0.9;
+        filt.frequency.setValueAtTime(1800 - i * 420, now + offset);
+        filt.frequency.exponentialRampToValueAtTime(680 - i * 130, now + offset + 0.08);
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.2 * (1 - i * 0.26), now + offset + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.095);
+        src.connect(filt).connect(gain).connect(ctx.destination);
+        src.start(now + offset);
+        src.stop(now + offset + 0.1);
+      });
+    } catch {
+      /* no Web Audio: the window scrunches silently */
+    }
+  }
+
+  // Scrunching the window crunches. Only shrinking counts, and a throttle folds the
+  // stream of resize events a drag produces into one crunch every few frames, so the
+  // gesture sounds like one continuous scrunch instead of a rattle.
+  let scrunchW = 0;
+  let scrunchH = 0;
+  let scrunchLast = 0;
+  function onWindowScrunch() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const shrank = (scrunchW > 0 && w < scrunchW) || (scrunchH > 0 && h < scrunchH);
+    scrunchW = w;
+    scrunchH = h;
+    if (!shrank) return;
+    const t = performance.now();
+    if (t - scrunchLast < 280) return;
+    scrunchLast = t;
+    playCrunch();
+  }
+  $effect(() => {
+    scrunchW = window.innerWidth;
+    scrunchH = window.innerHeight;
+    window.addEventListener("resize", onWindowScrunch);
+    return () => window.removeEventListener("resize", onWindowScrunch);
+  });
 
   // Touching the cat. When something wants you the mascot is already saying so, so the click
   // follows it: the oldest unread mention (Sets keep insertion order, so the first entry is the
@@ -12808,7 +12884,7 @@
                   class:active={configured}
                   class:effect-off={configured && !effectEnabled(pEffects, fx.id)}
                   class:motion-dead={dead}
-                  title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : configured ? `${fx.label}: show its saved settings` : `Add ${fx.label}`}
+                  title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : configured && effectEnabled(pEffects, fx.id) ? `${fx.label}: turn off (settings kept)` : configured ? `${fx.label}: turn back on` : `Add ${fx.label}`}
                   aria-label={fx.label}
                   aria-pressed={effectEnabled(pEffects, fx.id)}
                   onclick={() => selectNameEffect(fx.id)}
@@ -12818,7 +12894,7 @@
           </div>
         {/each}
       </div>
-      <span class="muted small">Add as many as you like, then tick combinations on and off below. Fill effects, and Bounce/Wobble, preserve every setup while enabling one compatible choice at a time.</span>
+      <span class="muted small">Add as many as you like; click a lit tile to switch it off without losing its settings. Fill effects, and Bounce/Wobble, preserve every setup while enabling one compatible choice at a time.</span>
 
       <div class="fx-master">
         <label class="fx-option"><span>Master intensity <output>{effectOptions(pEffects, "master").intensity}%</output></span><input type="range" min="25" max="175" step="5" value={effectOptions(pEffects, "master").intensity} oninput={(e) => updateStudioOption("master", "intensity", e.currentTarget.valueAsNumber)} /></label>
@@ -14944,142 +15020,184 @@
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
       </label>
-      <div class="field">
-        <span class="muted">Who is this server for?</span>
-        <div class="mode-cards">
-          <label class="mode-card" class:selected={serverMode === "friends"}>
-            <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
-            <span class="mc-pick">{serverMode === "friends" ? "◉" : "○"}</span>
-            <span class="mc-title">People I know</span>
-            <span class="mc-sub">friend circle</span>
-            <p>You connect to each other directly. Nothing to set up, nothing to run, no one in charge of the wires.</p>
-            <p class="mc-trade">Members may see each other's IP addresses, and bans depend on everyone's app playing fair.</p>
-            <span class="mc-foot">shields you from an operator · trusts your friends</span>
-          </label>
-          <label class="mode-card" class:selected={serverMode === "hosted"}>
-            <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
-            <span class="mc-pick">{serverMode === "hosted" ? "◉" : "○"}</span>
-            <span class="mc-title">People I don't know</span>
-            <span class="mc-sub">hosted community</span>
-            <p>Everyone connects through a node you run. Removing someone takes effect instantly: the group changes its keys, and they're locked out of everything said afterwards.</p>
-            <p class="mc-trade">You, the operator, can see who is a member and who talks to whom, never what is said.</p>
-            <span class="mc-foot">removal that holds · trusts you</span>
-          </label>
+      <div class="start-tabs" role="tablist" aria-label="Join or found a server">
+        <button
+          type="button"
+          role="tab"
+          id="start-tab-join"
+          aria-selected={startTab === "join"}
+          aria-controls="start-panel-join"
+          tabindex={startTab === "join" ? 0 : -1}
+          onclick={() => (startTab = "join")}
+          onkeydown={startTabArrows}
+        >
+          Join a server
+          <span class="st-hint">someone sent me an invite</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="start-tab-found"
+          aria-selected={startTab === "found"}
+          aria-controls="start-panel-found"
+          tabindex={startTab === "found" ? 0 : -1}
+          onclick={() => (startTab = "found")}
+          onkeydown={startTabArrows}
+        >
+          Found a server
+          <span class="st-hint">I'm starting a new one</span>
+        </button>
+      </div>
+      {#if startTab === "join"}
+        <div class="start-pane" role="tabpanel" id="start-panel-join" aria-labelledby="start-tab-join">
+          <p class="muted">
+            Paste the invite you were sent: it carries everything your app needs to find the group.
+          </p>
+          <textarea
+            class="invite-code"
+            bind:value={joinInvite}
+            oninput={() => {
+              joinPreview = null;
+              joinPreviewCode = "";
+              joinSwitchboardConsent = false;
+            }}
+            rows="3"
+            placeholder="paste invite here"
+          ></textarea>
+          {#if joinPreview?.switchboards}
+            <section class="repair-card switchboard-consent">
+              <div>
+                <h3>Direct first; member fallback only with your permission</h3>
+                <p class="muted small">
+                  This signed invite offers {joinPreview.switchboards} standing switchboard{joinPreview.switchboards === 1 ? "" : "s"}.
+                  Mewtual will try the named inviter directly first. If that fails, a switchboard can
+                  forward the admission handshake and remain your first encrypted group connection.
+                  That member learns your IP address and connection timing and may carry encrypted
+                  catch-up traffic. It already has ordinary member access, but helping grants no
+                  additional content access, and it cannot admit you itself.
+                </p>
+                <label class="check-row">
+                  <input type="checkbox" bind:checked={joinSwitchboardConsent} />
+                  Allow the signed member fallback after the direct attempt fails
+                </label>
+                <p class="muted small">Leave this off to try direct routes only. You can retry with fallback later.</p>
+              </div>
+            </section>
+          {/if}
+          <div class="pc-actions">
+            <button onclick={join} disabled={busy || !joinInvite.trim()}>
+              {joinPreview?.switchboards
+                ? joinSwitchboardConsent
+                  ? "Join with fallback"
+                  : "Join directly"
+                : busy
+                  ? "Working…"
+                  : "Join"}
+            </button>
+            <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
+              if (t) {
+                joinInvite = t;
+                joinPreview = null;
+                joinPreviewCode = "";
+                joinSwitchboardConsent = false;
+              }
+            })}>⛶ Scan invite QR</button>
+            <span class="aside muted small">invites are single-use and time-limited</span>
+          </div>
+          {#if joinReplyReady && !joinReplyExpired}
+            <section class="repair-card reply-card">
+              <div>
+                <h3>Nobody answered: meet in the middle</h3>
+                <p class="muted small">
+                  Your invite is fine; the routes it carried did not answer. Send this reply code
+                  back to the person who invited you, in the same chat the invite arrived in. When
+                  they paste it, both apps dial at the same moment, which can open a path one-sided
+                  dialling cannot. A member whose app confirms a current live route to the named
+                  inviter can paste it instead. It offers {joinReplyCandidateLabel(joinReplyReady.candidate_count)};
+                  it dials rather than relays, so it cannot cross symmetric NAT/CGNAT on its own.
+                  It works for 60 seconds: keep both apps open.
+                </p>
+                <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+              </div>
+              <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+            </section>
+          {:else if joinReplyReady}
+            <section class="repair-card reply-card">
+              <div><h3>Connection reply expired</h3><p class="muted small">Start the join again to mint a fresh 60-second route. The expired code is no longer copyable.</p></div>
+            </section>
+          {/if}
         </div>
-        <p class="muted small">Neither is the safer one: they guard against different people.</p>
-      </div>
-      {#if serverMode === "hosted"}
-        <label class="field">
-          <span class="muted small">
-            Your node's address: a hosted community runs through a small always-on machine you
-            operate. Set one up with <span class="fp">catcomsctl relay</span>; if you don't have
-            one yet, pick "People I know" instead.
-          </span>
-          <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
-        </label>
-      {/if}
-      <details>
-        <summary>Advanced: connectivity</summary>
-        <label class="field">
-          <span class="muted small">
-            Known address (optional): if this machine already has a reachable address, a LAN IP
-            or a public host:port you've forwarded, paste it to skip discovery.
-          </span>
-          <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
-        </label>
-        {#if serverMode === "friends"}
-          <label class="field">
-            <span class="muted small">
-              Relay node (optional): a relay's address makes this server reachable over the
-              internet with no port-forward.
-            </span>
-            <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/… (optional)" />
-          </label>
-        {/if}
-        <label class="field">
-          <span class="muted small">
-            Introducer node (optional): register at a rendezvous node so people can join with
-            <em>just the invite</em>, no address needed. Saved as your default.
-          </span>
-          <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-        </label>
-      </details>
-      <div class="pc-actions">
-        <button onclick={found} disabled={busy}>
-          {busy ? "Working…" : "Found server"}
-        </button>
-        <span class="aside muted small">most people never open Advanced</span>
-      </div>
-      <hr />
-      <p class="muted">…or join an existing server with an invite:</p>
-      <textarea
-        class="invite-code"
-        bind:value={joinInvite}
-        oninput={() => {
-          joinPreview = null;
-          joinPreviewCode = "";
-          joinSwitchboardConsent = false;
-        }}
-        rows="3"
-        placeholder="paste invite here"
-      ></textarea>
-      {#if joinPreview?.switchboards}
-        <section class="repair-card switchboard-consent">
-          <div>
-            <h3>Direct first; member fallback only with your permission</h3>
-            <p class="muted small">
-              This signed invite offers {joinPreview.switchboards} standing switchboard{joinPreview.switchboards === 1 ? "" : "s"}.
-              Mewtual will try the named inviter directly first. If that fails, a switchboard can
-              forward the admission handshake and remain your first encrypted group connection.
-              That member learns your IP address and connection timing and may carry encrypted
-              catch-up traffic. It already has ordinary member access, but helping grants no
-              additional content access, and it cannot admit you itself.
-            </p>
-            <label class="check-row">
-              <input type="checkbox" bind:checked={joinSwitchboardConsent} />
-              Allow the signed member fallback after the direct attempt fails
+      {:else}
+        <div class="start-pane" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
+          <div class="field">
+            <span class="muted">Who is this server for?</span>
+            <div class="mode-cards">
+              <label class="mode-card" class:selected={serverMode === "friends"}>
+                <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
+                <span class="mc-pick">{serverMode === "friends" ? "◉" : "○"}</span>
+                <span class="mc-title">People I know</span>
+                <span class="mc-sub">friend circle</span>
+                <p>You connect to each other directly. Nothing to set up, nothing to run, no one in charge of the wires.</p>
+                <p class="mc-trade">Members may see each other's IP addresses, and bans depend on everyone's app playing fair.</p>
+                <span class="mc-foot">shields you from an operator · trusts your friends</span>
+              </label>
+              <label class="mode-card" class:selected={serverMode === "hosted"}>
+                <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
+                <span class="mc-pick">{serverMode === "hosted" ? "◉" : "○"}</span>
+                <span class="mc-title">People I don't know</span>
+                <span class="mc-sub">hosted community</span>
+                <p>Everyone connects through a node you run. Removing someone takes effect instantly: the group changes its keys, and they're locked out of everything said afterwards.</p>
+                <p class="mc-trade">You, the operator, can see who is a member and who talks to whom, never what is said.</p>
+                <span class="mc-foot">removal that holds · trusts you</span>
+              </label>
+            </div>
+            <p class="muted small">Neither is the safer one: they guard against different people.</p>
+          </div>
+          {#if serverMode === "hosted"}
+            <label class="field">
+              <span class="muted small">
+                Your node's address: a hosted community runs through a small always-on machine you
+                operate. Set one up with <span class="fp">catcomsctl relay</span>; if you don't have
+                one yet, pick "People I know" instead.
+              </span>
+              <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
             </label>
-            <p class="muted small">Leave this off to try direct routes only. You can retry with fallback later.</p>
+          {/if}
+          <details>
+            <summary>Advanced: connectivity</summary>
+            <label class="field">
+              <span class="muted small">
+                Known address (optional): if this machine already has a reachable address, a LAN IP
+                or a public host:port you've forwarded, paste it to skip discovery.
+              </span>
+              <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
+            </label>
+            {#if serverMode === "friends"}
+              <label class="field">
+                <span class="muted small">
+                  Relay node (optional): a relay's address makes this server reachable over the
+                  internet with no port-forward.
+                </span>
+                <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/… (optional)" />
+              </label>
+            {/if}
+            <label class="field">
+              <span class="muted small">
+                Introducer node (optional): register at a rendezvous node so people can join with
+                <em>just the invite</em>, no address needed. Saved as your default.
+              </span>
+              <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
+            </label>
+          </details>
+          <div class="pc-actions">
+            <button onclick={found} disabled={busy}>
+              {busy ? "Working…" : "Found server"}
+            </button>
+            <span class="aside muted small">most people never open Advanced</span>
           </div>
-        </section>
+        </div>
       {/if}
-      <div class="pc-actions">
-        <button onclick={join} disabled={busy || !joinInvite.trim()}>
-          {joinPreview?.switchboards
-            ? joinSwitchboardConsent
-              ? "Join with fallback"
-              : "Join directly"
-            : "Join"}
-        </button>
-        <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
-          if (t) {
-            joinInvite = t;
-            joinPreview = null;
-            joinPreviewCode = "";
-            joinSwitchboardConsent = false;
-          }
-        })}>⛶ Scan invite QR</button>
-      </div>
-      {#if joinReplyReady && !joinReplyExpired}
-        <section class="repair-card reply-card">
-          <div>
-            <h3>The inviter needs to dial you back</h3>
-            <p class="muted small">
-              The invite's routes did not answer. Send this authenticated reply to the inviter,
-              or to a member whose app confirms a current live route to the named inviter, within
-              60 seconds and keep both apps open. It offers {joinReplyCandidateLabel(joinReplyReady.candidate_count)};
-              it is not a
-              relay and cannot cross symmetric NAT/CGNAT on its own.
-            </p>
-            <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
-          </div>
-          <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
-        </section>
-      {:else if joinReplyReady}
-        <section class="repair-card reply-card">
-          <div><h3>Connection reply expired</h3><p class="muted small">Start the join again to mint a fresh 60-second route. The expired code is no longer copyable.</p></div>
-        </section>
-      {/if}
+      <hr />
       {#if servers.length && activeServerId !== null}
         <details class="conn-panel reply-apply">
           <summary>I received a connection reply</summary>
@@ -16012,18 +16130,20 @@
                   onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
                 />
               </label>
-              <textarea
-                bind:this={composerEl}
-                bind:value={draft}
-                rows="1"
-                class="composer-input"
-                placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
-                oninput={onComposerInput}
-                onselect={() => onTextEffectSelection("chat")}
-                onkeydown={onComposerKeydown}
-                onblur={() => queueMicrotask(() => (mentionQuery = null))}
-              ></textarea>
-              <span class="c-hint">enter to send · shift+enter newline</span>
+              <div class="composer-entry">
+                <textarea
+                  bind:this={composerEl}
+                  bind:value={draft}
+                  rows="1"
+                  class="composer-input"
+                  placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                  oninput={onComposerInput}
+                  onselect={() => onTextEffectSelection("chat")}
+                  onkeydown={onComposerKeydown}
+                  onblur={() => queueMicrotask(() => (mentionQuery = null))}
+                ></textarea>
+                {#if !draft}<span class="c-hint">enter to send · shift+enter newline</span>{/if}
+              </div>
               {@render textEffectButton("chat", "Message text effects")}
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
               <button type="submit" disabled={uploading || sending}>Send</button>
@@ -18407,8 +18527,9 @@
                       <div class="sound-setting-controls">
                         <label>
                           <span>Tone</span>
-                          <select value={pref.tone} onchange={(e) => setGlobalToneMode(kind, e.currentTarget.value as "default" | "custom")}>
-                            <option value="default">Built-in</option>
+                          <select value={pref.tone} onchange={(e) => setGlobalToneMode(kind, e.currentTarget.value as "default" | "crunch" | "custom")}>
+                            <option value="default">Built-in chime</option>
+                            <option value="crunch">Paper scrunch</option>
                             <option value="custom" disabled={!pref.custom}>Custom{pref.custom ? ` · ${pref.custom.name}` : ""}</option>
                           </select>
                         </label>
@@ -18745,7 +18866,8 @@
                           <span>Tone</span>
                           <select value={pref.tone} onchange={(e) => setServerToneMode(kind, e.currentTarget.value as ToneOverride)}>
                             <option value="inherit">Inherit global</option>
-                            <option value="default">Built-in</option>
+                            <option value="default">Built-in chime</option>
+                            <option value="crunch">Paper scrunch</option>
                             <option value="custom" disabled={!pref.custom}>Custom{pref.custom ? ` · ${pref.custom.name}` : ""}</option>
                           </select>
                         </label>
