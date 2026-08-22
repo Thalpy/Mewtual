@@ -1978,30 +1978,6 @@ impl MediaPortMapping {
     }
 }
 
-/// Whether provably *nothing* is listening at this machine's `(local_ip, port)` UDP socket.
-///
-/// With several adapters up the caller cannot tell which interface an ICE port belongs to, and
-/// mapping a port nothing listens on would advertise a dead candidate. Windows surfaces "nothing
-/// there" as an ICMP port-unreachable that errors the next receive on a *connected* UDP socket,
-/// so a positive disproof is detectable. A silent timeout proves nothing either way (an ICE
-/// agent discards non-STUN datagrams without replying), so only the explicit error blocks.
-async fn media_socket_disproven(local_ip: Ipv4Addr, port: NonZeroU16) -> bool {
-    let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
-        return false;
-    };
-    if socket.connect((local_ip, port.get())).await.is_err() {
-        return false;
-    }
-    if socket.send(&[0u8; 8]).await.is_err() {
-        return true;
-    }
-    let mut response = [0u8; 32];
-    tokio::select! {
-        received = socket.recv(&mut response) => received.is_err(),
-        _ = SystemClock.sleep(Duration::from_millis(600)) => false,
-    }
-}
-
 /// Scan the router's own mapping table for the UDP entry on `port`. The strongest check
 /// available from inside the NAT; a gateway that does not implement the table reads as
 /// unconfirmed, never as failure. Bounded: no home router legitimately needs more entries.
@@ -2135,14 +2111,26 @@ async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping,
 ///
 /// Tries UPnP over the bound-interface search first (the proven path; see
 /// [`run_upnp_bound_mapper_attempt`]), then PCP and NAT-PMP for routers that speak those
-/// instead. Before touching the router at all, the socket itself is probed so a port that
-/// belongs to another interface is refused rather than advertised as a dead candidate.
-pub async fn map_media_udp_port(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+/// instead.
+///
+/// `claimed_ip` is the address the ICE candidate itself named (a mic-granted page gets real IPs
+/// in its host candidates); when present it must be the default-route interface, or the port
+/// belongs to another adapter and a mapping could never reach it. This replaced an active UDP
+/// liveness probe: Windows Firewall rejects unsolicited inbound UDP to the webview with the
+/// same ICMP a dead socket produces, so the probe disproved every port on a firewalled machine
+/// (observed live 2026-08-22) while real ICE flows, being outbound-first, pass that firewall
+/// fine. Never re-add a probe that cannot tell those apart.
+pub async fn map_media_udp_port(
+    port: NonZeroU16,
+    claimed_ip: Option<Ipv4Addr>,
+) -> Result<MediaPortMapping, String> {
     let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
-    if media_socket_disproven(local_ip, port).await {
-        return Err(format!(
-            "nothing is listening at {local_ip}:{port}; this ICE port belongs to another interface"
-        ));
+    if let Some(claimed) = claimed_ip {
+        if claimed != local_ip {
+            return Err(format!(
+                "ICE socket {claimed}:{port} is not on the default-route interface ({local_ip}); a router mapping cannot reach it"
+            ));
+        }
     }
     match map_media_port_upnp(local_ip, port).await {
         Ok(mapping) => Ok(mapping),
@@ -4776,25 +4764,24 @@ mod tests {
         assert!(unavailable.contains_key(&other_transport));
     }
 
-    /// The media-port gate: a socket that provably has no listener must be refused before any
-    /// router work, and a live socket must not be (its silence proves nothing, and blocking on
-    /// silence would kill the feature, since an ICE agent discards non-STUN datagrams).
+    /// A candidate that names a socket on another adapter must be refused before any router
+    /// work: a mapping to the default-route interface could never reach it. (This gate is the
+    /// candidate's own claimed address, deliberately not a liveness probe: Windows Firewall
+    /// rejects unsolicited inbound UDP to the webview with the same ICMP a dead socket
+    /// produces, and a probe that cannot tell those apart vetoed every mapping in the field.)
     #[tokio::test]
-    async fn a_dead_media_socket_is_disproven_and_a_live_one_is_not() {
-        let live = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let live_port = NonZeroU16::new(live.local_addr().unwrap().port()).unwrap();
+    async fn a_media_port_claimed_by_another_interface_is_refused() {
+        let Some(local_ip) = default_route_ipv4() else {
+            return; // no route on this machine: the gate cannot be exercised
+        };
+        let port = NonZeroU16::new(50_000).unwrap();
+        let other = Ipv4Addr::new(192, 0, 2, 55);
+        assert_ne!(other, local_ip, "TEST-NET-1 can never be a real interface");
+        let refused = map_media_udp_port(port, Some(other)).await;
+        let message = refused.expect_err("a foreign-interface claim must never reach the router");
         assert!(
-            !media_socket_disproven(Ipv4Addr::LOCALHOST, live_port).await,
-            "a bound socket that stays silent must not be disproven"
-        );
-        drop(live);
-
-        let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let dead_port = NonZeroU16::new(dead.local_addr().unwrap().port()).unwrap();
-        drop(dead);
-        assert!(
-            media_socket_disproven(Ipv4Addr::LOCALHOST, dead_port).await,
-            "the OS reports nothing listening; mapping it would advertise a dead candidate"
+            message.contains("not on the default-route interface"),
+            "refusal must say why: {message}"
         );
     }
 

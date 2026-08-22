@@ -7,6 +7,7 @@ export type MappedPort = { ip: string; port: number; mechanism: string; confirme
 export type IceCandidateView = {
   type: string | null;
   protocol: string | null;
+  address: string | null;
   port: number | null;
   foundation: string | null;
   component: string | null;
@@ -23,6 +24,27 @@ export type IceCandidateView = {
  */
 export function mappableIcePort(c: Pick<IceCandidateView, "type" | "protocol" | "port">): boolean {
   return c.type === "host" && c.protocol === "udp" && !!c.port;
+}
+
+/**
+ * How a host candidate's own address constrains router mapping. A mic-granted page gets real
+ * IPs in its candidates, so an IPv4 literal is passed to the native side as a claim it checks
+ * against the default-route interface. An mDNS-obfuscated `.local` name (or a missing address)
+ * proves nothing and maps permissively: an extra dead candidate is harmless, and this is
+ * deliberately NOT an active liveness probe, because Windows Firewall rejects unsolicited
+ * inbound UDP to the webview with the same ICMP a dead socket produces and a probe vetoed
+ * every mapping in the field. An IPv6 or hostname candidate is skipped outright: the mapped
+ * socket is IPv4.
+ */
+export function mappingAddressPolicy(address: string | null | undefined): {
+  map: boolean;
+  claim: string | null;
+} {
+  const a = address?.trim();
+  if (!a) return { map: true, claim: null };
+  if (a.endsWith(".local")) return { map: true, claim: null };
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(a)) return { map: true, claim: a };
+  return { map: false, claim: null };
 }
 
 /**

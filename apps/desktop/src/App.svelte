@@ -124,7 +124,7 @@
     assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
     withOrderedSwitchboardStatus,
   } from "./joinreply";
-  import { callBarStatus, mappableIcePort, routerMappedCandidate, type MappedPort } from "./callroutes";
+  import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -10648,11 +10648,13 @@
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
     if (!mappableIcePort(c)) return;
+    const policy = mappingAddressPolicy(c.address);
+    if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
     if (!mappedCallPorts.has(port)) {
       mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
       try {
-        const granted = await invoke<MappedPort>("map_call_port", { port });
+        const granted = await invoke<MappedPort>("map_call_port", { port, address: policy.claim });
         mappedCallPorts.set(port, granted);
         callMappedRoutes += 1;
         console.info("voice: router mapped the media port", {

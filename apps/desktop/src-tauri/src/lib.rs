@@ -5817,11 +5817,18 @@ struct MappedCallPort {
 /// media-plane counterpart of the mesh's mapping workers, which only ever cover the stable
 /// libp2p listen port and never the ICE agent's ephemeral sockets.
 #[tauri::command]
-async fn map_call_port(state: State<'_, AppState>, port: u16) -> Result<MappedCallPort, String> {
+async fn map_call_port(
+    state: State<'_, AppState>,
+    port: u16,
+    address: Option<String>,
+) -> Result<MappedCallPort, String> {
     require_unlocked_session(&state).await?;
     let key = port;
     let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
-    let mapped = catcoms_net::map_media_udp_port(port).await?;
+    // The candidate's own claimed IPv4, when the webview could read one (mic-granted pages get
+    // real IPs; an mDNS-obfuscated candidate passes None and is mapped permissively).
+    let claimed = address.as_deref().and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
+    let mapped = catcoms_net::map_media_udp_port(port, claimed).await?;
     let result = MappedCallPort {
         ip: mapped.external.ip().to_string(),
         port: mapped.external.port(),
