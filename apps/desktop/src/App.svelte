@@ -10553,6 +10553,54 @@
     }
   }
 
+  // UDP ports this call asked the router to open (bound-interface IGD on the native side, the
+  // same path the invite reachability fix proved out). One mapping per local ICE port; the
+  // granted public socket is signalled to the peer as an extra srflx candidate. A router mapping
+  // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
+  // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
+  // port that was tried and refused, so renegotiations don't re-ask the router every time.
+  const mappedCallPorts = new Map<number, { ip: string; port: number } | null>();
+
+  async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
+    // Host UDP candidates only: srflx/relay already traversed something, and a TCP candidate's
+    // port is not a socket the router mapping would reach.
+    if (c.type !== "host" || c.protocol !== "udp" || !c.port) return;
+    if (!mappedCallPorts.has(c.port)) {
+      mappedCallPorts.set(c.port, null); // claim before the await so a concurrent candidate doesn't double-map
+      try {
+        mappedCallPorts.set(c.port, await invoke<{ ip: string; port: number }>("map_call_port", { port: c.port }));
+      } catch (e) {
+        // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
+        console.warn("voice: router would not map the media port", { port: c.port, error: String(e) });
+        return;
+      }
+    }
+    const ext = mappedCallPorts.get(c.port);
+    if (!ext) return;
+    const component = c.component === "rtcp" ? 2 : 1;
+    const priority = Math.max(1, (c.priority ?? 1694498815) - 1);
+    void sendSignal(peer.server, peer.fp, {
+      callId: peer.channel,
+      type: "ice",
+      candidate: {
+        // A hand-built server-reflexive candidate carrying the router-granted socket. The
+        // receiving side treats it like any other remote candidate; its connectivity checks
+        // reach the mapped port and our ICE agent answers them from the host socket.
+        candidate: `candidate:${c.foundation ?? "rmap"}R ${component} udp ${priority} ${ext.ip} ${ext.port} typ srflx raddr 0.0.0.0 rport ${c.port}`,
+        sdpMid: c.sdpMid,
+        sdpMLineIndex: c.sdpMLineIndex,
+        usernameFragment: c.usernameFragment,
+      },
+    });
+  }
+
+  function releaseMappedCallPorts() {
+    for (const [port, granted] of mappedCallPorts) {
+      if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
+    }
+    mappedCallPorts.clear();
+  }
+
   function createPeer(fp: string): CallPeer | null {
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
@@ -10588,6 +10636,7 @@
     pc.onicecandidate = (e) => {
       if (e.candidate) {
         void sendSignal(peer.server, fp, { callId: peer.channel, type: "ice", candidate: e.candidate.toJSON() });
+        void signalMappedCandidate(peer, e.candidate);
       }
     };
     pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
@@ -10856,6 +10905,7 @@
   }
   function leaveVoice() {
     if (callChannel) broadcast({ callId: callChannel, type: "bye" });
+    releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
     if (camStream) {
       for (const t of camStream.getTracks()) t.stop();

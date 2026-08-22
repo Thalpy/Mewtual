@@ -61,6 +61,10 @@ export const TAURI_COMMAND_GROUPS = {
     boundary: "Call signalling/key material exposed to the trusted webview only for the active server.",
     commands: ["call_media_key"],
   },
+  router_boundary: {
+    boundary: "Best-effort router port mappings for the active call's media sockets; exact caller-named ports, bounded leases, no other router state.",
+    commands: ["map_call_port", "unmap_call_port"],
+  },
   device_pairing: {
     boundary: "Single-use, SAS-confirmed, passphrase-sealed device grant ceremony.",
     commands: [

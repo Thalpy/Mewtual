@@ -5714,6 +5714,40 @@ async fn get_call_transport(
     })
 }
 
+/// The public socket a router granted for one webview media port.
+#[derive(Serialize)]
+struct MappedCallPort {
+    ip: String,
+    port: u16,
+}
+
+/// Ask the router to forward one of the active call's media UDP ports to this machine, over the
+/// bound-interface IGD path the invite reachability fix proved out. The webview signals the
+/// returned public socket to the peer as an extra ICE candidate; a router mapping forwards from
+/// any source, so one mapped side connects the pair regardless of the other side's NAT type.
+/// This is the media-plane counterpart of the mesh's mapping workers, which only ever cover the
+/// stable libp2p listen port and never the ICE agent's ephemeral sockets.
+#[tauri::command]
+async fn map_call_port(state: State<'_, AppState>, port: u16) -> Result<MappedCallPort, String> {
+    require_unlocked_session(&state).await?;
+    let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
+    let mapped = catcoms_net::map_media_udp_port(port).await?;
+    Ok(MappedCallPort {
+        ip: mapped.ip().to_string(),
+        port: mapped.port(),
+    })
+}
+
+/// Best-effort removal of a call mapping when the call ends; the lease is bounded regardless.
+#[tauri::command]
+async fn unmap_call_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    if let Some(port) = std::num::NonZeroU16::new(port) {
+        catcoms_net::unmap_media_udp_port(port).await;
+    }
+    Ok(())
+}
+
 /// How much plaintext one media response may carry. A player asks for the window it is about to
 /// show; this bounds what a hostile or buggy `Range` can make the app allocate at once, and keeps
 /// one response comfortably inside a single sealed chunk.
@@ -8361,6 +8395,8 @@ pub fn run() {
             get_join_attempts,
             get_connectivity,
             get_call_transport,
+            map_call_port,
+            unmap_call_port,
             get_switchboard_status,
             set_switchboard_offered,
             get_ui_state,

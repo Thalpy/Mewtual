@@ -1931,6 +1931,73 @@ async fn run_upnp_bound_mapper_attempt(
     }
 }
 
+/// How long a media-socket mapping asks for. A call has no renewal loop (the webview owns the
+/// socket, not this crate), so the lease must outlive a long call on its own; four hours covers
+/// the realistic ones and still dies unattended after a crash.
+const MEDIA_MAP_LEASE_SECS: u32 = 4 * 60 * 60;
+
+/// Map one webview media UDP port through the router (bound-interface IGD search, same rationale
+/// as [`run_upnp_bound_mapper_attempt`]) and return the public socket a remote peer can be told
+/// about. One-shot by design: the mesh's mapping workers own the stable listen port, but a call's
+/// ICE agent binds fresh ephemeral ports the mesh never sees. The caller signals the returned
+/// socket as an extra ICE candidate; a router mapping forwards from **any** source, which is what
+/// makes one mapped side sufficient for a call regardless of the other side's NAT type.
+pub async fn map_media_udp_port(port: NonZeroU16) -> Result<SocketAddrV4, String> {
+    let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
+    let gateway = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
+        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
+        ..Default::default()
+    })
+    .await
+    .map_err(|error| format!("no IGD gateway answered a search bound to {local_ip}: {error}"))?;
+    gateway
+        .add_port(
+            igd_next::PortMappingProtocol::UDP,
+            port.get(),
+            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
+            MEDIA_MAP_LEASE_SECS,
+            "Mewtual call",
+        )
+        .await
+        .map_err(|error| format!("gateway refused the mapping: {error}"))?;
+    let external = match gateway.get_external_ip().await {
+        Ok(IpAddr::V4(ip)) => ip,
+        Ok(IpAddr::V6(ip)) => {
+            return Err(format!(
+                "gateway reported an IPv6 external address ({ip}) for an IPv4 mapping"
+            ))
+        }
+        Err(error) => return Err(format!("external-address query failed: {error}")),
+    };
+    if !ipv4_is_globally_routable(&external) {
+        return Err(format!(
+            "gateway returned non-public address {external} (likely CGNAT or double NAT)"
+        ));
+    }
+    Ok(SocketAddrV4::new(external, port.get()))
+}
+
+/// Best-effort removal of a mapping created by [`map_media_udp_port`]. Failure is acceptable:
+/// the lease is bounded and dies on its own.
+pub async fn unmap_media_udp_port(port: NonZeroU16) {
+    let Some(local_ip) = default_route_ipv4() else {
+        return;
+    };
+    let Ok(gateway) = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
+        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let _ = gateway
+        .remove_port(igd_next::PortMappingProtocol::UDP, port.get())
+        .await;
+}
+
 /// The bound-interface UPnP companion to [`run_port_mapper`], with the same retry cadence and
 /// the same laptop rationale: the first search may run before Wi-Fi has a default route.
 async fn run_upnp_bound_mapper(
