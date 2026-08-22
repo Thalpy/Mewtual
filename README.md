@@ -264,6 +264,44 @@ frontend checks, builds the Windows installer, and creates a draft GitHub prerel
 The version in `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, and
 `apps/desktop/src-tauri/tauri.conf.json` must match before starting the workflow.
 
+## Build a Linux release
+
+Tauri links against WebKitGTK/GTK3 at build time, so this has to run on an actual Linux
+environment (native, a VM, or WSL2) rather than being cross-compiled from a Windows host. Install
+the [Tauri prerequisites for Linux](https://v2.tauri.app/start/prerequisites/#linux); on
+Debian/Ubuntu:
+
+```sh
+sudo apt update
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Then, from the repository root:
+
+```sh
+cd apps/desktop
+npm ci
+npm test
+npm run check
+npm run tauri build -- --bundles deb,appimage
+```
+
+`--bundles nsis` (the Windows target above) only builds on Windows, so `deb,appimage` replaces it
+here; `npm run tauri build -- --no-bundle` still works for a plain portable binary. The command
+produces:
+
+```text
+apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+```
+
+As with a Windows source build, the result has no auto-update wiring: `tauri.official.conf.json`'s
+updater endpoint and key are only merged in by the Windows `release.yml` workflow. Nothing in this
+repository's CI has built `apps/desktop` on Linux yet either: `ci.yml`'s `ubuntu-latest` job tests
+the root Rust workspace, which explicitly excludes the desktop app's own Cargo workspace. Treat
+this as a starting point, not a path GitHub Actions has already verified end to end.
+
 ## Try the protocol from the CLI
 
 The developer CLI can exercise the stack without the desktop UI:
