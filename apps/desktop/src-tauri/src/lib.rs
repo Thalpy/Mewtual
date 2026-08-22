@@ -1255,7 +1255,12 @@ struct UploadProgressEvt {
 /// with a TypeScript copy of the slice size. Two languages holding the same two numbers is a drift
 /// no test in either language can see; here the native side states them per upload and the caller
 /// simply obeys.
+// camelCase, because this one is destructured by name in the upload loop rather than read field
+// by field. A snake_case key there is not a type error and not a runtime error either: the loop
+// simply gets `undefined` for the slice size, sends an empty first slice, and the upload is
+// rejected as short. `upload_ticket_keys_are_the_names_the_upload_loop_destructures` pins it.
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct UploadTicket {
     /// Identifies this upload's work for the rest of its life. See [`UploadKey`].
     token: String,
@@ -9664,6 +9669,29 @@ mod tests {
         let (_, sealed) = stream(CHUNK_BYTES);
         assert_eq!(sealed.len(), 1);
         assert_eq!(sealed[0].len(), CHUNK_BYTES);
+    }
+
+    #[test]
+    fn upload_ticket_keys_are_the_names_the_upload_loop_destructures() {
+        // The ticket exists so the frontend never holds its own copy of the slice size, which
+        // makes the key names part of that contract rather than a detail of this struct. The
+        // upload loop destructures `{ token, chunkTotal, sliceBytes }`, and a mismatch is silent
+        // in both languages: TypeScript trusts its declared type, serde has no idea who reads it.
+        // What reaches the user is `only the last slice of an upload may be short` on the first
+        // slice, because `offset + undefined` is NaN and `Blob.slice` reads that as an empty
+        // slice. Most payloads here are snake_case and read field by field; this one is not.
+        let json = serde_json::to_value(UploadTicket {
+            token: "t".into(),
+            chunk_total: 3,
+            slice_bytes: UPLOAD_SLICE_BYTES,
+        })
+        .unwrap();
+        let obj = json.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["chunkTotal", "sliceBytes", "token"]);
+        assert_eq!(obj["sliceBytes"], serde_json::json!(UPLOAD_SLICE_BYTES));
+        assert_eq!(obj["chunkTotal"], serde_json::json!(3));
     }
 
     #[test]

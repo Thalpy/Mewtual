@@ -1,7 +1,7 @@
 {
   "name": "mewtual-desktop",
   "private": true,
-  "version": "0.3.0-alpha.6",
+  "version": "0.3.0-alpha.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,8 @@
     "test:flows": "node scripts/flow-check.mjs",
     "tauri": "tauri",
     "fix-brick": "node scripts/fix-brick.mjs",
-    "notices": "node scripts/gen-notices.mjs"
+    "notices": "node scripts/gen-notices.mjs",
+    "build-and-release": "node scripts/build-and-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

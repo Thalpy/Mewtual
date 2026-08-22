@@ -4,6 +4,8 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.7] - 2026-08-22
+
 ### Fixed
 
 - **A screen share died on everyone else's screen seconds after it started.** The picture appeared,

@@ -20,7 +20,8 @@
 // Usage: npm run notices   (from apps/desktop)
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
@@ -37,11 +38,23 @@ const RULE = "=".repeat(80);
 
 function rustNotices() {
   // cargo-about resolves the crate graph itself; it needs the manifest, not a lockfile path.
-  return execFileSync(
-    "cargo",
-    ["about", "generate", "--manifest-path", join(TAURI, "Cargo.toml"), join(TAURI, "about.hbs")],
-    { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, cwd: TAURI },
-  );
+  //
+  // Output goes to a temp file via -o rather than being captured off stdout: cargo-about
+  // refuses to write generated output to a redirected stdout once it detects PowerShell
+  // somewhere in its ancestry (a defensive check against PowerShell's own `>` operator
+  // mangling non-ASCII redirected text), and PowerShell is this repo's primary shell. Writing
+  // straight to a file sidesteps that check instead of fighting it.
+  const tmpOut = join(tmpdir(), `mewtual-notices-${process.pid}.txt`);
+  try {
+    execFileSync(
+      "cargo",
+      ["about", "generate", "--manifest-path", join(TAURI, "Cargo.toml"), "-o", tmpOut, join(TAURI, "about.hbs")],
+      { maxBuffer: 64 * 1024 * 1024, cwd: TAURI },
+    );
+    return readFileSync(tmpOut, "utf8");
+  } finally {
+    if (existsSync(tmpOut)) rmSync(tmpOut);
+  }
 }
 
 // Walks node_modules for one package, following the flat layout npm produces. Returns null when
