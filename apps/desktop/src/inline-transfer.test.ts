@@ -18,6 +18,38 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const sourceDir = fileURLToPath(new URL(".", import.meta.url));
+const bridgePath = fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
+
+/**
+ * The JSON key names a `#[derive(Serialize)]` struct in the native bridge actually emits.
+ *
+ * Reading the Rust source is the only place the two halves of an invoke can be compared. Nothing
+ * else can: serde does not know who deserializes what it writes, and a TypeScript type for an
+ * invoke result is a declaration about the other language, checked against nothing.
+ */
+function nativeSerializedFields(struct: string): string[] {
+  const bridge = readFileSync(bridgePath, "utf8");
+  const at = bridge.indexOf(`\nstruct ${struct} {`);
+  assert.ok(at > 0, `${struct} is declared in the native bridge`);
+  // Attributes and doc comments run unbroken up to the struct, so walk back over them.
+  const attrs: string[] = [];
+  const before = bridge.slice(0, at).split("\n");
+  for (let i = before.length - 1; i >= 0; i--) {
+    const line = before[i].trim();
+    if (line.startsWith("#[")) attrs.unshift(line);
+    else if (!line.startsWith("//")) break;
+  }
+  assert.ok(attrs.some((a) => a.includes("Serialize")), `${struct} is serialized`);
+  const body = bridge.slice(at).split("\n}")[0];
+  assert.ok(
+    !/#\[serde\(rename/.test(body),
+    `${struct} renames a field individually; this helper only reads the container's rename_all`,
+  );
+  const fields = [...body.matchAll(/^ {4}(?:pub )?([a-z_][a-z0-9_]*)\s*:/gm)].map((m) => m[1]);
+  assert.ok(fields.length > 0, `${struct} has fields`);
+  if (!attrs.some((a) => /rename_all\s*=\s*"camelCase"/.test(a))) return fields;
+  return fields.map((f) => f.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase()));
+}
 
 /** Every frontend source file, as `[name, text]`, excluding tests. */
 function frontendSources(dir = sourceDir): Array<[string, string]> {
@@ -94,6 +126,10 @@ test("uploads are sent in slices sized by the native side, not by the frontend",
   );
   assert.ok(/offset \+= sliceBytes/.test(text), "the slice loop should step by the native size");
   assert.ok(
+    /ticket = uploadContract\(\s*await invoke<unknown>\("begin_file_upload"/.test(text),
+    "the ticket should be checked at the bridge, not taken on the strength of its declared type",
+  );
+  assert.ok(
     !/TRANSFER_SLICE_BYTES/.test(text),
     "App.svelte still names TRANSFER_SLICE_BYTES; the slice size comes from the ticket now",
   );
@@ -102,6 +138,35 @@ test("uploads are sent in slices sized by the native side, not by the frontend",
     const call = new RegExp(String.raw`invoke[^(]*\(\s*"${command}",\s*\{([^}]*)\}`).exec(text);
     assert.ok(call, `${command} is invoked`);
     assert.match(call[1], /token/, `${command} carries the upload token`);
+  }
+});
+
+test("the upload ticket's native keys are the ones the frontend reads", () => {
+  // The bug this pins shipped: the native struct emitted token/chunk_total/slice_bytes and this
+  // side read chunkTotal/sliceBytes. It is invisible to every single-language test, including
+  // the one above, which only checks that the frontend reads the ticket rather than a constant.
+  // The upload then stepped by undefined, sent an empty first slice, and every share failed with
+  // "only the last slice of an upload may be short", which described no fixable cause.
+  //
+  // Most payloads across this bridge are snake_case and read field by field, so a camelCase
+  // ticket is the odd one; whichever way the two sides settle, they have to agree.
+  const native = nativeSerializedFields("UploadTicket");
+  const [, visual] = frontendSources().find(([name]) => name === "transfer-visual.ts") ?? ["", ""];
+  const decl = /export type UploadTicket = \{([\s\S]*?)\n\};/.exec(visual);
+  assert.ok(decl, "transfer-visual.ts declares the ticket type");
+  const declared = [...decl[1].matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\??\s*:/gm)].map((m) => m[1]);
+  assert.deepEqual(
+    [...declared].sort(),
+    [...native].sort(),
+    "the ticket type and the native struct must name the same keys",
+  );
+  // A key in the type that nothing checks is the same hole again: the loop would read undefined
+  // from a ticket uploadContract called well-formed.
+  for (const field of declared) {
+    assert.ok(
+      new RegExp(String.raw`ticket\.${field}\b`).test(visual),
+      `uploadContract should check ticket.${field} before the upload starts`,
+    );
   }
 });
 

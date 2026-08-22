@@ -75,7 +75,7 @@
   import { installUiLogging } from "./uilog";
   import {
     TRANSFER_CHUNK_BYTES,
-    formatBytes, formatRate, sampleRate, transferPieces,
+    formatBytes, formatRate, sampleRate, transferPieces, uploadContract,
     type TransferPiece, type UploadTicket,
   } from "./transfer-visual";
   import { plainSummary } from "./wikitext";
@@ -7368,12 +7368,18 @@
     };
     let ticket: UploadTicket | undefined;
     try {
-      ticket = await invoke<UploadTicket>("begin_file_upload", {
-        server,
-        uploadId,
-        mime,
-        size: file.size,
-      });
+      // Checked, not trusted: the ticket is the whole streaming contract, and a field this side
+      // cannot read is a fault worth naming here rather than one the native side reports later
+      // as a malformed slice. A ticket rejected here leaves its native reservation for the idle
+      // sweep, which is the same position a failed begin leaves it in.
+      ticket = uploadContract(
+        await invoke<unknown>("begin_file_upload", {
+          server,
+          uploadId,
+          mime,
+          size: file.size,
+        }),
+      );
       const { token, chunkTotal, sliceBytes } = ticket;
       if (uploads[key]) uploads[key].total = chunkTotal;
       // Publishing the index entry is the step after the last chunk, so the bar is chunkTotal + 1
