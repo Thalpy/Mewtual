@@ -447,6 +447,32 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 const UPLOAD_SLICE_BYTES: usize = 1024 * 1024;
 const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES % UPLOAD_SLICE_BYTES == 0);
 
+/// The most a file may be and still be readable through `download_file`, which returns the whole
+/// thing as one base64 string.
+///
+/// Files are listed up to [`MAX_FILE_BYTES`] (256 MiB), and a listing's size is written by whoever
+/// shared it. Handing 256 MiB to the webview as a ~341 MB JS string is the exact shape that made
+/// uploads freeze the app, and an embedded image is enough to trigger it: no user action is
+/// required beyond scrolling past the message. Everything that can be large has a streaming route
+/// instead (`catcoms-media:` for playback and images, `save_group_file` for saving), so this bound
+/// costs nothing real and closes the path.
+const MAX_INLINE_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Whether a file of `size` may be read through `download_file`, which returns it whole as one
+/// base64 string. See [`MAX_INLINE_DOWNLOAD_BYTES`].
+///
+/// Checked against the size the *listing* declares, before a byte is fetched. That is only a real
+/// bound because a manifest's chunk layout is now validated against its declared size: otherwise a
+/// listing could declare one byte, pass this, and still deliver 256 MiB.
+fn inline_download_allowed(size: u64) -> Result<(), String> {
+    if size > MAX_INLINE_DOWNLOAD_BYTES {
+        return Err(format!(
+            "this file is {size} bytes; over {MAX_INLINE_DOWNLOAD_BYTES} it must be streamed or saved rather than read inline"
+        ));
+    }
+    Ok(())
+}
+
 /// How many [`CHUNK_BYTES`] chunks a file of `size` bytes is split into. An empty file is still
 /// one (empty) chunk, so a manifest always has at least one.
 fn upload_chunk_count(size: u64) -> usize {
@@ -1994,6 +2020,12 @@ async fn persist_registry(state: &AppState) {
 /// avatars persist encrypted at rest (keyed by the stable group id, so a reloaded server
 /// finds its blobs). Best-effort: a locked store or an error leaves the in-memory default.
 /// Must run before any blob is added (i.e. before `spawn`).
+///
+/// Also sweeps the store's staging area. An upload seals its chunks there and promotes them only
+/// when its manifest is published, so whatever is still staged belonged to an upload that did not
+/// survive the last process: the only record of what it was for died with that process, and no
+/// later upload can adopt it. This is the one place that can say so, because it runs once per
+/// server before anything has had a chance to stage something new.
 async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, OsCryptoRng>) {
     let guard = state.store.lock().await;
     if let Some(store) = guard.as_ref() {
@@ -2002,6 +2034,11 @@ async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, Os
             Ok(blobs) => server.set_blob_store(blobs),
             Err(e) => eprintln!("attach blob store failed: {e}"),
         }
+    }
+    drop(guard);
+    let swept = server.clear_staged_uploads();
+    if swept > 0 {
+        eprintln!("startup: dropped {swept} chunk(s) from uploads that never finished");
     }
 }
 
@@ -5713,11 +5750,17 @@ async fn get_wiki_pinned_cids(
     Ok(actor.wiki_pinned_cids().await)
 }
 
-/// Download a shared file by content-address hex; returns base64-encoded bytes. Fetches the file
-/// ONE chunk per actor command (emitting `download-progress` after each), so a large download no
-/// longer freezes the server actor; the actor returns to its loop between chunks and interleaves
-/// other commands + network sync. The whole reassembled file is verified against the requested
-/// content address (defends against a malicious manifest whose chunks individually verify).
+/// Download a small shared file by content-address hex; returns base64-encoded bytes. Fetches the
+/// file ONE chunk per actor command (emitting `download-progress` after each), so the actor returns
+/// to its loop between chunks and interleaves other commands + network sync. The whole reassembled
+/// file is verified against the requested content address (defends against a malicious manifest
+/// whose chunks individually verify).
+///
+/// **Bounded at [`MAX_INLINE_DOWNLOAD_BYTES`].** The result is one base64 string built in memory
+/// and handed to the webview, which is the shape that froze the app when uploads worked this way:
+/// cost scales with the file and the webview serializes it whole on its main thread. Media plays
+/// through the `catcoms-media:` protocol and saving streams to disk, so nothing needs this for a
+/// large file; the cap is here so no future caller can reintroduce the freeze by accident.
 #[tauri::command]
 async fn download_file(
     app: AppHandle,
@@ -5734,6 +5777,7 @@ async fn download_file(
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
     })?;
+    inline_download_allowed(size)?;
     require_unlocked_session(&state).await?;
     let _ = app.emit(
         "download-progress",
@@ -9628,6 +9672,46 @@ mod tests {
                 .sum::<u64>();
             assert_eq!(sliced, size, "the chunks cover the file exactly");
         }
+    }
+
+    #[test]
+    fn nothing_the_size_of_a_file_can_be_read_inline() {
+        // The freeze this whole change exists to stop is "cost scales with the file on a surface
+        // that serializes it whole". download_file is the last such surface, so its bound has to
+        // be far below what a listing may declare, and well above the one caller that still needs
+        // bytes in JS (the 2 MiB text reader).
+        assert!(
+            MAX_INLINE_DOWNLOAD_BYTES < MAX_FILE_BYTES as u64,
+            "a listing may declare far more than may be read inline"
+        );
+        assert!(
+            MAX_INLINE_DOWNLOAD_BYTES >= 2 * 1024 * 1024,
+            "the text reader's soft cap must still fit under the hard one"
+        );
+        // And the bound is on the *declared* size, which is only trustworthy because a manifest's
+        // chunk layout is now checked against it; otherwise a small declaration could still carry
+        // a large file. That link is what makes this a real bound rather than a hint.
+        assert_eq!(
+            upload_chunk_count(MAX_INLINE_DOWNLOAD_BYTES),
+            2,
+            "a file at the inline cap is a couple of chunks, not a stream"
+        );
+    }
+
+    #[test]
+    fn an_inline_read_is_refused_past_the_cap_and_allowed_up_to_it() {
+        assert!(inline_download_allowed(0).is_ok(), "an empty file");
+        assert!(inline_download_allowed(2 * 1024 * 1024).is_ok(), "a text read");
+        assert!(
+            inline_download_allowed(MAX_INLINE_DOWNLOAD_BYTES).is_ok(),
+            "exactly at the cap is still inline"
+        );
+        let over = inline_download_allowed(MAX_INLINE_DOWNLOAD_BYTES + 1).unwrap_err();
+        assert!(over.contains("streamed or saved"), "says what to do instead");
+        // The case that mattered: a listing at the product's own maximum. Before the cap this was
+        // a ~341 MB JS string built on the webview's main thread, reachable by scrolling past an
+        // embedded file rather than by any deliberate action.
+        assert!(inline_download_allowed(MAX_FILE_BYTES as u64).is_err());
     }
 
     #[test]

@@ -3275,6 +3275,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// `bytes` must be exactly [`CHUNK_BYTES`] for every chunk except the last: the media reader
     /// maps a byte offset to a chunk index by dividing, so a manifest's chunks are uniformly sized
     /// by construction. The caller owns that ordering; this call is deliberately stateless.
+    ///
+    /// The chunk lands in the blob store's **staging** area, not the store proper. An upload's
+    /// chunks are not held content until its manifest names them, and staging is what makes that
+    /// distinction survive a crash: written straight into the store, an upload that never finished
+    /// left blobs indistinguishable from real ones, which no sweep could safely reclaim.
+    /// [`publish_upload`](Self::publish_upload) promotes them; anything else collects them.
     pub fn seal_upload_chunk(&mut self, bytes: &[u8], mime: &str) -> Result<FileRef, AppError> {
         if bytes.len() > CHUNK_BYTES {
             return Err(AppError::Invalid(format!(
@@ -3288,8 +3294,18 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             ));
         }
         let (file_ref, ciphertext) = self.sync.seal_file(bytes, mime)?;
-        self.sync.put_blob(&ciphertext)?;
+        self.sync.put_staged_blob(&ciphertext)?;
         Ok(file_ref)
+    }
+
+    /// Drop every staged blob this server holds, returning how many went.
+    ///
+    /// Run once at startup. Staging holds the chunks of uploads that were in flight, and the only
+    /// thing that knew what any of them was for was the process that staged it: nothing can claim
+    /// them now, so they are unambiguously garbage. This is what closes the crash window that a
+    /// purely in-memory record of pending uploads could not.
+    pub fn clear_staged_uploads(&mut self) -> usize {
+        self.sync.clear_staged_blobs().unwrap_or(0)
     }
 
     /// Publish the file-index entry for an upload whose chunks are already sealed and stored,
@@ -3367,6 +3383,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         manifest
             .validate_layout()
             .map_err(|_| AppError::Invalid("the upload's chunk layout is invalid".into()))?;
+        // Promote before posting, never after. The window between the two is the only one left in
+        // which a crash strands anything, and this ordering makes that window strand *orphans*
+        // (blobs nothing names, harmless) rather than a *published listing whose chunks are still
+        // in staging*, which the next startup sweep would delete out from under the only device
+        // that holds them.
+        for chunk in &manifest.chunks {
+            self.sync.promote_staged_blob(&chunk.ciphertext_cid)?;
+        }
         let ref_bytes = manifest.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
@@ -3376,21 +3400,32 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Ok(plaintext_cid)
     }
 
-    /// Drop the sealed chunk blobs of an upload that will never be published: an abandoned or
-    /// failed streamed upload, or one whose content the dedup in
-    /// [`publish_upload`](Self::publish_upload) found already held. Without this, an interrupted
-    /// upload would leave sealed bytes on disk that no manifest ever names.
+    /// Drop the chunk blobs of an upload that will never be published: an abandoned or failed
+    /// streamed upload, or one whose content the dedup in
+    /// [`publish_upload`](Self::publish_upload) found already held.
     ///
-    /// Dedup-safe, like the GC in [`delete_file`](Self::delete_file): a chunk some *listed* file
-    /// references is kept, so this can never delete storage a shared file depends on.
+    /// Safe by construction, not by check: an unpublished upload's chunks live in the staging
+    /// area, which nothing references, so dropping them cannot take storage a shared file depends
+    /// on. (The held-content path is still swept dedup-safely, for the case of a caller handing
+    /// back refs that were already promoted.)
     pub fn discard_upload_chunks(&mut self, chunks: &[FileRef]) {
+        let mut unstaged: Vec<&FileRef> = Vec::new();
+        for chunk in chunks {
+            match self.sync.drop_staged_blob(&chunk.ciphertext_cid) {
+                Ok(true) => {}                          // staged: gone, and it was never held
+                _ => unstaged.push(chunk),              // already promoted, or never written
+            }
+        }
+        if unstaged.is_empty() {
+            return;
+        }
         let live: HashSet<Cid> = self
             .files()
             .iter()
             .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
             .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
             .collect();
-        for chunk in chunks {
+        for chunk in unstaged {
             if !live.contains(&chunk.ciphertext_cid) {
                 let _ = self.sync.delete_blob(&chunk.ciphertext_cid);
             }
@@ -9344,9 +9379,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sealed_chunk_is_not_held_content_until_its_upload_publishes() {
+        // The distinction staging exists to make. A chunk on disk that no manifest names must not
+        // look like a chunk this device holds: that is what let an interrupted upload leave blobs
+        // indistinguishable from real ones, which no sweep could then safely reclaim.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let staged = alice
+            .seal_upload_chunk(b"in flight", "application/octet-stream")
+            .unwrap();
+        assert!(
+            !alice.sync().has_blob(&staged.ciphertext_cid),
+            "staged, so not held"
+        );
+        assert!(
+            !alice.sync().blob_cids().contains(&staged.ciphertext_cid),
+            "and not in the store's inventory"
+        );
+
+        // Publishing is what makes it real.
+        let data = b"in flight".to_vec();
+        alice
+            .publish_upload(
+                "f.bin",
+                "application/octet-stream",
+                "",
+                Cid::of(&data),
+                data.len() as u64,
+                vec![staged.clone()],
+            )
+            .await
+            .unwrap();
+        assert!(alice.sync().has_blob(&staged.ciphertext_cid), "now held");
+        assert_eq!(alice.download_file(&Cid::of(&data)).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn a_restart_drops_the_chunks_of_uploads_that_never_finished() {
+        // The crash window an in-memory record of pending uploads could not close: the process
+        // that knew what these chunks were for is gone, so nothing can ever claim them.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let published = stream_upload(&mut alice, "kept.bin", "", &vec![5u8; 2048]).await;
+        let held_before = alice.sync().blob_cids().len();
+        alice
+            .seal_upload_chunk(b"upload interrupted here", "application/octet-stream")
+            .unwrap();
+        alice
+            .seal_upload_chunk(b"and here", "application/octet-stream")
+            .unwrap();
+
+        assert_eq!(alice.clear_staged_uploads(), 2, "both staged chunks went");
+
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            held_before,
+            "and the sweep touched nothing that was published"
+        );
+        assert_eq!(
+            alice.download_file(&published).await.unwrap(),
+            vec![5u8; 2048]
+        );
+        assert_eq!(alice.clear_staged_uploads(), 0, "a second sweep is a no-op");
+    }
+
+    #[tokio::test]
     async fn discarding_an_abandoned_upload_keeps_chunks_a_listed_file_still_needs() {
-        // Cancelling an upload collects what it sealed. The GC is dedup-safe, so a cancelled
-        // upload can never delete storage a shared file depends on.
+        // Cancelling an upload collects what it sealed, and cannot take storage a shared file
+        // depends on: an unpublished chunk is staged, which nothing references by construction.
         let mut alice = founder();
         alice.open_files().await.unwrap();
         let data = vec![5u8; 2048];
@@ -9364,7 +9464,6 @@ mod tests {
         let orphan = alice
             .seal_upload_chunk(b"never published", "application/octet-stream")
             .unwrap();
-        assert!(alice.sync().has_blob(&orphan.ciphertext_cid));
 
         let mut both = live.clone();
         both.push(orphan.clone());

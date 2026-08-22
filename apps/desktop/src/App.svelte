@@ -2598,8 +2598,6 @@
   let statuses = $state<Msg[]>([]);
   let statusDraft = $state("");
   let statusEl = $state<HTMLUListElement | undefined>(undefined);
-  // Cache of resolved embed media: ciphertext-CID hex -> data: URL (avoids re-fetching).
-  const embedCache = new Map<string, string>();
 
   // Custom emoji (10f): files under the "emoji" folder. code -> cid, and resolved code -> URL.
   let emojiUrls = $state<Record<string, string>>({});
@@ -4375,23 +4373,14 @@
     void files;
     if (activeServerId === null) return;
     for (const [code, cid] of Object.entries(emojiMap)) {
-      if (!emojiUrls[code]) void loadEmoji(code, cid);
+      if (!emojiUrls[code]) loadEmoji(code, cid);
     }
   });
-  async function loadEmoji(code: string, cid: string) {
+  // Custom emoji stream like every other shared image, so a "custom emoji" that is really a
+  // 200 MB file cannot be turned into a JS string by the act of rendering a message.
+  function loadEmoji(code: string, cid: string) {
     if (activeServerId === null) return;
-    try {
-      let url = embedCache.get(cid);
-      if (!url) {
-        const base64 = await invoke<string>("download_file", { server: activeServerId, cid });
-        const file = files.find((f) => f.cid === cid);
-        url = `data:${safeMime(file?.mime ?? "") || "image/png"};base64,${base64}`;
-        embedCache.set(cid, url);
-      }
-      emojiUrls = { ...emojiUrls, [code]: url };
-    } catch {
-      /* leave unresolved; retry on next files change */
-    }
+    emojiUrls = { ...emojiUrls, [code]: sharedMediaUrl(cid, activeServerId) };
   }
 
   function resolveEmoji(container: HTMLElement | undefined) {
@@ -7249,9 +7238,9 @@
   }
 
   // Read a Blob as raw base64 (strips the data: prefix). Deliberately a Blob and not a File: a
-  // streamed upload reads one TRANSFER_SLICE_BYTES slice at a time, so the whole file never
-  // becomes a JS string. FileReader decodes off the main thread, which is why this is not a
-  // btoa loop over the bytes.
+  // streamed upload reads one slice at a time (the size the native ticket asks for), so the whole
+  // file never becomes a JS string. FileReader decodes off the main thread, which is why this is
+  // not a btoa loop over the bytes.
   function readBase64(file: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -7537,46 +7526,32 @@
     return b;
   }
 
-  // The decrypted blob behind `cid` as a `data:` URL, from the cache or over the wire. Throws if
-  // the file cannot be fetched right now (not held locally and no peer sharing it), which every
-  // caller treats as "show something else" rather than as an error worth surfacing.
-  async function loadBlobUrl(cid: string, mime: string, server: number): Promise<string> {
-    const hit = embedCache.get(cid);
-    if (hit) return hit;
-    const base64 = await invoke<string>("download_file", { server, cid });
-    const url = `data:${mime};base64,${base64}`;
-    embedCache.set(cid, url);
-    // Bound the cache (each entry is a full decrypted blob): FIFO-evict the oldest.
-    if (embedCache.size > 48) {
-      const oldest = embedCache.keys().next().value;
-      if (oldest !== undefined) embedCache.delete(oldest);
-    }
-    return url;
+  // Shared media renders straight from the catcoms-media: protocol rather than being pulled into
+  // the webview first. The old path fetched the whole decrypted file over IPC, turned it into a
+  // base64 data: URL, and kept up to 48 of those alive at once: one embedded 200 MB video was
+  // enough to freeze the window, and no user action was needed beyond scrolling past the message.
+  // The protocol handler answers Range requests off the vault (fetching from a peer when a chunk
+  // is missing, exactly as before), so the element streams and the bytes never become a JS string.
+  function sharedMediaUrl(cid: string, server: number): string {
+    return mediaUrl(server, cid);
   }
 
-  // Blobs for markup that binds a `src` (the events tab's poster images) rather than building its
-  // own element the way the embed/card resolvers do. Keyed by cid, filled in the background.
+  // Stream URLs for markup that binds a `src` (the events tab's poster images) rather than
+  // building its own element the way the embed/card resolvers do. Keyed by cid. Filling these is
+  // now just address arithmetic: the element streams from the protocol handler, so there is
+  // nothing to fetch here and nothing to fail. A poster only needs to be a listed media file.
   let mediaUrls = $state<Record<string, string>>({});
-  const mediaLoading = new Set<string>();
-  async function ensureMedia(cid: string) {
-    if (!cid || mediaUrls[cid] || mediaLoading.has(cid) || activeServerId === null) return;
+  function ensureMedia(cid: string) {
+    if (!cid || mediaUrls[cid] || activeServerId === null) return;
     const file = files.find((f) => f.cid === cid);
-    const mime = safeMime(file?.mime ?? "");
-    if (!file || !mime) return; // not in the file index yet: retried when `files` updates
-    mediaLoading.add(cid);
-    try {
-      mediaUrls = { ...mediaUrls, [cid]: await loadBlobUrl(cid, mime, activeServerId) };
-    } catch {
-      /* nobody is sharing it right now: the event just shows without its picture */
-    } finally {
-      mediaLoading.delete(cid);
-    }
+    if (!file || !safeMime(file.mime)) return; // not in the file index yet: retried on update
+    mediaUrls = { ...mediaUrls, [cid]: sharedMediaUrl(cid, activeServerId) };
   }
   $effect(() => {
     const wanted = [...events.map((e) => e.image), evImage].filter(Boolean);
     void files; // a poster may only become fetchable once the index lists it
     untrack(() => {
-      for (const cid of wanted) void ensureMedia(cid);
+      for (const cid of wanted) ensureMedia(cid);
     });
   });
 
@@ -7602,11 +7577,7 @@
         span.replaceWith(downloadChip(file));
         continue;
       }
-      try {
-        span.replaceWith(buildMediaEl(mime, await loadBlobUrl(cid, mime, server), alt, cid));
-      } catch {
-        span.replaceWith(downloadChip(file));
-      }
+      span.replaceWith(buildMediaEl(mime, mediaUrl(server, cid), alt, cid));
     }
   }
 
@@ -7776,23 +7747,22 @@
     };
   }
 
-  /** Hang an image on a card once its blob arrives; a card without one just reads as text. */
+  /** Hang an image on a card; a card whose picture cannot be fetched just reads as text. */
   function attachCardThumb(card: HTMLElement, cid: string, server: number) {
     const mime = safeMime(files.find((f) => f.cid === cid)?.mime ?? "");
     if (!mime.startsWith("image/")) return;
-    void loadBlobUrl(cid, mime, server)
-      .then((url) => {
-        if (!card.isConnected) return; // the surface re-rendered while the blob was in flight
-        const img = document.createElement("img");
-        img.className = "ref-card-thumb";
-        img.src = url;
-        img.alt = "";
-        card.appendChild(img);
-        card.classList.add("has-thumb");
-      })
-      .catch(() => {
-        /* nobody is sharing it: no picture, same card */
-      });
+    const img = document.createElement("img");
+    img.className = "ref-card-thumb";
+    img.src = sharedMediaUrl(cid, server);
+    img.alt = "";
+    // The element does the fetching now, so a picture nobody is sharing fails here rather than in
+    // a rejected promise: drop it and leave the card as text, which is what it did before.
+    img.onerror = () => {
+      img.remove();
+      card.classList.remove("has-thumb");
+    };
+    card.appendChild(img);
+    card.classList.add("has-thumb");
   }
 
   /**
@@ -8186,17 +8156,11 @@
     } catch {
       if (fileInfo?.cid === f.cid) fileInfoAvail = false;
     }
-    // Fetch an inline preview for media types (bounded by the backend's max file size).
+    // Media previews stream from the protocol handler, so opening the properties of a large file
+    // costs a first chunk rather than the whole file as a string. The element reports its own
+    // failure through `on:error`, which is where "nobody is sharing this" now surfaces.
     if (safeMime(f.mime) && fileInfo?.cid === f.cid) {
-      try {
-        const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
-        // Guard against a race where the pane was closed/switched while fetching.
-        if (fileInfo?.cid === f.cid) fileInfoPreview = `data:${f.mime};base64,${base64}`;
-      } catch {
-        // The fetch failed (not held locally + no peer sharing it): surface that instead of
-        // leaving "Loading preview…" up forever.
-        if (fileInfo?.cid === f.cid) fileInfoPreviewError = true;
-      }
+      fileInfoPreview = sharedMediaUrl(f.cid, id);
     }
     // Documents, config and source read inline the same way media plays inline.
     if (fileTextKind && fileInfo?.cid === f.cid) await loadFileText(f);
@@ -8255,9 +8219,10 @@
   const fileTextHtml = $derived(fileTextRendered ? renderTextDocument(fileText) : "");
 
   /**
-   * Fetch and decode a text share for the reader. Files over the inline cap are not pulled at all
-   * until `force` (the "Read it anyway" button): `download_file` returns the whole blob in one
-   * base64 string, and a listing may declare up to 256 MiB.
+   * Fetch and decode a text share for the reader. This is the one surface that genuinely needs the
+   * bytes in JS, so it is the one place `download_file` is still called: everything visual streams
+   * instead. Files over the soft cap wait for `force` ("Read it anyway"), and even then the native
+   * side refuses past its own hard limit, so no button can pull a 256 MiB listing into the window.
    */
   async function loadFileText(f: UiFile, force = false) {
     const id = activeServerId;
@@ -20015,12 +19980,12 @@
                 {:else if !fileInfoPreview}
                   <p class="muted small">Loading preview…</p>
                 {:else if previewKind === "image"}
-                  <img src={fileInfoPreview} alt={fileInfo.name} />
+                  <img src={fileInfoPreview} alt={fileInfo.name} onerror={() => (fileInfoPreviewError = true)} />
                 {:else if previewKind === "video"}
                   <!-- svelte-ignore a11y_media_has_caption -->
-                  <video controls src={fileInfoPreview}></video>
+                  <video controls src={fileInfoPreview} onerror={() => (fileInfoPreviewError = true)}></video>
                 {:else if previewKind === "audio"}
-                  <audio controls src={fileInfoPreview}></audio>
+                  <audio controls src={fileInfoPreview} onerror={() => (fileInfoPreviewError = true)}></audio>
                 {/if}
               </div>
             {/if}
