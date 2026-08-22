@@ -56,8 +56,9 @@
   } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
-    driftAction, fetchPhase, isStalled, mediaKind, mediaUrl, nudgeRate, resolveCallName,
-    STALL_ANNOUNCE_MS, type FetchPhase, type MediaKind,
+    deckAdvance, deckPosition, driftAction, fetchPhase, isStalled, mediaKind, mediaUrl, nudgeRate,
+    playableQueue, resolveCallName, STALL_ANNOUNCE_MS,
+    type FetchPhase, type JukeEntry, type MediaKind,
   } from "./jukebox";
   import { installUiLogging } from "./uilog";
   import {
@@ -9921,8 +9922,9 @@
   // the server's file share, every listener fetches the whole blob and plays it through ONE hidden
   // element. Transport (what / where / paused) rides the call signalling as "juke" frames, and
   // whoever pressed last is the DJ. Receivers never trust a wall clock: they anchor the DJ's offset
-  // to their own performance.now() reading, so nobody has to agree on the time of day.
-  type JukeEntry = { id: string; cid: string; name: string; author: string; added_ms: number };
+  // to their own performance.now() reading, so nobody has to agree on the time of day. The DJ is
+  // the exception, and has to be: its own element is the position it announces, or a stall becomes
+  // a place it says the room is and has never played.
   let jukeQueue = $state<JukeEntry[]>([]);
   let jukeNow = $state<{ entry: string; cid: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
@@ -9990,7 +9992,10 @@
     // Streaming moves the failure from a thrown fetch to the element: a track nobody can serve,
     // or one the webview cannot decode, both land here.
     el.addEventListener("error", () => {
-      if (jukeNow?.cid) jukeFail(jukeNow.cid);
+      // Only for the track the element is actually holding: an aborted load from the src we just
+      // swapped away from must not blacklist the track we swapped to.
+      const cid = jukeNow?.cid;
+      if (cid && jukeElOn(cid)) jukeFail(cid);
     });
     // `waiting` fires constantly and harmlessly while streaming: every chunk boundary and every
     // seek raises it, and it clears again in milliseconds. Only a stall long enough for a person
@@ -10026,18 +10031,37 @@
   function jukeIsDj(): boolean {
     return !!jukeAdopted && !!callSelfFp && jukeAdopted.fromFp === callSelfFp;
   }
-  // Where the deck should be right now: the adopted offset plus locally measured elapsed time,
-  // frozen while paused or stale. The progress UI reads this.
+  // The deck element, but only while it actually holds this track. The comparison is against the
+  // attribute we set rather than `el.src`, which is the resolved URL and need not come back the
+  // same string it went in as.
+  function jukeElOn(cid: string): HTMLVideoElement | null {
+    const el = jukeAudio;
+    if (!el || !cid || callServer === null) return null;
+    return el.getAttribute("src") === mediaUrl(callServer, cid) ? el : null;
+  }
+  // Where the deck is right now. As DJ that is my own element (see deckPosition: projecting a
+  // wall clock over a buffering element is what made a pressed track chase itself and never
+  // play); as a listener it is the DJ's offset aged on my own clock.
   function jukePos(): number {
     if (!jukeAdopted || !jukeNow) return 0;
-    if (jukeNow.paused || jukeStale) return jukeAdopted.off;
-    return jukeAdopted.off + (performance.now() - jukeAdopted.at) / 1000;
+    return deckPosition({
+      isDj: jukeIsDj(),
+      paused: jukeNow.paused,
+      stale: jukeStale,
+      off: jukeAdopted.off,
+      since: performance.now() - jukeAdopted.at,
+      element: jukeElOn(jukeNow.cid),
+    });
+  }
+  // Where a load should land. The DJ starts exactly where it pressed; a listener has to age that
+  // offset by however long its own load took, or it starts behind the room.
+  function jukeTarget(): number {
+    if (!jukeAdopted) return 0;
+    return jukeIsDj() ? jukeAdopted.off : jukePos();
   }
   // Queue order (added_ms, id as the tiebreak so every machine agrees), minus the unfetchable.
   function jukePlayable(): JukeEntry[] {
-    return [...jukeQueue]
-      .sort((a, b) => a.added_ms - b.added_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .filter((e) => !jukeFailed.has(e.cid));
+    return playableQueue(jukeQueue, jukeFailed);
   }
   async function refreshJukebox() {
     const server = callServer;
@@ -10111,8 +10135,8 @@
     // which is what jukeFail below is for.
     const url = mediaUrl(server, cid);
     const el = jukeEl();
-    if (!sameTrack || el.src !== url) {
-      if (el.src !== url) {
+    if (!sameTrack || el.getAttribute("src") !== url) {
+      if (el.getAttribute("src") !== url) {
         el.src = url;
         jukeDur = 0;
         jukeFetch = null;
@@ -10125,8 +10149,10 @@
     // Same track, so this is a ping or a play/pause. Video cannot hide a snap the way audio can,
     // so a small gap is eased out by playing slightly fast or slow and only a large one is
     // snapped; audio keeps snap-or-nothing, because a rate change is audible where a seek is not.
+    // Only a listener corrects: the DJ's element is the clock, so correcting it against itself is
+    // how a slow track used to seek forward once per ping instead of playing.
     const target = jukePos();
-    if (el.readyState > 0) {
+    if (!jukeIsDj() && el.readyState > 0) {
       const drift = target - el.currentTime;
       const action = driftAction(drift, jukeKind);
       if (action === "seek") {
@@ -10211,16 +10237,22 @@
   }
   /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
   function jukeFail(cid: string) {
+    const advance = jukeNow?.cid === cid && jukeIsDj();
+    // Read the order BEFORE blacklisting this cid, or the track we are leaving is already out of
+    // the list and "the one after it" would be the top of the queue again.
+    const list = jukePlayable();
     jukeFailed.add(cid);
     jukeFetch = null;
-    if (jukeNow?.cid === cid && jukeIsDj()) jukeSkip();
+    // Nobody heard it, and whoever holds the file may come back: it stays on the queue.
+    if (advance) jukeAdvance(false, list);
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
   function jukeSettle() {
     const el = jukeAudio;
     if (!el || !jukeNow) return;
-    const target = jukeDur > 0 ? Math.min(jukePos(), jukeDur) : jukePos();
+    const want = jukeTarget();
+    const target = jukeDur > 0 ? Math.min(want, jukeDur) : want;
     if (Math.abs(el.currentTime - target) > 0.25) {
       try { el.currentTime = target; } catch { /* not seekable yet */ }
     }
@@ -10252,18 +10284,29 @@
     // A press on a stale deck resumes it (and claims it) rather than pausing an already dead DJ.
     jukeSend(jukeNow.entry, jukeNow.cid, jukeNow.name, jukePos(), jukeStale ? false : !jukeNow.paused);
   }
-  function jukeSkip() {
-    const list = jukePlayable();
-    const i = list.findIndex((e) => e.id === jukeNow?.entry);
-    const next = list[i + 1]; // i is -1 with nothing playing, so this starts at the top
+  /**
+   * Move the room on to the next track.
+   *
+   * `played` says the track being left was heard rather than given up on, and a heard track comes
+   * off the shared queue: it is a playlist, not a library, and the transport only ever moves
+   * forwards, so a spent entry left in place would sit above the play head where nothing can ever
+   * reach it again. Whoever presses is the DJ by definition, so the removal is sent once by the
+   * one machine that pressed rather than once per listener.
+   */
+  function jukeAdvance(played: boolean, list = jukePlayable()) {
+    const { next, drop } = deckAdvance(list, jukeNow?.entry ?? "", played);
     if (next) jukeSend(next.id, next.cid, next.name, 0, false);
     else jukeSend("", "", "", 0, true); // queue exhausted: everyone stops
+    if (drop) void jukeRemoveTrack(drop);
+  }
+  function jukeSkip() {
+    jukeAdvance(true);
   }
   // Only the DJ advances. Everyone else's element just stops and waits for the broadcast, so the
   // room can never fan out into per-listener playlists.
   function jukeEnded() {
     if (!inCall || !jukeIsDj()) return;
-    jukeSkip();
+    jukeAdvance(true);
   }
   // A transport frame off the wire. Peer input, so it is validated hard, then adopted only if it
   // beats what we follow: a higher seq, or the same seq from a higher fingerprint so a simultaneous
@@ -14165,9 +14208,19 @@
         </div>
       </div>
     {:else}
+      <!-- Idle still gets a transport. Without one the only way to start the room was to click a
+           named track, so a deck that had reached the end of its queue (or had just been joined)
+           had no play button anywhere on it. -->
       <div class="juke-idle">
+        <button
+          class="juke-play"
+          disabled={!jukeUpNext.length}
+          title={jukeUpNext.length ? "Play the queue for the room" : "Queue a track first"}
+          aria-label="Play"
+          onclick={jukeToggle}
+        >{@render icoPlay()}</button>
         <span class="stage-label">deck idle</span>
-        <span class="juke-idle-hint">queue something and press play</span>
+        <span class="juke-idle-hint">{jukeUpNext.length ? "press play to start the queue" : "queue something and press play"}</span>
       </div>
     {/if}
 

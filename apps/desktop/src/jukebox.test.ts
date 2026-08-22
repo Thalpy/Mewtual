@@ -3,15 +3,20 @@ import test from "node:test";
 import {
   DRIFT_HOLD_S,
   DRIFT_SEEK_S,
+  deckAdvance,
+  deckPosition,
   driftAction,
   fetchPhase,
   mediaKind,
+  mediaOrigin,
   mediaUrl,
   nudgeRate,
   isStalled,
+  playableQueue,
   resolveCallName,
   HAVE_FUTURE_DATA,
   STALL_ANNOUNCE_MS,
+  type JukeEntry,
 } from "./jukebox.ts";
 
 const progress = (over: Partial<Parameters<typeof fetchPhase>[0]> = {}) => ({
@@ -25,15 +30,61 @@ const progress = (over: Partial<Parameters<typeof fetchPhase>[0]> = {}) => ({
   ...over,
 });
 
+const WINDOWS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0";
+const MAC_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15";
+const LINUX_UA =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+const ANDROID_UA =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36";
+
 test("a media url names the server and the content address", () => {
-  assert.equal(mediaUrl(7, "abc123"), "catcoms-media://a/7/abc123");
+  assert.equal(mediaUrl(7, "abc123", MAC_UA), "catcoms-media://a/7/abc123");
 });
 
 test("a media url escapes anything that would change its path shape", () => {
   // The cid reaching this function is already validated, but the backend refuses anything that is
   // not exactly <server>/<64 hex>, so a smuggled separator must not silently become one.
-  assert.equal(mediaUrl(1, "a/b"), "catcoms-media://a/1/a%2Fb");
-  assert.equal(mediaUrl(1, "../x"), "catcoms-media://a/1/..%2Fx");
+  assert.equal(mediaUrl(1, "a/b", MAC_UA), "catcoms-media://a/1/a%2Fb");
+  assert.equal(mediaUrl(1, "../x", MAC_UA), "catcoms-media://a/1/..%2Fx");
+  assert.equal(mediaUrl(1, "a/b", WINDOWS_UA), "http://catcoms-media.localhost/1/a%2Fb");
+});
+
+// --- The platform the deck plays on ------------------------------------------------------------
+
+test("Windows plays through the http host, because it has no custom scheme to play through", () => {
+  // The regression that broke the whole jukebox on Windows: WebView2 has no custom schemes, so
+  // the toolkit intercepts `http://<scheme>.localhost/...` and NOTHING else. A catcoms-media://
+  // request there reaches no handler at all, the element errors, and the deck reads every track
+  // in the queue as one nobody will serve.
+  assert.equal(mediaUrl(7, "abc123", WINDOWS_UA), "http://catcoms-media.localhost/7/abc123");
+  assert.ok(
+    !mediaUrl(7, "abc123", WINDOWS_UA).startsWith("catcoms-media:"),
+    "the scheme form never reaches a Windows webview",
+  );
+});
+
+test("Android is Windows-shaped here, even though its user agent says Linux", () => {
+  // Android has no custom-scheme API either and uses the same work-around, and its UA contains
+  // "Linux": matching on Linux first would send it to a scheme that does not exist there.
+  assert.equal(mediaOrigin(ANDROID_UA), "http://catcoms-media.localhost");
+});
+
+test("macOS and Linux keep the real scheme, which is what their webviews register", () => {
+  assert.equal(mediaOrigin(MAC_UA), "catcoms-media://a");
+  assert.equal(mediaOrigin(LINUX_UA), "catcoms-media://a");
+});
+
+test("every platform's url keeps the two path segments the backend routes on", () => {
+  // The backend parses `/<server>/<cid>` and ignores the host, so the split has to survive both
+  // forms. This is also why Tauri's own convertFileSrc cannot be used: it would encode the whole
+  // path as one segment.
+  for (const ua of [WINDOWS_UA, MAC_UA, LINUX_UA, ANDROID_UA]) {
+    const cid = "de".repeat(32);
+    const path = mediaUrl(12, cid, ua).slice(mediaOrigin(ua).length);
+    assert.equal(path, `/12/${cid}`, ua);
+  }
 });
 
 test("the declared mime decides a file's kind when it says anything useful", () => {
@@ -120,6 +171,161 @@ test("progress percent is derived and clamped", () => {
 test("progress carries the serving peer through for attribution", () => {
   assert.equal(fetchPhase(progress({ provider: "d465c67a" })).provider, "d465c67a");
   assert.equal(fetchPhase(progress()).provider, "");
+});
+
+// --- The deck's own clock ----------------------------------------------------------------------
+
+const clock = (over: Partial<Parameters<typeof deckPosition>[0]> = {}) => ({
+  isDj: false,
+  paused: false,
+  stale: false,
+  off: 0,
+  since: 0,
+  element: null,
+  ...over,
+});
+
+test("the DJ reads its own element, never a wall clock", () => {
+  // The bug this exists for: the DJ projected `off + elapsed` like a listener, so five seconds
+  // spent waiting for the first bytes counted as five seconds of playback. The deck then seeked
+  // itself to a place it had never played, told the room to go there, and did it again at the
+  // next ping, so a track that took a moment to arrive never got going at all.
+  const pos = deckPosition(
+    clock({ isDj: true, off: 0, since: 5000, element: { currentTime: 1.2, readyState: 4 } }),
+  );
+  assert.equal(pos, 1.2);
+});
+
+test("the DJ never corrects itself, whatever the stall did to the clock", () => {
+  // The same thing said as the player says it: drift against your own element is always zero, so
+  // the action is always "hold". A DJ that could reach "seek" here is a DJ that seeks every ping.
+  const element = { currentTime: 8, readyState: 4 };
+  const drift =
+    deckPosition(clock({ isDj: true, off: 0, since: 30_000, element })) - element.currentTime;
+  assert.equal(drift, 0);
+  assert.equal(driftAction(drift, "audio"), "hold");
+  assert.equal(driftAction(drift, "video"), "hold");
+});
+
+test("a DJ whose element has nothing loaded holds at the offset it pressed", () => {
+  // Pressing play on a track that takes three seconds to arrive must still start it at the top:
+  // an aged offset here is how the deck used to eat the head of every track it had to fetch.
+  assert.equal(deckPosition(clock({ isDj: true, off: 0, since: 3000, element: null })), 0);
+  assert.equal(
+    deckPosition(clock({ isDj: true, off: 0, since: 3000, element: { currentTime: 0, readyState: 0 } })),
+    0,
+    "metadata-less is as good as absent: currentTime means nothing yet",
+  );
+  // And a resume names where it resumed from, not zero.
+  assert.equal(deckPosition(clock({ isDj: true, off: 42, since: 3000, element: null })), 42);
+});
+
+test("the DJ's paused position is still the element's", () => {
+  assert.equal(
+    deckPosition(clock({ isDj: true, paused: true, off: 0, element: { currentTime: 12.5, readyState: 3 } })),
+    12.5,
+  );
+});
+
+test("a listener ages the DJ's offset on its own clock", () => {
+  // Nobody has to agree on the time of day: the offset is the DJ's, the elapsed time is local.
+  assert.equal(deckPosition(clock({ off: 10, since: 2500 })), 12.5);
+  assert.equal(
+    deckPosition(clock({ off: 10, since: 2500, element: { currentTime: 3, readyState: 4 } })),
+    12.5,
+    "a listener's element is chasing the room, so it is not the thing to read",
+  );
+});
+
+test("a paused or stale deck is frozen where it got to", () => {
+  assert.equal(deckPosition(clock({ off: 10, since: 9000, paused: true })), 10);
+  assert.equal(deckPosition(clock({ off: 10, since: 9000, stale: true })), 10);
+});
+
+// --- The queue is a playlist, not a library ------------------------------------------------------
+
+const entry = (over: Partial<JukeEntry> = {}): JukeEntry => ({
+  id: "e1",
+  cid: "c1",
+  name: "Track",
+  author: "a1",
+  added_ms: 1,
+  ...over,
+});
+
+const queue = [
+  entry({ id: "b", cid: "c2", added_ms: 2 }),
+  entry({ id: "a", cid: "c1", added_ms: 1 }),
+  entry({ id: "c", cid: "c3", added_ms: 3 }),
+];
+
+test("the queue plays in the order it was built, with the id as the tiebreak", () => {
+  assert.deepEqual(playableQueue(queue, new Set()).map((e) => e.id), ["a", "b", "c"]);
+  const tied = [entry({ id: "z", added_ms: 5 }), entry({ id: "y", added_ms: 5 })];
+  assert.deepEqual(
+    playableQueue(tied, new Set()).map((e) => e.id),
+    ["y", "z"],
+    "every machine has to reach the same order or the room fans out",
+  );
+});
+
+test("the playable order drops what nobody would serve and leaves the queue alone", () => {
+  const before = queue.map((e) => e.id);
+  assert.deepEqual(playableQueue(queue, new Set(["c2"])).map((e) => e.id), ["a", "c"]);
+  assert.deepEqual(queue.map((e) => e.id), before, "sorting must not reorder the caller's array");
+});
+
+test("a track the room has heard comes off the queue", () => {
+  // The queue is consumed as it plays: the transport only moves forwards, so an entry left behind
+  // the play head can never be reached again.
+  const list = playableQueue(queue, new Set());
+  const { next, drop } = deckAdvance(list, "a", true);
+  assert.equal(next?.id, "b");
+  assert.equal(drop, "a");
+});
+
+test("the last track empties the queue and stops the room", () => {
+  const list = playableQueue(queue, new Set());
+  const { next, drop } = deckAdvance(list, "c", true);
+  assert.equal(next, null, "nothing follows the last one: the deck goes idle");
+  assert.equal(drop, "c", "and the last one is still spent");
+});
+
+test("playing the queue through drains it exactly once", () => {
+  let list = playableQueue(queue, new Set());
+  let current = list[0]!.id;
+  const heard: string[] = [];
+  for (let guard = 0; guard < 10 && current; guard += 1) {
+    const { next, drop } = deckAdvance(list, current, true);
+    heard.push(drop);
+    list = list.filter((e) => e.id !== drop);
+    current = next?.id ?? "";
+  }
+  assert.deepEqual(heard, ["a", "b", "c"]);
+  assert.deepEqual(list, [], "an empty deck at the end, with nothing left to replay");
+});
+
+test("a track the deck gave up on stays queued", () => {
+  // Nobody heard it, and whoever holds the file may come back, so it is not spent: only the
+  // session-local blacklist keeps the deck off it.
+  const list = playableQueue(queue, new Set());
+  const { next, drop } = deckAdvance(list, "b", false);
+  assert.equal(next?.id, "c");
+  assert.equal(drop, "", "an unplayable track is not a played track");
+});
+
+test("an idle deck starts at the top of the queue and drops nothing", () => {
+  const list = playableQueue(queue, new Set());
+  assert.deepEqual(deckAdvance(list, "", true), { next: list[0], drop: "" });
+  assert.deepEqual(
+    deckAdvance(list, "gone", true),
+    { next: list[0], drop: "" },
+    "a current entry that is no longer in the list cannot be dropped twice",
+  );
+});
+
+test("an empty queue advances to nothing rather than throwing", () => {
+  assert.deepEqual(deckAdvance([], "", true), { next: null, drop: "" });
 });
 
 // --- Regressions ------------------------------------------------------------------------------

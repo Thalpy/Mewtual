@@ -4,6 +4,22 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The jukebox plays on Windows again.** Shared tracks were requested through a URL scheme
+  WebView2 has no handler for, so every track failed the moment it was pressed and the deck
+  reported it as one nobody would serve. Windows now uses the host form the toolkit actually
+  intercepts; macOS and Linux are unchanged.
+- The DJ's own playback is now the room's clock. Time spent waiting for a track's first bytes used
+  to count as playback, so the deck seeked itself past what it had never played, announced that
+  position to the room, and did it again at every ping: a track that took a moment to arrive never
+  got going, and every pause/resume jumped forward by the accumulated gap.
+- The queue is consumed as it plays: a track the room has heard (or skipped) comes off it, instead
+  of collecting behind a play head that only moves forwards. A track nobody could serve stays
+  queued, so it can be retried when whoever holds it comes back.
+- An idle deck has a play button. Reaching the end of the queue, or joining a room where nothing
+  is playing, previously left no way to start the room short of clicking a named track.
+
 ## [0.3.0-alpha.4] - 2026-08-22
 
 ### Added

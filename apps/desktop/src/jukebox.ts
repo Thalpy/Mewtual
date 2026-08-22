@@ -13,15 +13,41 @@ export type MediaKind = "audio" | "video" | "other";
 /** The custom scheme the webview plays shared media through. */
 export const MEDIA_SCHEME = "catcoms-media";
 
+/** The user agent, where there is one to read (a unit test runs without a webview). */
+function ua(): string {
+  return typeof navigator === "undefined" ? "" : navigator.userAgent;
+}
+
+/**
+ * The origin a shared file is served from, which is not the same string on every platform.
+ *
+ * macOS and Linux register `catcoms-media:` in the webview as a real scheme, so a URL in that
+ * scheme reaches the handler. Windows (and Android) cannot: WebView2 has no custom schemes, so
+ * the toolkit instead intercepts `http://<scheme>.localhost/...` and nothing else. A
+ * `catcoms-media://` request there is an unknown scheme, so it never reaches the backend at all:
+ * the element fails to load, the deck reads that as a track nobody will serve, and every track in
+ * the queue fails the same way the moment it is pressed. That is the whole of "the jukebox is
+ * broken" on Windows, and no amount of backend correctness could have shown through it.
+ *
+ * The host segment is a constant placeholder either way: the backend routes on the path alone,
+ * because the Windows form makes the host `catcoms-media.localhost` and it stops being ours to
+ * choose.
+ */
+export function mediaOrigin(userAgent: string = ua()): string {
+  return /Windows|Android/i.test(userAgent)
+    ? `http://${MEDIA_SCHEME}.localhost`
+    : `${MEDIA_SCHEME}://a`;
+}
+
 /**
  * The URL a media element loads a shared file from.
  *
- * The host segment is a constant placeholder: the backend routes on the path alone, because
- * Windows rewrites the whole thing to `http://catcoms-media.localhost/...` and the host stops
- * being ours to choose.
+ * This mirrors what Tauri's own `convertFileSrc` does per platform. It is not simply called
+ * because that helper percent-encodes the whole path into one segment, and the backend routes on
+ * `/<server>/<cid>` as two.
  */
-export function mediaUrl(server: number, cid: string): string {
-  return `${MEDIA_SCHEME}://a/${server}/${encodeURIComponent(cid)}`;
+export function mediaUrl(server: number, cid: string, userAgent: string = ua()): string {
+  return `${mediaOrigin(userAgent)}/${server}/${encodeURIComponent(cid)}`;
 }
 
 const VIDEO_EXT = new Set(["mp4", "m4v", "webm", "mkv", "mov", "avi", "ogv"]);
@@ -77,6 +103,85 @@ export function driftAction(drift: number, kind: MediaKind): DriftAction {
 export function nudgeRate(drift: number): number {
   if (Math.abs(drift) < DRIFT_HOLD_S) return 1;
   return drift > 0 ? 1.05 : 0.95;
+}
+
+/** One entry in a channel's shared queue, as the backend hands it over. */
+export type JukeEntry = {
+  id: string;
+  cid: string;
+  name: string;
+  author: string;
+  added_ms: number;
+};
+
+/**
+ * The queue in the order the deck will play it: when it was added, with the id as the tiebreak so
+ * two machines that received the same two adds in different orders still agree. Tracks nobody
+ * would serve are dropped, so the deck does not stop on one.
+ */
+export function playableQueue(
+  entries: readonly JukeEntry[],
+  failed: ReadonlySet<string>,
+): JukeEntry[] {
+  return [...entries]
+    .sort((a, b) => a.added_ms - b.added_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .filter((e) => !failed.has(e.cid));
+}
+
+/**
+ * What the deck does when it leaves a track: which entry plays next, and which entry comes off
+ * the shared queue.
+ *
+ * The queue is a playlist, not a library. A track the room has heard is spent, so it is dropped
+ * rather than left sitting above the play head where it can never be reached again (the transport
+ * only ever moves forwards). `played` is false for a track the deck gave up on: nobody heard it,
+ * and whoever holds the file may come back, so it stays queued for a later retry.
+ *
+ * `queue` is already the playable order. A `currentId` that is not in it (nothing playing, or a
+ * track that just failed out of it) starts from the top, which is what makes pressing play on an
+ * idle deck work.
+ */
+export function deckAdvance(
+  queue: readonly JukeEntry[],
+  currentId: string,
+  played: boolean,
+): { next: JukeEntry | null; drop: string } {
+  const i = queue.findIndex((e) => e.id === currentId);
+  return { next: queue[i + 1] ?? null, drop: played && i >= 0 ? currentId : "" };
+}
+
+/** Everything the deck's position depends on. `element` is null unless it holds the live track. */
+export type DeckClock = {
+  /** Whether the transport being followed is my own press. */
+  isDj: boolean;
+  paused: boolean;
+  /** The DJ went quiet: the deck is frozen where it got to. */
+  stale: boolean;
+  /** The offset the followed transport named. */
+  off: number;
+  /** Milliseconds measured locally since that offset was adopted. */
+  since: number;
+  element: { currentTime: number; readyState: number } | null;
+};
+
+/**
+ * Where the deck is in the current track.
+ *
+ * The DJ's own element **is** the room's clock. Projecting a wall clock for the DJ as well was
+ * what broke playback: the projection ran on while the element sat waiting for bytes, so the DJ
+ * seeked itself forward to a place it had never played, announced that place to the room, and did
+ * it again at the next ping. A track that took a moment to arrive could never get going, and
+ * every pause/resume jumped forward by the accumulated gap. While the element has no track loaded
+ * the DJ's position is simply the offset it pressed: a slow load must not eat the head of a track.
+ *
+ * A listener has no such element to read, because its element is chasing the DJ rather than
+ * leading. For a listener the offset is somebody else's and ageing it locally is the only honest
+ * way to use it, which is the whole reason nobody has to agree on the time of day.
+ */
+export function deckPosition(c: DeckClock): number {
+  if (c.isDj) return c.element && c.element.readyState > 0 ? c.element.currentTime : c.off;
+  if (c.paused || c.stale) return c.off;
+  return c.off + c.since / 1000;
 }
 
 /** A `download-progress` event, as the backend emits it. */

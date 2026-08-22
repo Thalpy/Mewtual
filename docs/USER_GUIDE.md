@@ -456,7 +456,9 @@ type a `code`, choose its display size and upload an image. Then anyone types `:
   input/output device selection, camera and screen sharing.
 - **Instruments** opens an on-screen keyboard that also accepts computer-keyboard or Web MIDI
   input; notes are shared live with the room. The **Jukebox** queues audio already circulating in
-  the server's Files area, so it does not upload a second copy.
+  the server's Files area, so it does not upload a second copy. Whoever pressed last is the DJ and
+  everyone hears the same position; the deck's own play button starts the queue from the top, and
+  a track comes off the queue once the room has heard it through.
 - A hardware **MIDI controller** is set up under **Settings → Devices → MIDI controllers**. That
   panel lists every input the system reports, says which ones are routed, shows the messages
   arriving in a live monitor, and carries step-by-step setup and troubleshooting help. Controllers

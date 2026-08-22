@@ -8868,12 +8868,20 @@ button.juke-tbtn:hover {
   text-overflow: ellipsis;
 }
 
-/* Nothing on the deck: say so once, quietly, and say what to do about it. */
+/* Nothing on the deck: say so once, quietly, say what to do about it, and still offer the press
+   that does it. Centre rather than baseline alignment, because the row now carries a round
+   button as well as two lines of type. */
 .juke-idle {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 7px;
   padding: 1px 0;
+}
+button.juke-play:disabled,
+button.juke-play:disabled:hover {
+  background: var(--panel);
+  border-color: var(--border-soft);
+  color: var(--faint);
 }
 .juke-idle-hint {
   font-size: 0.7rem;
