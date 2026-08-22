@@ -130,6 +130,48 @@ a chunk larger than `CHUNK_BYTES`; it is bounded at one blob-fetch response, so 
   keeps running). Discard is an acknowledged actor command: cancel and lock report cleanup, so
   they must not return while deletion is merely queued.
 
+## Staging: an upload's chunks are not held content
+
+An upload's chunks used to be written straight into the blob store, where the only record that they
+were unpublished was a map in memory. A hard exit between sealing and publishing therefore left
+blobs indistinguishable from real ones: no manifest named them, and the storage-health pass walks
+only what the file index references, so nothing could ever find them again.
+
+The blob store now has a second namespace. `BlobStore::put_staged` writes into a `staging/`
+subdirectory that `get`, `has` and `cids` do not see, so a staged chunk is on disk without being
+*held*. `seal_upload_chunk` stages; `publish_upload` calls `promote_staged` (a rename, so a 256 MiB
+file costs a directory entry rather than a rewrite); everything else drops them. Cancelling is then
+safe by construction rather than by check: a staged blob is referenced by nothing, so there is no
+dedup question to get wrong.
+
+`clear_staging` runs once per server at startup, from `attach_blob_store`, before anything can
+stage something new. Whatever is in staging at that moment belonged to an upload that did not
+survive the last process, and the only thing that knew what it was for died with that process, so
+it is unambiguously garbage. That is what makes this a sweep the store can perform on its own,
+where a whole-store mark-and-sweep would have had to enumerate every blob owner and could delete
+live data by missing one.
+
+**Ordering:** promote, then post. The remaining crash window is between those two, and this
+direction makes it strand orphans (blobs nothing names, collected by nothing but costing only
+space) rather than a published listing whose chunks are still in staging, which the next startup
+sweep would delete out from under the only device that holds them.
+
+## Reading a file inline is bounded
+
+`download_file` returns a whole file as one base64 string, which is the same shape that froze the
+app on upload: cost scales with the file, and the webview serializes it whole on its main thread.
+It was reachable without any deliberate action, because embeds, custom emoji, event posters, card
+thumbnails and file previews all went through it, so scrolling past a message containing a large
+file was enough.
+
+Everything visual now renders from the `catcoms-media:` protocol instead (`sharedMediaUrl`), which
+answers Range requests off the vault and fetches missing chunks from peers exactly as before, so
+the element streams and the bytes never become a JS string. `download_file` keeps one caller, the
+text reader, which genuinely needs bytes in JS; it is bounded by a 2 MiB soft cap in the UI and by
+`MAX_INLINE_DOWNLOAD_BYTES` (16 MiB) natively, so no "read it anyway" button can pull a 256 MiB
+listing into the window. The native bound is meaningful only because the manifest layout check
+above makes a listing's declared size trustworthy.
+
 ## Saving is staged
 
 `save_group_file` reserves the final Downloads name, writes into a sibling `.part`, verifies size
@@ -146,14 +188,11 @@ something that looks like the finished file.
 - **Sealing is still on the async runtime:** a chunk's AEAD + blob write runs on the actor's
   thread rather than `spawn_blocking`. At 8 MiB that is tens of milliseconds per chunk, which the
   loop absorbs; it only matters if `CHUNK_BYTES` grows.
-- **Staged chunks are not yet durable-owned (open).** An upload's sealed chunks go straight into
-  the ordinary blob store, and the only record that they are unpublished is the in-memory pending
-  map. Cancel, lock and the idle sweep all collect them, but a hard process exit between sealing
-  and publishing strands them: nothing on disk says they were staged, and the storage-health pass
-  deliberately walks only chunks the file index references, so it will not find them either. The
-  fix is a staging namespace or a small upload journal written before the first chunk is sealed,
-  reconciled at startup. Bounded per session by `MAX_STAGED_UPLOAD_BYTES`; unbounded across
-  repeated crashes.
+- **The promote/post window (small, open).** A crash between promoting an upload's chunks and
+  posting its index entry leaves those chunks held but unnamed. Unlike the pre-staging behaviour
+  this is a window of milliseconds rather than the whole upload, and it costs space rather than
+  correctness; closing it entirely needs the index post and the promotion to be one atomic step,
+  which they cannot be while one is a CRDT operation and the other is a filesystem rename.
 
 ## Security
 

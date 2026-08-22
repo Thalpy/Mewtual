@@ -65,6 +65,10 @@
     CLOCK_SKEW_GRACE_MS, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
     unreadFromHeads, type ChannelHead,
   } from "./unread";
+  import {
+    deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
+    type DeliveryEvidence,
+  } from "./delivery";
   import { installUiLogging } from "./uilog";
   import {
     TRANSFER_CHUNK_BYTES,
@@ -5314,7 +5318,7 @@
   // bounds: a member is counted only once it has provably built on the message, so counts
   // only rise and 0 means "no proof yet", never "failed". Red is reserved for the one true
   // negative signal we have: no peers reachable at all.
-  type DeliveryState = { id: string; delivered: number; reachable: number };
+  type DeliveryState = { id: string; delivered: number; reachable: number; any_peer: boolean };
   let delivery = $state<Record<string, DeliveryState>>({});
   async function refreshDelivery() {
     const gen = viewGeneration;
@@ -5328,60 +5332,53 @@
       const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       const map: Record<string, DeliveryState> = {};
-      for (const s of list) map[s.id] = s;
+      for (const s of list) map[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
       delivery = map;
     } catch {
       if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       delivery = {}; // older backend or closed actor: ticks simply don't render
     }
   }
-  // The gutter tick for one of your messages: ✕ no peers · ◌ no proof yet · ~ partial ·
-  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed.
-  function deliveryTick(m: Msg): { g: string; cls: string; tip: string } | null {
-    if (m.author !== myFp || !m.id) return null;
-    if (m.id.startsWith("pending:"))
-      return { g: "◌", cls: "d-pending", tip: "Saving this message locally…" };
-    const total = Math.max(members - 1, 0);
-    if (total === 0) return null; // alone here: nothing to deliver to
-    const d = delivery[m.id];
-    const del = d?.delivered ?? 0;
-    const reach = d?.reachable ?? Math.max(onlineCount - 1, 0);
-    if (del >= total)
-      return { g: "✓✓", cls: "d-all", tip: `Delivered to everyone: all ${total} other member${total === 1 ? "" : "s"} proved they hold this message.` };
-    if (reach === 0)
-      return { g: "✕", cls: "d-none", tip: "No peers reachable: queued; it gossips automatically when members reconnect. Not lost." };
-    if (del >= reach)
-      return { g: "✓", cls: "d-ok", tip: `Delivered to all ${reach} reachable member${reach === 1 ? "" : "s"} (${del}/${total} confirmed overall). Confirmation is proof-based: silent receivers may also have it.` };
-    if (del > 0)
-      return { g: "~", cls: "d-part", tip: `Delivering: ${del} of ${reach} reachable confirmed (${total} members in total). Members confirm by building on the message.` };
-    return { g: "◌", cls: "d-wait", tip: `Sent: no confirmations yet from ${reach} reachable member${reach === 1 ? "" : "s"}. Silent receipt isn't visible; the count only rises.` };
-  }
-  // Index of your most recent message in the log (-1 if none): the receipt line's anchor.
+  // Index of your most recent message in the log (-1 if none): the one message whose state is
+  // still plausibly in flight, and the receipt line's anchor.
   let lastOwnIdx = $derived(messages.reduce((acc, m, i) => (m.author === myFp ? i : acc), -1));
-  // The spelled-out receipt under one of your messages. Same evidence as the gutter tick, in
-  // words. Shown on your latest message (the state you actually care about) and on any older
-  // one that hasn't settled yet; a delivered-and-superseded message stays quiet.
-  function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
-    if (mi !== lastOwnIdx) return null;
-    const t = deliveryTick(m);
-    if (!t || !m.id) return null;
-    if (t.cls === "d-pending") return { g: t.g, label: "sending…", cls: t.cls, tip: t.tip };
-    if ((t.cls === "d-all" || t.cls === "d-ok") && mi !== lastOwnIdx) return null;
+  // What is actually known about one of your messages. `delivered`/`reachable` are null when the
+  // actor has reported nothing for it, which is deliberately distinct from reporting zero: the
+  // absence of a measurement is not evidence that nobody is out there.
+  function deliveryEvidence(m: Msg, mi: number): DeliveryEvidence {
     const d = delivery[m.id];
-    const total = Math.max(members - 1, 0);
-    const del = d?.delivered ?? 0;
-    const reach = d?.reachable ?? Math.max(onlineCount - 1, 0);
-    const label =
-      t.cls === "d-none"
-        ? "queued · no peers reachable"
-        : t.cls === "d-wait"
-          ? "sending…"
-          : t.cls === "d-part"
-            ? `delivering · ${del}/${reach} peers`
-            : t.cls === "d-ok"
-              ? `delivered · ${del} peer${del === 1 ? "" : "s"}`
-              : `delivered · all ${total} member${total === 1 ? "" : "s"}`;
-    return { g: t.g, label, cls: t.cls, tip: t.tip };
+    return {
+      others: Math.max(members - 1, 0),
+      delivered: d ? d.delivered : null,
+      reachable: d ? d.reachable : null,
+      anyPeer: d ? d.any_peer : null,
+      pending: m.id.startsWith("pending:"),
+      latest: mi === lastOwnIdx,
+    };
+  }
+  // The gutter tick for one of your messages: ✕ nobody reachable · ◌ no proof yet · ~ partial ·
+  // ✓ all reachable confirmed · ✓✓ the whole roster confirmed. Shown on EVERY message of yours
+  // the actor still has evidence for, not only the newest: the point of a per-message tick is to
+  // be able to look back up the log and see which ones landed.
+  function deliveryTick(m: Msg, mi: number): { g: string; cls: string; tip: string } | null {
+    if (m.author !== myFp || !m.id) return null;
+    const e = deliveryEvidence(m, mi);
+    const verdict = deliveryVerdict(e);
+    if (!verdict) return null;
+    return { g: deliveryGlyph(verdict), cls: deliveryClass(verdict), tip: deliveryTip(verdict, e) };
+  }
+  // The spelled-out receipt under your latest message. Same evidence as the gutter tick, in words.
+  function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
+    if (mi !== lastOwnIdx || !m.id || m.author !== myFp) return null;
+    const e = deliveryEvidence(m, mi);
+    const verdict = deliveryVerdict(e);
+    if (!verdict) return null;
+    return {
+      g: deliveryGlyph(verdict),
+      label: deliveryLabel(verdict, e),
+      cls: deliveryClass(verdict),
+      tip: deliveryTip(verdict, e),
+    };
   }
   async function refreshMembers() {
     const gen = viewGeneration;
@@ -12683,7 +12680,9 @@
       }),
       listen<{ server: number; channel: string; states: DeliveryState[] }>("delivery-changed", (e) => {
         if (e.payload.server !== activeServerId || e.payload.channel !== cur?.active) return;
-        for (const s of e.payload.states) delivery[s.id] = s;
+        // Merged, not assigned: a report that happens to see fewer holders has not unproved the
+        // ones already counted, and letting it overwrite them is what made a settled tick flicker.
+        for (const s of e.payload.states) delivery[s.id] = { id: s.id, ...mergeDelivery(delivery[s.id], s) };
       }),
       listen<{ server: number }>("badges-changed", (e) => {
         if (e.payload.server === activeServerId) refreshBadges();
@@ -16343,7 +16342,7 @@
                 : DEFAULT_MESSAGE_FRAME}
               {@const arrival = arrivalMotion(m.author, m.id)}
               {@const arrivalVars = arrivalStyle(m.author)}
-              {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
+              {@const tick = deliveryTick(m, mi)}
               {@const ident = identityOf(m.author)}
               {@const warning = warningFor(cur?.active ?? "", m.id)}
               <li
@@ -16375,11 +16374,15 @@
                   </span>
                 {:else}
                   <!-- Header rows: the avatar owns the gutter (dead space anyway) and the time
-                       moves inline after the name, so the picture runs bigger for free. -->
-                  <span class="t">
+                       moves inline after the name, so the picture runs bigger for free. The tick
+                       does NOT follow the time inline: a delivery state belongs in one column you
+                       can run your eye down, not on the left of some rows and the right of others,
+                       so it sits under the avatar and stays in the gutter on every row. -->
+                  <span class="t t-head">
                     <button class="gutter-avatar" type="button" title="View profile" onclick={() => showProfile(ident.fp)}>
                       {@render avatarTag(ident.fp)}
                     </button>
+                    {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}
                   </span>
                 {/if}
                 <div class="m-body">
@@ -16414,9 +16417,7 @@
                       {@const b = badges[m.author]}
                       <span class="cust-badge" style={b.color ? `--badge-c:${b.color}` : ""} title="Badge assigned by a server admin">{b.label}</span>
                     {/if}
-                    <span class="time" title={new Date(m.ts).toLocaleString()}>
-                      {#if tick}<span class="dtick {tick.cls}" title={tick.tip}>{tick.g}</span>{/if}{fmtTime(m.ts)}
-                    </span>
+                    <span class="time" title={new Date(m.ts).toLocaleString()}>{fmtTime(m.ts)}</span>
                     {#if m.pinned}<span class="pin-mark" title="Pinned message">{@render icoPin()}</span>{/if}
                   </span>
                 {:else if m.pinned}

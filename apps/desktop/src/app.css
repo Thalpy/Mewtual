@@ -5359,6 +5359,14 @@ button.you-panel:hover {
   justify-content: flex-end;
   gap: 4px;
 }
+/* A header row's gutter holds the avatar, so the tick goes under it rather than following the
+   time inline after the name. The delivery column then reads top to bottom in one place. */
+.messages li > .t.t-head {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  padding-top: 2px;
+}
 .dtick {
   font-size: 0.62rem;
   line-height: 1;

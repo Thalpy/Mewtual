@@ -2353,6 +2353,14 @@ pub struct DeliveryState {
     /// indicators ([`Server::online_members`]). Independent of `delivered`, which can exceed it
     /// (a member that received the message and has since gone offline still holds it).
     pub reachable: usize,
+    /// Whether this node has **any** transport peer connected at all.
+    ///
+    /// Deliberately separate from `reachable`, and the only honest basis for a "nothing can leave
+    /// this device" claim. `reachable` resolves connections to member fingerprints through signed
+    /// peer records, so a peer whose record has not arrived (or whose peer id changed) is missing
+    /// from it while ops still gossip to it perfectly well. Counting that as "no peers reachable"
+    /// painted a red failure on messages that had already been received.
+    pub any_peer: bool,
 }
 
 /// A UI-facing view of one member: a short device-id **fingerprint** (display names are
@@ -3412,8 +3420,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let mut unstaged: Vec<&FileRef> = Vec::new();
         for chunk in chunks {
             match self.sync.drop_staged_blob(&chunk.ciphertext_cid) {
-                Ok(true) => {}                          // staged: gone, and it was never held
-                _ => unstaged.push(chunk),              // already promoted, or never written
+                Ok(true) => {}             // staged: gone, and it was never held
+                _ => unstaged.push(chunk), // already promoted, or never written
             }
         }
         if unstaged.is_empty() {
@@ -3860,6 +3868,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         };
         let (ids, changes): (Vec<String>, Vec<ChangeHash>) = recent.iter().cloned().unzip();
         let reachable = self.online_members().len();
+        let any_peer = self.sync.has_connected_peer();
         let holders = self
             .sync
             .peers_with_changes(DocType::Channel, channel, &changes);
@@ -3869,6 +3878,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 id,
                 delivered: peers.len(),
                 reachable,
+                any_peer,
             })
             .collect()
     }

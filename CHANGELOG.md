@@ -24,6 +24,18 @@ All notable changes to Mewtual are documented here.
   `.part` name and only becomes the real file once that check passes, so a failed or interrupted
   save never leaves something in Downloads that looks like the finished thing.
 
+- **An upload interrupted by closing the app no longer leaves anything behind.** A share encrypts
+  its pieces as it goes, and until the share is published those pieces belonged to nothing. If the
+  app closed mid-share they stayed on disk invisibly, and nothing could tell them apart from real
+  files afterwards, so they were never cleaned up. They are now written somewhere separate and only
+  moved into place once the share completes; anything still sitting there when the app starts is
+  from a share that never finished, and is cleared.
+- **A large picture or video in a message no longer freezes the window.** Anything shared and shown
+  inline (message images and video, custom emoji, event posters, link previews, the preview in a
+  file's properties) was fetched whole and handed to the window in one piece before it could be
+  drawn, so scrolling past a message with a big file attached could lock the app up with no warning
+  and nothing clicked. These now stream as they play or load, the same way the jukebox already did.
+
 ### Security
 
 - **A shared file can no longer claim to be small and arrive huge.** A file's listing says both how

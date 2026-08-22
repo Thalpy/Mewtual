@@ -28,8 +28,7 @@ use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
     addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
-    keypair_from_seed,
-    phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
+    keypair_from_seed, phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
     validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, JoinReply, MeshHandle,
     MeshObservationSnapshot, MeshService, PortMappingMechanism, PortMappingSnapshot,
     PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
@@ -330,6 +329,22 @@ struct PendingUpload {
     touched_at: u64,
 }
 
+// Manual Debug, redacting the buffer: it holds plaintext of the file being shared, and a derived
+// Debug would put it in whatever printed the error. Same reason `SealingBlobStore` redacts its key.
+impl std::fmt::Debug for PendingUpload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingUpload")
+            .field("server", &self.server)
+            .field("upload_id", &self.upload_id)
+            .field("buffered", &self.buffer.len())
+            .field("chunks", &self.chunks.len())
+            .field("sealing", &self.sealing)
+            .field("bytes_seen", &self.bytes_seen)
+            .field("declared_size", &self.declared_size)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PendingUpload {
     /// Admit one slice of the file at byte `offset`, returning a whole chunk's bytes when the
     /// buffered slices have completed one (and marking the upload as sealing until the caller
@@ -457,6 +472,12 @@ const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES % UPLOAD_SLICE_BYTES
 /// instead (`catcoms-media:` for playback and images, `save_group_file` for saving), so this bound
 /// costs nothing real and closes the path.
 const MAX_INLINE_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
+
+// Build failures rather than test failures, because both are properties of the constants
+// themselves: a listing may declare far more than may be read inline, and the text reader's own
+// 2 MiB soft cap has to fit underneath the hard one or the reader could never load anything.
+const _: () = assert!(MAX_INLINE_DOWNLOAD_BYTES < MAX_FILE_BYTES as u64);
+const _: () = assert!(MAX_INLINE_DOWNLOAD_BYTES >= 2 * 1024 * 1024);
 
 /// Whether a file of `size` may be read through `download_file`, which returns it whole as one
 /// base64 string. See [`MAX_INLINE_DOWNLOAD_BYTES`].
@@ -1262,6 +1283,10 @@ struct DeliveryStateEvt {
     id: String,
     delivered: usize,
     reachable: usize,
+    /// Any transport peer connected at all. The only honest basis for "nothing can leave this
+    /// device": `reachable` resolves connections to members through signed peer records and can
+    /// read zero while ops are gossiping fine.
+    any_peer: bool,
 }
 #[derive(Serialize, Clone)]
 struct DeliveryEvt {
@@ -1277,6 +1302,7 @@ fn delivery_payload(states: Vec<catcoms_app::DeliveryState>) -> Vec<DeliveryStat
             id: s.id,
             delivered: s.delivered,
             reachable: s.reachable,
+            any_peer: s.any_peer,
         })
         .collect()
 }
@@ -5328,6 +5354,38 @@ async fn push_file_chunk(
     Ok(())
 }
 
+/// Take an upload out of the map if, and only if, it may still be published.
+///
+/// The last gate before an irreversible, group-visible act, so it is deliberately one step: the
+/// upload is removed and returned, or it is removed and destroyed, and there is no state in
+/// between where a lock could arrive and find nothing to cancel. `locked` is read *after* the last
+/// seal, because an answer from before that await says nothing about the session now.
+///
+/// A locked session ends the upload rather than deferring it: the chunks are already sealed, and
+/// holding them across a lock would mean the vault carrying an unpublished transfer the user
+/// believes they closed. An incomplete upload is destroyed for a different reason: its chunks
+/// would be listed under the address of a whole file that was never sent, and every member would
+/// fail the reassembly check forever.
+async fn take_publishable_upload(
+    state: &AppState,
+    key: &UploadKey,
+    locked: bool,
+) -> Result<PendingUpload, String> {
+    let taken = state.uploads.lock().await.remove(key);
+    let Some(pending) = taken else {
+        return Err("no such upload".to_string());
+    };
+    if locked {
+        discard_pending_upload(state, pending).await;
+        return Err("the vault is locked".into());
+    }
+    if !pending.is_complete() {
+        discard_pending_upload(state, pending).await;
+        return Err("the upload did not send every chunk".into());
+    }
+    Ok(pending)
+}
+
 /// Seal one assembled chunk into the vault and record its reference against the pending upload;
 /// returns how many chunks that upload has sealed. The caller has already claimed the sealing
 /// slot, so this owns releasing it (and, on failure, tearing the whole upload down: the running
@@ -5409,27 +5467,8 @@ async fn finish_file_upload(
     if let Some((chunk, mime)) = tail {
         seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
     }
-    // Publishing is irreversible and visible to the group, so the lock is re-checked here, after
-    // the last await that could have run across it, and while the upload is still in the map for
-    // `lock_session_inner` to have taken. A lock that lands after this point is racing a
-    // publication already authorized; one that lands before it stops the publication entirely.
-    if let Err(e) = require_unlocked_session(&state).await {
-        let abandoned = state.uploads.lock().await.remove(&key);
-        if let Some(up) = abandoned {
-            discard_pending_upload(&state, up).await;
-        }
-        return Err(e);
-    }
-    let pending = state
-        .uploads
-        .lock()
-        .await
-        .remove(&key)
-        .ok_or_else(|| "no such upload".to_string())?;
-    if !pending.is_complete() {
-        actor.discard_upload(pending.chunks).await;
-        return Err("the upload did not send every chunk".into());
-    }
+    let locked = require_unlocked_session(&state).await.is_err();
+    let pending = take_publishable_upload(&state, &key, locked).await?;
     let cid = pending.address.cid();
     let chunk_total = pending.chunk_total;
     let upload_id = pending.upload_id;
@@ -6357,7 +6396,9 @@ async fn map_call_port(
     let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
     // The candidate's own claimed IPv4, when the webview could read one (mic-granted pages get
     // real IPs; an mDNS-obfuscated candidate passes None and is mapped permissively).
-    let claimed = address.as_deref().and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
+    let claimed = address
+        .as_deref()
+        .and_then(|a| a.parse::<std::net::Ipv4Addr>().ok());
     let mapped = catcoms_net::map_media_udp_port(port, claimed).await?;
     let result = MappedCallPort {
         ip: mapped.external.ip().to_string(),
@@ -8109,6 +8150,165 @@ async fn save_space_layout(
     })
 }
 
+/// What a streamed save needs from the running app: somewhere to get chunks, and an answer to
+/// "is this still allowed to happen?".
+///
+/// A seam, so the save loop below can be tested as itself. Its rules are all about *when* things
+/// happen relative to a fetch that may be in flight for seconds (the lock landing mid-transfer,
+/// bytes exceeding what the listing declared, the rename happening only after verification), and
+/// none of that is reachable through a `#[tauri::command]` signature that wants a live `AppHandle`.
+trait SaveSource {
+    /// Fetch and decrypt one chunk, with the signed provider that served it if it came over the
+    /// network. May take arbitrarily long: this is the await the lock can land inside.
+    async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String>;
+
+    /// Whether the webview session is still unlocked. Called again after every await, because an
+    /// answer from before a network round-trip says nothing about the state after it.
+    async fn still_unlocked(&self) -> Result<(), String>;
+
+    /// Report progress. Purely informational; a dropped update never changes the outcome.
+    fn progress(
+        &self,
+        done: usize,
+        bytes_done: u64,
+        network_bytes_done: u64,
+        provider: Option<String>,
+    );
+}
+
+/// Stream a listed file into Downloads and return the path it was published at.
+///
+/// Writes into a `.part` and renames onto the reserved name only once the whole file has been
+/// verified: reserving the final name up front stops a second save landing on it, and writing
+/// elsewhere until the end means neither an error here nor a crash can leave the peer's chosen
+/// filename holding bytes this device has not authenticated. Every failure path removes both.
+async fn stream_download_to_disk(
+    downloads: &Path,
+    name: &str,
+    total: usize,
+    size: u64,
+    target: &[u8; 32],
+    source: &mut impl SaveSource,
+) -> Result<PathBuf, String> {
+    let (mut file, staging, path) = create_staged_download(downloads, name)?;
+    let failed = |error: String| -> String {
+        let _ = std::fs::remove_file(&staging);
+        let _ = std::fs::remove_file(&path);
+        error
+    };
+    source.progress(0, 0, 0, None);
+    let mut address = CidHasher::new();
+    let mut bytes_done = 0u64;
+    let mut network_bytes_done = 0u64;
+    for i in 0..total {
+        // A transfer can outlive the click that started it, and a chunk fetch can be in flight
+        // across a lock. Check before asking for bytes and again before writing them: the second
+        // check is the one that matters, because the first says nothing about a session that
+        // closed while the fetch was outstanding.
+        if let Err(e) = source.still_unlocked().await {
+            return Err(failed(e));
+        }
+        let (chunk, provider) = match source.chunk(i).await {
+            Ok(got) => got,
+            Err(e) => return Err(failed(e)),
+        };
+        if let Err(e) = source.still_unlocked().await {
+            return Err(failed(e));
+        }
+        if provider.is_some() {
+            network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
+        }
+        // Independent of the manifest's own layout check: never write more bytes than the file
+        // said it was. The declared size is what the user was shown and what this download was
+        // sized against, so anything past it is not this file, whatever the manifest claims.
+        let next = bytes_done
+            .checked_add(chunk.len() as u64)
+            .filter(|n| *n <= size);
+        let Some(next) = next else {
+            return Err(failed(
+                "this file's chunks hold more data than it declares".into(),
+            ));
+        };
+        address.update(&chunk);
+        bytes_done = next;
+        if let Err(e) = file.write_all(&chunk) {
+            return Err(failed(e.to_string()));
+        }
+        source.progress(i + 1, bytes_done, network_bytes_done, provider);
+    }
+    if let Err(e) = file.sync_all() {
+        return Err(failed(e.to_string()));
+    }
+    drop(file);
+    if bytes_done != size {
+        return Err(failed(
+            "this file's chunks hold less data than it declares".into(),
+        ));
+    }
+    // End-to-end integrity, the same check the all-in-one download makes: individually valid
+    // chunks in the wrong order (or a manifest that lied) must not be saved as the file.
+    if address.cid().as_bytes() != target {
+        return Err(failed(
+            "the reassembled file failed its integrity check".into(),
+        ));
+    }
+    // Last gate before the file becomes visible under its real name and Downloads is opened.
+    // Pinned by `a_lock_after_the_last_chunk_still_stops_the_rename`: once the loop is done there
+    // is no next iteration left to notice a lock, so removing this publishes the file anyway.
+    if let Err(e) = source.still_unlocked().await {
+        return Err(failed(e));
+    }
+    if let Err(e) = publish_staged_download(&staging, &path) {
+        return Err(failed(e));
+    }
+    Ok(path)
+}
+
+/// The live [`SaveSource`]: chunks from the server actor, authorization from the session gate,
+/// progress to the webview.
+struct ActorSaveSource<'a> {
+    actor: ServerActor,
+    state: &'a AppState,
+    app: &'a AppHandle,
+    server: u64,
+    cid: String,
+    raw: Vec<u8>,
+    total: usize,
+    size: u64,
+}
+
+impl SaveSource for ActorSaveSource<'_> {
+    async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String> {
+        self.actor.fetch_file_chunk(self.raw.clone(), index).await
+    }
+
+    async fn still_unlocked(&self) -> Result<(), String> {
+        require_unlocked_session(self.state).await
+    }
+
+    fn progress(
+        &self,
+        done: usize,
+        bytes_done: u64,
+        network_bytes_done: u64,
+        provider: Option<String>,
+    ) {
+        let _ = self.app.emit(
+            "download-progress",
+            DownloadProgressEvt {
+                server: self.server,
+                cid: self.cid.clone(),
+                done,
+                total: self.total,
+                bytes_done,
+                bytes_total: self.size,
+                network_bytes_done,
+                provider,
+            },
+        );
+    }
+}
+
 /// Download a listed group file straight into Downloads, one chunk at a time, and reveal it.
 ///
 /// The plaintext never enters the webview. Saving a file used to mean `download_file` handing the
@@ -8143,103 +8343,18 @@ async fn save_group_file(
         ));
     }
     let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    // Write into a `.part` and rename onto the reserved name only once the whole file has been
-    // verified. Reserving the final name up front stops a second save landing on it; writing
-    // elsewhere until the end means neither an error here nor a crash can leave the peer's chosen
-    // filename holding bytes this device has not authenticated.
-    let (mut file, staging, path) = create_staged_download(&downloads, &name)?;
-    let failed = |error: String| -> String {
-        let _ = std::fs::remove_file(&staging);
-        let _ = std::fs::remove_file(&path);
-        error
+    let mut source = ActorSaveSource {
+        actor,
+        state: &state,
+        app: &app,
+        server,
+        cid,
+        raw,
+        total,
+        size,
     };
-    let _ = app.emit(
-        "download-progress",
-        DownloadProgressEvt {
-            server,
-            cid: cid.clone(),
-            done: 0,
-            total,
-            bytes_done: 0,
-            bytes_total: size,
-            network_bytes_done: 0,
-            provider: None,
-        },
-    );
-    let mut address = CidHasher::new();
-    let mut bytes_done = 0u64;
-    let mut network_bytes_done = 0u64;
-    for i in 0..total {
-        // A transfer can outlive the click that started it, and a chunk fetch can be in flight
-        // across a lock. Check before asking for bytes and again before writing them: the second
-        // check is the one that matters, because the first says nothing about a session that
-        // closed while the fetch was outstanding.
-        if let Err(e) = require_unlocked_session(&state).await {
-            return Err(failed(e));
-        }
-        let (chunk, provider) = match actor.fetch_file_chunk(raw.clone(), i).await {
-            Ok(got) => got,
-            Err(e) => return Err(failed(e)),
-        };
-        if let Err(e) = require_unlocked_session(&state).await {
-            return Err(failed(e));
-        }
-        if provider.is_some() {
-            network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
-        }
-        // Independent of the manifest's own layout check: never write more bytes than the file
-        // said it was. The declared size is what the user was shown and what this download was
-        // sized against, so anything past it is not this file, whatever the manifest claims.
-        let next = bytes_done
-            .checked_add(chunk.len() as u64)
-            .filter(|n| *n <= size);
-        let Some(next) = next else {
-            return Err(failed(
-                "this file's chunks hold more data than it declares".into(),
-            ));
-        };
-        address.update(&chunk);
-        bytes_done = next;
-        if let Err(e) = file.write_all(&chunk) {
-            return Err(failed(e.to_string()));
-        }
-        let _ = app.emit(
-            "download-progress",
-            DownloadProgressEvt {
-                server,
-                cid: cid.clone(),
-                done: i + 1,
-                total,
-                bytes_done,
-                bytes_total: size,
-                network_bytes_done,
-                provider,
-            },
-        );
-    }
-    if let Err(e) = file.sync_all() {
-        return Err(failed(e.to_string()));
-    }
-    drop(file);
-    if bytes_done != size {
-        return Err(failed(
-            "this file's chunks hold less data than it declares".into(),
-        ));
-    }
-    // End-to-end integrity, the same check the all-in-one download makes: individually valid
-    // chunks in the wrong order (or a manifest that lied) must not be saved as the file.
-    if address.cid().as_bytes() != &target {
-        return Err(failed(
-            "the reassembled file failed its integrity check".into(),
-        ));
-    }
-    // Last gate before the file becomes visible under its real name and Downloads is opened.
-    if let Err(e) = require_unlocked_session(&state).await {
-        return Err(failed(e));
-    }
-    if let Err(e) = publish_staged_download(&staging, &path) {
-        return Err(failed(e));
-    }
+    let path =
+        stream_download_to_disk(&downloads, &name, total, size, &target, &mut source).await?;
     let warning = reveal_path(&path)
         .err()
         .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
@@ -9332,7 +9447,10 @@ mod tests {
             ],
         );
         assert!(check.lan, "a private listener is the LAN scope");
-        assert!(check.public_direct, "a routable listener is the internet scope");
+        assert!(
+            check.public_direct,
+            "a routable listener is the internet scope"
+        );
         assert!(!check.relay);
         // The suggestion names the LAN listener's exact socket; loopback supplies nothing.
         assert_eq!(check.lan_ip, "192.168.0.231");
@@ -9360,12 +9478,18 @@ mod tests {
         );
         assert!(lan_relay.lan);
         assert!(!lan_relay.relay, "a LAN relay earns no internet confidence");
-        assert_eq!(lan_relay.lan_ip, "", "the relay's socket is not this machine's");
+        assert_eq!(
+            lan_relay.lan_ip, "",
+            "the relay's socket is not this machine's"
+        );
         assert_eq!(lan_relay.port, 0);
 
         // Loopback alone reaches neither scope: same-machine only.
         let mut loopback = InviteRouteCheck::default();
-        classify_invite_routes(&mut loopback, &[format!("/ip4/127.0.0.1/tcp/31484/p2p/{peer}")]);
+        classify_invite_routes(
+            &mut loopback,
+            &[format!("/ip4/127.0.0.1/tcp/31484/p2p/{peer}")],
+        );
         assert!(!loopback.lan);
         assert!(!loopback.public_direct);
         assert!(!loopback.relay);
@@ -9675,39 +9799,21 @@ mod tests {
     }
 
     #[test]
-    fn nothing_the_size_of_a_file_can_be_read_inline() {
-        // The freeze this whole change exists to stop is "cost scales with the file on a surface
-        // that serializes it whole". download_file is the last such surface, so its bound has to
-        // be far below what a listing may declare, and well above the one caller that still needs
-        // bytes in JS (the 2 MiB text reader).
-        assert!(
-            MAX_INLINE_DOWNLOAD_BYTES < MAX_FILE_BYTES as u64,
-            "a listing may declare far more than may be read inline"
-        );
-        assert!(
-            MAX_INLINE_DOWNLOAD_BYTES >= 2 * 1024 * 1024,
-            "the text reader's soft cap must still fit under the hard one"
-        );
-        // And the bound is on the *declared* size, which is only trustworthy because a manifest's
-        // chunk layout is now checked against it; otherwise a small declaration could still carry
-        // a large file. That link is what makes this a real bound rather than a hint.
-        assert_eq!(
-            upload_chunk_count(MAX_INLINE_DOWNLOAD_BYTES),
-            2,
-            "a file at the inline cap is a couple of chunks, not a stream"
-        );
-    }
-
-    #[test]
     fn an_inline_read_is_refused_past_the_cap_and_allowed_up_to_it() {
         assert!(inline_download_allowed(0).is_ok(), "an empty file");
-        assert!(inline_download_allowed(2 * 1024 * 1024).is_ok(), "a text read");
+        assert!(
+            inline_download_allowed(2 * 1024 * 1024).is_ok(),
+            "a text read"
+        );
         assert!(
             inline_download_allowed(MAX_INLINE_DOWNLOAD_BYTES).is_ok(),
             "exactly at the cap is still inline"
         );
         let over = inline_download_allowed(MAX_INLINE_DOWNLOAD_BYTES + 1).unwrap_err();
-        assert!(over.contains("streamed or saved"), "says what to do instead");
+        assert!(
+            over.contains("streamed or saved"),
+            "says what to do instead"
+        );
         // The case that mattered: a listing at the product's own maximum. Before the cap this was
         // a ~341 MB JS string built on the webview's main thread, reachable by scrolling past an
         // embedded file rather than by any deliberate action.
@@ -9746,6 +9852,327 @@ mod tests {
         // for it.
         up.sealing = Some(0);
         assert!(!up.idle_since(2_000));
+    }
+
+    /// A scripted [`SaveSource`]: hands out prepared chunks, and can have the session lock land
+    /// at a chosen point in the sequence, which is the schedule the real thing cannot be asked for.
+    struct ScriptedSave {
+        chunks: Vec<Vec<u8>>,
+        /// Lock the session once this many chunk fetches have completed: the lock lands while the
+        /// caller is suspended in the fetch. `None` never locks.
+        lock_after_fetches: Option<usize>,
+        /// Lock once this many chunks have actually been written. Reaches the phase after the
+        /// loop, where there is no next iteration left to notice a lock.
+        lock_after_writes: Option<usize>,
+        fetches: std::cell::Cell<usize>,
+        locked: std::cell::Cell<bool>,
+        /// `(chunks written, bytes written)` after each successful write. The observable record of
+        /// how far the save actually got, which is what distinguishes "stopped before writing"
+        /// from "wrote and then failed", since the failure path deletes the evidence on disk.
+        progress: std::cell::RefCell<Vec<(usize, u64)>>,
+    }
+
+    impl ScriptedSave {
+        fn new(chunks: Vec<Vec<u8>>) -> Self {
+            Self {
+                chunks,
+                lock_after_fetches: None,
+                lock_after_writes: None,
+                fetches: std::cell::Cell::new(0),
+                locked: std::cell::Cell::new(false),
+                progress: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn locking_after_fetch(mut self, fetches: usize) -> Self {
+            self.lock_after_fetches = Some(fetches);
+            self
+        }
+
+        fn locking_after_write(mut self, writes: usize) -> Self {
+            self.lock_after_writes = Some(writes);
+            self
+        }
+
+        /// Chunks whose bytes reached the staging file.
+        fn written(&self) -> usize {
+            self.progress
+                .borrow()
+                .iter()
+                .filter(|(done, _)| *done > 0)
+                .count()
+        }
+
+        fn total(&self) -> usize {
+            self.chunks.len()
+        }
+
+        fn size(&self) -> u64 {
+            self.chunks.iter().map(|c| c.len() as u64).sum()
+        }
+
+        fn whole(&self) -> Vec<u8> {
+            self.chunks.concat()
+        }
+
+        fn address(&self) -> [u8; 32] {
+            *Cid::of(&self.whole()).as_bytes()
+        }
+    }
+
+    impl SaveSource for ScriptedSave {
+        async fn chunk(&mut self, index: usize) -> Result<(Vec<u8>, Option<String>), String> {
+            let chunk = self
+                .chunks
+                .get(index)
+                .cloned()
+                .ok_or_else(|| format!("no chunk {index}"))?;
+            self.fetches.set(self.fetches.get() + 1);
+            // The lock lands while this fetch is outstanding, which is the whole point: it becomes
+            // true only after the await the caller was suspended in.
+            if Some(self.fetches.get()) == self.lock_after_fetches {
+                self.locked.set(true);
+            }
+            Ok((chunk, Some("a-member".into())))
+        }
+
+        async fn still_unlocked(&self) -> Result<(), String> {
+            if self.locked.get() {
+                Err("the vault is locked".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn progress(&self, done: usize, bytes_done: u64, _network: u64, _provider: Option<String>) {
+            self.progress.borrow_mut().push((done, bytes_done));
+            if Some(done) == self.lock_after_writes && done > 0 {
+                self.locked.set(true);
+            }
+        }
+    }
+
+    /// Nothing at all under `dir`, staging file or reserved name.
+    fn downloads_empty(dir: &Path) -> bool {
+        std::fs::read_dir(dir)
+            .map(|d| d.count() == 0)
+            .unwrap_or(true)
+    }
+
+    #[tokio::test]
+    async fn a_streamed_save_writes_verifies_and_publishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"first ".to_vec(), b"second".to_vec()]);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+
+        let path =
+            stream_download_to_disk(dir.path(), "notes.txt", total, size, &target, &mut source)
+                .await
+                .unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "notes.txt");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first second");
+        assert!(
+            !path.with_extension("txt.part").exists(),
+            "staging consumed"
+        );
+        assert_eq!(
+            source.progress.borrow().as_slice(),
+            &[(0, 0), (1, 6), (2, 12)],
+            "one update per chunk, plus the opening zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lock_landing_during_a_fetch_stops_the_save_before_it_writes() {
+        // The race the second session check exists for: the answer from before a fetch says
+        // nothing about the session after it. Locking during the first fetch must mean nothing is
+        // written and nothing is left behind, not a file that finishes and reveals itself.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source =
+            ScriptedSave::new(vec![b"aaaa".to_vec(), b"bbbb".to_vec()]).locking_after_fetch(1);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+
+        let err =
+            stream_download_to_disk(dir.path(), "secret.txt", total, size, &target, &mut source)
+                .await
+                .unwrap_err();
+
+        assert!(err.contains("locked"), "reports why: {err}");
+        assert!(
+            downloads_empty(dir.path()),
+            "no partial file, no reserved name"
+        );
+        assert_eq!(
+            source.fetches.get(),
+            1,
+            "it stopped rather than carrying on"
+        );
+        // The load-bearing assertion. Without the check *after* the fetch, the chunk already in
+        // hand would be written and only the next iteration would notice the lock; the file would
+        // still be cleaned up, so disk state alone cannot tell the two apart. This can: decrypted
+        // bytes must never reach the disk once the session has closed.
+        assert_eq!(
+            source.written(),
+            0,
+            "no plaintext was written after the lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lock_after_the_last_chunk_still_stops_the_rename() {
+        // The subtle half: once the loop has finished there is no next iteration to notice a lock,
+        // so without the check before the rename the file would be published under its real name
+        // and Downloads opened, after the session had closed.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"only chunk".to_vec()]).locking_after_write(1);
+        let (total, size, target) = (source.total(), source.size(), source.address());
+
+        let err =
+            stream_download_to_disk(dir.path(), "last.txt", total, size, &target, &mut source)
+                .await
+                .unwrap_err();
+
+        assert!(err.contains("locked"), "{err}");
+        assert_eq!(
+            source.written(),
+            1,
+            "the whole file did reach the staging file"
+        );
+        assert!(
+            downloads_empty(dir.path()),
+            "but the final name never appeared and the staging file was removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_save_that_fails_its_integrity_check_leaves_nothing_behind() {
+        // Chunks that individually arrive fine but do not reassemble to the requested address:
+        // a manifest that lied, or chunks served in the wrong order.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"real bytes".to_vec()]);
+        let (total, size) = (source.total(), source.size());
+        let wrong = *Cid::of(b"a different file").as_bytes();
+
+        let err = stream_download_to_disk(dir.path(), "x.bin", total, size, &wrong, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("integrity"), "{err}");
+        assert!(
+            downloads_empty(dir.path()),
+            "unverified bytes are not left on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_save_stops_when_the_chunks_exceed_the_declared_size() {
+        // The manifest-amplification defence at the write boundary: even if a listing's layout
+        // check were bypassed, the saver stops before writing past what the file declared.
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"aaaa".to_vec(), b"bbbb".to_vec()]);
+        let (total, target) = (source.total(), source.address());
+
+        let err = stream_download_to_disk(dir.path(), "small.bin", total, 5, &target, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("more data than it declares"), "{err}");
+        assert!(downloads_empty(dir.path()));
+    }
+
+    #[tokio::test]
+    async fn a_save_stops_when_the_chunks_fall_short_of_the_declared_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScriptedSave::new(vec![b"aaaa".to_vec()]);
+        let (total, target) = (source.total(), source.address());
+
+        let err = stream_download_to_disk(dir.path(), "short.bin", total, 99, &target, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("less data than it declares"), "{err}");
+        assert!(downloads_empty(dir.path()));
+    }
+
+    /// An `AppState` holding one pending upload under `key`, in the shape `finish` would see.
+    async fn state_with_upload(key: &UploadKey, up: PendingUpload) -> AppState {
+        let state = AppState::default();
+        state.uploads.lock().await.insert(key.clone(), up);
+        state
+    }
+
+    #[tokio::test]
+    async fn a_lock_before_the_index_post_ends_the_upload_instead_of_publishing_it() {
+        // The upload-side twin of the save race. Everything is sealed and complete, and the only
+        // step left is the group-visible one. A lock arriving here must end the transfer, not
+        // publish it a moment later; and it must take the upload with it rather than leaving a
+        // reservation nothing will ever close.
+        let key = (1u64, "tok".to_string());
+        let (complete, _) = stream(CHUNK_BYTES);
+        assert!(complete.is_complete(), "the upload was ready to publish");
+        let state = state_with_upload(&key, complete).await;
+
+        let err = take_publishable_upload(&state, &key, true)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("locked"), "{err}");
+        assert!(
+            state.uploads.lock().await.is_empty(),
+            "and the upload is gone, not left pending across the lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_complete_upload_publishes_and_an_incomplete_one_is_destroyed() {
+        let key = (1u64, "tok".to_string());
+        let (complete, _) = stream(CHUNK_BYTES * 2 + 3);
+        let state = state_with_upload(&key, complete).await;
+
+        let taken = take_publishable_upload(&state, &key, false).await.unwrap();
+        assert!(taken.is_complete());
+        assert!(state.uploads.lock().await.is_empty(), "taken, not copied");
+
+        // Removed twice is not publishable twice.
+        assert!(take_publishable_upload(&state, &key, false).await.is_err());
+
+        // A short upload is refused and destroyed rather than published under a whole-file address
+        // that was never sent.
+        let mut short = pending(CHUNK_BYTES as u64 * 2);
+        short
+            .admit_slice(0, &vec![0u8; UPLOAD_SLICE_BYTES])
+            .unwrap();
+        let state = state_with_upload(&key, short).await;
+        let err = take_publishable_upload(&state, &key, false)
+            .await
+            .unwrap_err();
+        assert!(err.contains("did not send every chunk"), "{err}");
+        assert!(state.uploads.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn locking_the_session_drains_every_upload_in_flight() {
+        // Uploads are session state. A lock must not leave one holding a slot (and its staged
+        // chunks) into whatever comes next.
+        let state = AppState::default();
+        for token in ["a", "b"] {
+            let (up, _) = stream(CHUNK_BYTES);
+            state
+                .uploads
+                .lock()
+                .await
+                .insert((1, token.to_string()), up);
+        }
+        *state.session_resumable.lock().await = true;
+
+        lock_session_inner(&state, None).await.unwrap();
+
+        assert!(state.uploads.lock().await.is_empty(), "drained by the lock");
+        assert!(
+            !*state.session_resumable.lock().await,
+            "and the session closed"
+        );
     }
 
     #[test]

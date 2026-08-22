@@ -454,7 +454,8 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
         let cid = Cid::of(bytes);
         let path = staged_target(&self.dir, &cid)?;
         let sealed = seal(&self.key, bytes, &mut self.rng)?;
-        std::fs::write(&path, encode_sealed(&sealed)).map_err(|e| StorageError::Io(e.to_string()))?;
+        std::fs::write(&path, encode_sealed(&sealed))
+            .map_err(|e| StorageError::Io(e.to_string()))?;
         Ok(cid)
     }
 
@@ -505,7 +506,10 @@ mod tests {
         // Promotion is what makes it real, and it is a move: nothing stays behind to sweep.
         assert!(store.promote_staged(&cid).unwrap());
         assert!(store.has(&cid));
-        assert_eq!(store.get(&cid).unwrap().as_deref(), Some(&b"chunk of an upload"[..]));
+        assert_eq!(
+            store.get(&cid).unwrap().as_deref(),
+            Some(&b"chunk of an upload"[..])
+        );
         assert_eq!(store.cids(), vec![cid]);
         assert!(!store.promote_staged(&cid).unwrap(), "nothing left staged");
         assert_eq!(store.clear_staging().unwrap(), 0);
@@ -523,7 +527,11 @@ mod tests {
         store.put_staged(b"two").unwrap();
         assert_eq!(store.clear_staging().unwrap(), 2);
         assert!(store.has(&cid), "and it still leaves held content alone");
-        assert_eq!(store.clear_staging().unwrap(), 0, "sweeping twice is a no-op");
+        assert_eq!(
+            store.clear_staging().unwrap(),
+            0,
+            "sweeping twice is a no-op"
+        );
     }
 
     #[test]
@@ -562,8 +570,16 @@ mod tests {
 
         let mut reopened =
             SealingBlobStore::open(dir.path(), key, ChaCha20Rng::seed_from_u64(3)).unwrap();
-        assert_eq!(reopened.cids(), vec![published], "staged never counted as held");
-        assert_eq!(reopened.clear_staging().unwrap(), 2, "both were still on disk");
+        assert_eq!(
+            reopened.cids(),
+            vec![published],
+            "staged never counted as held"
+        );
+        assert_eq!(
+            reopened.clear_staging().unwrap(),
+            2,
+            "both were still on disk"
+        );
         assert!(reopened.has(&published), "the published file is untouched");
         assert_eq!(
             reopened.get(&published).unwrap().as_deref(),
