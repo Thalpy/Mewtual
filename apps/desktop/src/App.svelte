@@ -407,7 +407,13 @@
     liveryDraft = emptyLivery();
     liveryDraftFor = null;
     if (liveryLoaded && targetServer !== null) seedLiveryDraft(targetServer);
-    if (page === "invites" && targetServer !== null) void refreshInviteFor(targetServer);
+    // Deliberately no invite fetch here: the stored invite stays hidden until the user generates
+    // one (get_invite re-wraps helper plans, and showing a code nobody asked for invites stale
+    // copies). The precheck is read-only: it only answers "what could an invite reach right now?".
+    if (page === "invites" && targetServer !== null) {
+      inviteRevealed = null;
+      void precheckInviteRoutes(targetServer);
+    }
   }
   async function renameServer() {
     const name = serverNameDraft.trim();
@@ -1923,6 +1929,10 @@
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
+  // The create-server product question, in product terms (see docs/design-zeroconf-reachability
+  // and the connectivity mockup): a friend circle connects members directly; a hosted community
+  // runs through a node the founder operates. Hosted maps onto the relay field below.
+  let serverMode = $state<"friends" | "hosted">("friends");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
   // Optional rendezvous multiaddr: when set, the founder registers there so a joiner discovers
@@ -4547,6 +4557,10 @@
   }
 
   async function found() {
+    if (serverMode === "hosted" && !relay.trim()) {
+      error = "A hosted community runs through a node you operate: paste its address, or pick \"People I know\" instead.";
+      return;
+    }
     busy = true;
     error = "";
     try {
@@ -11266,18 +11280,96 @@
   }
 
   let mintingInvite = $state(false);
+  // What the backend can say about routes right now, without minting anything. The scope
+  // booleans plus the mapping status line, and the LAN socket so the port-forward suggestion
+  // can name the exact values to type into a router.
+  type InviteRouteCheck = {
+    public_direct: boolean;
+    relay: boolean;
+    rendezvous: boolean;
+    lan: boolean;
+    lan_ip: string;
+    port: number;
+    waiting: boolean;
+    mapping: string;
+  };
+  // The latest route check, driving the "Your network / Internet" scope chips and the manual
+  // port-forward suggestion. Refreshed on invite-page open and during each generate.
+  let invitePre = $state<InviteRouteCheck | null>(null);
+  // The mid-generate progress bar; null outside a generate.
+  let inviteCheck = $state<{ pct: number; label: string } | null>(null);
+  // Which server's invite the user generated this panel visit. The stored invite is never shown
+  // on page open: generating one is the deliberate act, so the panel starts with the button.
+  let inviteRevealed = $state<number | null>(null);
+  // The backend's router-mapping window is 25s; give the bar a beat past it.
+  const INVITE_CHECK_MS = 26_000;
+
+  // The invite page's precheck: show what an invite could reach before one is minted, polling
+  // while the router-mapping window is still open. Read-only on the backend, so opening the
+  // page can never create bearer invites or rendezvous registrations.
+  let invitePreRunning = $state(false);
+  async function precheckInviteRoutes(server: number) {
+    if (invitePreRunning) return; // one poll loop at a time; re-run waits for the current one
+    invitePre = null;
+    invitePreRunning = true;
+    const started = Date.now();
+    try {
+      for (;;) {
+        if (mintingInvite) return; // the generate flow owns the polling now
+        let check: InviteRouteCheck;
+        try {
+          check = await invoke<InviteRouteCheck>("check_invite_routes", { server });
+        } catch {
+          return; // no chips is better than wrong chips
+        }
+        if (!showServerSettings || serverSettingsPage !== "invites" || activeServerId !== server) return;
+        invitePre = check;
+        if (check.public_direct || check.relay || !check.waiting || Date.now() - started >= INVITE_CHECK_MS) return;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    } finally {
+      invitePreRunning = false;
+    }
+  }
+
   // Mint a fresh single-use invite on demand (owner or admin: the backend gates on can_invite).
-  // The new invite carries the live bootstrap address, so it works even after a restart changed
-  // the listen port. An admin's invitee is owner-serialized (admitted when the owner is online).
+  // Before minting, poll the route check so the invite signs the public address the router is
+  // about to open, instead of the LAN-only set from the seconds before UPnP answered. The bar
+  // fills across the mapping window and finishes early the moment a shareable route exists.
+  // An admin's invitee is owner-serialized (admitted when the owner is online).
   async function generateInvite() {
     const server = activeServerId;
     if (server === null || !cur) return;
     mintingInvite = true;
+    inviteCheck = { pct: 4, label: "Checking how people can reach you…" };
+    const started = Date.now();
     try {
+      for (;;) {
+        let check: InviteRouteCheck;
+        try {
+          check = await invoke<InviteRouteCheck>("check_invite_routes", { server });
+        } catch {
+          break; // the check is advisory: minting proceeds without a verdict
+        }
+        invitePre = check;
+        const elapsed = Date.now() - started;
+        // Rendezvous alone is discovery, not reachability, so it does not end the wait early.
+        if (check.public_direct || check.relay || !check.waiting || elapsed >= INVITE_CHECK_MS) break;
+        inviteCheck = {
+          pct: Math.max(4, Math.min(95, (elapsed / INVITE_CHECK_MS) * 100)),
+          label: "Asking your router for a public route (UPnP / PCP / NAT-PMP)…",
+        };
+        await new Promise((r) => setTimeout(r, 900));
+      }
+      inviteCheck = { pct: 100, label: "Route check done: generating the invite…" };
       const invite = await updateInviteFor(server, true);
-      if (invite !== undefined && activeServerId === server) copied = false;
+      if (invite !== undefined && activeServerId === server) {
+        copied = false;
+        inviteRevealed = server;
+      }
     } finally {
       mintingInvite = false;
+      inviteCheck = null;
     }
   }
 
@@ -14798,35 +14890,72 @@
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
       </label>
+      <div class="field">
+        <span class="muted">Who is this server for?</span>
+        <div class="mode-cards">
+          <label class="mode-card" class:selected={serverMode === "friends"}>
+            <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
+            <span class="mc-pick">{serverMode === "friends" ? "◉" : "○"}</span>
+            <span class="mc-title">People I know</span>
+            <span class="mc-sub">friend circle</span>
+            <p>You connect to each other directly. Nothing to set up, nothing to run, no one in charge of the wires.</p>
+            <p class="mc-trade">Members may see each other's IP addresses, and bans depend on everyone's app playing fair.</p>
+            <span class="mc-foot">shields you from an operator · trusts your friends</span>
+          </label>
+          <label class="mode-card" class:selected={serverMode === "hosted"}>
+            <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
+            <span class="mc-pick">{serverMode === "hosted" ? "◉" : "○"}</span>
+            <span class="mc-title">People I don't know</span>
+            <span class="mc-sub">hosted community</span>
+            <p>Everyone connects through a node you run. Removing someone takes effect instantly: the group changes its keys, and they're locked out of everything said afterwards.</p>
+            <p class="mc-trade">You, the operator, can see who is a member and who talks to whom, never what is said.</p>
+            <span class="mc-foot">removal that holds · trusts you</span>
+          </label>
+        </div>
+        <p class="muted small">Neither is the safer one: they guard against different people.</p>
+      </div>
+      {#if serverMode === "hosted"}
+        <label class="field">
+          <span class="muted small">
+            Your node's address: a hosted community runs through a small always-on machine you
+            operate. Set one up with <span class="fp">catcomsctl relay</span>; if you don't have
+            one yet, pick "People I know" instead.
+          </span>
+          <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
+        </label>
+      {/if}
       <details>
-        <summary>Network (optional)</summary>
+        <summary>Advanced: connectivity</summary>
         <label class="field">
-          <span class="muted">
-            Reachable address so others can join over a network: your LAN IP (e.g.
-            192.168.1.5), or a public IP / host:port if port-forwarded. Leave blank for
-            same-machine only.
+          <span class="muted small">
+            Known address (optional): if this machine already has a reachable address, a LAN IP
+            or a public host:port you've forwarded, paste it to skip discovery.
           </span>
-          <input bind:value={advertise} placeholder="LAN/public IP (optional)" />
+          <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
         </label>
+        {#if serverMode === "friends"}
+          <label class="field">
+            <span class="muted small">
+              Relay node (optional): a relay's address makes this server reachable over the
+              internet with no port-forward.
+            </span>
+            <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/… (optional)" />
+          </label>
+        {/if}
         <label class="field">
-          <span class="muted">
-            Relay address (optional): paste a relay node's multiaddr to be reachable over
-            the internet with no port-forward (zero-config NAT traversal).
-          </span>
-          <input bind:value={relay} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-        </label>
-        <label class="field">
-          <span class="muted">
-            Rendezvous address (optional): paste a rendezvous node's multiaddr to register there,
-            so people can join with <em>just the invite</em> (no address needed). Saved as your
-            default.
+          <span class="muted small">
+            Introducer node (optional): register at a rendezvous node so people can join with
+            <em>just the invite</em>, no address needed. Saved as your default.
           </span>
           <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
         </label>
       </details>
-      <button onclick={found} disabled={busy}>
-        {busy ? "Working…" : "Found a server"}
-      </button>
+      <div class="pc-actions">
+        <button onclick={found} disabled={busy}>
+          {busy ? "Working…" : "Found server"}
+        </button>
+        <span class="aside muted small">most people never open Advanced</span>
+      </div>
       <hr />
       <p class="muted">…or join an existing server with an invite:</p>
       <textarea
@@ -18875,7 +19004,31 @@
                 {#if myRole === "admin"}
                   <p class="muted small">As an admin, the newcomer is admitted once the owner is next online.</p>
                 {/if}
-                {#if cur?.invite}
+                {#if invitePre}
+                  {@const internetReady = invitePre.public_direct || invitePre.relay}
+                  <div class="invite-scope">
+                    <span class="scope-chip" class:ok={invitePre.lan}>Your network: {invitePre.lan ? "ready" : "unknown"}</span>
+                    <span class="scope-chip" class:ok={internetReady} class:warn={!internetReady && !invitePre.waiting}>
+                      Internet: {internetReady ? "ready" : invitePre.waiting ? "checking…" : "not reachable yet"}
+                    </span>
+                    <button
+                      class="ghost small"
+                      disabled={invitePreRunning || mintingInvite}
+                      onclick={() => { if (activeServerId !== null) void precheckInviteRoutes(activeServerId); }}
+                    >{invitePreRunning ? "Checking…" : "Run check again"}</button>
+                  </div>
+                  {#if !internetReady && !invitePre.waiting}
+                    <p class="muted small">
+                      Automatic router setup got no answer, so an invite made now only works for someone on
+                      your own network. You can usually fix that by enabling UPnP on your
+                      router{#if invitePre.port > 0}, or by forwarding port {invitePre.port} (TCP and UDP) to
+                      this computer{invitePre.lan_ip ? ` at ${invitePre.lan_ip}` : ""}{/if}. If your provider
+                      shares one public address between homes (CGNAT), forwarding won't help; a relay or
+                      switchboard is the way through.
+                    </p>
+                  {/if}
+                {/if}
+                {#if cur?.invite && inviteRevealed === cur.id}
                   <textarea class="invite-code" readonly rows="3" value={wrapInvite(cur.invite, cur.id)}></textarea>
                   {#if wrapInvite(cur.invite, cur.id).length <= QR_MAX_CHARS}
                     <canvas class="qr-canvas" use:qr={wrapInvite(cur.invite, cur.id)}></canvas>
@@ -18884,14 +19037,44 @@
                     <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
                     {#if canInvite}
                       <button class="ghost" disabled={mintingInvite} onclick={generateInvite}>
-                        {mintingInvite ? "Generating…" : "Generate new invite"}
+                        {!mintingInvite ? "Generate new invite" : inviteCheck && inviteCheck.pct < 100 ? "Checking route…" : "Generating…"}
                       </button>
                     {/if}
                   </div>
                 {:else if canInvite}
                   <button disabled={mintingInvite} onclick={generateInvite}>
-                    {mintingInvite ? "Generating…" : "Generate an invite"}
+                    {!mintingInvite ? "Generate an invite" : inviteCheck && inviteCheck.pct < 100 ? "Checking route…" : "Generating…"}
                   </button>
+                {/if}
+                {#if inviteCheck}
+                  <div class="invite-check">
+                    <div class="invite-check-bar"><span style={`width:${inviteCheck.pct}%`}></span></div>
+                    <p class="muted small">{inviteCheck.label}</p>
+                  </div>
+                {/if}
+              </section>
+              <section class="set-section">
+                <h3>If their join fails: meet in the middle</h3>
+                <p class="muted small">
+                  When the invite alone can't get through, the person joining is shown a one-time
+                  connection reply (a code starting with <span class="fp">mewtual-reply-v1</span>)
+                  to send back to you in the same chat where you sent the invite. Paste it here and
+                  this app dials them instead; their app must still be open and waiting.
+                </p>
+                <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
+                <div class="pc-actions">
+                  <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>
+                    {joinReplyApplying ? "Dialling…" : "Connect"}
+                  </button>
+                  {#if joinReplyNeedsReplace}
+                    <button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>
+                      Confirm different joiner
+                    </button>
+                  {/if}
+                  <span class="muted small">codes expire about a minute after they're made</span>
+                </div>
+                {#if joinReplyNeedsReplace}
+                  <p class="muted small fail-t">This invite already has a different active joiner. Replace it only if you deliberately switched people.</p>
                 {/if}
               </section>
               {:else}

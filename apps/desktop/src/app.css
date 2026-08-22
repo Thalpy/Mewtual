@@ -2084,6 +2084,48 @@ button.primary:hover:not(:disabled) {
 
 .invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* The pre-mint route check: a thin bar that fills across the router-mapping window (finishing
+   early when a shareable route lands), then an honest verdict beside the fresh code. */
+.invite-check {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.invite-check-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-elev);
+  overflow: hidden;
+}
+
+.invite-check-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.9s linear;
+}
+
+/* The "Your network / Internet" scope chips shown by the pre-mint check. */
+.invite-scope {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0.25rem 0;
+}
+
+.scope-chip {
+  font-size: 0.7rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border, currentColor);
+  color: var(--muted);
+}
+
+.scope-chip.ok { color: var(--ok); border-color: var(--ok); }
+.scope-chip.warn { color: var(--warn); border-color: var(--warn); }
+
 /* Generic inline segment (status-bar cells, the feedback kind switcher).
    Container-scoped rules below/above refine it; this is just the base row. */
 .seg {
@@ -3354,7 +3396,75 @@ button.primary:hover:not(:disabled) {
 .pc-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
+.pc-actions .aside { margin-left: auto; color: var(--faint); }
+
+/* Create-server mode cards: the one product question, a radio pair wearing card clothes
+   (connectivity design pass, surface 1). The real radio is visually hidden; the card is the
+   label, so keyboard and screen-reader behaviour stay native. */
+.mode-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+@media (max-width: 560px) {
+  .mode-cards { grid-template-columns: 1fr; }
+}
+.mode-card {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--bg-0);
+  padding: 0.7rem 0.8rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  text-align: left;
+}
+.mode-card:hover { border-color: var(--faint); }
+.mode-card.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent), 0 0 14px color-mix(in oklab, var(--accent) 18%, transparent);
+}
+.mode-card .mc-radio {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.mode-card:has(.mc-radio:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mode-card .mc-title { font-weight: 600; font-size: 0.95rem; }
+.mode-card .mc-sub {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.mode-card.selected .mc-sub { color: var(--accent); }
+.mode-card p { margin: 0; font-size: 0.8rem; color: var(--text-2); line-height: 1.45; }
+.mode-card .mc-trade { color: var(--muted); }
+.mode-card .mc-foot {
+  margin-top: auto;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  text-transform: uppercase;
+}
+.mode-card .mc-pick {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--faint);
+}
+.mode-card.selected .mc-pick { color: var(--accent); }
 
 /* Personal transmission frames: compact terminal tiles in the profile editor. */
 .message-frame-field {

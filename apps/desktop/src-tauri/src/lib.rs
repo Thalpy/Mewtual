@@ -27,7 +27,8 @@ use catcoms_app::{
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
-    addr_is_globally_routable, addr_is_loopback, addr_is_undialable, keypair_from_seed,
+    addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
+    keypair_from_seed,
     phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
     validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, JoinReply, MeshHandle,
     MeshObservationSnapshot, MeshService, PortMappingMechanism, PortMappingSnapshot,
@@ -4477,6 +4478,92 @@ fn invite_routes_still_current(
         && !invite_addresses_changed(expected_rendezvous, current_rendezvous)
 }
 
+/// One poll of "would an invite minted right now work off this network?". Drives the invite
+/// page's route-check progress: the frontend polls while `waiting` holds, then mints.
+///
+/// Read-only by design: it inspects the live bootstrap set and the router-mapping fold and mints
+/// nothing, so polling it cannot create bearer invites or rendezvous registrations. The webview
+/// learns the scope booleans, the mapping status line, and the LAN socket: the last is disclosed
+/// so the port-forward suggestion can name the exact values to type into a router, and the
+/// connectivity panel already shows these same addresses via `get_connectivity`.
+#[derive(Debug, Clone, Default, Serialize)]
+struct InviteRouteCheck {
+    /// The live bootstrap set contains a globally routable direct address (mapped, advertised,
+    /// or a routable IPv6). "Available", not "verified": AutoNAT confirmation is separate.
+    public_direct: bool,
+    /// The live bootstrap set contains a relay circuit whose relay host is publicly routable.
+    relay: bool,
+    /// The server registered at a rendezvous, so the invite is discovery-enabled.
+    rendezvous: bool,
+    /// The live bootstrap set contains a LAN (private, non-loopback) address, so an invite works
+    /// for someone on the same network.
+    lan: bool,
+    /// The LAN IP a manual port-forward should target; empty when no LAN address exists.
+    lan_ip: String,
+    /// The listen port from the LAN entry, for the same suggestion; 0 when unknown.
+    port: u16,
+    /// The router-mapping window is still open with no verdict; worth polling again.
+    waiting: bool,
+    /// The router-mapping status line, same copy as the connectivity panel.
+    mapping: String,
+}
+
+#[tauri::command]
+async fn check_invite_routes(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<InviteRouteCheck, String> {
+    require_unlocked_session(&state).await?;
+    let (bootstrap, rendezvous) = {
+        let servers = state.servers.lock().await;
+        let e = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        (e.bootstrap.clone(), !e.rendezvous.is_empty())
+    };
+    let mapping = state
+        .upnp
+        .lock()
+        .await
+        .get(&server)
+        .cloned()
+        .unwrap_or_else(|| PORT_MAPPING_NOT_ATTEMPTED.to_string());
+    let mut check = InviteRouteCheck {
+        rendezvous,
+        waiting: mapping == PORT_MAPPING_WAITING,
+        mapping,
+        ..Default::default()
+    };
+    for address in &bootstrap {
+        let Ok(addr) = address.parse::<Multiaddr>() else {
+            continue;
+        };
+        // `addr_is_globally_routable` judges every IP literal in the multiaddr, so for a circuit
+        // address it is the relay host being judged: a LAN-hosted relay earns no confidence here,
+        // matching `switchboard_route_usable`.
+        if addr_is_globally_routable(&addr) {
+            if address.contains("/p2p-circuit") {
+                check.relay = true;
+            } else {
+                check.public_direct = true;
+            }
+        } else if addr_is_private(&addr) && !addr_is_loopback(&addr) {
+            check.lan = true;
+            if check.lan_ip.is_empty() {
+                for part in addr.iter() {
+                    match part {
+                        Protocol::Ip4(ip) => check.lan_ip = ip.to_string(),
+                        Protocol::Ip6(ip) => check.lan_ip = ip.to_string(),
+                        Protocol::Tcp(p) | Protocol::Udp(p) => check.port = p,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    Ok(check)
+}
+
 /// Rename a server; a **local** display label in this client's rail (server names are not
 /// shared between members), persisted to the registry.
 #[tauri::command]
@@ -8215,6 +8302,7 @@ pub fn run() {
             get_channels,
             get_invite,
             mint_invite_fresh,
+            check_invite_routes,
             rename_server,
             get_members,
             set_profile,
