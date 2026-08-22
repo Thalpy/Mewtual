@@ -11,7 +11,8 @@
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "test:flows": "node scripts/flow-check.mjs",
     "tauri": "tauri",
-    "fix-brick": "node scripts/fix-brick.mjs"
+    "fix-brick": "node scripts/fix-brick.mjs",
+    "notices": "node scripts/gen-notices.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

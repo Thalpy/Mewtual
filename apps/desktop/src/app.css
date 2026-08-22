@@ -2084,6 +2084,26 @@ button.primary:hover:not(:disabled) {
 
 .invite-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* Third-party licence text: half a megabyte of it, so it scrolls in its own box rather than
+   turning the settings pane into an endless page. Selectable, because someone checking a
+   licence obligation needs to be able to copy the clause. */
+.notices-text {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
 /* The pre-mint route check: a thin bar that fills across the router-mapping window (finishing
    early when a shareable route lands), then an honest verdict beside the fresh code. */
 .invite-check {

@@ -40,6 +40,13 @@ If you distribute or make a covered work available to anyone, you must, at no ch
 3. preserve all copyright, attribution, licensing, and required notices supplied with the
    software.
 
+Third-party components remain governed solely by their own licence terms. The same-terms
+requirement in condition 2 above reaches only those parts of the complete corresponding source
+that are not third-party components, and nothing in these terms requires or permits you to place
+a restriction on a third-party component that its own licence forbids. Where a third-party
+licence requires you to pass its text, notices, or source offer on to your recipients, doing so
+satisfies these terms rather than conflicting with them.
+
 If you modify a covered work and allow anyone other than you to interact with its functionality
 over a computer network, you must give every such user a prominent and readily accessible way
 to obtain the complete corresponding source under the same conditions.

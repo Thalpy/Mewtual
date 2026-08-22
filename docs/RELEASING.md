@@ -80,8 +80,14 @@ new one and must be reinstalled by hand. Rotate only if the key is lost or expos
    line agree: `apps/desktop/package.json`, `apps/desktop/src-tauri/Cargo.toml`, and
    `apps/desktop/src-tauri/tauri.conf.json`.
 2. Move the `[Unreleased]` entries in [`CHANGELOG.md`](../CHANGELOG.md) under the new version.
-3. Commit, then run the **Release desktop alpha** workflow from the Actions tab.
-4. The workflow leaves a **draft** release holding the installer, its `.sig`, and `latest.json`.
+3. If any dependency changed since the last release, regenerate the attribution file:
+   `npm --prefix apps/desktop run notices` (needs
+   `cargo install cargo-about --locked --features cli` once). It is committed rather than built
+   in CI, so a stale one ships silently: regenerate whenever `Cargo.lock` or
+   `package-lock.json` moved. Most licences in the tree require their text to travel with the
+   binary, so this is an obligation, not paperwork. Settings → About & Licences displays it.
+4. Commit, then run the **Release desktop alpha** workflow from the Actions tab.
+5. The workflow leaves a **draft** release holding the installer, its `.sig`, and `latest.json`.
    Review it, edit the release body if needed, and publish.
 
 If the draft has **no `.sig` and no `latest.json`**, the signing secrets or the

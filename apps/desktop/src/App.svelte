@@ -252,6 +252,7 @@
   type SetPage = { id: string; label: string; cat: string; danger?: boolean };
   const USER_SET_PAGES: SetPage[] = [
     { id: "guide", label: "Feature Guide", cat: "Help" },
+    { id: "about", label: "About & Licences", cat: "Help" },
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
@@ -11310,6 +11311,42 @@
     }
   }
 
+  // --- third-party notices -----------------------------------------------------------------
+  // Most of the licences Mewtual's dependencies ship under (MIT, BSD, ISC, Apache, MPL) require
+  // their text to travel with the binary, so scripts/gen-notices.mjs bakes it into a file vite
+  // copies next to the app. It is over half a megabyte: fetched on demand, never inlined into
+  // the bundle, so the app does not carry it in memory for the 99% of sessions nobody asks.
+  let noticesText = $state("");
+  let noticesBusy = $state(false);
+  let noticesError = $state("");
+
+  // Hands the URL to the user's browser. Never a plain anchor: navigating this webview away
+  // from the app replaces the whole UI and leaves the window softlocked.
+  async function openRepo() {
+    try {
+      await invoke("open_external_url", { url: "https://github.com/Thalpy/Mewtual" });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function loadNotices() {
+    if (noticesBusy || noticesText) return;
+    noticesBusy = true;
+    noticesError = "";
+    try {
+      const res = await fetch("THIRD-PARTY-NOTICES.txt");
+      if (!res.ok) throw new Error(`${res.status}`);
+      noticesText = await res.text();
+    } catch (e) {
+      // A source build that skipped "npm run notices" has no such file. Say what is missing
+      // rather than showing a bare fetch error.
+      noticesError = `Could not load the notices file (${e}). Official builds ship it; a build from source generates it with "npm run notices".`;
+    } finally {
+      noticesBusy = false;
+    }
+  }
+
   // "Later" hides it for this run; the next launch offers it again. "Skip" retires this version
   // for good: it stays reachable from Settings, so refusing an update is never a dead end.
   function dismissUpdate(forever: boolean) {
@@ -18754,6 +18791,46 @@
                   <button class="ghost" disabled={updateBusy} onclick={() => checkForUpdate(true)}>Check for updates</button>
                   <span class="muted small">Current version: {APP_VERSION}</span>
                 </div>
+              </section>
+            {:else if settingsPage === "about"}
+              <div class="stx-crumb">SETTINGS // HELP // ABOUT &amp; LICENCES</div>
+              <h1>About &amp; Licences</h1>
+              <section class="set-section">
+                <h3>Mewtual {APP_VERSION}</h3>
+                <p class="muted small">
+                  Peer-to-peer, end-to-end encrypted communities with no accounts and no company
+                  in the middle. This is alpha software: it has not had an independent security
+                  audit, so use it for testing with people you trust.
+                </p>
+                <p class="muted small">
+                  Mewtual is source-available under the Mewtual Combined Licence Terms 1.0.
+                  In short: noncommercial use, no use for training or operating AI systems, and
+                  anyone you pass a build to must be able to get its complete source under those
+                  same terms. The binding text is the LICENSE file in the source, not this summary.
+                </p>
+                <div class="invite-actions">
+                  <button type="button" class="ghost" onclick={() => openRepo()}>Open the project repository</button>
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Third-party notices</h3>
+                <p class="muted small">
+                  Mewtual is built on open-source components, and each one stays governed by its
+                  own licence rather than by Mewtual's. Their licence texts and copyright notices
+                  are reproduced here in full, which is what most of those licences ask of anyone
+                  distributing a build.
+                </p>
+                {#if noticesText}
+                  <pre class="notices-text">{noticesText}</pre>
+                {:else}
+                  <div class="invite-actions">
+                    <button type="button" class="ghost" disabled={noticesBusy} onclick={loadNotices}>
+                      {noticesBusy ? "Loading…" : "Show notices"}
+                    </button>
+                    <span class="muted small">About half a megabyte of licence text</span>
+                  </div>
+                {/if}
+                {#if noticesError}<p class="muted small">{noticesError}</p>{/if}
               </section>
             {/if}
           </div>
