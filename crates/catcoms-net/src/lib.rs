@@ -1955,6 +1955,19 @@ pub struct MediaPortMapping {
     keepalive: Option<portmapper::Client>,
 }
 
+// `portmapper::Client` is a live handle, not data; report only whether one is retained.
+impl std::fmt::Debug for MediaPortMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaPortMapping")
+            .field("external", &self.external)
+            .field("mechanism", &self.mechanism)
+            .field("confirmed", &self.confirmed)
+            .field("local_port", &self.local_port)
+            .field("keepalive", &self.keepalive.is_some())
+            .finish()
+    }
+}
+
 impl MediaPortMapping {
     /// Release the route. Best-effort for UPnP (the bounded lease dies on its own regardless);
     /// dropping the retained client is the whole release for PCP/NAT-PMP.
