@@ -4,7 +4,7 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
-## [0.2.0-alpha.3] - 2026-08-22
+## [0.3.0-alpha.3] - 2026-08-22
 
 First release cut by the signed release pipeline: installed copies of this version and later
 update themselves in-app. Copies installed from the hand-uploaded alpha.2 builds have no update
