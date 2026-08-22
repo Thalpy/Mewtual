@@ -54,7 +54,10 @@
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
+  import {
+    bufferIce, directionIdle, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState, videoSlotPlan,
+    VIDEO_BITRATE, type SlotDirection, type VideoKind,
+  } from "./voice-signaling";
   import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
     mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, resolveCallName, stallChip,
@@ -8683,6 +8686,9 @@
     makingOffer: boolean;
     ignoreOffer: boolean;
     lastRetry: number;
+    // This peer's one video slot. Held rather than looked up, because once a video stops the
+    // sender has no track to recognise it by and searching for one finds nothing.
+    vidSender: RTCRtpSender | null;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
@@ -8965,7 +8971,10 @@
     if (!track) return;
     track.enabled = !callMuted; // a hot swap must never quietly un-mute you
     for (const p of Object.values(callPeers)) {
-      const s = p.pc.getSenders().find((x) => x.track?.kind === "audio") ?? p.pc.getSenders()[0];
+      // An empty sender is a fair target (a swap while muted), but never the video slot: parked
+      // or not, handing it an audio track is a kind mismatch that throws.
+      const s = p.pc.getSenders().find((x) => x.track?.kind === "audio")
+        ?? p.pc.getSenders().find((x) => !x.track && x !== p.vidSender);
       if (s) { try { await s.replaceTrack(track); } catch { /* edge gone */ } }
     }
     if (localStream) for (const t of localStream.getTracks()) t.stop();
@@ -9099,12 +9108,18 @@
     b.tokens -= 1;
     return true;
   }
+  // Which video slot I am filling, in the wire's own vocabulary. One function, because the same
+  // number has to go out on the data channel AND on every room heartbeat: a heartbeat that omits
+  // it is read as a retraction by the peer that folds it in.
+  function myVid(): number {
+    return myVideo === "cam" ? 1 : myVideo === "screen" ? 2 : 0;
+  }
   function instState(): string {
     return JSON.stringify({
       t: "s",
       mic: callMuted ? 1 : 0,
       inst: instRxMuted ? 1 : 0,
-      vid: myVideo === "cam" ? 1 : myVideo === "screen" ? 2 : 0,
+      vid: myVid(),
     });
   }
   function pushInstState() {
@@ -9117,7 +9132,7 @@
     let m: Record<string, unknown>;
     try { m = JSON.parse(raw) as Record<string, unknown>; } catch { return; }
     if (m.t === "s") {
-      peerMeta = { ...peerMeta, [fp]: { mic: m.mic === 1, inst: m.inst === 1, vid: typeof m.vid === "number" ? m.vid : 0 } };
+      peerMeta = { ...peerMeta, [fp]: mergePeerState(peerMeta[fp], m) };
       return;
     }
     if (m.t !== "n") return;
@@ -10703,9 +10718,11 @@
   }
 
   // --- Video (camera / screen share) ----------------------------------------------------------
-  // One video slot per person: the camera and a screen share swap through the same sender via
-  // replaceTrack, so only the FIRST video ever renegotiates. Mesh reality check: every sender
-  // uploads its video once per peer, so this is for small rooms; the SFU hookup is the scale path.
+  // One video slot per person, for the life of the peer connection: the camera and a screen share
+  // swap through the same sender via replaceTrack, and stopping a video parks that sender rather
+  // than retiring it, so a stop/start cycle costs nothing but a direction flip. Mesh reality
+  // check: every sender uploads its video once per peer, so this is for small rooms; the SFU
+  // hookup is the scale path.
   let camStream: MediaStream | null = null; // whatever the slot currently captures
   let myVideo = $state<"" | "cam" | "screen">("");
   let localVideoStream = $state<MediaStream | null>(null); // the self-preview tile reads this
@@ -10735,26 +10752,74 @@
     localVideoStream = s;
     myVideo = kind;
     track.onended = () => stopVideo(); // the browser's own "stop sharing" chrome ends the track
-    for (const p of Object.values(callPeers)) {
-      const vidSender = p.pc.getSenders().find((sn) => sn.track?.kind === "video");
-      if (vidSender) void vidSender.replaceTrack(track); // same m-line: no renegotiation
-      else {
-        const sn = p.pc.addTrack(track, s); // first video: onnegotiationneeded takes it from here
-        try {
-          const prm = sn.getParameters();
-          prm.encodings = [{ maxBitrate: kind === "cam" ? 500_000 : 1_200_000 }];
-          void sn.setParameters(prm);
-        } catch { /* pre-negotiation: the constraints above still cap it */ }
-      }
-    }
+    for (const p of Object.values(callPeers)) fillVideoSlot(p, track, s, kind);
     if (old) for (const t of old.getTracks()) t.stop();
     pushInstState(); // vid state rides the same channel as the mute states
+  }
+  // The transceiver carrying a peer's video slot, and what direction it is currently in. A slot
+  // whose transceiver has gone, or whose connection has closed under it, reads as stopped: that
+  // sends the caller down the "open a fresh one" path rather than throwing on a corpse.
+  function vidSlot(p: CallPeer): { tr: RTCRtpTransceiver | null; direction: SlotDirection } {
+    if (!p.vidSender) return { tr: null, direction: "stopped" };
+    try {
+      const tr = p.pc.getTransceivers().find((t) => t.sender === p.vidSender) ?? null;
+      if (!tr || tr.currentDirection === "stopped") return { tr, direction: "stopped" };
+      return { tr, direction: tr.direction };
+    } catch {
+      return { tr: null, direction: "stopped" };
+    }
+  }
+  // Hold one peer's video to its budget. Re-applied on every swap, because cam and screen ride the
+  // same sender and the two do not cost the same. Mapping over the existing encodings rather than
+  // replacing them keeps whatever else negotiation put there; before the first negotiation there
+  // is nothing to map, and the capture constraints still bound it either way.
+  function capVideo(sender: RTCRtpSender, kind: VideoKind) {
+    try {
+      const prm = sender.getParameters();
+      prm.encodings = prm.encodings?.length
+        ? prm.encodings.map((e) => ({ ...e, maxBitrate: VIDEO_BITRATE[kind] }))
+        : [{ maxBitrate: VIDEO_BITRATE[kind] }];
+      void sender.setParameters(prm);
+    } catch { /* pre-negotiation, or an edge closing: the constraints above still cap it */ }
+  }
+  // Put a track into one peer's video slot: reuse the slot if it still exists, open one if not.
+  // Reuse is the common path and costs no renegotiation at all; the direction flip only happens
+  // when the slot was parked by a previous stopVideo, which is exactly when the far end needs to
+  // be told the m-line is sending again.
+  function fillVideoSlot(p: CallPeer, track: MediaStreamTrack, stream: MediaStream, kind: VideoKind) {
+    const slot = vidSlot(p);
+    const plan = videoSlotPlan({ hasSender: !!p.vidSender, direction: slot.direction });
+    try {
+      if (plan.action === "reuse" && p.vidSender) {
+        // Same m-line: a cam/screen swap never renegotiates. replaceTrack rejects rather than
+        // throwing when the edge has gone under us, so the failure is caught on the promise.
+        p.vidSender.replaceTrack(track).catch((e: unknown) =>
+          console.warn("voice: video swap was refused", { peer: p.fp, error: String(e) }));
+        if (plan.direction && slot.tr) slot.tr.direction = plan.direction;
+        capVideo(p.vidSender, kind);
+        return;
+      }
+      const sn = p.pc.addTrack(track, stream); // first video: onnegotiationneeded takes it from here
+      p.vidSender = sn;
+      capVideo(sn, kind);
+    } catch (e) {
+      console.warn("voice: could not put video on this edge", { peer: p.fp, error: String(e) });
+    }
   }
   function stopVideo() {
     if (!camStream) return;
     for (const p of Object.values(callPeers)) {
-      const sender = p.pc.getSenders().find((sn) => sn.track?.kind === "video");
-      if (sender) { try { p.pc.removeTrack(sender); } catch { /* edge closing */ } }
+      if (!p.vidSender) continue;
+      // Park the slot, never removeTrack it. removeTrack retires the transceiver for good (addTrack
+      // will not reuse one that has sent), so restarting a share would add a second video section
+      // to the SDP each time. replaceTrack(null) stops the frames; dropping the send half is what
+      // tells the far end the track is gone, so their tile clears instead of freezing on a frame.
+      try {
+        p.vidSender.replaceTrack(null).catch(() => { /* edge closing: the slot goes with it */ });
+        const slot = vidSlot(p);
+        const idle = directionIdle(slot.direction);
+        if (idle && slot.tr) slot.tr.direction = idle;
+      } catch { /* edge closing: the slot goes with it */ }
     }
     for (const t of camStream.getTracks()) t.stop();
     camStream = null;
@@ -10974,9 +11039,16 @@
       makingOffer: false,
       ignoreOffer: false,
       lastRetry: 0,
+      vidSender: null,
     };
     if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
-    if (camStream) for (const t of camStream.getTracks()) pc.addTrack(t, camStream); // joiner while my video is live
+    // A joiner arriving while my video is live gets it in the very first offer. It goes through
+    // the same slot bookkeeping as everyone else's, so their edge is capped and reusable from the
+    // start rather than being the one edge that behaves differently.
+    if (camStream && myVideo) {
+      const vt = camStream.getVideoTracks()[0];
+      if (vt) fillVideoSlot(peer, vt, camStream, myVideo);
+    }
     // The instrument channel: negotiated (same id on both ends) and created BEFORE the offer, so
     // the SCTP section rides the first SDP exchange and nothing ever renegotiates for it. An old
     // build just never opens its end; notes then go nowhere, which degrades cleanly.
@@ -11245,11 +11317,13 @@
     alertedRooms.delete(roomKey(server, channel));
     recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
-    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0 }); // announce + trigger existing members to offer
+    broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0, vid: myVid() }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
-        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0 });
+        // vid rides the heartbeat for the same reason mic does: it is the only thing that repairs
+        // a data-channel state message that never arrived, and the video tile is gated on it.
+        broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0, vid: myVid() });
         recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
@@ -11341,10 +11415,12 @@
       const wasActive = roomMembers(server, cid).length > 0;
       recordPresence(server, cid, fromFp);
       maybeNotifyRoom(server, cid, wasActive);
-      // Broadcast mute states ride the presence pings (the data channel also carries them, but
-      // pings cover the window before it opens). Only my own room's states matter to the UI.
+      // Broadcast states ride the presence pings (the data channel also carries them, but pings
+      // cover the window before it opens, and repair one that was dropped). Only my own room's
+      // states matter to the UI. mergePeerState is what keeps an older build's ping, which has
+      // no `vid` field at all, from reading as "they stopped sharing".
       if (currentRoom && typeof msg.mic === "number") {
-        peerMeta = { ...peerMeta, [fromFp]: { mic: msg.mic === 1, inst: msg.inst === 1, vid: typeof msg.vid === "number" ? msg.vid : 0 } };
+        peerMeta = { ...peerMeta, [fromFp]: mergePeerState(peerMeta[fromFp], msg) };
       }
       if (type === "voice-ping") {
         const peer = callPeers[fromFp];

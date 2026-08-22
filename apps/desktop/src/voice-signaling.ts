@@ -36,6 +36,89 @@ export function heartbeatRecovery(input: {
   return null;
 }
 
+/** What a peer says about itself: the two mute states plus which video slot they are filling. */
+export type PeerState = { mic: boolean; inst: boolean; vid: number };
+
+/**
+ * Fold a peer's broadcast state into what we already hold for them.
+ *
+ * `vid` (0 none, 1 camera, 2 screen) is the field that has to survive a partial message. It is
+ * announced once, on the data channel, when the video starts, while `mic` and `inst` are re-sent
+ * by every five-second room heartbeat. Reading an ABSENT `vid` as "no video" therefore let the
+ * next heartbeat retract a screen share that was still sending frames: the sender saw its own
+ * live preview and believed it was sharing, while every viewer had already torn the picture down.
+ * Absence is not a claim. Only a number in the message changes what we believe.
+ */
+export function mergePeerState(
+  prev: PeerState | undefined,
+  msg: { mic?: unknown; inst?: unknown; vid?: unknown },
+): PeerState {
+  return {
+    mic: msg.mic === 1,
+    inst: msg.inst === 1,
+    vid: typeof msg.vid === "number" ? msg.vid : prev?.vid ?? 0,
+  };
+}
+
+/** The two things a video slot can be carrying. They differ in what they cost on the wire. */
+export type VideoKind = "cam" | "screen";
+
+/**
+ * What one peer's video may spend, per second.
+ *
+ * A screen share carries text and edges, which fall apart at a bitrate a face survives, so the
+ * two are not interchangeable. The cap has to be re-applied every time the slot changes hands:
+ * cam and screen swap through one sender, and a screen share left on the camera's budget arrives
+ * as mush. Both numbers are per PEER, and in a mesh every peer gets its own encode.
+ */
+export const VIDEO_BITRATE: Readonly<Record<VideoKind, number>> = {
+  cam: 500_000,
+  screen: 1_200_000,
+};
+
+/** Every direction an RTP transceiver can be in, including the terminal one. */
+export type SlotDirection = "sendrecv" | "sendonly" | "recvonly" | "inactive" | "stopped";
+
+/**
+ * Open the send half of a video slot, leaving the receive half exactly as it is. `null` means
+ * "already right, do not touch it": assigning a direction that has not changed is wasted, and on
+ * a stopped transceiver it throws.
+ */
+export function directionSending(current: SlotDirection): SlotDirection | null {
+  if (current === "recvonly") return "sendrecv";
+  if (current === "inactive") return "sendonly";
+  return null; // already sending, or stopped and past reviving
+}
+
+/**
+ * Close the send half, leaving the receive half alone. Dropping to recvonly/inactive is what
+ * tells the far end the track is gone, so their tile clears instead of freezing on a last frame.
+ */
+export function directionIdle(current: SlotDirection): SlotDirection | null {
+  if (current === "sendrecv") return "recvonly";
+  if (current === "sendonly") return "inactive";
+  return null; // already not sending, or stopped
+}
+
+/**
+ * How to fill this peer's one video slot when a camera or screen share starts.
+ *
+ * There is deliberately only ever ONE video m-line per peer: cam and screen swap through the same
+ * sender, so only the first video a peer ever sends renegotiates. Stopping a video used to call
+ * removeTrack, which retires the transceiver for good, because addTrack will not reuse one that
+ * has sent before. Every stop/start cycle therefore bolted another video section onto the SDP,
+ * and the sender it left behind no longer matched the "has a video track" test that was supposed
+ * to find it. Stopping now parks the slot instead; this decides whether a parked one can be
+ * revived, and what direction it has to go back to.
+ */
+export function videoSlotPlan(slot: { hasSender: boolean; direction: SlotDirection }): {
+  action: "add" | "reuse";
+  direction: SlotDirection | null;
+} {
+  if (!slot.hasSender || slot.direction === "stopped") return { action: "add", direction: null };
+  return { action: "reuse", direction: directionSending(slot.direction) };
+}
+
 export const MAX_BUFFERED_ICE_PER_PEER = 64;
 
 /** Keep trickled ICE bounded while SDP is still in flight; retain the newest candidates. */

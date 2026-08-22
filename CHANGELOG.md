@@ -6,6 +6,29 @@ All notable changes to Mewtual are documented here.
 
 ### Fixed
 
+- **A screen share died on everyone else's screen seconds after it started.** The picture appeared,
+  froze on the first frames, and then dropped back to the avatar, while the person sharing kept
+  watching their own preview and had no reason to think anything was wrong. A room sends a
+  heartbeat every five seconds carrying who is muted, and that heartbeat had no field for who is
+  sharing video. Whoever received it read the missing field as "they stopped", so the first
+  heartbeat after a share began retracted it. Frames were still arriving the whole time; nothing
+  was left to draw them. The heartbeat now carries the video state alongside the mute states, and
+  a message that says nothing about video no longer counts as saying it stopped, which also means
+  a share announcement that gets lost now repairs itself within five seconds instead of never.
+
+- **Stopping a share and starting another one made the call heavier every time.** Each camera or
+  screen share is supposed to travel in one reserved slot per person, reused for the whole call.
+  Stopping one tore that slot out instead of parking it, and the replacement could not be reused,
+  so every stop and restart left another dead video section attached to the connection and grew
+  the negotiation between the two of you. A slot is now kept and refilled, so toggling a share
+  costs nothing after the first one.
+
+- **A screen share that followed a camera was sent at the camera's quality.** The two travel in
+  the same slot, and the quality budget was only set when the slot was first opened, so turning
+  your camera off and sharing your screen sent text and windows at a budget meant for a face.
+  Sharing your screen to someone who joined while you were already sharing had no budget applied
+  at all. Both now follow what is actually being sent.
+
 - **Sharing a file took the whole app down with it.** An upload would stop at 10% and everything
   around it would stop responding until it finished, or looked like it never would. Two separate
   bottlenecks, both of which scaled with the size of the file. The file was handed to the desktop
