@@ -2811,8 +2811,7 @@ impl Actor {
             .port_mapper_tasks
             .iter()
             .filter_map(|(key, task)| {
-                (desired.get(key) != Some(&task.port) || !task.is_fully_running())
-                    .then_some(*key)
+                (desired.get(key) != Some(&task.port) || !task.is_fully_running()).then_some(*key)
             })
             .collect();
         for key in stale {
@@ -4747,8 +4746,14 @@ mod tests {
                 "no compatible gateway answered the probe".to_string(),
             ),
             (bound, "no IGD gateway answered a search".to_string()),
-            (unbound_upnp, "no UPnP IGD gateway answered discovery".to_string()),
-            (other_transport, "no IGD gateway answered a search".to_string()),
+            (
+                unbound_upnp,
+                "no UPnP IGD gateway answered discovery".to_string(),
+            ),
+            (
+                other_transport,
+                "no IGD gateway answered a search".to_string(),
+            ),
         ]);
         assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
         assert!(!unavailable.contains_key(&bound));
