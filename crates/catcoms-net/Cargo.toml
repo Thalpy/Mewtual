@@ -10,14 +10,29 @@ catcoms-rt = { path = "../catcoms-rt" }
 thiserror.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+either = "1"
 bytes.workspace = true
 tracing.workspace = true
 blake3 = "1"
 hex = "0.4"
+# libp2p's `upnp` behaviour speaks IGD only. PCP and NAT-PMP cover routers that expose the
+# newer/Apple-style mapping protocols instead. Pin 0.18 because it is the maintained release whose
+# declared MSRV still matches this workspace's Rust 1.89 baseline (0.19 requires Rust 1.91).
+portmapper = { version = "=0.18.0", default-features = false }
+# The bound-interface UPnP fallback. libp2p's behaviour searches from an unbound socket and the
+# OS can egress the multicast M-SEARCH out a virtual adapter (WSL vEthernet, VirtualBox host-only),
+# so a second IGD search runs bound to the default-route interface; both feed one event path,
+# keyed apart by `local_address`. Pinned to the exact version libp2p-upnp already builds so this
+# adds no second copy of the crate.
+igd-next = { version = "=0.16.2", features = ["aio_tokio"] }
+# `portmapper` 0.18 exposes only an IPv4 client. `getifs` preserves the IPv6 route's native
+# interface index (including Windows' IPv6-specific index), letting the PCP socket bind the exact
+# global listener and scoped default gateway instead of guessing from an IPv4-oriented snapshot.
+getifs = { version = "=0.6.1", default-features = false }
 # PEM decoding for the operator-supplied TCP/443 TLS certificate. Already in the tree via
 # rustls (QUIC + libp2p-tls), so this adds no new crate, only a direct edge to it.
 rustls-pki-types = { version = "1.14", features = ["std"] }
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
 libp2p = { version = "0.56", features = [
     "tokio",
     "gossipsub",
@@ -35,6 +50,10 @@ libp2p = { version = "0.56", features = [
     "identify",
     "ping",
     "rendezvous",
+    # AutoNAT v2 lets a connected, publicly reachable peer or infrastructure node dial this
+    # node back and verify an address from outside. It measures reachability; it does not create
+    # a path through NAT, so relay/DCUtR remain the fallback when the probe fails.
+    "autonat",
     "upnp",
     # Rung 4 of the connectivity ladder: a TLS/WebSocket listener on TCP/443. Corporate,
     # university and guest networks routinely filter outbound traffic to arbitrary high

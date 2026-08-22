@@ -119,6 +119,11 @@ enum Command {
         external: Vec<String>,
         #[command(flatten)]
         ws: WsArgs,
+        /// Also serve guarded AutoNAT v2 dial-backs. Experimental and off by default: exact
+        /// source-IP target checks and node/prefix/peer limits bound, but do not erase, metadata
+        /// and same-NAT port-probe exposure.
+        #[arg(long)]
+        enable_autonat: bool,
         /// Concurrent reservations (how many NAT'd nodes can be reachable at once).
         #[arg(long)]
         max_reservations: Option<usize>,
@@ -179,6 +184,11 @@ enum Command {
         external: Vec<String>,
         #[command(flatten)]
         ws: WsArgs,
+        /// Also serve guarded AutoNAT v2 dial-backs. Experimental and off by default: exact
+        /// source-IP target checks and node/prefix/peer limits bound, but do not erase, metadata
+        /// and same-NAT port-probe exposure.
+        #[arg(long)]
+        enable_autonat: bool,
         /// Registrations the table may hold. Also the ceiling on a single census response.
         #[arg(long)]
         max_registrations: Option<usize>,
@@ -383,6 +393,7 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         identity,
         external,
         ws,
+        enable_autonat,
         max_reservations,
         max_circuits,
         max_circuit_bytes,
@@ -399,7 +410,10 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         unreachable!("dispatched only for Command::Relay")
     };
 
-    let mut limits = RelayLimits::default();
+    let mut limits = RelayLimits {
+        enable_autonat,
+        ..Default::default()
+    };
     if let Some(v) = max_reservations {
         limits.max_reservations = v;
         // The connection cap has to stay above the reservation cap, or reservations are refused
@@ -495,6 +509,11 @@ async fn run_relay_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         limits.node_budget_bytes
     );
     println!("[relay] forwarding ciphertext only; Ctrl-C to stop");
+    if limits.enable_autonat {
+        println!(
+            "[relay] EXPERIMENTAL AutoNAT enabled: callbacks require exact source-IP targets and are capped per peer, source prefix, node, and concurrency"
+        );
+    }
     node.run().await?; // runs until the process is killed
     Ok(())
 }
@@ -507,6 +526,7 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         identity,
         external,
         ws,
+        enable_autonat,
         max_registrations,
         max_registrations_per_peer,
         max_registrations_per_prefix,
@@ -522,7 +542,10 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         unreachable!("dispatched only for Command::Rendezvous")
     };
 
-    let mut limits = RendezvousLimits::default();
+    let mut limits = RendezvousLimits {
+        enable_autonat,
+        ..Default::default()
+    };
     if let Some(v) = max_registrations {
         limits.max_registrations_total = v;
     }
@@ -585,6 +608,11 @@ async fn run_rendezvous_node(cmd: Command) -> Result<(), Box<dyn Error>> {
         limits.query_window_secs
     );
     println!("[rendezvous] members register/discover under blinded namespaces; Ctrl-C to stop");
+    if limits.enable_autonat {
+        println!(
+            "[rendezvous] EXPERIMENTAL AutoNAT enabled: callbacks require exact source-IP targets and are capped per peer, source prefix, node, and concurrency"
+        );
+    }
     node.run().await?; // runs until the process is killed
     Ok(())
 }

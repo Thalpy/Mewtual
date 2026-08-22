@@ -8,52 +8,92 @@
 //! a `u64` server id. Every command takes a `server` id selecting which one to act on, and
 //! every forwarded event is tagged with its server id so the UI routes it correctly.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use catcoms_app::store::MAX_UI_STATE_BYTES;
 use catcoms_app::{
-    channel_id, spawn, AppEvent, Cid, DeviceId, Livery, PairingLedger, PairingSecrets,
-    PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord, ServerStore,
-    MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
+    channel_id, spawn, AppEvent, Cid, DeviceId, FileListing, InviteJoinPlan, Livery, PairingLedger,
+    PairingSecrets, PerServerGrant, Profile, Server, ServerActor, ServerNet, ServerRecord,
+    ServerStore, StorageHealth, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES, MAX_FILE_BYTES,
+    MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
 use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
-    addr_is_loopback, addr_is_private, addr_is_undialable, keypair_from_seed, phase0_peer_id,
-    target_peer_in_multiaddr, validate_invite_rendezvous_addrs, validate_operator_rendezvous_addrs,
-    MeshHandle, MeshService, RendezvousTarget,
+    addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
+    keypair_from_seed,
+    phase0_peer_id, target_peer_in_multiaddr, validate_invite_rendezvous_addrs,
+    validate_operator_rendezvous_addrs, AutoNatResult, AutoNatSnapshot, JoinReply, MeshHandle,
+    MeshObservationSnapshot, MeshService, PortMappingMechanism, PortMappingSnapshot,
+    PortMappingTransport, RelayAddressSnapshot, RendezvousTarget,
 };
 use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock, TransportEvent};
-use catcoms_sync::join_namespace;
+use catcoms_sync::{join_namespace, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{mpsc, Mutex};
+use tauri::{http, AppHandle, Emitter, Manager, State};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
+use zeroize::Zeroizing;
+
+/// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
+/// same IPv6 socket is commonly both a raw interface route and a PCP firewall pinhole; removing
+/// either owner alone must not withdraw the route from PEX, invites, rendezvous, or AutoNAT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BootstrapOwner {
+    AutomaticInterface,
+    Configured,
+    PortMapping,
+    Relay,
+}
+
+#[derive(Debug, Clone)]
+struct InterfaceRouteIdentity {
+    port: u16,
+    peer_id: String,
+}
 
 /// One running server: its actor handle, the single-use invite to share (founder only), and
 /// its display name (kept here too so the registry can be re-sealed on disk, Phase 9f).
 struct ServerEntry {
     actor: ServerActor,
+    /// Stable MLS identity checks for old signed invite permits embedded in two-way reply codes.
+    group_id: Vec<u8>,
+    device_id: DeviceId,
     invite: Option<String>,
     name: String,
     /// The current reachable bootstrap addresses for this device, captured when the server was
-    /// founded/reloaded. Reused to mint a *fresh* invite on demand (so it carries the live
-    /// address, not a stale one). Empty for a joiner (only the owner mints).
+    /// founded/joined/reloaded. Reused to mint a *fresh* owner invite on demand and, for every
+    /// member, to republish the live signed peer record after mapping/relay changes. A joiner
+    /// cannot mint an invite, but its base direct addresses must still remain in this set.
     bootstrap: Vec<String>,
+    /// Ownership of every exact entry in `bootstrap`. An address is removed from the aggregate
+    /// only after its final owner disappears; this is load-bearing for a raw global IPv6 address
+    /// that an active PCPv6 firewall lease also names.
+    bootstrap_owners: HashMap<String, HashSet<BootstrapOwner>>,
+    /// Stable listener coordinates used by the discovery timer to poll the OS-selected IPv4/IPv6
+    /// source routes. `None` only for the temporary companion path with no persisted identity.
+    interface_routes: Option<InterfaceRouteIdentity>,
     /// The rendezvous infra multiaddrs this server registered at (if any), so a fresh on-demand
     /// invite is also discovery-enabled. Empty when the server uses direct bootstrap only. Not
     /// separately persisted; on reload it is recovered from the persisted invite's `rendezvous`.
     rendezvous: Vec<String>,
-    /// A clonable handle to this server's live transport, kept so the bridge can register a
-    /// freshly-minted invite's namespace at the rendezvous *after* the `Server` was moved into its
-    /// actor. `None` for a joiner (never registers) or a server without rendezvous.
+    /// A clonable handle to this server's live transport. Besides late rendezvous registration it
+    /// lets an inviter dial a joiner's authenticated two-way reply candidates after `Server` has
+    /// moved into its actor. `None` only for legacy/companion paths without a retained transport.
     mesh: Option<MeshHandle>,
     /// Whether this group is a 1:1 DM (shown behind the DMs circle) rather than a server.
     is_dm: bool,
+    /// Persisted, explicit consent for this device to accept standing switchboard requests.
+    switchboard: bool,
     /// The next PEX peer-record sequence number this launch may publish, taken from the block
     /// `ServerNet::reserve_record_seq_block` reserved on disk before the transport came up.
     ///
@@ -64,13 +104,76 @@ struct ServerEntry {
     record_seq: u64,
 }
 
+/// One decrypted chunk, kept so a player reading a track sequentially does not re-fetch and
+/// re-decrypt the same 8 MiB for every window it asks for. Plaintext, so it is dropped whenever
+/// the vault locks, exactly like every other decrypted thing this process holds.
+struct MediaChunk {
+    server: u64,
+    cid: String,
+    index: usize,
+    bytes: Arc<Vec<u8>>,
+    total_size: u64,
+    mime: String,
+}
+
+/// Process-wide, coalesced notification that the operating system's interfaces or routes changed.
+/// A `watch` generation is deliberately used instead of a queued broadcast: every running server
+/// needs to refresh once, but retaining one item per noisy DHCP/route callback would be both
+/// wasteful and unbounded. A server created after a generation uses a fresh route sample during
+/// startup and therefore does not need historical notifications.
+#[derive(Debug, Clone)]
+struct NetworkChangeSignal {
+    generation: watch::Sender<u64>,
+}
+
+impl Default for NetworkChangeSignal {
+    fn default() -> Self {
+        let (generation, _initial_receiver) = watch::channel(0);
+        Self { generation }
+    }
+}
+
+impl NetworkChangeSignal {
+    fn subscribe(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+
+    fn notify(&self) {
+        // Wrapping cannot make a notification invisible: even u64::MAX -> 0 differs from the
+        // receiver's last generation, and reaching it would require centuries of callback spam.
+        self.generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+}
+
 /// App state managed by Tauri: every running server keyed by a bridge-assigned id, plus the
 /// on-disk store once the user has unlocked it with a passphrase (`None` = in-memory only).
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
+    /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
+    /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
+    /// boundary and a short seek backwards, which is all the locality there is to exploit.
+    media_cache: Mutex<Vec<MediaChunk>>,
+    /// Invite minting crosses actor and optional rendezvous awaits. Serialize it so two self-heal/
+    /// explicit requests cannot finish out of order and overwrite a newer route-set token.
+    invite_mint: Mutex<()>,
+    /// One bounded two-way reply session per `(server, invite nonce)`. A bearer-token holder may
+    /// refresh the same joiner key, but replacing it with a different key requires an explicit UI
+    /// confirmation so “one reply wins” cannot become a trivial invite-consumption DoS.
+    join_replies: Mutex<HashMap<(u64, [u8; 16]), ActiveJoinReply>>,
+    /// Serialize the state-map transition with the actor's revoke/authorize commands. Without
+    /// this, concurrent replacement completions can re-install a displaced helper capability.
+    join_reply_apply: Mutex<()>,
+    /// Live router mappings for the active call's media UDP ports, keyed by the local port. A
+    /// PCP/NAT-PMP entry's short lease is renewed by the client retained inside the mapping, so
+    /// dropping the entry (call end, or the app closing) is what ends that route.
+    media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
     next_id: Mutex<u64>,
     store: Mutex<Option<ServerStore>>,
+    /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
+    /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
+    session_resumable: Mutex<bool>,
     /// The **new device's** half of an in-flight grant ceremony (multi-device M2): the device
     /// identity + single-use nonce minted by `pairing_begin`, held until the grant bundle is
     /// pasted back. One slot; starting a new ceremony abandons any previous one; and, like
@@ -99,20 +202,89 @@ struct AppState {
     /// at, and keeping a history of every address every invite ever named is a worse trade than
     /// it sounds.
     diag: Mutex<Connectivity>,
-    /// Per-server UPnP result, kept out of [`Connectivity`] because it lands *after* the attempt
-    /// that started it returns (and possibly after the user has started another one). Keyed by
-    /// server id so a late answer can never be reported against a different server's attempt.
+    /// Per-server automatic router-mapping result (UPnP/PCP/NAT-PMP), kept out of
+    /// [`Connectivity`] because it lands *after* the attempt that started it returns (and possibly
+    /// after the user has started another one). Keyed by server id so a late answer can never be
+    /// reported against a different server's attempt. The field retains its original `upnp` name
+    /// for frontend command compatibility during the diagnostics transition.
     upnp: Mutex<HashMap<u64, String>>,
+    /// Per-server structured AutoNAT v2 evidence. Keeping every current address/server result lets
+    /// the read path filter against the live advertised set and retain a second successful route.
+    autonat: Mutex<HashMap<u64, AutoNatEvidence>>,
+    /// Connected peers' low-trust Identify observations of our outbound socket. Diagnostic only;
+    /// these are never folded into bootstrap, rendezvous registration or AutoNAT candidates.
+    mesh_observations: Mutex<HashMap<u64, Vec<String>>>,
+    /// One integrity/inventory scan per server per process session. Health is a point-in-time
+    /// observation, so file events deliberately do not invalidate it behind the user's back;
+    /// explicit authenticated repair is the only operation that replaces a cached report.
+    storage_health: Mutex<HashMap<u64, UiStorageHealth>>,
+    /// One native monitor fans a coalesced generation out to every per-server discovery loop.
+    /// Polling remains active, so monitor initialization failure affects latency, not correctness.
+    network_changes: NetworkChangeSignal,
 }
 
-/// UPnP has not been asked yet (no transport window was taken).
-const UPNP_NOT_ATTEMPTED: &str = "not attempted";
-/// The mapping request is out and the router has not answered yet.
-const UPNP_WAITING: &str = "waiting for the router";
-/// The transport reported no usable IGD gateway (no UPnP, or a CGNAT'd one).
-const UPNP_NO_GATEWAY: &str = "no usable gateway (no UPnP, or your ISP uses CGNAT)";
-/// The router never answered inside [`UPNP_WINDOW_SECS`].
-const UPNP_TIMED_OUT: &str = "the router did not answer in time";
+#[derive(Debug, Clone)]
+struct ActiveJoinReply {
+    joiner: libp2p::PeerId,
+    nonces: Vec<[u8; 16]>,
+    expires_at_ms: u64,
+    generation: u64,
+}
+
+const MAX_ACTIVE_JOIN_REPLIES: usize = 64;
+
+#[derive(Debug, Clone, Serialize)]
+struct JoinReplyReady {
+    code: String,
+    expires_at_ms: u64,
+    candidate_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JoinReplyApplied {
+    joiner: String,
+    expires_at_ms: u64,
+    replaced: bool,
+    helper: bool,
+}
+
+/// Decode-only information shown before a pasted invite is allowed to contact standing helpers.
+/// Routes stay native-side: the webview learns only that the inviter endorsed a bounded fallback
+/// set and the privacy consequence of choosing it.
+#[derive(Debug, Clone, Serialize)]
+struct InvitePreview {
+    direct_routes: usize,
+    rendezvous_routes: usize,
+    switchboards: usize,
+    expires_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AutoNatEvidence {
+    waiting: bool,
+    results: Vec<AutoNatResult>,
+}
+
+/// Automatic mapping has not started (no durable transport retained its event stream).
+const PORT_MAPPING_NOT_ATTEMPTED: &str = "not attempted";
+/// Mapping probes are out and the router has not answered yet.
+const PORT_MAPPING_WAITING: &str = "waiting for router mapping (UPnP, PCP/PCPv6, NAT-PMP)";
+/// None of the enabled router protocols produced a mapping inside the initial diagnostic window.
+const PORT_MAPPING_TIMED_OUT: &str = "no mapping obtained within 25s";
+const PORT_MAPPING_INACTIVE: &str = "no active router mapping";
+/// A join that failed before admission cannot preserve its temporary listener long enough for a
+/// router mapping to matter. This is more accurate than the old blanket "not attempted".
+const PORT_MAPPING_FAILED_JOIN: &str =
+    "not retained: the join failed before this node became a member";
+
+/// No public candidate/server pair produced an AutoNAT v2 result inside the collection window.
+const AUTONAT_NOT_TESTED: &str =
+    "not tested: no public address candidate and AutoNAT server were available together";
+/// A public relay/rendezvous is connected and the background collector is waiting for a callback.
+const AUTONAT_WAITING: &str = "waiting for a dial-back result";
+/// The temporary join swarm was dropped before it could become a durable member transport.
+const AUTONAT_FAILED_JOIN: &str =
+    "not tested: the join never reached a connected AutoNAT server as a member";
 
 /// One thing a founding or joining attempt did, in the order it did it.
 ///
@@ -161,10 +333,10 @@ impl DiagStep {
 /// Everything the app can honestly say about its own reachability and about the last thing it
 /// tried, for the connectivity panel on the create/join screens.
 ///
-/// Deliberately says nothing about "am I reachable from the internet". AutoNAT is not
-/// implemented (`docs/design-zeroconf-reachability.md` rung 0c), so nothing here can dial this
-/// node back, and a public address obtained from UPnP or a relay circuit is evidence, not proof.
-/// The UI states that rather than showing a green tick the code cannot support.
+/// AutoNAT v2 can now prove that one connected public infrastructure node reached one candidate
+/// address at one moment. That is real dial-back evidence, but deliberately not promoted into a
+/// timeless or universal node property: reachability varies by address family, transport, NAT and
+/// observer. A UPnP address remains evidence rather than proof until AutoNAT tests it.
 #[derive(Serialize, Clone, Default)]
 struct Connectivity {
     /// `found`, `join`, or empty when nothing has been attempted this session.
@@ -177,12 +349,35 @@ struct Connectivity {
     server: u64,
     /// The addresses this node offers other peers, as folded into the invite.
     advertised: Vec<String>,
-    /// The UPnP result for `server` (filled in by `get_connectivity` from the per-server map).
+    /// Whether at least one non-relayed advertised address is globally routable according to the
+    /// backend's canonical classifier. The frontend must not duplicate partial IP-range logic.
+    public_direct: bool,
+    /// Automatic UPnP/PCP/NAT-PMP result for `server` (filled in by `get_connectivity`).
+    /// Serialized as `upnp` for compatibility with the existing frontend command contract.
     upnp: String,
+    /// The AutoNAT v2 result for `server`, likewise filled by `get_connectivity`.
+    autonat: String,
+    /// Bounded connected-peer observations of this node's outbound source. These are telemetry,
+    /// not listener candidates; the frontend must retain that qualification.
+    mesh_observations: Vec<String>,
     /// What the attempt did, oldest first.
     steps: Vec<DiagStep>,
     /// The last error, verbatim, so the user can copy exactly what the code said.
     last_error: String,
+}
+
+#[derive(Serialize)]
+struct SwitchboardMember {
+    fingerprint: String,
+    addresses: usize,
+}
+
+#[derive(Serialize)]
+struct SwitchboardStatus {
+    offered: bool,
+    eligible: bool,
+    online: Vec<SwitchboardMember>,
+    reason: String,
 }
 
 /// The origin-side pending ceremony: what `pairing_read` decoded and anchored, held so
@@ -192,8 +387,20 @@ struct PendingGrant {
     origin: DeviceId,
 }
 
-/// Clone out the actor for `server` (so we never hold the servers lock across an await).
-async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+/// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
+/// networking in the background, but that must not leave their plaintext projections callable by
+/// injected/stale frontend code behind the lock screen.
+async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
+    if *state.session_resumable.lock().await && state.store.lock().await.is_some() {
+        Ok(())
+    } else {
+        Err("the vault is locked".into())
+    }
+}
+
+/// Internal actor lookup used by persistence/reload paths which must keep operating while the UI
+/// is locked. Native command handlers use [`actor_of`] so the webview cannot cross that boundary.
+async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor, String> {
     state
         .servers
         .lock()
@@ -203,12 +410,50 @@ async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> 
         .ok_or_else(|| "unknown server".to_string())
 }
 
+/// Clone out the actor for an unlocked webview command (never holding either lock across actor I/O).
+async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+    require_unlocked_session(state).await?;
+    actor_of_unchecked(state, server).await
+}
+
+/// Clone the actor and DM marker together. Moderation is server-wide and intentionally absent
+/// from 1:1 DM spaces, so its bridge commands use this helper to enforce that boundary before
+/// invoking the actor.
+async fn server_actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
+    require_unlocked_session(state).await?;
+    let servers = state.servers.lock().await;
+    let entry = servers
+        .get(&server)
+        .ok_or_else(|| "unknown server".to_string())?;
+    if entry.is_dm {
+        return Err("moderation is only available in server spaces".into());
+    }
+    Ok(entry.actor.clone())
+}
+
 /// Result of founding/joining: the new server's id plus its `#general` channel id.
 #[derive(Serialize, Clone)]
 struct FoundResult {
     server: u64,
     channel: String,
+    channels: Vec<UiChannel>,
     is_dm: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct UiChannel {
+    id: String,
+    name: String,
+}
+
+fn ui_channels(channels: Vec<catcoms_app::ChannelInfo>) -> Vec<UiChannel> {
+    channels
+        .into_iter()
+        .map(|c| UiChannel {
+            id: c.id.to_string(),
+            name: c.name,
+        })
+        .collect()
 }
 
 /// A chat message as serialized to the frontend.
@@ -404,6 +649,256 @@ struct FilesPayload {
     has_peers: bool,
 }
 
+/// Integrity-verified storage facts. Counts are scoped to file chunks referenced by this server;
+/// the peer flag only means a repair attempt has somewhere authenticated to ask.
+#[derive(Serialize, Clone)]
+struct UiStorageHealth {
+    listed_files: usize,
+    referenced_chunks: usize,
+    verified_chunks: usize,
+    missing_chunks: usize,
+    unreadable_chunks: usize,
+    invalid_manifests: usize,
+    verified_bytes: u64,
+    has_peers: bool,
+    checked_at_ms: u64,
+    unique_files: usize,
+    logical_bytes: u64,
+    local_estimated_bytes: u64,
+    pinned_files: usize,
+    pinned_logical_bytes: u64,
+    pinned_local_estimated_bytes: u64,
+    categories: Vec<UiStorageCategory>,
+    largest_files: Vec<UiStorageFile>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct UiStorageCategory {
+    name: String,
+    files: usize,
+    logical_bytes: u64,
+    local_estimated_bytes: u64,
+    pinned_files: usize,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+struct UiStorageFile {
+    name: String,
+    path: String,
+    cid: String,
+    mime: String,
+    logical_bytes: u64,
+    local_estimated_bytes: u64,
+    pinned: bool,
+    held: u32,
+    total: u32,
+}
+
+#[derive(Serialize, Clone)]
+struct UiStorageRepair {
+    attempted_chunks: usize,
+    recovered_chunks: usize,
+    health: UiStorageHealth,
+}
+
+fn ui_file(listing: FileListing) -> UiFile {
+    UiFile {
+        name: listing.entry.name,
+        size: listing.entry.size,
+        mime: listing.entry.mime,
+        cid: hex::encode(&listing.entry.cid),
+        author: listing.entry.author,
+        path: listing.entry.path,
+        held: listing.held_chunks,
+        total: listing.total_chunks,
+        expires: listing.entry.expires.deadline_ms(),
+        expires_known: listing.entry.expires.is_recorded(),
+    }
+}
+
+fn storage_category(mime: &str) -> &'static str {
+    let mime = mime.to_ascii_lowercase();
+    if mime.starts_with("image/") {
+        "Images"
+    } else if mime.starts_with("video/") {
+        "Video"
+    } else if mime.starts_with("audio/") {
+        "Audio"
+    } else if mime.starts_with("text/")
+        || mime.contains("pdf")
+        || mime.contains("document")
+        || mime.contains("sheet")
+        || mime.contains("presentation")
+    {
+        "Documents"
+    } else if mime.contains("zip")
+        || mime.contains("tar")
+        || mime.contains("gzip")
+        || mime.contains("compressed")
+        || mime.contains("archive")
+    {
+        "Archives"
+    } else {
+        "Other"
+    }
+}
+
+fn estimated_local_bytes(file: &UiFile) -> u64 {
+    if file.total == 0 {
+        return 0;
+    }
+    file.size
+        .saturating_mul(u64::from(file.held.min(file.total)))
+        / u64::from(file.total)
+}
+
+/// Add a deterministic, deduplicated content inventory to the cryptographic chunk verdict.
+/// Category/local totals are explicitly estimates based on held-chunk ratios; `verified_bytes`
+/// above remains the exact count of ciphertext bytes that passed every integrity check.
+fn build_storage_report(
+    health: StorageHealth,
+    files: Vec<UiFile>,
+    pinned: &HashSet<String>,
+    checked_at_ms: u64,
+) -> UiStorageHealth {
+    let mut unique = HashMap::<String, UiFile>::new();
+    for file in files {
+        unique.entry(file.cid.clone()).or_insert(file);
+    }
+    let mut category_map = HashMap::<String, UiStorageCategory>::new();
+    let mut largest_files = Vec::with_capacity(unique.len());
+    let mut logical_bytes = 0u64;
+    let mut local_estimated_bytes = 0u64;
+    let mut pinned_files = 0usize;
+    let mut pinned_logical_bytes = 0u64;
+    let mut pinned_local_estimated_bytes = 0u64;
+    for file in unique.values() {
+        let local = estimated_local_bytes(file);
+        let is_pinned = pinned.contains(&file.cid);
+        logical_bytes = logical_bytes.saturating_add(file.size);
+        local_estimated_bytes = local_estimated_bytes.saturating_add(local);
+        if is_pinned {
+            pinned_files += 1;
+            pinned_logical_bytes = pinned_logical_bytes.saturating_add(file.size);
+            pinned_local_estimated_bytes = pinned_local_estimated_bytes.saturating_add(local);
+        }
+        let category = storage_category(&file.mime).to_string();
+        let row = category_map
+            .entry(category.clone())
+            .or_insert(UiStorageCategory {
+                name: category,
+                files: 0,
+                logical_bytes: 0,
+                local_estimated_bytes: 0,
+                pinned_files: 0,
+            });
+        row.files += 1;
+        row.logical_bytes = row.logical_bytes.saturating_add(file.size);
+        row.local_estimated_bytes = row.local_estimated_bytes.saturating_add(local);
+        row.pinned_files += usize::from(is_pinned);
+        largest_files.push(UiStorageFile {
+            name: file.name.clone(),
+            path: file.path.clone(),
+            cid: file.cid.clone(),
+            mime: file.mime.clone(),
+            logical_bytes: file.size,
+            local_estimated_bytes: local,
+            pinned: is_pinned,
+            held: file.held,
+            total: file.total,
+        });
+    }
+    let order = ["Images", "Video", "Audio", "Documents", "Archives", "Other"];
+    let mut categories: Vec<_> = category_map.into_values().collect();
+    categories.sort_by_key(|row| {
+        order
+            .iter()
+            .position(|name| *name == row.name)
+            .unwrap_or(order.len())
+    });
+    largest_files.sort_by(|a, b| {
+        b.local_estimated_bytes
+            .cmp(&a.local_estimated_bytes)
+            .then_with(|| b.logical_bytes.cmp(&a.logical_bytes))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.cid.cmp(&b.cid))
+    });
+    largest_files.truncate(10);
+    UiStorageHealth {
+        listed_files: health.listed_files,
+        referenced_chunks: health.referenced_chunks,
+        verified_chunks: health.verified_chunks,
+        missing_chunks: health.missing_chunks,
+        unreadable_chunks: health.unreadable_chunks,
+        invalid_manifests: health.invalid_manifests,
+        verified_bytes: health.verified_bytes,
+        has_peers: health.has_peers,
+        checked_at_ms,
+        unique_files: unique.len(),
+        logical_bytes,
+        local_estimated_bytes,
+        pinned_files,
+        pinned_logical_bytes,
+        pinned_local_estimated_bytes,
+        categories,
+        largest_files,
+    }
+}
+
+async fn storage_report(
+    actor: &ServerActor,
+    health: StorageHealth,
+    checked_at_ms: u64,
+) -> UiStorageHealth {
+    let view = actor.files_view().await;
+    let pins = actor.wiki_pinned_cids().await.into_iter().collect();
+    build_storage_report(
+        health,
+        view.files.into_iter().map(ui_file).collect(),
+        &pins,
+        checked_at_ms,
+    )
+}
+
+/// A public, signed moderation attestation. Evidence is an immutable snapshot so later message
+/// deletion/editing cannot silently rewrite the reason a warning or kick case was based on.
+#[derive(Serialize, Clone)]
+struct UiModerationEvent {
+    id: String,
+    kind: String,
+    actor: String,
+    signer: String,
+    target: String,
+    channel: String,
+    message_id: String,
+    message_text: String,
+    message_ts: u64,
+    reason: String,
+    evidence_ids: Vec<String>,
+    case_id: String,
+    outcome: String,
+    ts: u64,
+    signature_valid: bool,
+    authorized: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct UiModerationVote {
+    case_id: String,
+    voter: String,
+    signer: String,
+    yes: bool,
+    ts: u64,
+    signature_valid: bool,
+    eligible: bool,
+}
+
+#[derive(Serialize, Clone)]
+struct UiModerationState {
+    events: Vec<UiModerationEvent>,
+    votes: Vec<UiModerationVote>,
+}
+
 // Event payloads; every event is tagged with its server id.
 #[derive(Serialize, Clone)]
 struct ChannelEvt {
@@ -432,7 +927,18 @@ struct DownloadProgressEvt {
     cid: String,
     done: usize,
     total: usize,
+    bytes_done: u64,
+    bytes_total: u64,
+    /// Bytes fetched from peers during this transfer (excludes chunks already held locally).
+    network_bytes_done: u64,
     provider: Option<String>,
+}
+#[derive(Serialize, Clone)]
+struct UploadProgressEvt {
+    server: u64,
+    upload_id: String,
+    done: usize,
+    total: usize,
 }
 #[derive(Serialize, Clone)]
 struct EclipseEvt {
@@ -491,9 +997,13 @@ const DISCOVERY_JITTER_MS: u64 = 15_000;
 /// a freshly-founded server looking dead for up to a minute. A few seconds is enough to stop the
 /// servers in one process from ticking in unison.
 const DISCOVERY_START_SPREAD_MS: u64 = 5_000;
+/// Extra quiet window above the platform monitor's own short coalescing delay. DHCP, route and
+/// IPv6 privacy-address changes commonly arrive as a burst; publishing a signed peer-record epoch
+/// for every callback would waste sequence numbers and make members redial transient routes.
+const NETWORK_CHANGE_DEBOUNCE_MS: u64 = 750;
 
 /// A uniformly random delay in `[base_ms, base_ms + spread_ms)`, drawn from the injected OS RNG
-/// seam (`catcoms_rt::OsCryptoRng`) rather than an ambient `rand::random`, so this file keeps to
+/// seam (`catcoms_rt::OsCryptoRng`) rather than an ambient randomness helper, so this file keeps to
 /// the same discipline the `crates` gate enforces even though it is not itself gated.
 fn jittered_delay(base_ms: u64, spread_ms: u64) -> Duration {
     let mut rng = OsCryptoRng;
@@ -505,15 +1015,144 @@ fn jittered_delay(base_ms: u64, spread_ms: u64) -> Duration {
     Duration::from_millis(base_ms.saturating_add(offset))
 }
 
+/// Turn a platform interface-state watcher into one bounded process-wide generation stream.
+/// `Watcher` itself retains only the latest state; calling `get` after the quiet window consumes
+/// every intermediate callback, so one burst wakes each server once. The clock is injected to keep
+/// the debounce contract deterministic in tests.
+async fn forward_network_changes<W, C>(mut changes: W, signal: NetworkChangeSignal, clock: C)
+where
+    W: n0_watcher::Watcher + Send,
+    C: Clock,
+{
+    loop {
+        if changes.updated().await.is_err() {
+            return;
+        }
+        // This is a trailing-edge debounce, not a fixed aggregation window. If another route
+        // update arrives just before the deadline, restart the quiet period; otherwise we could
+        // sample an intermediate DHCP state, consume the final callback, and wait a minute to
+        // notice the stable address.
+        loop {
+            tokio::select! {
+                biased;
+                changed = changes.updated() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                _ = clock.sleep(Duration::from_millis(NETWORK_CHANGE_DEBOUNCE_MS)) => {
+                    break;
+                }
+            }
+        }
+        signal.notify();
+    }
+}
+
+/// Start the one native route/interface watcher for this desktop process. The monitor uses the
+/// platform's route notification API on Windows, netlink on Linux/Android and SystemConfiguration
+/// route sockets on Apple/BSD platforms. Failure is deliberately non-fatal: the roughly-minute
+/// poll in every discovery loop remains the portable correctness path.
+fn spawn_network_monitor(app: &AppHandle) {
+    let signal = app.state::<AppState>().network_changes.clone();
+    tauri::async_runtime::spawn(async move {
+        let monitor = match netwatch::netmon::Monitor::new().await {
+            Ok(monitor) => monitor,
+            Err(error) => {
+                tracing::warn!(%error, "native network monitor unavailable; periodic polling remains active");
+                return;
+            }
+        };
+        let changes = monitor.interface_state();
+        // Keep `monitor` alive for as long as its watcher is being forwarded; dropping it cancels
+        // and unregisters the platform callbacks.
+        forward_network_changes(changes, signal, SystemClock).await;
+        tracing::warn!("native network monitor stopped; periodic polling remains active");
+    });
+}
+
+/// Poll the route-selected IPv4/IPv6 source addresses and publish one new authoritative address
+/// epoch when they change. Wildcard TCP/QUIC listeners already cover a newly appeared interface;
+/// this reconciliation is what teaches invites, PEX, rendezvous and AutoNAT about the new concrete
+/// route (and withdraws a vanished one). Mapping/manual/relay ownership is preserved separately.
+async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
+    let state = app.state::<AppState>();
+    let state = state.inner();
+    let prepared = {
+        let mut servers = state.servers.lock().await;
+        let Some(entry) = servers.get_mut(&server) else {
+            return false;
+        };
+        let (Some(identity), Some(mesh)) = (entry.interface_routes.clone(), entry.mesh.clone())
+        else {
+            return false;
+        };
+        let next = auto_bootstrap(identity.port, &identity.peer_id);
+        let (removed, added) =
+            reconcile_automatic_bootstrap(&mut entry.bootstrap, &mut entry.bootstrap_owners, &next);
+        if removed.is_empty() && added.is_empty() {
+            return false;
+        }
+        (
+            entry.actor.clone(),
+            mesh,
+            entry.bootstrap.clone(),
+            removed,
+            added,
+        )
+    };
+    let (actor, mesh, bootstrap, removed, added) = prepared;
+
+    // Keep libp2p's external-address ownership in lockstep. Only global routes enter this set;
+    // private LAN routes remain invite-only. A PCP lease for the same IPv6 socket independently
+    // protects it inside the net actor when the raw-interface owner is removed.
+    for address in external_addrs(&removed) {
+        if let Err(error) = mesh.remove_external_address(address.clone()).await {
+            eprintln!("interface refresh: could not withdraw {address}: {error}");
+        }
+    }
+    for address in external_addrs(&added) {
+        if let Err(error) = mesh.add_external_address(address.clone()).await {
+            eprintln!("interface refresh: could not advertise {address}: {error}");
+        }
+    }
+
+    if let Some(seq) = next_record_seq(state, server).await {
+        actor.publish_self_record(bootstrap.clone(), seq).await;
+    }
+    {
+        let mut diag = state.diag.lock().await;
+        if diag.server == server {
+            diag.advertised = bootstrap;
+        }
+    }
+    let _ = app.emit("reachability-changed", server);
+    true
+}
+
 /// Spawn a per-server timer that periodically drives steady-state discovery, so the group
 /// re-finds itself after a restart and members keep exchanging peer records. Exits once the actor
 /// stops (`drive_discovery` errors).
 fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
+    // Subscribe before spawning so a network change between server registration and the task's
+    // first poll cannot be lost. The current startup sample is already authoritative; only future
+    // generations wake this server early.
+    let mut network_changes = app.state::<AppState>().network_changes.subscribe();
     tokio::spawn(async move {
         // A short randomised start offset, then an independently randomised period each round.
         let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = SystemClock.sleep(delay) => {}
+                changed = network_changes.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                }
+            }
+            // Poll before PEX/rendezvous so a new interface address receives a fresh signed epoch
+            // and can be shared in this same discovery pass.
+            refresh_interface_routes(&app, server).await;
             if actor.drive_discovery().await.is_err() {
                 break; // the actor stopped
             }
@@ -531,7 +1170,22 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
 fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEvent>) {
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
+            // Actor networking stays live behind the explicit lock, but its event stream can
+            // contain member fingerprints, channel ids, delivery state and call signalling.
+            // Drop those notifications at the native boundary; unlock reloads fresh projections.
+            if require_unlocked_session(&app.state::<AppState>())
+                .await
+                .is_err()
+            {
+                if matches!(&ev, AppEvent::Closed) {
+                    break;
+                }
+                continue;
+            }
             match ev {
+                AppEvent::ChannelsUpdated => {
+                    let _ = app.emit("channels-changed", ServerEvt { server });
+                }
                 AppEvent::ChannelUpdated { channel } => {
                     // Channel ids are u128; send as a string (JS numbers lose precision).
                     let _ = app.emit(
@@ -572,11 +1226,17 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::RolesUpdated => {
                     let _ = app.emit("roles-updated", ServerEvt { server });
                 }
+                AppEvent::ModerationUpdated => {
+                    let _ = app.emit("moderation-updated", ServerEvt { server });
+                }
                 AppEvent::EclipseChanged { caution } => {
                     let _ = app.emit("eclipse-changed", EclipseEvt { server, caution });
                 }
                 AppEvent::ConnectivityChanged { online } => {
                     let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
+                }
+                AppEvent::SwitchboardsChanged => {
+                    let _ = app.emit("switchboard-changed", server);
                 }
                 AppEvent::DeliveryChanged { channel, states } => {
                     let _ = app.emit(
@@ -727,6 +1387,104 @@ fn auto_bootstrap(port: u16, peer_id: &str) -> Vec<String> {
     out
 }
 
+/// Add one ownership claim and, if this is the first owner, one aggregate bootstrap entry. The
+/// caller chooses front/back placement because mapped/manual/relay routes should race before raw
+/// LAN and loopback candidates, while a refreshed interface route should retain normal order.
+fn add_bootstrap_owner(
+    bootstrap: &mut Vec<String>,
+    owners: &mut HashMap<String, HashSet<BootstrapOwner>>,
+    entry: String,
+    owner: BootstrapOwner,
+    prefer_front: bool,
+) -> bool {
+    let first_owner = owners.get(&entry).is_none_or(HashSet::is_empty);
+    owners.entry(entry.clone()).or_default().insert(owner);
+    if first_owner && !bootstrap.contains(&entry) {
+        if prefer_front {
+            bootstrap.insert(0, entry);
+        } else {
+            bootstrap.push(entry);
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Remove one ownership claim and answer whether the exact aggregate route disappeared. Unknown
+/// or repeated expiry events are inert; an address survives while any other source still owns it.
+fn remove_bootstrap_owner(
+    bootstrap: &mut Vec<String>,
+    owners: &mut HashMap<String, HashSet<BootstrapOwner>>,
+    entry: &str,
+    owner: BootstrapOwner,
+) -> bool {
+    let Some(entry_owners) = owners.get_mut(entry) else {
+        return false;
+    };
+    if !entry_owners.remove(&owner) || !entry_owners.is_empty() {
+        return false;
+    }
+    owners.remove(entry);
+    if let Some(index) = bootstrap.iter().position(|candidate| candidate == entry) {
+        bootstrap.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+fn bootstrap_owners(
+    entries: &[String],
+    owner: BootstrapOwner,
+) -> HashMap<String, HashSet<BootstrapOwner>> {
+    entries
+        .iter()
+        .cloned()
+        .map(|entry| (entry, HashSet::from([owner])))
+        .collect()
+}
+
+/// Reconcile only the OS-derived owner against a fresh route-source sample. The returned vectors
+/// contain aggregate additions/removals, not ownership-only changes, so callers update Swarm and
+/// signed records exactly once and preserve an identical manual/mapping/relay route.
+fn reconcile_automatic_bootstrap(
+    bootstrap: &mut Vec<String>,
+    owners: &mut HashMap<String, HashSet<BootstrapOwner>>,
+    next: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let previous: HashSet<String> = owners
+        .iter()
+        .filter(|(_, entry_owners)| entry_owners.contains(&BootstrapOwner::AutomaticInterface))
+        .map(|(entry, _)| entry.clone())
+        .collect();
+    let next_set: HashSet<&str> = next.iter().map(String::as_str).collect();
+    let mut removed = Vec::new();
+    for old in &previous {
+        if !next_set.contains(old.as_str())
+            && remove_bootstrap_owner(bootstrap, owners, old, BootstrapOwner::AutomaticInterface)
+        {
+            removed.push(old.clone());
+        }
+    }
+
+    let mut added = Vec::new();
+    for entry in next {
+        if !previous.contains(entry)
+            && add_bootstrap_owner(
+                bootstrap,
+                owners,
+                entry.clone(),
+                BootstrapOwner::AutomaticInterface,
+                false,
+            )
+        {
+            added.push(entry.clone());
+        }
+    }
+    (removed, added)
+}
+
 /// The addresses a server binds: IPv4 **and** IPv6, TCP **and** QUIC, all on one port number.
 /// IPv6 has no NAT in front of it, so it silently rescues users their router would otherwise
 /// strand; QUIC's UDP hole-punching is materially more reliable than TCP's. Both listeners are
@@ -810,12 +1568,17 @@ async fn register_server(
     state: &AppState,
     actor: ServerActor,
     events: mpsc::Receiver<AppEvent>,
+    group_id: Vec<u8>,
+    device_id: DeviceId,
     invite: Option<String>,
     name: String,
     bootstrap: Vec<String>,
+    bootstrap_owners: HashMap<String, HashSet<BootstrapOwner>>,
+    interface_routes: Option<InterfaceRouteIdentity>,
     rendezvous: Vec<String>,
     mesh: Option<MeshHandle>,
     is_dm: bool,
+    switchboard: bool,
     record_seq: u64,
 ) -> u64 {
     let id = {
@@ -824,20 +1587,28 @@ async fn register_server(
         *n
     };
     forward_events(app.clone(), id, events);
-    spawn_discovery_timer(app.clone(), id, actor.clone());
+    let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         id,
         ServerEntry {
             actor,
+            group_id,
+            device_id,
             invite,
             name,
             bootstrap,
+            bootstrap_owners,
+            interface_routes,
             rendezvous,
             mesh,
             is_dm,
+            switchboard,
             record_seq,
         },
     );
+    // Start only after the entry exists. A zero-millisecond randomized first tick must not race
+    // the registry insertion and silently skip the initial interface/discovery refresh.
+    spawn_discovery_timer(app.clone(), id, timer_actor);
     id
 }
 
@@ -854,7 +1625,7 @@ async fn next_record_seq(state: &AppState, server: u64) -> Option<u64> {
 /// Snapshot a running server through its actor and seal it to disk (best-effort: a missing
 /// store, a stopped actor, or an I/O error is logged, not fatal; the app keeps running).
 async fn persist_server(state: &AppState, server: u64) {
-    let actor = match actor_of(state, server).await {
+    let actor = match actor_of_unchecked(state, server).await {
         Ok(a) => a,
         Err(_) => return,
     };
@@ -885,7 +1656,7 @@ async fn persist_server(state: &AppState, server: u64) {
 async fn persist_address_cache(app: &AppHandle, server: u64) {
     let state = app.state::<AppState>();
     let state = state.inner();
-    let Ok(actor) = actor_of(state, server).await else {
+    let Ok(actor) = actor_of_unchecked(state, server).await else {
         return;
     };
     // Fetch the key, then the bytes, before taking the store lock, so the actor round-trip never
@@ -1038,7 +1809,7 @@ fn external_addrs(bootstrap: &[String]) -> Vec<Multiaddr> {
     bootstrap
         .iter()
         .filter_map(|s| external_addr(s))
-        .filter(|a| !addr_is_private(a))
+        .filter(addr_is_globally_routable)
         .collect()
 }
 
@@ -1059,23 +1830,112 @@ async fn register_join_ns(
         .map_err(|e| e.to_string())
 }
 
-/// How long to let the router answer a UPnP/NAT-PMP mapping request, in the background. SSDP/IGD
-/// discovery on a consumer router routinely needs ten seconds or more, so the old four-second
-/// window (which additionally only ran when the user had supplied neither an advertise address nor
-/// a relay) lost that race far more often than it won it, and the one genuinely zero-config path
-/// to reachability was wasted. It now always runs, never blocks founding, and folds its answer
-/// into the stored bootstrap so every later invite carries it.
-const UPNP_WINDOW_SECS: u64 = 25;
+/// How long the Connectivity assistant labels automatic mapping as "waiting" before giving an
+/// honest no-result summary. The collector itself stays alive afterward: mappings are renewable
+/// leases, so late successes and expirations must still update peer records and stored invites.
+const PORT_MAPPING_WINDOW_SECS: u64 = 25;
 
 /// Everything that makes a node reachable from *outside* this machine, gathered in one place so
 /// founding and reloading do identical work.
 struct Reachability {
     /// The dialable addresses a minted invite should carry (relayed first when there is a relay).
     bootstrap: Vec<String>,
+    /// Per-entry ownership matching `bootstrap`, retained after startup so interface polling can
+    /// withdraw only the raw route without trampling manual or relay ownership.
+    bootstrap_owners: HashMap<String, HashSet<BootstrapOwner>>,
     /// The validated rendezvous target this server registers at, if any.
     rz_target: Option<RendezvousTarget>,
     /// A handle for registering later invites' namespaces; kept only once the rendezvous connected.
     rz_handle: Option<MeshHandle>,
+}
+
+fn listener_summary(addresses: &[Multiaddr]) -> String {
+    let mut capabilities = Vec::new();
+    for address in addresses {
+        if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        {
+            continue;
+        }
+        let family = if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Ip4(_)))
+        {
+            "IPv4"
+        } else if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Ip6(_)))
+        {
+            "IPv6"
+        } else {
+            "other"
+        };
+        let transport = if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::QuicV1))
+        {
+            "QUIC"
+        } else if address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Tcp(_)))
+        {
+            "TCP"
+        } else {
+            "transport"
+        };
+        let label = format!("{family} {transport}");
+        if !capabilities.contains(&label) {
+            capabilities.push(label);
+        }
+    }
+    capabilities.sort();
+    capabilities.join(", ")
+}
+
+/// Record only listeners the Swarm has reported live. `listen_on` returning a ListenerId means
+/// the request was accepted, but the OS bind may still fail asynchronously; presenting that as
+/// “bound IPv4 + IPv6” was a concrete Connectivity Assistant truth bug.
+async fn record_listener_evidence(
+    mesh: &MeshService,
+    accepted: &[Multiaddr],
+    steps: &mut Vec<DiagStep>,
+) {
+    let deadline = SystemClock.sleep(Duration::from_secs(3));
+    tokio::pin!(deadline);
+    let snapshot = tokio::select! {
+        value = mesh.next_listener_snapshot() => value,
+        _ = &mut deadline => None,
+    };
+    let addresses = snapshot.map(|value| value.addresses).unwrap_or_default();
+    let direct: Vec<_> = addresses
+        .into_iter()
+        .filter(|address| {
+            !address
+                .iter()
+                .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        })
+        .collect();
+    if direct.is_empty() {
+        steps.push(DiagStep::failed(
+            "listen",
+            "",
+            format!(
+                "{} listen request(s) were accepted, but no live OS listener was reported within 3s",
+                accepted.len()
+            ),
+        ));
+    } else {
+        steps.push(DiagStep::ok(
+            "listen",
+            "",
+            format!(
+                "Swarm reported {} live listener(s): {}",
+                direct.len(),
+                listener_summary(&direct)
+            ),
+        ));
+    }
 }
 
 /// Do the reachability work for a server: assemble the bootstrap list (auto-detected LAN IPv4,
@@ -1097,19 +1957,14 @@ async fn establish_reachability(
     mesh: &MeshService,
     peer_id: &str,
     port: u16,
+    accepted_listeners: &[Multiaddr],
     net: &ServerNet,
     steps: &mut Vec<DiagStep>,
 ) -> (Reachability, Vec<String>) {
     let mut problems = Vec::new();
     let mut bootstrap = auto_bootstrap(port, peer_id);
-    steps.push(DiagStep::ok(
-        "listen",
-        format!("port {port}"),
-        format!(
-            "bound IPv4 + IPv6 over TCP + QUIC; {} address(es) auto-detected",
-            bootstrap.len()
-        ),
-    ));
+    let mut bootstrap_owners = bootstrap_owners(&bootstrap, BootstrapOwner::AutomaticInterface);
+    record_listener_evidence(mesh, accepted_listeners, steps).await;
 
     let advertise = net.advertise.trim();
     if !advertise.is_empty() {
@@ -1119,9 +1974,15 @@ async fn establish_reachability(
                 steps.push(DiagStep::unknown(
                     "advertise",
                     a.clone(),
-                    "the address you supplied; nothing here can test it from outside",
+                    "the address you supplied; AutoNAT will test it if public infrastructure connects",
                 ));
-                bootstrap.insert(0, a)
+                add_bootstrap_owner(
+                    &mut bootstrap,
+                    &mut bootstrap_owners,
+                    a,
+                    BootstrapOwner::Configured,
+                    true,
+                );
             }
             Err(e) => {
                 steps.push(DiagStep::failed("advertise", advertise, e.clone()));
@@ -1140,7 +2001,13 @@ async fn establish_reachability(
                     addr.clone(),
                     "circuit reserved; joiners can reach this node through the relay",
                 ));
-                bootstrap.insert(0, addr)
+                add_bootstrap_owner(
+                    &mut bootstrap,
+                    &mut bootstrap_owners,
+                    addr,
+                    BootstrapOwner::Relay,
+                    true,
+                );
             }
             Err(e) => {
                 steps.push(DiagStep::failed("relay", relay, e.clone()));
@@ -1149,10 +2016,20 @@ async fn establish_reachability(
         }
     }
 
-    // Optional rendezvous: connect to it and advertise our reachable address(es) on the raw mesh
-    // (so the deferred registration can flush), keeping a handle to register each invite's
-    // namespace after the server is spawned. The node is then discoverable with no hard-coded
-    // address; a joiner needs only the pasted invite.
+    // Promote every plausible direct address even when no rendezvous is configured, and offer it
+    // to AutoNAT v2 for a real callback. Previously external addresses were added only inside
+    // `connect_rendezvous`, so a manually-forwarded address or global IPv6 on a direct-only server
+    // was never tested. Relay circuits are excluded by `external_addrs`; a reservation promotes
+    // itself because "reachable through a relay" is a separate property from direct reachability.
+    for addr in external_addrs(&bootstrap) {
+        if let Err(e) = mesh.add_external_address(addr.clone()).await {
+            eprintln!("reachability: could not offer {addr} to AutoNAT: {e}");
+        }
+    }
+
+    // Optional rendezvous: connect to it, keeping a handle to register each invite's namespace
+    // after the server is spawned. The node is then discoverable with no hard-coded address; a
+    // joiner needs only the pasted invite.
     let mut rz_target = None;
     let mut rz_handle = None;
     let rendezvous = net.rendezvous.trim();
@@ -1177,6 +2054,7 @@ async fn establish_reachability(
     (
         Reachability {
             bootstrap,
+            bootstrap_owners,
             rz_target,
             rz_handle,
         },
@@ -1229,14 +2107,13 @@ async fn reserve_relay_circuit(mesh: &MeshService, relay: &str) -> Result<String
     Ok(addr.to_string())
 }
 
-/// Dial the rendezvous node, wait for the connection, and advertise our routable addresses so the
-/// deferred registration can flush. A relay *circuit* address is intentionally not advertised
-/// here; it auto-promotes to an external address on reservation (in the transport actor), so the
-/// rendezvous still learns it.
+/// Dial the rendezvous node and wait for the connection. Routable addresses are offered to the
+/// transport by [`establish_reachability`] independently of whether rendezvous is configured;
+/// this helper only establishes the infrastructure path.
 async fn connect_rendezvous(
     mesh: &MeshService,
     rendezvous: &str,
-    bootstrap: &[String],
+    _bootstrap: &[String],
 ) -> Result<RendezvousTarget, String> {
     // Operator-typed: this is the "rendezvous" field of the create-server form, so a DNS name is
     // both legitimate and (for a TCP/443 TLS/WebSocket node) required.
@@ -1260,11 +2137,6 @@ async fn connect_rendezvous(
     })
     .await
     .map_err(|_| "could not connect to the rendezvous".to_string())?;
-    for addr in external_addrs(bootstrap) {
-        mesh.add_external_address(addr)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
     Ok(rz)
 }
 
@@ -1274,23 +2146,24 @@ async fn connect_rendezvous(
 /// network identity so two servers cannot be correlated to the same person. Reusing it across
 /// launches is what keeps an already-issued invite (which embeds `/p2p/<id>`) redeemable.
 ///
-/// Returns the transport, the peer id, and the port actually in use (which differs from
-/// `net.port` only when the saved port had to be abandoned; the caller persists it back).
+/// Returns the transport, peer id, selected port, and listen requests accepted synchronously.
+/// Callers use the separate live-listener snapshot before claiming that an OS bind succeeded.
 fn build_transport(
     net: &ServerNet,
     dial: &[Multiaddr],
-) -> Result<(MeshService, libp2p::PeerId, u16), String> {
+) -> Result<(MeshService, libp2p::PeerId, u16, Vec<Multiaddr>), String> {
     let key = keypair_from_seed(net.key_seed).map_err(|e| e.to_string())?;
     let port = choose_port(net);
     let (mesh, libp2p_id, bound) =
-        MeshService::new_tcp_with_key(key, &listen_addrs(port), dial).map_err(|e| e.to_string())?;
+        MeshService::new_tcp_with_key_and_port_mapping(key, &listen_addrs(port), dial)
+            .map_err(|e| e.to_string())?;
     // With `port == 0` the OS assigned the number; read it back off whatever bound.
     let port = if port != 0 {
         port
     } else {
         bound.iter().find_map(listen_port).unwrap_or(0)
     };
-    Ok((mesh, libp2p_id, port))
+    Ok((mesh, libp2p_id, port, bound))
 }
 
 /// This server's libp2p peer id, derived from its persisted identity seed. Lets a caller that
@@ -1320,6 +2193,7 @@ fn new_server_net(advertise: &str, relay: &str, rendezvous: &str) -> ServerNet {
         advertise: advertise.trim().to_string(),
         relay: relay.trim().to_string(),
         rendezvous: rendezvous.trim().to_string(),
+        switchboard: false,
         // Reserved just below; this session gets the first block, the next launch the second.
         record_seq: 0,
     };
@@ -1380,55 +2254,555 @@ async fn load_or_init_server_net(
     net
 }
 
-/// Watch for the UPnP mapping this node asked its router for, in the background, and fold the
-/// public address it reports into the server's stored bootstrap list so every invite minted from
-/// then on carries a directly-dialable address: no relay, no port-forward. Founding must not wait
-/// on it (see [`UPNP_WINDOW_SECS`]), so the answer is collected out here instead.
-fn spawn_upnp_fold(
+/// Deterministically summarize the live router mappings for the Connectivity assistant. Failed
+/// probes are kept per mechanism/transport: one unavailable UDP mapping must not be broadened into
+/// "PCP failed" while its TCP probe is still in flight.
+type PortMappingStatusKey = (PortMappingMechanism, PortMappingTransport, Option<IpAddr>);
+
+fn port_mapping_label(
+    mechanism: PortMappingMechanism,
+    transport: PortMappingTransport,
+    local_address: Option<IpAddr>,
+) -> String {
+    match local_address {
+        Some(IpAddr::V6(address)) => {
+            format!("{mechanism} IPv6 pinhole {transport} ({address})")
+        }
+        Some(IpAddr::V4(address)) => format!("{mechanism} IPv4 {transport} ({address})"),
+        None => format!("{mechanism} {transport}"),
+    }
+}
+
+fn port_mapping_status(
+    active: &HashMap<PortMappingStatusKey, Multiaddr>,
+    unavailable: &HashMap<PortMappingStatusKey, String>,
+    waiting: bool,
+) -> String {
+    let mapped = if active.is_empty() {
+        None
+    } else {
+        let mut mappings: Vec<String> = active
+            .iter()
+            .map(|((mechanism, transport, local_address), addr)| {
+                format!(
+                    "{}: {addr}",
+                    port_mapping_label(*mechanism, *transport, *local_address)
+                )
+            })
+            .collect();
+        mappings.sort_unstable();
+        Some(format!("mapped via {}", mappings.join("; ")))
+    };
+
+    let mut absent = Vec::new();
+    for mechanism in [
+        PortMappingMechanism::Upnp,
+        PortMappingMechanism::Pcp,
+        PortMappingMechanism::NatPmp,
+    ] {
+        let tcp = unavailable.get(&(mechanism, PortMappingTransport::Tcp, None));
+        let udp = unavailable.get(&(mechanism, PortMappingTransport::Udp, None));
+        match (tcp, udp) {
+            (Some(tcp), Some(udp)) if tcp == udp => {
+                absent.push(format!("{mechanism} unavailable: {tcp}"));
+            }
+            (Some(tcp), Some(udp)) => absent.push(format!(
+                "{mechanism} unavailable (TCP: {tcp}; UDP/QUIC: {udp})"
+            )),
+            (Some(tcp), None) => {
+                absent.push(format!("{mechanism} TCP unavailable: {tcp}"));
+            }
+            (None, Some(udp)) => {
+                absent.push(format!("{mechanism} UDP/QUIC unavailable: {udp}"));
+            }
+            (None, None) => {}
+        }
+    }
+    let mut scoped: Vec<_> = unavailable
+        .iter()
+        .filter_map(|(&(mechanism, transport, local_address), detail)| {
+            local_address.map(|local_address| {
+                format!(
+                    "{} unavailable: {detail}",
+                    port_mapping_label(mechanism, transport, Some(local_address))
+                )
+            })
+        })
+        .collect();
+    scoped.sort_unstable();
+    absent.extend(scoped);
+    if let Some(mapped) = mapped {
+        return if absent.is_empty() {
+            mapped
+        } else {
+            format!("{mapped}; other attempts: {}", absent.join("; "))
+        };
+    }
+    if waiting {
+        return PORT_MAPPING_WAITING.to_string();
+    }
+    if absent.is_empty() {
+        PORT_MAPPING_TIMED_OUT.to_string()
+    } else {
+        // An unavailable entry can describe a lease that existed and later expired. Calling that
+        // an initial timeout is both contradictory and misleading, so use neutral live-state copy.
+        format!("{} ({})", PORT_MAPPING_INACTIVE, absent.join("; "))
+    }
+}
+
+/// Retire one mechanism's lease and answer whether the durable bootstrap address can be removed.
+/// Multiple router protocols may report the same socket, so only the final owner withdrawing it
+/// makes the address stale. Kept pure so the duplicate-lease edge case is regression tested.
+#[cfg(test)]
+fn retire_port_mapping(
+    active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
+    mechanism: PortMappingMechanism,
+    transport: PortMappingTransport,
+    address: &Multiaddr,
+) -> bool {
+    if active.get(&(mechanism, transport, None)) != Some(address) {
+        return false;
+    }
+    active.remove(&(mechanism, transport, None));
+    !active.values().any(|candidate| candidate == address)
+}
+
+/// Replace one mechanism's current lease and return an old address that no other mapping still
+/// owns. Although the PCP/NAT-PMP worker normally emits `Expired(old)` before `Mapped(new)`, the
+/// product fold must also tolerate an implementation (or UPnP gateway) that reports only the new
+/// address; otherwise the old route would survive forever in invites and peer records.
+#[cfg(test)]
+fn replace_port_mapping(
+    active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
+    mechanism: PortMappingMechanism,
+    transport: PortMappingTransport,
+    address: Multiaddr,
+) -> Option<Multiaddr> {
+    let previous = active.insert((mechanism, transport, None), address.clone());
+    previous.filter(|old| old != &address && !active.values().any(|candidate| candidate == old))
+}
+
+/// Add or remove one mapped address in the durable bootstrap and republish only if the effective
+/// address set changed. Two mechanisms may own the same public socket; expiry of one must not
+/// withdraw an address while the other still has an active lease for it.
+async fn fold_mapped_bootstrap(
+    app: &AppHandle,
+    server: u64,
+    peer_id: &str,
+    address: &Multiaddr,
+    add: bool,
+) -> bool {
+    let entry = format!("{address}/p2p/{peer_id}");
+    fold_bootstrap_entry(app, server, &entry, BootstrapOwner::PortMapping, add).await
+}
+
+/// Add or remove one exact dial address from this member's live peer record. Router mappings use a
+/// bare transport address plus our peer id; relay circuit addresses already contain both relay and
+/// local peer ids and therefore call this helper directly. `owner` prevents one lifecycle from
+/// withdrawing an identical route that another lifecycle still owns.
+async fn fold_bootstrap_entry(
+    app: &AppHandle,
+    server: u64,
+    entry: &str,
+    owner: BootstrapOwner,
+    add: bool,
+) -> bool {
+    let entry = entry.to_string();
+    let state = app.state::<AppState>();
+    let changed_and_actor = {
+        let mut servers = state.inner().servers.lock().await;
+        let Some(server_entry) = servers.get_mut(&server) else {
+            return false;
+        };
+        let changed = if add {
+            // Mapping, configured and relay routes beat LAN/loopback during address racing.
+            add_bootstrap_owner(
+                &mut server_entry.bootstrap,
+                &mut server_entry.bootstrap_owners,
+                entry.clone(),
+                owner,
+                owner != BootstrapOwner::AutomaticInterface,
+            )
+        } else {
+            remove_bootstrap_owner(
+                &mut server_entry.bootstrap,
+                &mut server_entry.bootstrap_owners,
+                &entry,
+                owner,
+            )
+        };
+        changed.then(|| (server_entry.actor.clone(), server_entry.bootstrap.clone()))
+    };
+
+    let Some((actor, bootstrap)) = changed_and_actor else {
+        return false;
+    };
+    {
+        // The Connectivity assistant reads the last attempt record, not `ServerEntry` directly.
+        // Keep its advertised-address list live too, otherwise it would announce a successful PCP
+        // mapping while the copyable report still said "Addresses this node advertises: none".
+        let mut diag = state.inner().diag.lock().await;
+        if diag.server == server {
+            if add {
+                if !diag.advertised.contains(&entry) {
+                    diag.advertised.insert(0, entry.clone());
+                }
+            } else if let Some(index) = diag.advertised.iter().position(|item| item == &entry) {
+                diag.advertised.remove(index);
+            }
+        }
+    }
+    // A router lease nobody is told about is useless, while an expired lease left in an old peer
+    // record is a persistent dead dial. Publish both additions and removals on a fresh sequence.
+    if let Some(seq) = next_record_seq(state.inner(), server).await {
+        actor.publish_self_record(bootstrap, seq).await;
+    }
+    true
+}
+
+async fn store_port_mapping_status(
+    app: &AppHandle,
+    server: u64,
+    active: &HashMap<PortMappingStatusKey, Multiaddr>,
+    unavailable: &HashMap<PortMappingStatusKey, String>,
+    waiting: bool,
+) {
+    let state = app.state::<AppState>();
+    let outcome = port_mapping_status(active, unavailable, waiting);
+    let changed = state
+        .inner()
+        .upnp
+        .lock()
+        .await
+        .insert(server, outcome.clone())
+        .as_ref()
+        != Some(&outcome);
+    if changed {
+        let _ = app.emit("reachability-changed", server);
+    }
+}
+
+/// Reconcile one authoritative mapping snapshot into the live peer record. The source uses a watch
+/// channel, so a slow/late consumer sees the newest set rather than an unbounded event backlog.
+async fn apply_port_mapping_snapshot(
+    app: &AppHandle,
+    server: u64,
+    peer_id: &str,
+    snapshot: PortMappingSnapshot,
+    active: &mut HashMap<PortMappingStatusKey, Multiaddr>,
+    unavailable: &mut HashMap<PortMappingStatusKey, String>,
+) {
+    let (next, next_unavailable) = port_mapping_snapshot_state(snapshot);
+
+    // The bridge needs one aggregate PortMapping owner per exact socket. The snapshot itself may
+    // contain several protocol/interface owners; compare its unique address sets so expiry of one
+    // protocol cannot withdraw the other, while a raw/manual collision remains protected by the
+    // `ServerEntry` ownership map.
+    let previous_addresses: HashSet<_> = active.values().cloned().collect();
+    let next_addresses: HashSet<_> = next.values().cloned().collect();
+    for old in previous_addresses.difference(&next_addresses) {
+        fold_mapped_bootstrap(app, server, peer_id, old, false).await;
+    }
+    for address in next_addresses.difference(&previous_addresses) {
+        fold_mapped_bootstrap(app, server, peer_id, address, true).await;
+    }
+    *active = next;
+    *unavailable = next_unavailable;
+}
+
+/// Convert the public snapshot into family/interface-aware maps. Kept pure because accidentally
+/// collecting by only `(mechanism, transport)` silently discards either PCPv4 or PCPv6.
+fn port_mapping_snapshot_state(
+    snapshot: PortMappingSnapshot,
+) -> (
+    HashMap<PortMappingStatusKey, Multiaddr>,
+    HashMap<PortMappingStatusKey, String>,
+) {
+    let active = snapshot
+        .active
+        .into_iter()
+        .map(|entry| {
+            (
+                (entry.mechanism, entry.transport, entry.local_address),
+                entry.address,
+            )
+        })
+        .collect();
+    let unavailable = snapshot
+        .unavailable
+        .into_iter()
+        .map(|failure| {
+            (
+                (failure.mechanism, failure.transport, failure.local_address),
+                failure.detail.chars().take(240).collect(),
+            )
+        })
+        .collect();
+    (active, unavailable)
+}
+
+/// Watch UPnP, PCP and NAT-PMP in the background and fold live public mappings into the server's
+/// stored bootstrap. Founding does not wait for a router, but the current snapshot remains live for
+/// renewal/expiry and consumes constant memory even when a non-UI caller never takes it.
+fn spawn_port_mapping_fold(
     app: AppHandle,
     server: u64,
-    mut rx: mpsc::Receiver<Option<Multiaddr>>,
+    mut rx: watch::Receiver<PortMappingSnapshot>,
     peer_id: String,
 ) {
     tokio::spawn(async move {
-        let found = timeout(Duration::from_secs(UPNP_WINDOW_SECS), rx.recv()).await;
-        // Nested Options: the outer is the timeout, the middle the channel, the inner the actor's
-        // "no usable gateway" signal (sent promptly so we are not just waiting out the window).
-        // Each of the three means something different to a user staring at a failed invite, so
-        // the connectivity panel gets the distinction rather than a shrug.
-        let state = app.state::<AppState>();
-        let outcome = match &found {
-            Ok(Some(Some(addr))) => addr.to_string(),
-            Ok(Some(None)) => UPNP_NO_GATEWAY.to_string(),
-            // The channel closed with the transport (the server was dropped mid-window).
-            Ok(None) => UPNP_NOT_ATTEMPTED.to_string(),
-            Err(_) => UPNP_TIMED_OUT.to_string(),
-        };
-        state
-            .inner()
-            .upnp
-            .lock()
-            .await
-            .insert(server, outcome.clone());
-        let Ok(Some(Some(addr))) = found else { return };
-        let entry = format!("{addr}/p2p/{peer_id}");
-        let (actor, bootstrap) = {
-            let mut servers = state.inner().servers.lock().await;
-            let Some(e) = servers.get_mut(&server) else {
-                return;
+        let deadline = SystemClock.sleep(Duration::from_secs(PORT_MAPPING_WINDOW_SECS));
+        tokio::pin!(deadline);
+        let mut waiting = true;
+        let mut active = HashMap::new();
+        let mut unavailable = HashMap::new();
+        let initial = rx.borrow_and_update().clone();
+        apply_port_mapping_snapshot(
+            &app,
+            server,
+            &peer_id,
+            initial,
+            &mut active,
+            &mut unavailable,
+        )
+        .await;
+        loop {
+            let changed = tokio::select! {
+                _ = &mut deadline, if waiting => {
+                    waiting = false;
+                    false
+                }
+                result = rx.changed() => {
+                    if result.is_err() {
+                        waiting = false;
+                        store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
+                        break;
+                    }
+                    true
+                }
             };
-            if !e.bootstrap.contains(&entry) {
-                // Front of the list: a public address beats the LAN and loopback entries beside it.
-                e.bootstrap.insert(0, entry);
+            if changed {
+                let snapshot = rx.borrow_and_update().clone();
+                apply_port_mapping_snapshot(
+                    &app,
+                    server,
+                    &peer_id,
+                    snapshot,
+                    &mut active,
+                    &mut unavailable,
+                )
+                .await;
+                // Failure entries are scoped by mechanism, transport and (for PCPv6) local
+                // interface. Their cardinality therefore says nothing about whether every
+                // expected worker has settled. Keep the initial window open until its deadline;
+                // live mappings still appear immediately through `active`.
             }
-            (e.actor.clone(), e.bootstrap.clone())
-        };
-        // The whole point of the mapping is that members can now reach us directly, and they only
-        // learn that from a *fresher* peer record. Republishing on the next number in this
-        // launch's block is what turns the UPnP result into something other members can act on;
-        // without it the router opened a port nobody was ever told about.
-        if let Some(seq) = next_record_seq(state.inner(), server).await {
-            actor.publish_self_record(bootstrap, seq).await;
+            store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
+        }
+    });
+}
+
+async fn apply_relay_snapshot(
+    app: &AppHandle,
+    server: u64,
+    snapshot: RelayAddressSnapshot,
+    previous: &mut HashSet<String>,
+) {
+    let next: HashSet<String> = snapshot
+        .addresses
+        .into_iter()
+        .map(|address| address.to_string())
+        .collect();
+    for expired in previous.difference(&next) {
+        fold_bootstrap_entry(app, server, expired, BootstrapOwner::Relay, false).await;
+    }
+    for available in next.difference(previous) {
+        fold_bootstrap_entry(app, server, available, BootstrapOwner::Relay, true).await;
+    }
+    *previous = next;
+}
+
+/// Keep relay reservation addresses honest after the synchronous initial reservation. A relay
+/// listener can expire or be re-created later; the watch snapshot ensures Settings, invites and
+/// peer records all withdraw/add the same exact circuit address.
+fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAddressSnapshot>) {
+    tokio::spawn(async move {
+        let mut previous = HashSet::new();
+        let initial = rx.borrow_and_update().clone();
+        apply_relay_snapshot(&app, server, initial, &mut previous).await;
+        while rx.changed().await.is_ok() {
+            let snapshot = rx.borrow_and_update().clone();
+            apply_relay_snapshot(&app, server, snapshot, &mut previous).await;
+            let _ = app.emit("reachability-changed", server);
+        }
+    });
+}
+
+fn spawn_mesh_observation_fold(
+    app: AppHandle,
+    server: u64,
+    mut rx: watch::Receiver<MeshObservationSnapshot>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let snapshot = rx.borrow_and_update().clone();
+            let observations: Vec<String> = snapshot
+                .observations
+                .into_iter()
+                .map(|observation| {
+                    let peer = observation.observer.to_string();
+                    format!(
+                        "{} observed {}",
+                        peer.chars().take(12).collect::<String>(),
+                        observation.address
+                    )
+                })
+                .collect();
+            let state = app.state::<AppState>();
+            let changed = state
+                .inner()
+                .mesh_observations
+                .lock()
+                .await
+                .insert(server, observations.clone())
+                .as_ref()
+                != Some(&observations);
+            if changed {
+                let _ = app.emit("reachability-changed", server);
+            }
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// How long the background connectivity collector waits for AutoNAT v2.
+///
+/// The upstream client probes on a five-second cadence and may test several identify/manual
+/// candidates. Thirty seconds gives it multiple turns without delaying founding or joining; the
+/// server stays live after the window and the collector keeps listening, but the diagnostic
+/// refuses to sit at "waiting" forever.
+const AUTONAT_WINDOW_SECS: u64 = 30;
+
+fn bootstrap_names_address(entries: &[String], address: &Multiaddr) -> bool {
+    let bare = address.to_string();
+    let with_peer = format!("{bare}/p2p/");
+    entries
+        .iter()
+        .any(|entry| entry == &bare || entry.starts_with(&with_peer))
+}
+
+/// Derive the visible AutoNAT state from all current observations and the *current* advertised
+/// address set. Identify-only observations remain telemetry, an expired route disappears without
+/// bespoke string invalidation, and one failed route cannot erase a second successful route.
+fn autonat_status(advertised: &[String], evidence: Option<&AutoNatEvidence>) -> String {
+    let Some(evidence) = evidence else {
+        return AUTONAT_NOT_TESTED.to_string();
+    };
+    let current: Vec<_> = evidence
+        .results
+        .iter()
+        .filter(|result| {
+            bootstrap_names_address(advertised, &result.address)
+                && !result
+                    .address
+                    .iter()
+                    .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        })
+        .collect();
+
+    if let Some(result) = current
+        .iter()
+        .copied()
+        .find(|result| result.reachable && addr_is_globally_routable(&result.address))
+    {
+        return format!(
+            "reachable {} (verified by AutoNAT server {})",
+            result.address, result.server
+        );
+    }
+    if let Some(result) = current
+        .iter()
+        .copied()
+        .find(|result| !result.reachable && addr_is_globally_routable(&result.address))
+    {
+        let detail: String = result
+            .error
+            .as_deref()
+            .unwrap_or("dial-back failed")
+            .chars()
+            .take(240)
+            .collect();
+        return format!(
+            "unreachable {} from AutoNAT server {}: {detail}",
+            result.address, result.server
+        );
+    }
+    if let Some(result) = current.iter().copied().find(|result| result.reachable) {
+        return format!(
+            "local-only {} (the callback worked, but this is not a public address)",
+            result.address
+        );
+    }
+    if evidence.waiting {
+        AUTONAT_WAITING.to_string()
+    } else {
+        AUTONAT_NOT_TESTED.to_string()
+    }
+}
+
+async fn store_autonat_snapshot(
+    app: &AppHandle,
+    server: u64,
+    snapshot: AutoNatSnapshot,
+    waiting: bool,
+) {
+    let state = app.state::<AppState>();
+    let next = AutoNatEvidence {
+        waiting,
+        results: snapshot.results,
+    };
+    let changed = state
+        .inner()
+        .autonat
+        .lock()
+        .await
+        .insert(server, next.clone())
+        .as_ref()
+        != Some(&next);
+    if changed {
+        let _ = app.emit("reachability-changed", server);
+    }
+}
+
+/// Collect coalesced per-address AutoNAT v2 evidence. The product filters it against live routes
+/// only when read, closing startup-order and expiry races without an unbounded output queue.
+fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoNatSnapshot>) {
+    tokio::spawn(async move {
+        let deadline = SystemClock.sleep(Duration::from_secs(AUTONAT_WINDOW_SECS));
+        tokio::pin!(deadline);
+        let mut waiting = true;
+        let initial = rx.borrow_and_update().clone();
+        store_autonat_snapshot(&app, server, initial, waiting).await;
+        loop {
+            tokio::select! {
+                _ = &mut deadline, if waiting => {
+                    waiting = false;
+                    let snapshot = rx.borrow().clone();
+                    store_autonat_snapshot(&app, server, snapshot, waiting).await;
+                }
+                result = rx.changed() => {
+                    if result.is_err() {
+                        waiting = false;
+                        let snapshot = rx.borrow().clone();
+                        store_autonat_snapshot(&app, server, snapshot, waiting).await;
+                        break;
+                    }
+                    let snapshot = rx.borrow_and_update().clone();
+                    store_autonat_snapshot(&app, server, snapshot, waiting).await;
+                }
+            }
         }
     });
 }
@@ -1446,13 +2820,163 @@ fn spawn_upnp_fold(
 /// right amount for this gate: whether the inviter is a real member of the named group is decided
 /// later, on the wire, by `request_join`. What it does buy is that a token nobody signed, or one
 /// whose addresses were edited after signing, never causes a single packet.
-fn decode_and_verify_invite(invite_hex: &str) -> Result<InviteToken, String> {
-    let bytes = hex::decode(invite_hex.trim()).map_err(|e| e.to_string())?;
-    let invite = InviteToken::decode(&bytes).map_err(|e| e.to_string())?;
+#[derive(Debug)]
+struct DecodedInvite {
+    token: InviteToken,
+    switchboards: Vec<catcoms_app::SwitchboardRoute>,
+    inviter_peer: Option<PeerId>,
+    assisted_plan: Option<Vec<u8>>,
+}
+
+/// Assisted invite plans are a distinct wire version. Keeping a textual prefix avoids presenting
+/// their outer envelope as an ordinary hex invite that an older client will mysteriously reject.
+/// Plain legacy invite hex remains accepted indefinitely by new clients.
+const ASSISTED_INVITE_PREFIX: &str = "mewtual-invite-v3:";
+/// Paste input is untrusted. Bound the hex before decoding so a giant clipboard value cannot
+/// force an allocation before the protocol codecs apply their own field limits.
+const MAX_INVITE_WIRE_BYTES: usize = 64 * 1024;
+
+fn decode_and_verify_invite(invite_hex: &str) -> Result<DecodedInvite, String> {
+    let value = invite_hex.trim();
+    let (wire, explicitly_assisted) = value
+        .strip_prefix(ASSISTED_INVITE_PREFIX)
+        .map_or((value, false), |rest| (rest, true));
+    if wire.len() > MAX_INVITE_WIRE_BYTES.saturating_mul(2) {
+        return Err("this invite is too large".to_string());
+    }
+    let bytes = hex::decode(wire).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_INVITE_WIRE_BYTES {
+        return Err("this invite is too large".to_string());
+    }
+    let (invite, switchboards, inviter_peer, assisted_plan) = match InviteJoinPlan::decode(&bytes) {
+        Ok(plan) => (
+            plan.invite,
+            plan.switchboards,
+            Some(PeerId::new(plan.inviter_peer)),
+            Some(bytes.clone()),
+        ),
+        Err(_) if !explicitly_assisted => (
+            InviteToken::decode(&bytes).map_err(|e| e.to_string())?,
+            Vec::new(),
+            None,
+            None,
+        ),
+        Err(_) => {
+            return Err("this assisted invite is malformed or its signature is invalid".into())
+        }
+    };
     if !invite.verify_self() {
         return Err("this invite's signature is not valid; it may have been altered or forged, so nothing was contacted".into());
     }
-    Ok(invite)
+    if let Some(expected) = inviter_peer {
+        for address in &invite.bootstrap {
+            if let Ok(address) = address.parse::<Multiaddr>() {
+                if let Some(actual) = target_peer_in_multiaddr(&address) {
+                    if phase0_peer_id(&actual) != expected {
+                        return Err(
+                            "assisted invite names a different peer in its direct route".into()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(DecodedInvite {
+        token: invite,
+        switchboards,
+        inviter_peer,
+        assisted_plan,
+    })
+}
+
+/// Select a tiny, inviter-signed standing-fallback dial set. Each address must terminate in the
+/// helper identity named by its route, and the total remains at the pre-membership four-address
+/// budget even if a malicious inviter signs the maximum route/address counts.
+fn switchboard_dial_plan(
+    routes: &[catcoms_app::SwitchboardRoute],
+    group_id: &[u8],
+    now_ms: u64,
+    invite_expires_at_ms: u64,
+) -> (HashMap<PeerId, u64>, Vec<Multiaddr>) {
+    let mut prepared = Vec::new();
+    for route in routes {
+        // `routes` came through `InviteJoinPlan::decode`, which verified both the helper's offer
+        // signature and the inviter's outer endorsement. Recheck the short helper deadline here,
+        // immediately before any dial; an hour-long invite cannot stretch two-minute consent.
+        if route.offer.group_id != group_id
+            || route.offer.expires_at_ms < now_ms
+            || route.offer.expires_at_ms > invite_expires_at_ms
+            || route.offer.expires_at_ms.saturating_sub(now_ms)
+                > catcoms_app::SWITCHBOARD_OFFER_MAX_FUTURE_MS
+        {
+            continue;
+        }
+        let peer = PeerId::new(route.offer.peer_id);
+        let mut addresses = Vec::new();
+        for raw in &route.offer.addresses {
+            let Ok(address) = raw.parse::<Multiaddr>() else {
+                continue;
+            };
+            if target_peer_in_multiaddr(&address)
+                .is_some_and(|target| phase0_peer_id(&target) == peer)
+                && !addresses.contains(&address)
+            {
+                addresses.push(address);
+            }
+        }
+        if !addresses.is_empty() {
+            // Clock skew tolerance authenticates an honest host's timestamp; it does not grant
+            // extra local dial time. As with reply codes, cap the effective session at the
+            // advertised lifetime from receipt.
+            let effective_expiry = route
+                .offer
+                .expires_at_ms
+                .min(now_ms.saturating_add(catcoms_app::SWITCHBOARD_OFFER_LIFETIME_MS));
+            prepared.push((peer, effective_expiry, addresses));
+        }
+    }
+
+    let mut allowed: HashMap<PeerId, u64> = HashMap::new();
+    let mut selected = Vec::new();
+    // Round-robin keeps a max-sized first helper from consuming the whole connect budget.
+    for address_index in 0..2 {
+        for (peer, expires_at_ms, addresses) in &prepared {
+            let Some(address) = addresses.get(address_index) else {
+                continue;
+            };
+            allowed
+                .entry(*peer)
+                .and_modify(|current| *current = (*current).max(*expires_at_ms))
+                .or_insert(*expires_at_ms);
+            selected.push(address.clone());
+            if selected.len() == 4 {
+                return (allowed, selected);
+            }
+        }
+    }
+    (allowed, selected)
+}
+
+#[tauri::command]
+async fn preview_invite(
+    state: State<'_, AppState>,
+    invite_hex: String,
+) -> Result<InvitePreview, String> {
+    require_unlocked_session(&state).await?;
+    let decoded = decode_and_verify_invite(&invite_hex)?;
+    let now = SystemClock.now_ms();
+    let (switchboards, _) = switchboard_dial_plan(
+        &decoded.switchboards,
+        &decoded.token.group_id,
+        now,
+        decoded.token.expires_at_ms,
+    );
+    Ok(InvitePreview {
+        direct_routes: dialable_bootstrap(&decoded.token.bootstrap).len(),
+        rendezvous_routes: decoded.token.rendezvous.len(),
+        switchboards: switchboards.len(),
+        expires_at_ms: decoded.token.expires_at_ms,
+    })
 }
 
 /// The discover-on-join path (no hard-coded inviter address): build a transport, dial the invite's
@@ -1463,6 +2987,7 @@ fn decode_and_verify_invite(invite_hex: &str) -> Result<InviteToken, String> {
 async fn discover_and_connect(
     invite: &InviteToken,
     net: &ServerNet,
+    expected_inviter: Option<PeerId>,
     steps: &mut Vec<DiagStep>,
 ) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
     // Invite-supplied, so attacker-controlled: the strict variant. The bootstrap half of this same
@@ -1477,7 +3002,8 @@ async fn discover_and_connect(
     // Bind the joiner's own (stable, persisted-identity) listen addresses so it is itself dialable;
     // post-join steady-state discovery has members register/discover + dial each other. Then dial
     // the rendezvous nodes.
-    let (mesh, libp2p_id, port) = build_transport(net, &rz_addrs)?;
+    let (mesh, libp2p_id, port, bound) = build_transport(net, &rz_addrs)?;
+    record_listener_evidence(&mesh, &bound, steps).await;
     // Advertise our own reachable addresses so the steady-state rendezvous registration carries a
     // dialable record: the LAN IPv4 and routable IPv6 when this host has them, loopback otherwise.
     for addr in external_addrs(&auto_bootstrap(port, &libp2p_id.to_string())) {
@@ -1531,6 +3057,9 @@ async fn discover_and_connect(
     let mut candidates: Vec<Candidate> = Vec::new();
     let _ = timeout(Duration::from_secs(20), async {
         while let Some(d) = mesh.next_discovered().await {
+            if expected_inviter.is_some_and(|expected| phase0_peer_id(&d.peer) != expected) {
+                continue;
+            }
             candidates.push(Candidate {
                 peer: d.peer.to_bytes(),
                 addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
@@ -1628,7 +3157,11 @@ async fn discover_and_connect(
 /// reaches us through the relay with **no port-forward** (zero-config NAT traversal).
 /// `rendezvous` is an optional zero-knowledge rendezvous multiaddr; when given, we register at it
 /// so a joiner can discover us with **no hard-coded address at all** (just the pasted invite).
+/// `server_name` is an optional local display label for the server/DM rail entry; if omitted or
+/// empty, it defaults to `display_name` (preserving backwards compatibility). `display_name` is
+/// used to initialize the user's MLS profile in the group.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn found_server(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1637,7 +3170,9 @@ async fn found_server(
     relay: String,
     rendezvous: String,
     is_dm: bool,
+    server_name: Option<String>,
 ) -> Result<FoundResult, String> {
+    require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
         action: "found".into(),
         subject: display_name.clone(),
@@ -1652,6 +3187,7 @@ async fn found_server(
         relay,
         rendezvous,
         is_dm,
+        server_name,
         &mut diag,
     )
     .await;
@@ -1675,6 +3211,7 @@ async fn found_server_inner(
     relay: String,
     rendezvous: String,
     is_dm: bool,
+    server_name: Option<String>,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
     // This server's own network identity + stable port, minted once here and sealed to disk, so
@@ -1689,13 +3226,14 @@ async fn found_server_inner(
             .parse()
             .map_err(|e: libp2p::multiaddr::Error| format!("bad relay address: {e}"))?]
     };
-    let (mesh, libp2p_id, port) = build_transport(&net, &relay_dial)?;
+    let (mesh, libp2p_id, port, bound) = build_transport(&net, &relay_dial)?;
     net.port = port;
     let id = libp2p_id.to_string();
 
     // Everything that makes us reachable from off this machine. `reload_one` runs the very same
     // helper, so a restart reproduces this reachability instead of collapsing to loopback.
-    let (reach, problems) = establish_reachability(&mesh, &id, port, &net, &mut diag.steps).await;
+    let (reach, problems) =
+        establish_reachability(&mesh, &id, port, &bound, &net, &mut diag.steps).await;
     if !problems.is_empty() {
         // The user typed these addresses moments ago; tell them rather than founding a server that
         // silently nobody can reach.
@@ -1703,16 +3241,25 @@ async fn found_server_inner(
     }
     let Reachability {
         bootstrap,
+        bootstrap_owners,
         rz_target,
         rz_handle,
     } = reach;
-    // Take the UPnP channel before the transport disappears into the server, so a background task
-    // can wait out a realistic router-discovery window without holding up the UI.
-    let upnp_rx = mesh.take_external_addrs().await;
+    // Take the router-mapping lifecycle before the transport disappears into the server, so a
+    // background task can retain mappings and withdraw expired addresses without holding up UI.
+    let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
+    let autonat_rx = mesh.take_autonat_snapshots().await;
+    let relay_address_rx = mesh.take_relay_address_snapshots().await;
+    let mesh_observation_rx = mesh.take_mesh_observation_snapshots().await;
+    let mesh_handle = mesh.handle();
     diag.advertised = bootstrap.clone();
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
-    let name = display_name.clone();
+    // `server_name` is the local rail label (DM: friend's name). If omitted/empty, fall back to
+    // `display_name` (user's profile name) for backwards compatibility.
+    let name = server_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| display_name.clone());
     let mut server = Server::found(
         mesh,
         device,
@@ -1765,19 +3312,30 @@ async fn found_server_inner(
     let invite_hex = hex::encode(invite.encode());
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
+    let channels = ui_channels(actor.channels().await);
     let server_id = register_server(
         app,
         state,
         actor,
         events,
+        group_id,
+        device_id,
         Some(invite_hex),
         name,
         bootstrap,
+        bootstrap_owners,
+        Some(InterfaceRouteIdentity {
+            port,
+            peer_id: id.clone(),
+        }),
         rz_vec,
-        rz_handle,
+        Some(mesh_handle),
         is_dm,
+        net.switchboard,
         net.record_seq,
     )
     .await;
@@ -1798,23 +3356,119 @@ async fn found_server_inner(
             invite.rendezvous.len()
         ),
     ));
-    if let Some(rx) = upnp_rx {
+    if let Some(rx) = port_mapping_rx {
         state
             .upnp
             .lock()
             .await
-            .insert(server_id, UPNP_WAITING.to_string());
-        spawn_upnp_fold(app.clone(), server_id, rx, id);
+            .insert(server_id, PORT_MAPPING_WAITING.to_string());
+        spawn_port_mapping_fold(app.clone(), server_id, rx, id);
+    }
+    if let Some(rx) = autonat_rx {
+        state.autonat.lock().await.insert(
+            server_id,
+            AutoNatEvidence {
+                waiting: true,
+                results: Vec::new(),
+            },
+        );
+        spawn_autonat_fold(app.clone(), server_id, rx);
+    }
+    if let Some(rx) = relay_address_rx {
+        spawn_relay_fold(app.clone(), server_id, rx);
+    }
+    if let Some(rx) = mesh_observation_rx {
+        spawn_mesh_observation_fold(app.clone(), server_id, rx);
     }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
+        channels,
         is_dm,
     })
 }
 
 /// Join an existing server by pasting its invite: decode it, dial all bootstrap addresses,
 /// run the MLS join, then catch up #general / profiles / files.
+async fn wait_for_peer(mesh: &MeshService, wanted: PeerId, within: Duration) -> Result<(), ()> {
+    timeout(within, async {
+        loop {
+            match mesh.next_event().await {
+                Some(TransportEvent::PeerConnected(peer)) if peer == wanted => return,
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
+/// Wait for whichever peer answers a reply-code dial-back.  The reply candidate is public and
+/// may be applied by either the named inviter or an existing member helper; the subsequent MLS
+/// path distinguishes them and never grants the helper admission authority.
+async fn wait_for_reply_peer(
+    mesh: &MeshService,
+    reply: &JoinReply,
+    invite_nonce: &[u8; 16],
+    within: Duration,
+) -> Result<PeerId, ()> {
+    timeout(within, async {
+        loop {
+            match mesh.next_event().await {
+                Some(TransportEvent::Request {
+                    from,
+                    data,
+                    responder,
+                    ..
+                }) if data.first() == Some(&JOIN_REPLY_PROOF_KIND) => {
+                    let valid =
+                        reply.verify_dialback_proof(invite_nonce, from.as_bytes(), &data[1..]);
+                    responder.respond(if valid {
+                        bytes::Bytes::from_static(b"ok")
+                    } else {
+                        bytes::Bytes::new()
+                    });
+                    if valid {
+                        return from;
+                    }
+                }
+                Some(TransportEvent::Request { responder, .. }) => {
+                    responder.respond(bytes::Bytes::new());
+                }
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
+async fn wait_for_switchboard_peer(
+    mesh: &MeshService,
+    allowed: &HashMap<PeerId, u64>,
+    within: Duration,
+) -> Result<(PeerId, u64), ()> {
+    timeout(within, async {
+        loop {
+            match mesh.next_event().await {
+                Some(TransportEvent::PeerConnected(peer)) => {
+                    if let Some(expires_at_ms) = allowed.get(&peer).copied() {
+                        if SystemClock.now_ms() <= expires_at_ms {
+                            return (peer, expires_at_ms);
+                        }
+                    }
+                }
+                Some(_) => {}
+                None => std::future::pending::<()>().await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| ())
+}
+
 #[tauri::command]
 async fn join_server(
     app: AppHandle,
@@ -1822,13 +3476,26 @@ async fn join_server(
     invite_hex: String,
     display_name: String,
     is_dm: bool,
+    allow_switchboards: bool,
+    server_name: Option<String>,
 ) -> Result<FoundResult, String> {
+    require_unlocked_session(&state).await?;
     let mut diag = Connectivity {
         action: "join".into(),
         at: SystemClock.now_ms(),
         ..Default::default()
     };
-    let out = join_server_inner(&app, &state, invite_hex, display_name, is_dm, &mut diag).await;
+    let out = join_server_inner(
+        &app,
+        &state,
+        invite_hex,
+        display_name,
+        is_dm,
+        allow_switchboards,
+        server_name,
+        &mut diag,
+    )
+    .await;
     if let Err(e) = &out {
         diag.last_error.clone_from(e);
     }
@@ -1838,17 +3505,37 @@ async fn join_server(
 
 /// The body of [`join_server`], split out so every exit records the attempt for the connectivity
 /// panel (the exits that used to say nothing are the whole reason that panel exists).
+#[allow(clippy::too_many_arguments)]
 async fn join_server_inner(
     app: &AppHandle,
     state: &AppState,
     invite_hex: String,
     display_name: String,
     is_dm: bool,
+    allow_switchboards: bool,
+    server_name: Option<String>,
     diag: &mut Connectivity,
 ) -> Result<FoundResult, String> {
-    let invite = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
+    let decoded = decode_and_verify_invite(&invite_hex).inspect_err(|e| {
         diag.steps.push(DiagStep::failed("invite", "", e.clone()));
     })?;
+    let invite = decoded.token;
+    let plan_inviter = decoded.inviter_peer;
+    let assisted_plan = decoded.assisted_plan;
+    let now = SystemClock.now_ms();
+    let (available_helpers, _) = switchboard_dial_plan(
+        &decoded.switchboards,
+        &invite.group_id,
+        now,
+        invite.expires_at_ms,
+    );
+    let available_switchboard_count = available_helpers.len();
+    let use_switchboards = allow_switchboards && available_switchboard_count > 0;
+    let switchboards = if allow_switchboards {
+        decoded.switchboards
+    } else {
+        Vec::new()
+    };
     diag.subject = hex::encode(&invite.inviter_device_id.as_bytes()[..8]);
     diag.steps.push(DiagStep::ok(
         "invite",
@@ -1859,6 +3546,22 @@ async fn join_server_inner(
             invite.rendezvous.len()
         ),
     ));
+    if use_switchboards {
+        diag.steps.push(DiagStep::ok(
+            "switchboard",
+            "",
+            format!(
+                "the inviter endorsed {} currently dialable standing member fallback(s); unexpired routes may be tried only after the direct route",
+                available_switchboard_count
+            ),
+        ));
+    } else if available_switchboard_count > 0 {
+        diag.steps.push(DiagStep::unknown(
+            "switchboard",
+            "",
+            "standing member fallbacks were present but the joiner did not consent to contact them",
+        ));
+    }
 
     // A joiner gets its own per-server identity + stable port too: it is a full member afterwards,
     // so its peer record has to keep resolving across restarts exactly like the founder's.
@@ -1866,11 +3569,40 @@ async fn join_server_inner(
 
     // If the invite points at a rendezvous, discover the inviter there (no hard-coded address);
     // otherwise dial the invite's bootstrap addresses directly (loopback / LAN / relayed).
-    let (mesh, inviter, rz_config) = if !invite.rendezvous.is_empty() {
-        let (mesh, inviter, rz_config, port) =
-            discover_and_connect(&invite, &net, &mut diag.steps).await?;
-        net.port = port;
-        (mesh, inviter, rz_config)
+    let (mesh, inviter, rz_config, needs_direct_wait, direct_already_failed) = if !invite
+        .rendezvous
+        .is_empty()
+    {
+        let targets =
+            validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
+        let fallback_rz_config: Vec<_> = targets
+            .iter()
+            .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
+            .collect();
+        match discover_and_connect(&invite, &net, plan_inviter, &mut diag.steps).await {
+            Ok((mesh, inviter, rz_config, port)) => {
+                net.port = port;
+                (mesh, inviter, rz_config, false, false)
+            }
+            Err(error) if use_switchboards => {
+                let inviter = plan_inviter.ok_or_else(|| {
+                    "assisted invite does not pin the named inviter transport".to_string()
+                })?;
+                // The discovery transport may already have spent its deadline and is dropped.
+                // Retain the stable identity/port preference but start a clean listener with no
+                // attacker-controlled initial dial so the consented helper path can proceed.
+                let (mesh, _id, port, bound) = build_transport(&net, &[])?;
+                record_listener_evidence(&mesh, &bound, &mut diag.steps).await;
+                net.port = port;
+                diag.steps.push(DiagStep::unknown(
+                    "switchboard",
+                    "",
+                    format!("direct rendezvous path failed ({error}); trying the consented member fallback"),
+                ));
+                (mesh, inviter, fallback_rz_config, true, true)
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         // Validated + capped before a single socket is opened (defect P7): an unvalidated list of
         // up to 64 author-chosen addresses is a connect flood with a paste for a trigger.
@@ -1885,15 +3617,18 @@ async fn join_server_inner(
                 format!("{dropped} address(es) in the invite were unusable and were not dialled"),
             ));
         }
-        if addrs.is_empty() {
+        if addrs.is_empty() && !use_switchboards {
             return Err("invite carries no usable bootstrap address".to_string());
         }
-        let inviter_lp = addrs
-            .iter()
-            .find_map(target_peer_in_multiaddr)
-            .ok_or_else(|| "bootstrap has no peer id".to_string())?;
-        let inviter = phase0_peer_id(&inviter_lp);
-        let (mesh, _id, port) = build_transport(&net, &addrs)?;
+        let inviter = match addrs.iter().find_map(target_peer_in_multiaddr) {
+            Some(peer) => phase0_peer_id(&peer),
+            None => plan_inviter.ok_or_else(|| {
+                "invite has neither a direct inviter route nor a pinned assisted inviter"
+                    .to_string()
+            })?,
+        };
+        let (mesh, _id, port, bound) = build_transport(&net, &addrs)?;
+        record_listener_evidence(&mesh, &bound, &mut diag.steps).await;
         net.port = port;
         // The transport dials these itself, concurrently, so a per-address outcome is not
         // observable here; what IS observable is which were tried and whether any answered.
@@ -1901,50 +3636,253 @@ async fn join_server_inner(
             diag.steps
                 .push(DiagStep::unknown("dial", a.to_string(), "dialled"));
         }
-        // Wait for the connection to the inviter before requesting the join.
-        timeout(Duration::from_secs(20), async {
-            loop {
-                if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
-                    if p == inviter {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
+        let no_direct_route = addrs.is_empty();
+        (mesh, inviter, Vec::new(), true, no_direct_route)
+    };
+
+    // Prepare the future member's own reachability *before* waiting on the one-way invite route.
+    // On timeout this exact transport and stable identity stay alive for a 60-second two-way reply
+    // window; dropping/rebuilding them would invalidate the NAT mapping in the code just copied.
+    let local_peer_id = peer_id_of(&net)?;
+    let joiner_addrs = auto_bootstrap(net.port, &local_peer_id);
+    for addr in external_addrs(&joiner_addrs) {
+        let _ = mesh.add_external_address(addr).await;
+    }
+    let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
+    let autonat_rx = mesh.take_autonat_snapshots().await;
+    let relay_address_rx = mesh.take_relay_address_snapshots().await;
+    let mesh_observation_rx = mesh.take_mesh_observation_snapshots().await;
+    let mesh_handle = mesh.handle();
+
+    let mut join_contact = inviter;
+    let mut reply_expires_at_ms = None;
+    let mut reply_context: Option<JoinReply> = None;
+    let mut switchboard_expires_at_ms = None;
+    let mut switchboard_contacts = Vec::new();
+    if needs_direct_wait {
+        let direct_failed = direct_already_failed
+            || wait_for_peer(&mesh, inviter, Duration::from_secs(20))
+                .await
+                .is_err();
+        if direct_failed {
             diag.steps.push(DiagStep::failed(
                 "connect",
                 "",
-                "none of the dialled addresses answered within 20s",
+                if direct_already_failed {
+                    "no usable direct inviter route remained"
+                } else {
+                    "none of the dialled addresses answered within 20s"
+                },
             ));
-            "timed out connecting to the server".to_string()
-        })?;
-        diag.steps
-            .push(DiagStep::ok("connect", "", "connected to the server"));
-        (mesh, inviter, Vec::new())
-    };
+
+            // Direct-first is deliberate: member fallback reveals the joiner's IP/timing to an
+            // additional group member and may spend their bandwidth. Only routes separately
+            // labelled and signed by the inviter are dialled here; they were never mixed into the
+            // transport's initial bootstrap set.
+            if use_switchboards {
+                let now = SystemClock.now_ms();
+                let (allowed, candidates) = switchboard_dial_plan(
+                    &switchboards,
+                    &invite.group_id,
+                    now,
+                    invite.expires_at_ms,
+                );
+                let latest_deadline = allowed.values().copied().max().unwrap_or(now);
+                if !candidates.is_empty() {
+                    let _ = mesh.handle().dial_join_candidates(&candidates).await;
+                }
+                let remaining = latest_deadline.saturating_sub(now);
+                match wait_for_switchboard_peer(
+                    &mesh,
+                    &allowed,
+                    Duration::from_millis(remaining.min(15_000)),
+                )
+                .await
+                {
+                    Ok((helper, helper_deadline)) => {
+                        join_contact = helper;
+                        switchboard_contacts = allowed.into_iter().collect();
+                        switchboard_contacts
+                            .sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+                        switchboard_expires_at_ms = Some(helper_deadline.min(invite.expires_at_ms));
+                        diag.steps.push(DiagStep::ok(
+                            "switchboard",
+                            "",
+                            "connected to an inviter-endorsed standing member fallback",
+                        ));
+                    }
+                    Err(()) => diag.steps.push(DiagStep::failed(
+                        "switchboard",
+                        "",
+                        "none of the inviter-endorsed standing fallbacks answered within 15s",
+                    )),
+                }
+            }
+
+            let mut candidates = external_addrs(&joiner_addrs);
+            if let Some(rx) = port_mapping_rx.as_ref() {
+                candidates.extend(
+                    rx.borrow()
+                        .active
+                        .iter()
+                        .map(|mapping| mapping.address.clone()),
+                );
+            }
+            candidates.sort_by_key(ToString::to_string);
+            candidates.dedup();
+            candidates.truncate(4);
+            if switchboard_expires_at_ms.is_none() && candidates.is_empty() {
+                diag.steps.push(DiagStep::failed(
+                    "reply",
+                    "",
+                    "this joiner has no public listener route to put in a two-way reply",
+                ));
+                return Err(
+                    "timed out connecting to the server; no direct reply route is available"
+                        .to_string(),
+                );
+            }
+
+            if switchboard_expires_at_ms.is_none() {
+                let joiner_peer = keypair_from_seed(net.key_seed)
+                    .map_err(|e| e.to_string())?
+                    .public()
+                    .to_peer_id();
+                let mut rng = OsCryptoRng;
+                let reply = JoinReply::mint(
+                    invite.encode(),
+                    &invite.invite_nonce,
+                    joiner_peer,
+                    candidates,
+                    &SystemClock,
+                    &mut rng,
+                )
+                .map_err(|e| e.to_string())?;
+                let ready = JoinReplyReady {
+                    code: reply.encode(),
+                    expires_at_ms: reply.expires_at_ms,
+                    candidate_count: reply.candidates.len(),
+                };
+                reply_expires_at_ms = Some(reply.expires_at_ms);
+                app.emit("join-reply-ready", &ready)
+                    .map_err(|e| e.to_string())?;
+                diag.steps.push(DiagStep::unknown(
+                "reply",
+                "",
+                format!(
+                    "generated a 60-second two-way reply with {} direct candidate(s); waiting for the inviter to dial back",
+                    ready.candidate_count
+                ),
+            ));
+
+                let remaining = reply.expires_at_ms.saturating_sub(SystemClock.now_ms());
+                join_contact = wait_for_reply_peer(
+                &mesh,
+                &reply,
+                &invite.invite_nonce,
+                Duration::from_millis(remaining),
+            )
+                .await
+                .map_err(|_| {
+                    diag.steps.push(DiagStep::failed(
+                        "reply",
+                        "",
+                        "the two-way reply window expired before the inviter connected",
+                    ));
+                    "two-way connection reply expired; generate a fresh reply and keep both apps open"
+                        .to_string()
+                })?;
+                reply_context = Some(reply);
+            }
+        }
+        let detail = if join_contact == inviter {
+            "connected to the named inviter"
+        } else if switchboard_expires_at_ms.is_some() {
+            "connected to an inviter-endorsed standing switchboard"
+        } else {
+            "connected to an existing member helper; it will forward only the admission handshake"
+        };
+        diag.steps.push(DiagStep::ok("connect", "", detail));
+    }
 
     let device = MlsDevice::generate().map_err(|e| e.to_string())?;
-    let name = display_name.clone();
-    // Past this point the transport is up, so a failure here is the MLS admission itself: the
-    // one the serving node's join log explains and this side cannot.
-    let mut server = Server::join(
-        mesh,
-        device,
-        OsCryptoRng,
-        Box::new(SystemClock),
-        display_name,
-        inviter,
-        &invite,
-    )
-    .await
+    // `server_name` is the local rail label (DM: friend's name). If omitted/empty, fall back to
+    // `display_name` (user's profile name) for backwards compatibility.
+    let name = server_name
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| display_name.clone());
+    let used_reply_path = reply_expires_at_ms.is_some();
+    let used_switchboard_path = switchboard_expires_at_ms.is_some();
+    let join = if switchboard_expires_at_ms.is_some() {
+        let join_plan = assisted_plan.as_deref().ok_or_else(|| {
+            "standing fallback was selected without its signed assisted invite plan".to_string()
+        })?;
+        Server::join_from_switchboards(
+            mesh,
+            device,
+            OsCryptoRng,
+            Box::new(SystemClock),
+            display_name,
+            join_contact,
+            &switchboard_contacts,
+            inviter,
+            &invite,
+            join_plan,
+        )
+        .await
+        .map(|(server, authenticated_contact)| {
+            join_contact = authenticated_contact;
+            server
+        })
+    } else if let Some(expires_at_ms) = reply_expires_at_ms {
+        let reply = reply_context
+            .as_ref()
+            .ok_or_else(|| "reply connection was selected without its proof context".to_string())?;
+        let reply_joiner_peer = reply.joiner.to_bytes();
+        Server::join_from_reply(
+            mesh,
+            device,
+            OsCryptoRng,
+            Box::new(SystemClock),
+            display_name,
+            join_contact,
+            inviter,
+            &invite,
+            reply.joiner_nonce,
+            &reply_joiner_peer,
+            expires_at_ms,
+        )
+        .await
+        .map(|(server, authenticated_contact)| {
+            join_contact = authenticated_contact;
+            server
+        })
+    } else {
+        Server::join(
+            mesh,
+            device,
+            OsCryptoRng,
+            Box::new(SystemClock),
+            display_name,
+            inviter,
+            &invite,
+        )
+        .await
+    };
+    let mut server = join
     .map_err(|e| {
         let msg = e.to_string();
+        let detail = if used_reply_path || used_switchboard_path {
+            format!(
+                "{msg}; no dial-back contact produced an inviter-signed Welcome before the reply window closed. A helper may have been unable to reach/prove the named inviter, so there may be no serving-node Join log entry"
+            )
+        } else {
+            format!("{msg}; the server refused the join, and only the serving node knows why: ask its operator to read Server settings / Join log")
+        };
         diag.steps.push(DiagStep::failed(
             "join",
             "",
-            format!("{msg}; the server refused the join, and only the serving node knows why: ask its operator to read Server settings / Join log"),
+            detail,
         ));
         msg
     })?;
@@ -1966,45 +3904,55 @@ async fn join_server_inner(
         server.set_rendezvous_nodes(rz_config);
     }
     // A joiner is a full member the moment the Welcome lands, so it publishes its own signed peer
-    // record exactly like the founder does (defect P1). It mints no invites and therefore keeps no
-    // `bootstrap` list, so the addresses are the auto-detected ones; the non-routable entries are
-    // stripped inside `publish_self_record`.
-    let joiner_addrs = match peer_id_of(&net) {
-        Ok(id) => auto_bootstrap(net.port, &id),
-        Err(e) => {
-            eprintln!("join: could not derive the local peer id: {e}");
-            Vec::new()
-        }
-    };
+    // record exactly like the founder does (defect P1). `ServerEntry.bootstrap` is also the live
+    // source for later mapping/relay republication, so retain these base addresses even though a
+    // joiner cannot mint owner-scoped invites. Non-routable entries are stripped inside
+    // `publish_self_record`.
     diag.advertised.clone_from(&joiner_addrs);
-    if let Err(e) = server.publish_self_record(joiner_addrs, net.record_seq) {
+    if let Err(e) = server.publish_self_record(joiner_addrs.clone(), net.record_seq) {
         eprintln!("join: publishing the peer record failed: {e}");
     }
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
+    actor.catch_up_channel_index(join_contact).await;
     actor.open_channel(general).await;
-    actor.catch_up(inviter, general).await;
-    actor.catch_up_profiles(inviter).await;
-    actor.catch_up_livery(inviter).await;
-    actor.catch_up_badges(inviter).await;
-    actor.catch_up_files(inviter).await;
-    actor.catch_up_status(inviter).await;
-    actor.catch_up_calendar(inviter).await;
-    actor.catch_up_wiki(inviter).await;
-    actor.catch_up_roles(inviter).await;
-    // A joiner mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its own.
+    actor.catch_up(join_contact, general).await;
+    actor.catch_up_profiles(join_contact).await;
+    actor.catch_up_livery(join_contact).await;
+    actor.catch_up_badges(join_contact).await;
+    actor.catch_up_files(join_contact).await;
+    actor.catch_up_status(join_contact).await;
+    actor.catch_up_calendar(join_contact).await;
+    actor.catch_up_wiki(join_contact).await;
+    actor.catch_up_roles(join_contact).await;
+    actor.catch_up_moderation(join_contact).await;
+    let channels = ui_channels(actor.channels().await);
+    // A joiner mints no invites (owner-scoped), but these addresses still drive its signed live
+    // peer record. A later router mapping or relay reservation is folded into this same set.
+    let joiner_bootstrap_owners =
+        bootstrap_owners(&joiner_addrs, BootstrapOwner::AutomaticInterface);
     let server_id = register_server(
         app,
         state,
         actor,
         events,
+        group_id,
+        device_id,
         None,
         name,
+        joiner_addrs,
+        joiner_bootstrap_owners,
+        Some(InterfaceRouteIdentity {
+            port: net.port,
+            peer_id: local_peer_id.clone(),
+        }),
         Vec::new(),
-        Vec::new(),
-        None,
+        Some(mesh_handle),
         is_dm,
+        net.switchboard,
         net.record_seq,
     )
     .await;
@@ -2013,16 +3961,301 @@ async fn join_server_inner(
     persist_server_net(state, server_id, &net).await;
     persist_registry(state).await;
     diag.server = server_id;
+    if let Some(rx) = port_mapping_rx {
+        state
+            .upnp
+            .lock()
+            .await
+            .insert(server_id, PORT_MAPPING_WAITING.to_string());
+        spawn_port_mapping_fold(app.clone(), server_id, rx, local_peer_id);
+    }
+    if let Some(rx) = autonat_rx {
+        state.autonat.lock().await.insert(
+            server_id,
+            AutoNatEvidence {
+                waiting: true,
+                results: Vec::new(),
+            },
+        );
+        spawn_autonat_fold(app.clone(), server_id, rx);
+    }
+    if let Some(rx) = relay_address_rx {
+        spawn_relay_fold(app.clone(), server_id, rx);
+    }
+    if let Some(rx) = mesh_observation_rx {
+        spawn_mesh_observation_fold(app.clone(), server_id, rx);
+    }
     Ok(FoundResult {
         server: server_id,
         channel: general.to_string(),
+        channels,
         is_dm,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_active_join_reply(
+    sessions: &mut HashMap<(u64, [u8; 16]), ActiveJoinReply>,
+    server: u64,
+    invite_nonce: [u8; 16],
+    joiner: libp2p::PeerId,
+    joiner_nonce: [u8; 16],
+    expires_at_ms: u64,
+    replace: bool,
+    now_ms: u64,
+) -> Result<(bool, u64, bool, Option<libp2p::PeerId>), String> {
+    sessions.retain(|_, active| active.expires_at_ms >= now_ms);
+    let key = (server, invite_nonce);
+    match sessions.get_mut(&key) {
+        Some(active) if active.joiner != joiner && !replace => Err(
+            "a different joiner is already using this invite's reply window; confirm replacement only if you intended to switch people"
+                .to_string(),
+        ),
+        Some(active) if active.joiner != joiner => {
+            let displaced = active.joiner;
+            let generation = active.generation.saturating_add(1);
+            *active = ActiveJoinReply {
+                joiner,
+                nonces: vec![joiner_nonce],
+                expires_at_ms,
+                generation,
+            };
+            Ok((true, generation, true, Some(displaced)))
+        }
+        Some(active) => {
+            if active.nonces.contains(&joiner_nonce) {
+                return Ok((false, active.generation, false, None));
+            }
+            if active.nonces.len() >= 4 {
+                active.nonces.remove(0);
+            }
+            active.nonces.push(joiner_nonce);
+            active.expires_at_ms = expires_at_ms;
+            active.generation = active.generation.saturating_add(1);
+            Ok((false, active.generation, true, None))
+        }
+        None => {
+            if sessions.len() >= MAX_ACTIVE_JOIN_REPLIES {
+                return Err("too many connection replies are active; wait for one to expire"
+                    .to_string());
+            }
+            sessions.insert(
+                key,
+                ActiveJoinReply {
+                    joiner,
+                    nonces: vec![joiner_nonce],
+                    expires_at_ms,
+                    generation: 1,
+                },
+            );
+            Ok((false, 1, true, None))
+        }
+    }
+}
+
+/// Apply a joiner's short-lived two-way reply and repeatedly race its validated TCP/QUIC
+/// candidates until the window expires. This only establishes transport: MLS admission still
+/// runs on the inviter named and signed by the embedded invite, so a helper/other member cannot
+/// admit anybody through this command.
+#[tauri::command]
+async fn apply_join_reply(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: u64,
+    code: String,
+    replace: bool,
+) -> Result<JoinReplyApplied, String> {
+    require_unlocked_session(&state).await?;
+    let reply = JoinReply::decode(&code).map_err(|e| e.to_string())?;
+    let permit = InviteToken::decode(&reply.invite_permit).map_err(|e| e.to_string())?;
+    if !permit.verify_self() {
+        return Err("connection reply contains an invalid signed invite".to_string());
+    }
+    reply
+        .verify(&permit.invite_nonce, &SystemClock)
+        .map_err(|e| e.to_string())?;
+    let now_ms = SystemClock.now_ms();
+    if permit.expires_at_ms < now_ms {
+        return Err("the invite inside this connection reply has expired".to_string());
+    }
+    // Verification tolerates modest clock skew so two honest devices do not reject one another,
+    // but that tolerance must not lengthen the local dial/helper authorization window. A bearer
+    // can edit and re-MAC the reply, so cap every local side effect to sixty seconds from receipt.
+    let effective_expires_at_ms = effective_join_reply_expiry(reply.expires_at_ms, now_ms);
+
+    let (mesh, actor, group_id, device_id) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "server not found".to_string())?;
+        (
+            entry
+                .mesh
+                .clone()
+                .ok_or_else(|| "this server has no live transport handle".to_string())?,
+            entry.actor.clone(),
+            entry.group_id.clone(),
+            entry.device_id,
+        )
+    };
+    if permit.group_id != group_id {
+        return Err("connection reply belongs to a different server".to_string());
+    }
+    if !actor.contains_member_device(permit.inviter_device_id).await {
+        return Err(
+            "the signed invite in this reply was not issued by a current server member".to_string(),
+        );
+    }
+    let helper = permit.inviter_device_id != device_id;
+    let local_peer = mesh.local_peer();
+    let inviter_peers: HashSet<libp2p::PeerId> = permit
+        .bootstrap
+        .iter()
+        .filter_map(|address| address.parse::<Multiaddr>().ok())
+        .filter_map(|address| target_peer_in_multiaddr(&address))
+        .collect();
+    if inviter_peers.len() > 1 {
+        return Err(
+            "the invite in this reply does not name one unambiguous inviter peer".to_string(),
+        );
+    }
+    let inviter_peer = if !helper {
+        local_peer
+    } else if let Some(peer) = inviter_peers.iter().next() {
+        phase0_peer_id(peer)
+    } else {
+        actor
+            .member_transport_peer(permit.inviter_device_id)
+            .await
+            .ok_or_else(|| {
+                "this member has no current signed route for the invite's named inviter".to_string()
+            })?
+    };
+    let _apply_guard = state.join_reply_apply.lock().await;
+    let mut reply_sessions = state.join_replies.lock().await;
+    let (replaced, generation, start_dial, displaced) = record_active_join_reply(
+        &mut reply_sessions,
+        server,
+        permit.invite_nonce,
+        reply.joiner,
+        reply.joiner_nonce,
+        effective_expires_at_ms,
+        replace,
+        now_ms,
+    )?;
+    drop(reply_sessions);
+    if let Some(displaced) = displaced {
+        actor
+            .revoke_join_helper(phase0_peer_id(&displaced), permit.invite_nonce)
+            .await;
+    }
+    if helper
+        && !actor
+            .authorize_join_helper(
+                phase0_peer_id(&reply.joiner),
+                permit.invite_nonce,
+                permit.inviter_device_id,
+                inviter_peer,
+                effective_expires_at_ms,
+            )
+            .await
+    {
+        let mut sessions = state.join_replies.lock().await;
+        if sessions
+            .get(&(server, permit.invite_nonce))
+            .is_some_and(|active| active.generation == generation && active.joiner == reply.joiner)
+        {
+            sessions.remove(&(server, permit.invite_nonce));
+        }
+        return Err(
+            "this member could not open a bounded helper window for that reply".to_string(),
+        );
+    }
+    let targets = reply.dial_targets();
+    let target_count = targets.len();
+    let expires_at_ms = effective_expires_at_ms;
+    let joiner = reply.joiner;
+    let proof = reply.dialback_proof(&permit.invite_nonce, local_peer.as_bytes());
+    let jitter = u64::from(u16::from_be_bytes([
+        reply.joiner_nonce[0],
+        reply.joiner_nonce[1],
+    ])) % 200;
+    if start_dial {
+        let task_app = app.clone();
+        let invite_nonce = permit.invite_nonce;
+        tauri::async_runtime::spawn(async move {
+            let clock = SystemClock;
+            let mut delay_ms = 200 + jitter;
+            while clock.now_ms() <= expires_at_ms {
+                let current = task_app
+                    .state::<AppState>()
+                    .inner()
+                    .join_replies
+                    .lock()
+                    .await
+                    .get(&(server, invite_nonce))
+                    .is_some_and(|active| {
+                        active.generation == generation && active.joiner == joiner
+                    });
+                if !current || mesh.dial_join_candidates(&targets).await.is_err() {
+                    return;
+                }
+                // A socket alone proves nothing: send the code-holder proof over the Noise
+                // connection before the retained joiner reveals its bearer invite/KeyPackage.
+                let mut proof_request = Vec::with_capacity(33);
+                proof_request.push(JOIN_REPLY_PROOF_KIND);
+                proof_request.extend_from_slice(&proof);
+                let _ = mesh
+                    .request_control(phase0_peer_id(&joiner), bytes::Bytes::from(proof_request))
+                    .await;
+                clock.sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = delay_ms.saturating_mul(2).min(4_000);
+            }
+        });
+    }
+
+    {
+        let mut diag = state.diag.lock().await;
+        if diag.server == server {
+            diag.steps.push(DiagStep::unknown(
+                "reply",
+                joiner.to_string(),
+                format!(
+                    "accepted a two-way reply and started a bounded dial race across {} candidate(s){}",
+                    target_count,
+                    if helper { "; this member will only forward the admission handshake" } else { "" }
+                ),
+            ));
+        }
+    }
+    let out = JoinReplyApplied {
+        joiner: joiner.to_string(),
+        expires_at_ms,
+        replaced,
+        helper,
+    };
+    app.emit("join-reply-applied", &out)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+fn effective_join_reply_expiry(encoded_expires_at_ms: u64, received_at_ms: u64) -> u64 {
+    encoded_expires_at_ms.min(received_at_ms.saturating_add(catcoms_net::JOIN_REPLY_LIFETIME_MS))
 }
 
 /// Leave a server: shut down its actor and drop it from the registry.
 #[tauri::command]
 async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    state.storage_health.lock().await.remove(&server);
+    state.upnp.lock().await.remove(&server);
+    state.autonat.lock().await.remove(&server);
+    state.mesh_observations.lock().await.remove(&server);
+    state
+        .join_replies
+        .lock()
+        .await
+        .retain(|(candidate_server, _), _| *candidate_server != server);
     if let Some(entry) = state.servers.lock().await.remove(&server) {
         entry.actor.shutdown().await;
     }
@@ -2048,23 +4281,30 @@ async fn open_channel(
     server: u64,
     name: String,
 ) -> Result<String, String> {
-    let id = channel_id(&name);
     let actor = actor_of(&state, server).await?;
-    actor.open_channel(id).await;
-    actor.catch_up_any(id).await;
-    Ok(id.to_string())
+    let channel = actor.create_channel(name).await?;
+    persist_server(&state, server).await;
+    Ok(channel.id.to_string())
 }
 
-/// Does `current` offer a way to reach us that `minted` does not?
+/// Read the server-wide channel directory.
+#[tauri::command]
+async fn get_channels(state: State<'_, AppState>, server: u64) -> Result<Vec<UiChannel>, String> {
+    Ok(ui_channels(
+        actor_of(&state, server).await?.channels().await,
+    ))
+}
+
+/// Did the live address set change since this signed invite was minted?
 ///
 /// An `InviteToken` signs its bootstrap list, so an address learned after minting cannot be
-/// patched in: the invite has to be re-minted or it is simply wrong. This is the predicate that
-/// decides when that is worth doing, and it is deliberately one-directional. Losing an address
-/// (a relay circuit that dropped) does not make an invite stale, because the remaining addresses
-/// still work and re-minting would invalidate nothing and churn a nonce for no one's benefit.
-/// Gaining one does, because the invite is now strictly less useful than the node it points at.
-fn invite_missing_addresses(minted: &[String], current: &[String]) -> bool {
-    current.iter().any(|a| !minted.contains(a))
+/// patched in or removed: the currently presented invite has to be re-minted. Previously copied
+/// codes remain immutable and may still contain a route that later expired, which is why racing
+/// all entries and keeping relay/rendezvous fallbacks remain necessary.
+fn invite_addresses_changed(minted: &[String], current: &[String]) -> bool {
+    minted.len() != current.len()
+        || minted.iter().any(|a| !current.contains(a))
+        || current.iter().any(|a| !minted.contains(a))
 }
 
 /// The single-use invite to share (founder only); `None` for a joiner.
@@ -2075,36 +4315,32 @@ fn invite_missing_addresses(minted: &[String], current: &[String]) -> bool {
 /// the router had just opened. A friend on another network then got "timed out connecting to the
 /// server" and every fix underneath looked broken.
 ///
-/// Doing it here rather than in the UPnP path is what makes it general: every display path goes
-/// through this command, so *any* later reachability gain (UPnP, a relay circuit, a rendezvous
-/// registration) produces a correct invite the next time anyone looks, with no event to miss and
-/// no frontend change to keep in step.
+/// Doing it here rather than in one mapper path is what makes it general. The frontend calls this
+/// before every display/copy and on each reachability event, so both gains and losses produce a
+/// token whose signed address set matches the current route set.
 #[tauri::command]
 async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<String>, String> {
-    let (stored, current) = {
+    require_unlocked_session(&state).await?;
+    let has_invite = {
         let servers = state.servers.lock().await;
         match servers.get(&server) {
-            Some(e) => (e.invite.clone(), e.bootstrap.clone()),
+            Some(e) => e.invite.is_some(),
             None => return Ok(None),
         }
     };
-    let Some(hex_invite) = stored else {
+    if !has_invite {
         return Ok(None); // a joiner mints nothing
-    };
-    let stale = hex::decode(&hex_invite)
-        .ok()
-        .and_then(|b| InviteToken::decode(&b).ok())
-        .is_some_and(|t| invite_missing_addresses(&t.bootstrap, &current));
-    if !stale {
-        return Ok(Some(hex_invite));
     }
-    // Best effort: a re-mint that fails (no longer owner, actor gone) must not lose the invite
-    // the caller already has, so fall back to it rather than surfacing an error here.
-    match mint_and_store_invite(&state, server).await {
+    // A standing offer is intentionally short-lived and can disappear without changing our own
+    // bootstrap. Re-wrap the same still-valid inner token on every display/copy, changing only
+    // its signed helper plan. A new nonce is minted only when the inner token expired or its own
+    // direct/rendezvous routes changed; otherwise opening this panel would create bearer invites
+    // and rendezvous registrations without an explicit human action.
+    match refresh_or_mint_invite(&state, server, false).await {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
             eprintln!("get_invite: re-mint after a reachability change failed: {e}");
-            Ok(Some(hex_invite))
+            Err(format!("the live invite could not be refreshed: {e}"))
         }
     }
 }
@@ -2114,54 +4350,230 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
 /// rendezvous, the fresh invite is also discovery-enabled and its new (nonce-keyed) namespace is
 /// registered there via the stored transport handle, so the new joiner can discover us with no
 /// hard-coded address. Replaces the server's stored invite and re-seals the registry.
+///
+/// This is also the **only** path that lifts outstanding transport evictions (P6). A member
+/// removed earlier cannot otherwise reach this node to redeem an invite: the eviction refuses its
+/// connection, and the roster cannot change until that connection is allowed. Deliberately not
+/// folded into `mint_and_store_invite`, because [`get_invite`] re-mints on its own whenever the
+/// node gains an address the stored invite does not mention (UPnP, a relay circuit, a rendezvous
+/// registration); lifting there would silently re-admit every removed member the next time
+/// anybody opened the invite panel, with nobody deciding it. Pressing "Generate new invite" is a
+/// person saying they intend to admit somebody; opening a panel is not.
+///
+/// Best-effort and last: a failure to lift must not lose the invite that was just minted.
 #[tauri::command]
 async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<String, String> {
-    mint_and_store_invite(&state, server).await
+    let invite = mint_and_store_invite(&state, server).await?;
+    match actor_of(&state, server).await {
+        Ok(actor) => {
+            if let Err(e) = actor.readmit_evicted_peers().await {
+                eprintln!("mint_invite_fresh: lifting outstanding evictions failed: {e}");
+            }
+        }
+        Err(e) => eprintln!("mint_invite_fresh: no actor to lift evictions on: {e}"),
+    }
+    Ok(invite)
 }
 
 /// Mint a fresh single-use invite from the server's *current* bootstrap and rendezvous config,
 /// store it as the server's invite, and persist. Shared by the explicit "Generate new invite"
 /// action and by [`get_invite`]'s self-heal, so both mint the same way and neither can drift.
+///
+/// Minting only. Anything that should happen because a *person* asked for an invite, rather than
+/// because a stored one went stale, belongs in [`mint_invite_fresh`] and not here; the P6
+/// eviction lift is the first such thing.
 async fn mint_and_store_invite(state: &AppState, server: u64) -> Result<String, String> {
-    let (bootstrap, rendezvous, handle) = {
+    refresh_or_mint_invite(state, server, true).await
+}
+
+fn encode_invite_text(encoded: &[u8]) -> String {
+    if InviteJoinPlan::decode(encoded).is_ok() {
+        format!("{ASSISTED_INVITE_PREFIX}{}", hex::encode(encoded))
+    } else {
+        hex::encode(encoded)
+    }
+}
+
+/// Refresh only the short-lived helper envelope when possible. `force_new` is reserved for the
+/// explicit Generate action; automatic display/copy refresh must preserve a still-valid nonce.
+async fn refresh_or_mint_invite(
+    state: &AppState,
+    server: u64,
+    force_new: bool,
+) -> Result<String, String> {
+    let _mint_guard = state.invite_mint.lock().await;
+    let (bootstrap, rendezvous, handle, stored_invite) = {
         let servers = state.servers.lock().await;
         let e = servers
             .get(&server)
             .ok_or_else(|| "unknown server".to_string())?;
-        (e.bootstrap.clone(), e.rendezvous.clone(), e.mesh.clone())
+        (
+            e.bootstrap.clone(),
+            e.rendezvous.clone(),
+            e.mesh.clone(),
+            e.invite.clone(),
+        )
     };
-    let actor = actor_of(&state, server).await?;
-    let mut nonce = [0u8; 16];
-    let mut rng = OsCryptoRng;
-    rng.fill_bytes(&mut nonce);
-    let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
-    let encoded = if rendezvous.is_empty() {
-        actor.mint_invite(nonce, expires, bootstrap).await?
+    let actor = actor_of(state, server).await?;
+    let reusable = (!force_new)
+        .then_some(stored_invite.as_deref())
+        .flatten()
+        .and_then(|text| decode_and_verify_invite(text).ok())
+        .map(|decoded| decoded.token)
+        .filter(|token| {
+            token.expires_at_ms >= SystemClock.now_ms()
+                && !invite_addresses_changed(&token.bootstrap, &bootstrap)
+                && !invite_addresses_changed(&token.rendezvous, &rendezvous)
+        });
+    let plain_encoded = if let Some(token) = reusable {
+        token.encode()
     } else {
-        let encoded = actor
-            .mint_invite_with_rendezvous(nonce, expires, bootstrap, rendezvous.clone())
-            .await?;
-        // Register the fresh invite's namespace so the new joiner can discover us. This node's own
-        // rendezvous config (typed into the create-server form, or restored from its own sealed
-        // network record), so the operator variant: a joiner reading the invite we are about to
-        // mint validates it again on the way in, with the strict one.
-        if let (Some(handle), Some(rz)) = (
-            &handle,
-            validate_operator_rendezvous_addrs(&rendezvous)
-                .ok()
-                .and_then(|v| v.into_iter().next()),
-        ) {
-            let token = InviteToken::decode(&encoded).map_err(|e| e.to_string())?;
-            register_join_ns(handle, &token.group_id, &token.invite_nonce, &rz).await?;
+        let mut nonce = [0u8; 16];
+        let mut rng = OsCryptoRng;
+        rng.fill_bytes(&mut nonce);
+        let expires = SystemClock.now_ms() + 3_600_000; // single-use, valid for 1 hour
+        if rendezvous.is_empty() {
+            actor.mint_invite(nonce, expires, bootstrap.clone()).await?
+        } else {
+            let encoded = actor
+                .mint_invite_with_rendezvous(nonce, expires, bootstrap.clone(), rendezvous.clone())
+                .await?;
+            // Register the fresh invite's namespace so the new joiner can discover us. This node's own
+            // rendezvous config (typed into the create-server form, or restored from its own sealed
+            // network record), so the operator variant: a joiner reading the invite we are about to
+            // mint validates it again on the way in, with the strict one.
+            if let (Some(handle), Some(rz)) = (
+                &handle,
+                validate_operator_rendezvous_addrs(&rendezvous)
+                    .ok()
+                    .and_then(|v| v.into_iter().next()),
+            ) {
+                let token = InviteToken::decode(&encoded).map_err(|e| e.to_string())?;
+                register_join_ns(handle, &token.group_id, &token.invite_nonce, &rz).await?;
+            }
+            encoded
         }
-        encoded
     };
-    let invite_hex = hex::encode(encoded);
-    if let Some(e) = state.servers.lock().await.get_mut(&server) {
+    let encoded = actor.wrap_invite_with_switchboards(plain_encoded).await?;
+    let invite_hex = encode_invite_text(&encoded);
+    {
+        let mut servers = state.servers.lock().await;
+        let e = servers
+            .get_mut(&server)
+            .ok_or_else(|| "server closed while minting its invite".to_string())?;
+        if !invite_routes_still_current(&bootstrap, &rendezvous, &e.bootstrap, &e.rendezvous) {
+            return Err(
+                "reachable addresses changed while the invite was being minted; retry".to_string(),
+            );
+        }
         e.invite = Some(invite_hex.clone());
     }
-    persist_registry(&state).await;
+    persist_registry(state).await;
     Ok(invite_hex)
+}
+
+fn invite_routes_still_current(
+    expected_bootstrap: &[String],
+    expected_rendezvous: &[String],
+    current_bootstrap: &[String],
+    current_rendezvous: &[String],
+) -> bool {
+    !invite_addresses_changed(expected_bootstrap, current_bootstrap)
+        && !invite_addresses_changed(expected_rendezvous, current_rendezvous)
+}
+
+/// One poll of "would an invite minted right now work off this network?". Drives the invite
+/// page's route-check progress: the frontend polls while `waiting` holds, then mints.
+///
+/// Read-only by design: it inspects the live bootstrap set and the router-mapping fold and mints
+/// nothing, so polling it cannot create bearer invites or rendezvous registrations. The webview
+/// learns the scope booleans, the mapping status line, and the LAN socket: the last is disclosed
+/// so the port-forward suggestion can name the exact values to type into a router, and the
+/// connectivity panel already shows these same addresses via `get_connectivity`.
+#[derive(Debug, Clone, Default, Serialize)]
+struct InviteRouteCheck {
+    /// The live bootstrap set contains a globally routable direct address (mapped, advertised,
+    /// or a routable IPv6). "Available", not "verified": AutoNAT confirmation is separate.
+    public_direct: bool,
+    /// The live bootstrap set contains a relay circuit whose relay host is publicly routable.
+    relay: bool,
+    /// The server registered at a rendezvous, so the invite is discovery-enabled.
+    rendezvous: bool,
+    /// The live bootstrap set contains a LAN (private, non-loopback) address, so an invite works
+    /// for someone on the same network.
+    lan: bool,
+    /// The LAN IP a manual port-forward should target; empty when no LAN address exists.
+    lan_ip: String,
+    /// The listen port from the LAN entry, for the same suggestion; 0 when unknown.
+    port: u16,
+    /// The router-mapping window is still open with no verdict; worth polling again.
+    waiting: bool,
+    /// The router-mapping status line, same copy as the connectivity panel.
+    mapping: String,
+}
+
+#[tauri::command]
+async fn check_invite_routes(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<InviteRouteCheck, String> {
+    require_unlocked_session(&state).await?;
+    let (bootstrap, rendezvous) = {
+        let servers = state.servers.lock().await;
+        let e = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        (e.bootstrap.clone(), !e.rendezvous.is_empty())
+    };
+    let mapping = state
+        .upnp
+        .lock()
+        .await
+        .get(&server)
+        .cloned()
+        .unwrap_or_else(|| PORT_MAPPING_NOT_ATTEMPTED.to_string());
+    let mut check = InviteRouteCheck {
+        rendezvous,
+        waiting: mapping == PORT_MAPPING_WAITING,
+        mapping,
+        ..Default::default()
+    };
+    classify_invite_routes(&mut check, &bootstrap);
+    Ok(check)
+}
+
+/// Classify the live bootstrap set into the scopes an invite could reach. Split out so the
+/// rules are regression-tested: a routable direct address is "internet", a routable circuit is
+/// "relay" (`addr_is_globally_routable` judges every IP literal, so for a circuit it is the
+/// relay host being judged, matching `switchboard_route_usable`), and a private non-loopback
+/// address is "LAN". The first plain LAN entry also supplies the exact ip/port the manual
+/// port-forward suggestion names; a LAN-hosted circuit never does, because its socket is the
+/// relay's machine, not the one the user would forward to.
+fn classify_invite_routes(check: &mut InviteRouteCheck, bootstrap: &[String]) {
+    for address in bootstrap {
+        let Ok(addr) = address.parse::<Multiaddr>() else {
+            continue;
+        };
+        if addr_is_globally_routable(&addr) {
+            if address.contains("/p2p-circuit") {
+                check.relay = true;
+            } else {
+                check.public_direct = true;
+            }
+        } else if addr_is_private(&addr) && !addr_is_loopback(&addr) {
+            check.lan = true;
+            if check.lan_ip.is_empty() && !address.contains("/p2p-circuit") {
+                for part in addr.iter() {
+                    match part {
+                        Protocol::Ip4(ip) => check.lan_ip = ip.to_string(),
+                        Protocol::Ip6(ip) => check.lan_ip = ip.to_string(),
+                        Protocol::Tcp(p) | Protocol::Udp(p) => check.port = p,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Rename a server; a **local** display label in this client's rail (server names are not
@@ -2172,6 +4584,7 @@ async fn rename_server(
     server: u64,
     name: String,
 ) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("name cannot be empty".into());
@@ -2442,20 +4855,57 @@ async fn get_badges(
 }
 
 /// Share a file (base64-encoded bytes); returns its content-address hex.
+#[allow(clippy::too_many_arguments)] // Tauri injects app/state; the remaining fields are one file form.
 #[tauri::command]
 async fn add_file(
+    app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
     name: String,
     mime: String,
     path: String,
     data: String,
+    upload_id: Option<String>,
 ) -> Result<String, String> {
     let bytes = B64
         .decode(data.as_bytes())
         .map_err(|e| format!("bad file data: {e}"))?;
     let actor = actor_of(&state, server).await?;
-    let cid = actor.add_file(name, mime, path, bytes).await?;
+    let (progress, progress_task) = match upload_id {
+        Some(upload_id) => {
+            let (tx, mut rx) = mpsc::channel(64);
+            let task = tokio::spawn(async move {
+                while let Some((done, total)) = rx.recv().await {
+                    if require_unlocked_session(&app.state::<AppState>())
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let _ = app.emit(
+                        "upload-progress",
+                        UploadProgressEvt {
+                            server,
+                            upload_id: upload_id.clone(),
+                            done,
+                            total,
+                        },
+                    );
+                }
+            });
+            (Some(tx), Some(task))
+        }
+        None => (None, None),
+    };
+    let result = actor
+        .add_file_with_progress(name, mime, path, bytes, progress)
+        .await;
+    // The actor drops its progress sender when the command completes. Drain every queued event
+    // before resolving the invoke so the frontend sees the bar advance before it paints Done.
+    if let Some(task) = progress_task {
+        let _ = task.await;
+    }
+    let cid = result?;
     persist_server(&state, server).await;
     Ok(cid)
 }
@@ -2465,31 +4915,57 @@ async fn add_file(
 async fn get_files(state: State<'_, AppState>, server: u64) -> Result<FilesPayload, String> {
     let actor = actor_of(&state, server).await?;
     let view = actor.files_view().await;
-    let files = view
-        .files
-        .into_iter()
-        .map(|l| UiFile {
-            name: l.entry.name,
-            size: l.entry.size,
-            mime: l.entry.mime,
-            cid: hex::encode(&l.entry.cid),
-            author: l.entry.author,
-            path: l.entry.path,
-            held: l.held_chunks,
-            total: l.total_chunks,
-            expires: l.entry.expires.deadline_ms(),
-            expires_known: l.entry.expires.is_recorded(),
-        })
-        .collect();
+    let files = view.files.into_iter().map(ui_file).collect();
     Ok(FilesPayload {
         files,
         has_peers: view.has_peers,
     })
 }
 
+/// Verify the chunks referenced by this server. This performs no network requests and never
+/// treats a CID-named path as healthy until its seal, address and file reference all verify.
+#[tauri::command]
+async fn get_storage_health(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiStorageHealth, String> {
+    // Hold the dedicated cache lock across the actor round-trip. Simultaneous callers therefore
+    // coalesce into one scan instead of both missing the cache and hammering the blob store.
+    let mut cache = state.storage_health.lock().await;
+    if let Some(report) = cache.get(&server) {
+        return Ok(report.clone());
+    }
+    let actor = actor_of(&state, server).await?;
+    let health = actor.storage_health().await;
+    let report = storage_report(&actor, health, SystemClock.now_ms()).await;
+    cache.insert(server, report.clone());
+    Ok(report)
+}
+
+/// Ask authenticated peers for every missing/unreadable chunk, then verify the complete set.
+#[tauri::command]
+async fn repair_storage(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiStorageRepair, String> {
+    let mut cache = state.storage_health.lock().await;
+    let actor = actor_of(&state, server).await?;
+    let repaired = actor.repair_storage().await?;
+    let health = storage_report(&actor, repaired.health, SystemClock.now_ms()).await;
+    cache.insert(server, health.clone());
+    Ok(UiStorageRepair {
+        attempted_chunks: repaired.attempted_chunks,
+        recovered_chunks: repaired.recovered_chunks,
+        health,
+    })
+}
+
 /// The fingerprints of members reachable right now (presence indicators in the roster).
 #[tauri::command]
-async fn get_online_members(state: State<'_, AppState>, server: u64) -> Result<Vec<String>, String> {
+async fn get_online_members(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<String>, String> {
     let actor = actor_of(&state, server).await?;
     Ok(actor.online_members().await)
 }
@@ -2523,6 +4999,7 @@ struct DmStat {
 /// the awaits), then queries each; bounded by the (small) number of DMs.
 #[tauri::command]
 async fn dm_stats(state: State<'_, AppState>) -> Result<Vec<DmStat>, String> {
+    require_unlocked_session(&state).await?;
     let dms: Vec<(u64, ServerActor)> = {
         let servers = state.servers.lock().await;
         servers
@@ -2719,12 +5196,10 @@ async fn download_file(
         .try_into()
         .map_err(|_| "bad cid length".to_string())?;
     let actor = actor_of(&state, server).await?;
-    let (total, size) = actor
-        .file_download_plan(raw.clone())
-        .await
-        .ok_or_else(|| {
-            "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
-        })?;
+    let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
+        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
+    })?;
+    require_unlocked_session(&state).await?;
     let _ = app.emit(
         "download-progress",
         DownloadProgressEvt {
@@ -2732,12 +5207,22 @@ async fn download_file(
             cid: cid.clone(),
             done: 0,
             total,
+            bytes_done: 0,
+            bytes_total: size,
+            network_bytes_done: 0,
             provider: None,
         },
     );
     let mut out = Vec::with_capacity(size as usize);
+    let mut network_bytes_done = 0u64;
     for i in 0..total {
+        // A transfer can outlive the click that started it. Do not return plaintext or continue
+        // emitting file metadata after an explicit lock closes the webview session.
+        require_unlocked_session(&state).await?;
         let (chunk, provider) = actor.fetch_file_chunk(raw.clone(), i).await?;
+        if provider.is_some() {
+            network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
+        }
         out.extend_from_slice(&chunk);
         let _ = app.emit(
             "download-progress",
@@ -2746,6 +5231,9 @@ async fn download_file(
                 cid: cid.clone(),
                 done: i + 1,
                 total,
+                bytes_done: out.len() as u64,
+                bytes_total: size,
+                network_bytes_done,
                 provider,
             },
         );
@@ -2753,6 +5241,7 @@ async fn download_file(
     if Cid::of(&out).as_bytes() != &target {
         return Err("the reassembled file failed its integrity check".into());
     }
+    require_unlocked_session(&state).await?;
     Ok(B64.encode(&out))
 }
 
@@ -2891,17 +5380,718 @@ async fn get_join_attempts(
 
 /// What the last founding/joining attempt did, plus what this node knows about its own
 /// reachability. Feeds the connectivity panel on the create/join screens.
+fn reconcile_advertised(current: &mut Vec<String>, live: Option<Vec<String>>) {
+    if let Some(live) = live {
+        *current = live;
+    }
+}
+
 #[tauri::command]
 async fn get_connectivity(state: State<'_, AppState>) -> Result<Connectivity, String> {
+    require_unlocked_session(&state).await?;
     let mut diag = state.diag.lock().await.clone();
-    diag.upnp = state
-        .upnp
-        .lock()
-        .await
-        .get(&diag.server)
-        .cloned()
-        .unwrap_or_else(|| UPNP_NOT_ATTEMPTED.to_string());
+    // A mapper or relay can change between the inner found/join body spawning its collector and
+    // the wrapper committing `diag`. ServerEntry retains every member's base direct addresses, so
+    // its bootstrap is authoritative in both directions: replacement closes both “mapped,
+    // advertises none” and “expired relay remains ready” startup races.
+    if diag.server != 0 {
+        let live = state
+            .servers
+            .lock()
+            .await
+            .get(&diag.server)
+            .map(|entry| entry.bootstrap.clone());
+        reconcile_advertised(&mut diag.advertised, live);
+    }
+    diag.public_direct = diag.advertised.iter().any(|address| {
+        !address.contains("/p2p-circuit")
+            && address
+                .parse::<Multiaddr>()
+                .is_ok_and(|addr| addr_is_globally_routable(&addr))
+    });
+    let failed_join = diag.action == "join" && diag.server == 0;
+    diag.upnp = if failed_join {
+        PORT_MAPPING_FAILED_JOIN.to_string()
+    } else {
+        state
+            .upnp
+            .lock()
+            .await
+            .get(&diag.server)
+            .cloned()
+            .unwrap_or_else(|| PORT_MAPPING_NOT_ATTEMPTED.to_string())
+    };
+    diag.autonat = if failed_join {
+        AUTONAT_FAILED_JOIN.to_string()
+    } else {
+        let evidence = state.autonat.lock().await.get(&diag.server).cloned();
+        autonat_status(&diag.advertised, evidence.as_ref())
+    };
+    diag.mesh_observations = if diag.server == 0 {
+        Vec::new()
+    } else {
+        state
+            .mesh_observations
+            .lock()
+            .await
+            .get(&diag.server)
+            .cloned()
+            .unwrap_or_default()
+    };
     Ok(diag)
+}
+
+fn switchboard_route_usable(address: &str) -> bool {
+    // A relay circuit is useful only when the relay host itself is a literal public route. The
+    // old `contains p2p-circuit` shortcut accepted LAN/DNS relay paths which the signed-offer
+    // codec later stripped, letting Settings enable a role the protocol could never advertise.
+    address
+        .parse::<Multiaddr>()
+        .is_ok_and(|addr| addr_is_globally_routable(&addr))
+}
+
+#[tauri::command]
+async fn get_switchboard_status(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<SwitchboardStatus, String> {
+    require_unlocked_session(&state).await?;
+    let (actor, offered, eligible) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        (
+            entry.actor.clone(),
+            entry.switchboard,
+            entry
+                .bootstrap
+                .iter()
+                .any(|address| switchboard_route_usable(address)),
+        )
+    };
+    let online = actor
+        .switchboard_offers()
+        .await
+        .into_iter()
+        .map(|offer| SwitchboardMember {
+            fingerprint: hex::encode(&offer.device_id().as_bytes()[..8]),
+            addresses: offer.addresses.len(),
+        })
+        .collect();
+    let reason = if eligible {
+        "This device has an advertised public or relayed candidate route it can offer. Direct reachability remains best-effort until a callback succeeds.".to_string()
+    } else {
+        "An advertised public mapping candidate, public IPv6 address, manual forward, or relay circuit is required before this device can host.".to_string()
+    };
+    Ok(SwitchboardStatus {
+        offered,
+        eligible,
+        online,
+        reason,
+    })
+}
+
+#[tauri::command]
+async fn set_switchboard_offered(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: u64,
+    offered: bool,
+) -> Result<SwitchboardStatus, String> {
+    require_unlocked_session(&state).await?;
+    let actor = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        let eligible = entry
+            .bootstrap
+            .iter()
+            .any(|address| switchboard_route_usable(address));
+        if offered && !eligible {
+            return Err("this device has no usable public or relay route to offer".to_string());
+        }
+        entry.actor.clone()
+    };
+    if !offered {
+        // Revocation is fail-safe: close the protocol gate first. Even if disk sealing fails, the
+        // current process and UI state remain off rather than silently continuing to serve.
+        actor.set_switchboard_offered(false).await?;
+        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+            entry.switchboard = false;
+        }
+    }
+    let persist_result: Result<(), String> = async {
+        let store = state.store.lock().await;
+        if let Some(store) = store.as_ref() {
+            let mut net = store
+                .load_server_net(server)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "this server has no persisted network record".to_string())?;
+            net.switchboard = offered;
+            let mut rng = OsCryptoRng;
+            store
+                .save_server_net(server, &net, &mut rng)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = persist_result {
+        return Err(if offered {
+            format!("hosting was not enabled because consent could not be saved: {error}")
+        } else {
+            format!(
+                "hosting is off for this session, but the revocation could not be saved: {error}"
+            )
+        });
+    }
+    if offered {
+        // Enabling is the reverse order: durable consent first, then the serving gate. If the
+        // actor has stopped, roll the persisted bit back so a reload cannot surprise-enable it.
+        if let Err(error) = actor.set_switchboard_offered(true).await {
+            let store = state.store.lock().await;
+            if let Some(store) = store.as_ref() {
+                if let Ok(Some(mut net)) = store.load_server_net(server) {
+                    net.switchboard = false;
+                    let mut rng = OsCryptoRng;
+                    let _ = store.save_server_net(server, &net, &mut rng);
+                }
+            }
+            return Err(error);
+        }
+        if let Some(entry) = state.servers.lock().await.get_mut(&server) {
+            entry.switchboard = true;
+        }
+    }
+    let _ = app.emit("switchboard-changed", server);
+    get_switchboard_status(state, server).await
+}
+
+/// Pull the globally-routable IP literals out of a set of advertised multiaddrs, newest-family
+/// first. A relay circuit names the *relay's* address, never this node's, so circuits are
+/// dropped: reporting one here would tell the media plane it is directly reachable when the
+/// only working path runs through somebody else's host.
+fn routable_media_hosts(advertised: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut v4 = Vec::new();
+    let mut v6 = Vec::new();
+    for address in advertised {
+        let Ok(parsed) = address.parse::<Multiaddr>() else {
+            continue;
+        };
+        if parsed
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+        {
+            continue;
+        }
+        if !addr_is_globally_routable(&parsed) {
+            continue;
+        }
+        for protocol in parsed.iter() {
+            match protocol {
+                Protocol::Ip4(ip) => {
+                    let literal = ip.to_string();
+                    if !v4.contains(&literal) {
+                        v4.push(literal);
+                    }
+                }
+                Protocol::Ip6(ip) => {
+                    let literal = ip.to_string();
+                    if !v6.contains(&literal) {
+                        v6.push(literal);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (v4, v6)
+}
+
+/// One member this device could hand its media to when a direct path cannot be built.
+#[derive(Serialize)]
+struct CallBridge {
+    /// Short fingerprint, matching the identifier the call UI already renders for a peer.
+    fingerprint: String,
+    /// How many routes the helper published. More routes is a better bet, not a guarantee.
+    addresses: usize,
+    /// True when at least one published route is a literal public address rather than a circuit.
+    /// A helper reachable only through *another* relay is a poor media bridge: it inherits that
+    /// relay's latency and its liveness.
+    direct: bool,
+}
+
+/// What the media plane should do for this server, derived entirely from what the mesh already
+/// proved. The frontend owns ICE; this is the evidence it has never had access to.
+///
+/// The two planes are otherwise disjoint by construction: the libp2p transport's PCP/UPnP/PCPv6
+/// mappings cover the *mesh* socket, and the webview's ICE agent binds its own ephemeral ports,
+/// so none of that traversal work has ever applied to a call. What does transfer is the
+/// *knowledge*: whether this node is directly reachable, whether it has a global IPv6 route, and
+/// which members have proven they can host for others.
+#[derive(Serialize)]
+struct CallTransport {
+    /// Whether this node advertises at least one non-circuit, globally routable address.
+    public_direct: bool,
+    /// The AutoNAT verdict verbatim, so the call UI can quote evidence rather than assert.
+    autonat: String,
+    /// Public IPv4 literals this node is known at. Diagnostic only: the media plane cannot turn
+    /// these into ICE candidates, because the webview's ports are not the mesh's ports.
+    public_ipv4: Vec<String>,
+    /// Public IPv6 literals. These matter more than IPv4: IPv6 has no NAT to traverse, so a
+    /// direct media path needs only a firewall pinhole rather than a mapping.
+    public_ipv6: Vec<String>,
+    /// Members currently offering to host, best candidates first.
+    bridges: Vec<CallBridge>,
+    /// Whether a third-party relay is likely to be required for this node to be heard at all.
+    relay_likely_required: bool,
+    /// Whether this node's router has granted the mesh a port mapping. The media plane asks the
+    /// same router for each call's socket, so this is the "your router can help calls" signal.
+    router_maps: bool,
+    /// One line the call UI can show verbatim when a link will not come up.
+    advice: String,
+}
+
+#[tauri::command]
+async fn get_call_transport(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<CallTransport, String> {
+    require_unlocked_session(&state).await?;
+    let (actor, advertised, router_maps) = {
+        let servers = state.servers.lock().await;
+        let entry = servers
+            .get(&server)
+            .ok_or_else(|| "unknown server".to_string())?;
+        let router_maps = entry
+            .bootstrap_owners
+            .values()
+            .any(|owners| owners.contains(&BootstrapOwner::PortMapping));
+        (entry.actor.clone(), entry.bootstrap.clone(), router_maps)
+    };
+    let public_direct = advertised.iter().any(|address| {
+        address
+            .parse::<Multiaddr>()
+            .is_ok_and(|addr| addr_is_globally_routable(&addr))
+            && !address.contains("/p2p-circuit")
+    });
+    let autonat = {
+        let evidence = state.autonat.lock().await.get(&server).cloned();
+        autonat_status(&advertised, evidence.as_ref())
+    };
+    let (public_ipv4, public_ipv6) = routable_media_hosts(&advertised);
+
+    // Reuse the switchboard's consent-gated offer pool: a member who has already agreed to carry
+    // somebody else's traffic is exactly the member who should be asked to carry their media.
+    // Sorting puts literal-route helpers first so the picker never prefers a relayed helper.
+    let mut bridges: Vec<CallBridge> = actor
+        .switchboard_offers()
+        .await
+        .into_iter()
+        .map(|offer| {
+            let direct = offer
+                .addresses
+                .iter()
+                .any(|address| switchboard_route_usable(address));
+            CallBridge {
+                fingerprint: hex::encode(&offer.device_id().as_bytes()[..8]),
+                addresses: offer.addresses.len(),
+                direct,
+            }
+        })
+        .collect();
+    bridges.sort_by(|a, b| {
+        b.direct
+            .cmp(&a.direct)
+            .then_with(|| b.addresses.cmp(&a.addresses))
+    });
+
+    let relay_likely_required = !public_direct && public_ipv6.is_empty() && !router_maps;
+    let mut advice = if public_direct {
+        "This device is directly reachable, so a call should connect without a relay. A peer that still fails is behind the stricter NAT.".to_string()
+    } else if !public_ipv6.is_empty() {
+        "This device has a public IPv6 route but no verified IPv4 path. Calls will connect directly to IPv6 peers once the router permits inbound UDP to the app; IPv4-only peers will need a relay.".to_string()
+    } else if bridges.is_empty() {
+        "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay: ask a member with a public route to enable hosting, or set a TURN server in Settings, Calls.".to_string()
+    } else {
+        format!(
+            "This device is behind NAT. {} member(s) are offering to host, so a relayed path is available.",
+            bridges.len()
+        )
+    };
+    if router_maps {
+        advice.push_str(
+            " Your router opens ports on request, so each call also offers a router-mapped direct route; one mapped side is enough for the pair.",
+        );
+    }
+
+    Ok(CallTransport {
+        public_direct,
+        autonat,
+        public_ipv4,
+        public_ipv6,
+        bridges,
+        relay_likely_required,
+        router_maps,
+        advice,
+    })
+}
+
+/// The public socket a router granted for one webview media port.
+#[derive(Serialize)]
+struct MappedCallPort {
+    ip: String,
+    port: u16,
+    /// Which protocol granted it, for the log and the call panel.
+    mechanism: String,
+    /// The router's own state confirmed the mapping beyond the grant response (see
+    /// `MediaPortMapping::confirmed`); not a claim of verified external reachability.
+    confirmed: bool,
+}
+
+/// Ask the router to forward one of the active call's media UDP ports to this machine, over the
+/// bound-interface IGD path the invite reachability fix proved out, with PCP/NAT-PMP as the
+/// fallback rung for routers that don't speak UPnP. The webview signals the returned public
+/// socket to the peer as an extra ICE candidate; a router mapping forwards from any source, so
+/// one mapped side connects the pair regardless of the other side's NAT type. This is the
+/// media-plane counterpart of the mesh's mapping workers, which only ever cover the stable
+/// libp2p listen port and never the ICE agent's ephemeral sockets.
+#[tauri::command]
+async fn map_call_port(state: State<'_, AppState>, port: u16) -> Result<MappedCallPort, String> {
+    require_unlocked_session(&state).await?;
+    let key = port;
+    let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
+    let mapped = catcoms_net::map_media_udp_port(port).await?;
+    let result = MappedCallPort {
+        ip: mapped.external.ip().to_string(),
+        port: mapped.external.port(),
+        mechanism: mapped.mechanism.to_string(),
+        confirmed: mapped.confirmed,
+    };
+    // Retain the mapping: a PCP/NAT-PMP lease is renewed by the client inside it, and call end
+    // releases it. A same-port remap (shouldn't happen; ICE ports are fresh per call) releases
+    // the entry it replaces rather than leaking its renewal task.
+    if let Some(previous) = state.media_mappings.lock().await.insert(key, mapped) {
+        previous.release().await;
+    }
+    Ok(result)
+}
+
+/// Release a call mapping when the call ends. Best-effort at the router; the UPnP lease is
+/// bounded and a dropped PCP/NAT-PMP client stops renewing, so nothing outlives a crash long.
+#[tauri::command]
+async fn unmap_call_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    let mapping = state.media_mappings.lock().await.remove(&port);
+    if let Some(mapping) = mapping {
+        mapping.release().await;
+    }
+    Ok(())
+}
+
+/// How much plaintext one media response may carry. A player asks for the window it is about to
+/// show; this bounds what a hostile or buggy `Range` can make the app allocate at once, and keeps
+/// one response comfortably inside a single sealed chunk.
+const MEDIA_WINDOW_BYTES: usize = 2 * 1024 * 1024;
+
+/// A response must fit inside one chunk. Checked at compile time because both sides are
+/// constants: a runtime assertion on them is optimised out and proves nothing. Raising the window
+/// above the chunk size is exactly the regression that made one response need two decrypts.
+const _: () = assert!(MEDIA_WINDOW_BYTES <= CHUNK_BYTES);
+
+/// The custom scheme the webview plays shared media through: `catcoms-media://a/<server>/<cid>`.
+/// Windows rewrites this to `http://catcoms-media.localhost/...`, so the host is never parsed;
+/// only the path is.
+const MEDIA_SCHEME: &str = "catcoms-media";
+
+/// Parse `/<server>/<cid>` out of a media URI path. Deliberately strict: the server id must be a
+/// plain integer and the cid lowercase hex of exactly 32 bytes, so nothing resembling a path
+/// traversal or a foreign identifier reaches the file index.
+fn parse_media_path(path: &str) -> Option<(u64, String)> {
+    let mut parts = path.trim_start_matches('/').split('/');
+    let server: u64 = parts.next()?.parse().ok()?;
+    let cid = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    if cid.len() != 64 || !cid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((server, cid.to_ascii_lowercase()))
+}
+
+/// Parse a single-range `bytes=start-[end]` header into a start offset and a length cap.
+///
+/// Only the first range of a possibly-multi-range header is honoured, and a multipart response is
+/// never produced: media elements ask for one range at a time, and answering a multi-range request
+/// with the first range is a legal (if partial) response, where mis-assembling a multipart body
+/// would corrupt playback silently.
+fn parse_range_header(raw: &str, total: u64) -> Option<(u64, usize)> {
+    let spec = raw.trim().strip_prefix("bytes=")?;
+    let first = spec.split(',').next()?.trim();
+    let (from, to) = first.split_once('-')?;
+    if from.is_empty() {
+        // A suffix range ("-500") means the LAST n bytes, not the first n.
+        let n: u64 = to.parse().ok()?;
+        let n = n.min(total);
+        return Some((
+            total.saturating_sub(n),
+            n.min(MEDIA_WINDOW_BYTES as u64) as usize,
+        ));
+    }
+    let start: u64 = from.parse().ok()?;
+    let len = if to.is_empty() {
+        MEDIA_WINDOW_BYTES
+    } else {
+        let end: u64 = to.parse().ok()?;
+        // `bytes=0-0` is one byte: the range is inclusive at both ends.
+        end.saturating_sub(start)
+            .saturating_add(1)
+            .min(MEDIA_WINDOW_BYTES as u64) as usize
+    };
+    Some((start, len))
+}
+
+/// Serve one media request. Split out from the protocol registration so the whole path is
+/// testable and so every failure returns a status rather than panicking inside the webview's
+/// scheme handler.
+async fn serve_media(
+    state: &AppState,
+    path: &str,
+    range: Option<String>,
+) -> http::Response<Vec<u8>> {
+    let deny = |code: http::StatusCode| {
+        http::Response::builder()
+            .status(code)
+            .header("Access-Control-Allow-Origin", "null")
+            .body(Vec::new())
+            .expect("static response builds")
+    };
+    let Some((server, cid)) = parse_media_path(path) else {
+        return deny(http::StatusCode::BAD_REQUEST);
+    };
+    // The same boundary every native command sits behind: a locked vault serves no plaintext,
+    // and a media element left in the DOM must not keep pulling bytes after an explicit lock.
+    if require_unlocked_session(state).await.is_err() {
+        return deny(http::StatusCode::FORBIDDEN);
+    }
+    let Ok(actor) = actor_of(state, server).await else {
+        return deny(http::StatusCode::NOT_FOUND);
+    };
+    let Ok(raw) = hex::decode(&cid) else {
+        return deny(http::StatusCode::BAD_REQUEST);
+    };
+
+    // Reads are chunk-aligned and cached, which is not an optimisation but a correctness
+    // requirement for the actor: it processes one command at a time, so every chunk fetched here
+    // is time the server cannot answer get_messages or get_channels. Serving a 2 MiB window out
+    // of an 8 MiB chunk meant decrypting the same chunk four times over during ordinary
+    // playback, which stalled the deck and made the whole server look like it was still loading.
+    let (total, declared, _) = match media_chunk(state, &actor, server, &cid, &raw, 0).await {
+        Some(head) => head,
+        None => return deny(http::StatusCode::NOT_FOUND),
+    };
+    let mime = safe_media_mime(&declared);
+
+    let (start, len) = match range.as_deref().and_then(|r| parse_range_header(r, total)) {
+        Some(parsed) => parsed,
+        None if range.is_some() => return deny(http::StatusCode::RANGE_NOT_SATISFIABLE),
+        None => (0, MEDIA_WINDOW_BYTES),
+    };
+    if start >= total {
+        return http::Response::builder()
+            .status(http::StatusCode::RANGE_NOT_SATISFIABLE)
+            .header("Content-Range", format!("bytes */{total}"))
+            .body(Vec::new())
+            .expect("static response builds");
+    }
+    let plan = media_window(start, len);
+    let bytes = match media_chunk(state, &actor, server, &cid, &raw, plan.index).await {
+        Some((_, _, bytes)) => bytes,
+        None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
+    };
+    let lo = plan.offset.min(bytes.len());
+    let hi = (lo + plan.len).min(bytes.len());
+    let body = bytes[lo..hi].to_vec();
+    let end = start + body.len() as u64;
+    // Always a 206 with an explicit Content-Range: the response is a window by construction, and
+    // claiming 200 for a partial body is what makes a player think the file is truncated.
+    http::Response::builder()
+        .status(http::StatusCode::PARTIAL_CONTENT)
+        .header("Content-Type", mime)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", body.len().to_string())
+        .header(
+            "Content-Range",
+            format!("bytes {start}-{}/{total}", end.saturating_sub(1).max(start)),
+        )
+        // Plaintext from an encrypted vault: never cached to disk by the webview, and never
+        // readable by anything the page might embed.
+        .header("Cache-Control", "no-store")
+        .header("Access-Control-Allow-Origin", "null")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(body)
+        .expect("response builds")
+}
+
+/// Which chunk a read starts in, and how much of it may be served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MediaWindow {
+    /// Index of the chunk containing `start`.
+    index: usize,
+    /// Byte offset of `start` within that chunk.
+    offset: usize,
+    /// How many bytes may be taken, never past the end of this chunk.
+    len: usize,
+}
+
+/// Plan one media response.
+///
+/// The invariant that matters, and the one this exists to hold: **a response never spans more
+/// than one chunk.** The first version of this served a fixed 2 MiB window out of an 8 MiB
+/// chunk, so sequential playback decrypted every chunk four times over; because the actor
+/// handles one command at a time, those redundant reads were also time the server could not
+/// answer anything else, and the whole app looked like it was still loading during a call.
+/// Clamping to the chunk end makes a sequential reader ask for the next chunk next, which is
+/// exactly one decrypt per chunk.
+fn media_window(start: u64, len: usize) -> MediaWindow {
+    let chunk = CHUNK_BYTES as u64;
+    let index = (start / chunk) as usize;
+    let offset = (start % chunk) as usize;
+    let remaining = CHUNK_BYTES - offset;
+    MediaWindow {
+        index,
+        offset,
+        len: len.min(remaining),
+    }
+}
+
+/// Fetch one whole decrypted chunk, from the cache when possible.
+///
+/// Returns `(total plaintext size, declared mime, the chunk's bytes)`. The cache exists because
+/// the actor is single-threaded: every miss is time the server spends not answering anything
+/// else, so a player walking a track must not make us re-read a chunk it has already been served.
+async fn media_chunk(
+    state: &AppState,
+    actor: &ServerActor,
+    server: u64,
+    cid: &str,
+    raw: &[u8],
+    index: usize,
+) -> Option<(u64, String, Arc<Vec<u8>>)> {
+    {
+        let cache = state.media_cache.lock().await;
+        if let Some(hit) = cache
+            .iter()
+            .find(|c| c.server == server && c.cid == cid && c.index == index)
+        {
+            return Some((hit.total_size, hit.mime.clone(), Arc::clone(&hit.bytes)));
+        }
+    }
+    let start = index as u64 * CHUNK_BYTES as u64;
+    let range = actor
+        .read_file_range(raw.to_vec(), start, CHUNK_BYTES)
+        .await
+        .ok()?;
+    // A read past the end is how the caller learns the file is shorter than it guessed; it is not
+    // worth a cache entry, but the size and type it carries are still the truth.
+    if range.bytes.is_empty() && start > 0 {
+        return Some((range.total_size, range.mime, Arc::new(Vec::new())));
+    }
+    let bytes = Arc::new(range.bytes);
+    let mut cache = state.media_cache.lock().await;
+    // A different track displaces the whole cache: nothing about the old one will be asked for
+    // again, and holding two tracks' plaintext to serve one is the wrong trade.
+    if cache.iter().any(|c| c.cid != cid || c.server != server) {
+        cache.clear();
+    }
+    cache.retain(|c| c.index != index);
+    cache.push(MediaChunk {
+        server,
+        cid: cid.to_string(),
+        index,
+        bytes: Arc::clone(&bytes),
+        total_size: range.total_size,
+        mime: range.mime.clone(),
+    });
+    // Two chunks: enough for the straddle at a boundary and a short seek back, and no more
+    // decrypted plaintext resident than that.
+    while cache.len() > 2 {
+        cache.remove(0);
+    }
+    Some((range.total_size, range.mime, bytes))
+}
+
+/// Constrain what a shared file's declared MIME may become on a media response. The value is
+/// author-controlled, and `nosniff` only helps once the type itself is one we chose: an attacker
+/// who could name `text/html` here would have a same-origin script vector.
+fn safe_media_mime(declared: &str) -> String {
+    let lowered = declared.trim().to_ascii_lowercase();
+    let base = lowered.split(';').next().unwrap_or("").trim().to_string();
+    let ok = matches!(base.split('/').next(), Some("audio" | "video" | "image"))
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'+' | b'.'));
+    if ok {
+        base
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+fn validate_ui_state_json(json: &str) -> Result<(), String> {
+    if json.len() > MAX_UI_STATE_BYTES {
+        return Err("UI continuity state is too large".into());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|_| "UI continuity state is not valid JSON")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "UI continuity state must be an object".to_string())?;
+    if object.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || !object
+            .get("drafts")
+            .is_some_and(serde_json::Value::is_object)
+        || !object
+            .get("readMarks")
+            .is_some_and(serde_json::Value::is_object)
+    {
+        return Err("unsupported UI continuity state shape".into());
+    }
+    Ok(())
+}
+
+/// Load drafts/read markers only after the vault is unlocked. Returning a canonical empty value
+/// on first run keeps plaintext localStorage out of this path entirely.
+#[tauri::command]
+async fn get_ui_state(state: State<'_, AppState>) -> Result<String, String> {
+    require_unlocked_session(&state).await?;
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "unlock the vault before loading UI state".to_string())?;
+    let bytes = store.load_ui_state().map_err(|error| error.to_string())?;
+    if bytes.is_empty() {
+        return Ok(r#"{"version":1,"drafts":{},"readMarks":{}}"#.into());
+    }
+    let json = String::from_utf8(bytes).map_err(|_| "UI continuity state is not UTF-8")?;
+    validate_ui_state_json(&json)?;
+    Ok(json)
+}
+
+#[tauri::command]
+async fn save_ui_state(state: State<'_, AppState>, json: String) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    validate_ui_state_json(&json)?;
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "unlock the vault before saving UI state".to_string())?;
+    store
+        .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
+        .map_err(|error| error.to_string())
 }
 
 /// Every member's role (fingerprint -> owner/admin/member).
@@ -2912,6 +6102,116 @@ async fn get_roles(
 ) -> Result<std::collections::HashMap<String, String>, String> {
     let actor = actor_of(&state, server).await?;
     Ok(actor.roles().await)
+}
+
+/// Signed public moderation history and advisory kick votes for a server space.
+#[tauri::command]
+async fn get_moderation(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<UiModerationState, String> {
+    let actor = server_actor_of(&state, server).await?;
+    let state = actor.moderation_state().await;
+    Ok(UiModerationState {
+        events: state
+            .events
+            .into_iter()
+            .map(|event| UiModerationEvent {
+                id: event.id,
+                kind: event.kind,
+                actor: event.actor,
+                signer: event.signer,
+                target: event.target,
+                channel: event.channel,
+                message_id: event.message_id,
+                message_text: event.message_text,
+                message_ts: event.message_ts,
+                reason: event.reason,
+                evidence_ids: event.evidence_ids,
+                case_id: event.case_id,
+                outcome: event.outcome,
+                ts: event.ts,
+                signature_valid: event.signature_valid,
+                authorized: event.authorized,
+            })
+            .collect(),
+        votes: state
+            .votes
+            .into_iter()
+            .map(|vote| UiModerationVote {
+                case_id: vote.case_id,
+                voter: vote.voter,
+                signer: vote.signer,
+                yes: vote.yes,
+                ts: vote.ts,
+                signature_valid: vote.signature_valid,
+                eligible: vote.eligible,
+            })
+            .collect(),
+    })
+}
+
+/// Warn one current chat message. The backend snapshots its text/author/time into the signed
+/// record before any optional deletion so evidence cannot turn into a dangling pointer.
+#[tauri::command]
+async fn warn_message(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    message_id: String,
+    reason: String,
+) -> Result<String, String> {
+    let channel = channel
+        .parse::<u128>()
+        .map_err(|_| "bad channel id".to_string())?;
+    let actor = server_actor_of(&state, server).await?;
+    let id = actor.warn_message(channel, message_id, reason).await?;
+    persist_server(&state, server).await;
+    Ok(id)
+}
+
+/// Publish the moderator's case and its selected signed warning evidence. Voting is advisory;
+/// only the owner resolution command can invoke protocol-enforced MLS removal.
+#[tauri::command]
+async fn create_kick_case(
+    state: State<'_, AppState>,
+    server: u64,
+    target: String,
+    reason: String,
+    evidence_ids: Vec<String>,
+) -> Result<String, String> {
+    let actor = server_actor_of(&state, server).await?;
+    let id = actor.create_kick_case(target, reason, evidence_ids).await?;
+    persist_server(&state, server).await;
+    Ok(id)
+}
+
+#[tauri::command]
+async fn cast_kick_vote(
+    state: State<'_, AppState>,
+    server: u64,
+    case_id: String,
+    yes: bool,
+) -> Result<(), String> {
+    let actor = server_actor_of(&state, server).await?;
+    actor.cast_kick_vote(case_id, yes).await?;
+    persist_server(&state, server).await;
+    Ok(())
+}
+
+/// Resolve a case. `remove=false` dismisses it; `remove=true` is owner-only in the backend and
+/// performs MLS removal before recording whether removal succeeded.
+#[tauri::command]
+async fn resolve_kick_case(
+    state: State<'_, AppState>,
+    server: u64,
+    case_id: String,
+    remove: bool,
+) -> Result<(), String> {
+    let actor = server_actor_of(&state, server).await?;
+    actor.resolve_kick_case(case_id, remove).await?;
+    persist_server(&state, server).await;
+    Ok(())
 }
 
 /// Grant or revoke admin for a member (owner only); re-seals the server.
@@ -3173,7 +6473,9 @@ async fn send_message(
 ) -> Result<(), String> {
     let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
     let actor = actor_of(&state, server).await?;
-    actor.send_reply(id, text, reply_to.unwrap_or_default()).await;
+    actor
+        .send_reply(id, text, reply_to.unwrap_or_default())
+        .await?;
     persist_server(&state, server).await;
     Ok(())
 }
@@ -3350,6 +6652,7 @@ async fn get_messages(
 /// are per-server); the bridge tags each item with its server context.
 #[tauri::command]
 async fn get_inbox(state: State<'_, AppState>) -> Result<Vec<UiInboxItem>, String> {
+    require_unlocked_session(&state).await?;
     // Snapshot (id, name, is_dm, actor) under the lock, then query each actor without holding it.
     let servers: Vec<(u64, String, bool, ServerActor)> = {
         let guard = state.servers.lock().await;
@@ -3390,7 +6693,39 @@ struct ReloadedServer {
     name: String,
     invite: String,
     channel: String,
+    channels: Vec<UiChannel>,
     is_dm: bool,
+}
+
+async fn running_servers(state: &AppState) -> Vec<ReloadedServer> {
+    let servers: Vec<_> = state
+        .servers
+        .lock()
+        .await
+        .iter()
+        .map(|(id, e)| {
+            (
+                *id,
+                e.name.clone(),
+                e.invite.clone().unwrap_or_default(),
+                e.is_dm,
+                e.actor.clone(),
+            )
+        })
+        .collect();
+    let mut reloaded = Vec::with_capacity(servers.len());
+    for (server, name, invite, is_dm, actor) in servers {
+        reloaded.push(ReloadedServer {
+            server,
+            name,
+            invite,
+            channel: channel_id("general").to_string(),
+            channels: ui_channels(actor.channels().await),
+            is_dm,
+        });
+    }
+    reloaded.sort_by_key(|s| s.server);
+    reloaded
 }
 
 /// Reload one sealed server from disk onto a fresh transport and register it under its
@@ -3415,11 +6750,10 @@ async fn reload_one(
     // existed it is the only surviving record of which rendezvous this server used.
     let persisted_invite = (!record.invite.is_empty())
         .then(|| {
-            hex::decode(&record.invite)
+            decode_and_verify_invite(&record.invite)
                 .ok()
-                .map(|b| InviteToken::decode(&b).ok())
+                .map(|decoded| decoded.token)
         })
-        .flatten()
         .flatten();
     let invite_rendezvous = persisted_invite
         .as_ref()
@@ -3432,14 +6766,15 @@ async fn reload_one(
     let mut net = load_or_init_server_net(state, record.id, &invite_rendezvous).await;
     let saved_port = net.port;
     let relay_dial: Vec<Multiaddr> = net.relay.parse().into_iter().collect();
-    let (mesh, libp2p_id, port) = build_transport(&net, &relay_dial)?;
+    let (mesh, libp2p_id, port, bound) = build_transport(&net, &relay_dial)?;
     net.port = port;
 
     // Re-run the founder's reachability work verbatim: the advertise address, the UPnP probe, the
     // relay-circuit reservation and the rendezvous registration. Before this, a reload rebuilt a
     // loopback-only bootstrap and every invite minted afterwards was same-machine only.
     let id = libp2p_id.to_string();
-    let (reach, problems) = establish_reachability(&mesh, &id, port, &net, &mut Vec::new()).await;
+    let (reach, problems) =
+        establish_reachability(&mesh, &id, port, &bound, &net, &mut Vec::new()).await;
     for p in &problems {
         // Unlike founding, a reload never fails over this: the user is not standing at a form, and
         // a server that loads with reduced reach still reads its history and re-dials its peers.
@@ -3447,16 +6782,18 @@ async fn reload_one(
     }
     let Reachability {
         bootstrap,
+        bootstrap_owners,
         rz_target,
         rz_handle,
     } = reach;
-    // Advertise our reachable addresses unconditionally, so that a server whose steady-state
-    // rendezvous config was restored from the snapshot can re-register a dialable record on the
-    // actor's next discovery tick. Harmless for a server without rendezvous.
-    for addr in external_addrs(&bootstrap) {
-        let _ = mesh.add_external_address(addr).await;
-    }
-    let upnp_rx = mesh.take_external_addrs().await;
+    // `establish_reachability` has already advertised every direct candidate and offered it to
+    // AutoNAT. Do not add them again here: the v2 client treats each candidate event as work, so a
+    // duplicate would spend another public-server probe without adding evidence.
+    let port_mapping_rx = mesh.take_port_mapping_snapshots().await;
+    let autonat_rx = mesh.take_autonat_snapshots().await;
+    let relay_address_rx = mesh.take_relay_address_snapshots().await;
+    let mesh_observation_rx = mesh.take_mesh_observation_snapshots().await;
+    let mesh_handle = mesh.handle();
 
     // Re-register the persisted invite's own (nonce-keyed) namespace, so the invite that is about
     // to be re-presented in the UI still resolves for whoever is holding it. (`rz_handle` is `Some`
@@ -3490,6 +6827,7 @@ async fn reload_one(
     if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
         eprintln!("reload: publishing the peer record failed: {e}");
     }
+    server.set_switchboard_offered(net.switchboard);
     // Restore the cross-session address cache: the previously-proven members this node can offer
     // the dial policy immediately, before any rendezvous has had a chance to answer with Sybils.
     // Best-effort; a missing, unreadable or tamper-detected cache just means no cached candidates.
@@ -3547,31 +6885,64 @@ async fn reload_one(
     };
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
     forward_events(app.clone(), record.id, events);
-    spawn_discovery_timer(app.clone(), record.id, actor.clone());
+    let timer_actor = actor.clone();
     state.servers.lock().await.insert(
         record.id,
         ServerEntry {
             actor,
+            group_id,
+            device_id,
             invite: presented_invite,
             name: record.display_name.clone(),
             bootstrap,
+            bootstrap_owners,
+            interface_routes: Some(InterfaceRouteIdentity {
+                port,
+                peer_id: id.clone(),
+            }),
             rendezvous: rz_vec,
-            mesh: rz_handle,
+            mesh: Some(mesh_handle),
             is_dm: record.is_dm,
+            switchboard: net.switchboard,
             record_seq: net.record_seq,
         },
     );
+    spawn_discovery_timer(app.clone(), record.id, timer_actor);
     // Re-seal if the port moved. (The reserved peer-record sequence block was already sealed by
     // `load_or_init_server_net`, before the transport came up.)
     if net.port != saved_port {
         persist_server_net(state, record.id, &net).await;
     }
-    if let Some(rx) = upnp_rx {
-        spawn_upnp_fold(app.clone(), record.id, rx, id);
+    if let Some(rx) = port_mapping_rx {
+        app.state::<AppState>()
+            .inner()
+            .upnp
+            .lock()
+            .await
+            .insert(record.id, PORT_MAPPING_WAITING.to_string());
+        spawn_port_mapping_fold(app.clone(), record.id, rx, id);
+    }
+    if let Some(rx) = autonat_rx {
+        app.state::<AppState>().inner().autonat.lock().await.insert(
+            record.id,
+            AutoNatEvidence {
+                waiting: true,
+                results: Vec::new(),
+            },
+        );
+        spawn_autonat_fold(app.clone(), record.id, rx);
+    }
+    if let Some(rx) = relay_address_rx {
+        spawn_relay_fold(app.clone(), record.id, rx);
+    }
+    if let Some(rx) = mesh_observation_rx {
+        spawn_mesh_observation_fold(app.clone(), record.id, rx);
     }
     Ok(())
 }
@@ -3581,11 +6952,375 @@ async fn reload_one(
 /// to point the user's browser (or a registered `foo://` handler) anywhere, so the allowlist
 /// is a constant here rather than anything the webview can influence.
 const ISSUE_URL_PREFIX: &str = "https://github.com/Thalpy/Mewtual/issues/new?";
+const ISSUE_URL_MAX_BYTES: usize = 6_000;
 
 /// Is this a new-issue URL on our own tracker? Split out from the command so the allowlist
 /// itself is testable without launching a browser.
 fn is_tracker_url(url: &str) -> bool {
-    url.starts_with(ISSUE_URL_PREFIX)
+    url.len() <= ISSUE_URL_MAX_BYTES
+        && !url
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        && url.starts_with(ISSUE_URL_PREFIX)
+}
+
+fn is_external_http_url(url: &str) -> bool {
+    if url.is_empty()
+        || url.len() > 4096
+        || url.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return false;
+    }
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"));
+    rest.is_some_and(|r| !r.is_empty() && !r.starts_with(['/', '?', '#']))
+}
+
+fn launch_url(url: &str) -> Result<(), String> {
+    // Deliberately no shell: `cmd /C start` would interpret query-string separators. Each
+    // launcher receives the URL as one literal argv entry.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+const SPACE_GUIDE_NAME: &str = "mewtual-server-space-guide-2048x1024.png";
+const MAX_SPACE_GUIDE_BYTES: usize = 16 * 1024 * 1024;
+const SPACE_LAYOUT_NAME: &str = "mewtual-server-space-layout.json";
+const MAX_SPACE_LAYOUT_BYTES: usize = 1024 * 1024;
+
+/// Keep the frontend from turning this deliberately narrow command into an arbitrary-file
+/// writer. The canvas export must be a reasonably-sized 2048 x 1024 PNG with an IHDR first.
+fn validate_space_guide_png(bytes: &[u8]) -> bool {
+    bytes.len() >= 24
+        && bytes.len() <= MAX_SPACE_GUIDE_BYTES
+        && bytes[..8] == [137, 80, 78, 71, 13, 10, 26, 10]
+        && &bytes[12..16] == b"IHDR"
+        && u32::from_be_bytes(bytes[16..20].try_into().expect("four-byte PNG width")) == 2048
+        && u32::from_be_bytes(bytes[20..24].try_into().expect("four-byte PNG height")) == 1024
+}
+
+/// Layout export is intentionally its own narrow writer: accepting only our small, versioned
+/// object keeps a compromised webview from using the command as an arbitrary Downloads writer.
+fn validate_space_layout_json(json: &str) -> bool {
+    if json.is_empty() || json.len() > MAX_SPACE_LAYOUT_BYTES {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    value.get("kind").and_then(|v| v.as_str()) == Some("mewtual-server-space-layout")
+        && value.get("version").and_then(|v| v.as_u64()) == Some(1)
+        && value.get("space").is_some_and(serde_json::Value::is_object)
+}
+
+fn safe_download_name(requested: &str) -> String {
+    // Peer-provided file names are display data, not paths. Apply Windows' strict character rules
+    // everywhere so a shared name behaves consistently on every desktop platform.
+    let leaf = requested.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = leaf
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        // Leaves room for a collision suffix even when every scalar needs two UTF-16 code units.
+        .take(120)
+        .collect();
+    let trimmed = cleaned.trim_matches(|c: char| c == '.' || c.is_whitespace());
+    let mut name = if trimmed.is_empty() {
+        "mewtual-download".to_string()
+    } else {
+        trimmed.to_string()
+    };
+    let stem = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    let numbered_device = (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.len() == 4
+        && matches!(stem.as_bytes()[3], b'1'..=b'9');
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered_device {
+        name.insert(0, '_');
+    }
+    name
+}
+
+fn numbered_download_name(name: &str, number: usize) -> String {
+    if number == 0 {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mewtual-download");
+    match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+    {
+        Some(extension) => format!("{stem} ({number}).{extension}"),
+        None => format!("{stem} ({number})"),
+    }
+}
+
+/// Write without replacing an earlier download. `create_new` also closes the exists/write race.
+fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(downloads).map_err(|e| e.to_string())?;
+    let safe_name = safe_download_name(requested_name);
+    for number in 0..1_000 {
+        let name = numbered_download_name(&safe_name, number);
+        let path = downloads.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error.to_string());
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("too many copies of the guide already exist in Downloads".into())
+}
+
+fn launch_path(path: &Path) -> Result<(), String> {
+    // As with URLs, never involve a shell: the path is one literal argument to the OS launcher.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("rundll32.exe");
+        c.arg("url.dll,FileProtocolHandler").arg(path);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn reveal_path(path: &Path) -> Result<(), String> {
+    // Reveal rather than execute arbitrary shared files. This gives every Download button a
+    // visible system window without silently launching a peer-supplied executable or document.
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(format!("/select,{}", path.to_string_lossy()));
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path.parent().unwrap_or(path));
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedFileResult {
+    path: String,
+    displayed: bool,
+    warning: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupResult {
+    path: String,
+    files: usize,
+    bytes: u64,
+    displayed: bool,
+    warning: Option<String>,
+}
+
+/// Copy one already-sealed vault tree without following links. Refusing links is important for
+/// both directions: an attacker must not smuggle unrelated host files into an exported backup,
+/// and backup semantics must never depend on where a link happens to point at restore time.
+fn copy_backup_tree(source: &Path, destination: &Path) -> Result<(usize, u64), String> {
+    std::fs::create_dir(destination).map_err(|error| error.to_string())?;
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let entries = std::fs::read_dir(source).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        let to = destination.join(entry.file_name());
+        if kind.is_symlink() {
+            return Err(format!(
+                "the vault contains a symbolic link and cannot be backed up safely: {}",
+                entry.path().display()
+            ));
+        }
+        if kind.is_dir() {
+            let (nested_files, nested_bytes) = copy_backup_tree(&entry.path(), &to)?;
+            files = files.saturating_add(nested_files);
+            bytes = bytes.saturating_add(nested_bytes);
+        } else if kind.is_file() {
+            let copied = std::fs::copy(entry.path(), to).map_err(|error| error.to_string())?;
+            files = files.saturating_add(1);
+            bytes = bytes.saturating_add(copied);
+        } else {
+            return Err(format!(
+                "the vault contains an unsupported filesystem entry: {}",
+                entry.path().display()
+            ));
+        }
+    }
+    Ok((files, bytes))
+}
+
+fn backup_destination(downloads: &Path, stamp: u64) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(downloads).map_err(|error| error.to_string())?;
+    for number in 0..1_000usize {
+        let suffix = if number == 0 {
+            String::new()
+        } else {
+            format!(" ({number})")
+        };
+        let path = downloads.join(format!("Mewtual Backup {stamp}{suffix}"));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err("too many Mewtual backups with this name already exist in Downloads".into())
+}
+
+/// Export an offline copy of the entire sealed vault. It remains protected by the current vault
+/// secret; no plaintext snapshots, drafts, identities or attachments are written to Downloads.
+/// Restore is intentionally a locked-screen operation and is not performed by this command.
+#[tauri::command]
+async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<BackupResult, String> {
+    require_unlocked_session(&state).await?;
+    // Capture every actor first, without holding either state lock across its round trip.
+    let servers: Vec<(u64, ServerActor, ServerRecord)> = {
+        let servers = state.servers.lock().await;
+        servers
+            .iter()
+            .map(|(id, entry)| {
+                (
+                    *id,
+                    entry.actor.clone(),
+                    ServerRecord {
+                        id: *id,
+                        display_name: entry.name.clone(),
+                        invite: entry.invite.clone().unwrap_or_default(),
+                        is_dm: entry.is_dm,
+                    },
+                )
+            })
+            .collect()
+    };
+    let mut snapshots = Vec::with_capacity(servers.len());
+    for (id, actor, _) in &servers {
+        snapshots.push((*id, actor.snapshot().await?));
+    }
+    let records: Vec<ServerRecord> = servers.into_iter().map(|(_, _, record)| record).collect();
+
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| error.to_string())?;
+    let destination = backup_destination(&downloads, SystemClock.now_ms())?;
+    let (files, bytes) = {
+        // Serialize persistence and the filesystem copy with every other vault write so the
+        // exported registry and snapshots form one coherent point-in-time image.
+        let guard = state.store.lock().await;
+        let store = guard
+            .as_ref()
+            .ok_or_else(|| "unlock the vault before creating a backup".to_string())?;
+        let mut rng = OsCryptoRng;
+        for (id, snapshot) in snapshots {
+            store
+                .save_server(id, &snapshot, &mut rng)
+                .map_err(|error| error.to_string())?;
+        }
+        store
+            .save_registry(&records, &mut rng)
+            .map_err(|error| error.to_string())?;
+        copy_backup_tree(store.backup_source_dir(), &destination)?
+    };
+    let warning = reveal_path(&destination)
+        .err()
+        .map(|error| format!("The backup was created, but Downloads could not be opened: {error}"));
+    Ok(BackupResult {
+        path: destination.to_string_lossy().into_owned(),
+        files,
+        bytes,
+        displayed: warning.is_none(),
+        warning,
+    })
+}
+
+/// Change the local vault secret by rewrapping its root DEK. The store mutex serializes the small
+/// atomic vault-file replacement with snapshots and backup export; server actors can keep running
+/// because the DEK and every data-encryption subkey remain unchanged.
+#[tauri::command]
+async fn change_vault_secret(
+    state: State<'_, AppState>,
+    current_secret: String,
+    new_secret: String,
+) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    let current_secret = Zeroizing::new(current_secret);
+    let new_secret = Zeroizing::new(new_secret);
+    let guard = state.store.lock().await;
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "unlock the vault before changing its secret".to_string())?;
+    store
+        .change_passphrase(
+            current_secret.as_bytes(),
+            new_secret.as_bytes(),
+            &mut OsCryptoRng,
+        )
+        .map_err(|error| error.to_string())
 }
 
 /// Open a prefilled bug report / feature request on the tracker in the user's default browser.
@@ -3593,32 +7328,109 @@ fn is_tracker_url(url: &str) -> bool {
 /// filled-in form: the app carries no GitHub credentials and posts nothing itself, and the user
 /// submits (and so authors) the issue from their own browser.
 #[tauri::command]
-async fn open_issue_url(url: String) -> Result<(), String> {
+async fn open_issue_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     if !is_tracker_url(&url) {
         return Err("refusing to open a URL outside the issue tracker".into());
     }
-    // Deliberately no shell: `cmd /C start` would read the `&` between query parameters as a
-    // command separator. Each launcher below takes the URL as one literal argv entry instead.
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("rundll32.exe");
-        c.args(["url.dll,FileProtocolHandler", &url]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg(&url);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(&url);
-        c
-    };
-    cmd.spawn().map_err(|e| e.to_string())?;
-    Ok(())
+    launch_url(&url)
+}
+
+/// Open a chat/wiki link in the system browser, keeping the Mewtual webview on the conversation.
+#[tauri::command]
+async fn open_external_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    if !is_external_http_url(&url) {
+        return Err("only http and https links can be opened".into());
+    }
+    launch_url(&url)
+}
+
+/// Save the generated Server Space overlay to Downloads and show it in the user's normal image
+/// viewer. A normal detached `<a download>` is not dependable inside a desktop webview and gives
+/// no visible result when it is rejected.
+#[tauri::command]
+async fn save_and_open_space_guide(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    png_base64: String,
+) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
+    if png_base64.len() > MAX_SPACE_GUIDE_BYTES * 2 {
+        return Err("the generated guide is unexpectedly large".into());
+    }
+    let bytes = B64
+        .decode(png_base64)
+        .map_err(|_| "the generated guide could not be decoded".to_string())?;
+    if !validate_space_guide_png(&bytes) {
+        return Err("the generated guide is not a valid 2048 x 1024 PNG".into());
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, SPACE_GUIDE_NAME, &bytes)?;
+    let warning = launch_path(&path).err().map(|error| {
+        format!("The guide was saved, but its image viewer could not be opened: {error}")
+    });
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+    })
+}
+
+/// Export a portable Server Space layout to Downloads and reveal it without executing it.
+#[tauri::command]
+async fn save_space_layout(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
+    if !validate_space_layout_json(&json) {
+        return Err("the layout is not a valid Mewtual Server Space export".into());
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, SPACE_LAYOUT_NAME, json.as_bytes())?;
+    let warning = reveal_path(&path)
+        .err()
+        .map(|error| format!("The layout was saved, but Downloads could not be opened: {error}"));
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+    })
+}
+
+/// Persist a completed group-file transfer through the native shell. Unlike `<a download>`, this
+/// has an observable result in a Tauri webview. The file is revealed, never executed automatically.
+#[tauri::command]
+async fn save_download(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    data_base64: String,
+) -> Result<SavedFileResult, String> {
+    require_unlocked_session(&state).await?;
+    if data_base64.len() > MAX_FILE_BYTES * 2 {
+        return Err("the downloaded file is unexpectedly large".into());
+    }
+    let bytes = B64
+        .decode(data_base64)
+        .map_err(|_| "the downloaded file could not be decoded".to_string())?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(format!(
+            "file is larger than the {MAX_FILE_BYTES}-byte limit"
+        ));
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let path = write_download(&downloads, &name, &bytes)?;
+    let warning = reveal_path(&path)
+        .err()
+        .map(|error| format!("The file was saved, but Downloads could not be opened: {error}"));
+    Ok(SavedFileResult {
+        path: path.to_string_lossy().into_owned(),
+        displayed: warning.is_none(),
+        warning,
+    })
 }
 
 /// Is there already a vault on this machine? The frontend asks before it draws the gate:
@@ -3658,17 +7470,8 @@ async fn unlock(
     // process kept running), don't reload from disk; that would spawn a duplicate actor +
     // transport per server. Return the servers already registered so the rail repopulates.
     if state.store.lock().await.is_some() {
-        let servers = state.servers.lock().await;
-        return Ok(servers
-            .iter()
-            .map(|(id, e)| ReloadedServer {
-                server: *id,
-                name: e.name.clone(),
-                invite: e.invite.clone().unwrap_or_default(),
-                channel: channel_id("general").to_string(),
-                is_dm: e.is_dm,
-            })
-            .collect());
+        *state.session_resumable.lock().await = true;
+        return Ok(running_servers(&state).await);
     }
 
     let records = store.load_registry().map_err(|e| e.to_string())?;
@@ -3722,10 +7525,65 @@ async fn unlock(
             name: record.display_name.clone(),
             invite: record.invite.clone(),
             channel: channel_id("general").to_string(),
+            channels: ui_channels(
+                actor_of_unchecked(&state, record.id)
+                    .await?
+                    .channels()
+                    .await,
+            ),
             is_dm: record.is_dm,
         });
     }
+    *state.session_resumable.lock().await = true;
     Ok(reloaded)
+}
+
+/// Restore an already-unlocked frontend after F5/HMR without asking for the vault passphrase
+/// again. An explicit UI lock disables this path until `unlock` verifies the passphrase.
+#[tauri::command]
+async fn resume_session(state: State<'_, AppState>) -> Result<Option<Vec<ReloadedServer>>, String> {
+    if !*state.session_resumable.lock().await || state.store.lock().await.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(running_servers(&state).await))
+}
+
+#[tauri::command]
+async fn lock_session(
+    state: State<'_, AppState>,
+    ui_state_json: Option<String>,
+) -> Result<(), String> {
+    lock_session_inner(&state, ui_state_json).await
+}
+
+/// Testable core of the explicit lock operation. Closing the command boundary is unconditional:
+/// malformed continuity state or a vault write failure is reported, but must never leave the
+/// sensitive webview session open as a side effect of that error.
+async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> Result<(), String> {
+    // Save the final draft/read snapshot and close IPC as one ordered native operation. Two
+    // separate fire-and-forget commands could race, causing the save to arrive after the lock and
+    // be correctly rejected by the new session gate.
+    let save_result = if let Some(json) = ui_state_json {
+        match validate_ui_state_json(&json) {
+            Err(error) => Err(error),
+            Ok(()) => {
+                let guard = state.store.lock().await;
+                match guard.as_ref() {
+                    Some(store) => store
+                        .save_ui_state(json.as_bytes(), &mut OsCryptoRng)
+                        .map_err(|error| error.to_string()),
+                    None => Err("unlock the vault before saving UI state".to_string()),
+                }
+            }
+        }
+    } else {
+        Ok(())
+    };
+    *state.session_resumable.lock().await = false;
+    // The media cache holds decrypted chunks of shared files. Locking must drop them along with
+    // the rest of the session's plaintext, not leave a film resident until something evicts it.
+    state.media_cache.lock().await.clear();
+    save_result
 }
 
 // ---------------------------------------------------------------------------
@@ -3824,6 +7682,7 @@ async fn ceremony_origin(state: &AppState) -> Result<DeviceId, String> {
 /// request. The secrets stay in this process; only the request travels.
 #[tauri::command]
 async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, String> {
+    require_unlocked_session(&state).await?;
     let mut rng = OsCryptoRng;
     let (secrets, blob) = catcoms_app::begin_pairing(&mut rng).map_err(|e| e.to_string())?;
     let device_id = secrets.device_id().to_string();
@@ -3841,19 +7700,30 @@ async fn pairing_begin(state: State<'_, AppState>) -> Result<PairingBegun, Strin
 /// the pending view wholesale).
 #[tauri::command]
 async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<PairingRead, String> {
+    require_unlocked_session(&state).await?;
     let origin = ceremony_origin(&state).await?;
     let view = catcoms_app::read_pairing_blob(&blob, &origin).map_err(|e| e.to_string())?;
-    if state.pairing_ledger.lock().await.is_spent(&view.request.pairing_nonce) {
+    if state
+        .pairing_ledger
+        .lock()
+        .await
+        .is_spent(&view.request.pairing_nonce)
+    {
         return Err("that pairing request has already been used".to_string());
     }
     // The scope the popup must disclose: everything an accept would grant.
     let (servers, dm_count) = {
         let guard = state.servers.lock().await;
-        let mut names: Vec<(u64, String, bool)> =
-            guard.iter().map(|(id, e)| (*id, e.name.clone(), e.is_dm)).collect();
+        let mut names: Vec<(u64, String, bool)> = guard
+            .iter()
+            .map(|(id, e)| (*id, e.name.clone(), e.is_dm))
+            .collect();
         names.sort_by_key(|(id, _, _)| *id);
         let dm_count = names.iter().filter(|(_, _, dm)| *dm).count();
-        (names.into_iter().map(|(_, n, _)| n).collect::<Vec<_>>(), dm_count)
+        (
+            names.into_iter().map(|(_, n, _)| n).collect::<Vec<_>>(),
+            dm_count,
+        )
     };
     let read = PairingRead {
         device_id: view.new_device_id.to_string(),
@@ -3870,6 +7740,7 @@ async fn pairing_read(state: State<'_, AppState>, blob: String) -> Result<Pairin
 /// the pending view.
 #[tauri::command]
 async fn pairing_decline(state: State<'_, AppState>) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
     if let Some(pending) = state.pending_grant.lock().await.take() {
         // Already-spent just means a mint won the race; either way the nonce is dead.
         let _ = state
@@ -3910,6 +7781,7 @@ async fn pairing_mint(
     device_name: String,
     turn: Option<HashMap<String, String>>,
 ) -> Result<PairingBundle, String> {
+    require_unlocked_session(&state).await?;
     // Mint ONLY from the pending view `pairing_read` stored; the popup's device is the
     // certified device, closing the read→mint TOCTOU. The lock is held for the whole
     // mint so a concurrent re-read cannot swap the ceremony out from under the accept.
@@ -3921,7 +7793,12 @@ async fn pairing_mint(
     let view = &pending.view;
 
     // A spent nonce costs zero signatures (and zero actor round-trips).
-    if state.pairing_ledger.lock().await.is_spent(&view.request.pairing_nonce) {
+    if state
+        .pairing_ledger
+        .lock()
+        .await
+        .is_spent(&view.request.pairing_nonce)
+    {
         return Err("that pairing request has already been used".to_string());
     }
 
@@ -4010,6 +7887,7 @@ async fn pairing_open(
     bundle: String,
     passphrase: String,
 ) -> Result<PairingOpened, String> {
+    require_unlocked_session(&state).await?;
     let guard = state.pairing.lock().await;
     let secrets = guard
         .as_ref()
@@ -4063,6 +7941,7 @@ async fn pairing_join(
     state: State<'_, AppState>,
     server_index: Option<usize>,
 ) -> Result<Vec<PairingJoinResult>, String> {
+    require_unlocked_session(&state).await?;
     let grants = state.pairing_grants.lock().await.clone();
     if grants.is_empty() {
         return Err("no grants to join; open a grant bundle first".to_string());
@@ -4157,6 +8036,7 @@ async fn join_one_grant(
         .ok_or_else(|| "grant address has no peer id".to_string())?;
     let contact = phase0_peer_id(&contact_lp);
     let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
+    let mesh_handle = mesh.handle();
     timeout(Duration::from_secs(20), async {
         loop {
             if let Some(TransportEvent::PeerConnected(p)) = mesh.next_event().await {
@@ -4214,8 +8094,11 @@ async fn join_one_grant(
     }
 
     let general = channel_id("general");
+    let group_id = server.group_id();
+    let device_id = server.device_id();
     let (actor, events, _task) = spawn(server);
     actor.open_channel(general).await;
+    actor.catch_up_channel_index(contact).await;
     actor.catch_up(contact, general).await;
     actor.catch_up_profiles(contact).await;
     actor.catch_up_livery(contact).await;
@@ -4226,6 +8109,7 @@ async fn join_one_grant(
     actor.catch_up_calendar(contact).await;
     actor.catch_up_wiki(contact).await;
     actor.catch_up_roles(contact).await;
+    actor.catch_up_moderation(contact).await;
     // A companion mints no invites (owner-scoped), so it carries no bootstrap/rendezvous of its
     // own; the same registry shape a joiner gets. `is_dm` is not in the grant yet, so a DM pairs
     // in as a server on the rail until M4 carries the flag.
@@ -4242,11 +8126,16 @@ async fn join_one_grant(
         state,
         actor,
         events,
+        group_id,
+        device_id,
         None,
         name,
         Vec::new(),
-        Vec::new(),
+        HashMap::new(),
         None,
+        Vec::new(),
+        Some(mesh_handle),
+        false,
         false,
         0,
     )
@@ -4268,10 +8157,11 @@ fn log_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .join("logs"))
 }
 
-/// The preference file. Its **presence** is the setting: a flag with no parser cannot be
-/// corrupted into an unreadable state that silently turns logging on.
+/// The opt-**out** file. Its presence means "no log"; a flag with no parser cannot be corrupted
+/// into an unreadable state, and the sense is inverted from the obvious one on purpose: see
+/// [`debug_logging_enabled`].
 fn debug_flag_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    Ok(log_dir(app)?.join("debug-logging-enabled"))
+    Ok(log_dir(app)?.join("debug-logging-disabled"))
 }
 
 /// The state of the debug log, as shown in Settings.
@@ -4289,10 +8179,30 @@ struct DebugLogging {
     file: String,
 }
 
-/// Read the debug-logging preference. Never fails the caller: an unreadable app data directory
-/// means "off", which is the safe answer for a privacy tool.
+/// Read the debug-logging preference.
+///
+/// **On by default while the product is in alpha**, which is a deliberate reversal of the usual
+/// answer for a privacy tool. A bug report without a log costs a round trip and usually a second
+/// reproduction, and at this stage nearly every session is a test session. The opt-out is one
+/// click in Settings and is honoured permanently once taken; see `catcoms_log`'s module docs for
+/// exactly what an enabled log may contain. Revisit this default before a general release.
+///
+/// Never fails the caller: an unreadable app data directory reads as the default rather than
+/// erroring, since a preference lookup must not be able to stop the app starting.
 fn debug_logging_enabled(app: &AppHandle) -> bool {
-    debug_flag_path(app).map(|p| p.exists()).unwrap_or(false)
+    debug_flag_path(app)
+        .map(|p| debug_enabled_from_flag(p.exists()))
+        .unwrap_or(true)
+}
+
+/// The preference, from whether the opt-out file exists.
+///
+/// Split out because the sense is inverted from the obvious one and inverted flags are exactly
+/// what a later reader "corrects" back. Presence of the file means the user turned logging OFF;
+/// absence means the alpha default, which is ON. Getting this backwards would either lose every
+/// bug report or write a log for someone who explicitly asked not to have one.
+fn debug_enabled_from_flag(opt_out_exists: bool) -> bool {
+    !opt_out_exists
 }
 
 /// Whether this process installed a debug-log file layer, and which file it is writing. Set once
@@ -4329,7 +8239,11 @@ fn newest_log_file(dir: &std::path::Path) -> String {
 
 /// The debug log's current state, for Settings.
 #[tauri::command]
-async fn get_debug_logging(app: AppHandle) -> Result<DebugLogging, String> {
+async fn get_debug_logging(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DebugLogging, String> {
+    require_unlocked_session(&state).await?;
     let log = app.try_state::<LogState>();
     let active = log.as_ref().is_some_and(|l| l.active);
     // Prefer the directory this process actually opened, so the path shown is the path being
@@ -4353,16 +8267,60 @@ async fn get_debug_logging(app: AppHandle) -> Result<DebugLogging, String> {
 /// Turn the debug log on or off for the **next** launch (a tracing subscriber is install-once
 /// per process, so nothing can be attached to this one after the fact).
 #[tauri::command]
-async fn set_debug_logging(app: AppHandle, enabled: bool) -> Result<DebugLogging, String> {
+async fn set_debug_logging(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<DebugLogging, String> {
+    require_unlocked_session(&state).await?;
     let dir = log_dir(&app)?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // The file records the opt-OUT, so enabling removes it. Inverted from the obvious mapping
+    // because the default is on for alpha, and a default that depends on a file being written at
+    // first launch would silently turn itself off on any install that could not write one.
     let flag = debug_flag_path(&app)?;
     if enabled {
-        std::fs::write(&flag, b"on").map_err(|e| e.to_string())?;
-    } else if flag.exists() {
-        std::fs::remove_file(&flag).map_err(|e| e.to_string())?;
+        if flag.exists() {
+            std::fs::remove_file(&flag).map_err(|e| e.to_string())?;
+        }
+    } else {
+        std::fs::write(&flag, b"off").map_err(|e| e.to_string())?;
     }
-    get_debug_logging(app).await
+    get_debug_logging(app, state).await
+}
+
+/// How much of one frontend log line is kept. Long enough for a stack frame and a message,
+/// short enough that a runaway loop cannot fill the disk one line at a time.
+const MAX_UI_LOG_BYTES: usize = 2000;
+
+/// Record something the webview saw.
+///
+/// Until this existed the log was Rust-only, so every `console.warn` in the voice path (failed
+/// signals, rejected ICE candidates, offer handling that threw) went to a devtools console nobody
+/// had open and was gone. Half the app is in the webview; a log that cannot see it is a log of
+/// half the app.
+///
+/// Deliberately not gated on an unlocked session, unlike almost every other command: the errors
+/// most worth having are the ones from unlock failing and from startup, which happen before there
+/// is a session to check. It writes only to the local log file, and only when logging is on.
+#[tauri::command]
+async fn log_ui(app: AppHandle, level: String, message: String) {
+    if !app.state::<LogState>().active {
+        return;
+    }
+    let mut text = message;
+    if text.len() > MAX_UI_LOG_BYTES {
+        text.truncate(MAX_UI_LOG_BYTES);
+        text.push_str(" [truncated]");
+    }
+    // The webview chooses the level, so it is matched against a known set rather than parsed:
+    // an unrecognised one becomes info instead of being dropped.
+    match level.as_str() {
+        "error" => tracing::error!(target: "catcoms_ui", "{text}"),
+        "warn" => tracing::warn!(target: "catcoms_ui", "{text}"),
+        "debug" => tracing::debug!(target: "catcoms_ui", "{text}"),
+        _ => tracing::info!(target: "catcoms_ui", "{text}"),
+    }
 }
 
 /// Build and run the Tauri application.
@@ -4373,11 +8331,27 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(AppState::default())
+        // Shared media plays straight out of the vault instead of crossing the IPC bridge as a
+        // base64 string. The handler answers Range requests, so a player starts on the first
+        // chunk and a seek costs one chunk, and the bytes never become a JS string at all.
+        .register_asynchronous_uri_scheme_protocol(MEDIA_SCHEME, |app, request, responder| {
+            let handle = app.app_handle().clone();
+            let path = request.uri().path().to_string();
+            let range = request
+                .headers()
+                .get(http::header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                responder.respond(serve_media(&state, &path, range).await);
+            });
+        })
         // Install the tracing subscriber before anything interesting happens. Until this landed
         // the desktop app had **no** subscriber at all, so every `tracing::warn!` in the whole
         // protocol stack (including the five distinct reasons a join can be refused) was
-        // discarded and there was no log file anywhere. Off by default: see `DebugLogging`, and
-        // `catcoms_log`'s module docs for what an enabled log may contain.
+        // discarded and there was no log file anywhere. On by default while in alpha: see
+        // `debug_logging_enabled`, and `catcoms_log`'s module docs for what a log may contain.
         .setup(|app| {
             let handle = app.handle().clone();
             let enabled = debug_logging_enabled(&handle);
@@ -4388,17 +8362,24 @@ pub fn run() {
                 active: enabled,
                 dir,
             });
+            spawn_network_monitor(&handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             vault_exists,
+            resume_session,
+            lock_session,
             unlock,
             found_server,
+            preview_invite,
             join_server,
+            apply_join_reply,
             leave_server,
             open_channel,
+            get_channels,
             get_invite,
             mint_invite_fresh,
+            check_invite_routes,
             rename_server,
             get_members,
             set_profile,
@@ -4412,6 +8393,8 @@ pub fn run() {
             get_devices,
             add_file,
             get_files,
+            get_storage_health,
+            repair_storage,
             get_online_members,
             get_delivery,
             dm_stats,
@@ -4447,10 +8430,25 @@ pub fn run() {
             reject_wiki_edit,
             restore_wiki_page,
             get_roles,
+            get_moderation,
+            warn_message,
+            create_kick_case,
+            cast_kick_vote,
+            resolve_kick_case,
             get_join_attempts,
             get_connectivity,
+            get_call_transport,
+            map_call_port,
+            unmap_call_port,
+            get_switchboard_status,
+            set_switchboard_offered,
+            get_ui_state,
+            save_ui_state,
+            create_backup,
+            change_vault_secret,
             get_debug_logging,
             set_debug_logging,
+            log_ui,
             set_admin,
             remove_member,
             revoke_device,
@@ -4472,7 +8470,11 @@ pub fn run() {
             pairing_decline,
             pairing_open,
             pairing_join,
-            open_issue_url
+            open_issue_url,
+            open_external_url,
+            save_and_open_space_guide,
+            save_space_layout,
+            save_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Mewtual desktop app");
@@ -4482,43 +8484,1012 @@ pub fn run() {
 mod tests {
     use super::*;
 
+    /// The scope rules behind the invite page's "Your network / Internet" chips and the manual
+    /// port-forward suggestion. Each address kind must land in exactly one scope, and only a
+    /// plain LAN listener may supply the ip/port the suggestion names.
+    #[test]
+    fn invite_route_classification_pins_the_scope_rules() {
+        let peer = "12D3KooWSaXFXMFgkGxgBF6UPEojspeSj2KaDiP4ks5poLzieKKN";
+        let mut check = InviteRouteCheck::default();
+        classify_invite_routes(
+            &mut check,
+            &[
+                "not a multiaddr".to_string(),
+                format!("/ip4/127.0.0.1/tcp/31484/p2p/{peer}"),
+                format!("/ip4/192.168.0.231/udp/31484/quic-v1/p2p/{peer}"),
+                format!("/ip4/213.105.231.38/udp/31484/quic-v1/p2p/{peer}"),
+            ],
+        );
+        assert!(check.lan, "a private listener is the LAN scope");
+        assert!(check.public_direct, "a routable listener is the internet scope");
+        assert!(!check.relay);
+        // The suggestion names the LAN listener's exact socket; loopback supplies nothing.
+        assert_eq!(check.lan_ip, "192.168.0.231");
+        assert_eq!(check.port, 31484);
+
+        // A routable relay circuit is reachability, but through the relay, never "direct".
+        let mut relayed = InviteRouteCheck::default();
+        classify_invite_routes(
+            &mut relayed,
+            &[format!(
+                "/ip4/213.105.231.38/udp/7220/quic-v1/p2p/{peer}/p2p-circuit/p2p/{peer}"
+            )],
+        );
+        assert!(relayed.relay);
+        assert!(!relayed.public_direct);
+
+        // A LAN-hosted circuit is dialable on this network, but its socket is the relay's
+        // machine: it must never supply the port-forward suggestion's values.
+        let mut lan_relay = InviteRouteCheck::default();
+        classify_invite_routes(
+            &mut lan_relay,
+            &[format!(
+                "/ip4/192.168.0.50/tcp/7220/p2p/{peer}/p2p-circuit/p2p/{peer}"
+            )],
+        );
+        assert!(lan_relay.lan);
+        assert!(!lan_relay.relay, "a LAN relay earns no internet confidence");
+        assert_eq!(lan_relay.lan_ip, "", "the relay's socket is not this machine's");
+        assert_eq!(lan_relay.port, 0);
+
+        // Loopback alone reaches neither scope: same-machine only.
+        let mut loopback = InviteRouteCheck::default();
+        classify_invite_routes(&mut loopback, &[format!("/ip4/127.0.0.1/tcp/31484/p2p/{peer}")]);
+        assert!(!loopback.lan);
+        assert!(!loopback.public_direct);
+        assert!(!loopback.relay);
+    }
+
+    fn test_libp2p_peer(n: u8) -> libp2p::PeerId {
+        let mut seed = [21; 32];
+        seed[0] = n;
+        keypair_from_seed(seed).unwrap().public().to_peer_id()
+    }
+
+    #[tokio::test]
+    async fn native_network_bursts_become_one_bounded_generation() {
+        let source = n0_watcher::Watchable::new(0u8);
+        let watcher = source.watch();
+        let signal = NetworkChangeSignal::default();
+        let mut generations = signal.subscribe();
+        let clock = catcoms_rt::ManualClock::new(1_000);
+
+        // Make the first update observable before the forwarding task starts, then let it reach
+        // the injected debounce sleep before delivering a second callback in the same burst.
+        source.set(1).unwrap();
+        let task = tokio::spawn(forward_network_changes(watcher, signal, clock.clone()));
+        tokio::task::yield_now().await;
+        clock.advance_ms(500);
+        source.set(2).unwrap();
+        tokio::task::yield_now().await;
+
+        // A trailing debounce restarts from the second callback; the first callback's original
+        // deadline must not publish an intermediate epoch.
+        clock.advance_ms(NETWORK_CHANGE_DEBOUNCE_MS - 1);
+        tokio::task::yield_now().await;
+        assert!(!generations.has_changed().unwrap());
+        clock.advance_ms(1);
+        generations.changed().await.unwrap();
+        assert_eq!(*generations.borrow_and_update(), 1);
+
+        // The second source state was consumed by the first quiet window, not left queued as a
+        // second signed epoch. Advancing another whole window must therefore remain silent.
+        tokio::task::yield_now().await;
+        clock.advance_ms(NETWORK_CHANGE_DEBOUNCE_MS);
+        tokio::task::yield_now().await;
+        assert!(!generations.has_changed().unwrap());
+
+        // A genuinely later change still reaches every subscriber exactly once.
+        source.set(3).unwrap();
+        tokio::task::yield_now().await;
+        clock.advance_ms(NETWORK_CHANGE_DEBOUNCE_MS);
+        generations.changed().await.unwrap();
+        assert_eq!(*generations.borrow_and_update(), 2);
+
+        drop(source);
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn listener_summary_reports_only_the_transports_actually_observed() {
+        let addresses = vec![
+            "/ip4/0.0.0.0/tcp/22487".parse().unwrap(),
+            "/ip6/::/udp/22487/quic-v1".parse().unwrap(),
+            "/ip4/203.0.113.7/tcp/4001/p2p/12D3KooWF8W6GDyoRR93iGs7VjVQ7jH1mDbGKiqd28KxoM6qQjTq/p2p-circuit"
+                .parse()
+                .unwrap(),
+        ];
+        assert_eq!(listener_summary(&addresses), "IPv4 TCP, IPv6 QUIC");
+        assert_eq!(listener_summary(&addresses[2..]), "");
+    }
+
+    // --- Regression: the media window that stalled the whole app -----------------------------
+    // A fixed 2 MiB window over an 8 MiB chunk meant every chunk was fetched and decrypted four
+    // times during ordinary playback. Because the actor handles one command at a time, those
+    // redundant reads were also time the server could not answer anything else: joining a call
+    // and moving around it left the app looking like it was still loading. The invariant these
+    // pin is that one response never spans more than one chunk.
+
+    #[test]
+    fn a_media_response_never_spans_more_than_one_chunk() {
+        // Every offset in the file, at a few sizes, must stay inside the chunk it starts in.
+        for start in [
+            0u64,
+            1,
+            CHUNK_BYTES as u64 - 1,
+            CHUNK_BYTES as u64,
+            CHUNK_BYTES as u64 + 1,
+            CHUNK_BYTES as u64 * 3 + 4242,
+        ] {
+            for len in [
+                1usize,
+                4096,
+                MEDIA_WINDOW_BYTES,
+                CHUNK_BYTES,
+                CHUNK_BYTES * 4,
+            ] {
+                let w = media_window(start, len);
+                assert!(w.offset < CHUNK_BYTES, "offset must land inside its chunk");
+                assert!(
+                    w.offset + w.len <= CHUNK_BYTES,
+                    "start={start} len={len} would read past the end of chunk {}",
+                    w.index
+                );
+                assert_eq!(
+                    w.index,
+                    (start / CHUNK_BYTES as u64) as usize,
+                    "the window must serve the chunk the read starts in"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_media_window_is_truncated_at_the_chunk_boundary_rather_than_split() {
+        // Ten bytes before the boundary, asking for a thousand: it serves the ten and lets the
+        // reader come back for the next chunk. Splitting the read across two chunks here is the
+        // shape that made playback touch every chunk twice.
+        let start = CHUNK_BYTES as u64 - 10;
+        let w = media_window(start, 1000);
+        assert_eq!(w.index, 0);
+        assert_eq!(w.offset, CHUNK_BYTES - 10);
+        assert_eq!(w.len, 10);
+
+        // The very next read is the whole of the next chunk's head, not a continuation.
+        let next = media_window(CHUNK_BYTES as u64, 1000);
+        assert_eq!(next.index, 1);
+        assert_eq!(next.offset, 0);
+        assert_eq!(next.len, 1000);
+    }
+
+    #[test]
+    fn sequential_playback_walks_chunks_forward_and_never_returns_to_one() {
+        // A player asking for the default window makes several requests per chunk, and that is
+        // fine: the chunk cache means only the first of them decrypts anything. What must hold is
+        // that the walk only ever moves forward, so a chunk that has been left is never needed
+        // again and the two-entry cache is always big enough. A planner that ping-ponged across a
+        // boundary would defeat the cache and put every one of those reads back on the actor.
+        let total = CHUNK_BYTES as u64 * 3 + 4242;
+        let mut order = Vec::new();
+        let mut at = 0u64;
+        while at < total {
+            let w = media_window(at, MEDIA_WINDOW_BYTES);
+            assert!(w.len > 0, "a window must always make progress");
+            if order.last() != Some(&w.index) {
+                order.push(w.index);
+            }
+            at += w.len as u64;
+        }
+        // Every chunk, in order, each entered exactly once.
+        assert_eq!(
+            order,
+            vec![0, 1, 2, 3],
+            "the walk must be forward-only and skip nothing"
+        );
+    }
+
+    #[test]
+    fn the_debug_log_opt_out_is_not_accidentally_inverted() {
+        // On by default for alpha, off only when the user asked. Inverting this either loses
+        // every bug report or writes a log for someone who explicitly declined one.
+        assert!(
+            debug_enabled_from_flag(false),
+            "no opt-out file means logging is on"
+        );
+        assert!(
+            !debug_enabled_from_flag(true),
+            "the opt-out file must actually opt out"
+        );
+    }
+
+    #[test]
+    fn a_media_path_accepts_only_a_server_id_and_a_full_cid() {
+        let cid = "a".repeat(64);
+        assert_eq!(
+            parse_media_path(&format!("/7/{cid}")),
+            Some((7, cid.clone()))
+        );
+        // Uppercase hex is normalised rather than refused: the index is keyed lowercase.
+        assert_eq!(
+            parse_media_path(&format!("/7/{}", "A".repeat(64))),
+            Some((7, "a".repeat(64)))
+        );
+        // Anything that is not exactly <server>/<64 hex> is refused before it can reach the file
+        // index: traversal, extra segments, short or non-hex ids, missing parts.
+        assert_eq!(parse_media_path("/7/../../etc/passwd"), None);
+        assert_eq!(parse_media_path(&format!("/7/{cid}/extra")), None);
+        assert_eq!(parse_media_path(&format!("/7/{}", "a".repeat(63))), None);
+        assert_eq!(parse_media_path(&format!("/7/{}", "z".repeat(64))), None);
+        assert_eq!(parse_media_path(&format!("/{cid}")), None);
+        assert_eq!(parse_media_path("/notanumber/".to_string().as_str()), None);
+    }
+
+    #[test]
+    fn a_range_header_is_read_inclusively_and_capped() {
+        let total = 10_000u64;
+        // Both ends inclusive: bytes=0-0 is one byte, not zero.
+        assert_eq!(parse_range_header("bytes=0-0", total), Some((0, 1)));
+        assert_eq!(parse_range_header("bytes=100-199", total), Some((100, 100)));
+        // An open-ended range is answered with a window, not the rest of the file.
+        assert_eq!(
+            parse_range_header("bytes=0-", total),
+            Some((0, MEDIA_WINDOW_BYTES))
+        );
+        // A greedy range cannot make the app allocate more than one window.
+        assert_eq!(
+            parse_range_header("bytes=0-99999999", total),
+            Some((0, MEDIA_WINDOW_BYTES))
+        );
+        // A suffix range is the LAST n bytes; reading it as the first n would play the wrong part.
+        assert_eq!(parse_range_header("-500", total), None);
+        assert_eq!(parse_range_header("bytes=-500", total), Some((9_500, 500)));
+        assert_eq!(parse_range_header("bytes=-99999", total), Some((0, 10_000)));
+        // Only the first range of a multi-range request is honoured.
+        assert_eq!(parse_range_header("bytes=0-9,20-29", total), Some((0, 10)));
+        // Junk is refused rather than guessed at.
+        assert_eq!(parse_range_header("items=0-9", total), None);
+        assert_eq!(parse_range_header("bytes=abc-def", total), None);
+        assert_eq!(parse_range_header("", total), None);
+    }
+
+    #[test]
+    fn a_declared_mime_cannot_become_a_script_vector() {
+        // The value is author-controlled. Only media types survive; everything else is served as
+        // an opaque download type, so a file claiming text/html cannot become same-origin script.
+        assert_eq!(safe_media_mime("video/mp4"), "video/mp4");
+        assert_eq!(safe_media_mime("AUDIO/MPEG"), "audio/mpeg");
+        assert_eq!(safe_media_mime("image/svg+xml"), "image/svg+xml");
+        // Parameters are stripped rather than echoed.
+        assert_eq!(safe_media_mime("video/mp4; codecs=\"avc1\""), "video/mp4");
+        for hostile in [
+            "text/html",
+            "application/javascript",
+            "video/mp4\r\nX-Injected: 1",
+            "",
+            "../../etc/passwd",
+        ] {
+            assert_eq!(
+                safe_media_mime(hostile),
+                "application/octet-stream",
+                "{hostile} must not be served as its declared type"
+            );
+        }
+    }
+
+    #[test]
+    fn media_hosts_report_only_this_node_s_own_public_literals() {
+        let advertised = vec![
+            // Loopback and RFC1918: never a media host.
+            "/ip4/127.0.0.1/udp/22487/quic-v1".to_string(),
+            "/ip4/192.168.1.40/tcp/22487".to_string(),
+            // A real mapped IPv4 and a real global IPv6.
+            "/ip4/93.184.216.34/udp/22487/quic-v1".to_string(),
+            "/ip6/2606:2800:220:1:248:1893:25c8:1946/udp/22487/quic-v1".to_string(),
+            // A circuit names the RELAY's address, not ours. Reporting it would tell the media
+            // plane this node is directly reachable when it is only reachable through a host.
+            "/ip4/198.41.0.4/tcp/4001/p2p/12D3KooWF8W6GDyoRR93iGs7VjVQ7jH1mDbGKiqd28KxoM6qQjTq/p2p-circuit"
+                .to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert_eq!(v4, vec!["93.184.216.34".to_string()]);
+        assert_eq!(v6, vec!["2606:2800:220:1:248:1893:25c8:1946".to_string()]);
+    }
+
+    #[test]
+    fn media_hosts_reject_documentation_ranges() {
+        // RFC 5737 / RFC 3849 addresses appear in copy-pasted manual-forward configuration and
+        // in test fixtures. They parse and they look public; they route nowhere. Offering one to
+        // the media plane would advertise a direct path that can never carry a call.
+        let advertised = vec![
+            "/ip4/198.51.100.9/udp/22487/quic-v1".to_string(),
+            "/ip4/203.0.113.7/udp/22487/quic-v1".to_string(),
+            "/ip6/2001:db8::5/udp/22487/quic-v1".to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert!(v4.is_empty(), "documentation IPv4 must not be offered");
+        assert!(v6.is_empty(), "documentation IPv6 must not be offered");
+    }
+
+    #[test]
+    fn media_hosts_deduplicate_across_transports_of_the_same_address() {
+        // TCP and QUIC listeners on one address must not read as two separate routes.
+        let advertised = vec![
+            "/ip4/93.184.216.34/tcp/22487".to_string(),
+            "/ip4/93.184.216.34/udp/22487/quic-v1".to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert_eq!(v4, vec!["93.184.216.34".to_string()]);
+        assert!(v6.is_empty());
+    }
+
+    #[test]
+    fn media_hosts_are_empty_when_only_circuits_are_advertised() {
+        // The NAT'd case that motivates bridge election: nothing of our own is routable, even
+        // though the relay we are reachable through has a perfectly good public address.
+        let advertised = vec![
+            "/ip4/198.41.0.4/tcp/4001/p2p/12D3KooWF8W6GDyoRR93iGs7VjVQ7jH1mDbGKiqd28KxoM6qQjTq/p2p-circuit"
+                .to_string(),
+        ];
+        let (v4, v6) = routable_media_hosts(&advertised);
+        assert!(v4.is_empty() && v6.is_empty());
+    }
+
+    #[test]
+    fn join_reply_refresh_is_idempotent_and_key_replacement_needs_confirmation() {
+        let mut sessions = HashMap::new();
+        let invite = [7; 16];
+        let first = test_libp2p_peer(1);
+        let other = test_libp2p_peer(2);
+
+        assert_eq!(
+            record_active_join_reply(
+                &mut sessions,
+                4,
+                invite,
+                first,
+                [1; 16],
+                61_000,
+                false,
+                1_000,
+            ),
+            Ok((false, 1, true, None))
+        );
+        // Exact replay is harmless and does not grow the nonce ledger.
+        assert_eq!(
+            record_active_join_reply(
+                &mut sessions,
+                4,
+                invite,
+                first,
+                [1; 16],
+                62_000,
+                false,
+                2_000,
+            ),
+            Ok((false, 1, false, None))
+        );
+        assert_eq!(sessions[&(4, invite)].nonces.len(), 1);
+
+        let refused = record_active_join_reply(
+            &mut sessions,
+            4,
+            invite,
+            other,
+            [2; 16],
+            63_000,
+            false,
+            3_000,
+        )
+        .unwrap_err();
+        assert!(refused.contains("confirm replacement"));
+        assert_eq!(sessions[&(4, invite)].joiner, first);
+
+        assert_eq!(
+            record_active_join_reply(
+                &mut sessions,
+                4,
+                invite,
+                other,
+                [2; 16],
+                63_000,
+                true,
+                3_000,
+            ),
+            Ok((true, 2, true, Some(first)))
+        );
+        assert_eq!(sessions[&(4, invite)].joiner, other);
+    }
+
+    #[test]
+    fn expired_join_reply_sessions_are_pruned_and_refreshes_are_bounded() {
+        let mut sessions = HashMap::new();
+        let peer = test_libp2p_peer(3);
+        for nonce in 0..6u8 {
+            record_active_join_reply(
+                &mut sessions,
+                9,
+                [4; 16],
+                peer,
+                [nonce; 16],
+                100_000,
+                false,
+                1_000,
+            )
+            .unwrap();
+        }
+        assert_eq!(sessions[&(9, [4; 16])].nonces.len(), 4);
+
+        record_active_join_reply(
+            &mut sessions,
+            10,
+            [5; 16],
+            peer,
+            [9; 16],
+            200_000,
+            false,
+            100_001,
+        )
+        .unwrap();
+        assert!(!sessions.contains_key(&(9, [4; 16])));
+    }
+
+    #[test]
+    fn active_join_reply_windows_have_a_global_bound() {
+        let mut sessions = HashMap::new();
+        let peer = test_libp2p_peer(4);
+        for server in 0..MAX_ACTIVE_JOIN_REPLIES as u64 {
+            record_active_join_reply(
+                &mut sessions,
+                server,
+                [server as u8; 16],
+                peer,
+                [server as u8; 16],
+                100_000,
+                false,
+                1_000,
+            )
+            .unwrap();
+        }
+        let error = record_active_join_reply(
+            &mut sessions,
+            MAX_ACTIVE_JOIN_REPLIES as u64,
+            [0xff; 16],
+            peer,
+            [0xff; 16],
+            100_000,
+            false,
+            1_000,
+        )
+        .unwrap_err();
+        assert!(error.contains("too many connection replies"));
+        assert_eq!(sessions.len(), MAX_ACTIVE_JOIN_REPLIES);
+    }
+
+    #[test]
+    fn clock_skew_never_extends_a_received_join_reply_past_sixty_seconds() {
+        let now = 1_000_000;
+        assert_eq!(
+            effective_join_reply_expiry(now + 90_000, now),
+            now + catcoms_net::JOIN_REPLY_LIFETIME_MS
+        );
+        assert_eq!(effective_join_reply_expiry(now + 20_000, now), now + 20_000);
+    }
+
+    #[test]
+    fn switchboard_dial_plan_skips_expired_or_mismatched_routes_and_caps_total_dials() {
+        let now = 1_000;
+        let group_id = vec![9; 16];
+        let first = test_libp2p_peer(50);
+        let second = test_libp2p_peer(51);
+        let first_phase = phase0_peer_id(&first);
+        let second_phase = phase0_peer_id(&second);
+        let routes = vec![
+            catcoms_app::SwitchboardRoute {
+                offer: catcoms_app::SwitchboardOffer {
+                    group_id: group_id.clone(),
+                    device_pubkey: vec![1; 32],
+                    peer_id: *first_phase.as_bytes(),
+                    addresses: vec![
+                        format!("/ip4/45.79.12.34/tcp/22487/p2p/{first}"),
+                        format!("/ip4/45.79.12.34/udp/22487/quic-v1/p2p/{first}"),
+                        format!("/ip4/45.79.12.34/tcp/9/p2p/{second}"),
+                    ],
+                    seq: 1,
+                    expires_at_ms: 3_000,
+                    signature: [0; 64],
+                },
+            },
+            catcoms_app::SwitchboardRoute {
+                offer: catcoms_app::SwitchboardOffer {
+                    group_id: group_id.clone(),
+                    device_pubkey: vec![2; 32],
+                    peer_id: *second_phase.as_bytes(),
+                    addresses: vec![
+                        format!("/ip4/8.8.8.8/tcp/22487/p2p/{second}"),
+                        format!("/ip4/8.8.8.8/udp/22487/quic-v1/p2p/{second}"),
+                    ],
+                    seq: 1,
+                    expires_at_ms: 4_000,
+                    signature: [0; 64],
+                },
+            },
+            catcoms_app::SwitchboardRoute {
+                offer: catcoms_app::SwitchboardOffer {
+                    group_id: group_id.clone(),
+                    device_pubkey: vec![3; 32],
+                    peer_id: *phase0_peer_id(&test_libp2p_peer(52)).as_bytes(),
+                    addresses: vec![format!(
+                        "/ip4/1.1.1.1/tcp/22487/p2p/{}",
+                        test_libp2p_peer(52)
+                    )],
+                    seq: 1,
+                    expires_at_ms: 999,
+                    signature: [0; 64],
+                },
+            },
+        ];
+
+        let (allowed, addresses) = switchboard_dial_plan(&routes, &group_id, now, 10_000);
+        assert_eq!(addresses.len(), 4);
+        assert_eq!(allowed.len(), 2);
+        assert_eq!(allowed.get(&first_phase), Some(&3_000));
+        assert_eq!(allowed.get(&second_phase), Some(&4_000));
+        assert!(addresses.iter().all(|address| {
+            target_peer_in_multiaddr(address).is_some_and(|peer| peer == first || peer == second)
+        }));
+    }
+
+    #[test]
+    fn switchboard_host_eligibility_requires_a_public_literal_even_for_relays() {
+        let relay = test_libp2p_peer(70);
+        let client = test_libp2p_peer(71);
+        assert!(switchboard_route_usable(&format!(
+            "/ip4/8.8.8.8/tcp/22487/p2p/{relay}/p2p-circuit/p2p/{client}"
+        )));
+        assert!(!switchboard_route_usable(&format!(
+            "/ip4/192.168.1.2/tcp/22487/p2p/{relay}/p2p-circuit/p2p/{client}"
+        )));
+        assert!(!switchboard_route_usable(&format!(
+            "/dns4/relay.example/tcp/22487/p2p/{relay}/p2p-circuit/p2p/{client}"
+        )));
+    }
+
+    #[test]
+    fn switchboard_clock_skew_never_grants_more_than_two_local_minutes() {
+        let now = 1_000_000;
+        let group_id = vec![0x44; 16];
+        let peer = test_libp2p_peer(72);
+        let phase_peer = phase0_peer_id(&peer);
+        let routes = vec![catcoms_app::SwitchboardRoute {
+            offer: catcoms_app::SwitchboardOffer {
+                group_id: group_id.clone(),
+                device_pubkey: vec![4; 32],
+                peer_id: *phase_peer.as_bytes(),
+                addresses: vec![format!("/ip4/8.8.4.4/tcp/22487/p2p/{peer}")],
+                seq: 1,
+                expires_at_ms: now + catcoms_app::SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+                signature: [0; 64],
+            },
+        }];
+
+        let (allowed, addresses) = switchboard_dial_plan(
+            &routes,
+            &group_id,
+            now,
+            now + catcoms_app::SWITCHBOARD_OFFER_MAX_FUTURE_MS,
+        );
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(
+            allowed.get(&phase_peer),
+            Some(&(now + catcoms_app::SWITCHBOARD_OFFER_LIFETIME_MS))
+        );
+    }
+
+    #[test]
+    fn port_mapping_diagnostics_distinguish_waiting_unavailable_and_live_transports() {
+        let mut active = HashMap::new();
+        let mut unavailable = HashMap::new();
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, true),
+            PORT_MAPPING_WAITING
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            PORT_MAPPING_TIMED_OUT
+        );
+
+        // A single failed transport is scoped and does not claim the whole mechanism failed.
+        unavailable.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+            "no gateway answered".to_string(),
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            "no active router mapping (PCP TCP unavailable: no gateway answered)"
+        );
+        unavailable.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Udp, None),
+            "no gateway answered".to_string(),
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            "no active router mapping (PCP unavailable: no gateway answered)"
+        );
+
+        unavailable.remove(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None));
+        active.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+            "/ip4/203.0.113.7/tcp/22487".parse().unwrap(),
+        );
+        active.insert(
+            (
+                PortMappingMechanism::NatPmp,
+                PortMappingTransport::Udp,
+                None,
+            ),
+            "/ip4/203.0.113.7/udp/22487/quic-v1".parse().unwrap(),
+        );
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, false),
+            "mapped via NAT-PMP UDP/QUIC: /ip4/203.0.113.7/udp/22487/quic-v1; PCP TCP: /ip4/203.0.113.7/tcp/22487; other attempts: PCP UDP/QUIC unavailable: no gateway answered"
+        );
+
+        active.insert(
+            (
+                PortMappingMechanism::Pcp,
+                PortMappingTransport::Udp,
+                Some("2606:4700::10".parse().unwrap()),
+            ),
+            "/ip6/2606:4700::10/udp/22487/quic-v1".parse().unwrap(),
+        );
+        assert!(port_mapping_status(&active, &unavailable, false).contains(
+            "PCP IPv6 pinhole UDP/QUIC (2606:4700::10): /ip6/2606:4700::10/udp/22487/quic-v1"
+        ));
+    }
+
+    #[test]
+    fn scoped_ipv6_failures_do_not_end_the_initial_mapping_window() {
+        let first: IpAddr = "2606:4700::10".parse().unwrap();
+        let second: IpAddr = "2a00:1450::10".parse().unwrap();
+        let active = HashMap::new();
+        let unavailable = HashMap::from([
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Tcp,
+                    Some(first),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Udp,
+                    Some(first),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Tcp,
+                    Some(second),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::Pcp,
+                    PortMappingTransport::Udp,
+                    Some(second),
+                ),
+                "no IPv6 PCP target discovered".to_string(),
+            ),
+            (
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+                "IPv4 PCP unavailable".to_string(),
+            ),
+            (
+                (
+                    PortMappingMechanism::NatPmp,
+                    PortMappingTransport::Tcp,
+                    None,
+                ),
+                "NAT-PMP unavailable".to_string(),
+            ),
+        ]);
+
+        assert_eq!(unavailable.len(), 6);
+        assert_eq!(
+            port_mapping_status(&active, &unavailable, true),
+            PORT_MAPPING_WAITING,
+            "six scoped failures are not proof that the remaining IPv4 workers have settled"
+        );
+    }
+
+    #[test]
+    fn mapping_snapshot_keeps_ipv4_and_ipv6_pcp_owners_separate() {
+        let local_v6: IpAddr = "2606:4700::10".parse().unwrap();
+        let (active, unavailable) = port_mapping_snapshot_state(PortMappingSnapshot {
+            active: vec![
+                catcoms_net::ActivePortMapping {
+                    mechanism: PortMappingMechanism::Pcp,
+                    transport: PortMappingTransport::Tcp,
+                    local_address: None,
+                    address: "/ip4/8.8.8.8/tcp/22487".parse().unwrap(),
+                },
+                catcoms_net::ActivePortMapping {
+                    mechanism: PortMappingMechanism::Pcp,
+                    transport: PortMappingTransport::Tcp,
+                    local_address: Some(local_v6),
+                    address: "/ip6/2606:4700::10/tcp/22487".parse().unwrap(),
+                },
+            ],
+            unavailable: vec![catcoms_net::PortMappingFailure {
+                mechanism: PortMappingMechanism::Pcp,
+                transport: PortMappingTransport::Udp,
+                local_address: Some(local_v6),
+                detail: "IPv6 firewall pinhole unavailable: no gateway".to_string(),
+            }],
+        });
+        assert_eq!(active.len(), 2);
+        assert!(active.contains_key(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None)));
+        assert!(active.contains_key(&(
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            Some(local_v6)
+        )));
+        assert_eq!(unavailable.len(), 1);
+        assert!(port_mapping_status(&active, &unavailable, false).starts_with("mapped via "));
+    }
+
+    #[test]
+    fn an_address_is_withdrawn_only_after_its_last_mapping_lease_expires() {
+        let address: Multiaddr = "/ip4/203.0.113.7/tcp/22487".parse().unwrap();
+        let mut active = HashMap::from([
+            (
+                (PortMappingMechanism::Upnp, PortMappingTransport::Tcp, None),
+                address.clone(),
+            ),
+            (
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+                address.clone(),
+            ),
+        ]);
+
+        assert!(!retire_port_mapping(
+            &mut active,
+            PortMappingMechanism::Upnp,
+            PortMappingTransport::Tcp,
+            &address,
+        ));
+        assert!(active.values().any(|candidate| candidate == &address));
+        assert!(retire_port_mapping(
+            &mut active,
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            &address,
+        ));
+        assert!(active.is_empty());
+
+        let old: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        let replacement: Multiaddr = "/ip4/9.9.9.9/tcp/22487".parse().unwrap();
+        active.insert(
+            (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+            old.clone(),
+        );
+        assert_eq!(
+            replace_port_mapping(
+                &mut active,
+                PortMappingMechanism::Pcp,
+                PortMappingTransport::Tcp,
+                replacement.clone(),
+            ),
+            Some(old),
+            "a replacement event retires its unshared predecessor without a separate expiry"
+        );
+        assert_eq!(
+            active.get(&(PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None)),
+            Some(&replacement)
+        );
+    }
+
+    #[test]
+    fn autonat_results_rank_all_current_routes_and_ignore_expired_evidence() {
+        let observer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let result = |address: &str, reachable: bool| catcoms_net::AutoNatResult {
+            address: address.parse().unwrap(),
+            server: observer,
+            reachable,
+            error: (!reachable).then(|| "dial-back failed".to_string()),
+        };
+        let a = "/ip4/8.8.8.8/tcp/22487";
+        let b = "/ip4/9.9.9.9/tcp/22487";
+        let local = "/ip4/192.168.1.9/tcp/22487";
+        let mut evidence = AutoNatEvidence {
+            waiting: false,
+            results: vec![result(a, false), result(local, true)],
+        };
+        assert!(
+            autonat_status(&[a.into(), local.into()], Some(&evidence))
+                .starts_with("unreachable /ip4/8.8.8.8"),
+            "a local callback must not erase an actionable public failure"
+        );
+
+        evidence.results = vec![result(a, true), result(b, true)];
+        assert!(autonat_status(&[a.into(), b.into()], Some(&evidence)).starts_with("reachable "));
+
+        // A's newest observation is now a failure, but B retains an independent success.
+        evidence.results = vec![result(a, false), result(b, true)];
+        assert!(
+            autonat_status(&[a.into(), b.into()], Some(&evidence))
+                .starts_with("reachable /ip4/9.9.9.9"),
+            "failure of one route cannot erase a second verified route"
+        );
+        assert!(
+            autonat_status(&[a.into()], Some(&evidence)).starts_with("unreachable /ip4/8.8.8.8"),
+            "with B expired, only A's current failure remains"
+        );
+        assert_eq!(
+            autonat_status(&[], Some(&evidence)),
+            AUTONAT_NOT_TESTED,
+            "evidence for routes no longer advertised is not current state"
+        );
+    }
+
+    #[test]
+    fn autonat_evidence_must_name_an_address_the_product_advertises() {
+        let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        assert!(bootstrap_names_address(
+            &[format!(
+                "{address}/p2p/12D3KooWJvFzZpCWKjQbGvYQ8uY4rMw1qQznfKqcxpN6qjHVVqUd"
+            )],
+            &address,
+        ));
+        assert!(!bootstrap_names_address(
+            &["/ip4/9.9.9.9/tcp/22487/p2p/other".to_string()],
+            &address,
+        ));
+    }
+
+    #[test]
+    fn a_relay_callback_is_never_reported_as_direct_reachability() {
+        let relay = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let target = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let circuit = format!("/ip4/8.8.8.8/tcp/4001/p2p/{relay}/p2p-circuit/p2p/{target}");
+        let evidence = AutoNatEvidence {
+            waiting: false,
+            results: vec![AutoNatResult {
+                address: circuit.parse().unwrap(),
+                server: relay,
+                reachable: true,
+                error: None,
+            }],
+        };
+        assert_eq!(
+            autonat_status(&[circuit], Some(&evidence)),
+            AUTONAT_NOT_TESTED
+        );
+    }
+
+    #[test]
+    fn live_bootstrap_reconciliation_removes_a_relay_lost_during_startup() {
+        let circuit = "/ip4/8.8.8.8/tcp/4001/p2p/relay/p2p-circuit/p2p/member".to_string();
+        let mut advertised = vec![circuit];
+        reconcile_advertised(&mut advertised, Some(Vec::new()));
+        assert!(
+            advertised.is_empty(),
+            "the expired circuit is authoritative"
+        );
+
+        let mut failed_attempt = vec!["diagnostic-only-address".to_string()];
+        reconcile_advertised(&mut failed_attempt, None);
+        assert_eq!(
+            failed_attempt,
+            vec!["diagnostic-only-address"],
+            "a failed attempt with no live server keeps its diagnostic evidence"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_lock_saves_continuity_and_closes_the_webview_command_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState::default();
+        let store = ServerStore::open(root.path(), b"correct horse", &mut OsCryptoRng).unwrap();
+        *state.store.lock().await = Some(store);
+        *state.session_resumable.lock().await = true;
+        assert!(require_unlocked_session(&state).await.is_ok());
+
+        let continuity = r#"{"version":1,"drafts":{"1:2":"latest"},"readMarks":{"1:2":9}}"#;
+        lock_session_inner(&state, Some(continuity.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        let saved = state
+            .store
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .load_ui_state()
+            .unwrap();
+        assert_eq!(saved, continuity.as_bytes());
+
+        // Validation errors are returned to the caller, but the security boundary still closes.
+        *state.session_resumable.lock().await = true;
+        assert!(lock_session_inner(&state, Some("not json".into()))
+            .await
+            .is_err());
+        assert_eq!(
+            require_unlocked_session(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        // The vault remains mounted so actors and persistence may continue behind the UI lock.
+        assert!(state.store.lock().await.is_some());
+    }
+
     /// The trap this guards: founding mints the invite immediately, UPnP answers seconds later,
     /// so the invite a user copies first is the one *without* the public address their router
     /// just opened. Their friend on another network then gets an unactionable timeout. This
     /// predicate is what makes the invite self-heal the next time anyone reads it.
     #[test]
-    fn an_invite_is_stale_only_when_reachability_was_gained() {
+    fn an_invite_is_stale_when_the_live_address_set_changes() {
         let lan = "/ip4/192.168.0.5/tcp/9000/p2p/ID".to_string();
         let loop_ = "/ip4/127.0.0.1/tcp/9000/p2p/ID".to_string();
         let public = "/ip4/203.0.113.9/tcp/9000/p2p/ID".to_string();
 
         // The real case: UPnP landed after the mint, so the stored invite is missing the address
         // that is the entire point of the mapping.
-        assert!(invite_missing_addresses(
+        assert!(invite_addresses_changed(
             &[loop_.clone(), lan.clone()],
             &[public.clone(), loop_.clone(), lan.clone()]
         ));
 
         // Nothing gained: no re-mint, so reading the invite repeatedly cannot churn nonces.
-        assert!(!invite_missing_addresses(
+        assert!(!invite_addresses_changed(
             &[public.clone(), loop_.clone()],
             &[public.clone(), loop_.clone()]
         ));
         // Order is not a change.
-        assert!(!invite_missing_addresses(
+        assert!(!invite_addresses_changed(
             &[public.clone(), loop_.clone()],
             &[loop_.clone(), public.clone()]
         ));
-        // Deliberately one-directional: an address *lost* (a relay circuit that dropped) leaves
-        // the rest working, so it is not worth invalidating a nonce somebody may be about to use.
-        assert!(!invite_missing_addresses(
+        // A lost lease must disappear from the next invite shown to the operator. An already
+        // copied signed code cannot be rewritten and remains usable through any other entries.
+        assert!(invite_addresses_changed(
             &[public.clone(), loop_.clone(), lan.clone()],
-            &[loop_.clone()]
+            std::slice::from_ref(&loop_)
         ));
         // Degenerate cases stay quiet rather than re-minting forever.
-        assert!(!invite_missing_addresses(&[], &[]));
-        assert!(!invite_missing_addresses(&[public.clone()], &[]));
-        assert!(invite_missing_addresses(&[], &[public]));
+        assert!(!invite_addresses_changed(&[], &[]));
+        assert!(invite_addresses_changed(std::slice::from_ref(&public), &[]));
+        assert!(invite_addresses_changed(&[], std::slice::from_ref(&public)));
+
+        assert!(invite_routes_still_current(
+            std::slice::from_ref(&public),
+            &["rz-a".to_string()],
+            std::slice::from_ref(&public),
+            &["rz-a".to_string()],
+        ));
+        assert!(
+            !invite_routes_still_current(
+                std::slice::from_ref(&public),
+                &["rz-a".to_string()],
+                std::slice::from_ref(&loop_),
+                &["rz-a".to_string()],
+            ),
+            "an older overlapping mint cannot store after the live route set changes"
+        );
     }
 
     /// Settings promises the user "this session's file is X". If that name is wrong they open
@@ -4598,6 +9569,61 @@ mod tests {
                 format!("/ip6/2001:db8::5/udp/443/quic-v1/p2p/{id}"),
             ]
         );
+    }
+
+    #[test]
+    fn interface_refresh_replaces_one_epoch_without_dropping_other_owners() {
+        let id = "12D3KooWfakepeerid";
+        let old_v4 = dialable_addrs("192.168.1.20".parse().unwrap(), 9000, id);
+        let old_v6 = dialable_addrs("2606:4700::20".parse().unwrap(), 9000, id);
+        let loopback = dialable_addrs(std::net::Ipv4Addr::LOCALHOST.into(), 9000, id);
+        let mut bootstrap = old_v4
+            .iter()
+            .chain(&old_v6)
+            .chain(&loopback)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut owners = bootstrap_owners(&bootstrap, BootstrapOwner::AutomaticInterface);
+
+        // A PCPv6 lease commonly names the same GUA socket as the raw interface route. Removing
+        // the interface owner must leave that exact route until the mapping snapshot expires.
+        add_bootstrap_owner(
+            &mut bootstrap,
+            &mut owners,
+            old_v6[0].clone(),
+            BootstrapOwner::PortMapping,
+            true,
+        );
+        let new_v4 = dialable_addrs("10.0.0.44".parse().unwrap(), 9000, id);
+        let next = new_v4.iter().chain(&loopback).cloned().collect::<Vec<_>>();
+        let (removed, added) = reconcile_automatic_bootstrap(&mut bootstrap, &mut owners, &next);
+
+        let mut expected_removed = old_v4.into_iter().collect::<HashSet<_>>();
+        expected_removed.insert(old_v6[1].clone());
+        assert_eq!(
+            removed.into_iter().collect::<HashSet<_>>(),
+            expected_removed
+        );
+        assert_eq!(
+            added.into_iter().collect::<HashSet<_>>(),
+            HashSet::from_iter(new_v4.clone())
+        );
+        assert!(bootstrap.contains(&old_v6[0]));
+        assert!(!bootstrap.contains(&old_v6[1]));
+        assert_eq!(
+            owners.get(&old_v6[0]),
+            Some(&HashSet::from([BootstrapOwner::PortMapping]))
+        );
+        assert!(new_v4.iter().all(|entry| bootstrap.contains(entry)));
+        assert!(loopback.iter().all(|entry| bootstrap.contains(entry)));
+
+        assert!(remove_bootstrap_owner(
+            &mut bootstrap,
+            &mut owners,
+            &old_v6[0],
+            BootstrapOwner::PortMapping,
+        ));
+        assert!(!bootstrap.contains(&old_v6[0]));
     }
 
     #[test]
@@ -4742,19 +9768,26 @@ mod tests {
         }
 
         // A real public address is advertised, with our own /p2p/ stripped (libp2p re-appends it).
-        let public = format!("/ip4/203.0.113.7/udp/9000/quic-v1/p2p/{ID}");
+        let public = format!("/ip4/8.8.8.8/udp/9000/quic-v1/p2p/{ID}");
         let out = external_addrs(&[public]);
         assert_eq!(
             out.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
-            vec!["/ip4/203.0.113.7/udp/9000/quic-v1"]
+            vec!["/ip4/8.8.8.8/udp/9000/quic-v1"]
         );
 
         // A mixed list keeps only the routable entries; no fallback to loopback any more.
         let mixed = vec![
             format!("/ip4/127.0.0.1/tcp/9/p2p/{ID}"),
-            format!("/ip6/2001:db8::5/tcp/9/p2p/{ID}"),
+            format!("/ip6/2606:4700::1111/tcp/9/p2p/{ID}"),
         ];
         assert_eq!(external_addrs(&mixed).len(), 1);
+
+        // Documentation and multicast literals are syntactically valid but never internet
+        // endpoints; the bridge uses the same canonical classifier as the transport actor.
+        for host in ["/ip4/203.0.113.7", "/ip6/2001:db8::5", "/ip4/224.0.0.1"] {
+            let reserved = format!("{host}/tcp/9/p2p/{ID}");
+            assert!(external_addrs(&[reserved]).is_empty());
+        }
     }
 
     #[test]
@@ -4765,6 +9798,7 @@ mod tests {
             advertise: String::new(),
             relay: String::new(),
             rendezvous: String::new(),
+            switchboard: false,
             record_seq: 0,
         };
         // Nothing is holding the derived port on a test machine, so that is what gets chosen, and
@@ -4870,6 +9904,11 @@ mod tests {
         // Garbage in the box is refused too, rather than panicking.
         assert!(decode_and_verify_invite("not hex").is_err());
         assert!(decode_and_verify_invite("00ff00ff").is_err());
+        assert!(
+            decode_and_verify_invite(&"00".repeat(MAX_INVITE_WIRE_BYTES + 1))
+                .unwrap_err()
+                .contains("too large")
+        );
     }
 
     #[test]
@@ -4887,5 +9926,219 @@ mod tests {
         ));
         assert!(!is_tracker_url("file:///c:/windows/system32/calc.exe"));
         assert!(!is_tracker_url("https://github.com/Thalpy/Mewtual"));
+        assert!(!is_tracker_url(
+            "https://github.com/Thalpy/Mewtual/issues/new?title=x\nfile:///tmp/payload"
+        ));
+        assert!(!is_tracker_url(&format!(
+            "{}body={}",
+            ISSUE_URL_PREFIX,
+            "x".repeat(ISSUE_URL_MAX_BYTES)
+        )));
+    }
+
+    #[test]
+    fn external_links_are_limited_to_http_and_https() {
+        assert!(is_external_http_url("https://example.com/path?cat=yes"));
+        assert!(is_external_http_url("http://localhost:1420/image.png"));
+
+        assert!(!is_external_http_url("javascript:alert(1)"));
+        assert!(!is_external_http_url("data:text/html,hello"));
+        assert!(!is_external_http_url(
+            "file:///c:/windows/system32/calc.exe"
+        ));
+        assert!(!is_external_http_url("https:///missing-host"));
+        assert!(!is_external_http_url(""));
+    }
+
+    #[test]
+    fn space_guide_save_only_accepts_the_expected_png_shape() {
+        let mut header = vec![0u8; 24];
+        header[..8].copy_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+        header[12..16].copy_from_slice(b"IHDR");
+        header[16..20].copy_from_slice(&2048u32.to_be_bytes());
+        header[20..24].copy_from_slice(&1024u32.to_be_bytes());
+        assert!(validate_space_guide_png(&header));
+
+        let mut wrong_size = header.clone();
+        wrong_size[16..20].copy_from_slice(&1024u32.to_be_bytes());
+        assert!(!validate_space_guide_png(&wrong_size));
+
+        header[0] = 0;
+        assert!(!validate_space_guide_png(&header));
+    }
+
+    #[test]
+    fn space_layout_export_only_accepts_our_versioned_object() {
+        assert!(validate_space_layout_json(
+            r#"{"kind":"mewtual-server-space-layout","version":1,"space":{"placements":{}}}"#
+        ));
+        assert!(!validate_space_layout_json(
+            r#"{"kind":"mewtual-server-space-layout","version":2,"space":{}}"#
+        ));
+        assert!(!validate_space_layout_json(
+            r#"{"kind":"something-else","version":1,"space":{}}"#
+        ));
+        assert!(!validate_space_layout_json("not json"));
+    }
+
+    #[test]
+    fn downloaded_file_names_cannot_escape_downloads_or_use_device_names() {
+        assert_eq!(safe_download_name("../../report?.pdf"), "report_.pdf");
+        assert_eq!(safe_download_name(r"..\..\CON.txt"), "_CON.txt");
+        assert_eq!(safe_download_name(" . "), "mewtual-download");
+        assert_eq!(numbered_download_name("photo.png", 2), "photo (2).png");
+        assert_eq!(numbered_download_name("README", 3), "README (3)");
+    }
+
+    #[test]
+    fn ui_state_requires_the_bounded_versioned_shape() {
+        assert!(validate_ui_state_json(
+            r#"{"version":1,"drafts":{"1:2":"hello"},"readMarks":{"1:2":9}}"#
+        )
+        .is_ok());
+        assert!(validate_ui_state_json(r#"{"version":2,"drafts":{},"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json(r#"{"version":1,"drafts":[],"readMarks":{}}"#).is_err());
+        assert!(validate_ui_state_json("not json").is_err());
+        assert!(validate_ui_state_json(&"x".repeat(MAX_UI_STATE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn storage_inventory_deduplicates_content_and_breaks_out_pinned_space() {
+        let file = |name: &str, cid: &str, mime: &str, size: u64, held: u32, total: u32| UiFile {
+            name: name.into(),
+            size,
+            mime: mime.into(),
+            cid: cid.into(),
+            author: "member".into(),
+            path: "shared".into(),
+            held,
+            total,
+            expires: None,
+            expires_known: false,
+        };
+        let report = build_storage_report(
+            StorageHealth {
+                listed_files: 3,
+                referenced_chunks: 3,
+                verified_chunks: 3,
+                verified_bytes: 512,
+                ..StorageHealth::default()
+            },
+            vec![
+                file("cat.png", "aa", "image/png", 100, 1, 2),
+                file("same-cat.png", "aa", "image/png", 100, 1, 2),
+                file("song.ogg", "bb", "audio/ogg", 400, 2, 2),
+            ],
+            &HashSet::from(["aa".to_string()]),
+            42,
+        );
+
+        assert_eq!((report.listed_files, report.unique_files), (3, 2));
+        assert_eq!(
+            (report.logical_bytes, report.local_estimated_bytes),
+            (500, 450)
+        );
+        assert_eq!(
+            (
+                report.pinned_files,
+                report.pinned_logical_bytes,
+                report.pinned_local_estimated_bytes
+            ),
+            (1, 100, 50)
+        );
+        assert_eq!(report.checked_at_ms, 42);
+        assert_eq!(
+            report
+                .categories
+                .iter()
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Images", "Audio"]
+        );
+        assert_eq!(report.largest_files[0].name, "song.ogg");
+        assert!(report.largest_files[1].pinned);
+    }
+
+    #[test]
+    fn backup_copy_preserves_sealed_tree_and_never_overwrites_a_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("vault");
+        let nested = source.join("servers");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(source.join("vault.bin"), b"sealed-root").unwrap();
+        std::fs::write(nested.join("1.bin"), b"sealed-snapshot").unwrap();
+        let destination = root.path().join("backup");
+
+        assert_eq!(copy_backup_tree(&source, &destination).unwrap(), (2, 26));
+        assert_eq!(
+            std::fs::read(destination.join("servers").join("1.bin")).unwrap(),
+            b"sealed-snapshot"
+        );
+        assert!(
+            copy_backup_tree(&source, &destination).is_err(),
+            "an existing backup directory must never be merged into or overwritten"
+        );
+    }
+
+    #[test]
+    fn found_server_server_name_falls_back_to_display_name_when_empty() {
+        // When server_name is None or empty, the server entry name should fall back to display_name
+        // This preserves backwards compatibility for standard server creation
+        let display_name = "My Server".to_string();
+        let server_name: Option<String> = None;
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "My Server");
+
+        let server_name = Some("".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "My Server");
+
+        let server_name = Some("   ".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "My Server");
+    }
+
+    #[test]
+    fn found_server_server_name_used_when_provided() {
+        // When server_name is provided and non-empty, it should be used for the server entry name
+        let display_name = "My Profile Name".to_string();
+        let server_name = Some("Friend's Server".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "Friend's Server");
+    }
+
+    #[test]
+    fn join_server_server_name_falls_back_to_display_name_when_empty() {
+        // Same logic for join_server
+        let display_name = "Joiner's Profile".to_string();
+        let server_name: Option<String> = None;
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "Joiner's Profile");
+
+        let server_name = Some("".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "Joiner's Profile");
+    }
+
+    #[test]
+    fn join_server_server_name_used_when_provided() {
+        let display_name = "Joiner's Profile".to_string();
+        let server_name = Some("DM with Friend".to_string());
+        let name = server_name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| display_name.clone());
+        assert_eq!(name, "DM with Friend");
     }
 }

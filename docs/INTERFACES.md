@@ -13,9 +13,12 @@ test impls (in-memory, deterministic) or production impls (OS / libp2p).
 
 ### `Clock`; injected time  *(catcoms-rt)*
 ```rust
-pub trait Clock: Send + Sync + Debug { fn now_ms(&self) -> u64; }
+pub trait Clock: Send + Sync + Debug {
+    fn now_ms(&self) -> u64;       // signed/absolute Unix time
+    fn monotonic_ms(&self) -> u64; // elapsed-time leases and retries
+}
 pub struct SystemClock;                         // the ONLY OS-clock reader
-pub struct ManualClock;  fn new(start_ms) -> Self;  advance_ms(delta)->u64;  set_ms(v);
+pub struct ManualClock;  fn new(start_ms) -> Self;  advance_ms(delta)->u64;  set_ms(v);  set_wall_ms(v);
 ```
 Rule: no other code reads the OS clock. Pass `&dyn Clock` / `Box<dyn Clock + Send>`.
 
@@ -58,6 +61,53 @@ Implementations:
   - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
     circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
     `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
+    `MeshBehaviour` also runs an AutoNAT v2 client; `next_autonat_snapshot()` or the
+    single-consumer `take_autonat_snapshots()` returns a bounded `AutoNatSnapshot` containing the
+    latest `AutoNatResult` for each candidate/server pair. Results remain scoped to one candidate,
+    server and test, are pruned when that route is withdrawn, and are accepted only while the
+    address has a live configured or router-mapping owner. Relay/rendezvous swarms can serve v2
+    dial-backs only after the operator's experimental `--enable-autonat` opt-in; ordinary members
+    never do. `GuardedAutoNatServer` tags every upstream callback dial before the derived
+    behaviour sees it. Its first-declared guard rejects peer-less/non-direct/DNS/circuit/private
+    targets, requires the target literal to equal the exact inbound-connection source IP, and
+    charges bounded node/source-prefix/peer buckets before a transport socket is opened.
+    Connection-scoped source observations are refreshed by requests and removed on close.
+    Router mapping is coalesced current state: `next_port_mapping_snapshot()` or the
+    single-consumer `take_port_mapping_snapshots()` yields a bounded `PortMappingSnapshot` of live
+    leases and scoped failures labelled by UPnP, PCP or NAT-PMP, TCP or UDP/QUIC, and an optional
+    exact local-address owner. `None` is the legacy IPv4/default-gateway path; `Some(IpV6)` is an
+    independently managed PCPv6 firewall pinhole, so IPv4 and multiple interfaces cannot collide.
+    PCPv6 uses an internal narrow RFC 6887 MAP client because pinned `portmapper` 0.18 is
+    IPv4-only: it sends an exact 60-byte MAP request, accepts aligned option-bearing responses up
+    to the protocol bound, binds the exact global listener address, and selects the scoped default
+    router from the operating system's IPv6 route table and native interface index. It requests
+    five-minute TCP/UDP leases, honors the router-assigned lifetime up to a 24-hour sanity cap,
+    renews on an injected monotonic clock with the same 96-bit nonce, and sends a best-effort
+    lifetime-zero delete on listener removal. A slow/late
+    consumer may skip intermediate retries but cannot resurrect an expired current route. Only
+    globally routable mappings are offered to AutoNAT/the swarm; duplicate mapping and
+    manual-forward owners are reference-counted. Worker generations make buffered events from a
+    removed/replaced listener inert. `take_relay_address_snapshots()` similarly
+    exposes the live circuit-listener set so reservation expiry is withdrawn. The product layer
+    updates the live bootstrap/peer record and re-mints the next displayed invite after any set
+    change.
+    `MeshService`/`MeshHandle::remove_external_address(addr)` withdraws one caller-configured
+    owner while preserving an identical active router-mapping owner. The desktop's discovery timer
+    uses this with a route-source poll: changed raw IPv4/IPv6 entries update the aggregate
+    owner map, AutoNAT/rendezvous external set, Connectivity, and one new signed peer-record epoch
+    before that pass's PEX. One process-wide `netwatch` monitor wakes every server after a bounded
+    debounce when the native route/interface state changes. It uses platform notifications rather
+    than a second fast poll; the normal discovery poll remains the recovery path if monitoring is
+    unavailable or misses an event.
+    PCPv6 tracks Epoch for every response and randomizes rapid renewal after a restart signal, but
+    each transport/interface worker observes that signal independently; it is not a full
+    gateway-wide RFC ANNOUNCE coordinator.
+    Already copied signed invite strings are immutable and cannot be rewritten after lease loss.
+    `next_listener_snapshot()` reports only concrete listener addresses accepted by Swarm.
+    `take_mesh_observation_snapshots()` exposes bounded per-connected-peer Identify observations
+    for diagnostics only. Those outbound-source observations never enter invites, peer records,
+    AutoNAT candidate sets or dial plans: TCP source ports are normally ephemeral and a peer can
+    lie.
   - **Discovery (6e-3d):** `rendezvous_register(namespace, rz_node)` /
     `rendezvous_discover(namespace, rz_node)`; `next_registered()` and `next_discovered()`
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
@@ -90,9 +140,9 @@ Injected into GC so it never evicts the last copy. (Network-backed impl is later
 ### `BlobStore`; content-addressed bytes  *(catcoms-storage)*
 ```rust
 pub trait BlobStore {
-    fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;       // cid = Cid::of(bytes)
+    fn put(&mut self, bytes: &[u8]) -> Result<Cid, StorageError>;       // cid = Cid::of(bytes); replaces a corrupt record at that cid
     fn get(&self, cid: &Cid) -> Result<Option<Vec<u8>>, StorageError>;  // integrity-checked
-    fn has(&self, cid: &Cid) -> bool;
+    fn has(&self, cid: &Cid) -> bool;                                  // cheap existence hint only; NOT proof of integrity
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError>;
     fn cids(&self) -> Vec<Cid>;
 }
@@ -178,6 +228,13 @@ pub struct InviteLedger;  new(); revoke(nonce); is_consumed(&nonce); is_revoked(
   check(&InviteToken, now_ms) -> Result<(),InviteError>;  consume(nonce) -> Result<(),InviteError>;
 ```
 
+`catcoms-net::JoinReply` is the short-lived return channel for a failed one-way dial. Its
+`mewtual-reply-v1:` text embeds the complete signed `InviteToken` permit, the joiner's transport
+PeerId, a fresh joiner nonce, absolute expiry, at most four direct public TCP/QUIC candidates and
+an invite-nonce-derived MAC. Decode/verify is size-, shape-, identity- and clock-bounded before
+any dial; candidate `/p2p` suffixes are reconstructed from the authenticated joiner PeerId rather
+than accepted from text.
+
 ---
 
 ## 4. Encrypted CRDT replication  *(catcoms-replication)*
@@ -243,6 +300,12 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // 6e-3d-7 member PEX: members supply each other dialable, self-signed peer records.
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
+  // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
+  // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
+  // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
+  cache_known_records() -> usize;  async dial_cached_peers() -> usize;
+  authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
+                        target:PeerId, expires_at_ms:u64) -> bool;
   doc(DocType, doc_id) -> Option<&EncryptedDoc>;  local_peer() -> PeerId;  transport() -> &T;  // transport(): the discovery/dial layer above ChannelSync
 
 // 6e-3d-9 free fn: the pre-join rendezvous namespace, derivable from the invite ALONE
@@ -269,6 +332,26 @@ pub struct RoutingState;
 
 pub async fn request_join<T: MeshTransport>(transport:&T, inviter:PeerId, device:&MlsDevice, invite:&InviteToken)
     -> Result<(ServerGroup, RoutingState), SyncError>;  // join over the wire; authenticates the inviter (binds the sealed routing transfer) + rechecks group_id
+pub async fn request_join_from_reply<T: MeshTransport>(transport:&T, first_contact:PeerId, inviter:PeerId,
+    device:&MlsDevice, invite:&InviteToken, reply_joiner_nonce:[u8;16], reply_joiner_peer:&[u8],
+    clock:&dyn Clock, expires_at_ms:u64)
+    -> Result<(ServerGroup, RoutingState, PeerId), SyncError>;  // proves each contact before disclosing the bearer invite; ignores hostile contacts until an inviter-signed Welcome arrives
+pub async fn request_join_from_switchboards<T: MeshTransport>(transport:&T, first_contact:PeerId,
+    allowed_contacts:&[(PeerId,u64)], inviter:PeerId, device:&MlsDevice, invite:&InviteToken,
+    signed_join_plan:&[u8], clock:&dyn Clock)
+    -> Result<(ServerGroup, RoutingState, PeerId), SyncError>;
+
+// Additive standing-assistance wire types. PeerDescriptor v1 remains byte-for-byte strict.
+pub struct SwitchboardOffer { group_id, device_pubkey, peer_id, addresses, seq, expires_at_ms, signature }
+pub struct SwitchboardRoute { offer:SwitchboardOffer }
+pub struct InviteJoinPlan { invite:InviteToken, inviter_peer, switchboards, signature }
+// The desktop labels the outer envelope `mewtual-invite-v3:`. New clients accept both that form
+// and plain invite hex; old strict readers reject v3 rather than silently confusing helpers with
+// the inviter. Each route retains the helper's own signed two-minute offer under the inviter's
+// outer endorsement, so the inviter cannot replace its addresses or extend consent. A helper
+// requires local opt-in plus a live exact inviter peer record, checks both signatures and the
+// deadline, forwards only KIND_JOIN/KIND_WELCOME, and applies the resulting Add before returning
+// the inviter-signed Welcome.
 ```
 
 **Recovery internals (private to `catcoms-sync`, for orientation):** `commit_log`
@@ -342,6 +425,68 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
 - **`InviteToken`** signed payload (v2): `"catcoms/invite/v2" ‖ group_id ‖ inviter_device_id ‖ inviter_public_key ‖ nonce ‖ u64 expires ‖ u32 n ‖ n×bootstrap_str ‖ u32 m ‖ m×rendezvous_str`, then `signature(64)`.
 
 ## 8. `DocType` tags (stable; only append)
-`Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8`.
+`Channel=1, Wiki=2, Status=3, Calendar=4, InviteLedger=5, MemberRoles=6, FileIndex=7, Routing=8,
+Profile=9, Livery=10, Badges=11, Devices=12, ChannelIndex=13, Moderation=14`.
 Exporter context = `u16 tag ‖ u128 doc_id` (18 bytes, fixed-width → injective). `Routing` has no content
 doc; it feeds the **metadata** exporter label to derive the per-removal `ns_secret_L`.
+
+---
+
+## 9. Moderation, storage health and desktop continuity  *(catcoms-app / Tauri bridge)*
+
+```rust
+pub struct StorageHealth {
+    listed_files:usize, referenced_chunks:usize, verified_chunks:usize,
+    missing_chunks:usize, unreadable_chunks:usize, invalid_manifests:usize,
+    verified_bytes:u64, has_peers:bool,
+}
+pub struct StorageRepair { attempted_chunks:usize, recovered_chunks:usize, health:StorageHealth }
+impl Server {
+    fn storage_health(&self) -> StorageHealth;
+    async fn repair_storage(&mut self) -> Result<StorageRepair,AppError>;
+
+    async fn open_moderation(&mut self) -> Result<(),AppError>;
+    async fn request_moderation_catchup(&mut self, peer:PeerId) -> Result<usize,AppError>;
+    fn moderation_state(&self) -> ModerationState;
+    async fn warn_message(&mut self, channel:u128, message_id:&str, reason:&str) -> Result<String,AppError>;
+    async fn create_kick_case(&mut self, target:&str, reason:&str, evidence_ids:&[String]) -> Result<String,AppError>;
+    async fn cast_kick_vote(&mut self, case_id:&str, yes:bool) -> Result<(),AppError>;
+    async fn resolve_kick_case(&mut self, case_id:&str, remove:bool) -> Result<(),AppError>;
+}
+impl ServerStore {
+    fn save_ui_state(&self, json:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>; // ≤1 MiB, vault-sealed + atomic
+    fn load_ui_state(&self) -> Result<Vec<u8>,AppError>;
+    fn backup_source_dir(&self) -> &Path;
+    fn change_passphrase(&self, current:&[u8], new:&[u8], rng:&mut impl CryptoRngCore) -> Result<(),AppError>;
+}
+```
+
+`storage_health` counts a chunk as verified only after its storage seal/content address and the
+file-layer decryption both succeed. `repair_storage` explicitly fetches only missing or unreadable
+referenced chunks over the authenticated blob path and verifies again; `has()` alone must never
+short-circuit repair.
+
+The Tauri `get_storage_health(server)` command adds a cached, deduplicated inventory projection:
+`checked_at_ms`, unique/logical/local-estimated/pinned totals, category rows, and the ten largest
+files. It performs at most one ordinary scan per server per process session. Only
+`repair_storage(server)` replaces that cache after its mandatory post-repair verification.
+
+Moderation uses one server-wide `DocType::Moderation` document (`doc_id=0`). Events and votes have
+their own canonical, group-bound Ed25519 signatures in addition to the replicated-op envelope.
+Warning evidence is a bounded immutable message snapshot. Readers separately expose signature
+validity and authorization; signer→origin attribution and the current owner-signed role state are
+checked before an event can affect the honest UI. Votes are one current origin identity per case;
+departed identities remain attributable but are ineligible for the live tally. Votes are advisory.
+Only `resolve_kick_case(remove=true)` by the owner reaches the existing
+protocol-enforced MLS removal path.
+
+The bridge's `create_backup` snapshots every actor, persists the registry/snapshots, then copies
+the sealed store into a fresh non-overwriting directory under Downloads while holding the store
+lock. It refuses symbolic links and special files. This is an encrypted export under the existing
+vault secret, not a secret-reset mechanism; automated restore is deferred until it can run while
+locked with staged verification and rollback.
+
+The bridge's `change_vault_secret(current_secret,new_secret)` holds the store mutex and calls
+`ServerStore::change_passphrase`. The storage layer authenticates the current wrapper and atomically
+rewraps the unchanged root DEK under a fresh salt/nonce. Existing derived data keys do not rotate;
+older exported vaults remain bound to their old secret.

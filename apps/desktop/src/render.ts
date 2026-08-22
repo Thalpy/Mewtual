@@ -19,7 +19,7 @@
 // 10c/10f) replaces those placeholders with media elements it builds in code from the group's
 // own content-addressed blobs; so untrusted text can never inject a live tag or remote URL.
 
-import { marked, type TokenizerAndRendererExtension } from "marked";
+import { marked, Marked, type TokenizerAndRendererExtension } from "marked";
 import DOMPurify from "dompurify";
 
 import {
@@ -30,6 +30,7 @@ import {
   WIKI_LINK_RE,
   embedHtml,
   emojiHtml,
+  escAttr,
   escText,
   inlineToHtml,
   mentionHtml,
@@ -39,6 +40,7 @@ import {
   wikitextToHtml,
 } from "./wikitext.ts";
 import { extractInfobox, infoboxHtml } from "./infobox.ts";
+import { TEXT_EFFECT_RE, parseTextEffect, textEffectHtml } from "./message-effects.ts";
 
 // The token grammar lives in `wikitext.ts` (both renderers need it) but is re-exported here: this
 // is the module `refs.ts`'s round-trip tests pin the composer's markers against.
@@ -145,6 +147,26 @@ const embed: TokenizerAndRendererExtension = {
   },
 };
 
+// An explicitly-authored remote markdown image is kept inert until the UI resolver validates the
+// protocol and constructs the <img> itself. Raw HTML still cannot create media, preserving the
+// sanitizer boundary while allowing `![cat](https://…/cat.gif)` to work.
+const remoteEmbed: TokenizerAndRendererExtension = {
+  name: "remoteembed",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("![");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const m = /^!\[([^\]\n]{0,200})\]\((https?:\/\/[^\s)]+)\)/i.exec(src);
+    if (!m) return undefined;
+    return { type: "remoteembed", raw: m[0], alt: m[1], url: m[2] };
+  },
+  renderer(token) {
+    return `<span class="embed remote-embed" data-remote-url="${escAttr(token.url)}" data-alt="${escAttr(token.alt)}"></span>`;
+  },
+};
+
 // `[label](file:HEX)` / `[label](status:ID)` → an in-app reference chip (inserted by the composer's
 // "+" picker). Matched ahead of marked's own link syntax so these app-only schemes never reach an
 // `<a href>`; the app resolves the target from the data- attribute instead, so a reference can
@@ -167,10 +189,30 @@ const refLink: TokenizerAndRendererExtension = {
   },
 };
 
+// `[fx:shake]text[/fx]` and the other fixed-catalog text effects. The body is deliberately plain
+// text rather than nested HTML; the renderer escapes it and the normal DOMPurify boundary follows.
+const textEffect: TokenizerAndRendererExtension = {
+  name: "texteffect",
+  level: "inline",
+  start(src) {
+    const i = src.indexOf("[fx:");
+    return i < 0 ? undefined : i;
+  },
+  tokenizer(src) {
+    const match = TEXT_EFFECT_RE.exec(src);
+    if (!match) return undefined;
+    const effect = parseTextEffect(match[0]);
+    return effect ? { type: "texteffect", raw: effect.raw, effect: effect.id, text: effect.text } : undefined;
+  },
+  renderer(token) {
+    return textEffectHtml(token.effect, token.text);
+  },
+};
+
 let configured = false;
 function configure() {
   if (configured) return;
-  marked.use({ extensions: [wikiLink, emoji, mention, spoiler, embed, refLink], breaks: true, gfm: true });
+  marked.use({ extensions: [textEffect, wikiLink, emoji, mention, spoiler, embed, remoteEmbed, refLink], breaks: true, gfm: true });
   configured = true;
 }
 
@@ -186,8 +228,10 @@ const SANITIZE = {
   ],
   ALLOWED_ATTR: [
     "class", "href", "title", "data-wikilink", "data-emoji", "data-embed-cid", "data-alt",
+    "data-remote-url",
     "data-mention", "data-spoiler", "data-file-cid", "data-status-id", "data-event-id",
-    "tabindex", "role", "aria-hidden", "colspan",
+    "data-text-fx", "data-pride", "data-fx-tone",
+    "tabindex", "role", "aria-hidden", "aria-label", "colspan",
   ],
 };
 
@@ -220,4 +264,21 @@ export function renderWiki(text: string, format?: string): string {
     ? infoboxHtml(box, wiki ? inlineToHtml : (s) => marked.parseInline(stripMagicWords(s)) as string)
     : "";
   return DOMPurify.sanitize(card + body, SANITIZE) as string;
+}
+
+// A shared `.md` in the Files tab is a document someone uploaded, not a page of this server's
+// wiki, so it gets its OWN marked instance with none of the app's extensions registered. A
+// `[[Page]]` or `![](cid:…)` inside it would otherwise become a placeholder span that nothing in
+// the Properties pane ever resolves, i.e. an empty box where the author wrote text. Here that
+// syntax stays literal. `breaks` is off too: a plain markdown file follows the standard rule that
+// a single newline is not a line break, unlike the chat composer.
+const document_ = new Marked({ gfm: true, breaks: false });
+
+/**
+ * Render a standalone markdown file (Files tab → Properties → "Rendered"), sanitized with the
+ * same strict allow-list as everything else: no media tags, no raw HTML, so an uploaded file
+ * cannot pull in a remote URL or inject a live element.
+ */
+export function renderTextDocument(text: string): string {
+  return DOMPurify.sanitize(document_.parse(text ?? "") as string, SANITIZE) as string;
 }

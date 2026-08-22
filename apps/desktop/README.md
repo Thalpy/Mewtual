@@ -14,8 +14,26 @@ npm install
 npm run tauri dev      # starts Vite (port 1420) + opens the app window
 ```
 
-Found a server → open **"Invite someone"** → **Copy** the single-use invite. Type in
-#general and messages appear live.
+## Deterministic visual fixture
+
+For screenshots and browser-based UI review, run the ordinary Vite server and open the fixture
+URL at the native window size (900 × 640):
+
+```sh
+npm run dev
+# open http://localhost:1420/?fixture=chat
+```
+
+The fixture renders the real `App.svelte` with Tauri's supported frontend IPC mocks, fixed data,
+a fixed clock, and motion disabled. It is available only from `localhost` in a Vite development
+build; release builds always use the native vault and backend. Unsupported native commands fail
+loudly so new frontend/backend dependencies cannot silently disappear from a plausible screenshot.
+Automation should use a 900 × 640 viewport and wait for
+`html[data-visual-ready="chat"]` before capturing rather than relying on a fixed delay.
+
+Found a server → right-click its rail icon → **Server settings → Invites** → copy the
+single-use invite. Type in #general and messages appear live. For the complete current surface
+map, open **Settings → Feature Guide** in the app or see the repository README's feature table.
 
 ## Run two instances (to actually chat between them)
 
@@ -70,8 +88,23 @@ Joining dials **every** address in the invite, so the reachable one wins.
 
 You can also be in **several servers at once**; found/join adds a server to the left rail.
 
-**Deferred:** rendezvous auto-discovery (joining with *no* address in the invite; the CLI
-already does this over real TCP; not yet wired into the desktop `found`/`join`).
+The desktop also supports **rendezvous discovery**: configure a rendezvous multiaddress while
+founding (or as the default under Settings → Network), and an invite can locate the founder
+without embedding the founder's hard-coded address. Post-join re-registration/discovery helps
+existing members reconnect after restarts. This does not make servers publicly discoverable;
+joining still requires the valid single-use invite.
+
+## Operations surfaces
+
+Inside a non-DM server, owners/admins see **Moderation** with a per-user activity graph, detailed
+signed event timeline, warning evidence and advisory kick cases; ordinary members see only active
+community-vote cards in chat. The compact **Storage** and **Connectivity** buttons form one bottom
+stack with the profile button. Storage's integrity/inventory snapshot runs once per process session,
+shows category/pin/largest-file detail, and is also linked from **Transfers**. Encrypted offline
+export is under **Settings → Backup & Recovery**; **Vault & Lock** can atomically change the vault
+secret, while vault-sealed drafts and read positions restore automatically after unlock. The
+repository [feature map](../../README.md#what-can-it-do) and
+[User Guide](../../docs/USER_GUIDE.md) carry the full UI locations and security caveats.
 
 ## Layout
 

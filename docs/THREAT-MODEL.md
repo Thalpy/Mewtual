@@ -21,6 +21,65 @@ table with the commit that closed it.
   malicious; the owner is the root of governance authority by construction.
 - **Governance/policy actions vary.** Some are protocol-enforced; some are enforced only by the
   honest client today. The tables below are the source of truth.
+- **Public reachability infrastructure is low-trust, not invisible.** A relay/rendezvous that
+  serves AutoNAT v2 learns the requester's source address, candidate addresses, peer id and probe
+  timing, and can withhold service or cause a false negative. It cannot forge a v2 positive merely
+  by claiming success: the client accepts success only after the fresh callback returns its nonce.
+  Ordinary members do not serve anonymous probes. The relay/rendezvous wrapper tags the upstream
+  callback and a first-declared pre-socket guard accepts only one direct public TCP/QUIC literal
+  whose IP exactly matches the request connection's source; it charges peer, source-prefix, node
+  and concurrency limits before opening a socket. Exact-IP matching still permits bounded probes
+  of other ports on the requester's shared NAT/CGNAT address, and the service retains metadata and
+  egress cost, so it remains **experimental, disabled by default, and operator opt-in**.
+  A successful callback proves only that the configured observer reached that exact candidate at
+  that moment. Operator configuration also permits LAN/private infrastructure, so the product does
+  not turn that result into the broader claim “reachable from the internet”.
+- **Member switchboards are consented, bounded admission paths, not new authorities.** A standing
+  host explicitly opts in per server; its complete two-minute self-signed offer is carried under
+  the invite's named inviter endorsement, so the inviter cannot substitute routes or lengthen the
+  helper's consent. A joiner explicitly consents before any helper address is dialled.
+  The helper must be a current member with a live record-bound connection to that exact inviter.
+  It forwards only bounded `JOIN`/`WELCOME` frames, applies the resulting Add before serving as the
+  joiner's first sync path, and cannot forge the inviter-signed Welcome. It already has normal
+  member plaintext access; helping grants no additional content authority. The host learns the
+  joiner's IP/timing and spends bandwidth, while invite recipients learn the host's stable device
+  and transport identities plus candidate addresses. Opt-out refuses new forwards immediately,
+  but cached/already-copied signed offers remain dial-visible until their short expiry. A malicious
+  member may sign an arbitrary *public* candidate: shape/total-dial caps bound the resulting scan
+  surface, but the signature does not prove address ownership or live reachability.
+- **Two-way replies authenticate possession of the bearer invite, not a person.** Candidates are
+  public direct literals, capped at four and live for at most 60 seconds from receipt. Every callback
+  contact proves the invite-derived reply channel before seeing the invite/KeyPackage; replacing a
+  different joiner needs confirmation. Anyone who obtained the original invite can still form a
+  valid reply or redeem it. Both apps must remain open during an overlapping window, and symmetric
+  NAT/CGNAT can still make punching impossible.
+- **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP and PCPv6 firewall
+  pinholes can expose this app's stable TCP and UDP/QUIC listeners and can return a wrong or stale
+  public socket. PCPv6 accepts only a request-matched Global Unicast result from the exact scoped
+  default router, but the pinhole remains open to arbitrary Internet sources because invite peers
+  are not known in advance. Noise and connection limits still protect the listener; AutoNAT is the
+  independent test before the UI calls the route verified. A malicious gateway can still cause
+  denial of service or dead invites. The client requests five minutes but honors a larger
+  router-assigned lifetime up to a 24-hour sanity cap; a crash can therefore leave the pinhole
+  until that grant expires. Publishing a global IPv6 privacy address also makes that
+  device/address visible to invite recipients, peers and the configured AutoNAT observer.
+- **Discovery retries are availability aids, not proof of presence.** The current member roster and
+  self-signature gate every cached record, while the common discovery policy caps outbound dials.
+  Failed current epochs retry with monotonic exponential backoff and jitter; a newly signed epoch
+  is tried immediately. Each discovery pass also asks the local kernel which IPv4/IPv6 source it
+  would route toward documentation-only destinations (UDP `connect` sends no packet), then
+  republishes a changed raw route set. A process-wide native route/interface monitor normally
+  triggers that operation after a short debounce; the discovery-period poll repairs a missed event
+  or unavailable monitor. Exact ownership preserves an identical manual/mapping/relay route.
+  The cache intentionally replaces rather than permanently unions withdrawn
+  public IPs: an ISP may reassign an old address, and Noise authentication prevents impersonation
+  but not the metadata/connection cost of probing its new holder. PEX success proves one live
+  member connection at that moment; failure means only “not reachable from this device by this
+  path,” never offline, removed, or malicious.
+- **The desktop webview is trusted only while the UI session is unlocked.** An explicit lock keeps
+  native actors online for background sync but closes all non-bootstrap Tauri commands. CSP and
+  the main-window capability reduce injection reach; the native command gate is the enforcement
+  layer, not the fact that Svelte hid or cleared a control.
 
 ## Protocol- / crypto-enforced (a modified client CANNOT bypass)
 
@@ -35,6 +94,10 @@ table with the commit that closed it.
 | Forward secrecy on removal | A removal is a real MLS Remove commit → epoch advance + routing-secret rotation; the removed member is genuinely cut off | `catcoms-sync` removal path |
 | Blob integrity | Content-addressed; served bytes are re-hashed against the requested CID before storing (no cache poisoning) | `catcoms-sync::request_blob` |
 | File-at-rest encryption | Per-group file-wrap key; sealed at rest under the vault key | `catcoms-storage` (Phase 9h) |
+| UI continuity and backup confidentiality | Drafts/read positions are vault-sealed and bounded; offline backup copies only the already-sealed vault tree without following links. Export creates another offline guessing target and exposes filesystem metadata; it does not weaken record encryption | `catcoms-app::ServerStore`; desktop `create_backup` |
+| Vault-secret rotation | The current wrapper is authenticated; the same root DEK is atomically rewrapped with a fresh Argon2 salt/nonce, so no half-rekeyed data tree is possible | `catcoms-storage::change_vault_passphrase`; desktop `change_vault_secret` |
+| Desktop explicit-lock IPC boundary | Every non-bootstrap Tauri command requires both a mounted vault and an open UI session. Lock atomically saves bounded continuity state then closes the command boundary; actor events are dropped and long downloads re-check while actors continue native background network/persistence work | desktop `require_unlocked_session`; `lock_session`; `forward_events` |
+| Moderation-record attribution and field integrity | Each event/vote has a canonical group-bound Ed25519 signature; the reader verifies signer fingerprint and linked-device origin, so records cannot be altered or replayed into another server without detection | `catcoms-app::moderation` |
 | Path traversal | Virtual file paths normalized (drops `.`/`..`/empty) so a path can't escape the share | `catcoms-app::normalize_path` |
 
 ## Honest-client / product-layer only (a modified client CAN bypass); the residual backlog
@@ -47,6 +110,7 @@ table with the commit that closed it.
 | R4 | **Local role display** | `my_role()` drives which controls the UI shows | A modified client can paint itself as "admin/owner" **in its own UI**, but this grants **no real capability**; grants are owner-signed (unforgeable) and admission is rank-gated. Cosmetic only. | **Cosmetic** | Accepted; documented in-app |
 | R5 | **Invite rate-limit / server policy** (planned) | An owner-set server-settings doc, respected by honest clients | A modified admin can ignore a mint rate-limit / expiry policy. It is a guardrail against *accidental* over-sharing by honest admins, **not** a control against a malicious admin. | **Soft guardrail** | Document the limitation in the UI when shipped |
 | R6 | **Message edit / delete / react / pin** | `edit_message`/`delete_message` gate on `author == self` (own messages; delete also allows owner/admin moderation); `set_pin` gates on the owner/admin role; `toggle_reaction` keys the reaction by the caller's own fingerprint | A modified member could post a raw channel op editing/deleting/pinning **any** member's message, or forging a reaction under another member's fingerprint; the per-op inner signature signs the *delta*, not the semantic `author`/reactor/role (the same property that already lets a member forge a message's author on send). Low stakes; message content is not authenticated, by design. | **Low** | **Open**; accept (same posture as R2), or a later per-message author-binding hardening |
+| R7 | **Moderation-log semantic authorization and completeness** | Product APIs gate warning/case creation to current owner/admin, resolution to owner, bind evidence to a currently visible message and same-target warning, and readers ignore invalid/unattributed/currently unauthorized records | A modified member can still submit raw Automerge changes that delete/overwrite moderation keys. A modified current admin can sign an invented evidence snapshot because the original message is not author-signed. Signatures make alteration and attribution failures detectable, but do **not** make the CRDT an append-only audit log or prove the signer's role at the historical instant. Votes never authorize removal; owner-only MLS removal remains enforced. | **Medium** (accountability), **None** for removal authority | **Open and disclosed**; historical role certificates plus a countersigned/hash-chained append-only log are the hardening path |
 
 ### Notes on the key residual (R1) and the "admin invites" entanglement
 
@@ -124,6 +188,10 @@ roadmap:
      lands; so demotion is "current-doc, honest-client," not yet replay-proof.
 5. **Invite rate-limit as server policy (R5)**; owner-set, honest-client-enforced; ship with
    the limitation stated in the UI.
+6. **Moderation-log completeness (R7)**; design a monotonic, hash-linked event log with historical
+   owner-signed role evidence and a protocol-side append/delete policy before calling the timeline
+   a tamper-proof audit trail. Preserve the existing invariant that a tally is never executable
+   authority and only the owner removal path can mutate MLS membership.
 
 ## How to use this document
 
@@ -132,3 +200,5 @@ roadmap:
 - When the UI implies a rule is enforced, make sure the rule is either in the protocol table or
   carries an in-app note that it is advisory (as the roles panel already does).
 - When a residual is closed, move it up with the commit hash.
+- When a Tauri command is added or removed, update `apps/desktop/src/tauri-command-security.ts`;
+  the frontend suite checks the ledger against the native handler and every literal invocation.

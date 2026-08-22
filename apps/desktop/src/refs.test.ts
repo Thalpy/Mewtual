@@ -35,6 +35,10 @@ test("refLabel collapses whitespace and trims", () => {
   assert.equal(refLabel("  spaced   out  "), "spaced out");
 });
 
+test("refLabel uses effect prose rather than leaking its copyable markers", () => {
+  assert.equal(refLabel("[fx:cyber]signal online[/fx]"), "signal online");
+});
+
 test("refLabel bounds the label to the tokenizer's limit", () => {
   assert.equal(refLabel("x".repeat(200), 60).length, 60);
   assert.equal(refLabel("x".repeat(200), 48).length, 48);

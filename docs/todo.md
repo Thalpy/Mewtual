@@ -49,16 +49,29 @@
 | 8u/8v | **wiki** — per-server collaborative pages (name→body map doc) + Chat/Wiki view toggle (page list + editor); page bodies are automerge `Text`, so concurrent edits merge **char-by-char** (8v) | done |
 | 9 | **disk persistence + encryption-at-rest** — [designed](docs/design-persistence.md), **9a–9h done**: key vault, sealing blob store, snapshottable MLS state, doc + whole-server sync-state persistence, vault-sealed `ServerStore`/registry, the desktop passphrase-gate + reload-on-startup, peer re-dial, and e2e per-group file encryption (9c/9e/9h-b adversarially reviewed). Close/reopen the app, enter your passphrase → servers + history are back (read offline), sealed at rest | done |
 | 10 | **desktop UI / product overhaul** — **10a–10h done**: tabbed nav + Settings overlay; a sanitized markdown renderer (`marked`+DOMPurify) with `[[wiki links]]`, `:emoji:`, and `![cid embeds]`; fileshare **folders** + drag-drop **media embeds** in chat/status (built in code from CID-verified blobs); a **wiki** overhaul (markdown, links, backlinks, media, in-app help); **custom emoji**; **notification sounds**; and **owner/admin roles** + a server-settings role manager. 10c & 10h adversarially reviewed; roles enforcement is documented as policy-layer (cryptographic hardening is a named follow-up) | done |
-| 8… | rendezvous discovery in the UI · chunked large-file transfer · last-copy-safe blob retention | planned |
-| 8 | Product model + Tauri desktop UI | planned |
-| 9 | Android | planned |
-| 10 | Hardening + calendar | planned |
+| 11 | Desktop expansion: discovery UI, chunked transfers, DMs/friends, events/news, search/inbox, delivery states, multi-device, wiki history/review, livery and voice surfaces | done/current |
+| 12a | Signed moderation plane: event timeline, range warn/delete, collapsible warning evidence, kick cases/votes and owner-only resolution | done; full suites + antagonist gates passed 2026-08-20, R7 disclosed |
+| 12b | Durable history UX: vault-sealed composer drafts/read positions plus safe legacy read-mark migration | done; full suites passed 2026-08-20 |
+| 12c | Storage health/repair and connectivity assistant in the server sidebar, with storage repeated in Transfers | done; full suites passed 2026-08-20 |
+| 12d | Backup & Recovery centre: coherent encrypted export now; locked staged verification/import/rollback remains a named security gate | partial; export in tree, restore deferred |
+| 12e–12g | Notification controls (parallel review), voice completion (after user test), channel governance (later design) | queued/deferred |
+| 13 | Android (Tauri 2 mobile): keystore, foreground service and two-tier keys | planned |
+| 14 | Hardening: last-copy-safe retention, recovery import, AutoNAT, voice completion, supply-chain attestation and independent security review | planned |
 
 Features/things in stack:
-1. Draw waveform for midi in voice chat (fun) [Do we go full DAW lite?]
-2. needs better midi settings in the settings pannel
-3. a *lot* of settings are stubs and aren't fully integrated.
-4. 
+1. Draw a waveform or shared visualizer for MIDI/instruments in voice chat (fun; decide whether
+   this stays a toy or becomes a small collaborative music surface).
+2. Add better MIDI settings: ~~device routing~~, velocity curve, ~~sustain handling~~ and
+   per-instrument receive controls. Settings → Devices now carries the controller panel (live
+   device list, per-port routing, message monitor, panic, setup/troubleshooting help) and the
+   pedal is handled for the call instrument. Velocity is parsed and shown in the monitor but not
+   yet mapped to loudness, and per-instrument receive controls are untouched.
+3. Explicit settings gaps: vault re-key, keybind remapping, notification granularity, and the
+   protocol-backed Security / Server Nodes pages.
+4. The agreed experimental queue — **Campfire rooms, Promote conversation to wiki, Memory
+   Keepers, Ciphertext mailboxes, Guardian recovery, Two-way proximity invites, Community time
+   capsules, and Trust constellations** — is tracked with per-feature antagonist questions and
+   test/documentation gates in [`feature-implementation-tracker.md`](feature-implementation-tracker.md).
 
 ---
 
@@ -76,19 +89,27 @@ permanent false eclipse alarm), both deployment-blocking CRITICALs on the relay 
 nodes, a product-layer integration test suite, and the joiner control-topic bug that made
 later members invisible to earlier ones.
 
-**Open defects, all tracked in section 1c:** P3 (census is rate-limited, not prevented; needs
-upstream vendored), P6 (no eviction primitive), P9 (membership tag never on the wire, which
-also blocks finishing P8), P10 (no padding), P13 (invite-supplied address validator), P14's
-recovery half. P5 and P8 partial.
+**Every defect P1 to P14 is now worked to a conclusion** (2026-08-19). Nine closed outright.
+P3 deferred by decision. P5, P6 and P10 partial with their gaps named. P9 **closed as a
+decision**: its premise was false, since the membership tag is keyed on the same secret as the
+rendezvous namespace and so never defended the attacker P8 was filed about. The per-defect board
+in [`design-zeroconf-reachability.md`](design-zeroconf-reachability.md) section 1c is
+authoritative; section 11 carries the loose ends that are not defects.
 
-**Not built: most of the ladder.** AutoNAT and mDNS, racing the rungs concurrently, failure
-messaging, the two-way invite code, switchboard members, the port-forwarding wizard, hosted
-mode, the public DHT. And one that is not code: **a bootstrap node has to be provisioned and
-run** before rung 4 means anything.
+**Higher ladder status.** Stable direct ports, UPnP/PCP/NAT-PMP plus PCPv6 firewall pinholes, scoped AutoNAT v2, the live
+Connectivity assistant, 60-second two-way replies and opt-in member admission switchboards now
+exist. The AutoNAT server has pre-socket exact-source target policy plus peer/prefix/node limits,
+but remains experimental/off by default because metadata, egress and same-NAT port probes remain.
+mDNS, recurring/pairwise reachability, concurrent rung racing, the guided port-forwarding wizard,
+general circuit switchboards/monthly host budgets, hosted mode and the public DHT remain. One item
+is operational rather than code: **Mewtual starts with zero owned servers**, so a bootstrap node has
+to be provisioned before rung 4 means anything.
 
-**Designed but not implemented: the connectivity UI.** The create-server dialog still asks for
-three multiaddrs. Mockup and copy spec exist and are approved; most of what they display needs
-its backend rung first.
+**Partially implemented: the connectivity UI.** Onboarding and Settings share the mockup's live
+status line, readout and diagnosis over real mapping/AutoNAT evidence, plus one-time reply help,
+standing switchboard opt-in/status and direct-first joiner consent. The create-server mode,
+Advanced redesign, automatic escalation, one-time helper approval popups and onboarding/wiki
+questionnaire remain.
 
 Working rule carried out of this: **adversarial review happens per slice, before the commit
 that lands it.** Batching it at the end is how unreviewed work reached `main` twice.

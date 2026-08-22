@@ -1,6 +1,6 @@
 [package]
 name = "mewtual-desktop"
-version = "0.1.0-alpha.1"
+version = "0.3.0-alpha.3"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -14,6 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+bytes = "1"
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,6 +22,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"
 libp2p = { version = "0.56", features = ["tokio"] }
 hex = "0.4"
 base64 = "0.22"
+zeroize = "1"
 catcoms-app = { path = "../../../crates/catcoms-app" }
 catcoms-mls = { path = "../../../crates/catcoms-mls" }
 catcoms-net = { path = "../../../crates/catcoms-net" }
@@ -28,8 +30,17 @@ catcoms-rt = { path = "../../../crates/catcoms-rt" }
 catcoms-sync = { path = "../../../crates/catcoms-sync" }
 catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
 catcoms-log = { path = "../../../crates/catcoms-log" }
+# The router-mapping stack already pins this monitor transitively. Declare it directly because the
+# desktop owns the process-wide OS route/interface watcher used by post-join self-healing.
+netwatch = "=0.18.0"
+n0-watcher = "=1.0.0-rc.0"
+# The bridge emits its own spans now: log_ui carries what the webview saw into the same file.
+tracing = "0.1"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 # Own workspace so the heavy Tauri/webview deps stay out of the root `cargo test --all`.
 [workspace]

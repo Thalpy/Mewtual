@@ -41,6 +41,23 @@ reason = "libcrux-sha3 AVX2 SHAKE-256 panic: unreachable, our pinned ciphersuite
 id = "RUSTSEC-2026-0212"
 reason = "libcrux-secrets constant-time swap on aarch64: we ship x64 only; revisit for any ARM build"
 
+# hickory-proto arrives through libp2p-dns 0.44 (libp2p 0.56), which pins the 0.25 line. Both
+# advisories below sit behind that pin: drop them the moment libp2p moves to a hickory 0.26 line.
+#
+# The NSEC3 loop lives in DNSSEC proof validation. No crate in either lockfile enables any
+# dnssec feature (grep the locks: zero hits), so the vulnerable code is not compiled into the
+# binary. There is also no patched release to move to yet (patched = [] as of 2026-08-22).
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0118"
+reason = "hickory-proto NSEC3 validation loop: DNSSEC features are not compiled in; no patched release exists"
+
+# The O(n^2) name compression is in message *encoding*. As a stub resolver we encode only our
+# own single-name queries; an attacker cannot make this client encode a many-name message, so
+# the quadratic path is not attacker-drivable here. Fixed only in 0.26.1, behind the libp2p pin.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0119"
+reason = "hickory-proto O(n^2) encoding: client encodes only its own small queries; fix requires hickory 0.26 via a libp2p bump"
+
 [bans]
 # Flag duplicate versions of the same crate; tighten to "deny" as the tree stabilises.
 multiple-versions = "warn"
@@ -65,6 +82,9 @@ allow = [
     # attohttpc (via igd-next, for UPnP port mapping). MPL-2.0 obligations attach to modified
     # MPL files, so using these as dependencies does not reach into our own source.
     "MPL-2.0",
+    # webpki-roots: the Mozilla CA bundle shipped as data. CDLA-Permissive-2.0 is a permissive
+    # data license (attribution-free use, modification and redistribution of the data set).
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

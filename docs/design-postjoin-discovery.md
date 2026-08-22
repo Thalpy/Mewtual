@@ -1,12 +1,48 @@
 # Design; post-join steady-state rendezvous discovery
 
-Status: **design approved, implementing.** After joining, a member periodically re-registers itself
+Status: **implemented; self-healing retry hardened 2026-08-22.** After joining, a member periodically re-registers itself
 at the rendezvous under its rotation-aware namespaces and discovers + dials *other members* there;
 so members re-find each other after a restart / address change with **no fresh invite**. Built on
 the 6e-3d primitives (`rendezvous_namespaces`, the `DiscoveryPolicy`, PEX), driven by the per-server
 **actor** through the generic transport.
 
 See also: [`design-6e-rendezvous.md`](design-6e-rendezvous.md), [`design-rendezvous-ui.md`](design-rendezvous-ui.md).
+
+Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
+
+## Implementation checklist
+
+- [x] Periodic member-only rendezvous registration/discovery.
+- [x] Authenticated bounded member PEX independent of rendezvous.
+- [x] Vault-sealed, roster-reverified cross-session address cache.
+- [x] Bounded redial backoff with jitter; disconnect and a newer signed address epoch bypass it.
+- [x] Fold PEX records before the same pass's cached redial, so dynamic-IP updates are immediate.
+- [x] Poll the route-selected IPv4/IPv6 interfaces on the discovery cadence; publish one fresh
+  signed epoch and withdraw vanished raw routes without removing identical manual/mapping/relay
+  ownership.
+- [x] Subscribe to native OS network-change events for lower latency; retain polling as the
+  portable repair path and debounce event bursts into one signed epoch.
+- [ ] Add an optional, tightly bounded previous-address-epoch grace window (one record, minutes,
+  current routes first); never build an indefinite address history.
+- [ ] Add authenticated reciprocal-dial signalling through an already connected member.
+- [ ] Track bounded pairwise reachability evidence by address family and transport.
+- [ ] Add SWIM-style indirect probes without equating suspicion with membership removal.
+- [ ] Split topology maintenance into HyParView-like active/passive views and randomized promotion.
+- [ ] Add CYCLON-like age-biased, source-diverse passive-view shuffles.
+- [ ] Surface typed per-device health and safe personal/group actions in Connectivity.
+- [ ] Add an explicit manual fallback-redial action for a completely isolated member.
+- [ ] Make rendezvous renewal TTL-aware instead of re-registering every discovery tick.
+
+## WebSocket boundary
+
+WebSocket/WSS is useful as an additional **transport**, especially through enterprise HTTP proxies
+or to a known relay/rendezvous endpoint on port 443. It is not a zero-server discovery or NAT-
+traversal mechanism. A WebSocket starts as an outbound TCP connection to a listener that is already
+reachable; two members whose routers both reject inbound traffic still cannot open one directly.
+Hosting WSS on an ordinary member also adds certificate/name lifecycle without improving over the
+same member's reachable libp2p TCP listener. Keep WSS for proxy-compatible infrastructure and
+future browser interoperability, not as a substitute for reciprocal dialing, DCUtR, switchboards,
+or relay circuits.
 
 ## Why this needs an actor + transport-trait change
 
@@ -37,7 +73,13 @@ tag. So `Candidate.tag_verified` is **`false`** here. That is **safe**:
 - The **real gates are post-dial**: MLS group membership (a dialed non-member can't decrypt the
   channel), and `ingest_peer_record`/`request_pex` (membership-verified). A wrongly-dialed peer just
   wastes one dial (bounded by the policy budget).
-Wiring the synthetic-address tag (for pre-dial eclipse hardening) is a documented follow-up.
+**Update (2026-08-19): the synthetic-address wiring is now closed as a decision, not a follow-up.**
+The libp2p `PeerRecord` cannot carry it (`register` takes addresses from the swarm-global external
+set and mints `seq` itself), forcing it through `add_external_address` would broadcast a
+group-linked token over `identify`, and no call site could act on it anyway; the pre-join path
+that ranks several candidates holds no group secret, and the post-join path plans one candidate at
+a time. Reasoning in full: the P9 row of `design-zeroconf-reachability.md` § 1c. What the eclipse
+detector needed from it is served by roster-backed confirmation instead (the P8 row).
 
 ## State + flow
 
@@ -45,18 +87,22 @@ Wiring the synthetic-address tag (for pre-dial eclipse hardening) is a documente
 - `rendezvous_nodes: Vec<(String, Vec<u8>)>`; (dialable rz multiaddr, rz libp2p-id bytes), set at
   found/join, **persisted** in the snapshot (after the item-3 roster fields, before `finish()`; new
   fields strictly after the peer records, so `peer_addrs_from_snapshot` is unaffected).
-- `discovery: DiscoveryPolicy` (one long-lived per group) + `dialed_peers: HashSet<Vec<u8>>` (dedup,
-  keyed on discovered peer bytes), both rebuilt fresh on restore (transient).
+- `discovery: DiscoveryPolicy` (one long-lived per group) + a bounded transient dial-retry map.
+  Retry entries use monotonic exponential backoff with jitter, are cleared by a successful
+  connection/disconnection lifecycle, and are bypassed immediately by a newer signed peer-record
+  sequence. This replaces the old process-lifetime `dialed_peers` set, under which one failed dial
+  permanently suppressed that member until this app restarted.
 
 **Driver methods on `ChannelSync`** (called by `Server`, driven by the actor):
 - `drive_discovery()` (async): for each rz node, for each `ns` in `rendezvous_namespaces(rz_node)`;
   `transport.rendezvous_register(ns, rz_node)` (advertise our external addrs under the member-only
   namespace) and `transport.rendezvous_discover(ns, rz_node)`.
 - `next_discovered()` (async): delegate to `transport.next_discovered()`.
-- `ingest_discovered(d)` (async): build a `Candidate { source: Rendezvous(rz_node), seq: 1,
-  tag_verified: false }`, `DiscoveryPolicy::plan(roster = member_count)`, and for each planned addr
-  whose peer isn't already in `dialed_peers`, `transport.dial(addr)`; mark dialed. After connecting,
-  the existing PEX + membership verification take over.
+- `ingest_discovered(d)` (async): build a `Candidate { source: Rendezvous(rz_node), seq,
+  tag_verified: false }`, apply the retry deadline, then call
+  `DiscoveryPolicy::plan(roster = member_count)`. Only policy-granted dials receive retry state;
+  budget-deferred candidates remain eligible. After connecting, the existing PEX + membership
+  verification take over.
 
 **Driving it (timer in the bridge, off the deterministic-time seam).** The periodic timer can't
 live in `crates/`; the ambient-dependency gate forbids `tokio::time::interval`/`sleep` there (all
@@ -85,13 +131,129 @@ the invite); steady-state adds the rotation-aware namespaces on top.
   hysteretic detector (R = roster, D = reachable member peers + self, S = distinct rendezvous roots);
   the actor emits `EclipseChanged{caution}` on a change and the UI shows an advisory banner. Strictly
   advisory; never gates dialing/messaging/membership.
-- **Pre-dial membership-tag verification; still deferred:** carrying the per-namespace
-  `routing_membership_tag` as a synthetic address in the libp2p PeerRecord (the only libp2p-level
-  path) is invasive across 5 layers for marginal value; `tag_verified=false` is safe (the
-  `DiscoveryPolicy` never *drops* an unverified candidate, only ranks it; the member-only namespace +
-  MLS + PEX are the gates). `AddressCache` cross-session persistence: deferred.
+- **Pre-dial membership-tag verification; closed as a decision (2026-08-19), not deferred:**
+  carrying the per-namespace `routing_membership_tag` as a synthetic address in the libp2p
+  PeerRecord is not merely invasive, it is unbuildable as designed and would be a new disclosure,
+  and nothing above could use it (P9 in `design-zeroconf-reachability.md` § 1c).
+  `tag_verified=false` is safe and permanent (the `DiscoveryPolicy` never *drops* an unverified
+  candidate, only ranks it; the member-only namespace + MLS + PEX are the gates). The desktop now
+  seals `AddressCache` beside the server snapshot and re-verifies every row on load; SQLCipher
+  remains a storage-engine refinement.
 - **Re-registration cadence:** a fixed interval (re-register every tick) rather than TTL-driven; a
   TTL-aware schedule is a refinement.
+- **Ordinary interface churn; DONE:** one process-wide native monitor consumes Windows route/IP
+  notifications, Linux/Android netlink, and Apple/BSD route notifications. Callback bursts are
+  coalesced before every running server re-samples the kernel's route-selected IPv4/IPv6 sources.
+  A changed set updates external-address ownership, the live bootstrap, Connectivity, and one new
+  signed peer-record epoch before PEX in that same pass. Exact ownership prevents a disappearing
+  raw GUA from removing an identical live PCPv6/manual route. The roughly-minute discovery poll
+  remains active as the portable repair path if platform monitoring fails or misses an event.
+- **Pairwise reachability and reciprocal dial signalling:** not yet represented. A connected member
+  can distribute signed records, but it does not yet carry a bounded, authenticated “please dial
+  this member's fresh candidate now” signal or report which address/transport worked from its own
+  vantage point.
+
+## Reciprocal-dial design after adversarial review
+
+Targeted member-control gossip is rejected. Pubsub forwarding occurs below the application-level
+authorization handler, so a removed member that still knows a grandfathered topic could cause a
+stale subscriber to relay a dial request. Gossip would also disclose attempted peer pairs and timing
+to every subscriber.
+
+The zero-server design instead uses a small **addressed, capability-gated helper protocol**. If A
+cannot reach B but remains connected to C, A asks C to deliver a request to B. C catches up and
+revalidates its current roster before forwarding; C never dials A and does not carry the resulting
+connection. B validates the request and then dials A's already accepted current signed record. A
+simultaneously retries B, which may help QUIC NAT traversal. This does not claim general TCP
+simultaneous-open and cannot repair a completely partitioned group with no surviving path.
+
+The request contains references to the exact canonical hashes and sequences of A and B's already
+accepted descriptors, not embedded addresses or replacement descriptors. An equal sequence with a
+different hash is equivocation and is rejected. A descriptor replacement, route withdrawal, member
+removal, session change, shutdown, or server deletion cancels the corresponding pending intent.
+
+B advertises a signed reciprocal-dial capability containing a random receiver-session identifier,
+its current descriptor reference, routing label, protocol version, and a short expiry. The request
+binds the group, requester and target devices, both descriptor references, receiver session,
+attempt identifier, and expiry. One or two currently connected capable helpers may forward it and
+attach an authenticated delivery attestation. Helpers never invent or substitute routes. B applies
+the same current-roster, current-session, exact-record, replay, rate, and expiry checks regardless of
+which helper delivered it.
+
+Accepted work becomes a reference-only actor intent. Immediately before dialing, the actor resolves
+A's current record again and sends at most two direct peer-bound QUIC candidates (preferably one
+IPv4 and one IPv6) through the shared endpoint scheduler. There is no bare-address fallback. The
+scheduler accounts for every endpoint at pair, device, address/prefix, server, and process scopes;
+new address epochs and native network-change events refresh records but never directly trigger a
+reciprocal-dial storm.
+
+Rollout is capability-gated: receivers and helpers ship before automatic senders. An old client that
+does not advertise support is `feature unavailable`, not `offline`. The UI must derive presence and
+route claims from typed evidence; a transport connection alone does not prove which route, family,
+descriptor epoch, or helper path worked.
+
+### Baseline participation versus optional hosting
+
+Every online, current, compatible member participates in the group mesh. This baseline is part of
+joining the P2P network and is not disabled by opting out of hosting. It includes maintaining the
+member's own outbound connections, distributing authenticated group traffic and signed address
+epochs over already established paths, bounded PEX and health responses, and forwarding small,
+addressed, authenticated reciprocal-dial control requests when the member is already on a viable
+path. These duties must remain tightly bounded so an ordinary member cannot be conscripted into
+arbitrary dialing or meaningful third-party bandwidth use.
+
+Opt-in roles begin where the device accepts additional exposure or resource cost: accepting
+pre-member traffic, serving as a standing switchboard, carrying another pair's application traffic,
+opening a public relay/rendezvous/AutoNAT service, or accepting materially higher bandwidth/storage
+budgets. Opting out of those roles therefore does not turn a member into a passive consumer; it only
+prevents silent promotion into a public listener or general relay. A user can always cease all
+participation by disconnecting or leaving the group.
+
+Before reciprocal dialing is enabled, implementation must:
+
+- enforce one canonical direct-route grammar with a mandatory terminal `/p2p/<PeerId>` matching the
+  signed descriptor and remove every discovery bare-address dial path;
+- meter endpoints rather than peers through a process-wide scheduler shared by existing discovery
+  and reciprocal dialing;
+- add a typed peer-bound batch transport API;
+- implement bounded session/replay state, addressed helper forwarding, actor cancellation, and
+  deterministic topology-aware A-to-C-to-B tests; and
+- complete another adversarial review of each implementation slice before handoff.
+
+## Address-history policy
+
+The newest self-signed `PeerDescriptor` is authoritative and should normally carry every currently
+valid IPv4 and IPv6 TCP/QUIC route together. The cache therefore keeps that complete newest record;
+it does **not** union every historical IP forever. A withdrawn dynamic public address may be
+reassigned to another subscriber, and continuing to probe it leaks timing/IP metadata even though
+Noise will reject the wrong transport identity.
+
+A future history layer may retain at most one preceding signed record for a short grace period, try
+it only after the current epoch's routes fail, and discard it immediately on an explicit expiry or
+mapping withdrawal. That is a recovery hint, never an address the current record is claimed to
+endorse. Until that lifecycle exists, replacing the old record is safer and more truthful.
+
+## Swarm-inspired next layer
+
+The existing structures already resemble a small churn-tolerant overlay:
+
+- **active view:** authenticated entries in `connected_peers`;
+- **passive view:** roster-checked signed records in `AddressCache`;
+- **periodic shuffle:** bounded PEX requests, currently randomized within trust tiers;
+- **failure suspicion:** a missing connection/PEX answer affects presence and retry choice, never
+  MLS membership.
+
+The next coherent extension is HyParView/CYCLON-like behavior: on disconnect, promote randomized
+passive candidates; exchange small age-biased record samples; retain source diversity; and age
+unconfirmed candidates without deleting the member. SWIM-style indirect probes can then ask two
+active members whether they can reach a suspect peer. “Unreachable from me” must remain distinct
+from “offline” and must never remove a member.
+
+The product-facing model should be typed per device: `connected_direct`, `connected_relay`,
+`reachable_via_member`, `retrying`, `no_current_route`, last successful contact, candidate families,
+and the next safe actions. Personal actions include reopening/forwarding the stable port or sharing
+a fresh reply code; group actions include enabling a reachable switchboard or configuring a
+relay/rendezvous node. No single peer's failed probe is a global health verdict.
 
 ## Security
 Discovery only *surfaces* candidates; the `DiscoveryPolicy` alone decides dials (budget-bounded,

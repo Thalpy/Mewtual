@@ -411,6 +411,14 @@ test("inlineToHtml is the inline pass on its own, with no block wrapper", () => 
   assert.equal(inlineToHtml("a ''b''"), "a <em>b</em>");
 });
 
+test("text effects share the same safe token in wikitext and prose previews", () => {
+  assert.equal(
+    inlineToHtml("[fx:cyber]<script>alert(1)</script>[/fx]"),
+    '<span class="text-fx text-fx-cyber" data-text-fx="cyber">&lt;script&gt;alert(1)&lt;/script&gt;</span>',
+  );
+  assert.equal(plainSummary("Incoming [fx:shake]unstable signal[/fx] now"), "Incoming unstable signal now");
+});
+
 // --- directives ------------------------------------------------------------------------------------------------
 
 test("parseRedirect reads the target of a leading #REDIRECT", () => {

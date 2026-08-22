@@ -62,6 +62,14 @@ pub enum DocType {
     /// every member to attribute a companion's ops to the member's origin identity. A single
     /// shared CRDT document per server.
     Devices = 12,
+    /// The shared channel directory. Channel message bodies still live in their own
+    /// [`DocType::Channel`] documents; this small index is what lets a channel created by one
+    /// member appear automatically for everybody else.
+    ChannelIndex = 13,
+    /// Signed moderation evidence, kick cases, resolutions, and member votes. This is a separate
+    /// document from chat so warning evidence survives an edit/delete of the live message and a
+    /// vote can never be mistaken for an authorization to mutate membership.
+    Moderation = 14,
 }
 
 impl DocType {
@@ -85,6 +93,8 @@ impl DocType {
             10 => DocType::Livery,
             11 => DocType::Badges,
             12 => DocType::Devices,
+            13 => DocType::ChannelIndex,
+            14 => DocType::Moderation,
             _ => return None,
         })
     }
@@ -150,6 +160,16 @@ mod tests {
             exporter_context(DocType::Devices, 0),
             [0x00, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
         );
+        // ChannelIndex (tag 13), id = 0; the shared channel directory.
+        assert_eq!(
+            exporter_context(DocType::ChannelIndex, 0),
+            [0x00, 0x0d, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
+        );
+        // Moderation (tag 14), id = 0; signed evidence + advisory case votes.
+        assert_eq!(
+            exporter_context(DocType::Moderation, 0),
+            [0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00]
+        );
     }
 
     #[test]
@@ -167,12 +187,14 @@ mod tests {
             DocType::Livery,
             DocType::Badges,
             DocType::Devices,
+            DocType::ChannelIndex,
+            DocType::Moderation,
         ] {
             assert_eq!(DocType::from_tag(dt.tag()), Some(dt));
         }
         // Unknown tags decode to None (stable: 0 and the first unused value).
         assert_eq!(DocType::from_tag(0), None);
-        assert_eq!(DocType::from_tag(13), None);
+        assert_eq!(DocType::from_tag(15), None);
     }
 
     #[test]

@@ -240,4 +240,47 @@ pub trait MeshTransport: Send + Sync {
     async fn next_discovered(&self) -> Option<DiscoveredPeer> {
         std::future::pending().await
     }
+
+    // --- eviction (optional; default no-op for transports without a connection to sever) ------
+
+    /// **Evict** `peer`: sever any live connection to it and refuse new ones from it.
+    ///
+    /// The membership layer calls this when a Remove commit is applied. Rotating the routing
+    /// secret takes the removed member's *keys* away; without this it stays **attached**, which
+    /// is what lets it keep a granted circuit reservation and keep observing that the group is
+    /// active over a link it already holds. That is not a removal.
+    ///
+    /// **Best-effort by construction, in two ways, and neither is a bug to be fixed here.**
+    ///
+    /// 1. The caller only knows the peer id the removed device **asserted about itself** (the
+    ///    `peer_id` field of its own signed peer record). The signature binds that value to its
+    ///    signer, but nothing binds it to *naming* its signer, so the value is attacker-chosen:
+    ///    a member that lied about its peer id evades the disconnect, and one that named a third
+    ///    party can aim it at somebody else. Binding a device key to a transport identity is a
+    ///    documented deferral; until it lands, the caller is responsible for the checks that
+    ///    make acting on the value safe (see `ChannelSync::queue_eviction`), and an implementor
+    ///    of this trait must refuse to evict any peer its own configuration relies on.
+    /// 2. A transport with no notion of a connection (the in-memory test network) cannot honour
+    ///    it at all, which is why the default is inert rather than an error: a caller must not
+    ///    have to know which transport it is on, and a failure here must never abort a removal
+    ///    that has already been committed to the MLS group.
+    ///
+    /// Treat it as defence in depth on top of the key rotation, never as the thing that keeps a
+    /// removed member out.
+    async fn evict_peer(&self, _peer: PeerId) -> Result<(), TransportError> {
+        Ok(())
+    }
+
+    /// Lift an eviction, because `peer`'s device has been **admitted to the group again**.
+    ///
+    /// Removal is not the end of a relationship in this product: it ships a re-invite, and a
+    /// node's transport identity is stable across restarts, so without this a re-invited member
+    /// would dial its inviter, be refused at the connection handler, and see the join time out
+    /// with nothing to diagnose. Every peer holding the old eviction would refuse it too.
+    ///
+    /// The membership layer, not a timer, decides when this fires: readmission is an
+    /// authenticated group event, and elapsed time is not evidence of anything.
+    async fn unevict_peer(&self, _peer: PeerId) -> Result<(), TransportError> {
+        Ok(())
+    }
 }

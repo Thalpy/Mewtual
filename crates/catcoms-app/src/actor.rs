@@ -22,9 +22,10 @@ use tokio::task::JoinHandle;
 use catcoms_storage::Cid;
 
 use crate::{
-    ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileUsage, FilesView, InboxItem,
-    JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats, Profile, Server,
-    ServerEvent, WikiPendingEdit, WikiRevision,
+    ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange, FileUsage,
+    FilesView, InboxItem, JoinAttempt, JukeEntry, Livery, MemberBadge, MemberView, MessageStats,
+    ModerationState, Profile, Server, ServerEvent, StorageHealth, StorageRepair, SwitchboardOffer,
+    WikiPendingEdit, WikiRevision,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
@@ -49,6 +50,17 @@ type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
+    /// Create (or idempotently open) a channel and publish it to the shared directory.
+    CreateChannel {
+        name: String,
+        reply: oneshot::Sender<Result<ChannelInfo, String>>,
+    },
+    /// Query the shared channel directory.
+    Channels {
+        reply: oneshot::Sender<Vec<ChannelInfo>>,
+    },
+    /// Pull the channel directory from the join contact, then subscribe/catch up every entry.
+    CatchUpChannelIndex { peer: PeerId },
     /// Open a channel (subscribe + create locally). Acked once subscribed, so a caller
     /// can avoid racing a subsequent publish ahead of the subscription.
     OpenChannel {
@@ -60,6 +72,7 @@ pub enum AppCommand {
         channel: u128,
         text: String,
         reply_to: String,
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// Edit the text of one of your own messages (by id) in a channel.
     EditMessage {
@@ -142,6 +155,37 @@ pub enum AppCommand {
     Members {
         reply: oneshot::Sender<Vec<MemberView>>,
     },
+    /// Query whether an exact DeviceId is in the live MLS roster.
+    ContainsMemberDevice {
+        device: DeviceId,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Resolve a current roster device through its self-signed PEX record.
+    MemberTransportPeer {
+        device: DeviceId,
+        reply: oneshot::Sender<Option<PeerId>>,
+    },
+    /// Open one explicit, expiring pre-member handshake-helper capability.
+    AuthorizeJoinHelper {
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+        inviter: DeviceId,
+        target: PeerId,
+        expires_at_ms: u64,
+        reply: oneshot::Sender<bool>,
+    },
+    /// Revoke a replaced one-time helper capability before authorizing its successor.
+    RevokeJoinHelper {
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+    },
+    /// Enable/disable the local standing protocol gate; persistence and record publication are
+    /// coordinated by the bridge.
+    SetSwitchboardOffered { offered: bool },
+    /// Query only fresh, connected and record-bound standing offers.
+    SwitchboardOffers {
+        reply: oneshot::Sender<Vec<SwitchboardOffer>>,
+    },
     /// Set this member's own profile (name + styling).
     SetProfile { profile: Profile },
     /// Pull the profile document from `peer` (e.g. right after joining).
@@ -194,6 +238,7 @@ pub enum AppCommand {
         mime: String,
         path: String,
         bytes: Vec<u8>,
+        progress: Option<mpsc::Sender<(usize, usize)>>,
         reply: oneshot::Sender<Result<String, String>>,
     },
     /// Query the shared file list.
@@ -202,6 +247,14 @@ pub enum AppCommand {
     },
     /// Query the shared file list with per-file local-availability counts + a reachable-peer flag.
     FilesView { reply: oneshot::Sender<FilesView> },
+    /// Verify every file chunk referenced by this server without network traffic.
+    StorageHealth {
+        reply: oneshot::Sender<StorageHealth>,
+    },
+    /// Re-fetch missing/unreadable file chunks, then return the verified result.
+    RepairStorage {
+        reply: oneshot::Sender<Result<StorageRepair, String>>,
+    },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
     /// Query the recent inbound join attempts this node served, newest first (operator
@@ -249,6 +302,14 @@ pub enum AppCommand {
         cid: Vec<u8>,
         idx: usize,
         reply: oneshot::Sender<ChunkResult>,
+    },
+    /// Read one window of a file's plaintext, for the media protocol: whole-file reads do not fit
+    /// a player that wants to start on the first chunk and seek by the second.
+    ReadFileRange {
+        cid: Vec<u8>,
+        start: u64,
+        max_len: usize,
+        reply: oneshot::Sender<Result<FileRange, String>>,
     },
     /// Whether the file's blob is already held locally (no network fetch needed to open it).
     FileAvailable {
@@ -390,6 +451,38 @@ pub enum AppCommand {
     },
     /// Pull the roles document from `peer` (e.g. right after joining).
     CatchUpRoles { peer: PeerId },
+    /// Query the public signed moderation history and advisory votes.
+    ModerationState {
+        reply: oneshot::Sender<ModerationState>,
+    },
+    /// Preserve a message snapshot as a signed warning (owner/admin).
+    WarnMessage {
+        channel: u128,
+        message_id: String,
+        reason: String,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Open an advisory kick case citing warnings for the same target (owner/admin).
+    CreateKickCase {
+        target: String,
+        reason: String,
+        evidence_ids: Vec<String>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Cast/replace this member identity's advisory yes/no vote.
+    CastKickVote {
+        case_id: String,
+        yes: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Owner decision; optionally runs the protocol-enforced member removal.
+    ResolveKickCase {
+        case_id: String,
+        remove: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Pull moderation history from `peer` after joining.
+    CatchUpModeration { peer: PeerId },
     /// Remove a member by fingerprint (owner only).
     RemoveMember {
         fp: String,
@@ -419,6 +512,18 @@ pub enum AppCommand {
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
         reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    /// Wrap a just-minted plain token with the inviter-signed live switchboard plan. The actor
+    /// chooses the offers; the bridge cannot inject routes.
+    WrapInviteWithSwitchboards {
+        invite: Vec<u8>,
+        reply: oneshot::Sender<Result<Vec<u8>, String>>,
+    },
+    /// Lift every outstanding transport eviction (P6). Owner/admin only. Wired **only** to the
+    /// explicit "Generate new invite" action: minting is also reached automatically by the
+    /// invite panel's self-heal, and lifting there would silently re-admit every removed member.
+    ReadmitEvictedPeers {
+        reply: oneshot::Sender<Result<(), String>>,
     },
     /// This member's origin identity on this server: its device id plus the group id.
     /// Read-only; the grant ceremony (multi-device M2) needs both to anchor the SAS
@@ -466,6 +571,8 @@ pub enum AppCommand {
 /// An event from a running server actor to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
+    /// The shared channel directory changed; the UI should re-fetch it (`channels`).
+    ChannelsUpdated,
     /// A channel's message list changed; the UI should re-fetch it (`messages`). Using
     /// a re-fetch signal (rather than diffed deltas) keeps ordering robust under CRDT
     /// merges of concurrent messages.
@@ -491,12 +598,17 @@ pub enum AppEvent {
     WikiUpdated,
     /// Member roles changed; the UI should re-fetch roles.
     RolesUpdated,
+    /// Signed moderation evidence/cases/votes changed.
+    ModerationUpdated,
     /// The advisory eclipse verdict changed: `true` = the node may be isolated (verify a member
     /// out of band). Surfaced as a UI hint; never gates anything.
     EclipseChanged { caution: bool },
     /// The set of members reachable right now (a live connection) changed; `online` is their
     /// fingerprints, for the roster's presence indicators + the file-availability hint.
     ConnectivityChanged { online: Vec<String> },
+    /// The fresh, connected standing-switchboard offer set changed or expired. The UI should
+    /// re-fetch its typed status instead of retaining an old host indefinitely.
+    SwitchboardsChanged,
     /// Delivery state changed for this device's recent messages in `channel` (oldest first).
     /// Recomputed at most once a second per channel and emitted only on a real change, so a UI
     /// can render it directly without polling.
@@ -520,6 +632,41 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    /// Create a channel in the shared directory.
+    pub async fn create_channel(&self, name: impl Into<String>) -> Result<ChannelInfo, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::CreateChannel {
+                name: name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Read the shared channel directory.
+    pub async fn channels(&self) -> Vec<ChannelInfo> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::Channels { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Pull the shared channel directory from `peer` after joining.
+    pub async fn catch_up_channel_index(&self, peer: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::CatchUpChannelIndex { peer })
+            .await;
+    }
+
     /// Open a channel and wait until it is subscribed.
     pub async fn open_channel(&self, channel: u128) {
         let (ack, done) = oneshot::channel();
@@ -533,16 +680,9 @@ impl ServerActor {
         }
     }
 
-    /// Send a chat message to a channel (fire-and-forget; a `ChannelUpdated` event follows).
+    /// Send a chat message to a channel; a `ChannelUpdated` event follows on success.
     pub async fn send_message(&self, channel: u128, text: impl Into<String>) {
-        let _ = self
-            .cmd_tx
-            .send(AppCommand::SendMessage {
-                channel,
-                text: text.into(),
-                reply_to: String::new(),
-            })
-            .await;
+        let _ = self.send_reply(channel, text, String::new()).await;
     }
 
     /// Send a chat message replying to `reply_to` (the parent message's id).
@@ -551,15 +691,22 @@ impl ServerActor {
         channel: u128,
         text: impl Into<String>,
         reply_to: impl Into<String>,
-    ) {
-        let _ = self
+    ) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
             .cmd_tx
             .send(AppCommand::SendMessage {
                 channel,
                 text: text.into(),
                 reply_to: reply_to.into(),
+                reply,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Edit the text of one of your own messages (by id) in a channel.
@@ -831,6 +978,23 @@ impl ServerActor {
             .unwrap_or_else(|_| Err("server actor dropped".into()))
     }
 
+    /// Lift every outstanding transport eviction (owner/admin only), so a previously removed
+    /// member can reach this node to redeem an invite. Call from the **explicit** invite action
+    /// only; see `Server::readmit_evicted_peers`.
+    pub async fn readmit_evicted_peers(&self) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ReadmitEvictedPeers { reply })
+            .await
+            .is_err()
+        {
+            return Err("server actor stopped".into());
+        }
+        rx.await
+            .unwrap_or_else(|_| Err("server actor dropped".into()))
+    }
+
     /// Mint a fresh single-use invite that ALSO embeds `rendezvous` infra addrs (owner/admin only);
     /// returns the encoded `InviteToken` bytes. The caller registers the new namespace separately.
     pub async fn mint_invite_with_rendezvous(
@@ -941,6 +1105,89 @@ impl ServerActor {
         rx.await.unwrap_or_default()
     }
 
+    pub async fn contains_member_device(&self, device: DeviceId) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ContainsMemberDevice { device, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn member_transport_peer(&self, device: DeviceId) -> Option<PeerId> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MemberTransportPeer { device, reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.unwrap_or(None)
+    }
+
+    pub async fn authorize_join_helper(
+        &self,
+        joiner: PeerId,
+        invite_nonce: [u8; 16],
+        inviter: DeviceId,
+        target: PeerId,
+        expires_at_ms: u64,
+    ) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::AuthorizeJoinHelper {
+                joiner,
+                invite_nonce,
+                inviter,
+                target,
+                expires_at_ms,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn revoke_join_helper(&self, joiner: PeerId, invite_nonce: [u8; 16]) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::RevokeJoinHelper {
+                joiner,
+                invite_nonce,
+            })
+            .await;
+    }
+
+    pub async fn set_switchboard_offered(&self, offered: bool) -> Result<(), String> {
+        self.cmd_tx
+            .send(AppCommand::SetSwitchboardOffered { offered })
+            .await
+            .map_err(|_| "server stopped".to_string())
+    }
+
+    pub async fn switchboard_offers(&self) -> Vec<SwitchboardOffer> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SwitchboardOffers { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// Set this member's own profile (a `ProfilesUpdated` event follows).
     pub async fn set_profile(&self, profile: Profile) {
         let _ = self.cmd_tx.send(AppCommand::SetProfile { profile }).await;
@@ -976,6 +1223,15 @@ impl ServerActor {
         {
             return Err("server stopped".into());
         }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn wrap_invite_with_switchboards(&self, invite: Vec<u8>) -> Result<Vec<u8>, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::WrapInviteWithSwitchboards { invite, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
@@ -1100,6 +1356,19 @@ impl ServerActor {
         path: String,
         bytes: Vec<u8>,
     ) -> Result<String, String> {
+        self.add_file_with_progress(name, mime, path, bytes, None)
+            .await
+    }
+
+    /// Share a file while reporting sealed/stored chunks plus final index publication.
+    pub async fn add_file_with_progress(
+        &self,
+        name: String,
+        mime: String,
+        path: String,
+        bytes: Vec<u8>,
+        progress: Option<mpsc::Sender<(usize, usize)>>,
+    ) -> Result<String, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -1108,6 +1377,7 @@ impl ServerActor {
                 mime,
                 path,
                 bytes,
+                progress,
                 reply,
             })
             .await
@@ -1143,6 +1413,34 @@ impl ServerActor {
             return empty();
         }
         rx.await.unwrap_or_else(|_| empty())
+    }
+
+    /// Verify this server's referenced file chunks without network traffic.
+    pub async fn storage_health(&self) -> StorageHealth {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::StorageHealth { reply })
+            .await
+            .is_err()
+        {
+            return StorageHealth::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Attempt repair of missing/unreadable referenced chunks.
+    pub async fn repair_storage(&self) -> Result<StorageRepair, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::RepairStorage { reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
     /// Fetch the fingerprints of members reachable right now (presence).
@@ -1285,6 +1583,30 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::FetchFileChunk { cid, idx, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Read one window of a file's plaintext. See [`AppCommand::ReadFileRange`].
+    pub async fn read_file_range(
+        &self,
+        cid: Vec<u8>,
+        start: u64,
+        max_len: usize,
+    ) -> Result<FileRange, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ReadFileRange {
+                cid,
+                start,
+                max_len,
+                reply,
+            })
             .await
             .is_err()
         {
@@ -1524,6 +1846,107 @@ impl ServerActor {
     /// Pull the roles document from `peer`.
     pub async fn catch_up_roles(&self, peer: PeerId) {
         let _ = self.cmd_tx.send(AppCommand::CatchUpRoles { peer }).await;
+    }
+
+    /// Fetch the signed moderation history and votes.
+    pub async fn moderation_state(&self) -> ModerationState {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ModerationState { reply })
+            .await
+            .is_err()
+        {
+            return ModerationState::default();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    pub async fn warn_message(
+        &self,
+        channel: u128,
+        message_id: String,
+        reason: String,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::WarnMessage {
+                channel,
+                message_id,
+                reason,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn create_kick_case(
+        &self,
+        target: String,
+        reason: String,
+        evidence_ids: Vec<String>,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::CreateKickCase {
+                target,
+                reason,
+                evidence_ids,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn cast_kick_vote(&self, case_id: String, yes: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::CastKickVote {
+                case_id,
+                yes,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn resolve_kick_case(&self, case_id: String, remove: bool) -> Result<(), String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::ResolveKickCase {
+                case_id,
+                remove,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn catch_up_moderation(&self, peer: PeerId) {
+        let _ = self
+            .cmd_tx
+            .send(AppCommand::CatchUpModeration { peer })
+            .await;
     }
 
     /// Remove a member by fingerprint (owner only).
@@ -1845,6 +2268,21 @@ where
         // edit/delete/add all surface a `ChannelUpdated`.
         let mut counts: HashMap<u128, u64> = HashMap::new();
         let mut members = server.member_count();
+        // The directory itself is shared. Seed `general` for legacy/new servers, then open every
+        // known message document so later gossip and reconnect catch-up have somewhere to land.
+        if let Err(e) = server.open_channel_index().await {
+            tracing::warn!(error = %e, "open_channel_index failed");
+        }
+        if let Err(e) = server.create_channel("general").await {
+            tracing::warn!(error = %e, "seed general channel failed");
+        }
+        let mut last_channels = server.channels();
+        for channel in last_channels.iter().map(|c| c.id) {
+            if let Err(e) = server.open_channel(channel).await {
+                tracing::warn!(error = %e, channel, "open listed channel failed");
+            }
+            channel_changed(&server, channel, &mut counts);
+        }
         // Open the per-server profile document and seed this member's name from the
         // display name, so the roster/messages show a name immediately (the user can
         // customize color/font/effect later via SetProfile). Seed ONLY when this device has no
@@ -1906,8 +2344,15 @@ where
             tracing::warn!(error = %e, "open_roles failed");
         }
         let mut last_roles = server.roles();
+        // Moderation evidence is its own signed document so it survives edits/deletes of the live
+        // chat post and so advisory votes never share a membership authorization path.
+        if let Err(e) = server.open_moderation().await {
+            tracing::warn!(error = %e, "open_moderation failed");
+        }
+        let mut last_moderation = server.moderation_state();
         let mut last_eclipse = false;
         let mut last_online = server.online_members();
+        let mut last_switchboards = server.connected_switchboard_offers();
         let mut last_dm_requests = server.dm_requests();
         // Per channel: when delivery state was last recomputed, and what it was; the throttle
         // plus the change detector for `DeliveryChanged`.
@@ -1916,6 +2361,41 @@ where
             tokio::select! {
                 biased;
                 cmd = cmd_rx.recv() => match cmd {
+                    Some(AppCommand::CreateChannel { name, reply }) => {
+                        let res = server.create_channel(&name).await.map_err(|e| e.to_string());
+                        // The creator already opened this document as part of create_channel.
+                        // Do not immediately pull that same empty/new document from a peer: a
+                        // peer receiving the directory op may simultaneously be pulling it from
+                        // us, and the two actors would otherwise wait on each other's request.
+                        let locally_created = res.as_ref().ok().map(|channel| channel.id);
+                        let _ = reply.send(res);
+                        sync_channels(
+                            &mut server,
+                            &mut last_channels,
+                            &mut counts,
+                            &event_tx,
+                            None,
+                            locally_created,
+                        )
+                        .await;
+                    }
+                    Some(AppCommand::Channels { reply }) => {
+                        let _ = reply.send(server.channels());
+                    }
+                    Some(AppCommand::CatchUpChannelIndex { peer }) => {
+                        if let Err(e) = server.request_channel_index_catchup(peer).await {
+                            tracing::warn!(error = %e, "channel directory catch-up failed");
+                        }
+                        sync_channels(
+                            &mut server,
+                            &mut last_channels,
+                            &mut counts,
+                            &event_tx,
+                            Some(peer),
+                            None,
+                        )
+                        .await;
+                    }
                     Some(AppCommand::OpenChannel { channel, ack }) => {
                         if let Err(e) = server.open_channel(channel).await {
                             tracing::warn!(error = %e, channel, "open_channel failed");
@@ -1932,11 +2412,18 @@ where
                         channel,
                         text,
                         reply_to,
+                        reply,
                     }) => {
-                        if let Err(e) = server.send_reply(channel, &text, &reply_to).await {
+                        let res = server
+                            .send_reply(channel, &text, &reply_to)
+                            .await
+                            .map_err(|e| e.to_string());
+                        if let Err(e) = &res {
                             tracing::warn!(error = %e, channel, "send_message failed");
                         }
-                        if channel_changed(&server, channel, &mut counts) {
+                        let changed = res.is_ok() && channel_changed(&server, channel, &mut counts);
+                        let _ = reply.send(res);
+                        if changed {
                             let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
                         }
                     }
@@ -2075,6 +2562,38 @@ where
                     Some(AppCommand::Members { reply }) => {
                         let _ = reply.send(server.members_view());
                     }
+                    Some(AppCommand::ContainsMemberDevice { device, reply }) => {
+                        let _ = reply.send(server.contains_member_device(&device));
+                    }
+                    Some(AppCommand::MemberTransportPeer { device, reply }) => {
+                        let _ = reply.send(server.member_transport_peer(&device));
+                    }
+                    Some(AppCommand::AuthorizeJoinHelper {
+                        joiner,
+                        invite_nonce,
+                        inviter,
+                        target,
+                        expires_at_ms,
+                        reply,
+                    }) => {
+                        let _ = reply.send(server.authorize_join_helper(
+                            joiner,
+                            invite_nonce,
+                            inviter,
+                            target,
+                            expires_at_ms,
+                        ));
+                    }
+                    Some(AppCommand::RevokeJoinHelper {
+                        joiner,
+                        invite_nonce,
+                    }) => server.revoke_join_helper(joiner, invite_nonce),
+                    Some(AppCommand::SetSwitchboardOffered { offered }) => {
+                        server.set_switchboard_offered(offered);
+                    }
+                    Some(AppCommand::SwitchboardOffers { reply }) => {
+                        let _ = reply.send(server.connected_switchboard_offers());
+                    }
                     Some(AppCommand::SetProfile { profile }) => {
                         if let Err(e) = server.set_profile(profile).await {
                             tracing::warn!(error = %e, "set_profile failed");
@@ -2157,12 +2676,17 @@ where
                             let _ = event_tx.send(AppEvent::DevicesUpdated).await;
                         }
                     }
-                    Some(AppCommand::AddFile { name, mime, path, bytes, reply }) => {
+                    Some(AppCommand::AddFile { name, mime, path, bytes, progress, reply }) => {
                         let res = server
-                            .add_file(&name, &mime, &path, &bytes)
+                            .add_file_with_progress(&name, &mime, &path, &bytes, progress.as_ref())
                             .await
                             .map(|cid| cid.to_hex())
                             .map_err(|e| e.to_string());
+                        // Close the progress stream before resolving the command. The desktop
+                        // bridge drains that stream before returning from its invoke; retaining
+                        // this sender until the end of the arm can otherwise leave the transfer
+                        // UI waiting behind an unrelated (and potentially back-pressured) event.
+                        drop(progress);
                         let _ = reply.send(res);
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
@@ -2173,6 +2697,13 @@ where
                     }
                     Some(AppCommand::FilesView { reply }) => {
                         let _ = reply.send(server.files_view());
+                    }
+                    Some(AppCommand::StorageHealth { reply }) => {
+                        let _ = reply.send(server.storage_health());
+                    }
+                    Some(AppCommand::RepairStorage { reply }) => {
+                        let res = server.repair_storage().await.map_err(|e| e.to_string());
+                        let _ = reply.send(res);
                     }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
@@ -2234,6 +2765,21 @@ where
                         let res = match <[u8; 32]>::try_from(cid.as_slice()) {
                             Ok(arr) => server
                                 .fetch_file_chunk(&Cid::from_bytes(arr), idx)
+                                .await
+                                .map_err(|e| e.to_string()),
+                            Err(_) => Err("bad content address".to_string()),
+                        };
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::ReadFileRange {
+                        cid,
+                        start,
+                        max_len,
+                        reply,
+                    }) => {
+                        let res = match <[u8; 32]>::try_from(cid.as_slice()) {
+                            Ok(arr) => server
+                                .read_file_range(&Cid::from_bytes(arr), start, max_len)
                                 .await
                                 .map_err(|e| e.to_string()),
                             Err(_) => Err("bad content address".to_string()),
@@ -2359,6 +2905,9 @@ where
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
                         }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
                     }
                     Some(AppCommand::CatchUpRoles { peer }) => {
                         if let Err(e) = server.request_roles_catchup(peer).await {
@@ -2366,6 +2915,75 @@ where
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ModerationState { reply }) => {
+                        let _ = reply.send(server.moderation_state());
+                    }
+                    Some(AppCommand::WarnMessage {
+                        channel,
+                        message_id,
+                        reason,
+                        reply,
+                    }) => {
+                        let res = server
+                            .warn_message(channel, &message_id, &reason)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CreateKickCase {
+                        target,
+                        reason,
+                        evidence_ids,
+                        reply,
+                    }) => {
+                        let res = server
+                            .create_kick_case(&target, &reason, &evidence_ids)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CastKickVote { case_id, yes, reply }) => {
+                        let res = server
+                            .cast_kick_vote(&case_id, yes)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::ResolveKickCase { case_id, remove, reply }) => {
+                        let res = server
+                            .resolve_kick_case(&case_id, remove)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
+                        let mc = server.member_count();
+                        if mc != members {
+                            members = mc;
+                            let _ = event_tx.send(AppEvent::MembersChanged { count: mc }).await;
+                        }
+                        if roles_changed(&server, &mut last_roles) {
+                            let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::CatchUpModeration { peer }) => {
+                        if let Err(e) = server.request_moderation_catchup(peer).await {
+                            tracing::warn!(error = %e, "moderation catch-up failed");
+                        }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
                     }
                     Some(AppCommand::RevokeDevice { fp, reply }) => {
@@ -2382,6 +3000,9 @@ where
                         }
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
+                        }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
                         }
                     }
                     Some(AppCommand::ReadWikiPage { name, reply }) => {
@@ -2536,7 +3157,16 @@ where
                             )
                             .await
                             {
-                                Ok(Ok(_)) => {}
+                                Ok(Ok(_)) => {
+                                    // The role offer uses its own additive request kind so old
+                                    // peers remain PEX-compatible. It is best-effort and bounded
+                                    // by the same per-peer deadline as PEX.
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_millis(PEX_REQUEST_MS),
+                                        server.request_switchboard_offer(peer),
+                                    )
+                                    .await;
+                                }
                                 Ok(Err(e)) => {
                                     tracing::trace!(error = %e, "PEX request failed");
                                     server.note_pex_failure(peer);
@@ -2547,8 +3177,17 @@ where
                                 }
                             }
                         }
-                        server.dial_cached_peers().await;
+                        // Fold records learned by the PEX requests above into the passive view
+                        // before dialing it. The previous order delayed a newly learned member or
+                        // dynamic-IP epoch until the *next* minute tick, even though its fresh
+                        // signature is precisely the signal that should bypass retry backoff.
                         server.cache_known_records();
+                        server.dial_cached_peers().await;
+                        let switchboards = server.connected_switchboard_offers();
+                        if switchboards != last_switchboards {
+                            last_switchboards = switchboards;
+                            let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
+                        }
                     }
                     Some(AppCommand::PublishSelfRecord { addresses, seq }) => {
                         if let Err(e) = server.publish_self_record(addresses, seq) {
@@ -2575,6 +3214,16 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
+                    Some(AppCommand::WrapInviteWithSwitchboards { invite, reply }) => {
+                        let result = server
+                            .wrap_invite_with_switchboards(&invite)
+                            .map_err(|error| error.to_string());
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::ReadmitEvictedPeers { reply }) => {
+                        let res = server.readmit_evicted_peers().map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
                     Some(AppCommand::OriginIdentity { reply }) => {
                         let _ = reply.send((server.device_id(), server.group_id()));
                     }
@@ -2594,6 +3243,15 @@ where
                 },
                 cont = server.sync_once() => match cont {
                     Ok(true) => {
+                        sync_channels(
+                            &mut server,
+                            &mut last_channels,
+                            &mut counts,
+                            &event_tx,
+                            None,
+                            None,
+                        )
+                        .await;
                         for channel in counts.keys().copied().collect::<Vec<_>>() {
                             if channel_changed(&server, channel, &mut counts) {
                                 let _ = event_tx.send(AppEvent::ChannelUpdated { channel }).await;
@@ -2629,6 +3287,9 @@ where
                         if roles_changed(&server, &mut last_roles) {
                             let _ = event_tx.send(AppEvent::RolesUpdated).await;
                         }
+                        if moderation_changed(&server, &mut last_moderation) {
+                            let _ = event_tx.send(AppEvent::ModerationUpdated).await;
+                        }
                         // Presence: emit when the set of currently-reachable members changes
                         // (a peer connected or dropped). `online_members` is sorted, so the Vec
                         // compare is order-stable.
@@ -2638,6 +3299,11 @@ where
                             let _ = event_tx
                                 .send(AppEvent::ConnectivityChanged { online })
                                 .await;
+                        }
+                        let switchboards = server.connected_switchboard_offers();
+                        if switchboards != last_switchboards {
+                            last_switchboards = switchboards;
+                            let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
                         }
                         // Delivery: a peer's inbound op may be the evidence that it received one of
                         // our messages. Recomputing walks the channel's change graph, so it is
@@ -2681,6 +3347,49 @@ where
         }
     });
     (ServerActor { cmd_tx }, event_rx, handle)
+}
+
+/// Notice channel-directory changes, subscribe newly-discovered channel documents, and recover
+/// their existing history. The catalog event is emitted only after those subscriptions exist, so
+/// clicking a channel immediately cannot race its first catch-up.
+async fn sync_channels<T, R>(
+    server: &mut Server<T, R>,
+    last: &mut Vec<ChannelInfo>,
+    sigs: &mut HashMap<u128, u64>,
+    event_tx: &mpsc::Sender<AppEvent>,
+    catchup_peer: Option<PeerId>,
+    locally_created: Option<u128>,
+) where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let next = server.channels();
+    if next == *last {
+        return;
+    }
+    let prior: std::collections::HashSet<u128> = last.iter().map(|c| c.id).collect();
+    for channel in next.iter().filter(|c| !prior.contains(&c.id)) {
+        if let Err(e) = server.open_channel(channel.id).await {
+            tracing::warn!(error = %e, channel = channel.id, "open discovered channel failed");
+            continue;
+        }
+        if locally_created != Some(channel.id) {
+            let recovered = match catchup_peer {
+                Some(peer) => server.request_channel_catchup(peer, channel.id).await,
+                None => server.request_channel_catchup_any(channel.id).await,
+            };
+            if let Err(e) = recovered {
+                tracing::warn!(
+                    error = %e,
+                    channel = channel.id,
+                    "discovered channel catch-up failed"
+                );
+            }
+        }
+        channel_changed(server, channel.id, sigs);
+    }
+    *last = next;
+    let _ = event_tx.send(AppEvent::ChannelsUpdated).await;
 }
 
 /// Whether a channel's rendered content (its messages, its topic or its jukebox) changed since
@@ -2879,6 +3588,23 @@ where
     R: CryptoRngCore,
 {
     let now = server.roles();
+    if now != *last {
+        *last = now;
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether signed moderation evidence/cases/votes changed since last seen. The document is bounded
+/// per record and returned in deterministic order, so a full comparison also catches a changed vote
+/// without relying on a count.
+fn moderation_changed<T, R>(server: &Server<T, R>, last: &mut ModerationState) -> bool
+where
+    T: MeshTransport,
+    R: CryptoRngCore,
+{
+    let now = server.moderation_state();
     if now != *last {
         *last = now;
         true
@@ -3087,6 +3813,60 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_actor_surfaces_an_inbound_call_signal_with_its_verified_sender() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        alice_srv
+            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .unwrap();
+        let alice_record = alice_srv.sync.self_record().unwrap().clone();
+        let alice_fp = alice_srv.my_fingerprint();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let mut bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        assert!(bob_srv.sync.ingest_peer_record(alice_record));
+        let bob_fp = bob_srv.my_fingerprint();
+        let (bob, _bob_events, bob_handle) = spawn(bob_srv);
+
+        let payload = br#"{"type":"offer","sdp":"opaque-to-actor"}"#.to_vec();
+        assert!(bob
+            .send_call_signal(alice_fp, payload.clone())
+            .await
+            .unwrap());
+
+        let received = timeout(Duration::from_secs(5), async {
+            loop {
+                match alice_events.recv().await {
+                    Some(AppEvent::CallSignal { from_fp, payload }) => break (from_fp, payload),
+                    Some(_) => continue,
+                    None => panic!("alice actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("Alice did not surface the call signal");
+        assert_eq!(received, (bob_fp, payload));
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn two_actors_converge_on_profiles() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
@@ -3152,8 +3932,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_founder_catches_up_a_channel_the_joiner_created() {
-        const SECRET: u128 = 0xBEEF;
+    async fn a_new_channel_and_its_messages_reach_existing_members() {
         let hub = Hub::new();
         let alice_peer = PeerId::from_u64(1);
         let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
@@ -3174,13 +3953,29 @@ mod tests {
         .unwrap();
         let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
 
-        // Bob creates a channel Alice has never opened and posts to it.
-        bob.open_channel(SECRET).await;
-        bob.send_message(SECRET, "from bob").await;
+        // Bob creates a named channel. The shared directory must make it appear for Alice and
+        // subscribe her before any message is sent; users should not need to know or manually
+        // open the channel's derived document id.
+        let plans = bob.create_channel("plans").await.unwrap();
+        timeout(Duration::from_secs(60), async {
+            loop {
+                if alice.channels().await.iter().any(|c| c == &plans) {
+                    break;
+                }
+                match alice_events.recv().await {
+                    Some(_) => continue,
+                    None => panic!("alice actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("Alice did not discover Bob's channel");
+
+        bob.send_message(plans.id, "from bob").await;
         timeout(Duration::from_secs(60), async {
             loop {
                 if bob
-                    .messages(SECRET)
+                    .messages(plans.id)
                     .await
                     .iter()
                     .any(|m| m.text == "from bob")
@@ -3196,14 +3991,11 @@ mod tests {
         .await
         .expect("bob has his own message");
 
-        // Alice opens the same channel and pulls the backlog with no named peer; the
-        // founder catching up a joiner-created channel (the symmetric case 8i could not do).
-        alice.open_channel(SECRET).await;
-        alice.catch_up_any(SECRET).await;
+        // Posting to the discovered channel must then update Alice automatically too.
         timeout(Duration::from_secs(60), async {
             loop {
                 if alice
-                    .messages(SECRET)
+                    .messages(plans.id)
                     .await
                     .iter()
                     .any(|m| m.text == "from bob")
@@ -3217,7 +4009,7 @@ mod tests {
             }
         })
         .await
-        .expect("alice caught up the joiner-created channel from the best peer");
+        .expect("Alice did not receive a message in Bob's channel");
 
         alice.shutdown().await;
         bob.shutdown().await;

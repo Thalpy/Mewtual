@@ -14,7 +14,8 @@
 //! - **ranks** peers so a member-tag-verified peer leads, then multi-source
 //!   corroboration, then a prior proven contact from the cache, then raw single-
 //!   rendezvous candidates (the junk/flood) last; but *never drops* the junk, only
-//!   sinks it,
+//!   sinks it. (The tag-verified tier is **inert in this workspace**: nothing sets
+//!   `Candidate::tag_verified`, by decision rather than omission; see that field's docs,)
 //! - counts **≤ 1 trust root per rendezvous** (two colluding rendezvous cannot
 //!   manufacture independent corroboration) and **round-robin interleaves** equal-rank
 //!   peers across their source so **a single rendezvous** flooding thousands of
@@ -65,9 +66,18 @@ pub enum Source {
     Cache,
 }
 
-/// One discovered candidate, before merging. The caller (which holds `ns_secret_L`)
-/// sets `tag_verified` by recomputing the member-only registration tag; an
-/// unverified candidate is never dropped here, only ranked last.
+/// One discovered candidate, before merging. An unverified candidate is never dropped
+/// here, only ranked last.
+///
+/// NOTE (2026-08-19): **no caller in this workspace sets `tag_verified`, and the decision is
+/// that none will.** The tag it names is never carried on the wire (see
+/// `catcoms_sync::routing_membership_tag` for why the libp2p `PeerRecord` cannot carry it and
+/// why doing so anyway would be a new disclosure), and no call site could act on it if it were:
+/// the pre-join discovery path is the only one that ranks several candidates against each other
+/// and it holds no group secret to recompute a tag with, while the post-join path feeds `plan`
+/// one candidate at a time, where a score orders nothing. The field and
+/// [`SCORE_TAG_VERIFIED`](self) stay because the ranking tier is correct and costs nothing
+/// inert; do not read them as a live signal.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     /// The peer the record names (the record's signer).
@@ -140,6 +150,9 @@ impl Default for PolicyConfig {
 /// Score weights. A tag-verified member dominates everything; otherwise more
 /// distinct trust roots rank higher, and a prior proven contact (cache) outranks a
 /// raw single-rendezvous record (the flood). Each rendezvous counts once.
+///
+/// `SCORE_TAG_VERIFIED` never fires in this workspace, because nothing sets the flag it reads;
+/// see [`Candidate::tag_verified`].
 const SCORE_TAG_VERIFIED: i64 = 1_000;
 const SCORE_PER_RENDEZVOUS: i64 = 30;
 const SCORE_PER_PEX: i64 = 50;

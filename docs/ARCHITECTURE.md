@@ -8,13 +8,15 @@ code was written), the honest residual risks, and the phased build plan.
 
 | Area | Decision |
 |------|----------|
-| Stack | Rust core (shared `rlib`+`cdylib`) + React UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
+| Stack | Rust core (shared `rlib`+`cdylib`) + Svelte 5 UI, packaged via **Tauri 2** to Linux/Windows/Android from one codebase. |
 | Group crypto | **MLS (RFC 9420)** via `openmls`, ciphersuite `0x0003` (X25519 + ChaCha20-Poly1305 + SHA-256 + Ed25519), `PrivateMessage` wire format only. One MLS group == one server/connection. Per-**device** identity (a human with N devices = N leaves). |
-| Channels | NOT separate groups; each channel/wiki/status/calendar derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
-| Delivery | Encrypted append-only **CRDT logs** (`automerge`) synced P2P. Channels, wiki, status, calendar are all CRDT documents. |
-| Networking | **rust-libp2p** (QUIC + TCP + WSS; *no WebRTC in v1*). Zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and an authenticated rendezvous. Invites embed bootstrap multiaddrs. |
+| Channels | NOT separate groups; each channel/wiki/status/calendar/moderation document derives an independent key via the MLS exporter secret + a canonical, injective `(doc_type, doc_id)` context. |
+| Delivery | Encrypted **CRDT documents** (`automerge`) synced P2P. Chat logs are append-oriented; policy documents are not assumed append-only without protocol enforcement. |
+| Networking | **rust-libp2p** (QUIC + TCP + WSS; *no WebRTC in v1*). Direct reachability uses stable ports plus best-effort **UPnP IGD, IPv4 PCP/NAT-PMP, and IPv6 PCP firewall pinholes**; zero-knowledge **circuit-relay v2 + DCUtR** hole-punching and authenticated rendezvous cover harder networks; **AutoNAT v2** performs scoped dial-back testing through explicitly enabled relay/rendezvous nodes. PCPv6 binds the exact global listener address to that interface's scoped default router, requests short leases for TCP and UDP/QUIC, and honors the router's assigned lifetime up to 24 hours. AutoNAT serving is experimental and off by default; its pre-socket guard enforces exact source/target matching, direct public-address shape, global/per-prefix/per-peer rate buckets and concurrency caps. Invites embed bootstrap multiaddrs. A 60-second `JoinReply` lets the inviter (or one explicitly authorized current-member helper) dial a joiner's validated public routes back. Separately, an opted-in current member can publish a two-minute signed **switchboard offer**; a fresh, explicitly labelled assisted invite may endorse up to three such members, and the joiner must consent before they are contacted after direct routes fail. A switchboard forwards only the admission exchange to the invite's named inviter and must catch up the exact MLS Add before becoming the joiner's first member path; it never signs/adopts the Welcome or becomes a general circuit relay. |
 | Invites | Strictly **single-use, device-bound** (one device per invite); revocable/expirable. |
-| Files | Content-addressed over **ciphertext**. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. |
+| Files | Content-addressed over **ciphertext**. Expiry default **1 month**, adjustable global → per-server → per-file; "expired" = evicted from cache / dropped from auto-share, still re-fetchable by CID. Health checks authenticate storage seals/CIDs and decrypt file refs; repair may overwrite a corrupt local record only with authenticated, CID-valid peer bytes. |
+| Moderation | One group-bound, independently signed moderation document per server. Warnings attest to bounded snapshots; kick votes are advisory; only the owner-only MLS removal path changes membership. The log is not yet protocol-enforced append-only (threat-model R7). |
+| Local continuity & backup | Drafts/read positions are bounded and vault-sealed. Backup is an opaque, non-overwriting copy of a freshly snapshotted sealed vault. Secret changes atomically rewrap the same DEK; automated restore is not implied. |
 
 ## 2. Corrections from the adversarial review (must hold in the implementation)
 
@@ -60,7 +62,32 @@ is broken. The load-bearing fixes:
 
 - **Metadata** is the dominant weakness: who-talks-to-whom, timing, group sizes, and; once
   two members hole-punch; each other's IP, are partly observable. Mitigated, not eliminated.
+  AutoNAT additionally reveals a candidate address and probe timing to its configured observer;
+  a positive is scoped to that server/address/moment and is not a universal reachability claim.
   No nation-state-grade metadata protection is promised.
+- Automatic router mapping and IPv6 firewall pinholes intentionally expose the stable TCP and UDP/QUIC libp2p listeners to
+  the internet when the local gateway grants a lease. Noise still authenticates/encrypts libp2p
+  sessions and connection limits cap strangers, but a hostile/local gateway can deny mapping or
+  report an unusable address. PCPv6 may also disclose a device-specific/privacy address, and a
+  granted pinhole does not prove the host or upstream firewall permits traffic. A mapping is
+  therefore only a candidate until AutoNAT calls that exact address back.
+- Two-way reply codes and member switchboards improve signalling/routing, but cannot create a path
+  from nothing. The first two mutually unreachable users still need a public IPv6/manual/router
+  mapping, a configured relay, or a reachable third party. Reply punching requires both apps'
+  60-second sessions to overlap and is primarily useful for QUIC; TCP simultaneous-open is not
+  claimed. Switchboard offers disclose the helper's stable identities/candidate addresses to the
+  invite recipient and disclose the joiner's IP/timing to the helper. Signed candidates are not
+  proof of address ownership or reachability.
+- Post-join discovery is self-healing only while some route survives: the desktop polls a bounded
+  set of peers with authenticated PEX, retries cached/current signed address epochs with monotonic
+  exponential backoff and jitter, and resets that delay on a new signed epoch or connection
+  lifecycle. Native route/interface notifications trigger a debounced re-sample of the kernel's
+  route-selected IPv4/IPv6 sources, while the roughly-minute pass remains a fallback. A changed
+  sample republishes one address epoch; exact route ownership prevents raw-interface removal from
+  withdrawing an identical mapping/manual/relay route. It intentionally does not merge
+  withdrawn public IPs forever because an ISP can reassign them. A fully isolated device whose current address is unknown to every peer still needs
+  out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
+  cannot manufacture a route from no contact.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals
   *after* the device is removed.
 - **Already-fetched files cannot be un-shared.**
@@ -137,6 +164,36 @@ recovery buffer/queue.
   plus the replicated InviteLedger (single-use across members) and joiner-bound
   nonces. Until then network admission is single-committer only.
 - Per-peer rate limiting / off-actor offload of join work.
+
+## 4d. Product operations and moderation plane
+
+The desktop keeps operational observations separate from protocol claims. **Storage health** walks
+the current file index and validates every manifest and referenced chunk through the storage seal,
+CID and file-layer key. One report per server is cached for the process session and augmented with a
+deduplicated category/pin/largest-file inventory; category local-byte totals remain estimates, while
+the verified ciphertext total is exact. **Repair** is an explicit network action: it re-fetches only
+missing or unreadable content from authenticated members, re-runs verification, and replaces that
+cache. **Connectivity assistant**
+reports the live peer/path evidence already available to the node; it is diagnostic and never a
+proof that every remote member or future network path is reachable.
+
+Moderation history lives in `DocType::Moderation` (stable tag 14, document id 0), not in a chat
+channel. Each event/vote has a canonical Ed25519 signature binding its semantic fields and group id.
+The app also binds the signer device to its certified member origin and interprets authority through
+the current owner-signed role state. Warning evidence therefore survives a live message edit/delete
+and is attributable to the moderator who observed it. It does not retroactively authenticate the
+message author, prove historical role state, or prevent a modified member from deleting a CRDT root
+entry; those are the explicit R7 residual. A vote can never invoke membership mutation. The owner
+must resolve a case, and removal reuses the protocol-enforced MLS Remove flow.
+
+Frontend continuity state (currently composer drafts and per-channel read marks) is stored as a
+bounded vault-sealed record rather than browser plaintext. An offline backup first snapshots live
+actors and persists the registry, then copies the already-sealed vault tree to a new destination
+without following links or overwriting an existing backup. Restore remains deliberately staged work:
+it needs a locked-vault import path, full verification, atomic swap and rollback before it can be
+safe to expose. Export creates another permanent offline guessing surface and leaves filesystem
+metadata visible. Changing the live secret atomically rewrites only the DEK wrapper; it cannot revoke
+an older export and never rotates the server/blob encryption keys.
 
 ## 5. Roadmap (test-gated, block by block)
 

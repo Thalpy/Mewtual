@@ -5,22 +5,92 @@
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onMount, tick, untrack } from "svelte";
-  import { renderMessage, renderWiki, parseRedirect, tocDirective } from "./render";
+  import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
+  import {
+    TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
+    type TextFileKind,
+  } from "./textfile";
+  import {
+    MAX_SPEAKESE_BLIPS, SPEAKESE_STEP_SECONDS, TEXT_EFFECTS, TEXT_EFFECT_GROUPS,
+    cherryBlossomShouldBurst, dismissTextEffectPalette, insertTextEffect, redTruthNoiseSample,
+    redTruthSoundPlan, speakeseSoundPlan, textEffectHtml,
+    type TextEffectPointerRegion,
+  } from "./message-effects";
+  import {
+    DEFAULT_TEXT_EFFECT_KEYBINDS, effectForKeybind, keybindConflict, keybindFromEvent,
+    sanitizeTextEffectKeybinds,
+  } from "./text-effect-keybinds";
+  import {
+    CHAT_MESSAGE_FRAMES_ENABLED, DEFAULT_MESSAGE_FRAME, defaultMessageFrameLayer, encodeMessageFrame,
+    messageFrameArrivalStyle, messageFrameLayerStyle,
+    messageFramePosition, messageFrameScanGeometry, messageFrameStyle, parseMessageFrame, visibleMessageFrameMotion,
+    visibleMessageFrameStyle, type MessageFrame, type MessageFrameArrival,
+    type MessageFrameEasing, type MessageFrameEffectId, type MessageFrameEffectOptions,
+    type MessageFrameMotion, type MessageFrameShape,
+  } from "./message-frame";
+  import {
+    CHAT_INITIAL_ROWS, CHAT_WINDOW_STEP, CoalescedAsyncRefresh, SanitizedMessageCache, initialChatWindow,
+    nearScrollBottom, reconcileChatWindow, revealNewer, revealOlder, windowAround,
+    type ChatWindow,
+  } from "./chat-performance";
+  import { chatScopeKey, reconcileActiveChannel, scopeHoldsConversation } from "./chatscope";
+  import {
+    WIKI_REVIEW_UNKNOWN,
+    mayEditWikiStructure,
+    mayPublishLivery,
+    moderationSurfaceOpen,
+    scopeCurrent,
+  } from "./viewscope";
+  import { pastedImageUrl, safeRemoteUrl } from "./remote-media";
+  import { scheduleNewsChime } from "./news-chime";
+  import { acceptTickerReceipt, messageTickerId } from "./ticker";
+  import {
+    MAX_CUSTOM_TONE_BYTES, MAX_CUSTOM_TONE_SECONDS, NOTIFICATION_SOUND_KINDS,
+    customToneError, customToneMime, defaultGlobalSoundPrefs, defaultServerSoundPrefs,
+    parseGlobalSoundPrefs, parseServerSoundPrefs, resolveNotificationSound,
+    type GlobalSoundPrefs, type NotificationSoundKind, type ServerSoundPrefs, type SoundOverride,
+    type StoredTone, type ToneOverride,
+  } from "./notification-sounds";
+  import {
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupDownload, saveSpaceGuide,
+  } from "./native-download";
+  import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
+  import {
+    driftAction, fetchPhase, isStalled, mediaKind, mediaUrl, nudgeRate, resolveCallName,
+    STALL_ANNOUNCE_MS, type FetchPhase, type MediaKind,
+  } from "./jukebox";
+  import { installUiLogging } from "./uilog";
+  import {
+    TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
+    type TransferPiece,
+  } from "./transfer-visual";
   import { plainSummary } from "./wikitext";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
   import { buildWikiTree, visibleRows, ancestorsOf } from "./wikitree";
   import { extractInfobox, infoboxTemplate } from "./infobox";
   import {
     type Connectivity, type JoinAttempt, describeOutcome, formatConnectivity, formatJoinLog,
-    reachabilitySummary,
+    automaticMappingUnavailable, connectivityReadout, connectivityStatus,
+    reachabilityEventAffectsReport, reachabilitySummary,
+    switchboardEventRefreshDecision, withOrderedConnectivity, withOrderedRefreshedInvite,
   } from "./joinlog";
   import { diffLines, diffStats, type DiffLine } from "./linediff";
   import {
-    type Placement, type SpaceState, angularOffsets, applyOffsets, clampPitch, defaultSpace,
-    lassoCapture, parseSpace, project, unproject, wrapYaw,
+    buildModerationGraph, buildModerationTimeline, filterModerationTimeline, openKickCases,
+    selectTimelineRows, timelineIdentities, voteTally, warningMap,
+    type ModerationEvent, type ModerationState, type TimelineMessage,
+  } from "./moderation";
+  import { planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity";
+  import {
+    type NameEffect, type NameEffectId, type NameEffectOptions, animatedEffect,
+    decodeNameEffects, defaultNameEffect, effectConfigured, effectEnabled, effectOptions, encodeNameEffects,
+    nameEffectClasses, nameEffectStyle,
+  } from "./name-effects";
+  import {
+    type Placement, type ScreenPoint, type SpaceCluster, type SpaceState, angularOffsets,
+    applyOffsets, autoArrangePlacements, clampPitch, defaultSpace, lassoCapturePath, parseSpace,
+    placementCentre, project, separatePlacements, unproject, wrapYaw, yawDelta,
   } from "./space";
-  import QRCode from "qrcode";
-  import jsQR from "jsqr";
   // The repo-root logo, bundled by Vite as a same-origin asset (the CSP allows img-src 'self').
   import logoUrl from "../../../assets/mewtual-logo.svg";
   // Raw rather than as URLs: inline SVG inherits currentColor, so one drawing themes itself
@@ -38,11 +108,22 @@
     STAFF_TOP, STAFF_BOT, HEAD_RX, HEAD_RY, buildSheet, scoreText,
   } from "./melody";
   import {
+    MIDI_FIXES, MIDI_SETUP_STEPS, describeMidiMessage, deviceRows, isMonitorWorthy, isPortRouted,
+    midiPortLabel, midiStatus, newMidiRouter, parseMidiMessage, pushMonitorLine, releaseAllNotes,
+    routeMidi, routedDevices,
+    type MidiDeviceRow, type MidiMonitorLine, type MidiPermission,
+  } from "./midi";
+  import {
     SIGIL_VIEW, SIGIL_C, R_INNER, R_OUTER, R_TEXT, R_EMOJI, NODE_R, LATTICE, nodeLabel, hitNode,
     appendHit, classifyGesture, encodeSigil, encodeSigilPath, segmentCount,
     sigilBits as sigilBitsOf, normalizeWord, MAX_SIGIL_EMOJI, SIGIL_COLORS, COLOR_NAMES,
     coloredCount, ringGlyphs, ringPoints, ringPathD,
   } from "./sigil";
+  import {
+    assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
+    withOrderedSwitchboardStatus,
+  } from "./joinreply";
+  import { callBarStatus, mappableIcePort, routerMappedCandidate, type MappedPort } from "./callroutes";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -61,8 +142,8 @@
   // Where a file is referenced across the server (Properties → "Used in"). `pinned` mirrors
   // `wiki_pages.length > 0`: a wiki-embedded file never drops out of circulation.
   type UiFileUsage = { wiki_pages: string[]; status_count: number; chat_count: number; event_count: number; pinned: boolean };
-  type Found = { server: number; channel: string; is_dm: boolean };
-  type Reloaded = { server: number; name: string; invite: string; channel: string; is_dm: boolean };
+  type Found = { server: number; channel: string; channels?: Channel[]; is_dm: boolean };
+  type Reloaded = { server: number; name: string; invite: string; channel: string; channels?: Channel[]; is_dm: boolean };
 
   // One server in the rail (each its own encrypted group). Per-server UI state lives here;
   // messages/roster/profiles/files are loaded for the active server on switch + events.
@@ -79,6 +160,24 @@
 
   let servers = $state<ServerState[]>([]);
   let activeServerId = $state<number | null>(null);
+  // Bumped by every move that changes WHICH group the panes show. An async refresh captures it
+  // on entry and re-checks after its awaits: a slow answer from the group you just left must
+  // never paint over the one you moved to. Channel-scoped reads pair this with the channel id,
+  // which switchTo changes without changing the group.
+  let viewGeneration = 0;
+  // True from the moment a group's panes are emptied until its first batch of reads lands. Panes
+  // whose empty state makes a CLAIM ("No messages yet", "No matching members") must consult this:
+  // an empty collection mid-switch means "not read yet", not "there is nothing".
+  let groupLoading = $state(false);
+  function beginViewSwitch(): number {
+    return ++viewGeneration;
+  }
+  // Is the captured context still the one on screen? Both halves matter: the generation catches
+  // a move away, and the server id catches a read issued for a different group at the same
+  // generation (event-driven refreshes do not bump anything).
+  function viewCurrent(gen: number, server: number | null): boolean {
+    return scopeCurrent({ generation: gen, server }, { generation: viewGeneration, server: activeServerId });
+  }
   // DM-home mode: the rail's DMs circle is active and the sidebar shows the friends/DM list. Kept in
   // sync with the active group's kind by switchServer (a DM ⇒ dmHome, a server ⇒ not).
   let dmHome = $state(false);
@@ -112,6 +211,14 @@
     return arr.sort((a, b) => key(b.id) - key(a.id));
   });
   let showAdd = $state(false); // showing the found/join form to add a server
+  let startTab = $state<"join" | "found">("join"); // which start-surface tab is open; join is the common case
+  // Roving-tabindex arrows for the start tabs: with two tabs, either arrow means "the other one".
+  function startTabArrows(e: KeyboardEvent) {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    e.preventDefault();
+    startTab = startTab === "join" ? "found" : "join";
+    document.getElementById(startTab === "join" ? "start-tab-join" : "start-tab-found")?.focus();
+  }
   let showNewDm = $state(false); // the "New DM" composer (friend name → friend code to share)
   let showAddFriend = $state(false); // the "Add friend" composer (paste a friend code)
   let dmName = $state(""); // the friend's name for a new/accepted DM
@@ -129,11 +236,26 @@
   let settingsPage = $state("appearance");
   let serverSettingsPage = $state("overview");
   let setSearch = $state("");
+  let backupBusy = $state(false);
+  let backupResult = $state<{ path: string; files: number; bytes: number; displayed: boolean; warning?: string } | null>(null);
+  async function createBackup() {
+    backupBusy = true;
+    backupResult = null;
+    try {
+      backupResult = await invoke("create_backup");
+    } catch (e) {
+      error = String(e);
+    } finally {
+      backupBusy = false;
+    }
+  }
   type SetPage = { id: string; label: string; cat: string; danger?: boolean };
   const USER_SET_PAGES: SetPage[] = [
+    { id: "guide", label: "Feature Guide", cat: "Help" },
     { id: "profile", label: "My Profile", cat: "Account" },
     { id: "devices", label: "Devices", cat: "Account" },
     { id: "vault", label: "Vault & Lock", cat: "Account" },
+    { id: "backup", label: "Backup & Recovery", cat: "Account" },
     { id: "verify", label: "Verification", cat: "Account" },
     { id: "appearance", label: "Appearance", cat: "App" },
     { id: "space", label: "Server Space", cat: "App" },
@@ -147,6 +269,7 @@
   ];
   const SRV_SET_PAGES: SetPage[] = [
     { id: "overview", label: "Overview", cat: "Overview" },
+    { id: "notifications", label: "Notifications", cat: "Overview" },
     { id: "livery", label: "Livery", cat: "Overview" },
     { id: "members", label: "Members", cat: "People" },
     { id: "badges", label: "Badges", cat: "People" },
@@ -157,6 +280,114 @@
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
   ];
+  type FeatureTarget =
+    | "dms"
+    | "feedback"
+    | "inbox"
+    | "news"
+    | "quick"
+    | "space"
+    | `surface:${"chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity"}`
+    | `settings:${string}`
+    | `server:${string}`;
+  type FeatureGuideItem = {
+    group: string;
+    title: string;
+    detail: string;
+    where: string;
+    shortcut?: string;
+    target?: FeatureTarget;
+  };
+  const FEATURE_GUIDE_GROUPS = [
+    "Conversation",
+    "Knowledge & media",
+    "People & trust",
+    "Voice & play",
+    "Community",
+    "App & network",
+  ];
+  const FEATURE_GUIDE: FeatureGuideItem[] = [
+    { group: "Conversation", title: "Channels & chat", detail: "Markdown messages, replies, reactions, editing, pins, mentions, unread marks and delivery evidence.", where: "Open a server → Chat", shortcut: "Ctrl+1", target: "surface:chat" },
+    { group: "Conversation", title: "Search", detail: "Search one channel or the whole server; filter by people, dates, media, replies, reactions and more.", where: "Chat → magnifier, or press Ctrl+F", shortcut: "Ctrl+Shift+F", target: "surface:chat" },
+    { group: "Conversation", title: "DMs & friends", detail: "Private 1:1 spaces, friend codes and authenticated in-server friend requests.", where: "Left rail → DMs", target: "dms" },
+    { group: "Conversation", title: "Inbox", detail: "Mentions and replies gathered across every server and DM, with one-click jumps to the message.", where: "Left rail → Inbox", target: "inbox" },
+    { group: "Knowledge & media", title: "Files & folders", detail: "Encrypted sharing, folders, previews, deduplication, circulation controls and usage tracking.", where: "Open a server → Files", shortcut: "Ctrl+2", target: "surface:files" },
+    { group: "Knowledge & media", title: "Transfers", detail: "Track uploads and downloads, progress, availability and the peer serving a download.", where: "Open a server → Transfers", shortcut: "Ctrl+6", target: "surface:downloads" },
+    { group: "Knowledge & media", title: "Storage health & repair", detail: "Save one integrity/inventory report per server session, inspect categories, pins and largest files, then explicitly re-fetch missing or unreadable data from authenticated peers.", where: "Server sidebar → Storage, or Transfers", target: "surface:storage" },
+    { group: "Knowledge & media", title: "Durable history UX", detail: "Channel drafts and read positions survive restarts inside the encrypted vault, alongside the server's replicated history.", where: "Chat: automatic after unlock", target: "surface:chat" },
+    { group: "Knowledge & media", title: "Wiki", detail: "Markdown or Wikitext pages, nested pages, backlinks, infoboxes, history, rollback and optional edit review.", where: "Open a server → Wiki", shortcut: "Ctrl+4", target: "surface:wiki" },
+    { group: "Knowledge & media", title: "Announcements", detail: "Post short server announcements with the same rich text and media embeds as chat.", where: "Open a server → Announcements", shortcut: "Ctrl+3", target: "surface:status" },
+    { group: "Knowledge & media", title: "News", detail: "Read recent announcements and upcoming events from every server in one feed.", where: "Left rail → Inbox → News", target: "news" },
+    { group: "Knowledge & media", title: "Events", detail: "Create shared events with times, descriptions and optional artwork.", where: "Open a server → Events", shortcut: "Ctrl+7", target: "surface:events" },
+    { group: "People & trust", title: "Profiles", detail: "Per-server names, bios, banners, animated avatars, plus studios for name effects, joined message frames and new-message motion.", where: "Profile, or Settings → My Profile", shortcut: "Ctrl+5", target: "settings:profile" },
+    { group: "People & trust", title: "Identity verification", detail: "Compare cryptographic fingerprints out of band and keep a private verified mark.", where: "Settings → Verification", target: "settings:verify" },
+    { group: "People & trust", title: "Linked devices", detail: "Grant another device access with a one-time ceremony carried by paste, QR or sound; revoke companions per server.", where: "Settings → Devices", target: "settings:devices" },
+    { group: "People & trust", title: "Vault & lock", detail: "Lock the visible session, use a passphrase, sigil or played melody, and atomically change that local vault secret after authenticating the current one.", where: "Settings → Vault & Lock", shortcut: "Ctrl+L", target: "settings:vault" },
+    { group: "Voice & play", title: "Voice, camera & screen share", detail: "Join a channel voice room, switch devices live, share a camera or screen and control each peer locally.", where: "Chat channel header → Join voice", target: "surface:chat" },
+    { group: "Voice & play", title: "Instruments & jukebox", detail: "Play the call-stage instrument from screen, keyboard or MIDI and queue shared server audio for the room.", where: "Voice stage → Instruments / Jukebox", target: "surface:chat" },
+    { group: "Voice & play", title: "MIDI controllers", detail: "Connect a music keyboard for the melody lock and the call instrument: live device list, per-port routing, a message monitor and setup help.", where: "Settings → Devices", target: "settings:devices" },
+    { group: "Community", title: "Members, roles & badges", detail: "Inspect presence and devices; owners manage admins and removals, while moderators assign display badges.", where: "Right-click server → Server settings → Members / Badges", target: "server:members" },
+    { group: "Community", title: "Moderation plane", detail: "Owners/admins inspect a per-user activity graph and signed detail timeline, issue warnings, and build evidence-backed kick cases; members vote from focused chat cards.", where: "Owner/admin: server sidebar → Moderation", target: "surface:moderation" },
+    { group: "Community", title: "Invites", detail: "Generate single-use, device-bound invites; admin admissions are serialized by the owner to avoid group forks.", where: "Right-click server → Server settings → Invites", target: "server:invites" },
+    { group: "Community", title: "Emoji & stickers", detail: "Upload server emoji at emoji, medium, large or sticker size and use them in messages or reactions.", where: "Server settings → Emoji & Stickers", target: "server:emoji" },
+    { group: "Community", title: "Server livery", detail: "Publish a safe shared palette, icon, cursor, typography and background treatment; every member can opt out.", where: "Server settings → Livery", target: "server:livery" },
+    { group: "App & network", title: "Quick switcher", detail: "Jump to channels, surfaces, servers and DMs without hunting through the rails.", where: "Anywhere in the unlocked app", shortcut: "Ctrl+K", target: "quick" },
+    { group: "App & network", title: "Server Space", detail: "Arrange servers in a navigable 360-degree room; group them into interactive neighbourhoods, search, auto-arrange, or use a custom backdrop.", where: "Left rail → Orbit", shortcut: "Ctrl+O", target: "space" },
+    { group: "App & network", title: "Appearance", detail: "Themes, accent, density, text scale, clock style, reduced motion, and local opt-outs for shared livery, message frames and arrivals.", where: "Settings → Appearance", target: "settings:appearance" },
+    { group: "App & network", title: "Connectivity & diagnostics", detail: "Configure rendezvous defaults, inspect the latest connection attempt and opt into a privacy-labelled debug log.", where: "Settings → Network / Diagnostics", target: "settings:diagnostics" },
+    { group: "App & network", title: "Connectivity assistant", detail: "See honest three-state connection evidence, live peer counts and concrete recovery suggestions without claiming unproven internet reachability.", where: "Server sidebar → Connectivity", target: "surface:connectivity" },
+    { group: "App & network", title: "Backup & recovery", detail: "Export a coherent sealed vault copy while seeing the offline-guessing, metadata and old-secret exposure tradeoffs. Automated restore remains staged follow-up work.", where: "Settings → Backup & Recovery", target: "settings:backup" },
+    { group: "App & network", title: "Signed updates", detail: "Check for a newer signed release and choose whether to install, defer or skip it.", where: "Settings → Updates", target: "settings:updates" },
+    { group: "App & network", title: "Feedback", detail: "Open a pre-filled bug report or feature request for review before submitting, or copy it to send another way.", where: "Left rail → Feedback", target: "feedback" },
+  ];
+  let featureQuery = $state("");
+  let filteredFeatures = $derived.by(() => {
+    const q = featureQuery.trim().toLowerCase();
+    if (!q) return FEATURE_GUIDE;
+    return FEATURE_GUIDE.filter((item) =>
+      `${item.group} ${item.title} ${item.detail} ${item.where} ${item.shortcut ?? ""}`.toLowerCase().includes(q),
+    );
+  });
+
+  function openFeatureTarget(target: FeatureTarget) {
+    if (target.startsWith("settings:")) {
+      settingsPage = target.slice("settings:".length);
+      setSearch = "";
+      return;
+    }
+    if (target.startsWith("server:")) {
+      if (!cur || cur.isDm || activeServerId === null) {
+        toast("Open a server first to use its settings", "info", 3500);
+        return;
+      }
+      showSettings = false;
+      void openServerSettings(null, target.slice("server:".length));
+      return;
+    }
+    if (target.startsWith("surface:")) {
+      if (activeServerId === null) {
+        toast("Open a server or DM first", "info", 3000);
+        return;
+      }
+      if (target === "surface:moderation" && !canModerate) {
+        toast("Moderation is available to this server's owner and admins", "info", 3500);
+        return;
+      }
+      showSettings = false;
+      switchView(target.slice("surface:".length) as Tab);
+      return;
+    }
+    showSettings = false;
+    if (target === "dms") enterDmHome();
+    else if (target === "inbox") openInbox();
+    else if (target === "news") {
+      openInbox();
+      inboxMode = "news";
+      loadNews();
+    } else if (target === "quick") openQuickSwitch();
+    else if (target === "space" && !spaceOpen) toggleSpace();
+    else if (target === "feedback") showFeedback = true;
+  }
   // One filter for both sidebars: category headers only survive while a page of theirs does.
   function filterPages(pages: SetPage[], q: string): SetPage[] {
     const n = q.trim().toLowerCase();
@@ -169,14 +400,29 @@
   }
 
   function openServerSettings(id: number | null = null, page: string = serverSettingsPage) {
-    if (id !== null && id !== activeServerId) switchServer(id);
+    const targetServer = id ?? activeServerId;
+    // switchServer runs synchronously as far as its first await, so `cur` below already names the
+    // target. It also empties `livery` on the way past and refills it a round-trip later, which is
+    // why the editor draft is seeded from liveryLoaded rather than from `livery` directly.
+    if (id !== null && id !== activeServerId) void switchServer(id);
     serverNameDraft = cur?.name ?? "";
-    // The draft never carries the images: set_livery ignores them (set_server_icon /
-    // set_server_cursor own those fields).
-    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
     serverSettingsPage = page;
     setSearch = "";
     showServerSettings = true;
+    // The draft never carries the images: set_livery ignores them (set_server_icon /
+    // set_server_cursor own those fields). It is seeded ONLY from a livery we have read: the
+    // wrench is reachable mid-switch, and seeding from an unread livery would present the default
+    // theme as this server's own, one Publish away from erasing the real one for every member.
+    liveryDraft = emptyLivery();
+    liveryDraftFor = null;
+    if (liveryLoaded && targetServer !== null) seedLiveryDraft(targetServer);
+    // Deliberately no invite fetch here: the stored invite stays hidden until the user generates
+    // one (get_invite re-wraps helper plans, and showing a code nobody asked for invites stale
+    // copies). The precheck is read-only: it only answers "what could an invite reach right now?".
+    if (page === "invites" && targetServer !== null) {
+      inviteRevealed = null;
+      void precheckInviteRoutes(targetServer);
+    }
   }
   async function renameServer() {
     const name = serverNameDraft.trim();
@@ -189,26 +435,97 @@
     }
   }
   let showFeedback = $state(false); // the Send-feedback overlay
-  let feedbackKind = $state<"bug" | "feature">("bug");
-  let feedbackTitle = $state("");
-  let feedbackText = $state("");
-  let feedbackCopied = $state(false);
-  let feedbackOpened = $state(false);
-  // Notification-sound preference (wired to actual playback in 10g), persisted locally.
+  type FeedbackOverlayComponent = (typeof import("./FeedbackOverlay.svelte"))["default"];
+  let FeedbackOverlay = $state<FeedbackOverlayComponent | null>(null);
+  let feedbackOverlayLoading = false;
+  let feedbackOverlayError = $state("");
+  async function loadFeedbackOverlay() {
+    if (FeedbackOverlay || feedbackOverlayLoading) return;
+    feedbackOverlayLoading = true;
+    feedbackOverlayError = "";
+    try {
+      FeedbackOverlay = (await import("./FeedbackOverlay.svelte")).default;
+    } catch (cause) {
+      feedbackOverlayError = String(cause);
+    } finally {
+      feedbackOverlayLoading = false;
+    }
+  }
+  $effect(() => {
+    if (showFeedback && !FeedbackOverlay) void loadFeedbackOverlay();
+  });
+  // Notification sound policy is entirely local. The master preserves the original one-switch
+  // behavior; category defaults and per-server overrides refine it without publishing preferences
+  // to peers or changing any server document.
   let soundOn = $state(typeof localStorage !== "undefined" ? localStorage.getItem("catcoms.sound") !== "off" : true);
+  const GLOBAL_SOUND_PREFS_KEY = "catcoms.sound.preferences.v1";
+  const serverSoundPrefsKey = (server: number) => `catcoms.sound.server.${server}.v1`;
+  function loadGlobalSoundPrefs(): GlobalSoundPrefs {
+    try { return parseGlobalSoundPrefs(localStorage.getItem(GLOBAL_SOUND_PREFS_KEY)); }
+    catch { return defaultGlobalSoundPrefs(); }
+  }
+  function readServerSoundPrefs(server: number): ServerSoundPrefs {
+    try { return parseServerSoundPrefs(localStorage.getItem(serverSoundPrefsKey(server))); }
+    catch { return defaultServerSoundPrefs(); }
+  }
+  let globalSoundPrefs = $state<GlobalSoundPrefs>(loadGlobalSoundPrefs());
+  let serverSoundPrefs = $state<ServerSoundPrefs>(defaultServerSoundPrefs());
+  const SOUND_LABELS: Record<NotificationSoundKind, { title: string; detail: string }> = {
+    message: { title: "Messages", detail: "Ordinary message notifications" },
+    mention: { title: "Mentions & replies", detail: "Messages specifically aimed at you" },
+    news: { title: "News ticker", detail: "Announcement, wiki, event, and ticker headline cue" },
+  };
   function toggleSound() {
     soundOn = !soundOn;
     try { localStorage.setItem("catcoms.sound", soundOn ? "on" : "off"); } catch { /* ignore */ }
+  }
+  function saveGlobalSoundPrefs() {
+    try { localStorage.setItem(GLOBAL_SOUND_PREFS_KEY, JSON.stringify(globalSoundPrefs)); }
+    catch { toast("Could not save sound settings: custom tones may be too large", "err", 4500); }
+  }
+  function loadServerSoundPreferences(server: number | null) {
+    serverSoundPrefs = server === null ? defaultServerSoundPrefs() : readServerSoundPrefs(server);
+  }
+  function saveServerSoundPrefs() {
+    if (activeServerId === null) return;
+    try { localStorage.setItem(serverSoundPrefsKey(activeServerId), JSON.stringify(serverSoundPrefs)); }
+    catch { toast("Could not save this server's sound settings", "err", 4500); }
+  }
+  function setGlobalSoundEnabled(kind: NotificationSoundKind, enabled: boolean) {
+    globalSoundPrefs[kind].enabled = enabled;
+    saveGlobalSoundPrefs();
+  }
+  function setGlobalToneMode(kind: NotificationSoundKind, tone: "default" | "crunch" | "custom") {
+    if (tone === "custom" && !globalSoundPrefs[kind].custom) return;
+    globalSoundPrefs[kind].tone = tone;
+    saveGlobalSoundPrefs();
+  }
+  function setServerSoundEnabled(kind: NotificationSoundKind, enabled: SoundOverride) {
+    serverSoundPrefs[kind].enabled = enabled;
+    saveServerSoundPrefs();
+  }
+  function setServerToneMode(kind: NotificationSoundKind, tone: ToneOverride) {
+    if (tone === "custom" && !serverSoundPrefs[kind].custom) return;
+    serverSoundPrefs[kind].tone = tone;
+    saveServerSoundPrefs();
+  }
+  function soundPolicy(kind: NotificationSoundKind, server: number | null) {
+    const local = server === null
+      ? null
+      : server === activeServerId
+        ? serverSoundPrefs
+        : readServerSoundPrefs(server);
+    return resolveNotificationSound(soundOn, globalSoundPrefs, local, kind);
   }
 
   // Appearance: the whole theme is a token map in app.css; these choices only flip
   // data-attributes / one CSS variable on <html>, so they can never fork the layout.
   // Semantic colours (green=presence, gold=mentions, red=danger) are constant in every preset.
-  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string; clock: string; scale: number };
+  type Appearance = { preset: string; accent: string; density: string; chrome: string; flat: boolean; icons: string; motion: string; messageMotion: string; textEffects: string; clock: string; scale: number };
   const APPEARANCE_KEY = "catcoms.appearance";
-  // clock: "" = the locale's habit, "12"/"24" force a convention. scale: chat text size in
-  // percent (100 = the density's own base size); clamped where applied, not where stored.
-  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: true, icons: "", motion: "", clock: "", scale: 100 };
+  // clock: "" = the locale's habit, "12"/"24" force a convention. scale: whole-interface text
+  // size in percent; clamped where applied, not where stored.
+  const APPEARANCE_DEFAULT: Appearance = { preset: "", accent: "", density: "", chrome: "terminal", flat: false, icons: "", motion: "", messageMotion: "", textEffects: "", clock: "", scale: 100 };
   function loadAppearance(): Appearance {
     try {
       return { ...APPEARANCE_DEFAULT, ...JSON.parse(localStorage.getItem(APPEARANCE_KEY) ?? "{}") };
@@ -236,6 +553,21 @@
   // fresh by livery-changed events. Values are sanitized base64 (rendered as data: URLs).
   let serverIcons = $state<Record<number, string>>({});
   let liveryDraft = $state<Livery>(emptyLivery()); // Server-settings editor draft
+  // Whether `livery` holds an answer we actually read for the active server, as opposed to the
+  // empty value a switch leaves behind. An empty livery is byte-for-byte the payload that REMOVES
+  // a server's branding for every member, so nothing may publish a draft without this.
+  let liveryLoaded = $state(false);
+  let liveryDraftFor = $state<number | null>(null); // which server liveryDraft was seeded from
+  // Each server's published branding, remembered for the session: a revisit repaints once, to the
+  // right brand, instead of default-then-brand a round-trip later.
+  const liveryCache = new Map<number, Livery>();
+  // Fill an unseeded livery editor from the loaded livery. Never overwrites a seeded draft: once
+  // the editor has this server's values in it, the buffer belongs to the user.
+  function seedLiveryDraft(server: number) {
+    if (!showServerSettings || liveryDraftFor === server) return;
+    liveryDraft = { preset: livery.preset, accent: livery.accent, tokens: { ...livery.tokens }, icon: "", cursor: "" };
+    liveryDraftFor = server;
+  }
   const LIVERY_TOKENS = [
     "--bg-0", "--panel", "--bg-elev", "--border", "--border-soft",
     "--text", "--text-2", "--muted", "--faint", "--accent", "--accent-hi",
@@ -319,20 +651,42 @@
     liveryActive && !liveryOptOut && !dmHome && !inboxView && activeServerId !== null,
   );
   async function refreshLivery() {
-    if (activeServerId === null || cur?.isDm) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null || cur?.isDm) {
       livery = emptyLivery();
+      liveryCursorUrl = "";
+      liveryLoaded = server !== null; // a DM has no livery, and that is a read answer
       return;
     }
     try {
-      livery = sanitizeLivery(await invoke<Livery>("get_livery", { server: activeServerId }));
-      liveryCursorUrl = await validateCursor(livery.cursor);
+      const next = sanitizeLivery(await invoke<Livery>("get_livery", { server }));
+      if (!viewCurrent(gen, server)) return; // a late theme repaints the app in the wrong brand
+      // The brand lands before the cursor image decodes. Waiting on the decode would leave the app
+      // unbranded for its duration, and a decode that never settles would hang the whole switch.
+      liveryCache.set(server, next);
+      livery = next;
+      liveryLoaded = true;
+      seedLiveryDraft(server);
+      // Deliberately not awaited. The cursor is decoration that arrives when it arrives, whereas
+      // this function sits inside the switch barrier: validateCursor resolves an image with no
+      // timeout, so awaiting it would let one undecodable cursor hold the entire switch open.
+      void validateCursor(next.cursor).then((cursor) => {
+        if (viewCurrent(gen, server)) liveryCursorUrl = cursor;
+      });
     } catch {
+      if (!viewCurrent(gen, server)) return;
       livery = emptyLivery(); // failed/malformed reads degrade to "no livery", never an error
       liveryCursorUrl = "";
+      liveryLoaded = false; // a failed read is not "this server has no theme": refuse to publish
     }
   }
   async function publishLivery() {
     if (activeServerId === null) return;
+    if (!mayPublishLivery(liveryLoaded, liveryDraftFor, activeServerId)) {
+      toast("Still reading this server's theme: try again in a moment", "info", 3000);
+      return;
+    }
     try {
       await invoke("set_livery", {
         server: activeServerId,
@@ -519,6 +873,11 @@
     // Hover motion is personal and never livery-controllable: a server must not be able to
     // start animating a viewer's chrome. "off" is also what prefers-reduced-motion gets.
     set("motion", appearance.motion === "off" ? "off" : "");
+    const reduced = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const textEffects = appearance.textEffects === "off"
+      ? "off"
+      : appearance.textEffects === "low" || reduced ? "low" : "full";
+    set("text-effects", textEffects);
     for (const t of [...LIVERY_TOKENS, "--r", "--r-lg", "--ui", "--livery-cursor"]) el.style.removeProperty(t);
     el.removeAttribute("data-livery-pattern");
     el.removeAttribute("data-livery-cursor");
@@ -544,14 +903,11 @@
       el.style.setProperty("--accent", accent);
       el.style.setProperty("--accent-hi", `color-mix(in oklab, ${accent} 80%, white)`);
     }
-    // Chat text size: a personal multiplier on the density's own base. Never livery-controllable,
-    // and cleared first so returning the slider to 100% restores the token untouched.
-    el.style.removeProperty("--fs-msg");
-    const scale = Math.min(140, Math.max(70, appearance.scale || 100));
-    if (scale !== 100) {
-      const base = appearance.density === "compact" ? 0.78 : 0.84;
-      el.style.setProperty("--fs-msg", `${((base * scale) / 100).toFixed(3)}rem`);
-    }
+    // Scale the root rather than one chat token: menus, member names, dialogs and every other
+    // rem-sized label now follow the same accessibility preference.
+    const scale = Math.min(200, Math.max(70, appearance.scale || 100));
+    if (scale === 100) el.style.removeProperty("font-size");
+    else el.style.fontSize = `${scale}%`;
     try { localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance)); } catch { /* best-effort */ }
   });
 
@@ -561,6 +917,14 @@
   let locked = $state(true);
   let passphrase = $state("");
   let unlocking = $state(false);
+  type VaultChangeStep = "" | "current" | "new" | "confirm";
+  let vaultChangeStep = $state<VaultChangeStep>("");
+  let vaultChangeCurrent = $state("");
+  let vaultChangeFirst = $state("");
+  let vaultChangeMismatch = $state(false);
+  let vaultChangeBusy = $state(false);
+  let vaultChangeError = $state("");
+  let changingVaultSecret = $derived(vaultChangeStep !== "");
 
   // --- First run --------------------------------------------------------------------------
   // `unlock` CREATES the vault when there isn't one, so the gate cannot be one screen: on a
@@ -582,7 +946,7 @@
   let inSetup = $derived(vaultExists === false);
   // Is a secret-entry panel actually on screen? The melody game turns the whole keyboard into a
   // piano, so it must not be armed while the wizard is showing the welcome or appearance step.
-  let gateEntry = $derived(locked && (!inSetup || setupStep === "secret" || setupStep === "confirm"));
+  let gateEntry = $derived((locked || changingVaultSecret) && (!inSetup || setupStep === "secret" || setupStep === "confirm"));
 
   // Clear whichever entry surface the chosen method uses, so "enter it again" starts blank.
   function clearUnlockEntry() {
@@ -595,6 +959,81 @@
     sigilEmojis = [];
     sigilWord = "";
     melodySeq = [];
+  }
+  function beginVaultSecretChange() {
+    showSettings = false;
+    error = "";
+    vaultChangeCurrent = "";
+    vaultChangeFirst = "";
+    vaultChangeMismatch = false;
+    vaultChangeError = "";
+    vaultChangeStep = "current";
+    clearUnlockEntry();
+  }
+  function cancelVaultSecretChange() {
+    vaultChangeCurrent = "";
+    vaultChangeFirst = "";
+    vaultChangeMismatch = false;
+    vaultChangeError = "";
+    vaultChangeStep = "";
+    clearUnlockEntry();
+    settingsPage = "vault";
+    showSettings = true;
+  }
+  async function submitVaultSecretChange() {
+    const secret = unlockSecret();
+    if (!secret || vaultChangeBusy) return;
+    vaultChangeError = "";
+    if (vaultChangeStep === "current") {
+      vaultChangeCurrent = secret;
+      vaultChangeStep = "new";
+      clearUnlockEntry();
+      return;
+    }
+    if (vaultChangeStep === "new") {
+      if (secret === vaultChangeCurrent) {
+        vaultChangeError = "Choose a different secret from the current one.";
+        clearUnlockEntry();
+        return;
+      }
+      vaultChangeFirst = secret;
+      vaultChangeMismatch = false;
+      vaultChangeStep = "confirm";
+      clearUnlockEntry();
+      return;
+    }
+    if (vaultChangeStep !== "confirm") return;
+    if (secret !== vaultChangeFirst) {
+      vaultChangeMismatch = true;
+      clearUnlockEntry();
+      return;
+    }
+    vaultChangeBusy = true;
+    try {
+      await invoke("change_vault_secret", {
+        currentSecret: vaultChangeCurrent,
+        newSecret: vaultChangeFirst,
+      });
+      vaultChangeCurrent = "";
+      vaultChangeFirst = "";
+      vaultChangeMismatch = false;
+      vaultChangeStep = "";
+      clearUnlockEntry();
+      settingsPage = "vault";
+      showSettings = true;
+      toast("Vault secret changed. Existing backups still use their old secret.", "ok", 6500);
+    } catch (e) {
+      // A wrong current secret is intentionally indistinguishable from a damaged wrapper here.
+      // Drop both transient strings and restart authentication; never leave them in the form.
+      vaultChangeCurrent = "";
+      vaultChangeFirst = "";
+      vaultChangeMismatch = false;
+      vaultChangeError = `The vault secret was not changed: ${e}`;
+      vaultChangeStep = "current";
+      clearUnlockEntry();
+    } finally {
+      vaultChangeBusy = false;
+    }
   }
   // Step 1 → 2: hold what was entered and blank the surface, so the confirmation is a real
   // second performance rather than a second look at the same drawing.
@@ -1032,46 +1471,205 @@
   let sheetW = $state(560);
   let sheet = $derived(buildSheet(melodySeq, melodyRhythm, sheetW));
   let sheetText = $derived(scoreText(melodySeq, melodyRhythm));
-  // Web MIDI (Chromium/WebView2): a connected controller feeds the same pitch-class handler,
-  // so you can literally play your unlock tune. Feature-detected; denied/absent is fine.
-  let midiName = $state("");
-  let midiTried = false;
-  async function initMidi() {
-    if (midiTried) return;
-    midiTried = true;
-    try {
-      const nav = navigator as Navigator & { requestMIDIAccess?: () => Promise<MIDIAccess> };
-      if (!nav.requestMIDIAccess) return;
-      const access = await nav.requestMIDIAccess();
-      const wire = () => {
-        let name = "";
-        for (const input of access.inputs.values()) {
-          name = input.name ?? "MIDI device";
-          input.onmidimessage = (m: MIDIMessageEvent) => {
-            const d = m.data;
-            if (!d || d.length < 3) return;
-            const status = d[0] & 0xf0;
-            // Note-off is either 0x80 or a 0x90 with zero velocity: controllers disagree.
-            const isOn = status === 0x90 && d[2] > 0;
-            const isOff = status === 0x80 || (status === 0x90 && d[2] === 0);
-            // Route by surface: the melody lock while locked, the call instrument drawer while
-            // in a call. Never both, and never anywhere else.
-            if (locked && unlockMethod === "melody") {
-              if (isOn) noteOn(d[1]);
-              else if (isOff) noteOff(d[1]);
-            } else if (inCall && instOpen) {
-              if (isOn) instNoteOn(d[1]);
-              else if (isOff) instNoteOff(d[1]);
-            }
-          };
-        }
-        midiName = name;
-      };
-      access.onstatechange = wire;
-      wire();
-    } catch {
-      midiName = ""; // permission denied or no MIDI subsystem: on-screen keys remain
+  // Web MIDI (Chromium/WebView2): a connected controller feeds the same note handlers the
+  // on-screen keys do, so you can literally play your unlock tune, or the call instrument.
+  // Feature-detected; absent or refused is survivable and Settings says which it was.
+  //
+  // Everything below exists because "I plugged it in and nothing happened" was the old failure
+  // mode, and it had four separate causes:
+  //   * the request was one-shot. A dismissed prompt, a driver still enumerating, or a keyboard
+  //     plugged in a minute after launch left the whole session deaf until the app restarted.
+  //   * only the LAST input in the map kept a handler. Controllers routinely publish two or three
+  //     ports and the keys come out of exactly one of them, so it was a coin toss.
+  //   * ports reporting "disconnected" counted as the connected device, so the badge could name
+  //     hardware that had already been unplugged.
+  //   * nothing was recorded when no surface wanted the notes, so there was no way to tell
+  //     "not listening" apart from "listening, and the controller is silent".
+  // Parsing and routing themselves live in midi.ts so they can be tested; this half is the
+  // browser plumbing and the surface routing.
+  const MIDI_INPUT_KEY = "catcoms.midi.input";
+  let midiSupported = $state(typeof navigator !== "undefined" && "requestMIDIAccess" in navigator);
+  let midiAccess: MIDIAccess | null = null;
+  let midiRequested = $state(false); // access has been asked for at least once this session
+  let midiBusy = $state(false);
+  let midiFailure = $state(""); // why the last request was rejected, "" when it was not
+  let midiPermission = $state<MidiPermission>("unknown");
+  let midiDevices = $state<MidiDeviceRow[]>([]);
+  // "" routes every connected input, which is right for almost everyone. Pinning one port is the
+  // escape hatch for a controller whose second or third port is the one carrying the keys.
+  let midiInput = $state(
+    typeof localStorage !== "undefined" ? localStorage.getItem(MIDI_INPUT_KEY) ?? "" : "",
+  );
+  let midiMonitor = $state<MidiMonitorLine[]>([]); // last few messages, for the Settings monitor
+  let midiLastAt = $state(0); // when anything at all last arrived
+  let midiRealtime = $state(0); // clock/sensing packets: a live cable that is sending no notes
+  let midiSeq = 0;
+  const midiRouter = newMidiRouter();
+  let midiStat = $derived(
+    midiStatus({
+      supported: midiSupported,
+      requested: midiRequested,
+      busy: midiBusy,
+      failure: midiFailure,
+      permission: midiPermission,
+      devices: midiDevices,
+    }),
+  );
+  // The drawer and lock badges want one name: the first input actually allowed to play.
+  let midiName = $derived(routedDevices(midiDevices)[0]?.label ?? "");
+
+  /** Which surface MIDI notes belong to right now, or "" when nothing is listening for them. */
+  function midiTarget(): "melody" | "instrument" | "" {
+    if (locked && unlockMethod === "melody") return "melody";
+    if (inCall && instOpen) return "instrument";
+    return "";
+  }
+  function onMidiMessage(port: MIDIInput, event: MIDIMessageEvent) {
+    const msg = parseMidiMessage(event.data);
+    if (!msg) return;
+    const routed = isPortRouted(port, midiInput);
+    midiLastAt = Date.now();
+    if (isMonitorWorthy(msg)) {
+      midiMonitor = pushMonitorLine(midiMonitor, {
+        seq: ++midiSeq,
+        port: midiPortLabel(port),
+        text: describeMidiMessage(msg),
+        routed,
+      });
+    } else {
+      midiRealtime++; // proof of life for a cable whose keys are not reaching us
     }
+    // Filtering happens AFTER the monitor on purpose: watching the port you did not pin light up
+    // is how anyone works out which of a controller's ports carries the keys. It is applied here
+    // rather than by leaving that port unwired, so it stays listed, keeps proving itself, and can
+    // be switched to without a rescan. The router only ever sees the routed port, so a port being
+    // ignored cannot corrupt its held-note bookkeeping.
+    if (!routed) return;
+    // The router is fed even when no surface wants the notes, so held state stays truthful across
+    // a surface change. Sustain is enabled ONLY for the call instrument: see routeMidi, where the
+    // melody lock's secret would otherwise change under a held pedal.
+    const target = midiTarget();
+    for (const { note, on } of routeMidi(midiRouter, msg, target === "instrument")) {
+      if (target === "melody") {
+        if (on) noteOn(note);
+        else noteOff(note);
+      } else if (target === "instrument") {
+        if (on) instNoteOn(note);
+        else instNoteOff(note);
+      }
+    }
+  }
+  /** Lift everything MIDI believes is sounding: an unplug, a surface change, or the panic button. */
+  function releaseMidiNotes() {
+    const target = midiTarget();
+    for (const { note } of releaseAllNotes(midiRouter)) {
+      if (target === "melody") noteOff(note);
+      else if (target === "instrument") instNoteOff(note);
+    }
+  }
+  /** Wire every input we can see and rebuild the device list. Safe to call as often as we like. */
+  function wireMidi() {
+    const access = midiAccess;
+    if (!access) {
+      midiDevices = [];
+      return;
+    }
+    const wasConnected = new Set(midiDevices.filter((d) => d.connected).map((d) => d.id));
+    for (const input of access.inputs.values()) {
+      // Assigning the handler implicitly opens the port. A port whose device is currently absent
+      // stays pending and starts delivering by itself the moment that device returns, which is
+      // what makes replugging work without a rescan.
+      input.onmidimessage = (event: MIDIMessageEvent) => onMidiMessage(input, event);
+    }
+    midiDevices = deviceRows(access.inputs.values(), midiInput);
+    // A controller yanked mid-note never gets to send its note-offs. Lift them here rather than
+    // leaving a tone sounding until something else happens to clear it.
+    const lost = [...wasConnected].some((id) => !midiDevices.some((d) => d.connected && d.id === id));
+    if (lost) releaseMidiNotes();
+  }
+  /**
+   * Ask for MIDI access, or just rescan when we already have it. Retryable on purpose: the old
+   * one-shot guard is exactly why a controller connected after launch never worked.
+   */
+  async function initMidi(force = false): Promise<void> {
+    if (!midiSupported || midiBusy) return;
+    if (midiAccess && !force) {
+      wireMidi();
+      return;
+    }
+    midiBusy = true;
+    midiFailure = "";
+    try {
+      const nav = navigator as Navigator & {
+        requestMIDIAccess?: (options?: { sysex?: boolean }) => Promise<MIDIAccess>;
+      };
+      if (!nav.requestMIDIAccess) {
+        midiSupported = false;
+        return;
+      }
+      // sysex stays off: nothing here sends a device anything, and asking for it would turn a
+      // routine permission into a much scarier one for no gain.
+      const access = await nav.requestMIDIAccess({ sysex: false });
+      midiAccess = access;
+      access.onstatechange = () => wireMidi(); // hot-plug: ports appear and vanish under us
+      wireMidi();
+    } catch (e) {
+      // Refused, or no MIDI subsystem at all. Deliberately not sticky: granting it later and
+      // pressing Rescan has to work without restarting the app.
+      midiFailure = String((e as Error)?.message ?? e);
+    } finally {
+      midiRequested = true;
+      midiBusy = false;
+      void refreshMidiPermission();
+    }
+  }
+  /**
+   * Track the permission separately from the request. It can be granted or revoked outside the
+   * app, so knowing it lets the panel say "refused" instead of showing a vague failure, and lets
+   * an already-granted permission wire itself up without prompting anyone.
+   */
+  async function refreshMidiPermission(): Promise<void> {
+    try {
+      const perms = navigator.permissions as Permissions | undefined;
+      const status = await perms?.query({ name: "midi" } as PermissionDescriptor);
+      if (!status) return;
+      midiPermission = status.state as MidiPermission;
+      status.onchange = () => {
+        midiPermission = status.state as MidiPermission;
+        if (status.state === "granted") void initMidi();
+      };
+    } catch {
+      midiPermission = "unknown"; // the query is Chromium-only; not knowing is not a failure
+    }
+  }
+  /**
+   * Startup: if MIDI is already granted, connect without asking anyone anything. This is what
+   * makes an already-plugged-in keyboard play the lock screen straight away, instead of only
+   * after the instrument drawer has been opened once to trigger the old lazy request.
+   */
+  async function primeMidi(): Promise<void> {
+    if (!midiSupported) return;
+    await refreshMidiPermission();
+    if (midiPermission === "granted") void initMidi();
+  }
+  // Opening Settings → Devices rescans an existing grant so the list is never stale by the time
+  // it is looked at. It deliberately never prompts: an unasked permission stays behind the
+  // explicit button, because a permission popup nobody asked for is how people end up denying it.
+  // untrack because the rescan reads and rewrites `midiDevices`; without it the effect would
+  // depend on its own output and re-run itself until Svelte gave up. Opening the page is the
+  // trigger, nothing else.
+  $effect(() => {
+    if (showSettings && settingsPage === "devices") {
+      untrack(() => {
+        if (midiAccess) void initMidi();
+      });
+    }
+  });
+  function setMidiInput(id: string) {
+    releaseMidiNotes(); // a note held on a port that is about to stop being routed would hang
+    midiInput = id;
+    try { localStorage.setItem(MIDI_INPUT_KEY, id); } catch { /* ignore */ }
+    wireMidi(); // recompute which rows are routed
   }
   function unlockSecret(): string {
     return unlockMethod === "pass" ? passphrase : unlockMethod === "sigil" ? sigilSecret : melodySecret;
@@ -1081,16 +1679,45 @@
   // Paste remains the baseline; QR and the acoustic channel are conveniences for the same
   // strings. QR fits both legs when small enough; sound is request-leg-sized only.
   const QR_MAX_CHARS = 2600; // v40-L capacity headroom; beyond this we say "use paste"
+  type QrRenderer = { toCanvas: typeof import("qrcode").toCanvas };
+  let qrCodeLoader: Promise<QrRenderer> | null = null;
+  let qrDecoderLoader: Promise<typeof import("jsqr")> | null = null;
+  function loadQrCode() {
+    // QR is a pairing convenience rather than startup UI, so keep both sizeable codecs outside
+    // the initial webview payload. Vite emits real async chunks for these dynamic imports.
+    return (qrCodeLoader ??= import("qrcode").then((module) => {
+      // qrcode uses `export =` typings while Vite's CommonJS interop supplies `default` at
+      // runtime. Accept either shape so the lazy boundary works in tests and production builds.
+      const compatible = module as unknown as QrRenderer & { default?: QrRenderer };
+      return compatible.default ?? compatible;
+    }));
+  }
+  function loadQrDecoder() {
+    return (qrDecoderLoader ??= import("jsqr"));
+  }
   // Svelte action: render `text` as a QR into the canvas (re-renders when text changes).
   function qr(canvas: HTMLCanvasElement, text: string) {
-    const draw = (t: string) => {
+    let live = true;
+    let generation = 0;
+    const draw = async (t: string) => {
+      const current = ++generation;
       if (!t || t.length > QR_MAX_CHARS) return;
-      QRCode.toCanvas(canvas, t, { margin: 1, width: 220 }).catch(() => {});
+      try {
+        const QRCode = await loadQrCode();
+        if (!live || current !== generation || !canvas.isConnected) return;
+        await QRCode.toCanvas(canvas, t, { margin: 1, width: 220 });
+      } catch {
+        // Paste remains the baseline pairing path if the optional renderer cannot load.
+      }
     };
-    draw(text);
+    void draw(text);
     return {
       update(t: string) {
-        draw(t);
+        void draw(t);
+      },
+      destroy() {
+        live = false;
+        generation += 1;
       },
     };
   }
@@ -1106,6 +1733,9 @@
     scanTarget = into;
     scanOpen = true;
     try {
+      // Load the decoder before asking for camera access; if the optional chunk fails, no media
+      // stream is created and therefore none can be stranded outside `closeScan` cleanup.
+      const { default: decodeQr } = await loadQrDecoder();
       scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
       await tick();
       if (!scanVideoEl) throw new Error("no video element");
@@ -1119,7 +1749,7 @@
         c.height = scanVideoEl.videoHeight;
         ctx.drawImage(scanVideoEl, 0, 0);
         const img = ctx.getImageData(0, 0, c.width, c.height);
-        const hit = jsQR(img.data, img.width, img.height);
+        const hit = decodeQr(img.data, img.width, img.height);
         if (hit?.data) closeScan(hit.data);
       }, 180);
     } catch {
@@ -1308,6 +1938,10 @@
   let busy = $state(false);
   let error = $state("");
   let displayName = $state("me");
+  // The create-server product question, in product terms (see docs/design-zeroconf-reachability
+  // and the connectivity mockup): a friend circle connects members directly; a hosted community
+  // runs through a node the founder operates. Hosted maps onto the relay field below.
+  let serverMode = $state<"friends" | "hosted">("friends");
   let advertise = $state(""); // optional reachable address (LAN/public IP) for the founder
   let relay = $state(""); // optional relay-node multiaddr (zero-config NAT traversal)
   // Optional rendezvous multiaddr: when set, the founder registers there so a joiner discovers
@@ -1317,10 +1951,49 @@
     typeof localStorage !== "undefined" ? (localStorage.getItem("catcoms.rendezvous") ?? "") : ""
   );
   let joinInvite = $state(""); // pasted invite (joiner)
+  type InvitePreview = {
+    direct_routes: number;
+    rendezvous_routes: number;
+    switchboards: number;
+    expires_at_ms: number;
+  };
+  let joinPreview = $state<InvitePreview | null>(null);
+  let joinPreviewCode = $state("");
+  let joinSwitchboardConsent = $state(false);
+  type JoinReplyReady = { code: string; expires_at_ms: number; candidate_count: number };
+  let joinReplyReady = $state<JoinReplyReady | null>(null);
+  let joinReplyNow = $state(Date.now());
+  let joinReplyExpired = $derived(
+    joinReplyReady !== null && joinReplyIsExpired(joinReplyReady.expires_at_ms, joinReplyNow),
+  );
+  let joinReplyInput = $state("");
+  let joinReplyApplying = $state(false);
+  let joinReplyNeedsReplace = $state(false);
   let copied = $state(false);
   let newChannel = $state("");
 
   let messages = $state<Msg[]>([]);
+  // The actor remains the source of truth for the complete channel history. Only a bounded slice
+  // enters the DOM, which caps Svelte work, rich-media resolution, observers and layout cost in a
+  // long-running room. Sanitized HTML is cached in memory only and wiped at the lock boundary.
+  const messageRenderCache = new SanitizedMessageCache();
+  let messageWindow = $state<ChatWindow>({ start: 0, end: 0 });
+  let messageWindowScope = $state("");
+  let chatStickToBottom = $state(true);
+  let expandingMessageWindow = false;
+  let renderedMessages = $derived(messages.slice(messageWindow.start, messageWindow.end));
+  // Only rows inserted by a live update receive an arrival animation. A short-lived id set keeps
+  // history loads and ordinary re-renders still, and also lets each sender choose their motion.
+  let arrivalMessageIds = $state<Set<string>>(new Set());
+  function markMessageArrivals(ids: string[]) {
+    if (!ids.length) return;
+    arrivalMessageIds = new Set([...arrivalMessageIds, ...ids]);
+    setTimeout(() => {
+      const next = new Set(arrivalMessageIds);
+      for (const id of ids) next.delete(id);
+      arrivalMessageIds = next;
+    }, 900);
+  }
   let messagesEl = $state<HTMLUListElement | undefined>(undefined);
   // In-channel message search (Ctrl+F): match indices into the loaded messages + the current one.
   // Beyond the plain substring there's an advanced filter set (Ctrl+Shift+F): author, date range,
@@ -1590,7 +2263,31 @@
     }
   }
 
-  function scrollToMatch(msgIdx: number) {
+  function activeMessageScope(): string {
+    return activeServerId !== null && cur?.active ? chatScopeKey(activeServerId, cur.active) : "";
+  }
+  function messageDomKey(message: Msg, index: number): string {
+    // Persisted messages have immutable ids. The fallback is only for legacy rows which predate
+    // them; including the index avoids accidentally reusing DOM state between equal timestamps.
+    return message.id || `legacy:${message.ts}:${message.author}:${index}`;
+  }
+  function renderedMessage(message: Msg): string {
+    return messageRenderCache.render(
+      activeMessageScope(),
+      message.id || `legacy:${message.ts}:${message.author}`,
+      message.text,
+      message.edited,
+      myMentionName,
+      renderMessage,
+    );
+  }
+  async function ensureMessageRendered(msgIdx: number) {
+    if (msgIdx >= messageWindow.start && msgIdx < messageWindow.end) return;
+    messageWindow = windowAround(msgIdx, messages.length, CHAT_INITIAL_ROWS);
+    await tick();
+  }
+  async function scrollToMatch(msgIdx: number) {
+    await ensureMessageRendered(msgIdx);
     messagesEl?.querySelector(`[data-mi="${msgIdx}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
   // Go to a hit, following it into another channel if that's where it lives. The channel we leave
@@ -1601,10 +2298,10 @@
       chanMsgs[cur.active] = messages;
       await switchTo(h.ch, true);
       if (h.m.id) jumpToMessageId(h.m.id);
-      else scrollToMatch(h.idx); // a legacy message has no id: its index still holds
+      else void scrollToMatch(h.idx); // a legacy message has no id: its index still holds
       return;
     }
-    scrollToMatch(h.idx);
+    void scrollToMatch(h.idx);
   }
   function stepMatch(dir: number) {
     if (!searchMatches.length) return;
@@ -1621,7 +2318,7 @@
   function refilter() {
     searchPos = 0;
     const h = searchMatches[0];
-    if (h && h.ch === (cur?.active ?? "")) scrollToMatch(h.idx);
+    if (h && h.ch === (cur?.active ?? "")) void scrollToMatch(h.idx);
   }
   function clearFilters() {
     Object.assign(filters, noFilters());
@@ -1660,7 +2357,7 @@
   let quickIdx = $state(0);
   const QUICK_SURFACES: { label: string; tab: Tab }[] = [
     { label: "Files", tab: "files" },
-    { label: "Status", tab: "status" },
+    { label: "Announcements", tab: "status" },
     { label: "Wiki", tab: "wiki" },
     { label: "Events", tab: "events" },
     { label: "Transfers", tab: "downloads" },
@@ -1718,28 +2415,66 @@
     }
   }
 
-  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen, persisted
-  // to localStorage. Entering a channel snapshots the PRIOR mark as `dividerTs` (so a "New" divider
-  // renders before the first message past it), then the mark advances to the latest once loaded.
-  let readMarks = $state<Record<string, number>>(loadReadMarks());
+  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen. It and
+  // composer drafts are sealed into the unlocked vault: neither sensitive text nor reading habits
+  // fall back to plaintext browser storage.
+  let readMarks = $state<Record<string, number>>({});
   let dividerTs = $state(Number.POSITIVE_INFINITY);
-  function loadReadMarks(): Record<string, number> {
-    try {
-      return JSON.parse(localStorage.getItem("catcoms.readmarks") ?? "{}") as Record<string, number>;
-    } catch {
-      return {};
-    }
+  let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let uiStateReady = false;
+  let uiStateSaveFailed = false;
+  let uiStateLoadGeneration = 0;
+  function scheduleUiStateSave() {
+    if (!uiStateReady || locked) return;
+    clearTimeout(uiStateSaveTimer);
+    uiStateSaveTimer = setTimeout(() => {
+      const json = JSON.stringify({ version: 1, drafts, readMarks });
+      void invoke("save_ui_state", { json }).then(() => {
+        uiStateSaveFailed = false;
+      }).catch((e) => {
+        console.warn("UI continuity save failed", e);
+        if (!uiStateSaveFailed) toast("Draft/read-position save failed; this session is still usable", "err", 8000);
+        uiStateSaveFailed = true;
+      });
+    }, 250);
   }
-  function persistReadMarks() {
+  async function loadUiContinuity(generation: number) {
     try {
-      localStorage.setItem("catcoms.readmarks", JSON.stringify(readMarks));
-    } catch {
-      /* storage unavailable: read marks are best-effort */
+      let next = sanitizeUiContinuity(JSON.parse(await invoke<string>("get_ui_state")));
+      if (generation !== uiStateLoadGeneration || locked) return;
+      // Older builds kept read positions in plaintext localStorage. Migrate that one app-owned
+      // key only when the sealed record has none, and erase it only after the native save succeeds.
+      // A failed save leaves the legacy copy recoverable for the next launch.
+      try {
+        const migration = planLegacyReadMarkMigration(next, localStorage.getItem("catcoms.readmarks"));
+        if (migration.saveBeforeRemoval) {
+          await invoke("save_ui_state", {
+            json: JSON.stringify(migration.state),
+          });
+        }
+        if (migration.removeLegacy) {
+          localStorage.removeItem("catcoms.readmarks");
+        }
+        next = migration.state;
+      } catch (migrationError) {
+        console.warn("Legacy read-mark migration failed", migrationError);
+      }
+      if (generation !== uiStateLoadGeneration || locked) return;
+      drafts = next.drafts;
+      readMarks = next.readMarks;
+    } catch (e) {
+      if (generation !== uiStateLoadGeneration || locked) return;
+      console.warn("UI continuity load failed", e);
+      drafts = {};
+      readMarks = {};
+      error = `Durable history could not be authenticated and was not loaded: ${e}`;
+    } finally {
+      if (generation === uiStateLoadGeneration && !locked) uiStateReady = true;
     }
   }
   function chanKey(): string | null {
     if (activeServerId === null || !cur?.active) return null;
-    return `${activeServerId}:${cur.active}`;
+    return chatScopeKey(activeServerId, cur.active);
   }
   function captureDivider() {
     const k = chanKey();
@@ -1751,7 +2486,7 @@
     const latest = messages.reduce((a, m) => Math.max(a, m.ts), 0);
     if ((readMarks[k] ?? 0) < latest) {
       readMarks[k] = latest;
-      persistReadMarks();
+      scheduleUiStateSave();
     }
   }
   // Index of the first message newer than the read boundary (-1 if all read).
@@ -1774,8 +2509,19 @@
     const dd = String(d.getDate()).padStart(2, "0");
     return `${wd} ${d.getFullYear()}-${mm}-${dd}`;
   }
+  let messageFrameBreaks = $derived.by(() => {
+    const breaks = new Set<number>();
+    if (!CHAT_MESSAGE_FRAMES_ENABLED) return breaks;
+    if (firstUnreadIdx >= 0) breaks.add(firstUnreadIdx);
+    for (let i = 1; i < messages.length; i++) {
+      if (!sameDay(messages[i - 1].ts, messages[i].ts)) breaks.add(i);
+    }
+    return breaks;
+  });
 
   let draft = $state("");
+  let sending = $state(false);
+  let pendingSendNonce = 0;
   let members = $state(1);
   let roster = $state<Member[]>([]);
   // Fingerprints of members reachable right now (a live connection): drives the roster's online
@@ -1841,6 +2587,192 @@
   let menu = $state<{ x: number; y: number; items: MenuItem[] } | null>(null);
   let menuEl = $state<HTMLElement | undefined>();
   let composerEl = $state<HTMLTextAreaElement | undefined>();
+  let editMessageEl = $state<HTMLTextAreaElement | undefined>();
+  let announcementInputEl = $state<HTMLTextAreaElement | undefined>();
+  let profileBioEl = $state<HTMLTextAreaElement | undefined>();
+  let eventTitleEl = $state<HTMLInputElement | undefined>();
+  let eventBodyEl = $state<HTMLTextAreaElement | undefined>();
+
+  type TextEffectTarget = "chat" | "chat-edit" | "announcement" | "wiki" | "bio" | "event-title" | "event-body";
+  const TEXT_EFFECT_KEYBINDS_KEY = "catcoms.text-effect-keybinds";
+  function loadTextEffectKeybinds(): Record<string, string> {
+    try {
+      const stored = localStorage.getItem(TEXT_EFFECT_KEYBINDS_KEY);
+      return stored === null
+        ? { ...DEFAULT_TEXT_EFFECT_KEYBINDS }
+        : sanitizeTextEffectKeybinds(JSON.parse(stored));
+    } catch {
+      return { ...DEFAULT_TEXT_EFFECT_KEYBINDS };
+    }
+  }
+  let textEffectKeybinds = $state<Record<string, string>>(loadTextEffectKeybinds());
+  let textEffectTarget = $state<TextEffectTarget | null>(null);
+  let textEffectSelection = $state({ start: 0, end: 0 });
+  let textEffectBubble = $state({ x: 0, y: 0 });
+  let showTextEffectCatalog = $state(false);
+  let textEffectQuery = $state("");
+  let recordingTextEffect = $state("");
+  let textEffectKeyError = $state("");
+  let suppressTextEffectSelection = false;
+  const QUICK_TEXT_EFFECT_IDS = [
+    "shake", "wave", "sparkle", "speakese", "perfect-cherry-blossom", "red-truth",
+    "flame", "gloom", "cyber", "crt", "censor", "pride/rainbow",
+  ];
+  let quickTextEffects = $derived(TEXT_EFFECTS.filter((effect) => QUICK_TEXT_EFFECT_IDS.includes(effect.id)));
+  let filteredTextEffects = $derived.by(() => {
+    const q = textEffectQuery.trim().toLowerCase();
+    return q
+      ? TEXT_EFFECTS.filter((effect) => `${effect.label} ${effect.description} ${effect.group} ${effect.id}`.toLowerCase().includes(q))
+      : TEXT_EFFECTS;
+  });
+
+  function textEffectElement(target: TextEffectTarget): HTMLInputElement | HTMLTextAreaElement | undefined {
+    if (target === "chat") return composerEl;
+    if (target === "chat-edit") return editMessageEl;
+    if (target === "announcement") return announcementInputEl;
+    if (target === "wiki") return wikiTextarea;
+    if (target === "bio") return profileBioEl;
+    if (target === "event-title") return eventTitleEl;
+    return eventBodyEl;
+  }
+  function textEffectValue(target: TextEffectTarget): string {
+    if (target === "chat") return draft;
+    if (target === "chat-edit") return editDraft;
+    if (target === "announcement") return statusDraft;
+    if (target === "wiki") return wikiBody;
+    if (target === "bio") return pDescription;
+    if (target === "event-title") return evTitle;
+    return evBody;
+  }
+  function setTextEffectValue(target: TextEffectTarget, value: string) {
+    if (target === "chat") draft = value;
+    else if (target === "chat-edit") editDraft = value;
+    else if (target === "announcement") statusDraft = value;
+    else if (target === "wiki") { wikiBody = value; wikiDirty = true; }
+    else if (target === "bio") pDescription = value;
+    else if (target === "event-title") evTitle = value;
+    else evBody = value;
+  }
+  function captureTextEffectSelection(target: TextEffectTarget): boolean {
+    const input = textEffectElement(target);
+    if (!input) return false;
+    textEffectSelection = { start: input.selectionStart ?? 0, end: input.selectionEnd ?? 0 };
+    return true;
+  }
+  function openTextEffectCatalog(target: TextEffectTarget) {
+    if (!captureTextEffectSelection(target)) return;
+    textEffectTarget = target;
+    textEffectQuery = "";
+    showTextEffectCatalog = true;
+  }
+  function textEffectTargetLabel(target: TextEffectTarget): string {
+    return ({
+      chat: "chat message",
+      "chat-edit": "edited message",
+      announcement: "announcement",
+      wiki: "wiki prose",
+      bio: "profile bio",
+      "event-title": "event title",
+      "event-body": "event details",
+    } as Record<TextEffectTarget, string>)[target];
+  }
+  function textEffectSelectionAnchor(input: HTMLInputElement | HTMLTextAreaElement, start: number, end: number) {
+    const rect = input.getBoundingClientRect();
+    const computed = getComputedStyle(input);
+    const mirror = document.createElement("div");
+    const picked = document.createElement("span");
+    const copied = [
+      "font-family", "font-size", "font-style", "font-weight", "font-variant", "line-height",
+      "letter-spacing", "text-transform", "text-indent", "word-spacing", "tab-size",
+      "padding-top", "padding-right", "padding-bottom", "padding-left", "border-top-width",
+      "border-right-width", "border-bottom-width", "border-left-width", "box-sizing",
+    ];
+    mirror.style.position = "fixed";
+    mirror.style.left = "0";
+    mirror.style.top = "0";
+    mirror.style.width = `${rect.width}px`;
+    mirror.style.visibility = "hidden";
+    mirror.style.pointerEvents = "none";
+    mirror.style.overflow = "hidden";
+    mirror.style.whiteSpace = input instanceof HTMLInputElement ? "pre" : "pre-wrap";
+    mirror.style.overflowWrap = input instanceof HTMLInputElement ? "normal" : "break-word";
+    for (const prop of copied) mirror.style.setProperty(prop, computed.getPropertyValue(prop));
+    mirror.append(document.createTextNode(input.value.slice(0, start)));
+    picked.textContent = input.value.slice(start, end) || "\u200b";
+    mirror.append(picked, document.createTextNode(input.value.slice(end)));
+    document.body.append(mirror);
+    const mirrorRect = mirror.getBoundingClientRect();
+    const pickedRect = picked.getBoundingClientRect();
+    const x = rect.left + pickedRect.left - mirrorRect.left + pickedRect.width / 2 - input.scrollLeft;
+    const y = rect.top + pickedRect.top - mirrorRect.top - input.scrollTop - 8;
+    mirror.remove();
+    const halfPalette = Math.min(205, Math.max(0, (innerWidth - 18) / 2));
+    return {
+      x: Math.max(9 + halfPalette, Math.min(innerWidth - 9 - halfPalette, x)),
+      y: Math.max(8, Math.min(rect.bottom - 8, y)),
+    };
+  }
+  function onTextEffectSelection(target: TextEffectTarget) {
+    if (suppressTextEffectSelection || !captureTextEffectSelection(target)) return;
+    if (textEffectSelection.start === textEffectSelection.end) {
+      if (!showTextEffectCatalog && textEffectTarget === target) textEffectTarget = null;
+      return;
+    }
+    const input = textEffectElement(target);
+    if (!input) return;
+    textEffectBubble = textEffectSelectionAnchor(input, textEffectSelection.start, textEffectSelection.end);
+    textEffectTarget = target;
+    showTextEffectCatalog = false;
+  }
+  async function applyTextEffect(id: string, target = textEffectTarget) {
+    if (!target) return;
+    const wrapped = insertTextEffect(textEffectValue(target), textEffectSelection.start, textEffectSelection.end, id);
+    setTextEffectValue(target, wrapped.value);
+    showTextEffectCatalog = false;
+    textEffectTarget = null;
+    suppressTextEffectSelection = true;
+    await tick();
+    const input = textEffectElement(target);
+    input?.focus();
+    input?.setSelectionRange(wrapped.selectionStart, wrapped.selectionEnd);
+    queueMicrotask(() => { suppressTextEffectSelection = false; });
+  }
+  function activeTextEffectTarget(): TextEffectTarget | null {
+    const active = document.activeElement;
+    for (const target of ["chat", "chat-edit", "announcement", "wiki", "bio", "event-title", "event-body"] as TextEffectTarget[]) {
+      if (textEffectElement(target) === active) return target;
+    }
+    return null;
+  }
+  function setTextEffectKeybind(id: string, chord: string) {
+    const conflict = keybindConflict(textEffectKeybinds, id, chord);
+    if (conflict) { textEffectKeyError = conflict; return; }
+    textEffectKeybinds = { ...textEffectKeybinds, [id]: chord };
+    textEffectKeyError = "";
+    recordingTextEffect = "";
+    try { localStorage.setItem(TEXT_EFFECT_KEYBINDS_KEY, JSON.stringify(textEffectKeybinds)); } catch { /* best-effort */ }
+  }
+  function clearTextEffectKeybind(id: string) {
+    const next = { ...textEffectKeybinds };
+    delete next[id];
+    textEffectKeybinds = next;
+    recordingTextEffect = "";
+    textEffectKeyError = "";
+    try { localStorage.setItem(TEXT_EFFECT_KEYBINDS_KEY, JSON.stringify(next)); } catch { /* best-effort */ }
+  }
+  function resetTextEffectKeybinds() {
+    textEffectKeybinds = { ...DEFAULT_TEXT_EFFECT_KEYBINDS };
+    recordingTextEffect = "";
+    textEffectKeyError = "";
+    try { localStorage.removeItem(TEXT_EFFECT_KEYBINDS_KEY); } catch { /* best-effort */ }
+  }
+  function recordTextEffectKey(e: KeyboardEvent, id: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === "Escape") { recordingTextEffect = ""; textEffectKeyError = ""; return; }
+    const chord = keybindFromEvent(e);
+    if (chord) setTextEffectKeybind(id, chord);
+  }
 
   // Group the file list into the current folder's subfolders + files-here (folder browser).
   let folderView = $derived.by(() => {
@@ -1898,8 +2830,191 @@
   });
 
   // The main pane shows one tab at a time.
-  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events";
+  type Tab = "chat" | "files" | "status" | "wiki" | "profile" | "downloads" | "events" | "moderation" | "storage" | "connectivity";
   let view = $state<Tab>("chat");
+  type StorageHealth = {
+    listed_files: number; referenced_chunks: number; verified_chunks: number;
+    missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
+    verified_bytes: number; has_peers: boolean;
+    checked_at_ms: number; unique_files: number; logical_bytes: number;
+    local_estimated_bytes: number; pinned_files: number; pinned_logical_bytes: number;
+    pinned_local_estimated_bytes: number;
+    categories: Array<{ name: string; files: number; logical_bytes: number; local_estimated_bytes: number; pinned_files: number }>;
+    largest_files: Array<{ name: string; path: string; cid: string; mime: string; logical_bytes: number; local_estimated_bytes: number; pinned: boolean; held: number; total: number }>;
+  };
+  let storageHealth = $state<StorageHealth | null>(null);
+  // The Rust bridge is the authoritative once-per-process cache (and survives frontend HMR).
+  // This mirror avoids even an IPC round-trip when revisiting a server in this frontend mount.
+  const storageHealthCache = new Map<number, StorageHealth>();
+  let storageChecking = $state(false);
+  let storageRepairing = $state(false);
+  let storageRepairNote = $state("");
+  let storageCategoryMax = $derived(Math.max(1, ...(storageHealth?.categories ?? []).map((row) => row.local_estimated_bytes)));
+  let moderation = $state<ModerationState>({ events: [], votes: [] });
+  let moderationMessages = $state<TimelineMessage[]>([]);
+  let moderationLoading = $state(false);
+  let moderationReason = $state("");
+  let moderationSelected = $state<Set<string>>(new Set());
+  let moderationAnchor = $state("");
+  // Batch deletion is irreversible at the product layer, so require a deliberate second click.
+  // Any selection change disarms it, preventing a confirmation for one range applying to another.
+  let moderationDeleteArmed = $state(false);
+  let expandedWarnings = $state<Set<string>>(new Set());
+  let caseTarget = $state("");
+  let caseReason = $state("");
+  let caseEvidence = $state<Set<string>>(new Set());
+  let moderationUserFilter = $state("");
+  let moderationTimeline = $derived(buildModerationTimeline(moderationMessages, moderation.events));
+  let filteredModerationTimeline = $derived(filterModerationTimeline(moderationTimeline, moderationUserFilter));
+  let moderationGraph = $derived(buildModerationGraph(filteredModerationTimeline));
+  let moderationUsers = $derived.by(() => [...new Set(moderationTimeline.flatMap(timelineIdentities))]
+    .sort((a, b) => nameOf(a).localeCompare(nameOf(b))));
+  let moderationWarnings = $derived(warningMap(moderation.events));
+  let moderationCases = $derived(openKickCases(moderation.events));
+  let signedWarnings = $derived(moderation.events.filter((event) => event.kind === "warning" && event.signature_valid && event.authorized));
+
+  function warningFor(channel: string, messageId: string): ModerationEvent | undefined {
+    return moderationWarnings.get(`${channel}:${messageId}`);
+  }
+  function toggleWarning(id: string) {
+    const next = new Set(expandedWarnings);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    expandedWarnings = next;
+  }
+  function selectModerationRow(key: string, extend: boolean) {
+    const result = selectTimelineRows(
+      filteredModerationTimeline.map((row) => row.key), moderationSelected, key, moderationAnchor, extend,
+    );
+    moderationSelected = result.selected;
+    moderationAnchor = result.anchor;
+    moderationDeleteArmed = false;
+  }
+  function selectedModerationMessages(): TimelineMessage[] {
+    return filteredModerationTimeline
+      .filter((row) => row.kind === "message" && moderationSelected.has(row.key))
+      .map((row) => (row as Extract<typeof row, { kind: "message" }>).message);
+  }
+  function setModerationUserFilter(identity: string) {
+    moderationUserFilter = identity;
+    moderationSelected = new Set();
+    moderationAnchor = "";
+    moderationDeleteArmed = false;
+  }
+  // Two reads of very different cost sit behind this one name. The case/vote state is small and
+  // EVERYONE needs it, because a community vote renders in chat: it loads on every switch. The
+  // message corpus behind the privileged timeline is every message in every channel, and only the
+  // moderation surface reads it, so it loads with that surface. `withCorpus` defaults to whether
+  // the surface is actually open, which is the right answer at every existing call site.
+  async function refreshModeration(withCorpus = moderationSurfaceOpen(view, inboxView, spaceOpen)) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null || cur?.isDm) {
+      moderation = { events: [], votes: [] };
+      moderationMessages = [];
+      return;
+    }
+    const wantCorpus = withCorpus && canModerate;
+    moderationLoading = true;
+    try {
+      const [state, channelRows] = await Promise.all([
+        invoke<ModerationState>("get_moderation", { server }),
+        wantCorpus
+          ? Promise.all((cur?.channels ?? []).map(async (channel) => {
+              const rows = await invoke<Msg[]>("get_messages", { server, channel: channel.id });
+              return rows.map((message): TimelineMessage => ({
+                id: message.id, author: message.author, text: message.text, ts: message.ts,
+                channel: channel.id, channelName: channel.name,
+              }));
+            }))
+          : Promise.resolve([] as TimelineMessage[][]),
+      ]);
+      if (!viewCurrent(gen, server)) return;
+      moderation = state;
+      // Only a corpus read may replace the corpus: a light refresh must not blank the timeline out
+      // from under an open moderation surface. Losing moderator authority is the exception, and the
+      // one case the old unconditional assignment used to cover: the corpus goes with the role.
+      if (wantCorpus) moderationMessages = channelRows.flat();
+      else if (!canModerate) moderationMessages = [];
+    } catch (e) {
+      if (viewCurrent(gen, server)) error = String(e);
+    } finally {
+      // A stale call must not clear the flag for the live one; clearServerView resets it on switch.
+      if (viewCurrent(gen, server)) moderationLoading = false;
+    }
+  }
+  async function warnModerationSelection() {
+    // Captured once, not re-read per iteration: the channel and message ids come from THIS
+    // server's corpus, so a switch mid-loop would address the rest of them to a different server.
+    const server = activeServerId;
+    if (server === null || !moderationReason.trim()) return;
+    const selected = selectedModerationMessages();
+    if (!selected.length) return;
+    try {
+      for (const message of selected) {
+        await invoke("warn_message", {
+          server, channel: message.channel,
+          messageId: message.id, reason: moderationReason.trim(),
+        });
+      }
+      moderationReason = "";
+      moderationSelected = new Set();
+      moderationDeleteArmed = false;
+      await refreshModeration();
+      if (view === "chat") await refresh();
+    } catch (e) { error = String(e); }
+  }
+  async function deleteModerationSelection() {
+    const server = activeServerId; // as above: the ids belong to this server's corpus
+    if (server === null) return;
+    const selected = selectedModerationMessages();
+    if (!selected.length) return;
+    if (!moderationDeleteArmed) {
+      moderationDeleteArmed = true;
+      return;
+    }
+    try {
+      for (const message of selected) {
+        await invoke("delete_message", {
+          server, channel: message.channel, msgId: message.id,
+        });
+      }
+      moderationSelected = new Set();
+      moderationDeleteArmed = false;
+      await refreshModeration();
+      if (view === "chat") await refresh();
+    } catch (e) { error = String(e); }
+  }
+  function toggleCaseEvidence(id: string) {
+    const next = new Set(caseEvidence);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    caseEvidence = next;
+  }
+  async function openKickCase() {
+    if (activeServerId === null || !caseTarget || !caseReason.trim()) return;
+    try {
+      await invoke("create_kick_case", {
+        server: activeServerId, target: caseTarget, reason: caseReason.trim(),
+        evidenceIds: [...caseEvidence],
+      });
+      caseReason = "";
+      caseEvidence = new Set();
+      await refreshModeration();
+    } catch (e) { error = String(e); }
+  }
+  async function voteKick(caseId: string, yes: boolean) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("cast_kick_vote", { server: activeServerId, caseId, yes });
+      await refreshModeration();
+    } catch (e) { error = String(e); }
+  }
+  async function resolveKick(caseId: string, remove: boolean) {
+    if (activeServerId === null) return;
+    try {
+      await invoke("resolve_kick_case", { server: activeServerId, caseId, remove });
+      await Promise.all([refreshModeration(), refreshMembers(), refreshRoles()]);
+    } catch (e) { error = String(e); }
+  }
   let wikiPages = $state<string[]>([]);
   let wikiFilter = $state("");
   let filteredWikiPages = $derived.by(() => {
@@ -1907,6 +3022,25 @@
     return q ? wikiPages.filter((p) => p.toLowerCase().includes(q)) : wikiPages;
   });
   let wikiMap = $state<Record<string, string>>({}); // name -> body (backlinks + link existence)
+  // Which server wikiMap holds. Deliberately NOT $state: ensureWikiMap is called from the ref-card
+  // effect, and a reactive read-then-write of this inside that effect would re-trigger it forever.
+  let wikiMapFor: number | null = null;
+  // The ref cards in chat summarise a page out of wikiMap, so it is not wiki-tab-only state. It is
+  // every page's full body though, far too big for the switch barrier, so it loads once per server
+  // the first time a pane that can render cards is live. The ref-card effect tracks wikiMap, so
+  // the cards re-resolve themselves when it lands.
+  async function ensureWikiMap() {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null || wikiMapFor === server) return;
+    wikiMapFor = server; // claimed up front: the effect can re-run before the read returns
+    try {
+      const map = await invoke<Record<string, string>>("get_wiki_map", { server });
+      if (viewCurrent(gen, server)) wikiMap = map;
+    } catch {
+      if (wikiMapFor === server) wikiMapFor = null; // let a later pass retry
+    }
+  }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
   let wikiBody = $state("");
@@ -1915,6 +3049,26 @@
   let wikiEdit = $state(false); // edit (textarea) vs read (rendered) mode
   let wikiEl = $state<HTMLDivElement | undefined>(undefined); // rendered-page container (media resolve)
   let showWikiHelp = $state(false);
+  type WikiHelpOverlayComponent = (typeof import("./WikiHelpOverlay.svelte"))["default"];
+  let WikiHelpOverlay = $state<WikiHelpOverlayComponent | null>(null);
+  let wikiHelpLoading = false;
+  let wikiHelpLoadError = $state("");
+  async function loadWikiHelpOverlay() {
+    if (WikiHelpOverlay || wikiHelpLoading) return;
+    wikiHelpLoading = true;
+    wikiHelpLoadError = "";
+    try {
+      WikiHelpOverlay = (await import("./WikiHelpOverlay.svelte")).default;
+    } catch (cause) {
+      wikiHelpLoadError = String(cause);
+    } finally {
+      wikiHelpLoading = false;
+    }
+  }
+  $effect(() => {
+    // Warm this small help chunk after entering Wiki, while keeping it off the app startup path.
+    if ((view === "wiki" || showWikiHelp) && !WikiHelpOverlay) void loadWikiHelpOverlay();
+  });
   let wikiFormat = $derived(wikiMeta[activeWikiPage] === "wiki" ? "wiki" : "md");
   let wikiPreview = $state(false); // live side-by-side preview in edit mode
   let wikiPreviewEl = $state<HTMLDivElement | undefined>(undefined);
@@ -1926,7 +3080,7 @@
   // --- wiki history + edit review (11x) ---
   type UiWikiRev = { id: string; author: string; ts: number; body: string; kind: string; actor: string; note: string };
   type UiWikiPending = { id: string; page: string; author: string; ts: number; expires_ts: number; body: string };
-  let wikiReviewDays = $state(0); // server setting: 0 = edits publish immediately
+  let wikiReviewDays = $state(WIKI_REVIEW_UNKNOWN); // server setting: 0 = edits publish immediately
   let wikiPending = $state<UiWikiPending[]>([]); // the live review queue (whole server)
   let wikiHistory = $state<UiWikiRev[]>([]); // the open page's revisions, oldest first
   let showWikiHistory = $state(false); // the history browser replaces the article body
@@ -1991,6 +3145,8 @@
   let pColor = $state("#4f8cff");
   let pFont = $state("system");
   let pEffect = $state("none");
+  let pEffects = $state<NameEffect[]>([]);
+  let collapsedEffects = $state<Record<string, boolean>>({});
   let pDescription = $state("");
   let pBubble = $state("");
   let pAvatar = $state("");
@@ -2004,60 +3160,484 @@
     { id: "script", label: "Script" },
     { id: "caps", label: "Small caps" },
     { id: "rounded", label: "Rounded" },
+    { id: "cute", label: "Cute" },
     { id: "gothic", label: "Gothic" },
   ];
-  // "gradient" (the old accent-mix effect) is deliberately absent from the picker: the
-  // custom creator below covers it. Peers who still wear it keep rendering fine.
-  const NAME_EFFECTS: { id: string; label: string }[] = [
-    { id: "none", label: "Solid" },
-    { id: "neon", label: "Neon" },
-    { id: "rainbow", label: "Rainbow" },
-    { id: "wave", label: "Wave" },
-    { id: "pulse", label: "Pulse" },
-    { id: "outline", label: "Outline" },
-    { id: "retro", label: "Retro" },
-    { id: "glitch", label: "Glitch" },
+  const NAME_FONT_IDS = new Set(NAME_FONTS.map((font) => font.id));
+  const NAME_EFFECTS: { id: NameEffectId; label: string; description: string; group: "Fill" | "Motion" | "Finish" }[] = [
+    { id: "gradient", label: "Gradient", description: "A custom multi-colour fill.", group: "Fill" },
+    { id: "rainbow", label: "Rainbow", description: "A scrolling spectrum fill.", group: "Fill" },
+    { id: "shimmer", label: "Shimmer", description: "A bright sweep across the letters.", group: "Fill" },
+    { id: "candy", label: "Candy stripes", description: "Two-colour striped lettering.", group: "Fill" },
+    { id: "wave", label: "Bounce", description: "The whole name gently bobs.", group: "Motion" },
+    { id: "mexican", label: "Mexican wave", description: "Letters rise one after another.", group: "Motion" },
+    { id: "pulse", label: "Pulse", description: "The name softly fades in and out.", group: "Motion" },
+    { id: "wobble", label: "Wobble", description: "A playful side-to-side tilt.", group: "Motion" },
+    { id: "sparkle", label: "Sparkle", description: "Small highlights twinkle around the name.", group: "Finish" },
+    { id: "neon", label: "Neon", description: "A coloured glow around the letters.", group: "Finish" },
+    { id: "outline", label: "Outline", description: "A coloured edge around each letter.", group: "Finish" },
+    { id: "shadow", label: "Drop shadow", description: "A configurable shadow behind the name.", group: "Finish" },
+    { id: "retro", label: "Retro", description: "A crisp offset copy of the name.", group: "Finish" },
+    { id: "glitch", label: "Glitch", description: "A small red-and-blue colour fringe.", group: "Finish" },
+    { id: "ghost", label: "Ghost", description: "Soft, translucent frosted text.", group: "Finish" },
+    { id: "fire", label: "Fire glow", description: "A warm, flickering ember aura.", group: "Finish" },
+    { id: "extrude", label: "3D extrude", description: "Layered depth behind the letters.", group: "Finish" },
   ];
-  // Rainbow/wave/pulse are ANIMATIONS: with motion off (the Appearance toggle or the
-  // OS's reduced-motion) they freeze and look like Solid, so their tiles say so.
-  const ANIM_FX = new Set(["rainbow", "wave", "pulse"]);
+  const EFFECT_GROUPS = ["Fill", "Motion", "Finish"] as const;
+  const PUBLIC_EFFECT_IDS = new Set(NAME_EFFECTS.map((effect) => effect.id));
+  let appliedEffects = $derived(pEffects.filter((effect) => PUBLIC_EFFECT_IDS.has(effect.id)));
   const prefersStill = typeof matchMedia !== "undefined" && matchMedia("(prefers-reduced-motion: reduce)").matches;
   let fxMotionOff = $derived(appearance.motion === "off" || prefersStill);
   // Curated name colours that stay legible on the dark grounds (content, not theme).
   const NAME_COLORS = ["#977df2", "#6ca0d8", "#57c77a", "#d8a657", "#e0574b", "#e879c0", "#6ee7d8", "#c6c2d6"];
-  // Preset message-bubble backgrounds (CSS) the profile editor offers; "" = the default. All chosen
-  // dark enough for the white message text (and a text-shadow on custom bubbles backs it up).
-  const BUBBLE_PRESETS: { label: string; value: string }[] = [
-    { label: "Default", value: "" },
-    { label: "Ocean", value: "linear-gradient(135deg,#1a2980,#26415e)" },
-    { label: "Sunset", value: "linear-gradient(135deg,#c31432,#5c1020)" },
-    { label: "Forest", value: "linear-gradient(135deg,#134e5e,#1c7a4d)" },
-    { label: "Grape", value: "linear-gradient(135deg,#41295a,#5d2a6e)" },
-    { label: "Ember", value: "linear-gradient(135deg,#8a3a12,#b34700)" },
-    { label: "Rose", value: "linear-gradient(135deg,#7a1f3d,#3d1020)" },
-    { label: "Slate", value: "#3a3f4b" },
+  // Message frames preserve the existing opaque profile value for wire compatibility; the new
+  // renderer contains that colour inside the content column instead of painting the whole row.
+  const BUBBLE_PRESETS: { code: string; label: string; value: string }[] = [
+    { code: "OFF", label: "Open channel", value: "" },
+    { code: "OCN", label: "Deep sea", value: "linear-gradient(135deg,#1a2980,#26415e)" },
+    { code: "RED", label: "Redshift", value: "linear-gradient(135deg,#c31432,#5c1020)" },
+    { code: "BIO", label: "Canopy", value: "linear-gradient(135deg,#134e5e,#1c7a4d)" },
+    { code: "UV", label: "Ultraviolet", value: "linear-gradient(135deg,#41295a,#5d2a6e)" },
+    { code: "THR", label: "Furnace", value: "linear-gradient(135deg,#8a3a12,#b34700)" },
+    { code: "ROS", label: "Night rose", value: "linear-gradient(135deg,#7a1f3d,#3d1020)" },
+    { code: "GRF", label: "Graphite", value: "#3a3f4b" },
   ];
-  // Custom gradient creator. Name gradients pack 2..8 stops + an angle into the OPAQUE
-  // effect string as `grad2-rrggbb(-rrggbb)+-deg`: the backend never interprets it, and
-  // a build that predates gradients sees an unknown class and falls back to the member's
-  // flat colour (graceful, never garbled). Bubble gradients reuse the bubble channel,
-  // which already carries preset gradient strings.
-  // Optional animation suffix `-a<speed>[r]`: the gradient scrolls along its own angle
-  // (that IS the vector; `r` reverses it), speed 1..10 sets the pace. Encoded in the same
-  // opaque string, so peers on this build animate it and older builds stay flat.
-  const GRAD2_RE = /^grad2-((?:[0-9a-f]{6})(?:-[0-9a-f]{6}){1,7})-(\d{1,3})(?:-a(\d{1,2})(r?))?$/;
   const GRAD_MAX_STOPS = 8;
-  let pGradStops = $state<string[]>(["#e879c0", "#977df2"]);
-  let pGradDeg = $state(90);
-  let pGradSpeed = $state(0);
-  let pGradRev = $state(false);
-  const grad2Id = () =>
-    `grad2-${pGradStops.map((s) => s.slice(1).toLowerCase()).join("-")}-${Math.max(0, Math.min(360, pGradDeg))}` +
-    (pGradSpeed > 0 ? `-a${Math.min(10, pGradSpeed)}${pGradRev ? "r" : ""}` : "");
   const BUB_GRAD_RE = /^linear-gradient\(135deg,(#[0-9a-fA-F]{6}),(#[0-9a-fA-F]{6})\)$/;
   let pBubA = $state("#41295a");
   let pBubB = $state("#1a2980");
   const customBubble = () => `linear-gradient(135deg,${pBubA},${pBubB})`;
+  let pFrame = $derived(parseMessageFrame(pBubble));
+  let framePreviewReplay = $state(0);
+  let collapsedFrameEffects = $state<Record<string, boolean>>({});
+  const FRAME_SHAPES: { id: MessageFrameShape; code: string; label: string; description: string }[] = [
+    { id: "terminal", code: "TRM", label: "Terminal", description: "Clipped operator panel with a signal rail" },
+    { id: "bracket", code: "BRK", label: "Brackets", description: "Open targeting corners with a quiet centre" },
+    { id: "packet", code: "PKT", label: "Packet", description: "Squared data block with a header bus" },
+    { id: "holo", code: "HOL", label: "Holo", description: "Soft projected glass with a luminous edge" },
+    { id: "signal", code: "SIG", label: "Signal", description: "Minimal transmission rail and fading wash" },
+  ];
+  const FRAME_EFFECTS: { id: MessageFrameEffectId; code: string; label: string; description: string }[] = [
+    { id: "scan", code: "SCN", label: "Scan", description: "The channel's shared sweep crosses this frame" },
+    { id: "pulse", code: "PLS", label: "Pulse", description: "The signal edge breathes gently" },
+    { id: "trace", code: "TRC", label: "Trace", description: "A short telemetry trace runs the frame" },
+    { id: "flicker", code: "FLK", label: "Flicker", description: "A restrained terminal refresh flicker" },
+  ];
+  const FRAME_MOTIONS: { id: MessageFrameMotion; label: string; description: string; glyph: string }[] = [
+    { id: "none", label: "Still", description: "No entrance movement", glyph: "—" },
+    { id: "glide", label: "Glide", description: "Lift gently into place", glyph: "↑" },
+    { id: "fly", label: "Fly in", description: "Sweep in from the side", glyph: "→" },
+    { id: "pop", label: "Pop", description: "A quick soft-scale arrival", glyph: "◇" },
+    { id: "drift", label: "Drift", description: "Float diagonally into place", glyph: "↗" },
+  ];
+  const FRAME_EASINGS: { id: MessageFrameEasing; label: string; description: string }[] = [
+    { id: "soft", label: "Soft", description: "Gentle terminal easing" },
+    { id: "snappy", label: "Snappy", description: "Fast response with a firm stop" },
+    { id: "spring", label: "Spring", description: "A restrained overshoot" },
+  ];
+  function updateFrame(patch: Partial<typeof pFrame>) {
+    pBubble = encodeMessageFrame({ ...pFrame, ...patch });
+  }
+  function selectFrameEffect(id: MessageFrameEffectId) {
+    const existing = pFrame.effects.find((layer) => layer.id === id);
+    if (existing) {
+      // Same toggle contract as the name-effect tiles: off keeps the layer's settings.
+      collapsedFrameEffects[id] = false;
+      setFrameEffectEnabled(id, !existing.enabled);
+      return;
+    }
+    updateFrame({ effects: [...pFrame.effects, defaultMessageFrameLayer(id)] });
+    collapsedFrameEffects[id] = false;
+  }
+  function setFrameEffectEnabled(id: MessageFrameEffectId, enabled: boolean) {
+    updateFrame({ effects: pFrame.effects.map((layer) => layer.id === id ? { ...layer, enabled } : layer) });
+  }
+  function updateFrameEffect(id: MessageFrameEffectId, key: keyof MessageFrameEffectOptions, value: number) {
+    updateFrame({ effects: pFrame.effects.map((layer) => layer.id === id
+      ? { ...layer, options: { ...layer.options, [key]: value } }
+      : layer) });
+  }
+  function resetFrameEffect(id: MessageFrameEffectId) {
+    updateFrame({ effects: pFrame.effects.map((layer) => layer.id === id
+      ? { ...defaultMessageFrameLayer(id), enabled: layer.enabled }
+      : layer) });
+  }
+  function removeFrameEffect(id: MessageFrameEffectId) {
+    updateFrame({ effects: pFrame.effects.filter((layer) => layer.id !== id) });
+    delete collapsedFrameEffects[id];
+  }
+  function disableAllFrameEffects() {
+    updateFrame({ effects: pFrame.effects.map((layer) => ({ ...layer, enabled: false })) });
+  }
+  function moveFrameEffect(id: MessageFrameEffectId, direction: -1 | 1) {
+    const from = pFrame.effects.findIndex((layer) => layer.id === id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= pFrame.effects.length) return;
+    const effects = [...pFrame.effects];
+    [effects[from], effects[to]] = [effects[to], effects[from]];
+    updateFrame({ effects });
+  }
+  function updateFrameArrival(patch: Partial<MessageFrameArrival>) {
+    updateFrame({ arrival: { ...pFrame.arrival, ...patch } });
+  }
+  function resetMessageStudio() {
+    pBubble = "";
+    collapsedFrameEffects = {};
+  }
+  const FILL_EFFECT_IDS = new Set<NameEffectId>(["gradient", "rainbow", "shimmer", "candy"]);
+  const TRANSFORM_EFFECT_IDS = new Set<NameEffectId>(["wave", "wobble"]);
+
+  type NameStyleSnapshot = { font: string; color: string; effect: string };
+  let styleUndo = $state<NameStyleSnapshot[]>([]);
+  let styleRedo = $state<NameStyleSnapshot[]>([]);
+  let lastStyleHistoryKey = "";
+  let lastStyleHistoryAt = 0;
+
+  const styleSnapshot = (): NameStyleSnapshot => ({ font: pFont, color: pColor, effect: pEffect });
+
+  function rememberNameStyle(key: string) {
+    const now = Date.now();
+    // A slider can emit dozens of input events per drag. One undo step per short, continuous
+    // adjustment is useful; one per pixel is not.
+    if (key !== lastStyleHistoryKey || now - lastStyleHistoryAt > 650) {
+      styleUndo = [...styleUndo.slice(-39), styleSnapshot()];
+      styleRedo = [];
+    }
+    lastStyleHistoryKey = key;
+    lastStyleHistoryAt = now;
+  }
+
+  function restoreNameStyle(snapshot: NameStyleSnapshot) {
+    pFont = snapshot.font;
+    pColor = snapshot.color;
+    pEffect = snapshot.effect;
+    pEffects = decodeNameEffects(snapshot.effect);
+    lastStyleHistoryKey = "";
+  }
+
+  function undoNameStyle() {
+    const previous = styleUndo.at(-1);
+    if (!previous) return;
+    styleRedo = [...styleRedo, styleSnapshot()];
+    styleUndo = styleUndo.slice(0, -1);
+    restoreNameStyle(previous);
+  }
+
+  function redoNameStyle() {
+    const next = styleRedo.at(-1);
+    if (!next) return;
+    styleUndo = [...styleUndo, styleSnapshot()];
+    styleRedo = styleRedo.slice(0, -1);
+    restoreNameStyle(next);
+  }
+
+  function setNameEffects(next: NameEffect[], historyKey = "effects") {
+    rememberNameStyle(historyKey);
+    pEffects = next;
+    pEffect = encodeNameEffects(next);
+  }
+
+  function setNameFont(font: string) {
+    if (font === pFont) return;
+    rememberNameStyle("font");
+    pFont = font;
+  }
+
+  function setNameColor(color: string) {
+    if (color === pColor) return;
+    rememberNameStyle("color");
+    pColor = color;
+  }
+
+  function selectNameEffect(id: NameEffectId) {
+    if (effectConfigured(pEffects, id)) {
+      // A second click on a lit tile is a toggle, not a no-op: off keeps every saved
+      // setting, and on re-enables them (kicking out any exclusive sibling).
+      collapsedEffects[id] = false;
+      setNameEffectEnabled(id, !effectEnabled(pEffects, id));
+      return;
+    }
+    // Both fill effects stay configured, but only one can be enabled at a time. Switching
+    // between them therefore keeps every stop, speed and direction setting intact.
+    const exclusive = FILL_EFFECT_IDS.has(id) ? FILL_EFFECT_IDS : TRANSFORM_EFFECT_IDS.has(id) ? TRANSFORM_EFFECT_IDS : null;
+    const prepared = exclusive
+      ? pEffects.map((effect) => exclusive.has(effect.id)
+        ? { ...effect, enabled: false }
+        : effect)
+      : pEffects;
+    setNameEffects([...prepared, defaultNameEffect(id)], `add:${id}`);
+    collapsedEffects[id] = false;
+  }
+
+  function setNameEffectEnabled(id: NameEffectId, enabled: boolean) {
+    const exclusive = FILL_EFFECT_IDS.has(id) ? FILL_EFFECT_IDS : TRANSFORM_EFFECT_IDS.has(id) ? TRANSFORM_EFFECT_IDS : null;
+    setNameEffects(pEffects.map((effect) => {
+      if (effect.id === id) return { ...effect, enabled };
+      if (enabled && exclusive?.has(effect.id)) {
+        return { ...effect, enabled: false };
+      }
+      return effect;
+    }), `enable:${id}`);
+  }
+
+  function removeNameEffect(id: NameEffectId) {
+    setNameEffects(pEffects.filter((effect) => effect.id !== id), `remove:${id}`);
+    delete collapsedEffects[id];
+  }
+
+  function disableAllNameEffects() {
+    setNameEffects(pEffects.map((effect) => PUBLIC_EFFECT_IDS.has(effect.id) ? { ...effect, enabled: false } : effect), "all-off");
+  }
+
+  function updateNameEffect(id: NameEffectId, key: keyof NameEffectOptions, value: NameEffectOptions[keyof NameEffectOptions]) {
+    setNameEffects(pEffects.map((effect) => effect.id === id
+      ? { ...effect, options: { ...effect.options, [key]: value } }
+      : effect), `${id}:${String(key)}`);
+  }
+
+  function updateStudioOption(id: "typography" | "master", key: keyof NameEffectOptions, value: NameEffectOptions[keyof NameEffectOptions]) {
+    const existing = pEffects.find((effect) => effect.id === id);
+    const next = existing
+      ? pEffects.map((effect) => effect.id === id ? { ...effect, enabled: true, options: { ...effect.options, [key]: value } } : effect)
+      : [...pEffects, { ...defaultNameEffect(id), options: { ...defaultNameEffect(id).options, [key]: value } }];
+    setNameEffects(next, `${id}:${String(key)}`);
+  }
+
+  function resetNameEffect(id: NameEffectId) {
+    if (id === "typography" || id === "master") {
+      setNameEffects(pEffects.filter((effect) => effect.id !== id), `reset:${id}`);
+      return;
+    }
+    setNameEffects(pEffects.map((effect) => effect.id === id
+      ? { ...defaultNameEffect(id), enabled: effect.enabled }
+      : effect), `reset:${id}`);
+  }
+
+  function moveNameEffect(id: NameEffectId, direction: -1 | 1) {
+    const publicOrder = appliedEffects.map((effect) => effect.id);
+    const from = publicOrder.indexOf(id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= publicOrder.length) return;
+    [publicOrder[from], publicOrder[to]] = [publicOrder[to], publicOrder[from]];
+    const ordered = publicOrder.map((effectId) => pEffects.find((effect) => effect.id === effectId)!);
+    const specials = pEffects.filter((effect) => !PUBLIC_EFFECT_IDS.has(effect.id));
+    setNameEffects([...ordered, ...specials], `move:${id}`);
+  }
+
+  let draggedNameEffect = $state<NameEffectId | null>(null);
+  function dropNameEffect(target: NameEffectId) {
+    if (!draggedNameEffect || draggedNameEffect === target) return;
+    const publicOrder = appliedEffects.map((effect) => effect.id);
+    const from = publicOrder.indexOf(draggedNameEffect);
+    const to = publicOrder.indexOf(target);
+    if (from < 0 || to < 0) return;
+    const [moved] = publicOrder.splice(from, 1);
+    publicOrder.splice(to, 0, moved);
+    const specials = pEffects.filter((effect) => !PUBLIC_EFFECT_IDS.has(effect.id));
+    setNameEffects([...publicOrder.map((id) => pEffects.find((effect) => effect.id === id)!), ...specials], `drag:${draggedNameEffect}`);
+    draggedNameEffect = null;
+  }
+
+  function updateGradientStop(index: number, value: string) {
+    const stops = [...(effectOptions(pEffects, "gradient").stops ?? [])];
+    stops[index] = value;
+    updateNameEffect("gradient", "stops", stops);
+  }
+
+  function addGradientStop() {
+    const stops = [...(effectOptions(pEffects, "gradient").stops ?? [])];
+    if (stops.length < GRAD_MAX_STOPS) stops.push(stops[stops.length - 1] ?? "#977df2");
+    updateNameEffect("gradient", "stops", stops);
+  }
+
+  function removeGradientStop(index: number) {
+    const stops = [...(effectOptions(pEffects, "gradient").stops ?? [])];
+    if (stops.length > 2) stops.splice(index, 1);
+    updateNameEffect("gradient", "stops", stops);
+  }
+
+  type NameRecipe = { id: string; name: string; font: string; color: string; effect: string; builtin?: boolean };
+  const NAME_RECIPE_KEY = "catcoms.name-style-recipes.v1";
+
+  function recipeFx(id: NameEffectId, options: NameEffectOptions = {}): NameEffect {
+    const effect = defaultNameEffect(id);
+    return { ...effect, options: { ...effect.options, ...options } };
+  }
+
+  const BUILTIN_NAME_RECIPES: NameRecipe[] = [
+    {
+      id: "cute", name: "Cute", font: "cute", color: "#fff7fc", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("outline", { width: 1.5, color: "#e879c0" }),
+        recipeFx("shadow", { x: 1, y: 2, blur: 1, opacity: 85, color: "#3b1830" }),
+        recipeFx("typography", { weight: 800, tracking: 0.2, bubble: 0.5 }),
+      ]),
+    },
+    {
+      id: "arcade", name: "Neon Arcade", font: "mono", color: "#6ee7d8", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("neon", { glow: 12, intensity: 90 }), recipeFx("glitch", { spread: 2, opacity: 60 }),
+        recipeFx("pulse", { speed: 4, depth: 28 }), recipeFx("typography", { weight: 800, tracking: 1 }),
+      ]),
+    },
+    {
+      id: "holo", name: "Holographic", font: "rounded", color: "#c9fbff", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("gradient", { stops: ["#6ee7d8", "#977df2", "#e879c0", "#6ee7d8"], angle: 105, speed: 5 }),
+        recipeFx("sparkle", { speed: 4, intensity: 80 }), recipeFx("outline", { width: 0.5, color: "#e9fdff" }),
+      ]),
+    },
+    {
+      id: "ghost", name: "Ghost", font: "serif", color: "#d9f5ff", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("ghost", { opacity: 64, blur: 0.5, glow: 10 }), recipeFx("wobble", { speed: 2, amount: 1 }),
+        recipeFx("typography", { italic: true, weight: 600, tracking: 1 }),
+      ]),
+    },
+    {
+      id: "candy", name: "Candy", font: "cute", color: "#fff4fb", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("candy", { color: "#ff82bd", secondary: "#fff4fb", angle: 45, speed: 2 }),
+        recipeFx("outline", { width: 1, color: "#b83d78" }), recipeFx("shadow", { x: 2, y: 2, blur: 2, opacity: 70 }),
+      ]),
+    },
+    {
+      id: "retro", name: "Retro 3D", font: "caps", color: "#ffd66e", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("extrude", { depth: 5, color: "#7c315c", opacity: 95 }), recipeFx("outline", { width: 1, color: "#3b1830" }),
+        recipeFx("typography", { weight: 900, uppercase: true, tracking: 1.5 }),
+      ]),
+    },
+    {
+      id: "ember", name: "Ember", font: "rounded", color: "#ffd36a", builtin: true,
+      effect: encodeNameEffects([
+        recipeFx("fire", { height: 6, intensity: 88, speed: 7 }), recipeFx("extrude", { depth: 2, color: "#7a2518" }),
+        recipeFx("typography", { weight: 800 }),
+      ]),
+    },
+  ];
+
+  function loadNameRecipes(): NameRecipe[] {
+    try {
+      const raw = JSON.parse(localStorage.getItem(NAME_RECIPE_KEY) ?? "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.slice(0, 24).flatMap((value): NameRecipe[] => {
+        if (!value || typeof value !== "object") return [];
+        const r = value as Partial<NameRecipe>;
+        if (typeof r.name !== "string" || typeof r.font !== "string" || typeof r.color !== "string" || typeof r.effect !== "string") return [];
+        if (!/^#[0-9a-fA-F]{6}$/.test(r.color) || r.effect.length > 4096) return [];
+        const effects = decodeNameEffects(r.effect);
+        if (r.effect !== "none" && !effects.length) return [];
+        return [{
+          id: typeof r.id === "string" ? r.id : crypto.randomUUID(),
+          name: r.name.slice(0, 32),
+          font: NAME_FONT_IDS.has(r.font) ? r.font : "system",
+          color: r.color.toLowerCase(),
+          effect: encodeNameEffects(effects),
+        }];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  let savedNameRecipes = $state<NameRecipe[]>(loadNameRecipes());
+  let recipeNameDraft = $state("");
+
+  function persistNameRecipes(next: NameRecipe[]) {
+    savedNameRecipes = next.slice(-24);
+    try {
+      localStorage.setItem(NAME_RECIPE_KEY, JSON.stringify(savedNameRecipes));
+    } catch {
+      // The library still works for this session if private storage is unavailable or full.
+    }
+  }
+
+  function applyNameRecipe(recipe: NameRecipe) {
+    rememberNameStyle(`recipe:${recipe.id}`);
+    pFont = recipe.font;
+    pColor = recipe.color;
+    pEffect = recipe.effect;
+    pEffects = decodeNameEffects(recipe.effect);
+  }
+
+  function saveNameRecipe() {
+    const name = recipeNameDraft.trim().slice(0, 32);
+    if (!name) return;
+    persistNameRecipes([...savedNameRecipes, {
+      id: crypto.randomUUID(), name, font: pFont, color: pColor, effect: pEffect,
+    }]);
+    recipeNameDraft = "";
+  }
+
+  function deleteNameRecipe(id: string) {
+    persistNameRecipes(savedNameRecipes.filter((recipe) => recipe.id !== id));
+  }
+
+  const pick = <T,>(items: readonly T[]): T => items[Math.floor(Math.random() * items.length)];
+  const chance = (probability: number) => Math.random() < probability;
+
+  function randomizeNameStyle() {
+    const effects: NameEffect[] = [];
+    const fills: NameEffectId[] = fxMotionOff ? ["gradient", "candy"] : ["gradient", "rainbow", "shimmer", "candy"];
+    if (chance(0.75)) effects.push(defaultNameEffect(pick(fills)));
+    if (!fxMotionOff && chance(0.55)) effects.push(defaultNameEffect(pick(["wave", "mexican", "wobble", "pulse"] as const)));
+    const finishes = ["neon", "outline", "shadow", "retro", "glitch", "ghost", "fire", "extrude", "sparkle"] as const;
+    for (const id of [...finishes].sort(() => Math.random() - 0.5).slice(0, chance(0.55) ? 2 : 1)) effects.push(defaultNameEffect(id));
+    effects.push(recipeFx("typography", {
+      weight: pick([600, 700, 800, 900]), tracking: pick([0, 0.3, 0.7, 1.2]),
+      italic: chance(0.18), uppercase: chance(0.18), bubble: chance(0.25) ? 0.5 : 0,
+    }));
+    rememberNameStyle("randomize");
+    pFont = pick(["system", "rounded", "cute", "mono", "script"]);
+    pColor = pick(NAME_COLORS);
+    pEffects = effects;
+    pEffect = encodeNameEffects(effects);
+  }
+
+  let namePreviewMode = $state<"all" | "profile" | "chat" | "member" | "mention">("all");
+  let namePreviewPaused = $state(false);
+
+  function movingNameEffect(id: NameEffectId): boolean {
+    if (!animatedEffect(id)) return false;
+    return id !== "gradient" && id !== "candy" || (effectOptions(pEffects, id).speed ?? 0) > 0;
+  }
+
+  function relativeLuminance(color: string): number {
+    const match = /^#([0-9a-f]{6})$/i.exec(color);
+    if (!match) return 1;
+    const value = Number.parseInt(match[1], 16);
+    const channel = (byte: number) => {
+      const c = byte / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    return 0.2126 * channel(value >> 16) + 0.7152 * channel((value >> 8) & 255) + 0.0722 * channel(value & 255);
+  }
+
+  function contrastRatio(a: string, b: string): number {
+    const [bright, dark] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x);
+    return (bright + 0.05) / (dark + 0.05);
+  }
+
+  function nameStyleWarnings(): string[] {
+    const warnings: string[] = [];
+    const enabled = appliedEffects.filter((effect) => effect.enabled);
+    const type = effectOptions(pEffects, "typography");
+    const master = effectOptions(pEffects, "master");
+    if (contrastRatio(pColor, "#131218") < 3 && !enabled.some((effect) => FILL_EFFECT_IDS.has(effect.id))) {
+      warnings.push("Low contrast on the darkest chat background.");
+    }
+    if (enabled.filter((effect) => movingNameEffect(effect.id)).length > 2) warnings.push("Several animations at once may feel busy or cost more battery.");
+    if (enabled.length > 5) warnings.push("This stack may become hard to read at member-list size.");
+    if ((type.tracking ?? 0) > 3) warnings.push("Wide letter spacing can clip long names in the member list.");
+    if ((type.bubble ?? 0) > 2 || ((effectOptions(pEffects, "outline").width ?? 0) > 2.5 && effectEnabled(pEffects, "outline"))) {
+      warnings.push("Very thick lettering can close up small characters.");
+    }
+    if (effectEnabled(pEffects, "ghost") && (effectOptions(pEffects, "ghost").opacity ?? 100) < 45) warnings.push("Ghost opacity is faint at compact sizes.");
+    if ((master.intensity ?? 100) > 140) warnings.push("High master intensity can make glows and shadows muddy.");
+    return warnings;
+  }
+  let styleWarnings = $derived(nameStyleWarnings());
 
   let cur = $derived(servers.find((s) => s.id === activeServerId) ?? null);
   let myFp = $derived(roster.find((r) => r.you)?.fingerprint ?? "");
@@ -2087,18 +3667,48 @@
     const p = profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
     return p?.name?.trim() || fp;
   }
+  // The call surfaces' counterpart to nameOf/profileFor. Resolves against the room's server
+  // first and only falls back to the viewed server's map, so a peer keeps one name for the
+  // whole call no matter where the user wanders in the rail.
+  function callProfileFor(fp: string): Prof | undefined {
+    return (
+      callProfiles[fp] ??
+      (deviceMap[fp] ? callProfiles[deviceMap[fp].origin] : undefined) ??
+      profiles[fp]
+    );
+  }
+  function callNameOf(fp: string): string {
+    return resolveCallName(fp, callProfiles, profiles, (id) => deviceMap[id]?.origin);
+  }
   // Two-letter mono monogram for a rail circle (one letter for a one-character name).
   function monogram(name: string): string {
     return (name ?? "").trim().slice(0, 2).toUpperCase() || "?";
   }
-  // A member's custom message-bubble background (CSS), or "" for the default. The value comes from an
-  // untrusted profile, so allow only simple colors/gradients: no `url(...)`, `;`, `@`, `{` etc. that
-  // could inject CSS.
+  // A profile's custom frame is untrusted; the helper validates it before it reaches CSS. A
+  // companion device inherits its origin's frame just as it already inherits the origin's name.
+  function profileFor(fp: string): Prof | undefined {
+    return profiles[fp] ?? (deviceMap[fp] ? profiles[deviceMap[fp].origin] : undefined);
+  }
   function bubbleStyle(fp: string): string {
-    const b = (profiles[fp]?.bubble ?? "").trim();
-    if (!b) return "";
-    if (!/^[#a-z0-9 ,.%()-]+$/i.test(b) || /url|expression|image|var\(/i.test(b)) return "";
-    return `background:${b}`;
+    // Avoid profile/device identity work for every row while live-chat frames are rolled back.
+    if (!CHAT_MESSAGE_FRAMES_ENABLED) return "";
+    const isOwn = fp === myFp || (!!myFp && identityOf(fp).fp === identityOf(myFp).fp);
+    return visibleMessageFrameStyle(
+      profileFor(fp)?.bubble,
+      appearance.flat,
+      isOwn,
+      CHAT_MESSAGE_FRAMES_ENABLED,
+    );
+  }
+  function arrivalMotion(fp: string, id: string): MessageFrameMotion {
+    return visibleMessageFrameMotion(
+      profileFor(fp)?.bubble,
+      arrivalMessageIds.has(id),
+      appearance.messageMotion === "off" || fxMotionOff,
+    );
+  }
+  function arrivalStyle(fp: string): string {
+    return messageFrameArrivalStyle(profileFor(fp)?.bubble);
   }
   // The profile card popover (opened by clicking a member's avatar/name).
   let profileCard = $state<string | null>(null);
@@ -2143,23 +3753,26 @@
   let evImageBusy = $state(false);
   let confirmDeleteEventId = $state("");
   async function refreshEvents() {
-    if (activeServerId === null) {
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) {
       events = [];
       return;
     }
     try {
       const knownEvents = new Set(events.map((e) => e.id));
       const hadEvents = events.length > 0;
-      const srv = activeServerId;
-      events = await invoke<UiEvent[]>("get_events", { server: activeServerId });
+      const next = await invoke<UiEvent[]>("get_events", { server: srv });
+      if (!viewCurrent(gen, srv)) return;
+      events = next;
       if (hadEvents) {
         for (const ev of events) {
           if (knownEvents.has(ev.id)) continue;
-          pushTicker("event", `event:${srv}:${ev.id}`, ev.title, () => void goSurface(srv, "events"));
+          pushTicker("event", srv, `event:${srv}:${ev.id}`, msgSnippet(ev.title, 60), () => void goSurface(srv, "events"));
         }
       }
     } catch {
-      events = [];
+      if (viewCurrent(gen, srv)) events = [];
     }
   }
   async function createEvent() {
@@ -2180,16 +3793,14 @@
   async function pickEventImage(fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file || activeServerId === null) return;
+    if (!file.type.startsWith("image/")) {
+      toast("Drop an image to use it as the event poster", "err", 3500);
+      return;
+    }
     evImageBusy = true;
     const tid = toast(`Uploading ${file.name}…`, "info", 0);
     try {
-      evImage = await invoke<string>("add_file", {
-        server: activeServerId,
-        name: file.name,
-        mime: file.type || "image/png",
-        path: myEmbedFolder,
-        data: await readBase64(file),
-      });
+      evImage = await addSharedFile(file, myEmbedFolder, file.name, file.type || "image/png");
       updateToast(tid, `Event image set: ${file.name}`, "ok");
       await refreshFiles();
     } catch (e) {
@@ -2218,7 +3829,7 @@
   function fmtEventWhen(e: UiEvent): string {
     const s = new Date(e.start_ts);
     const day = dayLabel(e.start_ts);
-    const t = s.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const t = s.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" });
     const end = e.end_ts ? `–${new Date(e.end_ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}` : "";
     return `${day} · ${t}${end}`;
   }
@@ -2229,7 +3840,12 @@
   let inboxMode = $state<"mentions" | "news">("mentions");
   let newsItems = $state<NewsItem[]>([]);
   let newsLoading = $state(false);
+  let newsUnseen = $state(false);
+  let newsGeneration = 0;
   async function loadNews() {
+    // The News tab button, "status-updated" and "events-changed" all call this, so concurrent
+    // loads are routine: without a generation the first to finish clears the spinner for the rest.
+    const generation = ++newsGeneration;
     newsLoading = true;
     const items: NewsItem[] = [];
     const now = Date.now();
@@ -2250,8 +3866,10 @@
         }
       }),
     );
-    newsItems = items;
+    if (generation !== newsGeneration) return; // a later load owns the list and the spinner
     newsLoading = false;
+    if (locked) return; // as loadInbox: the lock cleared this, and it is cross-server text
+    newsItems = items;
   }
   let newsUpcoming = $derived(newsItems.filter((n) => n.kind === "event").sort((a, b) => a.ts - b.ts));
   let newsFeed = $derived(newsItems.filter((n) => n.kind === "status").sort((a, b) => b.ts - a.ts).slice(0, 30));
@@ -2269,14 +3887,18 @@
   type UiDevice = { origin: string; name: string };
   let deviceMap = $state<Record<string, UiDevice>>({});
   async function refreshDevices() {
-    if (activeServerId === null) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) {
       deviceMap = {};
       return;
     }
     try {
-      deviceMap = await invoke<Record<string, UiDevice>>("get_devices", { server: activeServerId });
+      const next = await invoke<Record<string, UiDevice>>("get_devices", { server });
+      if (!viewCurrent(gen, server)) return; // companion attribution is per-server
+      deviceMap = next;
     } catch {
-      deviceMap = {};
+      if (viewCurrent(gen, server)) deviceMap = {};
     }
   }
   // Revoke one of YOUR OWN linked devices (M5 "lost phone"). Origin-only: the backend refuses a
@@ -2374,12 +3996,15 @@
     return { label, color };
   }
   async function refreshBadges() {
-    if (activeServerId === null) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) {
       badges = {};
       return;
     }
     try {
-      const raw = await invoke<Record<string, MemberBadge>>("get_badges", { server: activeServerId });
+      const raw = await invoke<Record<string, MemberBadge>>("get_badges", { server });
+      if (!viewCurrent(gen, server)) return; // a badge is granted by one server, not carried between
       const map: Record<string, MemberBadge> = {};
       for (const [fp, b] of Object.entries(raw)) {
         const ok = sanitizeBadge(b);
@@ -2387,7 +4012,7 @@
       }
       badges = map;
     } catch {
-      badges = {};
+      if (viewCurrent(gen, server)) badges = {};
     }
   }
   // The badge editor row in Server settings (admin-only affordance).
@@ -2427,6 +4052,8 @@
             ? "font-caps"
             : font === "rounded"
               ? "font-rounded"
+              : font === "cute"
+                ? "font-cute"
               : font === "gothic"
                 ? "font-gothic"
                 : "";
@@ -2441,29 +4068,24 @@
     if (mime.includes("zip") || mime.includes("compressed")) return "🗜";
     return "📄";
   }
-  // Known: none | gradient | neon | rainbow | wave | pulse. Anything else still maps to
-  // `fx-<id>` (harmless: no rule matches), but the id is stripped to [a-z0-9-] first so an
-  // untrusted profile can't smuggle extra class names into the span.
   function fxClass(effect: string): string {
-    if (GRAD2_RE.test(effect)) return "fx-grad2";
-    const id = effect.toLowerCase().replace(/[^a-z0-9-]/g, "");
-    return id && id !== "none" ? `fx-${id}` : "";
+    // The original accent-derived gradient predates the stack codec. Keep rendering it for
+    // profiles that have not opened and re-saved the new editor yet.
+    if (effect === "gradient") return "fx-gradient";
+    return nameEffectClasses(decodeNameEffects(effect));
   }
-  // The inline half of a custom name gradient: the image itself. The clip rules live in
-  // .fx-grad2, so without this style (an old build, a non-matching effect) nothing clips.
+
   function fxStyle(effect: string): string {
-    const m = GRAD2_RE.exec(effect);
-    if (!m) return "";
-    const stops = m[1].split("-").map((h) => "#" + h);
-    const speed = m[3] ? Math.min(10, +m[3]) : 0;
-    if (!speed) return `;background-image:linear-gradient(${m[2]}deg, ${stops.join(", ")})`;
-    // Animated: the first stop repeats at the end so the 200% tile wraps seamlessly; the
-    // keyframes scroll one full tile period. Motion-off rules freeze this with !important.
-    const dur = ((11 - speed) * 1.2).toFixed(1);
-    return (
-      `;background-image:linear-gradient(${m[2]}deg, ${[...stops, stops[0]].join(", ")})` +
-      `;background-size:200% 200%;animation:fx-grad2-scroll ${dur}s linear infinite${m[4] === "r" ? " reverse" : ""}`
-    );
+    if (effect === "gradient") return "";
+    return nameEffectStyle(decodeNameEffects(effect));
+  }
+  const nameSegmenter = typeof Intl.Segmenter === "function"
+    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+    : null;
+  function nameLetters(name: string): string[] {
+    return nameSegmenter
+      ? Array.from(nameSegmenter.segment(name), (part) => part.segment)
+      : Array.from(name);
   }
   function colorStyle(color: string): string {
     return color ? `color:${color}` : "";
@@ -2503,9 +4125,52 @@
     return `${(n / (1024 * 1024)).toFixed(1)} MB`;
   }
 
+  async function revealOlderMessages() {
+    const node = messagesEl;
+    if (!node || messageWindow.start <= 0 || expandingMessageWindow) return;
+    expandingMessageWindow = true;
+    const previousHeight = node.scrollHeight;
+    const previousTop = node.scrollTop;
+    messageWindow = revealOlder(messageWindow, messages.length, CHAT_WINDOW_STEP);
+    await tick();
+    // Retain the reader's visual anchor after inserting rows above the viewport.
+    if (messagesEl === node) node.scrollTop = previousTop + node.scrollHeight - previousHeight;
+    expandingMessageWindow = false;
+  }
+  function revealNewerMessages() {
+    messageWindow = revealNewer(messageWindow, messages.length, CHAT_WINDOW_STEP);
+  }
+  function onChatScroll() {
+    const node = messagesEl;
+    if (!node) return;
+    // Do not auto-expand a short, non-scrollable list: it would defeat the DOM bound on unusual
+    // compact themes. The explicit edge control remains available in that case.
+    if (
+      node.scrollTop < 80 &&
+      node.scrollHeight > node.clientHeight + 40 &&
+      messageWindow.start > 0
+    ) {
+      void revealOlderMessages();
+    }
+    if (nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight) && messageWindow.end < messages.length) {
+      revealNewerMessages();
+      chatStickToBottom = false;
+      return;
+    }
+    chatStickToBottom =
+      messageWindow.end >= messages.length &&
+      nearScrollBottom(node.scrollTop, node.clientHeight, node.scrollHeight);
+  }
+
   $effect(() => {
     void messages;
-    if (messagesEl) messagesEl.scrollTop = messagesEl.scrollHeight;
+    void messageWindow;
+    if (!chatStickToBottom) return;
+    tick().then(() => {
+      if (messagesEl && chatStickToBottom && messageWindow.end >= messages.length) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    });
   });
 
   // Persist the rendezvous address as a reusable default (it's usually a stable infra node).
@@ -2522,7 +4187,9 @@
   $effect(() => {
     void activeServerId;
     eclipseCaution = false;
-    onlineMembers = new Set();
+    // onlineMembers is NOT cleared here: clearServerView already drops it synchronously on every
+    // switch, and this effect flushes after the switch's reads may have resolved, so clearing it
+    // again here could discard a roster that had already landed.
     onlineSince = {};
     lastSeen = {};
   });
@@ -2542,7 +4209,6 @@
   // same flush as the {@html} block, finds zero placeholders, and never re-runs: so embeds
   // render on first send but vanish after a restart.
   $effect(() => {
-    void messages;
     void statuses;
     void files;
     void emojiUrls;
@@ -2550,14 +4216,17 @@
     void events; // a card for an event that has only just synced
     void wikiPages;
     void wikiMap;
+    void ensureWikiMap(); // fills the page summaries the wiki cards below want
     void profiles; // cards name the author, so a renamed member re-reads
     void view; // switching tabs destroys + recreates this DOM (fresh, unresolved placeholders)
     void inboxView; // returning from the inbox recreates the chat DOM too
     tick().then(() => {
       resolveMedia(messagesEl);
+      resolveRemoteMedia(messagesEl);
       resolveEmoji(messagesEl);
       resolveRefCards(messagesEl);
       resolveMedia(statusEl);
+      resolveRemoteMedia(statusEl);
       resolveEmoji(statusEl);
       resolveRefCards(statusEl);
     });
@@ -2581,12 +4250,14 @@
     tick().then(() => {
       if (!wikiEdit) {
         resolveMedia(wikiEl);
+        resolveRemoteMedia(wikiEl);
         resolveEmoji(wikiEl);
         resolveWikiLinks(wikiEl);
         resolveRefCards(wikiEl);
         decorateWikiHeadings(wikiEl);
       } else if (wikiPreview) {
         resolveMedia(wikiPreviewEl);
+        resolveRemoteMedia(wikiPreviewEl);
         resolveEmoji(wikiPreviewEl);
         resolveWikiLinks(wikiPreviewEl);
         resolveRefCards(wikiPreviewEl);
@@ -2743,13 +4414,7 @@
     try {
       // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
       const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
-      await invoke("add_file", {
-        server: activeServerId,
-        name: sz ? `${code}~${sz}` : code,
-        mime: file.type || "image/png",
-        path: "emoji",
-        data: await readBase64(file),
-      });
+      await addSharedFile(file, "emoji", sz ? `${code}~${sz}` : code, file.type || "image/png");
       newEmojiCode = "";
       await refreshFiles();
     } catch (e) {
@@ -2780,6 +4445,31 @@
 
   // Unlock the vault with the entered passphrase and reload persisted servers (9f). A wrong
   // passphrase fails (the vault won't decrypt) and we stay locked, showing the error.
+  function restoreReloaded(reloaded: Reloaded[]) {
+    servers = reloaded.map((r) => ({
+      id: r.server,
+      name: r.name,
+      channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }],
+      active: r.channel,
+      unread: [],
+      invite: r.invite,
+      dot: false,
+      isDm: r.is_dm,
+    }));
+    locked = false;
+    try { sessionStorage.removeItem("catcoms.explicit-lock"); } catch { /* best effort */ }
+    const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
+    // Drafts/read boundaries must land before switchServer restores the active composer and
+    // snapshots its divider. The native actors are already running, so this is only local UI state.
+    const continuityGeneration = ++uiStateLoadGeneration;
+    void loadUiContinuity(continuityGeneration).finally(() => {
+      if (continuityGeneration === uiStateLoadGeneration && !locked && firstServer) void switchServer(firstServer.id);
+    });
+    refreshAllDmRequests();
+    loadInbox();
+    refreshAllServerIcons();
+  }
+
   async function unlock(secret = unlockSecret()) {
     if (!secret) return;
     unlocking = true;
@@ -2797,18 +4487,7 @@
       sigilWord = "";
       stopPlayback();
       melodySeq = [];
-      for (const r of reloaded) {
-        servers = [
-          ...servers,
-          { id: r.server, name: r.name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: r.invite, dot: false, isDm: r.is_dm },
-        ];
-      }
-      locked = false;
-      passphrase = "";
-      const firstServer = servers.find((s) => !s.isDm) ?? servers[0];
-      if (firstServer) switchServer(firstServer.id);
-      loadInbox(); // populate the inbox badge once the reloaded servers are live
-      refreshAllServerIcons(); // rail icons come from each server's livery doc
+      restoreReloaded(reloaded);
     } catch (e) {
       abortSummon(); // wrong secret ⇒ no cat: the failure must read as a failure
       error = String(e);
@@ -2824,7 +4503,29 @@
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen() {
     if (locked) return;
+    // Lock wins over an in-progress secret change and drops every transient secret first.
+    vaultChangeCurrent = "";
+    vaultChangeFirst = "";
+    vaultChangeMismatch = false;
+    vaultChangeError = "";
+    vaultChangeStep = "";
+    clearUnlockEntry();
+    // Capture the very latest composer value before clearing the screen. Send the immutable JSON
+    // argument immediately (without awaiting it) so locking stays visually instant while the
+    // native vault writer can finish after the sensitive JS state has been dropped.
+    const key = chanKey();
+    if (key) {
+      if (draft.trim()) drafts[key] = draft;
+      else delete drafts[key];
+    }
+    clearTimeout(uiStateSaveTimer);
+    clearTimeout(inboxTimer);
+    if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
+    inboxIdle = undefined;
+    const continuityJson = uiStateReady ? JSON.stringify({ version: 1, drafts, readMarks }) : null;
+    try { sessionStorage.setItem("catcoms.explicit-lock", "1"); } catch { /* best effort */ }
     if (inCall) leaveVoice(); // never leave a hot mic behind a lock screen
+    void invoke("lock_session", { uiStateJson: continuityJson }).catch((e) => console.warn("Session locked; final UI continuity save failed", e));
     spaceOpen = false; // and no server names floating behind it either
     showSettings = false;
     showServerSettings = false;
@@ -2843,22 +4544,27 @@
     navStack = []; // where you have been is part of what the lock screen takes off the screen
     navAt = -1;
     tickerItems = []; // and so is anything the ticker was naming
+    tickerReceipts = new Set(); // receipts can include wiki/page ids; do not retain them behind lock
     servers = [];
+    beginViewSwitch(); // a read still in flight must not land behind the lock
     activeServerId = null;
     dmHome = false;
     inboxView = false;
-    messages = [];
-    roster = [];
-    profiles = {};
-    files = [];
-    statuses = [];
-    events = [];
-    wikiPages = [];
+    // One definition of "every window onto a group's contents", not two that drift. The hand-rolled
+    // list here used to miss the sanitized message-render cache and wikiMap, both of which hold
+    // plaintext, along with roles, livery, badges and the rest.
+    clearServerView();
     inboxItems = [];
     newsItems = [];
     serverIcons = {};
     delivery = {};
     draft = "";
+    drafts = {};
+    readMarks = {};
+    uiStateReady = false;
+    uiStateSaveFailed = false;
+    uiStateLoadGeneration += 1;
+    clearTimeout(uiStateSaveTimer);
     passphrase = "";
     error = "";
     syncIntent = false;
@@ -2866,6 +4572,10 @@
   }
 
   async function found() {
+    if (serverMode === "hosted" && !relay.trim()) {
+      error = "A hosted community runs through a node you operate: paste its address, or pick \"People I know\" instead.";
+      return;
+    }
     busy = true;
     error = "";
     try {
@@ -2881,16 +4591,61 @@
   async function join() {
     busy = true;
     error = "";
+    joinReplyReady = null;
     try {
       const { hex, turn } = unwrapInvite(joinInvite);
-      const r = await invoke<Found>("join_server", { inviteHex: hex, displayName, isDm: false });
+      const previewMatchesCode = joinPreviewCode === hex;
+      if (!previewMatchesCode) {
+        joinPreview = await invoke<InvitePreview>("preview_invite", { inviteHex: hex });
+        joinPreviewCode = hex;
+        joinSwitchboardConsent = false;
+      }
+      const assistedAction = assistedJoinAction(
+        previewMatchesCode,
+        joinPreview?.switchboards ?? 0,
+        joinSwitchboardConsent,
+      );
+      // Do not let the click that first reveals the extra-member privacy boundary also cross it.
+      if (assistedAction === "preview") return;
+      const r = await invoke<Found>("join_server", {
+        inviteHex: hex,
+        displayName,
+        isDm: false,
+        allowSwitchboards: assistedAction === "switchboard",
+      });
       if (turn) storeServerTurn(r.server, turn); // inherit the operator's shared TURN
       addServer(r, displayName);
       joinInvite = "";
+      joinPreview = null;
+      joinPreviewCode = "";
+      joinSwitchboardConsent = false;
+      joinReplyReady = null;
     } catch (e) {
+      joinReplyReady = null;
       error = String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  async function applyJoinReply(replace = false) {
+    const server = activeServerId;
+    if (server === null || !joinReplyInput.trim()) return;
+    joinReplyApplying = true;
+    joinReplyNeedsReplace = false;
+    error = "";
+    try {
+      const applied = await invoke<{ helper: boolean }>("apply_join_reply", { server, code: joinReplyInput.trim(), replace });
+      notice = applied.helper
+        ? "Connection reply accepted. Dialling as a member helper; only the admission handshake will be forwarded."
+        : "Connection reply accepted. Dialling the joiner now; keep both apps open.";
+      joinReplyInput = "";
+    } catch (e) {
+      const message = String(e);
+      if (joinReplyNeedsReplacement(message)) joinReplyNeedsReplace = true;
+      error = message;
+    } finally {
+      joinReplyApplying = false;
     }
   }
 
@@ -2902,7 +4657,9 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("found_server", { displayName: name, advertise, relay, rendezvous, isDm: true });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || name).trim() || "me";
+      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
       addServer(r, name);
       dmName = "";
       showNewDm = false;
@@ -2920,7 +4677,9 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: name, isDm: true });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || name).trim() || "me";
+      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
       addServer(r, name);
       dmName = "";
       dmInvite = "";
@@ -2933,9 +4692,10 @@
   }
 
   function addServer(r: Found, name: string) {
+    const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     servers = [
       ...servers,
-      { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
+      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
     ];
     showAdd = false;
     // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
@@ -2955,11 +4715,13 @@
     notice = "";
     menu = null;
     try {
-      const r = await invoke<Found>("found_server", { displayName: name, advertise, relay, rendezvous, isDm: true });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || name).trim() || "me";
+      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
-        { id: r.server, name, channels: [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
+        { id: r.server, name, channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
       ];
       const invite = (await invoke<string | null>("get_invite", { server: r.server })) ?? "";
       const sent = invite
@@ -2986,12 +4748,32 @@
     }
   }
 
+  // Refresh pending DM requests across all non-DM servers (for inbox aggregation).
+  async function refreshAllDmRequests() {
+    try {
+      const allReqs: DmRequest[] = [];
+      for (const s of servers.filter((s) => !s.isDm)) {
+        try {
+          const reqs = await invoke<{ from_fp: string; from_name: string; invite: string }[]>("get_dm_requests", { server: s.id });
+          allReqs.push(...reqs.map((r) => ({ server: s.id, ...r })));
+        } catch {
+          /* a server that's gone / mid-shutdown: ignore */
+        }
+      }
+      dmRequests = allReqs;
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Accept a friend request: join the DM group, then clear the request on the carrying server.
   async function acceptDmRequest(req: DmRequest) {
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: req.from_name, isDm: true });
+      // Derive my profile name from the current profile or fall back to "me"
+      const myProfileName = (pName.trim() || req.from_name).trim() || "me";
+      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
       addServer(r, req.from_name);
       await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
       dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
@@ -3032,50 +4814,82 @@
     showNewDm = false;
     showAddFriend = false;
     refreshDmStats();
-    if (dmList.length) switchServer(dmList[0].id);
-    else {
+    if (dmList.length) {
+      // Sequenced, not raced: switchServer merges the target DM's own requests in, so running the
+      // cross-server aggregate first would have it replaced or not depending on IPC timing.
+      void switchServer(dmList[0].id).then(refreshAllDmRequests);
+    } else {
+      refreshAllDmRequests();
+      beginViewSwitch();
       activeServerId = null;
       clearServerView(); // no active group: drop the previous server's stale messages/roster/etc.
     }
   }
-  // Reset the per-server display collections (used when there is no active group, so nothing from a
-  // previously-active server lingers behind the empty DM-home placeholder).
+  // Reset every collection the panes render for the active group, synchronously. Called when there
+  // is no active group (the empty DM-home placeholder) and at the top of every switch: without it
+  // the previous group's messages, roster, files and branding stay on screen for the whole
+  // round-trip, which reads as the switch not having taken.
   function clearServerView() {
     view = "chat";
+    moderationSelected = new Set();
+    moderationDeleteArmed = false;
+    moderationAnchor = "";
+    caseEvidence = new Set();
+    moderationUserFilter = "";
+    storageHealth = null;
+    storageRepairNote = "";
     messages = [];
+    messageRenderCache.clear();
+    messageWindow = { start: 0, end: 0 };
+    messageWindowScope = "";
+    chatStickToBottom = true;
+    channelTopic = "";
+    delivery = {};
     roster = [];
     members = 0;
-    files = [];
-    statuses = [];
     onlineMembers = new Set();
-  }
-  function openNewDm() {
-    showNewDm = true;
-    showAddFriend = false;
-    dmName = "";
-  }
-  function openAddFriend() {
-    showAddFriend = true;
-    showNewDm = false;
-    dmName = "";
-    dmInvite = "";
-  }
-
-  async function switchServer(id: number) {
-    saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
-    activeServerId = id;
-    inboxView = false;
-    spaceOpen = false; // navigating anywhere leaves the orbit view behind
-    const s = servers.find((x) => x.id === id);
-    if (s) s.dot = false;
-    dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
-    showNewDm = false;
-    showAddFriend = false;
-    if (showSearch) closeSearch();
-    notice = "";
-    refreshDmRequests(id); // pick up any friend request that arrived over this server
-    // Each server has its own wiki + fileshare; reset per-server view state.
-    view = "chat";
+    profiles = {};
+    // Roles gate the privileged surfaces, so the empty map is the safe transient: unprivileged
+    // until this group's own roles resolve.
+    roles = {};
+    badges = {};
+    deviceMap = {};
+    files = [];
+    hasPeers = false;
+    wikiPinned = new Set();
+    wikiPages = [];
+    wikiMap = {}; // name -> body: the previous server's page CONTENT, not just its names
+    wikiMapFor = null;
+    wikiPending = [];
+    wikiReviewDays = WIKI_REVIEW_UNKNOWN; // NOT 0: see the constant, zero is a real policy
+    wikiHistory = [];
+    showWikiHistory = false;
+    wikiHistorySel = "";
+    statuses = [];
+    events = [];
+    moderation = { events: [], votes: [] };
+    moderationMessages = [];
+    moderationLoading = false;
+    groupLoading = false; // a clear with no load behind it (no active group) is not "loading"
+    // Livery is server branding: leaving it up paints the group you left over the one you opened.
+    // followLiveryNow already drops to the default theme for DM-home and the inbox, so the brief
+    // default between servers is that same transition rather than a new kind of flicker.
+    livery = emptyLivery();
+    liveryCursorUrl = "";
+    liveryLoaded = false;
+    liveryDraftFor = null;
+    // Surfaces that render one server's data but were never closed on a switch: the settings
+    // takeover would keep rendering server A's pages against server B, and the wiki review queue
+    // would open on B still asserting A's (now empty) backlog.
+    showServerSettings = false;
+    wikiReviewOpen = false;
+    // Custom emoji are per-server but emojiUrls is keyed by CODE, so two servers defining the same
+    // :code: would show the first one's image on the second.
+    emojiUrls = {};
+    joinAttempts = []; // who tried to join THIS server: never carried to the next one
+    // The wiki editor and the chat/fileshare affordances below used to be reset only by
+    // switchServer, so the paths that end with no active group (leaving your last server, empty
+    // DM-home, locking) kept a page body and its drafts in memory as plaintext.
     activeWikiPage = "";
     wikiBody = "";
     wikiDirty = false;
@@ -3094,12 +4908,61 @@
     mentionQuery = null;
     showPinned = false;
     mentionChannels = new Set(); // mention badges are scoped to the active server
+  }
+  function openNewDm() {
+    showNewDm = true;
+    showAddFriend = false;
+    dmName = "";
+  }
+  function openAddFriend() {
+    showAddFriend = true;
+    showNewDm = false;
+    dmName = "";
+    dmInvite = "";
+  }
+
+  async function switchServer(id: number) {
+    saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
+    const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
+    activeServerId = id;
+    inboxView = false;
+    spaceOpen = false; // navigating anywhere leaves the orbit view behind
+    // Drop the previous group's plaintext render artifacts, window anchors and every collection
+    // the panes render, synchronously, before the scope of trust changes.
+    clearServerView();
+    groupLoading = true;
+    const s = servers.find((x) => x.id === id);
+    if (s) s.dot = false;
+    // A brand already read this session repaints once, straight to the right one, instead of
+    // default-then-brand a round-trip later. refreshLivery still confirms it below.
+    const cachedLivery = s && !s.isDm ? liveryCache.get(id) : undefined;
+    if (cachedLivery) {
+      livery = cachedLivery;
+      liveryLoaded = true;
+    }
+    dmHome = s?.isDm ?? false; // a DM keeps us in DM-home; a server leaves it
+    showNewDm = false;
+    showAddFriend = false;
+    if (showSearch) closeSearch();
+    notice = "";
+    refreshDmRequests(id); // pick up any friend request that arrived over this server
+    // Each server has its own wiki + fileshare; clearServerView above dropped the previous one's.
+    storageHealth = storageHealthCache.get(id) ?? null; // a cached report shows without re-probing
     acceptCallsHere = loadAccept(id); // this server's call-notification preference
+    loadServerSoundPreferences(id); // local message/mention/news overrides for this server
     loadSrvTurn(id); // this server's operator-set TURN (for the Server-settings editor)
     loadLiveryOptOut(id); // whether the user opted out of this server's livery
     loadVerified(id); // this server's locally-verified members
     loadDraftFor(chanKey()); // restore this server's active-channel draft
     captureDivider(); // snapshot the read boundary for this server's active channel
+    // One barrier, not two. refreshModeration used to be awaited AFTER this batch because it read
+    // the privileged message corpus and so had to see this server's roles first; it now fetches
+    // only the case/vote state everyone needs in chat, and the corpus loads with the surface that
+    // uses it, so it joins the batch and the switch loses a whole serial round-trip.
+    // The roles-first guarantee still holds, but it now rests on clearServerView having set
+    // `view = "chat"` and `roles = {}` above: withCorpus is false here, so the corpus is
+    // structurally unreachable during a switch. Anything that later keeps the moderation surface
+    // open ACROSS a switch must restore the explicit ordering rather than rely on that.
     await Promise.all([
       refresh(),
       refreshMembers(),
@@ -3114,7 +4977,11 @@
       refreshBadges(),
       refreshEvents(),
       refreshDevices(),
+      refreshModeration(),
+      refreshWikiPages(),
     ]);
+    if (!viewCurrent(gen, id)) return; // moved on while this group was loading
+    groupLoading = false;
     syncProfileEditor();
   }
 
@@ -3127,21 +4994,17 @@
       pColor = me.color || pColor;
       pFont = me.font || pFont;
       pEffect = me.effect || pEffect;
+      pEffects = decodeNameEffects(pEffect);
+      styleUndo = [];
+      styleRedo = [];
+      lastStyleHistoryKey = "";
       pDescription = me.description ?? "";
       pBubble = me.bubble ?? "";
       pAvatar = me.avatar || "";
       pBanner = me.banner || "";
-      // Re-seat the gradient creators on whatever the saved profile carries, so opening
-      // the editor shows the stops you actually published rather than the defaults.
-      const g = GRAD2_RE.exec(pEffect);
-      if (g) {
-        pGradStops = g[1].split("-").map((h) => "#" + h);
-        pGradDeg = +g[2];
-        pGradSpeed = g[3] ? Math.min(10, +g[3]) : 0;
-        pGradRev = g[4] === "r";
-      }
-      const bg = BUB_GRAD_RE.exec(pBubble);
-      if (bg && !BUBBLE_PRESETS.some((b) => b.value === pBubble)) {
+      const frame = parseMessageFrame(pBubble);
+      const bg = BUB_GRAD_RE.exec(frame.surface);
+      if (bg && !BUBBLE_PRESETS.some((b) => b.value === frame.surface)) {
         pBubA = bg[1];
         pBubB = bg[2];
       }
@@ -3157,7 +5020,11 @@
     servers = servers.filter((s) => s.id !== id);
     if (activeServerId === id) {
       if (servers.length) switchServer(servers[0].id);
-      else activeServerId = null;
+      else {
+        beginViewSwitch();
+        activeServerId = null;
+        clearServerView(); // leaving the last one must not leave its messages on screen
+      }
     }
   }
 
@@ -3174,11 +5041,42 @@
     }
   }
 
+  async function refreshChannels(server: number) {
+    try {
+      const channels = await invoke<Channel[]>("get_channels", { server });
+      const s = servers.find((x) => x.id === server);
+      if (!s || !channels.length) return;
+      s.channels = channels;
+      const next = reconcileActiveChannel(channels, s.active);
+      if (!next.changed) return;
+      if (server === activeServerId) {
+        // switchTo owns the move for the group on screen: reassigning `active` on its own would
+        // leave the previous channel's messages, topic, delivery ticks and draft sitting under the
+        // new channel's name. Not awaited here, and `s.active` is deliberately NOT set first:
+        // switchTo stashes the outgoing draft under the channel being left.
+        void switchTo(next.active);
+      } else {
+        s.active = next.active; // not on screen: there is no loaded state to reconcile
+      }
+    } catch {
+      // Older backend: retain the locally-known list.
+    }
+  }
+
   // `keepSearch` is set when the search itself is driving the move (jumping to a hit in another
   // channel): everything else closes the search bar, as before.
   async function switchTo(id: string, keepSearch = false) {
     if (!cur) return;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
+    // Channel-scoped content, dropped before the move rather than when the read returns: the
+    // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
+    messages = [];
+    messageRenderCache.clear();
+    messageWindow = { start: 0, end: 0 };
+    messageWindowScope = "";
+    chatStickToBottom = true;
+    channelTopic = "";
+    delivery = {};
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
     cur.unread = cur.unread.filter((c) => c !== id);
@@ -3202,13 +5100,19 @@
   let editingTopic = $state(false);
   let topicDraft = $state("");
   async function refreshTopic() {
-    if (activeServerId === null || !cur?.active) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) {
       channelTopic = "";
       return;
     }
     try {
-      channelTopic = await invoke<string>("get_channel_topic", { server: activeServerId, channel: cur.active });
+      const topic = await invoke<string>("get_channel_topic", { server, channel });
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
+      channelTopic = topic;
     } catch {
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       channelTopic = "";
     }
   }
@@ -3225,15 +5129,45 @@
     }
   }
 
-  async function refresh() {
+  let refreshRevision = 0;
+  async function refresh(animateArrivals = false) {
     if (!cur || !cur.active || activeServerId === null) return;
+    const server = activeServerId;
+    const channel = cur.active;
+    const revision = ++refreshRevision;
     try {
-      messages = await invoke<Msg[]>("get_messages", { server: activeServerId, channel: cur.active });
+      const previousMessages = messages;
+      const previous = new Set(previousMessages.map((message) => message.id));
+      const next = await invoke<Msg[]>("get_messages", { server, channel });
+      // A slow response from the conversation we just left must never populate the new one.
+      if (revision !== refreshRevision || activeServerId !== server || cur?.active !== channel) return;
+      const nextScope = chatScopeKey(server, channel);
+      const nextWindow = reconcileChatWindow(
+        previousMessages,
+        next,
+        messageWindow,
+        chatStickToBottom,
+        messageWindowScope !== nextScope,
+      );
+      messages = next;
+      messageWindow = nextWindow;
+      messageWindowScope = nextScope;
+      if (animateArrivals) {
+        // Own posts already animate at optimistic insertion; excluding them prevents the
+        // acknowledged, server-assigned id from replaying the entrance a second time.
+        markMessageArrivals(next.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
+      }
       advanceReadMark();
     } catch (e) {
       error = String(e);
     }
   }
+
+  // A single network merge can emit several channel notifications. Serialize and coalesce their
+  // full snapshots so the bridge never has multiple large `get_messages` payloads racing for the
+  // same view. Direct navigation/send acknowledgements still call `refresh` at their own explicit
+  // completion points.
+  const channelEventRefresh = new CoalescedAsyncRefresh(refresh);
 
   // Delivery states for OWN messages (docs/design-delivery-states.md). Evidence-based lower
   // bounds: a member is counted only once it has provably built on the message, so counts
@@ -3242,16 +5176,21 @@
   type DeliveryState = { id: string; delivered: number; reachable: number };
   let delivery = $state<Record<string, DeliveryState>>({});
   async function refreshDelivery() {
-    if (activeServerId === null || !cur?.active) {
+    const gen = viewGeneration;
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) {
       delivery = {};
       return;
     }
     try {
-      const list = await invoke<DeliveryState[]>("get_delivery", { server: activeServerId, channel: cur.active });
+      const list = await invoke<DeliveryState[]>("get_delivery", { server, channel });
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       const map: Record<string, DeliveryState> = {};
       for (const s of list) map[s.id] = s;
       delivery = map;
     } catch {
+      if (!viewCurrent(gen, server) || cur?.active !== channel) return;
       delivery = {}; // older backend or closed actor: ticks simply don't render
     }
   }
@@ -3259,6 +5198,8 @@
   // ✓ all reachable confirmed · ✓✓ the whole roster confirmed.
   function deliveryTick(m: Msg): { g: string; cls: string; tip: string } | null {
     if (m.author !== myFp || !m.id) return null;
+    if (m.id.startsWith("pending:"))
+      return { g: "◌", cls: "d-pending", tip: "Saving this message locally…" };
     const total = Math.max(members - 1, 0);
     if (total === 0) return null; // alone here: nothing to deliver to
     const d = delivery[m.id];
@@ -3280,8 +5221,10 @@
   // words. Shown on your latest message (the state you actually care about) and on any older
   // one that hasn't settled yet; a delivered-and-superseded message stays quiet.
   function deliveryReceipt(m: Msg, mi: number): { g: string; label: string; cls: string; tip: string } | null {
+    if (mi !== lastOwnIdx) return null;
     const t = deliveryTick(m);
     if (!t || !m.id) return null;
+    if (t.cls === "d-pending") return { g: t.g, label: "sending…", cls: t.cls, tip: t.tip };
     if ((t.cls === "d-all" || t.cls === "d-ok") && mi !== lastOwnIdx) return null;
     const d = delivery[m.id];
     const total = Math.max(members - 1, 0);
@@ -3300,46 +5243,121 @@
     return { g: t.g, label, cls: t.cls, tip: t.tip };
   }
   async function refreshMembers() {
+    const gen = viewGeneration;
     const id = activeServerId;
     if (id === null) return;
     try {
-      const r = await invoke<Member[]>("get_members", { server: id });
-      const online = await invoke<string[]>("get_online_members", { server: id });
-      if (activeServerId !== id) return; // server switched mid-fetch: drop stale results
+      // Two independent reads, so they go together; the roster is the source of myFp, which half
+      // of canModerate derives from, so this is the one that most needs the generation and not
+      // just the id: an A -> B -> A hop passes an id-only check with an older snapshot.
+      const [r, online] = await Promise.all([
+        invoke<Member[]>("get_members", { server: id }),
+        invoke<string[]>("get_online_members", { server: id }),
+      ]);
+      if (!viewCurrent(gen, id)) return;
       roster = r;
       members = r.length;
       onlineMembers = new Set(online);
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, id)) error = String(e);
     }
   }
   async function refreshProfiles() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      const list = await invoke<Prof[]>("get_profiles", { server: activeServerId });
+      const list = await invoke<Prof[]>("get_profiles", { server });
+      if (!viewCurrent(gen, server)) return; // names and avatars from the group you left
       const map: Record<string, Prof> = {};
       for (const p of list) map[p.fingerprint] = p;
       profiles = map;
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
+    }
+  }
+  // The call surfaces' own copy of the room server's profiles. Deliberately a separate fetch
+  // from refreshProfiles: that one is keyed to whatever server is being viewed and is wiped on
+  // every switch, which is exactly the behaviour the call chrome must not inherit.
+  async function refreshCallProfiles() {
+    const server = callServer;
+    if (server === null) return;
+    try {
+      const list = await invoke<Prof[]>("get_profiles", { server });
+      if (callServer !== server) return; // left, or moved rooms, mid-fetch
+      const map: Record<string, Prof> = {};
+      for (const p of list) map[p.fingerprint] = p;
+      callProfiles = map;
+    } catch {
+      // A missing profile renders as a fingerprint, which is honest and still identifies the
+      // peer. Surfacing an error banner over a cosmetic lookup would be worse than the gap.
     }
   }
   async function refreshFiles() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      const v = await invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", {
-        server: activeServerId,
-      });
-      files = v.files;
-      hasPeers = v.has_peers;
-      // Wiki-pinned content addresses, derived fresh from the wiki on the backend each call: a
-      // file embedded in a live page never drops out of circulation, whatever its expiry says.
-      // One extra round-trip per refresh, so the Files tab and Properties can say so instantly.
-      wikiPinned = new Set(
-        await invoke<string[]>("get_wiki_pinned_cids", { server: activeServerId })
+      // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
+      // file embedded in a live page never drops out of circulation, whatever its expiry says. It
+      // is a second round-trip, so it rides alongside the listing rather than after it.
+      const [listing, pinned] = await Promise.allSettled([
+        invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
+        invoke<string[]>("get_wiki_pinned_cids", { server }),
+      ]);
+      if (!viewCurrent(gen, server)) return; // another group's shared files
+      // Applied independently: a failing pin lookup must not blank the listing it only decorates.
+      if (listing.status === "fulfilled") {
+        files = listing.value.files;
+        hasPeers = listing.value.has_peers;
+      } else {
+        error = String(listing.reason);
+      }
+      if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
+    } catch (e) {
+      if (viewCurrent(gen, server)) error = String(e);
+    }
+  }
+  async function refreshStorageHealth() {
+    if (activeServerId === null) return;
+    const server = activeServerId;
+    const cached = storageHealthCache.get(server);
+    if (cached) {
+      storageHealth = cached;
+      return;
+    }
+    storageChecking = true;
+    try {
+      const report = await invoke<StorageHealth>("get_storage_health", { server });
+      storageHealthCache.set(server, report);
+      if (activeServerId === server) storageHealth = report;
+    } catch (e) {
+      if (activeServerId === server) error = String(e);
+    } finally {
+      // Keyed: a late probe from the server you left must not clear the spinner for the one you
+      // opened, which is still reading.
+      if (activeServerId === server) storageChecking = false;
+    }
+  }
+  async function repairStorage() {
+    if (activeServerId === null || storageRepairing) return;
+    storageRepairing = true;
+    storageRepairNote = "";
+    try {
+      const server = activeServerId;
+      const result = await invoke<{ attempted_chunks: number; recovered_chunks: number; health: StorageHealth }>(
+        "repair_storage", { server },
       );
+      storageHealthCache.set(server, result.health);
+      if (activeServerId === server) storageHealth = result.health;
+      storageRepairNote = result.attempted_chunks
+        ? `Checked ${result.attempted_chunks} damaged or missing chunks; recovered ${result.recovered_chunks}.`
+        : "Everything referenced by this server already verifies.";
+      await refreshFiles();
     } catch (e) {
       error = String(e);
+    } finally {
+      storageRepairing = false;
     }
   }
   // Lowercase-hex cids embedded in a live wiki page (the never-decay set).
@@ -3353,10 +5371,12 @@
   function availOf(f: UiFile): Avail {
     const dl =
       activeServerId !== null ? downloads[dlKey(activeServerId, f.cid)] : undefined;
-    if (dl && dl.status === "downloading")
+    if (dl && (dl.status === "downloading" || dl.status === "verifying"))
       return { cls: "downloading", icon: "↓", label: `Downloading ${Math.round(dl.progress * 100)}%` };
-    if (dl && dl.status === "queued")
-      return { cls: "downloading", icon: "↓", label: "Queued" };
+    if (dl && (dl.status === "queued" || dl.status === "waiting"))
+      return hasPeers
+        ? { cls: "downloading", icon: "↓", label: "Waiting for source" }
+        : { cls: "offline", icon: "○", label: "No peers online" };
     if (f.total > 0 && f.held >= f.total)
       return { cls: "local", icon: "●", label: "On this device" };
     if (f.held > 0)
@@ -3365,24 +5385,54 @@
     return { cls: "offline", icon: "○", label: "No peers online" };
   }
   async function refreshStatuses() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) return;
     try {
+      // Read the "what we already knew" set before the await, and note that a switch empties it:
+      // arriving at a server must not announce its whole status wall as if it had just landed.
       const knownStatuses = new Set(statuses.map((s) => s.id));
       const hadStatuses = statuses.length > 0;
-      const srv = activeServerId;
-      statuses = await invoke<Msg[]>("get_statuses", { server: activeServerId });
+      const next = await invoke<Msg[]>("get_statuses", { server: srv });
+      if (!viewCurrent(gen, srv)) return;
+      statuses = next;
       if (hadStatuses) {
         for (const st of statuses) {
           if (knownStatuses.has(st.id)) continue;
-          pushTicker("status", `status:${srv}:${st.id}`, `${nameOf(st.author)}: ${msgSnippet(st.text, 60)}`, () =>
+          pushTicker("status", srv, `status:${srv}:${st.id}`, `${nameOf(st.author)}: ${msgSnippet(st.text, 60)}`, () =>
             void goSurface(srv, "status"),
           );
         }
       }
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, srv)) error = String(e);
     }
   }
+  // The media plane's own report. The mesh and the call are two separate NAT-traversal stacks, so
+  // "chat works" says nothing about whether a call will, and until this was surfaced there was
+  // nowhere to look when one failed. See get_call_transport.
+  type CallBridge = { fingerprint: string; addresses: number; direct: boolean };
+  type CallTransport = {
+    public_direct: boolean;
+    autonat: string;
+    public_ipv4: string[];
+    public_ipv6: string[];
+    bridges: CallBridge[];
+    relay_likely_required: boolean;
+    router_maps: boolean;
+    advice: string;
+  };
+  let callTransport = $state<CallTransport | null>(null);
+  async function refreshCallTransport() {
+    const server = callServer ?? activeServerId;
+    if (server === null) return;
+    try {
+      callTransport = await invoke<CallTransport>("get_call_transport", { server });
+    } catch {
+      callTransport = null; // an unknown server or a locked vault: the panel says nothing rather than lying
+    }
+  }
+
   // --- Diagnostics: the join log, the connectivity report, and the debug log ---------------
   //
   // Three surfaces for one problem: a join that fails tells nobody anything. The join log is the
@@ -3392,25 +5442,99 @@
   let joinAttempts = $state<JoinAttempt[]>([]);
   let joinLogCopied = $state(false);
   let connectivity = $state<Connectivity | null>(null);
+  type SwitchboardStatus = {
+    offered: boolean;
+    eligible: boolean;
+    online: { fingerprint: string; addresses: number }[];
+    reason: string;
+  };
+  let switchboardStatus = $state<SwitchboardStatus | null>(null);
+  let switchboardBusy = $state(false);
+  const switchboardRefreshGeneration = new Map<number, number>();
+  let connectivityRefreshGeneration = 0;
   let connCopied = $state(false);
   let debugLog = $state<{ enabled: boolean; active: boolean; dir: string; file: string } | null>(null);
   let debugLogBusy = $state(false);
 
   async function refreshJoinAttempts() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      joinAttempts = await invoke<JoinAttempt[]>("get_join_attempts", { server: activeServerId });
+      const next = await invoke<JoinAttempt[]>("get_join_attempts", { server });
+      if (!viewCurrent(gen, server)) return; // fingerprints of people who tried to join elsewhere
+      joinAttempts = next;
+    } catch (e) {
+      if (viewCurrent(gen, server)) error = String(e);
+    }
+  }
+  async function refreshConnectivity() {
+    const generation = ++connectivityRefreshGeneration;
+    try {
+      const refreshed = await invoke<Connectivity>("get_connectivity");
+      connectivity = withOrderedConnectivity(
+        connectivity,
+        refreshed,
+        generation,
+        connectivityRefreshGeneration,
+      );
+    } catch {
+      // A build without the command (or a locked app) simply has nothing to show; the panel
+      // says so rather than raising an error over a diagnostic. An older failure must not erase
+      // a newer successful snapshot.
+      connectivity = withOrderedConnectivity(
+        connectivity,
+        null,
+        generation,
+        connectivityRefreshGeneration,
+      );
+    }
+  }
+  async function refreshSwitchboards() {
+    const server = activeServerId;
+    if (server === null) {
+      switchboardStatus = null;
+      return;
+    }
+    const generation = (switchboardRefreshGeneration.get(server) ?? 0) + 1;
+    switchboardRefreshGeneration.set(server, generation);
+    try {
+      const status = await invoke<SwitchboardStatus>("get_switchboard_status", { server });
+      switchboardStatus = withOrderedSwitchboardStatus(
+        switchboardStatus,
+        activeServerId,
+        server,
+        status,
+        generation,
+        switchboardRefreshGeneration.get(server) ?? 0,
+      );
     } catch (e) {
       error = String(e);
     }
   }
-  async function refreshConnectivity() {
+  async function toggleSwitchboard() {
+    const server = activeServerId;
+    if (server === null || switchboardBusy) return;
+    switchboardBusy = true;
+    const generation = (switchboardRefreshGeneration.get(server) ?? 0) + 1;
+    switchboardRefreshGeneration.set(server, generation);
     try {
-      connectivity = await invoke<Connectivity>("get_connectivity");
-    } catch {
-      // A build without the command (or a locked app) simply has nothing to show; the panel
-      // says so rather than raising an error over a diagnostic.
-      connectivity = null;
+      const status = await invoke<SwitchboardStatus>("set_switchboard_offered", {
+        server,
+        offered: !switchboardStatus?.offered,
+      });
+      switchboardStatus = withOrderedSwitchboardStatus(
+        switchboardStatus,
+        activeServerId,
+        server,
+        status,
+        generation,
+        switchboardRefreshGeneration.get(server) ?? 0,
+      );
+    } catch (e) {
+      error = String(e);
+    } finally {
+      switchboardBusy = false;
     }
   }
   async function refreshDebugLog() {
@@ -3472,11 +5596,20 @@
   });
 
   async function refreshRoles() {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     try {
-      roles = await invoke<Record<string, string>>("get_roles", { server: activeServerId });
+      const next = await invoke<Record<string, string>>("get_roles", { server });
+      // The sharpest of the stale writes: canModerate derives from this map, so a late answer
+      // from the server you left would hand you moderator chrome on the one you opened.
+      if (!viewCurrent(gen, server)) return;
+      roles = next;
+      // A demotion closes the privileged surface immediately; hiding only the sidebar entry
+      // would leave a stale moderation page reachable through history/navigation.
+      if (!canModerate && view === "moderation") switchView("chat");
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, server)) error = String(e);
     }
   }
   async function setAdmin(fp: string, admin: boolean) {
@@ -3511,16 +5644,26 @@
 
   function switchView(v: Tab) {
     menu = null;
+    if (v === "moderation" && !canModerate) {
+      toast("Moderation is available to this server's owner and admins", "info", 3500);
+      v = "chat";
+    }
     view = v;
     if (v === "wiki") refreshWiki();
     if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "status") refreshStatuses(); // a read that failed during the switch gets a retry here
+    if (v === "events") refreshEvents();
+    if (v === "moderation") refreshModeration();
+    if (v === "storage" || v === "downloads") refreshStorageHealth();
+    if (v === "connectivity") void Promise.all([refreshConnectivity(), refreshSwitchboards()]);
   }
 
   // Delegated click handler for rendered rich text: [[wiki links]] navigate to the wiki tab.
   async function handleRichClick(e: MouseEvent) {
     const target = e.target as HTMLElement | null;
-    // A spoiler: first click reveals it (don't also follow any link inside).
-    const sp = target?.closest("[data-spoiler]") as HTMLElement | null;
+    // Spoilers and censored effects use the same local, reader-controlled reveal. First click
+    // reveals them and never follows a link that happens to sit inside.
+    const sp = target?.closest("[data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
     if (sp && !sp.classList.contains("revealed")) {
       e.preventDefault();
       sp.classList.add("revealed");
@@ -3532,6 +5675,15 @@
     if (im && !im.closest("a[href],[data-wikilink]")) {
       e.preventDefault();
       openLightbox(im);
+      return;
+    }
+    // The inbox and news lists render text from every server, but a [[link]] or a file/event/status
+    // chip inside rendered text carries no server with it: resolving one against whatever group
+    // happens to sit behind the overlay opens the WRONG server's wiki or fileshare, and a wiki page
+    // that server lacks opens its editor. Jump to the item's own server first.
+    if (inboxView && target?.closest("[data-wikilink],[data-file-cid],[data-event-id],[data-status-id]")) {
+      e.preventDefault();
+      toast("Open the item's server first to follow its links", "info", 4000);
       return;
     }
     const el = target?.closest("[data-wikilink]") as HTMLElement | null;
@@ -3561,6 +5713,20 @@
     if (sl) {
       e.preventDefault();
       await openStatusRef(sl.getAttribute("data-status-id") ?? "");
+      return;
+    }
+    // Never let an external anchor navigate this webview: doing so replaces the entire Mewtual
+    // UI and leaves the window effectively softlocked. The native side accepts http(s) only and
+    // hands the URL to the user's normal browser without invoking a shell.
+    const link = target?.closest("a[href]") as HTMLAnchorElement | null;
+    if (link) {
+      e.preventDefault();
+      const url = link.href || link.getAttribute("href") || "";
+      try {
+        await invoke("open_external_url", { url });
+      } catch (err) {
+        error = String(err);
+      }
     }
   }
 
@@ -3569,12 +5735,12 @@
   function richClicks(node: HTMLElement) {
     const h = (e: Event) => handleRichClick(e as MouseEvent);
     const c = (e: Event) => handleRichContext(e as MouseEvent);
-    // A link card is focusable and reads as a button, so it has to open from the keyboard too;
-    // the synthesized click goes through the same delegated handler as a real one.
+    // Link cards, spoilers, and censored effects are focusable buttons, so they must open from
+    // the keyboard too; the synthesized click uses the same delegated handler as a real one.
     const k = (e: Event) => {
       const ev = e as KeyboardEvent;
       if (ev.key !== "Enter" && ev.key !== " ") return;
-      const card = (ev.target as HTMLElement | null)?.closest(".ref-card") as HTMLElement | null;
+      const card = (ev.target as HTMLElement | null)?.closest(".ref-card, [data-spoiler], [data-text-fx='censor']") as HTMLElement | null;
       if (!card) return;
       ev.preventDefault();
       card.click();
@@ -3587,6 +5753,388 @@
         node.removeEventListener("click", h);
         node.removeEventListener("contextmenu", c);
         node.removeEventListener("keydown", k);
+      },
+    };
+  }
+
+  // Text effects are rendered in several independent surfaces, so their viewport/pointer
+  // behaviour is delegated once at the document. One-shot entrances are armed the first time each
+  // rendered instance becomes visible; a WeakSet prevents scroll-jiggling from replaying them.
+  // Effect audio uses the shared app preference and is short, deterministic, and Full-mode only.
+  function mountTextEffectRuntime() {
+    const played = new WeakSet<HTMLElement>();
+    const observed = new WeakSet<HTMLElement>();
+    const pendingSpeakese = new Set<HTMLElement>();
+    const speakeseRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+    const pendingRedTruth = new Set<HTMLElement>();
+    const redTruthRevealTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
+    let pointerFx: HTMLElement | null = null;
+    let speakeseAudioUntil = 0;
+    let redTruthAudioUntil = 0;
+
+    function effectVisible(el: HTMLElement) {
+      const rect = el.getBoundingClientRect();
+      return el.isConnected && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth;
+    }
+
+    function scheduleSpeakese(el: HTMLElement) {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
+      const units = [...el.querySelectorAll<HTMLElement>(".fx-speakese-unit")]
+        .filter((unit) => (unit.textContent ?? "").trim())
+        .slice(0, MAX_SPEAKESE_BLIPS);
+      if (!units.length) return;
+      try {
+        const ctx = audioCtx;
+        if (!ctx || ctx.state !== "running") { pendingSpeakese.add(el); return; }
+        if (ctx.currentTime < speakeseAudioUntil) return;
+        const start = ctx.currentTime + 0.025;
+        const plan = speakeseSoundPlan(units.map((unit) => Number(unit.dataset.fxTone ?? 0)), start);
+        speakeseAudioUntil = start + units.length * SPEAKESE_STEP_SECONDS;
+        plan.forEach((blip) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = blip.waveform;
+          osc.frequency.setValueAtTime(blip.frequency, blip.at);
+          osc.frequency.exponentialRampToValueAtTime(blip.endFrequency, blip.at + 0.055);
+          gain.gain.setValueAtTime(0.0001, blip.at);
+          gain.gain.exponentialRampToValueAtTime(blip.peak, blip.at + 0.007);
+          gain.gain.exponentialRampToValueAtTime(0.0001, blip.at + 0.061);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(blip.at);
+          osc.stop(blip.stop);
+        });
+      } catch {
+        // Visual reveal remains useful where Web Audio is unavailable or gesture-gated.
+      }
+    }
+
+    function scheduleRedTruth(el: HTMLElement) {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) return;
+      try {
+        const ctx = audioCtx;
+        if (!ctx || ctx.state !== "running") { pendingRedTruth.add(el); return; }
+        if (ctx.currentTime < redTruthAudioUntil) return;
+        const plan = redTruthSoundPlan(ctx.currentTime + 0.025);
+        redTruthAudioUntil = plan.sweep.stop;
+        plan.strike.forEach((note) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = note.waveform;
+          osc.frequency.setValueAtTime(note.frequency, note.at);
+          osc.frequency.exponentialRampToValueAtTime(note.endFrequency, note.stop - 0.01);
+          gain.gain.setValueAtTime(0.0001, note.at);
+          gain.gain.exponentialRampToValueAtTime(note.peak, note.at + 0.003);
+          gain.gain.exponentialRampToValueAtTime(0.0001, note.stop - 0.006);
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(note.at);
+          osc.stop(note.stop);
+        });
+
+        const sweep = plan.sweep;
+        const duration = sweep.stop - sweep.at;
+        const buffer = ctx.createBuffer(1, Math.ceil(duration * ctx.sampleRate), ctx.sampleRate);
+        const samples = buffer.getChannelData(0);
+        for (let index = 0; index < samples.length; index += 1) samples[index] = redTruthNoiseSample(index);
+        const noise = ctx.createBufferSource();
+        const highpass = ctx.createBiquadFilter();
+        const bandpass = ctx.createBiquadFilter();
+        const washGain = ctx.createGain();
+        noise.buffer = buffer;
+        highpass.type = "highpass";
+        highpass.frequency.setValueAtTime(sweep.highpassFrequency, sweep.at);
+        bandpass.type = "bandpass";
+        bandpass.Q.setValueAtTime(0.58, sweep.at);
+        bandpass.frequency.setValueAtTime(sweep.startFrequency, sweep.at);
+        bandpass.frequency.exponentialRampToValueAtTime(sweep.crestFrequency, sweep.crest);
+        bandpass.frequency.exponentialRampToValueAtTime(sweep.endFrequency, sweep.stop);
+        washGain.gain.setValueAtTime(0.0001, sweep.at);
+        washGain.gain.exponentialRampToValueAtTime(sweep.peak * 0.3, sweep.at + 0.13);
+        washGain.gain.exponentialRampToValueAtTime(sweep.peak, sweep.crest);
+        washGain.gain.exponentialRampToValueAtTime(0.0001, sweep.stop);
+        noise.connect(highpass).connect(bandpass).connect(washGain).connect(ctx.destination);
+        noise.start(sweep.at);
+        noise.stop(sweep.stop);
+      } catch {
+        // The visual seal and reveal do not depend on Web Audio support.
+      }
+    }
+
+    function revealPending(
+      pending: Set<HTMLElement>,
+      timers: Map<HTMLElement, ReturnType<typeof setTimeout>>,
+      schedule: ((effect: HTMLElement) => void) | undefined = undefined,
+    ) {
+      const waiting = [...pending];
+      const visible = waiting.filter(effectVisible);
+      pending.clear(); // never pile several authored voices of the same kind on top of one another
+      for (const effect of waiting) {
+        const timer = timers.get(effect);
+        if (timer) clearTimeout(timer);
+        timers.delete(effect);
+        effect.classList.add("fx-play");
+      }
+      if (schedule && visible[0]) schedule(visible[0]);
+    }
+
+    function flushTextEffectAudio() {
+      if (document.documentElement.dataset.textEffects !== "full" || !soundOn) {
+        revealPending(pendingSpeakese, speakeseRevealTimers);
+        revealPending(pendingRedTruth, redTruthRevealTimers);
+        return;
+      }
+      try {
+        audioCtx ??= new AudioContext();
+        const playPending = () => {
+          if (!audioCtx || audioCtx.state !== "running") return;
+          revealPending(pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
+          revealPending(pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+        };
+        if (audioCtx.state === "running") playPending();
+        else void audioCtx.resume().then(playPending).catch(() => { /* retry on the next gesture */ });
+      } catch {
+        /* Web Audio is optional; letter playback still runs. */
+      }
+    }
+
+    function startOneShot(
+      el: HTMLElement,
+      pending: Set<HTMLElement>,
+      timers: Map<HTMLElement, ReturnType<typeof setTimeout>>,
+      schedule: (effect: HTMLElement) => void,
+    ) {
+      const wantsSound = document.documentElement.dataset.textEffects === "full" && soundOn;
+      if (!wantsSound || audioCtx?.state === "running") {
+        el.classList.add("fx-play");
+        if (wantsSound) schedule(el);
+        return;
+      }
+      // Keep sound and letters together when the webview is waiting for a trusted gesture. If no
+      // gesture comes promptly, reveal silently so authored text can never remain inaccessible.
+      pending.add(el);
+      const timer = setTimeout(() => {
+        timers.delete(el);
+        if (pending.delete(el)) el.classList.add("fx-play");
+      }, 420);
+      timers.set(el, timer);
+    }
+
+    const intersection = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const el = entry.target as HTMLElement;
+        intersection.unobserve(el);
+        if (played.has(el)) continue;
+        played.add(el);
+        if (el.dataset.textFx === "speakese") {
+          startOneShot(el, pendingSpeakese, speakeseRevealTimers, scheduleSpeakese);
+        } else if (el.dataset.textFx === "red-truth") {
+          startOneShot(el, pendingRedTruth, redTruthRevealTimers, scheduleRedTruth);
+        }
+      }
+    }, { threshold: 0.18 });
+
+    function discover(root: ParentNode) {
+      const effects = root instanceof HTMLElement && root.matches("[data-text-fx]")
+        ? [root]
+        : [...root.querySelectorAll<HTMLElement>("[data-text-fx]")];
+      for (const effect of effects) {
+        effect.querySelectorAll<HTMLElement>(".text-fx-unit").forEach((unit, index) =>
+          unit.style.setProperty("--fx-i", String(index)));
+        if (["speakese", "red-truth"].includes(effect.dataset.textFx ?? "") && !observed.has(effect)) {
+          observed.add(effect);
+          // Picker/settings previews demonstrate the entrance, but selecting or browsing effects
+          // must never make sound. Authored content is the only observer-driven audio source.
+          if (effect.closest(".text-fx-selection-bar, .text-fx-catalog, .text-fx-key-preview")) {
+            effect.classList.add("fx-play");
+          } else {
+            intersection.observe(effect);
+          }
+        }
+      }
+    }
+
+    const mutations = new MutationObserver((records) => {
+      for (const record of records) for (const node of record.addedNodes) {
+        if (node instanceof HTMLElement) discover(node);
+      }
+    });
+    discover(document.body);
+    mutations.observe(document.body, { childList: true, subtree: true });
+
+    const onPointerMove = (event: PointerEvent) => {
+      const next = document.documentElement.dataset.textEffects === "full"
+        ? (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-text-fx]:not([data-text-fx='censor'])") ?? null
+        : null;
+      const entered = next !== pointerFx;
+      if (pointerFx && pointerFx !== next) {
+        pointerFx.classList.remove("fx-pointer");
+        pointerFx.classList.remove("fx-petal-burst");
+        pointerFx.style.removeProperty("--fx-px");
+        pointerFx.style.removeProperty("--fx-py");
+      }
+      pointerFx = next;
+      if (!next) return;
+      const rect = next.getBoundingClientRect();
+      const x = rect.width ? (event.clientX - rect.left) / rect.width - 0.5 : 0;
+      const y = rect.height ? (event.clientY - rect.top) / rect.height - 0.5 : 0;
+      next.style.setProperty("--fx-px", x.toFixed(3));
+      next.style.setProperty("--fx-py", y.toFixed(3));
+      next.classList.add("fx-pointer");
+      if (cherryBlossomShouldBurst(entered, next.dataset.textFx)) {
+        // One bloom per visit: movement within the same words may shift them, but only leaving and
+        // entering again re-arms their petal burst.
+        next.classList.add("fx-petal-burst");
+      }
+    };
+    // Web Audio must be resumed from a trusted interaction in Chromium/WebView. Warm the shared
+    // context on normal app input, then flush any visible one-shot effect waiting for it.
+    const onSoundGesture = () => flushTextEffectAudio();
+    // A textarea keeps its old selection after losing focus. Close the Aa palette when the user
+    // goes elsewhere, while allowing its own buttons and the source editor to keep it alive.
+    const onPalettePointerDown = (event: PointerEvent) => {
+      if (!textEffectTarget) return;
+      const target = event.target as HTMLElement | null;
+      const region: TextEffectPointerRegion = target?.closest(".text-fx-selection-bar")
+        ? "palette"
+        : target?.closest(".text-fx-trigger")
+          ? "trigger"
+          : target === textEffectElement(textEffectTarget)
+            ? "editor"
+            : "outside";
+      if (dismissTextEffectPalette(showTextEffectCatalog, region)) textEffectTarget = null;
+    };
+    // `select` is not emitted consistently when typing replaces a selection. The document-level
+    // event follows caret changes too, so a collapsed selection cannot leave the Aa bar behind.
+    const onDocumentSelectionChange = () => {
+      const target = activeTextEffectTarget();
+      if (target) onTextEffectSelection(target);
+    };
+    document.addEventListener("pointermove", onPointerMove, { passive: true });
+    document.addEventListener("pointerdown", onSoundGesture, true);
+    document.addEventListener("keydown", onSoundGesture, true);
+    document.addEventListener("pointerdown", onPalettePointerDown, true);
+    document.addEventListener("selectionchange", onDocumentSelectionChange);
+    return () => {
+      intersection.disconnect();
+      mutations.disconnect();
+      for (const timer of speakeseRevealTimers.values()) clearTimeout(timer);
+      for (const timer of redTruthRevealTimers.values()) clearTimeout(timer);
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerdown", onSoundGesture, true);
+      document.removeEventListener("keydown", onSoundGesture, true);
+      document.removeEventListener("pointerdown", onPalettePointerDown, true);
+      document.removeEventListener("selectionchange", onDocumentSelectionChange);
+    };
+  }
+
+  // Resolve placeholders only in the row Svelte has just mounted or updated. Resource-index
+  // changes still use the coarse effect above because an older placeholder can become resolvable,
+  // but ordinary chat arrivals no longer rescan every historical row four times.
+  function resolveChatRow(node: HTMLLIElement, _message: Msg) {
+    let live = true;
+    let generation = 0;
+    const resolve = () => {
+      const current = ++generation;
+      queueMicrotask(() => {
+        if (!live || current !== generation || !node.isConnected) return;
+        void resolveMedia(node);
+        void resolveRemoteMedia(node);
+        void resolveEmoji(node);
+        void resolveRefCards(node);
+      });
+    };
+    resolve();
+    return {
+      update(_next: Msg) {
+        resolve();
+      },
+      destroy() {
+        live = false;
+        generation += 1;
+      },
+    };
+  }
+
+  // A Scan layer remains clipped inside its author's frame, but every enabled Scan shares the
+  // message viewport's coordinates and animation phase. The result is one channel-wide beam,
+  // revealed only while it crosses frames whose authors opted into the layer.
+  function channelScan(node: HTMLUListElement) {
+    // Do not attach a ResizeObserver, MutationObserver, scroll listener, or animation-sync work
+    // while the live-chat frame rollout is paused. The editor preview remains available and saved
+    // frame values remain untouched.
+    if (!CHAT_MESSAGE_FRAMES_ENABLED) return;
+    let raf = 0;
+    const observedBodies = new Set<HTMLElement>();
+
+    const syncAnimations = (rows: HTMLLIElement[]) => {
+      const animations: Animation[] = [];
+      for (const row of rows) {
+        for (const layer of row.querySelectorAll<HTMLElement>(":scope > .m-body > .message-frame-fx > .frame-fx-scan")) {
+          animations.push(...layer.getAnimations());
+        }
+      }
+      const duration = Number(animations[0]?.effect?.getTiming().duration);
+      if (!Number.isFinite(duration) || duration <= 0) return;
+      const phase = performance.now() % duration;
+      for (const animation of animations) animation.currentTime = phase;
+    };
+
+    const measure = () => {
+      raf = 0;
+      const rows = [...node.children].filter((child): child is HTMLLIElement => child instanceof HTMLLIElement);
+      const viewport = node.getBoundingClientRect();
+      const viewportTop = viewport.top + node.clientTop;
+      const viewportBottom = viewportTop + node.clientHeight;
+      const scanRows: HTMLLIElement[] = [];
+      const measured: { row: HTMLLIElement; body: HTMLElement; rect: DOMRect }[] = [];
+      for (const row of rows) {
+        row.style.removeProperty("--frame-scan-offset");
+        row.style.removeProperty("--frame-scan-height");
+        const body = row.querySelector<HTMLElement>(":scope > .m-body");
+        if (!body) continue;
+        if (!observedBodies.has(body)) {
+          resize.observe(body);
+          observedBodies.add(body);
+        }
+        measured.push({ row, body, rect: body.getBoundingClientRect() });
+      }
+      const visible = measured.filter(({ rect }) => rect.bottom > viewportTop && rect.top < viewportBottom);
+      const scanTop = visible.length ? Math.max(viewportTop, visible[0].rect.top) : viewportTop;
+      const scanBottom = visible.length
+        ? Math.min(viewportBottom, visible.at(-1)?.rect.bottom ?? viewportBottom)
+        : viewportBottom;
+      const scanHeight = Math.max(1, scanBottom - scanTop);
+      for (const { row, body, rect } of measured) {
+        if (!body.querySelector(":scope > .message-frame-fx > .frame-fx-scan")) continue;
+        const geometry = messageFrameScanGeometry(scanTop, scanHeight, rect.top);
+        row.style.setProperty("--frame-scan-offset", `${geometry.offset}px`);
+        row.style.setProperty("--frame-scan-height", `${geometry.height}px`);
+        scanRows.push(row);
+      }
+      for (const body of observedBodies) {
+        if (node.contains(body)) continue;
+        resize.unobserve(body);
+        observedBodies.delete(body);
+      }
+      syncAnimations(scanRows);
+    };
+
+    const schedule = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    };
+    const resize = new ResizeObserver(schedule);
+    const mutations = new MutationObserver(schedule);
+    resize.observe(node);
+    mutations.observe(node, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+    node.addEventListener("scroll", schedule, { passive: true });
+    schedule();
+    return {
+      destroy() {
+        cancelAnimationFrame(raf);
+        resize.disconnect();
+        mutations.disconnect();
+        node.removeEventListener("scroll", schedule);
       },
     };
   }
@@ -3650,8 +6198,9 @@
   async function copyText(text: string) {
     try {
       await navigator.clipboard.writeText(text);
+      toast("Copied to clipboard", "ok", 1800);
     } catch {
-      /* clipboard may be unavailable in the webview */
+      toast("Clipboard unavailable: select and copy the text manually", "err", 3500);
     }
   }
 
@@ -3828,8 +6377,8 @@
 
   function serverMenu(s: ServerState): MenuItem[] {
     const items: MenuItem[] = [];
-    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => copyText(s.invite) });
-    items.push({ label: "Server settings", icon: "⚙", onSelect: () => openServerSettings(s.id) });
+    if (s.invite) items.push({ label: "Copy invite", icon: "⧉", onSelect: () => void copyFreshInvite(s.id) });
+    items.push({ label: "Server settings", icon: "⚙", onSelect: () => void openServerSettings(s.id) });
     items.push({ divider: true });
     items.push({
       label: "Leave server",
@@ -3875,7 +6424,7 @@
       const id = el.getAttribute("data-status-id") ?? "";
       const label = chipLabel(el) || "status";
       openMenu(e, [
-        { label: "Open status", icon: "⊞", onSelect: () => openStatusRef(id) },
+        { label: "Open announcement", icon: "⊞", onSelect: () => openStatusRef(id) },
         { label: "Copy link", icon: "⧉", onSelect: () => copyText(`[${refLabel(label)}](status:${id})`) },
         ...rowActions(el),
       ]);
@@ -3917,34 +6466,82 @@
       openMenu(e, items);
     }
   }
-  async function refreshWiki() {
-    if (activeServerId === null) return;
+  // Just the page names, and they belong to every switch rather than only to opening the wiki tab.
+  // Two things outside that tab read them: the ref cards in chat, which say "not created yet" for a
+  // name the list lacks, and openWikiPage, which opens a page in EDIT mode when the list lacks it.
+  // An empty list therefore does not merely look wrong, it drops a [[link]] click into the editor.
+  async function refreshWikiPages() {
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) return;
     try {
       const knownPages = wikiPages;
-      const srv = activeServerId;
-      wikiPages = await invoke<string[]>("get_wiki_pages", { server: activeServerId });
+      // The review policy rides along with the page list. It gates the rename/delete controls and
+      // the eager-create path, both of which are reachable from a [[link]] in chat without the
+      // wiki tab ever being opened, so it cannot wait for refreshWiki.
+      const [listed, reviewDays] = await Promise.allSettled([
+        invoke<string[]>("get_wiki_pages", { server: srv }),
+        invoke<number>("get_wiki_review_days", { server: srv }),
+      ]);
+      if (!viewCurrent(gen, srv)) return;
+      if (reviewDays.status === "fulfilled") wikiReviewDays = reviewDays.value;
+      if (listed.status !== "fulfilled") {
+        error = String(listed.reason);
+        return;
+      }
+      const next = listed.value;
+      wikiPages = next;
       // A page list arriving for the first time is not news, it is just the list; only pages that
-      // appear against a list we already had get announced.
+      // appear against a list we already had get announced. A switch empties the list, so arriving
+      // at a server never announces its whole wiki.
       if (knownPages.length) {
-        for (const pg of wikiPages) {
+        for (const pg of next) {
           if (knownPages.includes(pg)) continue;
-          pushTicker("wiki", `wiki:${srv}:${pg}`, pg, () => void goWikiPage(srv, pg));
+          pushTicker("wiki", srv, `wiki:${srv}:${pg}`, pg, () => void goWikiPage(srv, pg));
         }
       }
-      wikiMap = await invoke<Record<string, string>>("get_wiki_map", { server: activeServerId });
-      wikiMeta = await invoke<Record<string, string>>("get_wiki_meta", { server: activeServerId });
-      wikiReviewDays = await invoke<number>("get_wiki_review_days", { server: activeServerId });
-      wikiPending = await invoke<UiWikiPending[]>("get_wiki_pending", { server: activeServerId });
-      // Reload the open page only if it still exists and the user isn't mid-edit.
-      if (activeWikiPage && !wikiDirty && wikiPages.includes(activeWikiPage)) {
-        wikiBody = await invoke<string>("get_wiki_page", { server: activeServerId, name: activeWikiPage });
+    } catch (e) {
+      if (viewCurrent(gen, srv)) error = String(e);
+    }
+  }
+  async function refreshWiki() {
+    const gen = viewGeneration;
+    const srv = activeServerId;
+    if (srv === null) return;
+    await refreshWikiPages();
+    if (!viewCurrent(gen, srv)) return;
+    // Four independent reads, applied independently: one failing (an older backend without
+    // get_wiki_review_days, say) must not discard the three that answered.
+    const [map, meta, reviewDays, pending] = await Promise.allSettled([
+      invoke<Record<string, string>>("get_wiki_map", { server: srv }),
+      invoke<Record<string, string>>("get_wiki_meta", { server: srv }),
+      invoke<number>("get_wiki_review_days", { server: srv }),
+      invoke<UiWikiPending[]>("get_wiki_pending", { server: srv }),
+    ]);
+    if (!viewCurrent(gen, srv)) return;
+    if (map.status === "fulfilled") {
+      wikiMap = map.value;
+      wikiMapFor = srv;
+    }
+    if (meta.status === "fulfilled") wikiMeta = meta.value;
+    if (reviewDays.status === "fulfilled") wikiReviewDays = reviewDays.value;
+    if (pending.status === "fulfilled") wikiPending = pending.value;
+    try {
+      // Reload the open page only if it still exists and the user isn't mid-edit. Re-checked after
+      // the read as well as before it: an edit begun while the body was in flight owns the buffer.
+      const page = activeWikiPage;
+      if (page && !wikiDirty && wikiPages.includes(page)) {
+        const body = await invoke<string>("get_wiki_page", { server: srv, name: page });
+        if (viewCurrent(gen, srv) && activeWikiPage === page && !wikiDirty) wikiBody = body;
       }
-      // Keep an open history browser current (an approval elsewhere adds a revision).
-      if (showWikiHistory && activeWikiPage) {
-        wikiHistory = await invoke<UiWikiRev[]>("get_wiki_history", { server: activeServerId, page: activeWikiPage });
+      // Keep an open history browser current (an approval elsewhere adds a revision). Reached even
+      // when the body reload above was skipped or its answer discarded.
+      if (showWikiHistory && page) {
+        const history = await invoke<UiWikiRev[]>("get_wiki_history", { server: srv, page });
+        if (viewCurrent(gen, srv) && activeWikiPage === page) wikiHistory = history;
       }
     } catch (e) {
-      error = String(e);
+      if (viewCurrent(gen, srv)) error = String(e);
     }
   }
 
@@ -4039,11 +6636,13 @@
   // a [[link]] away from a half-edited page stashes the draft; coming back restores it.
   const wikiDrafts = new Map<string, string>();
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}) {
-    if (activeServerId === null) return;
+    const gen = viewGeneration;
+    const server = activeServerId;
+    if (server === null) return;
     if (wikiDirty && activeWikiPage && activeWikiPage !== name) wikiDrafts.set(activeWikiPage, wikiBody);
     if (showInsert && insertTarget === "wiki") closeInsert();
     try {
-      let body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+      let body = await invoke<string>("get_wiki_page", { server, name });
       // Follow #REDIRECT [[Target]] pages Wikipedia-style (bounded; only to pages that exist),
       // remembering where we came from so the notice can link back to the redirect itself.
       let from = "";
@@ -4053,9 +6652,14 @@
           if (!target || target === name || !wikiPages.includes(target)) break;
           from = from || name;
           name = target;
-          body = await invoke<string>("get_wiki_page", { server: activeServerId, name });
+          if (!viewCurrent(gen, server)) return; // do not follow one server's redirect into another
+          body = await invoke<string>("get_wiki_page", { server, name });
         }
       }
+      // The whole point of the guard: without it this page's text lands in the editor of whatever
+      // server you moved to, and because that server's wikiPages lacks the name it opens in EDIT
+      // mode, one Ctrl+S from publishing one server's wiki content into another's.
+      if (!viewCurrent(gen, server)) return;
       wikiRedirectedFrom = from;
       wikiBody = body;
       activeWikiPage = name;
@@ -4251,7 +6855,7 @@
       // With review on, a member's save queues as a proposal; creating the page eagerly here
       // would queue an EMPTY proposal that eventually auto-creates a blank page. So members
       // under review just open the editor; their first real save becomes the proposal.
-      if (!wikiPages.includes(name) && (wikiReviewDays === 0 || canModerate)) {
+      if (!wikiPages.includes(name) && mayEditWikiStructure(wikiReviewDays, canModerate)) {
         await invoke("save_wiki_page", { server: activeServerId, name, body: "" });
         await refreshWiki();
       }
@@ -4290,13 +6894,7 @@
       for (const file of Array.from(fileList)) {
         const tid = toast(`Uploading ${file.name}…`, "info", 0);
         try {
-          const cid = await invoke<string>("add_file", {
-            server: activeServerId,
-            name: file.name,
-            mime: file.type || "application/octet-stream",
-            path: `wiki/${activeWikiPage}`,
-            data: await readBase64(file),
-          });
+          const cid = await addSharedFile(file, `wiki/${activeWikiPage}`);
           const alt = file.name.replace(/[[\]]/g, " ");
           insertIntoWikiBody(`![${alt}](cid:${cid})`);
           updateToast(tid, `Embedded ${file.name} · save the page to publish`, "ok", 5000);
@@ -4311,6 +6909,7 @@
   }
   function onWikiDrop(e: DragEvent) {
     e.preventDefault();
+    e.stopPropagation();
     dragOver = false;
     wikiEmbed(e.dataTransfer?.files ?? null);
   }
@@ -4333,13 +6932,40 @@
       toast(`Saving "${activeWikiPage}" failed: ${e}`, "err", 9000);
     }
   }
-  async function refreshInvite() {
-    if (!cur || activeServerId === null) return;
+  const inviteRefreshGeneration = new Map<number, number>();
+
+  async function updateInviteFor(
+    server: number,
+    mintFresh = false,
+  ): Promise<string | undefined> {
+    const generation = (inviteRefreshGeneration.get(server) ?? 0) + 1;
+    inviteRefreshGeneration.set(server, generation);
     try {
-      cur.invite = (await invoke<string | null>("get_invite", { server: activeServerId })) ?? "";
+      // Keep both command names as static literals. Besides making the security boundary easy to
+      // audit, this lets the command-ledger test prove every frontend IPC call is registered.
+      const invite = (
+        mintFresh
+          ? await invoke<string | null>("mint_invite_fresh", { server })
+          : await invoke<string | null>("get_invite", { server })
+      ) ?? "";
+      const latest = inviteRefreshGeneration.get(server) ?? 0;
+      if (generation !== latest) return undefined;
+      servers = withOrderedRefreshedInvite(servers, server, invite, generation, latest);
+      return invite;
     } catch (e) {
-      error = String(e);
+      if (generation === (inviteRefreshGeneration.get(server) ?? 0)) error = String(e);
+      return undefined;
     }
+  }
+
+  async function refreshInviteFor(server: number): Promise<string | undefined> {
+    return updateInviteFor(server);
+  }
+
+  async function refreshInvite() {
+    const server = activeServerId;
+    if (server === null) return;
+    await refreshInviteFor(server);
   }
 
   // Centre-crop an image file to a size×size JPEG, returned as raw base64 (no data: prefix).
@@ -4470,11 +7096,16 @@
     }
   }
 
-  // Read a File as raw base64 (strips the data: prefix), for the add_file command.
-  function readBase64(file: File): Promise<string> {
+  // Read a File as raw base64 (strips the data: prefix), reporting the browser-side read before
+  // the backend starts sealing/storing chunks. The Transfers UI reserves its first 10% for this.
+  function readBase64(
+    file: File,
+    onProgress: ((done: number, total: number) => void) | undefined = undefined,
+  ): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(new Error("could not read file"));
+      reader.onprogress = (e) => onProgress?.(e.loaded, e.lengthComputable ? e.total : file.size);
       reader.onload = () => {
         const r = reader.result;
         resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
@@ -4483,27 +7114,169 @@
     });
   }
 
+  // Decode only metadata before retaining a custom notification tone. This keeps an accidentally
+  // selected song from becoming a minutes-long alert and gives unsupported codecs a clear error
+  // at import time rather than a silent failure when the next message arrives.
+  function customToneDuration(file: File): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const audio = new Audio();
+      let settled = false;
+      const finish = (duration: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        audio.removeAttribute("src");
+        URL.revokeObjectURL(url);
+        if (duration === null) reject(new Error("could not decode that audio file"));
+        else resolve(duration);
+      };
+      const timer = setTimeout(() => finish(null), 5000);
+      audio.preload = "metadata";
+      audio.onloadedmetadata = () => finish(audio.duration);
+      audio.onerror = () => finish(null);
+      audio.src = url;
+    });
+  }
+
+  async function importCustomTone(
+    scope: "global" | "server",
+    kind: NotificationSoundKind,
+    files: FileList | null,
+  ) {
+    const file = files?.[0];
+    if (!file) return;
+    const mime = customToneMime(file.type, file.name);
+    // Reject obvious type/size failures before asking the decoder to touch the bytes.
+    const earlyError = customToneError(mime, file.size, 1);
+    if (earlyError) { toast(earlyError, "err", 4500); return; }
+    try {
+      const duration = await customToneDuration(file);
+      const validationError = customToneError(mime, file.size, duration);
+      if (validationError || !mime) {
+        toast(validationError ?? "Unsupported audio file", "err", 4500);
+        return;
+      }
+      const stored: StoredTone = {
+        name: file.name.trim().slice(0, 96) || "custom tone",
+        mime,
+        dataUrl: `data:${mime};base64,${await readBase64(file)}`,
+      };
+      if (scope === "global") {
+        globalSoundPrefs[kind].custom = stored;
+        globalSoundPrefs[kind].tone = "custom";
+        saveGlobalSoundPrefs();
+      } else {
+        serverSoundPrefs[kind].custom = stored;
+        serverSoundPrefs[kind].tone = "custom";
+        saveServerSoundPrefs();
+      }
+      toast(`${SOUND_LABELS[kind].title} tone set to ${stored.name}`, "ok", 2600);
+    } catch (e) {
+      toast(`Could not import tone: ${String(e)}`, "err", 4500);
+    }
+  }
+
+  function removeCustomTone(scope: "global" | "server", kind: NotificationSoundKind) {
+    if (scope === "global") {
+      globalSoundPrefs[kind].custom = null;
+      globalSoundPrefs[kind].tone = "default";
+      saveGlobalSoundPrefs();
+    } else {
+      serverSoundPrefs[kind].custom = null;
+      serverSoundPrefs[kind].tone = "inherit";
+      saveServerSoundPrefs();
+    }
+  }
+
+  // The one upload path used by files, embeds, wiki attachments, event art and custom emoji.
+  // Keeping it central means every group upload gets the same progress and terminal state.
+  async function addSharedFile(
+    file: File,
+    path: string,
+    name = file.name,
+    mime = file.type || "application/octet-stream",
+  ): Promise<string> {
+    if (activeServerId === null) throw new Error("no server selected");
+    const server = activeServerId;
+    const uploadId = crypto.randomUUID();
+    const key = uploadKey(server, uploadId);
+    const started = Date.now();
+    uploads[key] = {
+      server,
+      id: uploadId,
+      name,
+      path,
+      size: file.size,
+      done: 0,
+      total: Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES)),
+      status: "reading",
+      progress: 0,
+      updatedAt: started,
+      ts: started,
+    };
+    try {
+      const data = await readBase64(file, (done, total) => {
+        const u = uploads[key];
+        if (u && u.status === "reading") {
+          u.progress = total > 0 ? 0.1 * done / total : 0;
+          u.updatedAt = Date.now();
+        }
+      });
+      const u = uploads[key];
+      if (u) {
+        u.status = "uploading";
+        u.progress = Math.max(u.progress, 0.1);
+        u.updatedAt = Date.now();
+      }
+      const cid = await invoke<string>("add_file", { server, name, mime, path, data, uploadId });
+      if (uploads[key]) {
+        uploads[key].status = "done";
+        uploads[key].progress = 1;
+        uploads[key].done = uploads[key].total;
+        uploads[key].updatedAt = Date.now();
+      }
+      return cid;
+    } catch (e) {
+      if (uploads[key]) {
+        uploads[key].status = "failed";
+        uploads[key].error = String(e);
+        uploads[key].updatedAt = Date.now();
+      }
+      throw e;
+    }
+  }
+
   // Share a file into the Files-tab's current folder.
   async function uploadFile(fileList: FileList | null) {
-    const file = fileList?.[0];
-    if (!file || activeServerId === null) return;
+    if (!fileList?.length || activeServerId === null) return;
     uploading = true;
-    const tid = toast(`Sharing ${file.name}…`, "info", 0);
     try {
-      await invoke("add_file", {
-        server: activeServerId,
-        name: file.name,
-        mime: file.type || "application/octet-stream",
-        path: folder,
-        data: await readBase64(file),
-      });
-      updateToast(tid, `Shared ${file.name}`, "ok");
+      for (const file of Array.from(fileList)) {
+        const tid = toast(`Sharing ${file.name}…`, "info", 0);
+        try {
+          await addSharedFile(file, folder);
+          updateToast(tid, `Shared ${file.name}`, "ok");
+        } catch (e) {
+          updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
+        }
+      }
       await refreshFiles();
-    } catch (e) {
-      updateToast(tid, `Sharing ${file.name} failed: ${e}`, "err", 9000);
     } finally {
       uploading = false;
     }
+  }
+
+  function onFilesDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    void uploadFile(e.dataTransfer?.files ?? null);
+  }
+
+  function onEventDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    void pickEventImage(e.dataTransfer?.files ?? null);
   }
 
   // Embed media (image/video/audio) into the chat/status composer: upload under this
@@ -4516,13 +7289,7 @@
       for (const file of Array.from(fileList)) {
         const tid = toast(`Uploading ${file.name}…`, "info", 0);
         try {
-          const cid = await invoke<string>("add_file", {
-            server: activeServerId,
-            name: file.name,
-            mime: file.type || "application/octet-stream",
-            path: myEmbedFolder,
-            data: await readBase64(file),
-          });
+          const cid = await addSharedFile(file, myEmbedFolder);
           // Brackets in the alt would break the `![alt](cid:…)` marker parse: strip them.
           const alt = file.name.replace(/[[\]]/g, " ");
           const marker = `![${alt}](cid:${cid})`;
@@ -4655,6 +7422,35 @@
     }
   }
 
+  function remoteImage(url: string, alt: string): HTMLImageElement {
+    const img = document.createElement("img");
+    img.src = url;
+    img.alt = alt;
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    img.className = "embed-media embed-image remote-image";
+    img.title = "Remote image · click to view full size";
+    img.dataset.remoteImage = "1";
+    return img;
+  }
+
+  // Resolve explicit remote-image markdown and bare direct image/Giphy links. The renderer emits
+  // only inert placeholders; raw member HTML still cannot inject an image element.
+  function resolveRemoteMedia(container: HTMLElement | undefined) {
+    if (!container) return;
+    for (const span of Array.from(container.querySelectorAll<HTMLElement>("[data-remote-url]:not([data-resolved])"))) {
+      span.dataset.resolved = "1";
+      const url = safeRemoteUrl(span.dataset.remoteUrl ?? "");
+      if (url) span.replaceWith(remoteImage(url, span.dataset.alt ?? "Remote image"));
+    }
+    for (const a of Array.from(container.querySelectorAll<HTMLAnchorElement>("a[href]:not([data-remote-checked])"))) {
+      a.dataset.remoteChecked = "1";
+      const url = pastedImageUrl(a.href);
+      if (!url) continue;
+      a.replaceWith(remoteImage(url, a.textContent?.trim() || "Remote image"));
+    }
+  }
+
   // --- image lightbox: click an inline image to fill the screen with it ----------------------
   // The viewer reuses the data: URL the embed already holds, so opening it never refetches the
   // blob; `cid` is kept so Properties/Download can look the file up in the index.
@@ -4747,7 +7543,7 @@
     return {
       kind: "status",
       icon: "◈",
-      kicker: `Status · ${relDay(post.ts, Date.now())}`,
+      kicker: `Announcement · ${relDay(post.ts, Date.now())}`,
       title: nameOf(post.author),
       body: plainSummary(post.text, 200) || "(no text)",
       thumb: firstEmbedCid(post.text),
@@ -4773,6 +7569,9 @@
   function wikiCardSpec(page: string): CardSpec | null {
     const exists = wikiPages.includes(page);
     const body = wikiMap[page] ?? "";
+    // Whether `body` is an answer at all. Without this an unread map reads as "every page is
+    // empty", which is a claim about the server rather than about what we have loaded.
+    const mapped = wikiMapFor === activeServerId;
     // A page nobody has written yet is still worth a card: it says so, and clicking it starts one.
     if (!exists && !body) {
       return { kind: "wiki", icon: "⊞", kicker: "Wiki page", title: page, sub: "not created yet", missing: true };
@@ -4784,7 +7583,7 @@
       kicker: "Wiki page",
       title: page,
       sub: target ? `redirects to ${target}` : undefined,
-      body: target ? undefined : plainSummary(body, 220) || "(empty page)",
+      body: target ? undefined : plainSummary(body, 220) || (mapped ? "(empty page)" : undefined),
       thumb: firstEmbedCid(body),
     };
   }
@@ -4878,29 +7677,44 @@
 
   async function downloadFile(f: UiFile) {
     if (activeServerId === null) return;
-    const key = dlKey(activeServerId, f.cid);
+    const server = activeServerId;
+    const key = dlKey(server, f.cid);
+    const started = Date.now();
+    const held = Math.min(f.held, f.total);
     downloads[key] = {
-      server: activeServerId,
+      server,
       cid: f.cid,
       name: f.name,
       author: f.author,
       status: "queued",
-      progress: 0,
-      ts: Date.now(),
+      progress: f.total > 0 ? held / f.total : 0,
+      done: held,
+      total: f.total,
+      heldBefore: held,
+      bytesDone: f.total > 0 ? Math.round(f.size * held / f.total) : 0,
+      bytesTotal: f.size,
+      networkBytesDone: 0,
+      speed: 0,
+      lastRateAt: started,
+      updatedAt: started,
+      ts: started,
     };
     try {
-      const base64 = await invoke<string>("download_file", { server: activeServerId, cid: f.cid });
-      const a = document.createElement("a");
-      a.href = `data:${f.mime || "application/octet-stream"};base64,${base64}`;
-      a.download = f.name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      if (downloads[key]) downloads[key].status = "done";
+      const base64 = await invoke<string>("download_file", { server, cid: f.cid });
+      const saved = await saveGroupDownload(invoke, f.name, base64);
+      if (downloads[key]) {
+        Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
+      }
+      const notice = downloadSavedNotice(f.name, saved);
+      toast(notice.text, notice.kind, notice.ms);
       refreshFiles(); // the file's chunks are now held locally: update its availability
     } catch (e) {
       error = String(e);
-      if (downloads[key]) downloads[key].status = "failed";
+      if (downloads[key]) {
+        downloads[key].status = "failed";
+        downloads[key].error = String(e);
+        downloads[key].updatedAt = Date.now();
+      }
     }
   }
 
@@ -4913,6 +7727,14 @@
   let confirmDeleteCid = $state(""); // two-click delete confirm in the info pane
   let fileInfoUsage = $state<UiFileUsage | null>(null); // null = still checking
   let fileInfoExpiryBusy = $state(false);
+  // Reading a text/markdown share inline. `fileTextState` is the reader's whole story: nothing to
+  // read, fetching, readable, over the inline cap (a fetch the reader has to ask for), not
+  // actually text, or the fetch failed.
+  let fileText = $state("");
+  let fileTextLines = $state(0);
+  let fileTextState = $state<"none" | "loading" | "ready" | "too-big" | "binary" | "error">("none");
+  let fileTextMode = $state<"render" | "source">("render"); // markdown only; other text is source
+  let fileTextWrap = $state(true); // off for logs and code, where columns carry meaning
 
   // The default circulation lifetime, mirroring `catcoms_app::FILE_EXPIRY_DEFAULT_MS`. Used only
   // to compute the deadline "Restore 30-day expiry" writes back; new shares are stamped by the
@@ -4979,7 +7801,7 @@
       fileInfoExpiryBusy = false;
     }
   }
-  // Tracked downloads keyed by file cid, for the Downloads tab + the file-info progress bar. Driven
+  // Tracked downloads keyed by file cid, for the Transfers tab + the file-info progress bar. Driven
   // by 'download-progress' events (per-chunk) from the actor. Only EXPLICIT downloads (the Download
   // button) are tracked here: background embed/preview fetches emit progress but create no entry.
   type DownloadInfo = {
@@ -4988,28 +7810,158 @@
     name: string;
     author: string; // the uploader (the file's source)
     provider?: string; // the live serving peer's fingerprint, when bytes came over the network
-    status: "queued" | "downloading" | "done" | "failed";
+    status: "queued" | "waiting" | "downloading" | "verifying" | "done" | "failed";
     progress: number; // 0..1
+    done: number;
+    total: number;
+    heldBefore: number;
+    bytesDone: number;
+    bytesTotal: number;
+    networkBytesDone: number;
+    speed: number;
+    lastRateAt: number;
+    updatedAt: number;
+    savedPath?: string;
+    error?: string;
     ts: number;
   };
   // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
   // exist on two servers, and switching servers must not show the other's transfers).
   let downloads = $state<Record<string, DownloadInfo>>({});
   const dlKey = (server: number, cid: string) => `${server}:${cid}`;
-  // The active server's downloads, newest first.
+  type UploadInfo = {
+    server: number;
+    id: string;
+    name: string;
+    path: string;
+    size: number;
+    done: number;
+    total: number;
+    status: "reading" | "uploading" | "publishing" | "done" | "failed";
+    progress: number; // 0..1; 0..0.1 is the webview read, the remainder is backend work
+    updatedAt: number;
+    error?: string;
+    ts: number;
+  };
+  let uploads = $state<Record<string, UploadInfo>>({});
+  let transferNow = $state(Date.now());
+  const uploadKey = (server: number, id: string) => `${server}:${id}`;
+
+  // The active server's transfers, newest first. Uploads are first-class rows instead of a
+  // transient button label, so a completed share stays visibly completed until cleared.
   let downloadList = $derived(
     Object.values(downloads)
       .filter((d) => d.server === activeServerId)
       .sort((a, b) => b.ts - a.ts)
   );
-  let activeDownloads = $derived(
-    downloadList.filter((d) => d.status === "queued" || d.status === "downloading").length
+  let uploadList = $derived(
+    Object.values(uploads)
+      .filter((u) => u.server === activeServerId)
+      .sort((a, b) => b.ts - a.ts)
   );
-  function clearFinishedDownloads() {
+  type TransferRow =
+    | (DownloadInfo & { direction: "download"; key: string })
+    | (UploadInfo & { direction: "upload"; key: string });
+  let transferList = $derived(
+    [
+      ...downloadList.map((d): TransferRow => ({ ...d, direction: "download", key: `download:${d.cid}` })),
+      ...uploadList.map((u): TransferRow => ({ ...u, direction: "upload", key: `upload:${u.id}` })),
+    ].sort((a, b) => b.ts - a.ts)
+  );
+  let activeTransfers = $derived(
+    transferList.filter((t) =>
+      t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
+      t.status === "verifying" || t.status === "reading" || t.status === "uploading" ||
+      t.status === "publishing"
+    ).length
+  );
+  let movingTransfers = $derived(
+    transferList.filter((t) => transferIsActive(t) && transferConnected(t)).length
+  );
+  let waitingTransfers = $derived(Math.max(0, activeTransfers - movingTransfers));
+  let finishedTransfers = $derived(transferList.length - activeTransfers);
+  let failedTransfers = $derived(transferList.filter((t) => t.status === "failed").length);
+  function clearFinishedTransfers() {
     for (const [k, d] of Object.entries(downloads)) {
       if (d.server === activeServerId && (d.status === "done" || d.status === "failed"))
         delete downloads[k];
     }
+    for (const [k, u] of Object.entries(uploads)) {
+      if (u.server === activeServerId && (u.status === "done" || u.status === "failed"))
+        delete uploads[k];
+    }
+  }
+
+  function transferConnected(t: TransferRow): boolean {
+    if (t.direction === "upload" || t.status === "done") return true;
+    return onlineCount > 1 || t.done >= t.total ||
+      (t.status === "downloading" && transferNow - t.updatedAt < 3_000);
+  }
+
+  function transferIsActive(t: TransferRow): boolean {
+    if (t.direction === "download" && t.status === "downloading") {
+      return transferNow - t.updatedAt < 3_000;
+    }
+    return t.status === "reading" || t.status === "uploading" || t.status === "publishing" ||
+      t.status === "verifying";
+  }
+
+  function transferPieceStates(t: TransferRow): TransferPiece[] {
+    return transferPieces(
+      t.total,
+      t.done,
+      transferIsActive(t) && t.status !== "publishing" && t.status !== "verifying",
+      transferConnected(t),
+      t.status === "failed",
+      t.status === "done",
+    );
+  }
+
+  function transferTone(t: TransferRow): string {
+    if (t.status === "done") return "complete";
+    if (t.status === "failed" || !transferConnected(t)) return "error";
+    if (t.status === "downloading" && !transferIsActive(t)) return "waiting";
+    if (t.status === "queued" || t.status === "waiting" || t.status === "reading" ||
+        t.status === "publishing" || t.status === "verifying") return "waiting";
+    return "active";
+  }
+
+  function transferStatus(t: TransferRow): string {
+    const pct = Math.round(t.progress * 100);
+    if (t.status === "done") return t.direction === "upload" ? "✓ Available" : "✓ Saved";
+    if (t.status === "failed") {
+      return t.direction === "download" && onlineCount <= 1 ? "No connection" : "✕ Failed";
+    }
+    if (t.direction === "upload") {
+      if (t.status === "reading") return `Preparing ${pct}%`;
+      if (t.status === "publishing") return "Publishing…";
+      return `Processing ${pct}%`;
+    }
+    if (!transferConnected(t)) return "No connection";
+    if (t.status === "queued" || t.status === "waiting") return "Waiting for source…";
+    if (t.status === "verifying") return "Verifying…";
+    if (!transferIsActive(t)) return "Waiting for next chunk…";
+    return `Receiving ${pct}%`;
+  }
+
+  function transferHover(t: TransferRow): string {
+    const lines = [
+      `Status: ${transferStatus(t).replace(/[✓✕…]/g, "").trim()}`,
+      `Chunks ready: ${Math.min(t.done, t.total)} / ${t.total}`,
+    ];
+    if (t.direction === "download") {
+      lines.push(`Data ready: ${formatBytes(t.bytesDone)} / ${formatBytes(t.bytesTotal)}`);
+      if (t.savedPath) lines.push(`Saved to: ${t.savedPath}`);
+      lines.push(`Source: ${t.provider ? `${nameOf(t.provider)}${transferConnected(t) ? "" : " (last source; now offline)"}` : transferConnected(t) ? "finding a reachable member" : "no member connected"}`);
+      if (t.speed > 0 && t.status === "downloading") lines.push(`Speed: ${formatRate(t.speed)}`);
+      if (t.heldBefore > 0) lines.push(`Already held when started: ${t.heldBefore} chunk${t.heldBefore === 1 ? "" : "s"}`);
+    } else {
+      lines.push(`File size: ${formatBytes(t.size)}`);
+      lines.push("Source: this device");
+      lines.push("Availability: members download these chunks on demand");
+    }
+    if (t.error) lines.push(`Detail: ${t.error}`);
+    return lines.join("\n");
   }
   // Advisory eclipse hint for the active server (the node may be isolated: verify a member out of
   // band). Never gates anything; driven by 'eclipse-changed'. Reset when switching servers.
@@ -5023,6 +7975,12 @@
     fileInfoPreviewError = false;
     confirmDeleteCid = "";
     fileInfoUsage = null;
+    fileText = "";
+    fileTextLines = 0;
+    fileTextMode = "render";
+    // `fileTextKind` reads off the listing just assigned, so the reader shows its bar and a
+    // "Loading…" line from the first frame rather than an empty frame until the fetch starts.
+    fileTextState = fileTextKind ? "loading" : "none";
     const id = activeServerId;
     // Where the file is used (wiki pages + status/chat counts). Async like the availability row,
     // and guarded against the pane being switched while the scan is in flight.
@@ -5053,6 +8011,8 @@
         if (fileInfo?.cid === f.cid) fileInfoPreviewError = true;
       }
     }
+    // Documents, config and source read inline the same way media plays inline.
+    if (fileTextKind && fileInfo?.cid === f.cid) await loadFileText(f);
   }
 
   function closeFileInfo() {
@@ -5062,6 +8022,9 @@
     fileInfoAvail = null;
     confirmDeleteCid = "";
     fileInfoUsage = null;
+    fileText = "";
+    fileTextLines = 0;
+    fileTextState = "none";
   }
 
   /** From Properties → "Used in": close the pane and open the wiki page that embeds the file. */
@@ -5093,6 +8056,48 @@
     return "";
   });
 
+  // Which reader the pane offers below the media block. Gated on `previewKind` so a listing that
+  // somehow satisfies both (a .txt stamped image/png, say) shows one preview, not two.
+  const fileTextKind = $derived<TextFileKind>(
+    fileInfo && !previewKind ? textFileKind(fileInfo.name, fileInfo.mime) : ""
+  );
+  // A markdown file opens rendered and can be flipped to its source; everything else IS source.
+  const fileTextRendered = $derived(fileTextKind === "markdown" && fileTextMode === "render");
+  // Memoised so parsing + sanitizing a long document runs when the body changes, not on every
+  // repaint of the pane around it (the progress bar under it ticks once per chunk).
+  const fileTextHtml = $derived(fileTextRendered ? renderTextDocument(fileText) : "");
+
+  /**
+   * Fetch and decode a text share for the reader. Files over the inline cap are not pulled at all
+   * until `force` (the "Read it anyway" button): `download_file` returns the whole blob in one
+   * base64 string, and a listing may declare up to 256 MiB.
+   */
+  async function loadFileText(f: UiFile, force = false) {
+    const id = activeServerId;
+    if (id === null) return;
+    if (!force && f.size > TEXT_PREVIEW_MAX_BYTES) {
+      fileTextState = "too-big";
+      return;
+    }
+    fileTextState = "loading";
+    try {
+      const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
+      // Guard against the pane being closed or switched while the fetch was in flight.
+      if (fileInfo?.cid !== f.cid) return;
+      const decoded = decodeTextFile(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
+      if (!decoded.ok) {
+        fileTextState = "binary";
+        return;
+      }
+      fileText = decoded.text;
+      fileTextLines = decoded.lines;
+      fileTextState = "ready";
+    } catch {
+      // Not held locally and no peer sharing it right now: say so instead of spinning forever.
+      if (fileInfo?.cid === f.cid) fileTextState = "error";
+    }
+  }
+
   // Index the loaded messages by id once per change, so reply-parent lookups (the quote on every
   // reply + the composer banner) are O(1) instead of a linear scan per render.
   let msgById = $derived(new Map(messages.map((m) => [m.id, m] as const)));
@@ -5105,7 +8110,7 @@
   function jumpToMessageId(id: string) {
     const idx = messages.findIndex((m) => m.id === id);
     if (idx < 0) return; // parent not in the loaded list (deleted / scrolled out of history)
-    scrollToMatch(idx);
+    void scrollToMatch(idx);
     flashId = id;
     setTimeout(() => {
       if (flashId === id) flashId = "";
@@ -5131,8 +8136,7 @@
     replyingTo = "";
   }
   function msgSnippet(text: string, n = 70): string {
-    const t = text.replace(/\s+/g, " ").trim();
-    return t.length > n ? t.slice(0, n) + "…" : t;
+    return plainSummary(text, n);
   }
 
   // --- toasts: visible feedback for otherwise-silent work (uploads, saves, renames) --------------
@@ -5309,7 +8313,7 @@
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
     await tick();
     if (!statuses.some((s) => s.id === id)) {
-      error = "That status post is no longer in this server's feed.";
+      error = "That announcement is no longer in this server's feed.";
       return;
     }
     statusEl?.querySelector(`[data-sid="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
@@ -5333,6 +8337,7 @@
       .slice(0, 6);
   });
   function onComposerInput(e: Event & { currentTarget: HTMLTextAreaElement }) {
+    saveDraftFor(chanKey());
     const caret = e.currentTarget.selectionStart ?? draft.length;
     const m = /@([^\s@[\]]{0,30})$/.exec(draft.slice(0, caret));
     if (m) {
@@ -5394,8 +8399,12 @@
   // Does `msgs` contain a message newer than the channel's read mark that targets me (and isn't
   // mine)? Used to flag a channel and to decide whether an arrival deserves a mention chime.
   function targetsMe(channel: string, msgs: Msg[]): boolean {
-    if (!myFp) return false;
-    const seen = readMarks[`${activeServerId}:${channel}`] ?? 0;
+    // No active server means no read mark to measure against. The sole caller already requires
+    // server === activeServerId, and its documented fallback is an ordinary-message notification,
+    // which is what false gives it. The old key built `null:channel`, which said the same thing
+    // by accident rather than on purpose.
+    if (!myFp || activeServerId === null) return false;
+    const seen = readMarks[chatScopeKey(activeServerId, channel)] ?? 0;
     const byId = new Map(msgs.map((m) => [m.id, m] as const));
     return msgs.some(
       (m) =>
@@ -5407,9 +8416,12 @@
 
   // Cross-server inbox: the backend scans every server's channels for messages addressed to me.
   async function loadInbox() {
+    if (locked) return;
     inboxLoading = true;
     try {
-      inboxItems = await invoke<InboxEntry[]>("get_inbox");
+      const next = await invoke<InboxEntry[]>("get_inbox");
+      if (locked) return; // the lock cleared this list; it carries message text from every server
+      inboxItems = next;
     } catch (e) {
       error = String(e);
     } finally {
@@ -5417,14 +8429,28 @@
     }
   }
   let inboxTimer: ReturnType<typeof setTimeout> | undefined;
+  let inboxIdle: number | undefined;
   function scheduleInboxReload() {
+    if (locked) return;
     clearTimeout(inboxTimer);
-    inboxTimer = setTimeout(loadInbox, 1500); // debounce the cross-server scan
+    if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
+    inboxIdle = undefined;
+    inboxTimer = setTimeout(() => {
+      inboxTimer = undefined;
+      if ("requestIdleCallback" in window) {
+        inboxIdle = window.requestIdleCallback(() => {
+          inboxIdle = undefined;
+          void loadInbox();
+        }, { timeout: 2_500 });
+      } else {
+        void loadInbox();
+      }
+    }, 1_000); // coalesce bursts, then run the cross-server scan off the interaction path
   }
   // An inbox entry is "unseen" until you've read past it in that channel (the same read marks that
   // drive jump-to-unread); resolved against the entry's own server, not the active one.
   function inboxUnseen(it: InboxEntry): boolean {
-    return it.ts > (readMarks[`${it.server}:${it.channel}`] ?? 0);
+    return it.ts > (readMarks[chatScopeKey(it.server, it.channel)] ?? 0);
   }
   let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
   // The entry's channel name, resolved from the server's known channel list (names are a UI concern).
@@ -5434,6 +8460,11 @@
   function openInbox() {
     inboxView = true;
     dmHome = false;
+    if (newsUnseen) {
+      inboxMode = "news";
+      newsUnseen = false;
+      loadNews();
+    }
     loadInbox();
   }
   // Open the server + channel an inbox entry points at and scroll to the message.
@@ -5467,23 +8498,77 @@
   // The lexicographically-smaller fingerprint is the polite end and yields on collision.
   type CallPeer = {
     fp: string;
+    server: number;
+    channel: string;
     pc: RTCPeerConnection;
     dc: RTCDataChannel | null;
     polite: boolean;
     makingOffer: boolean;
     ignoreOffer: boolean;
+    lastRetry: number;
   };
   let inCall = $state(false);
   let callMuted = $state(false);
+  // Whether this device has a microphone in the room at all, as distinct from having muted one.
+  // Being in a room without one is a supported state, not a failed join.
+  let micOn = $state(false);
   let callParticipants = $state<string[]>([]); // peer fingerprints, for the call UI
   let callPeerStates = $state<Record<string, string>>({}); // fp -> RTCPeerConnectionState
   // A voice room is per-CHANNEL: the channel id doubles as the call id (for signalling + the media
   // key). You join a channel's room; others see it via presence (below) and join the same room.
   let callChannel = $state(""); // the channel id of my active voice room ("" = not in a call)
   let callChannelName = $state(""); // for the call bar
-  let callServer: number | null = null; // the server the room is on
+  // Reactive, unlike the plain binding this replaces: the call chrome has to re-render when the
+  // room's server stops being the viewed one, which is the whole point of the fields below.
+  let callServer = $state<number | null>(null); // the server the room is on
+  let callServerName = $state(""); // the room's server, for chrome that must not say "here"
+  let callSelfFp = $state(""); // identity on callServer; the viewed server may change mid-call
+  // Names and avatars on the call surfaces MUST resolve against the room's server, never the
+  // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
+  // so reading it from the call bar re-labelled you and every peer the moment you clicked
+  // another server: your own name changed under you, and the dock read as though the call had
+  // moved with you. This map is fetched once for callServer and is cleared only on leave.
+  let callProfiles = $state<Record<string, Prof>>({});
+  // True while the user is looking at a different server from the one the call is on. The dock
+  // uses it to say where the call actually is instead of silently implying "here".
+  let callElsewhere = $derived(inCall && callServer !== null && callServer !== activeServerId);
+  // The room's server name. Prefer the live rail entry so a rename mid-call lands; fall back to
+  // the name captured at join, which is all we have if the server leaves the rail under us.
+  let callSrvLabel = $derived(
+    callServer !== null
+      ? (servers.find((s) => s.id === callServer)?.name ?? callServerName)
+      : "",
+  );
+  // Which dock slot the voice chrome occupies. Two slots rather than free dragging: the dock is
+  // a fixed centred overlay, and a freely draggable surface near the top edge would fight the
+  // titlebar's own drag region for no real gain.
+  let callDockTop = $state(loadCallSetting("dock", "top") !== "bottom");
+  function toggleDockSlot() {
+    callDockTop = !callDockTop;
+    try {
+      localStorage.setItem("catcoms.call.dock", callDockTop ? "top" : "bottom");
+    } catch {
+      /* storage unavailable */
+    }
+  }
+  // Per-peer media path. Absent means "not known yet": still negotiating, or getStats has not
+  // answered. An unknown path renders as nothing at all, never as a guess.
+  let peerTransport = $state<Record<string, "direct" | "relayed">>({});
+  let secInfoOpen = $state(false); // the "what a relay can see" fold-out in the stage
+  // The room folds to the weakest path present: one relayed leg means a relay learns that much
+  // of who is talking to whom.
+  let roomPath = $derived.by(() => {
+    const known = callParticipants
+      .map((fp) => peerTransport[fp])
+      .filter((t): t is "direct" | "relayed" => !!t);
+    if (!known.length) return "";
+    return known.includes("relayed") ? "relayed" : "direct";
+  });
   let localStream: MediaStream | null = null;
   const callPeers: Record<string, CallPeer> = {};
+  // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
+  // remote description instead of throwing it away and making the call depend on event timing.
+  const waitingIce: Record<string, RTCIceCandidateInit[]> = {};
 
   // Voice-room presence: `${server}:${channel}` -> { fp: lastSeenMs }, from periodic pings members in
   // a room broadcast. Drives the per-channel "in voice" indicators + the room-active notification.
@@ -5609,19 +8694,43 @@
   function b64dec(b: string): string {
     return new TextDecoder().decode(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
   }
-  async function sendSignal(targetFp: string, msg: Record<string, unknown>) {
-    if (callServer === null) return;
+  async function sendSignal(server: number, targetFp: string, msg: Record<string, unknown>): Promise<boolean> {
     try {
-      await invoke("send_call_signal", { server: callServer, targetFp, payload: b64enc(JSON.stringify(msg)) });
-    } catch {
-      /* peer unreachable: ignore (mesh tolerates a missing edge) */
+      const delivered = await invoke<boolean>("send_call_signal", {
+        server,
+        targetFp,
+        payload: b64enc(JSON.stringify(msg)),
+      });
+      if (!delivered) console.warn("voice signal had no member route", { server, targetFp, type: msg.type });
+      return delivered;
+    } catch (e) {
+      console.warn("voice signal failed", { server, targetFp, type: msg.type, error: String(e) });
+      return false;
     }
   }
-  // Send a signal to every online member of the call's server.
-  function broadcast(msg: Record<string, unknown>) {
-    for (const m of roster) {
-      if (m.fingerprint !== myFp && onlineMembers.has(m.fingerprint)) void sendSignal(m.fingerprint, msg);
+  // Send against the CALL server's live roster, never the server currently being viewed. Fetching
+  // this small in-memory view also lets a background call pick up newly-reconnected members.
+  async function broadcastOn(server: number, selfFp: string, msg: Record<string, unknown>) {
+    try {
+      const [membersHere, onlineHere] = await Promise.all([
+        invoke<Member[]>("get_members", { server }),
+        invoke<string[]>("get_online_members", { server }),
+      ]);
+      const online = new Set(onlineHere);
+      for (const m of membersHere) {
+        if (m.fingerprint !== selfFp && online.has(m.fingerprint)) {
+          void sendSignal(server, m.fingerprint, msg);
+        }
+      }
+    } catch (e) {
+      console.warn("voice broadcast could not read its server roster", { server, error: String(e) });
     }
+  }
+  // Capture the room synchronously: leaveVoice clears global state immediately after sending bye.
+  function broadcast(msg: Record<string, unknown>) {
+    const server = callServer;
+    const selfFp = callSelfFp;
+    if (server !== null && selfFp) void broadcastOn(server, selfFp, msg);
   }
   // --- Audio devices ----------------------------------------------------------------------------
   // Which mic/speaker this install uses. Remembered locally (per machine, not per server), applied
@@ -5686,8 +8795,8 @@
     localStream = next;
     addAnalyser("me", next); // the meter was watching the track that just went away
   }
-  async function ensureMic(): Promise<boolean> {
-    if (localStream) return true;
+  async function ensureMic(announce = true): Promise<MediaStream | null> {
+    if (localStream) return localStream;
     // Try the remembered input first; a device that has since vanished must not block the call.
     const tries: (MediaTrackConstraints | boolean)[] = micDev
       ? [{ deviceId: { exact: micDev } }, true]
@@ -5696,13 +8805,36 @@
       try {
         localStream = await navigator.mediaDevices.getUserMedia({ audio, video: false });
         void refreshAudioDevices();
-        return true;
+        return localStream;
       } catch {
         /* remembered device gone: fall back to the system default */
       }
     }
-    error = "Couldn't access the microphone (permission denied or no device).";
-    return false;
+    // Joining a room does not announce this: no microphone is a perfectly good way to be in a
+    // room (the jukebox and the instruments do not need one), so the dock says so in place
+    // rather than the app raising it as a failure.
+    if (announce) error = "Couldn't access the microphone (permission denied or no device).";
+    return null;
+  }
+  /**
+   * Turn the microphone on for a room already joined. Adding a track raises negotiationneeded on
+   * every existing peer, and the perfect-negotiation path already handles the renegotiation, so
+   * this needs no signalling of its own.
+   */
+  async function enableMic() {
+    if (localStream || !inCall) return;
+    const stream = await ensureMic();
+    if (!stream) return;
+    callMuted = false;
+    for (const t of stream.getAudioTracks()) t.enabled = true;
+    for (const p of Object.values(callPeers)) {
+      for (const t of stream.getTracks()) {
+        try { p.pc.addTrack(t, stream); } catch { /* already added on this edge */ }
+      }
+    }
+    addAnalyser("me", stream);
+    micOn = true;
+    pushInstState();
   }
   function attachRemote(fp: string, stream: MediaStream) {
     let el = document.getElementById(`call-audio-${fp}`) as HTMLAudioElement | null;
@@ -5963,18 +9095,50 @@
   // Cursor as px offsets from the viewport centre (the projection's origin).
   let spaceCursor = $state({ x: 0, y: 0 });
   let spaceRoot = $state<HTMLElement | undefined>();
-  // One drag at a time: "maybe" until the pointer commits to a look-drag or the
-  // hold timer commits it to a lasso. Pointer capture starts only at that commit,
-  // so plain clicks still reach the server buttons underneath.
-  let spaceDrag: { id: number; sx: number; sy: number; yaw0: number; pitch0: number; mode: "maybe" | "look" } | null = null;
+  // One gesture at a time. Background presses can become look-drags or, after a
+  // hold, freehand lassos. Server and tray presses become direct drags after the
+  // movement threshold; plain clicks still reach their buttons.
+  type SpaceDragMode = "background-maybe" | "look" | "lasso" | "server-maybe" | "server" | "tray-maybe" | "tray";
+  let spaceDrag: {
+    id: number;
+    sx: number;
+    sy: number;
+    cx0: number;
+    cy0: number;
+    yaw0: number;
+    pitch0: number;
+    mode: SpaceDragMode;
+    serverId?: number;
+  } | null = null;
   let spaceHoldTimer = 0;
-  let spaceLasso = $state<{ x: number; y: number; r: number; t0: number } | null>(null);
+  let spaceLasso = $state<{ points: ScreenPoint[] } | null>(null);
   // Captured servers ride as angular offsets around the aim point until dropped.
   let spaceCarried = $state<Record<number, Placement> | null>(null);
   let spaceSwallowClick = false; // a drop's trailing click must not open a server
+  let spaceEntering = $state<number | null>(null);
+  let spaceEntryPhase = $state<"focus" | "zoom" | null>(null);
+  let spaceEnterTimer = 0;
+  let spaceCameraRaf = 0;
   let spaceTrayPinned = $state(false);
   let spaceTrayHeld = $state(false);
   let spaceTray = $derived(spaceTrayPinned || spaceTrayHeld);
+  let spaceSearch = $state("");
+  let spaceSearchOpen = $state(false);
+  let spaceSearchEl = $state<HTMLInputElement | undefined>();
+  let spaceSearchIdx = $state(0);
+  let spaceFocusedServer = $state<number | null>(null);
+  let spaceOnlineCounts = $state<Record<number, number>>({});
+  let spaceActivityAt = $state<Record<number, number>>({});
+  let spaceUndo = $state<Record<number, Placement>[]>([]);
+  let spaceRedo = $state<Record<number, Placement>[]>([]);
+  let spaceNewCluster = $state("");
+  let spaceNewClusterColor = $state("#8d7cf5");
+  let spaceClusterOpen = $state<string | null>(null);
+  let spaceClusterDrop = $state<string | null>(null);
+  let spacePanoYaw = $state(0);
+  let spaceSeamPreview = $state(false);
+  let spaceLayoutBusy = $state(false);
+  let spaceLayoutInput = $state<HTMLInputElement | undefined>();
   // Per-server livery accents, so a hovered server can glow in its own colour.
   let spaceAccents = $state<Record<number, string>>({});
   async function refreshSpaceAccents() {
@@ -5989,14 +9153,114 @@
       }
     }
   }
+  function cloneSpacePlacements(source = spaceState.placements): Record<number, Placement> {
+    return Object.fromEntries(Object.entries(source).map(([id, p]) => [Number(id), { ...p }]));
+  }
+  function rememberSpaceLayout() {
+    spaceUndo = [...spaceUndo.slice(-19), cloneSpacePlacements()];
+    spaceRedo = [];
+  }
+  function undoSpaceLayout() {
+    const previous = spaceUndo[spaceUndo.length - 1];
+    if (!previous) return;
+    spaceRedo = [...spaceRedo.slice(-19), cloneSpacePlacements()];
+    spaceUndo = spaceUndo.slice(0, -1);
+    spaceState.placements = cloneSpacePlacements(previous);
+    saveSpace();
+  }
+  function redoSpaceLayout() {
+    const next = spaceRedo[spaceRedo.length - 1];
+    if (!next) return;
+    spaceUndo = [...spaceUndo.slice(-19), cloneSpacePlacements()];
+    spaceRedo = spaceRedo.slice(0, -1);
+    spaceState.placements = cloneSpacePlacements(next);
+    saveSpace();
+  }
+  async function refreshSpacePresence() {
+    const pairs = await Promise.all(railServers.map(async (s) => {
+      try {
+        const online = await invoke<string[]>("get_online_members", { server: s.id });
+        return [s.id, online.length + 1] as const; // this device is also present
+      } catch {
+        return [s.id, 1] as const;
+      }
+    }));
+    spaceOnlineCounts = Object.fromEntries(pairs);
+  }
+  let spaceMentionCounts = $derived.by(() => {
+    const counts: Record<number, number> = {};
+    for (const item of inboxItems) if (inboxUnseen(item)) counts[item.server] = (counts[item.server] ?? 0) + 1;
+    return counts;
+  });
+  function spaceVoiceCount(server: number): number {
+    let count = 0;
+    for (const s of servers.find((item) => item.id === server)?.channels ?? []) {
+      count += roomMembers(server, s.id).length;
+    }
+    return count;
+  }
+  function stopSpaceCameraTween() {
+    if (spaceCameraRaf) cancelAnimationFrame(spaceCameraRaf);
+    spaceCameraRaf = 0;
+  }
+  function tweenSpaceCamera(target: Placement, duration: number, done: () => void = () => {}) {
+    stopSpaceCameraTween();
+    const from = { ...spaceCam };
+    const dyaw = yawDelta(from.yaw, target.yaw);
+    const dpitch = target.pitch - from.pitch;
+    const start = performance.now();
+    const frame = (now: number) => {
+      const raw = Math.min(1, (now - start) / Math.max(1, duration));
+      const t = 1 - (1 - raw) ** 3;
+      spaceCam = { yaw: wrapYaw(from.yaw + dyaw * t), pitch: clampPitch(from.pitch + dpitch * t) };
+      if (raw < 1) spaceCameraRaf = requestAnimationFrame(frame);
+      else {
+        spaceCameraRaf = 0;
+        done();
+      }
+    };
+    spaceCameraRaf = requestAnimationFrame(frame);
+  }
+  function focusSpaceServer(id: number, duration = 360) {
+    const placement = spaceState.placements[id];
+    if (!placement) return;
+    spaceFocusedServer = id;
+    tweenSpaceCamera(placement, fxMotionOff ? 1 : duration);
+  }
+  function focusSpaceCluster(id: string, duration = 420) {
+    if (!spaceState.clusters.some((cluster) => cluster.id === id)) return;
+    spaceClusterOpen = id;
+    spaceFocusedServer = null;
+    tweenSpaceCamera(spaceClusterAnchor(id), fxMotionOff ? 1 : duration);
+  }
   function toggleSpace() {
+    clearTimeout(spaceEnterTimer);
+    stopSpaceCameraTween();
+    spaceEntering = null;
+    spaceEntryPhase = null;
     spaceOpen = !spaceOpen;
     spaceLasso = null;
     spaceCarried = null;
     spaceTrayPinned = false;
     spaceTrayHeld = false;
     spaceDrag = null;
-    if (spaceOpen) refreshSpaceAccents();
+    spaceSearch = "";
+    spaceSearchOpen = false;
+    spaceClusterOpen = null;
+    spaceClusterDrop = null;
+    if (spaceOpen) {
+      // Migrate an older or hand-edited layout too, rather than only preventing
+      // new drops from overlapping from this point onward.
+      spaceState.placements = separatePlacements(
+        spaceState.placements,
+        Object.keys(spaceState.placements).map(Number),
+        spaceMinSeparation(),
+      );
+      saveSpace();
+      refreshSpaceAccents();
+      void refreshSpacePresence();
+      void loadInbox();
+    }
   }
   // Where the placed servers land on screen this frame. While carrying, the group's
   // placements are overridden by re-anchoring the stored offsets at the cursor's aim
@@ -6021,6 +9285,79 @@
   });
   // Servers with no place yet (new joins) wait in the tray until hung.
   let spaceUnplaced = $derived(spaceOpen ? railServers.filter((s) => !spaceState.placements[s.id]) : []);
+  let spaceSearchMatches = $derived.by(() => {
+    const q = spaceSearch.trim().toLowerCase();
+    if (!q) return [] as ServerState[];
+    return railServers.filter((s) => {
+      const cluster = spaceState.clusters.find((c) => c.id === spaceState.serverClusters[s.id]);
+      return s.name.toLowerCase().includes(q) || !!cluster?.name.toLowerCase().includes(q);
+    });
+  });
+  function spaceClusterServerIds(cluster: string): number[] {
+    return railServers.filter((s) => spaceState.serverClusters[s.id] === cluster).map((s) => s.id);
+  }
+  function spaceClusterAnchor(cluster: string): Placement {
+    const index = Math.max(0, spaceState.clusters.findIndex((c) => c.id === cluster));
+    const fallback = {
+      yaw: wrapYaw((index * 360) / Math.max(1, spaceState.clusters.length)),
+      pitch: 0,
+    };
+    return placementCentre(spaceState.placements, spaceClusterServerIds(cluster), fallback);
+  }
+  let spaceZones = $derived.by(() => {
+    const zones: { cluster: SpaceCluster; x: number; y: number; rx: number; ry: number; count: number }[] = [];
+    for (const cluster of spaceState.clusters) {
+      const ids = spaceClusterServerIds(cluster.id);
+      const centre = project(spaceCam, spaceClusterAnchor(cluster.id), spaceF);
+      if (!centre.visible) continue;
+      const members = spacePlaced.filter((it) => spaceState.serverClusters[it.s.id] === cluster.id);
+      const spreadX = members.length ? Math.max(...members.map((m) => Math.abs(m.x - centre.x))) : 0;
+      const spreadY = members.length ? Math.max(...members.map((m) => Math.abs(m.y - centre.y))) : 0;
+      zones.push({
+        cluster,
+        x: centre.x,
+        y: centre.y,
+        rx: Math.min(230, Math.max(70, spreadX + spaceState.serverSize)),
+        ry: Math.min(160, Math.max(50, spreadY + spaceState.serverSize * 0.8)),
+        count: ids.length,
+      });
+    }
+    return zones;
+  });
+  let spaceMapServers = $derived.by(() => railServers.flatMap((s) => {
+    const p = spaceState.placements[s.id];
+    if (!p) return [];
+    return [{
+      s,
+      x: ((yawDelta(spaceCam.yaw, p.yaw) + 180) / 360) * 100,
+      y: 50 - ((p.pitch - spaceCam.pitch) / 120) * 72,
+    }];
+  }));
+  // A restrained constellation layer gives the floating icons some shared depth.
+  // Each visible server links only to its nearest neighbour, with duplicates folded.
+  let spaceLinks = $derived.by(() => {
+    const links: { key: string; x1: number; y1: number; x2: number; y2: number }[] = [];
+    const seen = new Set<string>();
+    for (const a of spacePlaced) {
+      let nearest: (typeof spacePlaced)[number] | null = null;
+      let nearestD = 360;
+      for (const b of spacePlaced) {
+        if (a.s.id === b.s.id) continue;
+        const d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d < nearestD) {
+          nearest = b;
+          nearestD = d;
+        }
+      }
+      if (!nearest) continue;
+      const ids = [a.s.id, nearest.s.id].sort((x, y) => x - y);
+      const key = `${ids[0]}:${ids[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      links.push({ key, x1: a.x, y1: a.y, x2: nearest.x, y2: nearest.y });
+    }
+    return links;
+  });
   // "custom" without an uploaded panorama falls back to the default room.
   let spaceBackdropEff = $derived(spaceState.backdrop === "custom" && !spaceState.custom ? "den" : spaceState.backdrop);
   function spaceCursorFrom(e: PointerEvent) {
@@ -6028,45 +9365,107 @@
     if (!r) return;
     spaceCursor = { x: e.clientX - r.left - r.width / 2, y: e.clientY - r.top - r.height / 2 };
   }
-  function spaceLassoLoop() {
-    if (!spaceLasso) return;
-    // The circle grows while held (66px/s after a snappy start) and caps well short
-    // of the viewport, so "hold longer" reads as "reach further" without ever lassoing
-    // the whole sky by accident.
-    spaceLasso = { ...spaceLasso, r: Math.min(300, 46 + (performance.now() - spaceLasso.t0) * 0.066) };
-    requestAnimationFrame(spaceLassoLoop);
+  function spaceClusterAtPoint(e: PointerEvent): string | null {
+    const target = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+    const id = target?.closest<HTMLElement>("[data-space-cluster]")?.dataset.spaceCluster ?? "";
+    return spaceState.clusters.some((cluster) => cluster.id === id) ? id : null;
+  }
+  function putSpaceCarriedInCluster(cluster: string) {
+    if (!spaceCarried) return;
+    const ids = Object.keys(spaceCarried).map(Number);
+    for (const id of ids) spaceState.serverClusters[id] = cluster;
+    const anchor = spaceClusterAnchor(cluster);
+    const newlyPlaced = Object.fromEntries(
+      ids.filter((id) => !spaceState.placements[id]).map((id) => [id, anchor]),
+    );
+    if (Object.keys(newlyPlaced).length) commitSpacePlacements(newlyPlaced);
+    else saveSpace();
+    spaceClusterOpen = cluster;
+    spaceCarried = null;
+    spaceSwallowClick = true;
+  }
+  function newSpaceDrag(e: PointerEvent, mode: SpaceDragMode, serverId: number | undefined = undefined) {
+    spaceCursorFrom(e);
+    spaceDrag = {
+      id: e.pointerId,
+      sx: e.clientX,
+      sy: e.clientY,
+      cx0: spaceCursor.x,
+      cy0: spaceCursor.y,
+      yaw0: spaceCam.yaw,
+      pitch0: spaceCam.pitch,
+      mode,
+      serverId,
+    };
   }
   function onSpaceDown(e: PointerEvent) {
-    if (e.button !== 0) return;
-    spaceCursorFrom(e);
-    spaceDrag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, yaw0: spaceCam.yaw, pitch0: spaceCam.pitch, mode: "maybe" };
+    if (e.button !== 0 || spaceEntering !== null) return;
+    const target = e.target as HTMLElement | null;
+    if (!spaceCarried && target?.closest("button, input, label, .sp-tray")) return;
+    newSpaceDrag(e, "background-maybe");
     clearTimeout(spaceHoldTimer);
-    // Holding still grows a lasso from the cursor, which also covers the single-server
-    // move (a lasso of one). While already carrying, the next press is a drop, not a grab.
+    // A lasso can only begin on empty space. A server press is handled by
+    // onSpaceServerDown and never reaches this timer.
     if (!spaceCarried) {
       spaceHoldTimer = window.setTimeout(() => {
-        if (!spaceDrag || spaceDrag.mode !== "maybe" || !spaceOpen) return;
+        if (!spaceDrag || spaceDrag.mode !== "background-maybe" || !spaceOpen) return;
+        spaceDrag.mode = "lasso";
         spaceRoot?.setPointerCapture(spaceDrag.id);
-        spaceLasso = { x: spaceCursor.x, y: spaceCursor.y, r: 46, t0: performance.now() };
-        requestAnimationFrame(spaceLassoLoop);
-      }, 350);
+        spaceLasso = { points: [{ x: spaceCursor.x, y: spaceCursor.y }] };
+      }, 320);
     }
+  }
+  function onSpaceServerDown(e: PointerEvent, id: number) {
+    if (e.button !== 0 || spaceEntering !== null || spaceCarried) return;
+    e.stopPropagation();
+    clearTimeout(spaceHoldTimer);
+    newSpaceDrag(e, "server-maybe", id);
+  }
+  function onSpaceTrayServerDown(e: PointerEvent, id: number) {
+    if (e.button !== 0 || spaceEntering !== null || spaceCarried) return;
+    e.stopPropagation();
+    clearTimeout(spaceHoldTimer);
+    newSpaceDrag(e, "tray-maybe", id);
   }
   function onSpaceMove(e: PointerEvent) {
     spaceCursorFrom(e);
-    if (spaceLasso) {
-      spaceLasso = { ...spaceLasso, x: spaceCursor.x, y: spaceCursor.y };
+    if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
+    if (spaceLasso && spaceDrag.mode === "lasso") {
+      const last = spaceLasso.points[spaceLasso.points.length - 1];
+      if (!last || Math.hypot(spaceCursor.x - last.x, spaceCursor.y - last.y) >= 4) {
+        spaceLasso = { points: [...spaceLasso.points, { x: spaceCursor.x, y: spaceCursor.y }] };
+      }
       return;
     }
-    if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
     const dx = e.clientX - spaceDrag.sx;
     const dy = e.clientY - spaceDrag.sy;
-    if (spaceDrag.mode === "maybe") {
+    if (spaceDrag.mode === "server-maybe" || spaceDrag.mode === "tray-maybe") {
+      if (Math.hypot(dx, dy) < 5) return;
+      clearTimeout(spaceHoldTimer);
+      spaceRoot?.setPointerCapture(spaceDrag.id);
+      const id = spaceDrag.serverId;
+      if (id === undefined) return;
+      if (spaceDrag.mode === "server-maybe") {
+        const grab = unproject(spaceCam, spaceDrag.cx0, spaceDrag.cy0, spaceF);
+        spaceCarried = angularOffsets([id], spaceState.placements, grab);
+        spaceDrag.mode = "server";
+      } else {
+        spaceCarried = { [id]: { yaw: 0, pitch: 0 } };
+        spaceDrag.mode = "tray";
+      }
+      return;
+    }
+    if (spaceDrag.mode === "server" || spaceDrag.mode === "tray") {
+      spaceClusterDrop = spaceClusterAtPoint(e);
+      return;
+    }
+    if (spaceDrag.mode === "background-maybe") {
       if (Math.hypot(dx, dy) < 6) return; // still a click or a hold
       clearTimeout(spaceHoldTimer);
       spaceDrag.mode = "look";
       spaceRoot?.setPointerCapture(spaceDrag.id);
     }
+    if (spaceDrag.mode !== "look") return;
     // Grab semantics: the world follows the hand, small-angle px-to-degrees via f.
     const k = (180 / Math.PI) / spaceF;
     spaceCam = { yaw: wrapYaw(spaceDrag.yaw0 - dx * k), pitch: clampPitch(spaceDrag.pitch0 + dy * k) };
@@ -6075,25 +9474,42 @@
     clearTimeout(spaceHoldTimer);
     if (!spaceDrag || e.pointerId !== spaceDrag.id) return;
     const mode = spaceDrag.mode;
+    const clusterDrop = spaceCarried ? spaceClusterAtPoint(e) : null;
     spaceDrag = null;
+    spaceClusterDrop = null;
     if (spaceLasso) {
-      const caught = lassoCapture(spaceState.placements, spaceCam, spaceLasso.x, spaceLasso.y, spaceLasso.r, spaceF);
+      const path = [...spaceLasso.points, { x: spaceCursor.x, y: spaceCursor.y }];
+      const caught = lassoCapturePath(spaceState.placements, spaceCam, path, spaceF);
       if (caught.length) {
-        const aim = unproject(spaceCam, spaceLasso.x, spaceLasso.y, spaceF);
+        const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
         spaceCarried = angularOffsets(caught, spaceState.placements, aim);
       }
       spaceLasso = null;
       spaceSwallowClick = true;
       return;
     }
-    if (mode === "maybe" && spaceCarried) {
+    if (clusterDrop && spaceCarried) {
+      putSpaceCarriedInCluster(clusterDrop);
+      return;
+    }
+    if ((mode === "server" || mode === "tray") && spaceCarried) {
+      const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
+      commitSpacePlacements(applyOffsets(spaceCarried, aim));
+      spaceCarried = null;
+      spaceSwallowClick = true;
+      return;
+    }
+    if (mode === "background-maybe" && spaceCarried) {
       // A plain click while carrying: drop the constellation where the cursor aims.
       const aim = unproject(spaceCam, spaceCursor.x, spaceCursor.y, spaceF);
-      spaceState.placements = { ...spaceState.placements, ...applyOffsets(spaceCarried, aim) };
+      commitSpacePlacements(applyOffsets(spaceCarried, aim));
       spaceCarried = null;
-      saveSpace();
       spaceSwallowClick = true;
     }
+  }
+  function spaceLassoPath(points: ScreenPoint[]): string {
+    if (!points.length) return "";
+    return `M ${points.map((p) => `${p.x + spaceVw / 2} ${p.y + spaceVh / 2}`).join(" L ")} Z`;
   }
   // Drops and lasso releases produce a trailing click on whatever sat under the
   // pointer; capture-phase swallow keeps that click from opening a server.
@@ -6103,16 +9519,125 @@
     e.stopPropagation();
     e.preventDefault();
   }
+  function startSpaceSearch(seed = "") {
+    spaceSearchOpen = true;
+    spaceSearch = seed;
+    spaceSearchIdx = 0;
+    void tick().then(() => spaceSearchEl?.focus());
+  }
+  function pickSpaceSearch(open: boolean) {
+    const matches = spaceSearchMatches;
+    if (!matches.length) return;
+    const server = matches[Math.max(0, Math.min(spaceSearchIdx, matches.length - 1))];
+    if (!spaceState.placements[server.id]) placeFromTray(server.id);
+    if (open) spaceIconClick(server.id);
+    else focusSpaceServer(server.id);
+  }
+  function onSpaceSearchKey(e: KeyboardEvent) {
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      e.preventDefault();
+      spaceSearchIdx = Math.min(spaceSearchMatches.length - 1, spaceSearchIdx + 1);
+      pickSpaceSearch(false);
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      spaceSearchIdx = Math.max(0, spaceSearchIdx - 1);
+      pickSpaceSearch(false);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      pickSpaceSearch(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      spaceSearch = "";
+      spaceSearchOpen = false;
+      spaceFocusedServer = null;
+      spaceRoot?.focus();
+    }
+  }
+  function cycleSpaceFocus(direction: number) {
+    const ids = railServers.filter((s) => !!spaceState.placements[s.id]).map((s) => s.id);
+    if (!ids.length) return;
+    const at = spaceFocusedServer === null ? -1 : ids.indexOf(spaceFocusedServer);
+    const next = ids[(at + direction + ids.length) % ids.length];
+    focusSpaceServer(next);
+  }
+  function handleSpaceKey(e: KeyboardEvent): boolean {
+    if (!spaceOpen || typingTarget(e.target) || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === "/") {
+      e.preventDefault();
+      startSpaceSearch();
+      return true;
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      cycleSpaceFocus(e.shiftKey ? -1 : 1);
+      return true;
+    }
+    if (e.key === "Enter" && spaceFocusedServer !== null) {
+      e.preventDefault();
+      spaceIconClick(spaceFocusedServer);
+      return true;
+    }
+    if (e.key.startsWith("Arrow")) {
+      e.preventDefault();
+      if (e.key === "ArrowLeft") spaceCam = { ...spaceCam, yaw: wrapYaw(spaceCam.yaw - 6) };
+      if (e.key === "ArrowRight") spaceCam = { ...spaceCam, yaw: wrapYaw(spaceCam.yaw + 6) };
+      if (e.key === "ArrowUp") spaceCam = { ...spaceCam, pitch: clampPitch(spaceCam.pitch + 5) };
+      if (e.key === "ArrowDown") spaceCam = { ...spaceCam, pitch: clampPitch(spaceCam.pitch - 5) };
+      spaceFocusedServer = null;
+      return true;
+    }
+    if (e.key.length === 1 && e.key !== " " && e.key.toLowerCase() !== "t") {
+      e.preventDefault();
+      startSpaceSearch(e.key);
+      return true;
+    }
+    return false;
+  }
   function spaceIconClick(id: number) {
-    if (spaceCarried || spaceSwallowClick) return;
-    switchServer(id); // switchServer also folds the space away
+    if (spaceCarried || spaceSwallowClick || spaceEntering !== null) return;
+    playSpacePortal();
+    if (!spaceState.zoomOnOpen || fxMotionOff) {
+      void switchServer(id); // switchServer also folds the space away
+      return;
+    }
+    spaceEntering = id;
+    spaceEntryPhase = "focus";
+    clearTimeout(spaceEnterTimer);
+    const target = spaceState.placements[id];
+    if (!target) {
+      spaceEntering = null;
+      spaceEntryPhase = null;
+      void switchServer(id);
+      return;
+    }
+    tweenSpaceCamera(target, 360, () => {
+      if (spaceEntering !== id) return;
+      spaceEntryPhase = "zoom";
+      spaceEnterTimer = window.setTimeout(() => {
+        if (spaceEntering !== id) return;
+        spaceEntering = null;
+        spaceEntryPhase = null;
+        void switchServer(id);
+      }, 440);
+    });
   }
   function spaceServerMenu(s: ServerState): MenuItem[] {
+    const clusterItems: MenuItem[] = spaceState.clusters.map((cluster) => ({
+      label: `${spaceState.serverClusters[s.id] === cluster.id ? "✓ " : ""}Neighbourhood: ${cluster.name}`,
+      onSelect: () => assignSpaceCluster(s.id, cluster.id),
+    }));
     return [
       { label: "Open", onSelect: () => spaceIconClick(s.id) },
+      { label: "Focus", onSelect: () => focusSpaceServer(s.id) },
+      ...(clusterItems.length ? [{ divider: true } as MenuItem, ...clusterItems, {
+        label: `${spaceState.serverClusters[s.id] ? "✓ " : ""}Neighbourhood: Unsorted`,
+        onSelect: () => assignSpaceCluster(s.id, ""),
+      } as MenuItem] : []),
+      { divider: true },
       {
         label: "Return to tray",
         onSelect: () => {
+          rememberSpaceLayout();
           const { [s.id]: _gone, ...rest } = spaceState.placements;
           spaceState.placements = rest;
           saveSpace();
@@ -6122,15 +9647,91 @@
   }
   // Tray tap: the server flies to wherever the camera is aiming (the reticle).
   function placeFromTray(id: number) {
-    spaceState.placements = { ...spaceState.placements, [id]: { yaw: spaceCam.yaw, pitch: spaceCam.pitch } };
+    commitSpacePlacements({ [id]: { yaw: spaceCam.yaw, pitch: spaceCam.pitch } });
+  }
+  function spaceMinSeparation(size = spaceState.serverSize): number {
+    // Use the smallest possible focal length so a saved layout remains clear in
+    // a narrower window too; the small extra halo leaves the pulse room to breathe.
+    return (2 * Math.atan((size * 0.58) / 560) * 180) / Math.PI;
+  }
+  function commitSpacePlacements(moved: Record<number, Placement>) {
+    rememberSpaceLayout();
+    const merged = { ...spaceState.placements, ...moved };
+    spaceState.placements = separatePlacements(merged, Object.keys(moved).map(Number), spaceMinSeparation());
+    saveSpace();
+  }
+  function setSpaceServerSize(size: number) {
+    spaceState.serverSize = Math.max(32, Math.min(88, Math.round(size)));
+    spaceState.placements = separatePlacements(
+      spaceState.placements,
+      Object.keys(spaceState.placements).map(Number),
+      spaceMinSeparation(spaceState.serverSize),
+    );
+    saveSpace();
+  }
+  function setSpaceShape(shape: "circle" | "square") {
+    spaceState.shape = shape;
     saveSpace();
   }
   function setSpaceBackdrop(b: string) {
     spaceState.backdrop = b as SpaceState["backdrop"];
     saveSpace();
   }
-  // A custom panorama: one equirectangular 2:1 image, downscaled and stored locally
-  // (it is a per-device preference, exactly like the placements).
+  function assignSpaceCluster(server: number, cluster: string) {
+    if (cluster && !spaceState.clusters.some((item) => item.id === cluster)) return;
+    if (cluster) spaceState.serverClusters[server] = cluster;
+    else delete spaceState.serverClusters[server];
+    saveSpace();
+  }
+  function toggleSpaceClusterServer(server: number, cluster: string) {
+    const joining = spaceState.serverClusters[server] !== cluster;
+    assignSpaceCluster(server, joining ? cluster : "");
+    if (joining && !spaceState.placements[server]) {
+      commitSpacePlacements({ [server]: spaceClusterAnchor(cluster) });
+    }
+  }
+  function addSpaceCluster() {
+    const name = spaceNewCluster.trim().slice(0, 32);
+    if (!name) return;
+    const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "neighbourhood";
+    let id = base.slice(0, 24), suffix = 2;
+    while (spaceState.clusters.some((c) => c.id === id)) id = `${base.slice(0, 20)}-${suffix++}`;
+    spaceState.clusters = [...spaceState.clusters, { id, name, color: spaceNewClusterColor }];
+    spaceNewCluster = "";
+    saveSpace();
+    spaceClusterOpen = id;
+    if (spaceOpen) focusSpaceCluster(id);
+  }
+  function updateSpaceCluster(id: string, update: Partial<Pick<SpaceCluster, "name" | "color">>) {
+    spaceState.clusters = spaceState.clusters.map((c) => c.id === id ? { ...c, ...update } : c);
+    saveSpace();
+  }
+  function removeSpaceCluster(id: string) {
+    spaceState.clusters = spaceState.clusters.filter((c) => c.id !== id);
+    spaceState.serverClusters = Object.fromEntries(
+      Object.entries(spaceState.serverClusters).filter(([, cluster]) => cluster !== id).map(([server, cluster]) => [Number(server), cluster]),
+    );
+    if (spaceClusterOpen === id) spaceClusterOpen = null;
+    if (spaceClusterDrop === id) spaceClusterDrop = null;
+    saveSpace();
+  }
+  function tidySpace() {
+    const ids = railServers.map((s) => s.id);
+    if (!ids.length) return;
+    rememberSpaceLayout();
+    spaceState.placements = autoArrangePlacements(ids, spaceState.serverClusters, spaceMinSeparation());
+    saveSpace();
+  }
+  function forgetSpacePlacements() {
+    if (!Object.keys(spaceState.placements).length) return;
+    rememberSpaceLayout();
+    spaceState.placements = {};
+    saveSpace();
+  }
+  let spaceImageNote = $state("");
+  // A custom panorama is normalized to an exact 2:1 equirectangular canvas before
+  // storage. Centre-cropping odd aspect ratios avoids the stretching that made a
+  // portrait or phone photo look especially rough on the cube walls.
   async function loadSpacePano(fileList: FileList | null) {
     const file = fileList?.[0];
     if (!file) return;
@@ -6142,18 +9743,121 @@
         img.onerror = () => rej(new Error("not an image"));
         img.src = url;
       });
-      const w = Math.min(2048, img.naturalWidth);
-      const h = Math.round((img.naturalHeight / img.naturalWidth) * w);
+      let sx = 0, sy = 0, sw = img.naturalWidth, sh = img.naturalHeight;
+      if (sw / sh > 2) {
+        sw = sh * 2;
+        sx = (img.naturalWidth - sw) / 2;
+      } else if (sw / sh < 2) {
+        sh = sw / 2;
+        sy = (img.naturalHeight - sh) / 2;
+      }
+      const w = Math.max(2, Math.min(2048, Math.floor(sw)));
+      const h = Math.max(1, Math.floor(w / 2));
       const c = document.createElement("canvas");
       c.width = w;
       c.height = h;
-      c.getContext("2d")?.drawImage(img, 0, 0, w, h);
+      c.getContext("2d")?.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
       URL.revokeObjectURL(url);
       spaceState.custom = c.toDataURL("image/jpeg", 0.82);
       spaceState.backdrop = "custom";
+      spaceImageNote = `${file.name} prepared as ${w} × ${h}${Math.abs(img.naturalWidth / img.naturalHeight - 2) > 0.01 ? " (centre-cropped to 2:1)" : ""}.`;
       saveSpace();
     } catch (err) {
       error = String(err);
+    }
+  }
+  // A paint-over PNG for image editors. The cardinal centres, cube seams,
+  // horizon, visible band, and circular safe areas mirror this renderer.
+  let spaceGuideSaving = $state(false);
+  async function downloadSpaceTemplate() {
+    if (spaceGuideSaving) return;
+    const c = document.createElement("canvas");
+    c.width = 2048;
+    c.height = 1024;
+    const x = c.getContext("2d");
+    if (!x) return;
+    x.fillStyle = "#11141d";
+    x.fillRect(0, 0, c.width, c.height);
+    x.fillStyle = "rgba(118, 139, 255, 0.08)";
+    x.fillRect(0, 256, c.width, 512);
+    x.strokeStyle = "rgba(255, 255, 255, 0.28)";
+    x.lineWidth = 2;
+    x.setLineDash([12, 10]);
+    for (const seam of [256, 768, 1280, 1792]) {
+      x.beginPath(); x.moveTo(seam, 0); x.lineTo(seam, 1024); x.stroke();
+    }
+    x.strokeStyle = "rgba(118, 139, 255, 0.72)";
+    x.setLineDash([]);
+    x.beginPath(); x.moveTo(0, 512); x.lineTo(2048, 512); x.stroke();
+    x.strokeStyle = "rgba(118, 139, 255, 0.42)";
+    x.setLineDash([8, 8]);
+    for (const center of [0, 512, 1024, 1536, 2048]) {
+      x.beginPath(); x.arc(center, 512, 230, 0, Math.PI * 2); x.stroke();
+    }
+    x.font = "600 28px ui-monospace, monospace";
+    x.textAlign = "center";
+    x.fillStyle = "rgba(255, 255, 255, 0.82)";
+    [[0, "BACK / SEAM"], [512, "LEFT"], [1024, "FRONT"], [1536, "RIGHT"], [2048, "BACK / SEAM"]].forEach(([cx, label]) => {
+      x.fillText(String(label), Number(cx), 500);
+    });
+    x.font = "22px ui-monospace, monospace";
+    x.fillStyle = "rgba(255, 255, 255, 0.56)";
+    x.fillText("HORIZON — KEEP IMPORTANT DETAIL IN THE MIDDLE 50%", 1024, 548);
+    x.fillText("TOP / CEILING POLE — LOW DETAIL", 1024, 54);
+    x.fillText("BOTTOM / FLOOR POLE — LOW DETAIL", 1024, 988);
+    x.font = "18px ui-monospace, monospace";
+    x.fillStyle = "rgba(255, 255, 255, 0.4)";
+    x.fillText("2048 × 1024 EQUIRECTANGULAR · HIDE THIS GUIDE LAYER BEFORE EXPORT", 1024, 92);
+    const dataUrl = c.toDataURL("image/png");
+    const comma = dataUrl.indexOf(",");
+    if (comma < 0) {
+      spaceImageNote = "The guide could not be generated.";
+      toast(spaceImageNote, "err", 6000);
+      return;
+    }
+    spaceGuideSaving = true;
+    spaceImageNote = "Saving the guide to Downloads…";
+    try {
+      const saved = await saveSpaceGuide(invoke, dataUrl.slice(comma + 1));
+      const notice = guideSavedNotice(saved);
+      spaceImageNote = notice.note;
+      toast(notice.text, notice.kind, 5000);
+    } catch (err) {
+      spaceImageNote = `Guide failed to open: ${String(err)}`;
+      toast(spaceImageNote, "err", 8000);
+    } finally {
+      spaceGuideSaving = false;
+    }
+  }
+  async function exportSpaceLayout() {
+    spaceLayoutBusy = true;
+    try {
+      const json = JSON.stringify({ kind: "mewtual-server-space-layout", version: 1, space: spaceState }, null, 2);
+      const saved = await invoke<{ path: string; displayed: boolean; warning?: string }>("save_space_layout", { json });
+      toast(saved.displayed ? "Space layout saved to Downloads" : `Layout saved to ${saved.path}`, saved.displayed ? "ok" : "info", 6000);
+    } catch (err) {
+      toast(`Could not export the Space layout: ${String(err)}`, "err", 8000);
+    } finally {
+      spaceLayoutBusy = false;
+    }
+  }
+  async function importSpaceLayout(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error("layout file is too large");
+      const raw = JSON.parse(await file.text());
+      if (raw?.kind !== "mewtual-server-space-layout" || raw?.version !== 1 || !raw.space) {
+        throw new Error("not a Mewtual Server Space layout");
+      }
+      rememberSpaceLayout();
+      spaceState = parseSpace(JSON.stringify(raw.space));
+      saveSpace();
+      toast("Space layout imported", "ok", 5000);
+    } catch (err) {
+      toast(`Could not import the Space layout: ${String(err)}`, "err", 8000);
+    } finally {
+      if (spaceLayoutInput) spaceLayoutInput.value = "";
     }
   }
   // Background-position for one 90-degree wall slice of an equirect 2:1 panorama
@@ -6165,7 +9869,42 @@
     { id: "den", name: "The Den" },
     { id: "ridge", name: "Nightfall Ridge" },
     { id: "void", name: "Void Deck" },
+    { id: "garden", name: "Lumen Garden" },
   ];
+  // Controller support stays entirely local: left stick looks, bumpers cycle,
+  // A opens the focused server, X undoes a move, and B leaves Space.
+  $effect(() => {
+    if (!spaceOpen || typeof navigator === "undefined" || !("getGamepads" in navigator)) return;
+    let raf = 0;
+    let last = performance.now();
+    const previous: boolean[] = [];
+    const frame = (now: number) => {
+      const pad = navigator.getGamepads().find((g) => !!g);
+      if (pad) {
+        const dt = Math.min(40, now - last) / 16.67;
+        const ax = Math.abs(pad.axes[0] ?? 0) > 0.18 ? pad.axes[0] : 0;
+        const ay = Math.abs(pad.axes[1] ?? 0) > 0.18 ? pad.axes[1] : 0;
+        if (ax || ay) {
+          spaceCam = {
+            yaw: wrapYaw(spaceCam.yaw + ax * 1.2 * dt),
+            pitch: clampPitch(spaceCam.pitch - ay * 1.05 * dt),
+          };
+          spaceFocusedServer = null;
+        }
+        const pressed = (index: number) => !!pad.buttons[index]?.pressed && !previous[index];
+        if (pressed(4)) cycleSpaceFocus(-1);
+        if (pressed(5)) cycleSpaceFocus(1);
+        if (pressed(0) && spaceFocusedServer !== null) spaceIconClick(spaceFocusedServer);
+        if (pressed(2)) undoSpaceLayout();
+        if (pressed(1)) toggleSpace();
+        for (let i = 0; i < pad.buttons.length; i += 1) previous[i] = pad.buttons[i].pressed;
+      }
+      last = now;
+      raf = requestAnimationFrame(frame);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => cancelAnimationFrame(raf);
+  });
   // Panic release: folding the drawer (or the whole stage) away must not leave a note sounding
   // in everyone else's ears. untrack keeps the release out of this effect's dependency set.
   $effect(() => {
@@ -6187,17 +9926,37 @@
   let jukeNow = $state<{ entry: string; cid: string; name: string; paused: boolean; dj: string } | null>(null); // dj: "" is me
   let jukeStale = $state(false); // the DJ went quiet: the deck is frozen until someone presses
   let jukeDur = $state(0); // 0 until loadedmetadata knows
-  let jukeFetching = $state(""); // the cid currently being pulled off the share
-  let jukeReady = $state<Record<string, boolean>>({}); // cid -> already fetched
   let jukeVol = $state(loadJukeVol());
-  const jukeUrls: Record<string, string> = {}; // cid -> the fetched blob's url
+  // Dock fold, shared by both call surfaces because the deck is one deck. What stays is the
+  // room's shared state (track, time, transport, DJ, sync chip); what folds is the queue, which
+  // is planning rather than state. Planning is the part you put away.
+  let jukeOpen = $state(loadCallSetting("jukeopen", "on") !== "off");
+  function toggleJukeOpen() {
+    jukeOpen = !jukeOpen;
+    try {
+      localStorage.setItem("catcoms.call.jukeopen", jukeOpen ? "on" : "off");
+    } catch {
+      /* storage unavailable */
+    }
+  }
   const jukeFailed = new Set<string>(); // cids nobody would serve: the DJ's auto-advance skips them
   // The transport we currently follow. `seq`/`fromFp` decide who wins a race, `off`/`at` anchor the
   // position to the local clock. Plain `let`: identity, not reactivity, is what the races need.
   let jukeSeq = 0; // my own monotonic press counter
   let jukeAdopted: { seq: number; fromFp: string; off: number; at: number } | null = null;
   let jukeHeard = 0; // performance.now() of the last frame from the DJ we follow
-  let jukeAudio: HTMLAudioElement | null = null;
+  let jukeAudio: HTMLVideoElement | null = null;
+  // How the current track is coming in: null once it is playing, otherwise local read or peer
+  // pull with a percentage. Fed by the same download-progress events the Downloads surface uses.
+  let jukeFetch = $state<FetchPhase | null>(null);
+  let jukeBuffering = $state(false); // the element ran out of data mid-track
+  let bufferTimer: ReturnType<typeof setTimeout> | undefined; // debounce for the chip above
+  let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
+  // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
+  // declared type when the share is the one in view.
+  let jukeKind = $derived<MediaKind>(
+    jukeNow ? mediaKind(jukeNow.name, files.find((f) => f.cid === jukeNow?.cid)?.mime ?? "") : "other",
+  );
   const JUKE_DJ_GONE_MS = 15000; // silence longer than three pings means the DJ walked away
 
   function loadJukeVol(): number {
@@ -6210,24 +9969,61 @@
     try { localStorage.setItem("catcoms.call.jukevol", String(jukeVol)); } catch { /* ignore */ }
   }
   // The one deck element, made on first play and appended like the per-peer call audio.
-  function jukeEl(): HTMLAudioElement {
+  // One <video> element for both kinds. A video element plays audio perfectly well, and building
+  // one element means the transport, drift and race logic below never has to care which kind is
+  // loaded; only the surfaces care, and they adopt this element by re-parenting it rather than
+  // creating their own, so folding the dock or moving to the focus view never restarts playback.
+  function jukeEl(): HTMLVideoElement {
     if (jukeAudio) return jukeAudio;
-    const el = document.createElement("audio");
-    el.id = "jukebox-audio";
+    const el = document.createElement("video");
+    el.id = "jukebox-media";
     el.volume = jukeVol;
     el.muted = callDeafened;
+    el.playsInline = true;
+    el.preload = "auto";
     el.addEventListener("loadedmetadata", () => {
       jukeDur = Number.isFinite(el.duration) ? el.duration : 0;
       jukeSettle(); // the seek the src swap could not take yet
     });
     el.addEventListener("ended", () => jukeEnded());
+    // Streaming moves the failure from a thrown fetch to the element: a track nobody can serve,
+    // or one the webview cannot decode, both land here.
+    el.addEventListener("error", () => {
+      if (jukeNow?.cid) jukeFail(jukeNow.cid);
+    });
+    // `waiting` fires constantly and harmlessly while streaming: every chunk boundary and every
+    // seek raises it, and it clears again in milliseconds. Only a stall long enough for a person
+    // to notice is worth a chip, so this waits before saying anything and any progress cancels
+    // it. Announcing the raw event made an ordinary playing track claim it had run dry.
+    el.addEventListener("waiting", () => {
+      clearTimeout(bufferTimer);
+      bufferTimer = setTimeout(() => {
+        if (jukeAudio && isStalled(jukeAudio)) jukeBuffering = true;
+      }, STALL_ANNOUNCE_MS);
+    });
+    el.addEventListener("playing", () => {
+      clearTimeout(bufferTimer);
+      jukeBuffering = false;
+      jukeFetch = null;
+    });
+    el.addEventListener("canplay", () => {
+      clearTimeout(bufferTimer);
+      jukeBuffering = false;
+    });
+    // Progress of any kind means it is not stalled, whatever `waiting` claimed a moment ago.
+    el.addEventListener("timeupdate", () => {
+      if (jukeBuffering) {
+        clearTimeout(bufferTimer);
+        jukeBuffering = false;
+      }
+    });
     document.body.appendChild(el);
     jukeAudio = el;
     return el;
   }
   // I am the DJ while the transport we follow is my own press.
   function jukeIsDj(): boolean {
-    return !!jukeAdopted && !!myFp && jukeAdopted.fromFp === myFp;
+    return !!jukeAdopted && !!callSelfFp && jukeAdopted.fromFp === callSelfFp;
   }
   // Where the deck should be right now: the adopted offset plus locally measured elapsed time,
   // frozen while paused or stale. The progress UI reads this.
@@ -6283,7 +10079,7 @@
   function jukeSend(entry: string, cid: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
     jukeSeq = Math.max(jukeSeq, jukeAdopted?.seq ?? 0) + 1;
-    jukeAdopt(jukeSeq, myFp, entry, cid, name, off, paused);
+    jukeAdopt(jukeSeq, callSelfFp, entry, cid, name, off, paused);
     broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, name, off, paused });
   }
   function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
@@ -6291,7 +10087,7 @@
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
-    jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === myFp ? "" : fromFp } : null;
+    jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
     if (!jukeNow) {
       jukeDur = 0;
       jukeStop(); // entry "" is the DJ saying the queue ran out
@@ -6306,45 +10102,117 @@
     const now = jukeNow;
     if (!now || !now.cid) return;
     const cid = now.cid;
-    const entry = now.entry;
-    let url = jukeUrls[cid];
-    if (!url) {
-      if (jukeFetching === cid) return; // already in flight; the ping after it re-syncs
-      const server = callServer;
-      if (server === null) return;
-      jukeFetching = cid;
-      try {
-        const mime = safeMime(files.find((f) => f.cid === cid)?.mime ?? "") || "audio/mpeg";
-        url = await loadBlobUrl(cid, mime, server);
-      } catch {
-        jukeFailed.add(cid); // nobody is sharing it: the deck cannot sit here
-        jukeFetching = "";
-        if (jukeNow?.cid === cid && jukeIsDj()) jukeSkip();
-        return;
-      }
-      jukeFetching = "";
-      jukeUrls[cid] = url;
-      jukeReady = { ...jukeReady, [cid]: true };
-      if (jukeNow?.cid !== cid || jukeNow?.entry !== entry) return; // a newer press landed mid-fetch
-      sameTrack = false; // seek to the target as recomputed NOW, not the one we started with
-    }
+    const server = callServer;
+    if (server === null) return;
+    // The element streams straight out of the vault, so there is no fetch-then-play step any
+    // more: playback starts on the first chunk instead of the last, and a seek costs one chunk.
+    // A track nobody can serve now surfaces as an element error rather than a thrown fetch,
+    // which is what jukeFail below is for.
+    const url = mediaUrl(server, cid);
     const el = jukeEl();
     if (!sameTrack || el.src !== url) {
       if (el.src !== url) {
         el.src = url;
         jukeDur = 0;
+        jukeFetch = null;
+        jukeNudging = false;
+        el.playbackRate = 1;
       }
       jukeSettle();
       return;
     }
-    // Same track, so this is a ping or a play/pause: only a real drift is worth a jarring snap.
+    // Same track, so this is a ping or a play/pause. Video cannot hide a snap the way audio can,
+    // so a small gap is eased out by playing slightly fast or slow and only a large one is
+    // snapped; audio keeps snap-or-nothing, because a rate change is audible where a seek is not.
     const target = jukePos();
-    if (el.readyState > 0 && Math.abs(el.currentTime - target) > 2) {
-      try { el.currentTime = target; } catch { /* not seekable yet */ }
+    if (el.readyState > 0) {
+      const drift = target - el.currentTime;
+      const action = driftAction(drift, jukeKind);
+      if (action === "seek") {
+        try { el.currentTime = target; } catch { /* not seekable yet */ }
+        jukeNudging = false;
+        el.playbackRate = 1;
+      } else if (action === "nudge") {
+        el.playbackRate = nudgeRate(drift);
+        jukeNudging = true;
+      } else if (jukeNudging) {
+        el.playbackRate = 1;
+        jukeNudging = false;
+      }
     }
     const live = jukeNow;
     if (!live || live.paused) el.pause();
     else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
+  }
+  // True window fullscreen, distinct from the focus view. Focus is a layout (the call takes the
+  // app); fullscreen is the window losing its chrome. They are separate wishes and either can be
+  // wanted without the other, so both toggles exist in both states.
+  let winFullscreen = $state(false);
+  async function toggleFullscreen() {
+    try {
+      const next = !(await appWindow.isFullscreen());
+      await appWindow.setFullscreen(next);
+      winFullscreen = next;
+    } catch (e) {
+      console.warn("could not toggle fullscreen", String(e));
+    }
+  }
+
+  /**
+   * Show the connection report for the call. Switches to the room's server first when the user is
+   * looking elsewhere: the report is per server, so opening it from a different one would answer
+   * a question nobody asked.
+   */
+  async function openCallDiagnostics() {
+    if (callServer !== null && callServer !== activeServerId) await switchServer(callServer);
+    void refreshCallTransport();
+    void refreshConnectivity();
+    switchView("connectivity");
+  }
+
+  /**
+   * Publish the channel header's bottom edge so the top-docked voice bar can sit under it rather
+   * than over it. Measured rather than assumed: the header grows when a topic wraps, so any
+   * constant here would be wrong at exactly the moments the topic is worth reading.
+   */
+  function headBottom(node: HTMLElement) {
+    const update = () => {
+      const px = Math.round(node.getBoundingClientRect().bottom);
+      document.documentElement.style.setProperty("--chan-head-bottom", `${px}px`);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    window.addEventListener("resize", update);
+    return {
+      destroy() {
+        ro.disconnect();
+        window.removeEventListener("resize", update);
+        document.documentElement.style.removeProperty("--chan-head-bottom");
+      },
+    };
+  }
+
+  /**
+   * Hand the one deck element to whichever surface currently wants to show it. Re-parenting keeps
+   * playback running (a media element survives being moved in the DOM), which is the whole reason
+   * there is one element rather than one per surface: folding the dock or opening focus must never
+   * restart the room's film. On teardown it goes back to the body, still playing, still audible.
+   */
+  function jukeHost(node: HTMLElement) {
+    const el = jukeEl();
+    node.appendChild(el);
+    return {
+      destroy() {
+        if (jukeAudio === el) document.body.appendChild(el);
+      },
+    };
+  }
+  /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
+  function jukeFail(cid: string) {
+    jukeFailed.add(cid);
+    jukeFetch = null;
+    if (jukeNow?.cid === cid && jukeIsDj()) jukeSkip();
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
@@ -6432,22 +10300,21 @@
     jukeStale = true; // anyone's next press claims the deck
     jukeAudio?.pause();
   }
-  // Leaving the room takes the deck with it, blobs included (each one is a whole decrypted track).
+  // Leaving the room takes the deck with it. There are no blobs to release any more: the element
+  // streamed from the vault rather than holding a decrypted copy of the track.
   function jukeReset() {
     jukeStop();
     jukeAudio?.remove();
     jukeAudio = null;
-    for (const c of Object.keys(jukeUrls)) {
-      try { URL.revokeObjectURL(jukeUrls[c]); } catch { /* a data: url has nothing to revoke */ }
-      delete jukeUrls[c];
-    }
     jukeFailed.clear();
-    jukeReady = {};
     jukeQueue = [];
     jukeNow = null;
     jukeAdopted = null;
     jukeStale = false;
-    jukeFetching = "";
+    jukeFetch = null;
+    clearTimeout(bufferTimer);
+    jukeBuffering = false;
+    jukeNudging = false;
     jukeDur = 0;
   }
 
@@ -6464,7 +10331,8 @@
   });
   // The queue as the DJ will actually play it, minus whatever is already on the deck.
   let jukeUpNext = $derived(jukePlayable().filter((e) => e.id !== jukeNow?.entry));
-  let jukeAudioFiles = $derived(files.filter((f) => f.mime.startsWith("audio/")));
+  // Anything the deck can play: audio and video both, since one element handles both.
+  let jukeAudioFiles = $derived(files.filter((f) => mediaKind(f.name, f.mime) !== "other"));
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
   // expiring, the picker itself) is gated on this rather than lying about another server's share.
@@ -6493,7 +10361,8 @@
   }
   // The share no longer carries this track: the deck can still name it, but nobody can serve it.
   function jukeGone(cid: string): boolean {
-    return jukeShareInView && !files.some((f) => f.cid === cid);
+    // Never while the file index is still being read: an unread index is not proof of withdrawal.
+    return jukeShareInView && !groupLoading && !files.some((f) => f.cid === cid);
   }
   // The mono tag on a picker row: the file's own extension, or the mime subtype when it has none.
   function jukeExt(f: UiFile): string {
@@ -6563,6 +10432,10 @@
     myVideo = "";
     pushInstState();
   }
+  function toggleVideo(kind: "cam" | "screen") {
+    if (myVideo === kind) stopVideo();
+    else void startVideo(kind);
+  }
   // Feeding a MediaStream to a <video> is the one thing markup cannot do: srcObject is a property,
   // never an attribute. Update swaps the stream in place (a replaceTrack keeps the same object,
   // so the guard makes that a no-op and never restarts playback).
@@ -6599,12 +10472,170 @@
     focusDismissed = true; // otherwise the effect above re-opens it on the next frame
   }
   // Self first, then peers: one tile per person, and nothing else on the grid.
-  let focusTiles = $derived([myFp, ...callParticipants]);
+  let focusTiles = $derived([callSelfFp, ...callParticipants]);
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
-  function createPeer(fp: string): CallPeer {
+  async function negotiatePeer(peer: CallPeer) {
+    if (callPeers[peer.fp] !== peer || peer.pc.signalingState === "closed") return;
+    try {
+      peer.makingOffer = true;
+      await peer.pc.setLocalDescription();
+      if (peer.pc.localDescription?.type === "offer") {
+        void sendSignal(peer.server, peer.fp, {
+          callId: peer.channel,
+          type: "offer",
+          sdp: peer.pc.localDescription,
+        });
+      }
+    } catch (e) {
+      console.warn("voice negotiation failed", { peer: peer.fp, error: String(e) });
+    } finally {
+      peer.makingOffer = false;
+    }
+  }
+  async function flushWaitingIce(peer: CallPeer) {
+    if (!peer.pc.remoteDescription) return;
+    const queued = waitingIce[peer.fp] ?? [];
+    delete waitingIce[peer.fp];
+    for (const candidate of queued) {
+      try {
+        await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        if (!peer.ignoreOffer) console.warn("buffered ICE candidate was rejected", { peer: peer.fp, error: String(e) });
+      }
+    }
+  }
+  function recoverPeer(peer: CallPeer) {
+    const now = Date.now();
+    if (now - peer.lastRetry < 4000) return;
+    const action = heartbeatRecovery({
+      currentRoom: isCurrentVoiceRoom(callServer, callChannel, peer.server, peer.channel),
+      hasPeer: true,
+      connectionState: peer.pc.connectionState,
+      signalingState: peer.pc.signalingState,
+      localDescriptionType: peer.pc.localDescription?.type,
+    });
+    if (!action || action === "create") return;
+    peer.lastRetry = now;
+    if (action === "resend-offer" || action === "resend-answer") {
+      const sdp = peer.pc.localDescription;
+      if (sdp) void sendSignal(peer.server, peer.fp, { callId: peer.channel, type: sdp.type, sdp });
+      return;
+    }
+    try {
+      peer.pc.restartIce(); // raises negotiationneeded and sends a fresh ICE offer
+    } catch (e) {
+      console.warn("voice ICE restart failed", { peer: peer.fp, error: String(e) });
+    }
+  }
+
+  // Ask the ICE agent which candidate pair actually won, and classify the media path from it.
+  // A "relay" candidate on either end means a TURN carries the media: still ciphertext, but a
+  // third party now sees who is talking to whom, when, and from which address. That is a real
+  // difference in what leaks and the room deserves to be told, so it is surfaced rather than
+  // averaged away. Best-effort throughout: on any miss the badge stays unknown, which is an
+  // honest answer, where guessing "direct" would not be.
+  async function sniffTransport(fp: string, pc: RTCPeerConnection) {
+    try {
+      const stats = await pc.getStats();
+      let pairId = "";
+      stats.forEach((s) => {
+        const t = s as RTCStats & { selectedCandidatePairId?: string };
+        if (t.type === "transport" && t.selectedCandidatePairId) pairId = t.selectedCandidatePairId;
+      });
+      if (!pairId) {
+        // Firefox and older Chromium never fill selectedCandidatePairId; the nominated,
+        // succeeded pair is the same fact spelled the other way.
+        stats.forEach((s) => {
+          const p = s as RTCStats & { state?: string; nominated?: boolean };
+          if (p.type === "candidate-pair" && p.state === "succeeded" && p.nominated) pairId = p.id;
+        });
+      }
+      const pair = pairId
+        ? (stats.get(pairId) as (RTCStats & { localCandidateId?: string; remoteCandidateId?: string }) | undefined)
+        : undefined;
+      if (!pair) return;
+      const local = pair.localCandidateId
+        ? (stats.get(pair.localCandidateId) as (RTCStats & { candidateType?: string }) | undefined)
+        : undefined;
+      const remote = pair.remoteCandidateId
+        ? (stats.get(pair.remoteCandidateId) as (RTCStats & { candidateType?: string }) | undefined)
+        : undefined;
+      if (!local && !remote) return;
+      const relayed = local?.candidateType === "relay" || remote?.candidateType === "relay";
+      peerTransport = { ...peerTransport, [fp]: relayed ? "relayed" : "direct" };
+    } catch {
+      /* stats are best-effort: an unknown path renders as no badge at all */
+    }
+  }
+
+  // UDP ports this call asked the router to open (bound-interface IGD on the native side, the
+  // same path the invite reachability fix proved out). One mapping per local ICE port; the
+  // granted public socket is signalled to the peer as an extra srflx candidate. A router mapping
+  // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
+  // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
+  // port that was tried and refused, so renegotiations don't re-ask the router every time.
+  // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
+  // where they are unit-tested.
+  const mappedCallPorts = new Map<number, MappedPort | null>();
+  // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
+  // plain Map mutation is invisible to $derived.
+  let callMappedRoutes = $state(0);
+
+  async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
+    if (!mappableIcePort(c)) return;
+    const port = c.port as number;
+    if (!mappedCallPorts.has(port)) {
+      mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
+      try {
+        const granted = await invoke<MappedPort>("map_call_port", { port });
+        mappedCallPorts.set(port, granted);
+        callMappedRoutes += 1;
+        console.info("voice: router mapped the media port", {
+          port,
+          via: granted.mechanism,
+          confirmed: granted.confirmed,
+        });
+      } catch (e) {
+        // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
+        console.warn("voice: router would not map the media port", { port, error: String(e) });
+        return;
+      }
+    }
+    const ext = mappedCallPorts.get(port);
+    if (!ext) return;
+    void sendSignal(peer.server, peer.fp, {
+      callId: peer.channel,
+      type: "ice",
+      candidate: routerMappedCandidate(c, ext),
+    });
+  }
+
+  function releaseMappedCallPorts() {
+    for (const [port, granted] of mappedCallPorts) {
+      if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
+    }
+    mappedCallPorts.clear();
+    callMappedRoutes = 0;
+  }
+
+  function createPeer(fp: string): CallPeer | null {
+    if (callPeers[fp]) return callPeers[fp];
+    const server = callServer;
+    const channel = callChannel;
+    if (server === null || !channel || !callSelfFp) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
-    const peer: CallPeer = { fp, pc, dc: null, polite: myFp < fp, makingOffer: false, ignoreOffer: false };
+    const peer: CallPeer = {
+      fp,
+      server,
+      channel,
+      pc,
+      dc: null,
+      polite: callSelfFp < fp,
+      makingOffer: false,
+      ignoreOffer: false,
+      lastRetry: 0,
+    };
     if (localStream) for (const t of localStream.getTracks()) pc.addTrack(t, localStream);
     if (camStream) for (const t of camStream.getTracks()) pc.addTrack(t, camStream); // joiner while my video is live
     // The instrument channel: negotiated (same id on both ends) and created BEFORE the offer, so
@@ -6619,20 +10650,19 @@
     }
     // Perfect negotiation, offer side: fires for the initial tracks AND whenever video is added
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
-    pc.onnegotiationneeded = async () => {
-      try {
-        peer.makingOffer = true;
-        await pc.setLocalDescription();
-        void sendSignal(fp, { callId: callChannel, type: "offer", sdp: pc.localDescription });
-      } catch {
-        /* torn down mid-negotiation */
-      } finally {
-        peer.makingOffer = false;
+    pc.onnegotiationneeded = () => void negotiatePeer(peer);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        void sendSignal(peer.server, fp, { callId: peer.channel, type: "ice", candidate: e.candidate.toJSON() });
+        void signalMappedCandidate(peer, e.candidate);
       }
     };
-    pc.onicecandidate = (e) => {
-      if (e.candidate) void sendSignal(fp, { callId: callChannel, type: "ice", candidate: e.candidate.toJSON() });
-    };
+    pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
+      peer: fp,
+      code: e.errorCode,
+      text: e.errorText,
+      url: e.url,
+    });
     pc.ontrack = (e) => {
       const stream = e.streams[0];
       if (!stream) return;
@@ -6649,7 +10679,9 @@
     };
     pc.onconnectionstatechange = () => {
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
-      if (pc.connectionState === "failed" || pc.connectionState === "closed") removePeer(fp);
+      if (pc.connectionState === "connected") void sniffTransport(fp, pc);
+      if (pc.connectionState === "failed") recoverPeer(peer);
+      else if (pc.connectionState === "closed") removePeer(fp);
     };
     callPeers[fp] = peer;
     callParticipants = Object.keys(callPeers);
@@ -6661,10 +10693,13 @@
       try { p.pc.close(); } catch { /* already closed */ }
       delete callPeers[fp];
     }
+    delete waitingIce[fp];
     document.getElementById(`call-audio-${fp}`)?.remove();
     callParticipants = Object.keys(callPeers);
     const { [fp]: _drop, ...rest } = callPeerStates;
     callPeerStates = rest;
+    const { [fp]: _path, ...paths } = peerTransport;
+    peerTransport = paths;
     // Silence and forget anything they were sounding; a dead edge must not drone on.
     stopAllFrom(fp);
     const { [fp]: _h, ...rh } = remoteHeld;
@@ -6679,17 +10714,17 @@
     const { [fp]: _vs, ...vs } = remoteStreams;
     remoteStreams = vs;
   }
-  // A short status for the call bar: how many peers are connected, or "connecting" while ICE works.
-  let callStatusText = $derived.by(() => {
-    const n = callParticipants.length;
-    if (n === 0) return "waiting for others…";
-    const connected = callParticipants.filter((fp) => callPeerStates[fp] === "connected").length;
-    if (connected === n) return `${n} connected`;
-    const failed = callParticipants.some(
-      (fp) => callPeerStates[fp] === "failed" || callPeerStates[fp] === "disconnected",
-    );
-    return failed ? `${connected}/${n} connected · check NAT/TURN` : `${connected}/${n} · connecting…`;
-  });
+  // A short status for the call bar; the phrasing rules live (tested) in callroutes.ts.
+  let callStatusText = $derived.by(() =>
+    callBarStatus(
+      callParticipants.length,
+      callParticipants.filter((fp) => callPeerStates[fp] === "connected").length,
+      callParticipants.some(
+        (fp) => callPeerStates[fp] === "failed" || callPeerStates[fp] === "disconnected",
+      ),
+      callMappedRoutes,
+    ),
+  );
 
   // --- Voice stage: speaking detection + mic meter -----------------------------------------------
   // One AudioContext, one analyser per source, one 120ms timer. Time-domain RMS is enough to light
@@ -6799,6 +10834,9 @@
     return state === "failed" || state === "disconnected" || state === "closed" ? "lost" : "neg";
   }
   function toggleInstDrawer() {
+    // Lift MIDI notes while the drawer is still their target, otherwise closing it mid-hold
+    // strands a tone that nothing is left to release.
+    if (instOpen) releaseMidiNotes();
     instOpen = !instOpen;
     if (instOpen) void initMidi(); // only ask for MIDI once a keyboard is actually on screen
   }
@@ -6826,16 +10864,37 @@
     if (!loadAccept(server)) return;
     alertedRooms.add(key);
     voiceAlert = { server, channel, name: channelNameFor(server, channel) };
-    playMention();
+    playMention(server);
   }
   // Join (or switch to) a channel's voice room. The channel id IS the call id.
   async function joinVoice(channel: string, server: number, name: string) {
     if (inCall && callChannel === channel && callServer === server) return;
     if (inCall) leaveVoice();
+    let selfFp = "";
+    try {
+      const membersHere = await invoke<Member[]>("get_members", { server });
+      selfFp = membersHere.find((m) => m.you)?.fingerprint ?? "";
+    } catch (e) {
+      error = `Couldn't read the voice room's member list: ${String(e)}`;
+      return;
+    }
+    if (!selfFp) {
+      error = "Couldn't identify this device on the voice room's server.";
+      return;
+    }
     callServer = server;
-    if (!(await ensureMic())) { callServer = null; return; }
+    callSelfFp = selfFp;
+    // A missing or refused microphone is no longer a reason not to join. The room is also where
+    // the jukebox and the instruments live, and neither needs one: the data channel carries the
+    // instruments and the deck rides the mesh, so a peer with no mic is a full participant in
+    // everything except talking. The dock offers the mic in place if one turns up later.
+    micOn = (await ensureMic(false)) !== null;
     callChannel = channel;
     callChannelName = name;
+    // Snapshot the room's server identity now, while we are certainly on it. Everything the
+    // dock renders afterwards has to survive the user walking off to another server.
+    callServerName = servers.find((s) => s.id === server)?.name ?? "";
+    void refreshCallProfiles();
     inCall = true;
     callMuted = false;
     focusOpen = false;
@@ -6845,20 +10904,26 @@
     startMeters();
     navigator.mediaDevices?.addEventListener?.("devicechange", onDeviceChange);
     alertedRooms.delete(roomKey(server, channel));
-    recordPresence(server, channel, myFp);
+    recordPresence(server, channel, callSelfFp);
     void refreshJukebox(); // the room's queue, whatever the DJ is currently on
     broadcast({ callId: channel, type: "hello", mic: 0, inst: instRxMuted ? 1 : 0 }); // announce + trigger existing members to offer
     clearInterval(pingTimer);
     pingTimer = setInterval(() => {
       if (callChannel && callServer !== null) {
         broadcast({ callId: callChannel, type: "voice-ping", mic: callMuted ? 1 : 0, inst: instRxMuted ? 1 : 0 });
-        recordPresence(callServer, callChannel, myFp); // keep my own presence fresh
+        recordPresence(callServer, callChannel, callSelfFp); // keep my own presence fresh
         jukeTick(); // the DJ's re-announce (and the listener's DJ-left check) ride this tick
+        // Re-read the winning candidate pair: an ICE restart can migrate a live call from
+        // direct to relayed (or back) with no connection-state change to notice it by.
+        for (const [fp, p] of Object.entries(callPeers)) {
+          if (p.pc.connectionState === "connected") void sniffTransport(fp, p.pc);
+        }
       }
     }, 5000);
   }
   function leaveVoice() {
     if (callChannel) broadcast({ callId: callChannel, type: "bye" });
+    releaseMappedCallPorts(); // give the router its ports back; the lease is bounded regardless
     instReleaseAll(); // lift my own notes (and tell peers) before the edges go down
     if (camStream) {
       for (const t of camStream.getTracks()) t.stop();
@@ -6886,12 +10951,19 @@
     }
     clearInterval(pingTimer);
     pingTimer = undefined;
-    if (callServer !== null && callChannel) dropPresence(callServer, callChannel, myFp);
+    if (callServer !== null && callChannel && callSelfFp) dropPresence(callServer, callChannel, callSelfFp);
     inCall = false;
     callMuted = false;
+    micOn = false;
     callChannel = "";
     callChannelName = "";
     callServer = null;
+    callServerName = "";
+    callSelfFp = "";
+    callProfiles = {};
+    peerTransport = {};
+    secInfoOpen = false;
+    for (const fp of Object.keys(waitingIce)) delete waitingIce[fp];
   }
   function toggleMute() {
     callMuted = !callMuted;
@@ -6924,6 +10996,7 @@
     const cid = msg.callId as string | undefined;
     const type = msg.type as string | undefined;
     if (!cid || !type) return;
+    const currentRoom = inCall && isCurrentVoiceRoom(callServer, callChannel, server, cid);
     // Presence: both "hello" (a newcomer) and "voice-ping" (heartbeat) mean someone's in a room.
     if (type === "hello" || type === "voice-ping") {
       const wasActive = roomMembers(server, cid).length > 0;
@@ -6931,23 +11004,42 @@
       maybeNotifyRoom(server, cid, wasActive);
       // Broadcast mute states ride the presence pings (the data channel also carries them, but
       // pings cover the window before it opens). Only my own room's states matter to the UI.
-      if (inCall && cid === callChannel && typeof msg.mic === "number") {
+      if (currentRoom && typeof msg.mic === "number") {
         peerMeta = { ...peerMeta, [fromFp]: { mic: msg.mic === 1, inst: msg.inst === 1, vid: typeof msg.vid === "number" ? msg.vid : 0 } };
       }
-      if (type === "voice-ping") return; // presence only
+      if (type === "voice-ping") {
+        const peer = callPeers[fromFp];
+        const action = heartbeatRecovery({
+          currentRoom,
+          hasPeer: !!peer,
+          connectionState: peer?.pc.connectionState,
+          signalingState: peer?.pc.signalingState,
+          localDescriptionType: peer?.pc.localDescription?.type,
+        });
+        if (action === "create") createPeer(fromFp);
+        else if (action && peer) recoverPeer(peer);
+        return;
+      }
+    }
+    // A bye is useful presence cleanup even for a room other than the one I am in.
+    if (type === "bye") {
+      dropPresence(server, cid, fromFp);
+      if (currentRoom) removePeer(fromFp);
+      return;
     }
     // Everything below is only for MY current room.
-    if (!inCall || cid !== callChannel) return;
+    if (!currentRoom) return;
     if (type === "juke") {
       jukeRecv(fromFp, msg); // shared-listening transport: what is playing and where it is
       return;
     }
     if (type === "hello") {
-      if (callPeers[fromFp]) return;
+      if (callPeers[fromFp]) { recoverPeer(callPeers[fromFp]); return; }
       playBlip(79); // audible arrival: there is no lobby, so the room itself says someone joined
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
+      if (!peer) return;
       const pc = peer.pc;
       // Perfect negotiation, answer side: on a collision the impolite end ignores the incoming
       // offer (its own is in flight and will win); the polite end lets setRemoteDescription
@@ -6955,36 +11047,50 @@
       const collision = peer.makingOffer || pc.signalingState !== "stable";
       peer.ignoreOffer = !peer.polite && collision;
       if (peer.ignoreOffer) return;
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
-      await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
-      void sendSignal(fromFp, { callId: callChannel, type: "answer", sdp: pc.localDescription });
-    } else if (type === "answer") {
-      const pc = callPeers[fromFp]?.pc;
-      // Guard against a stale answer landing after a rollback settled the state.
-      if (pc && pc.signalingState === "have-local-offer") {
+      try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        await flushWaitingIce(peer);
+        await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
+        void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
+      } catch (e) {
+        console.warn("voice offer handling failed", { peer: fromFp, error: String(e) });
+      }
+    } else if (type === "answer") {
+      const peer = callPeers[fromFp];
+      const pc = peer?.pc;
+      // Guard against a stale answer landing after a rollback settled the state.
+      if (peer && pc && pc.signalingState === "have-local-offer") {
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          await flushWaitingIce(peer);
+        } catch (e) {
+          console.warn("voice answer handling failed", { peer: fromFp, error: String(e) });
+        }
       }
     } else if (type === "ice") {
       const peer = callPeers[fromFp];
-      if (peer && msg.candidate) {
+      const candidate = msg.candidate as RTCIceCandidateInit | undefined;
+      if (!candidate) return;
+      if (!peer || !peer.pc.remoteDescription) {
+        waitingIce[fromFp] = bufferIce(waitingIce[fromFp] ?? [], candidate);
+      } else {
         try {
-          await peer.pc.addIceCandidate(new RTCIceCandidate(msg.candidate as RTCIceCandidateInit));
-        } catch {
-          if (!peer.ignoreOffer) { /* genuinely stale candidate: harmless */ }
+          await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          if (!peer.ignoreOffer) console.warn("voice ICE candidate was rejected", { peer: fromFp, error: String(e) });
         }
       }
-    } else if (type === "bye") {
-      removePeer(fromFp);
-      dropPresence(server, cid, fromFp);
     }
   }
 
-  // Per-channel composer drafts (in-memory): switching channels/servers preserves what you'd typed.
+  // Per-channel composer drafts: switching channels/servers preserves what you typed, and the
+  // bounded map is vault-sealed through scheduleUiStateSave for restart durability.
   let drafts = $state<Record<string, string>>({});
   function saveDraftFor(key: string | null) {
     if (!key) return;
     if (draft.trim()) drafts[key] = draft;
     else delete drafts[key];
+    scheduleUiStateSave();
   }
   function loadDraftFor(key: string | null) {
     draft = (key && drafts[key]) || "";
@@ -7010,17 +11116,64 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || !cur || !cur.active || activeServerId === null) return;
+    if (!text || !cur || !cur.active || activeServerId === null || sending) return;
+    const server = activeServerId;
+    const channel = cur.active;
     const reply_to = replyingTo;
     const key = chanKey();
     draft = "";
     replyingTo = "";
     mentionQuery = null;
     if (key) delete drafts[key];
+    scheduleUiStateSave();
+    sending = true;
+    const pendingId = `pending:${Date.now()}:${pendingSendNonce++}`;
+    const previousMessages = messages;
+    const nextMessages = [...previousMessages, {
+      id: pendingId,
+      author: myFp,
+      text,
+      ts: Date.now(),
+      edited: 0,
+      reactions: [],
+      reply_to,
+      pinned: false,
+    }];
+    const nextScope = chatScopeKey(server, channel);
+    chatStickToBottom = true;
+    messages = nextMessages;
+    messageWindow = reconcileChatWindow(
+      previousMessages,
+      nextMessages,
+      messageWindow,
+      true,
+      messageWindowScope !== nextScope,
+    );
+    messageWindowScope = nextScope;
+    markMessageArrivals([pendingId]);
+    await tick();
     try {
-      await invoke("send_message", { server: activeServerId, channel: cur.active, text, replyTo: reply_to });
+      await invoke("send_message", { server, channel, text, replyTo: reply_to });
+      sending = false;
+      // The channel-updated event normally refreshes this too, but the command acknowledgement is
+      // the deterministic local completion point. Do not leave the just-sent message dependent on
+      // event scheduling, and do not refresh a different conversation if the user switched away.
+      if (activeServerId === server && cur?.active === channel) await refresh();
     } catch (e) {
       error = String(e);
+      if (activeServerId === server && cur?.active === channel) {
+        messages = messages.filter((m) => m.id !== pendingId);
+      }
+      // Put the message back only if the user has not already started another one while the send
+      // was in flight. A failed send should never silently eat their text.
+      if (activeServerId === server && cur?.active === channel && !draft.trim()) {
+        draft = text;
+        if (key) drafts[key] = text;
+        scheduleUiStateSave();
+        replyingTo = reply_to;
+      }
+    } finally {
+      sending = false;
     }
   }
 
@@ -7095,68 +11248,6 @@
     }
   }
 
-  // The issue tracker feedback is filed against. The backend refuses to launch anything that
-  // isn't under this, so the URL built here is the only one the app can ever open.
-  const ISSUE_TRACKER = "https://github.com/Thalpy/Mewtual";
-
-  function feedbackReport(): string {
-    return [
-      `**Type:** ${feedbackKind === "bug" ? "Bug report" : "Feature request"}`,
-      `**App:** Mewtual desktop ${APP_VERSION}`,
-      `**Environment:** ${navigator.userAgent}`,
-      ``,
-      feedbackText.trim(),
-    ].join("\n");
-  }
-
-  // A title is optional in the form: fall back to the first line of the description so the
-  // issue never lands on GitHub untitled.
-  function feedbackSubject(): string {
-    const typed = feedbackTitle.trim();
-    const first = feedbackText.trim().split("\n")[0].trim();
-    return (typed || first || (feedbackKind === "bug" ? "Bug report" : "Feature request")).slice(0, 120);
-  }
-
-  async function copyFeedback() {
-    try {
-      await navigator.clipboard.writeText(feedbackReport());
-      feedbackCopied = true;
-      setTimeout(() => (feedbackCopied = false), 2000);
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  // File the report on the tracker by opening GitHub's new-issue form, prefilled, in the
-  // user's browser. The app holds no GitHub credentials and posts nothing itself: the user
-  // reviews the filled-in form and presses Submit, which also keeps them as the issue author
-  // so maintainers can reply to them.
-  async function openFeedbackIssue() {
-    const labels = feedbackKind === "bug" ? "bug" : "enhancement";
-    const url = (body: string) =>
-      `${ISSUE_TRACKER}/issues/new?labels=${labels}` +
-      `&title=${encodeURIComponent(feedbackSubject())}` +
-      `&body=${encodeURIComponent(body)}`;
-    let body = feedbackReport();
-    // GitHub serves a 414 rather than a form past roughly 8k of URL, and percent-encoding
-    // inflates the body several times over. Trim the tail instead of handing over a dead
-    // link, and put the full text on the clipboard so nothing typed is lost.
-    const LIMIT = 6000;
-    const NOTE = "\n\n_(Report truncated: the full text is on your clipboard.)_";
-    if (url(body).length > LIMIT) {
-      await copyFeedback();
-      while (body.length > 200 && url(body + NOTE).length > LIMIT) body = body.slice(0, -200);
-      body += NOTE;
-    }
-    try {
-      await invoke("open_issue_url", { url: url(body) });
-      feedbackOpened = true;
-      setTimeout(() => (feedbackOpened = false), 4000);
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
   // --- update check: quiet on launch, never nagging ---------------------------------------------
   // Releases are minisign-signed and the download + verification happen in Rust (see the updater
   // plugin), so the webview only learns "there is a newer version" and can ask for it to be
@@ -7226,39 +11317,202 @@
     updateAvail = null;
   }
 
-  async function copyInvite() {
-    if (!cur) return;
+  async function copyFreshInvite(server: number): Promise<boolean> {
+    const invite = await refreshInviteFor(server);
+    if (invite === undefined) {
+      toast("Invite changed but could not be refreshed; nothing was copied", "err", 4500);
+      return false;
+    }
+    if (!invite) {
+      toast("No invite is available for this server", "info", 3000);
+      return false;
+    }
     try {
-      await navigator.clipboard.writeText(wrapInvite(cur.invite, cur.id));
-      copied = true;
-      setTimeout(() => (copied = false), 1500);
+      await navigator.clipboard.writeText(wrapInvite(invite, server));
+      toast("Friend code copied", "ok", 1800);
+      return true;
     } catch {
       // Clipboard may be unavailable in the webview: the textarea allows manual copy.
+      toast("Clipboard unavailable: select and copy the code manually", "err", 3500);
+      return false;
+    }
+  }
+
+  async function copyInvite() {
+    const server = activeServerId;
+    if (server === null) return;
+    if (await copyFreshInvite(server)) {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
     }
   }
 
   let mintingInvite = $state(false);
-  // Mint a fresh single-use invite on demand (owner or admin: the backend gates on can_invite).
-  // The new invite carries the live bootstrap address, so it works even after a restart changed
-  // the listen port. An admin's invitee is owner-serialized (admitted when the owner is online).
-  async function generateInvite() {
-    if (activeServerId === null || !cur) return;
-    mintingInvite = true;
+  // What the backend can say about routes right now, without minting anything. The scope
+  // booleans plus the mapping status line, and the LAN socket so the port-forward suggestion
+  // can name the exact values to type into a router.
+  type InviteRouteCheck = {
+    public_direct: boolean;
+    relay: boolean;
+    rendezvous: boolean;
+    lan: boolean;
+    lan_ip: string;
+    port: number;
+    waiting: boolean;
+    mapping: string;
+  };
+  // The latest route check, driving the "Your network / Internet" scope chips and the manual
+  // port-forward suggestion. Refreshed on invite-page open and during each generate.
+  let invitePre = $state<InviteRouteCheck | null>(null);
+  // The mid-generate progress bar; null outside a generate.
+  let inviteCheck = $state<{ pct: number; label: string } | null>(null);
+  // Which server's invite the user generated this panel visit. The stored invite is never shown
+  // on page open: generating one is the deliberate act, so the panel starts with the button.
+  let inviteRevealed = $state<number | null>(null);
+  // The backend's router-mapping window is 25s; give the bar a beat past it.
+  const INVITE_CHECK_MS = 26_000;
+
+  // The invite page's precheck: show what an invite could reach before one is minted, polling
+  // while the router-mapping window is still open. Read-only on the backend, so opening the
+  // page can never create bearer invites or rendezvous registrations.
+  let invitePreRunning = $state(false);
+  async function precheckInviteRoutes(server: number) {
+    if (invitePreRunning) return; // one poll loop at a time; re-run waits for the current one
+    invitePre = null;
+    invitePreRunning = true;
+    const started = Date.now();
     try {
-      cur.invite = await invoke<string>("mint_invite_fresh", { server: activeServerId });
-      copied = false;
-    } catch (e) {
-      error = String(e);
+      for (;;) {
+        if (mintingInvite) return; // the generate flow owns the polling now
+        let check: InviteRouteCheck;
+        try {
+          check = await invoke<InviteRouteCheck>("check_invite_routes", { server });
+        } catch {
+          return; // no chips is better than wrong chips
+        }
+        if (!showServerSettings || serverSettingsPage !== "invites" || activeServerId !== server) return;
+        invitePre = check;
+        if (check.public_direct || check.relay || !check.waiting || Date.now() - started >= INVITE_CHECK_MS) return;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    } finally {
+      invitePreRunning = false;
+    }
+  }
+
+  // Mint a fresh single-use invite on demand (owner or admin: the backend gates on can_invite).
+  // Before minting, poll the route check so the invite signs the public address the router is
+  // about to open, instead of the LAN-only set from the seconds before UPnP answered. The bar
+  // fills across the mapping window and finishes early the moment a shareable route exists.
+  // An admin's invitee is owner-serialized (admitted when the owner is online).
+  async function generateInvite() {
+    const server = activeServerId;
+    if (server === null || !cur) return;
+    mintingInvite = true;
+    inviteCheck = { pct: 4, label: "Checking how people can reach you…" };
+    const started = Date.now();
+    try {
+      for (;;) {
+        let check: InviteRouteCheck;
+        try {
+          check = await invoke<InviteRouteCheck>("check_invite_routes", { server });
+        } catch {
+          break; // the check is advisory: minting proceeds without a verdict
+        }
+        invitePre = check;
+        const elapsed = Date.now() - started;
+        // Rendezvous alone is discovery, not reachability, so it does not end the wait early.
+        if (check.public_direct || check.relay || !check.waiting || elapsed >= INVITE_CHECK_MS) break;
+        inviteCheck = {
+          pct: Math.max(4, Math.min(95, (elapsed / INVITE_CHECK_MS) * 100)),
+          label: "Asking your router for a public route (UPnP / PCP / NAT-PMP)…",
+        };
+        await new Promise((r) => setTimeout(r, 900));
+      }
+      inviteCheck = { pct: 100, label: "Route check done: generating the invite…" };
+      const invite = await updateInviteFor(server, true);
+      if (invite !== undefined && activeServerId === server) {
+        copied = false;
+        inviteRevealed = server;
+      }
     } finally {
       mintingInvite = false;
+      inviteCheck = null;
     }
   }
 
   // A short two-note chime via the Web Audio API (no asset to bundle), gated by the
   // notification-sound preference. Played for messages you aren't actively looking at.
   let audioCtx: AudioContext | null = null;
-  function playChime(freqs: number[]) {
-    if (!soundOn) return;
+  // An original, asset-free "painted portal" cue: a soft surface whoomp, an elastic
+  // upward glide, then three glassy droplets. It begins in the click gesture so a
+  // suspended AudioContext can resume, and its crest lands with the visual zoom.
+  function playSpacePortal() {
+    if (!soundOn || !spaceState.entrySound) return;
+    try {
+      audioCtx = audioCtx ?? new AudioContext();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") void ctx.resume();
+      const now = ctx.currentTime;
+      const master = ctx.createGain();
+      master.gain.setValueAtTime(0.0001, now);
+      master.gain.exponentialRampToValueAtTime(0.34, now + 0.025);
+      master.gain.setValueAtTime(0.34, now + 0.48);
+      master.gain.exponentialRampToValueAtTime(0.0001, now + 0.88);
+      master.connect(ctx.destination);
+
+      const whoomp = ctx.createOscillator();
+      const whoompGain = ctx.createGain();
+      whoomp.type = "sine";
+      whoomp.frequency.setValueAtTime(118, now);
+      whoomp.frequency.exponentialRampToValueAtTime(54, now + 0.24);
+      whoompGain.gain.setValueAtTime(0.46, now);
+      whoompGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      whoomp.connect(whoompGain).connect(master);
+      whoomp.start(now);
+      whoomp.stop(now + 0.3);
+
+      const glide = ctx.createOscillator();
+      const glideGain = ctx.createGain();
+      const wobble = ctx.createOscillator();
+      const wobbleDepth = ctx.createGain();
+      glide.type = "triangle";
+      glide.frequency.setValueAtTime(174, now + 0.04);
+      glide.frequency.exponentialRampToValueAtTime(392, now + 0.3);
+      glide.frequency.exponentialRampToValueAtTime(784, now + 0.58);
+      wobble.type = "sine";
+      wobble.frequency.value = 12;
+      wobbleDepth.gain.setValueAtTime(20, now);
+      wobbleDepth.gain.exponentialRampToValueAtTime(2, now + 0.58);
+      wobble.connect(wobbleDepth).connect(glide.detune);
+      glideGain.gain.setValueAtTime(0.0001, now + 0.04);
+      glideGain.gain.exponentialRampToValueAtTime(0.32, now + 0.1);
+      glideGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.64);
+      glide.connect(glideGain).connect(master);
+      glide.start(now + 0.04);
+      wobble.start(now + 0.04);
+      glide.stop(now + 0.66);
+      wobble.stop(now + 0.66);
+
+      [659.25, 880, 1174.66].forEach((frequency, index) => {
+        const drop = ctx.createOscillator();
+        const dropGain = ctx.createGain();
+        const start = now + 0.33 + index * 0.105;
+        drop.type = "sine";
+        drop.frequency.setValueAtTime(frequency * 0.96, start);
+        drop.frequency.exponentialRampToValueAtTime(frequency, start + 0.045);
+        dropGain.gain.setValueAtTime(0.0001, start);
+        dropGain.gain.exponentialRampToValueAtTime(0.22, start + 0.012);
+        dropGain.gain.exponentialRampToValueAtTime(0.0001, start + 0.24);
+        drop.connect(dropGain).connect(master);
+        drop.start(start);
+        drop.stop(start + 0.26);
+      });
+    } catch {
+      /* audio unavailable */
+    }
+  }
+  function playSynthChime(freqs: number[]) {
     try {
       audioCtx = audioCtx ?? new AudioContext();
       const ctx = audioCtx;
@@ -7281,13 +11535,67 @@
       /* audio unavailable */
     }
   }
-  // A regular new-message chime (two notes) vs a distinct, brighter rising triad for a message that
-  // mentions you or replies to you.
-  function playNotify() {
-    playChime([880, 1318.5]);
+
+  const activeTonePlayers = new Set<HTMLAudioElement>();
+  function playStoredTone(tone: StoredTone, fallback: () => void) {
+    try {
+      const player = new Audio(tone.dataUrl);
+      let failed = false;
+      const cleanup = () => {
+        activeTonePlayers.delete(player);
+        player.onended = null;
+        player.onerror = null;
+      };
+      const fail = () => {
+        if (failed) return;
+        failed = true;
+        cleanup();
+        fallback(); // corrupt/unsupported local data never turns notifications silently off
+      };
+      player.volume = 0.72;
+      player.onended = cleanup;
+      player.onerror = fail;
+      activeTonePlayers.add(player); // hold it until playback ends; GC must not cut a cue short
+      void player.play().catch(fail);
+    } catch {
+      fallback();
+    }
   }
-  function playMention() {
-    playChime([987.8, 1318.5, 1760]);
+
+  // One policy gate for every notification caller. Custom files are local data URLs validated at
+  // import/load; built-ins stay asset-free Web Audio. Server overrides are read even for a server
+  // that is not currently open, which is precisely when most message notifications arrive.
+  function playConfiguredSound(kind: NotificationSoundKind, server: number | null) {
+    const policy = soundPolicy(kind, server);
+    if (!policy.enabled) return;
+    const builtIn = () => {
+      if (policy.builtIn === "crunch") playCrunch();
+      else if (kind === "message") playSynthChime([880, 1318.5]);
+      else if (kind === "mention") playSynthChime([987.8, 1318.5, 1760]);
+      else {
+        try {
+          audioCtx = audioCtx ?? new AudioContext();
+          if (audioCtx.state === "suspended") void audioCtx.resume();
+          scheduleNewsChime(audioCtx);
+        } catch {
+          /* audio unavailable */
+        }
+      }
+    };
+    if (policy.custom) playStoredTone(policy.custom, builtIn);
+    else builtIn();
+  }
+
+  // A regular new-message chime vs a brighter mention/reply triad. Passing the source server is
+  // important: notifications generally arrive while some *other* server is open.
+  function playNotify(server: number | null = activeServerId) {
+    playConfiguredSound("message", server);
+  }
+  function playMention(server: number | null = activeServerId) {
+    playConfiguredSound("mention", server);
+  }
+  function playNewsTicker(server: number | null = activeServerId) {
+    playConfiguredSound("news", server);
   }
 
   // ---- location & history --------------------------------------------------
@@ -7451,17 +11759,25 @@
   // The strip only moves when something actually happened, so the motion itself is the signal
   // rather than decoration. Items are built where the data lands rather than from the raw events,
   // because an event only says "the wiki changed" while a diff says WHICH page.
-  type TickerKind = "status" | "wiki" | "event";
-  type TickerItem = { id: string; kind: TickerKind; text: string; at: number; go: () => void };
+  type TickerKind = "status" | "wiki" | "event" | "message";
+  type TickerItem = { id: string; server: number; kind: TickerKind; text: string; at: number; go: () => void };
   const TICKER_TTL = 5 * 60_000; // news for five minutes; after that it is just history
   const TICKER_MAX = 8;
   let tickerItems = $state<TickerItem[]>([]);
-  function pushTicker(kind: TickerKind, id: string, text: string, go: () => void) {
-    if (locked) return; // nothing that names app content may reach a locked screen
-    if (!text.trim() || tickerItems.some((t) => t.id === id)) return;
+  // Receipts live for the unlocked UI session. Unlike the old feed-coupled set they are never
+  // pruned just because a five-minute item aged out, so a replayed backend event cannot crawl or
+  // ring a second time. lockScreen clears them because wiki/page ids can contain content names.
+  let tickerReceipts = $state<Set<string>>(new Set());
+  function pushTicker(kind: TickerKind, server: number, id: string, text: string, go: () => void): boolean {
+    if (locked) return false; // nothing that names app content may reach a locked screen
+    if (!text.trim()) return false;
+    const nextReceipts = acceptTickerReceipt(tickerReceipts, id);
+    if (!nextReceipts) return false;
     const at = Date.now();
     const kept = tickerItems.filter((t) => at - t.at < TICKER_TTL);
-    tickerItems = [...kept, { id, kind, text, at, go }].slice(-TICKER_MAX);
+    tickerItems = [...kept, { id, server, kind, text, at, go }].slice(-TICKER_MAX);
+    tickerReceipts = nextReceipts;
+    return true;
   }
   function pruneTicker() {
     const at = Date.now();
@@ -7491,6 +11807,79 @@
       navStepEnd();
     }
   }
+  async function goTickerMessage(server: number, channel: string, messageId: string) {
+    navStepStart();
+    try {
+      inboxView = false;
+      if (server !== activeServerId) await switchServer(server);
+      view = "chat";
+      // A channel update can arrive before its channel-list event. Register a readable fallback
+      // so the click can still land instead of silently selecting an absent sidebar entry.
+      if (cur && !cur.channels.some((c) => c.id === channel)) {
+        cur.channels = [...cur.channels, { id: channel, name: channelNameFor(server, channel) }];
+      }
+      if (cur?.active !== channel) await switchTo(channel);
+      else await refresh();
+      jumpToMessageId(messageId);
+    } finally {
+      navStepEnd();
+    }
+  }
+
+  function messageTickerText(server: number, channel: string, message: Msg): string {
+    const group = servers.find((s) => s.id === server);
+    const channelName = group?.channels.find((c) => c.id === channel)?.name ?? "channel";
+    // Profiles are scoped to the active server. Never label a cross-server fingerprint with the
+    // active server's unrelated profile; the group/channel plus message snippet remains useful.
+    const sender = server === activeServerId ? `${nameOf(message.author)}: ` : "";
+    return `${group?.name ?? "Server"} · #${channelName} · ${sender}${msgSnippet(message.text, 72)}`;
+  }
+
+  function notifyMessage(
+    server: number,
+    channel: string,
+    message: Msg | undefined,
+    kind: "message" | "mention",
+  ) {
+    if (!message?.id) return; // current clients assign stable ids; legacy rows cannot be click targets
+    if (server === activeServerId && message.author === myFp) return;
+    const accepted = pushTicker(
+      "message",
+      server,
+      messageTickerId(server, channel, message.id),
+      messageTickerText(server, channel, message),
+      () => void goTickerMessage(server, channel, message.id),
+    );
+    // A repeated channel-updated event (reaction, topic, duplicate bridge delivery) must not ring
+    // for the same row again. The ticker receipt is the shared exactly-once gate for both signals.
+    if (!accepted) return;
+    if (kind === "mention") playMention(server);
+    else playNotify(server);
+  }
+
+  async function notifyLatestChannelMessage(
+    server: number,
+    channel: string,
+    mode: "message" | "mention" | "detect",
+  ) {
+    try {
+      const channelMessages = await invoke<Msg[]>("get_messages", { server, channel });
+      const latest = channelMessages[channelMessages.length - 1];
+      let kind: "message" | "mention" = mode === "mention" ? "mention" : "message";
+      // Mention detection depends on the active server's identity/profile and read marks. If the
+      // user switches servers during this fetch, degrade to an ordinary message notification.
+      if (mode === "detect" && server === activeServerId && targetsMe(channel, channelMessages)) {
+        if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
+        kind = "mention";
+      }
+      notifyMessage(server, channel, latest, kind);
+    } catch {
+      // Without a stable message id there is nothing safe to put in a clickable ticker. Preserve
+      // the audible alert, but do not create a headline that cannot land anywhere.
+      if (mode === "mention") playMention(server);
+      else playNotify(server);
+    }
+  }
 
   // ---- mascot ---------------------------------------------------------------
   // The app's mood in one glyph: asleep when nobody is looking or the vault is shut, ears up when
@@ -7504,7 +11893,7 @@
         ? catBlinkArt
         : mentionChannels.size > 0
           ? catAlertArt
-          : activeDownloads > 0
+          : activeTransfers > 0
             ? catSyncArt
             : catIdleArt,
   );
@@ -7520,8 +11909,8 @@
         ? "asleep: this window isn't focused"
         : mentionChannels.size > 0
           ? `ears up: ${mentionChannels.size} channel${mentionChannels.size === 1 ? "" : "s"} mentioned you (click to go)`
-          : activeDownloads > 0
-            ? `busy: ${activeDownloads} transfer${activeDownloads === 1 ? "" : "s"} running`
+          : activeTransfers > 0
+            ? `busy: ${activeTransfers} transfer${activeTransfers === 1 ? "" : "s"} running`
             : "settled: nothing is waiting (click to pet)",
   );
 
@@ -7574,6 +11963,67 @@
     }
   }
 
+  // A crunch: three quick bites of band-passed noise, each pitched a little lower and
+  // softer than the last, which reads as paper being scrunched rather than as static.
+  // Same lazily-created context as the chimes, gated by the same sound preference.
+  function playCrunch() {
+    if (!soundOn) return;
+    try {
+      audioCtx = audioCtx ?? new AudioContext();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") void ctx.resume();
+      const now = ctx.currentTime;
+      const len = Math.floor(ctx.sampleRate * 0.1);
+      const buffer = ctx.createBuffer(1, len, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+      [0, 0.07, 0.15].forEach((offset, i) => {
+        const src = ctx.createBufferSource();
+        src.buffer = buffer;
+        src.playbackRate.value = 1 - i * 0.22;
+        const filt = ctx.createBiquadFilter();
+        filt.type = "bandpass";
+        filt.Q.value = 0.9;
+        filt.frequency.setValueAtTime(1800 - i * 420, now + offset);
+        filt.frequency.exponentialRampToValueAtTime(680 - i * 130, now + offset + 0.08);
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0001, now + offset);
+        gain.gain.exponentialRampToValueAtTime(0.2 * (1 - i * 0.26), now + offset + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + 0.095);
+        src.connect(filt).connect(gain).connect(ctx.destination);
+        src.start(now + offset);
+        src.stop(now + offset + 0.1);
+      });
+    } catch {
+      /* no Web Audio: the window scrunches silently */
+    }
+  }
+
+  // Scrunching the window crunches. Only shrinking counts, and a throttle folds the
+  // stream of resize events a drag produces into one crunch every few frames, so the
+  // gesture sounds like one continuous scrunch instead of a rattle.
+  let scrunchW = 0;
+  let scrunchH = 0;
+  let scrunchLast = 0;
+  function onWindowScrunch() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const shrank = (scrunchW > 0 && w < scrunchW) || (scrunchH > 0 && h < scrunchH);
+    scrunchW = w;
+    scrunchH = h;
+    if (!shrank) return;
+    const t = performance.now();
+    if (t - scrunchLast < 280) return;
+    scrunchLast = t;
+    playCrunch();
+  }
+  $effect(() => {
+    scrunchW = window.innerWidth;
+    scrunchH = window.innerHeight;
+    window.addEventListener("resize", onWindowScrunch);
+    return () => window.removeEventListener("resize", onWindowScrunch);
+  });
+
   // Touching the cat. When something wants you the mascot is already saying so, so the click
   // follows it: the oldest unread mention (Sets keep insertion order, so the first entry is the
   // one that has been waiting longest). Otherwise there is nowhere to go and it is just a cat.
@@ -7606,19 +12056,14 @@
   // An item crawls exactly once and is then consumed: the lane is a notification, not a loop.
   // When the queue empties the slot settles back to the ident line, so a bar that is moving
   // always means something arrived, and a bar that stops means you are caught up.
-  let tbShown = $state<Set<string>>(new Set());
   // Newest six unshown: a burst drops its oldest rather than crawling for minutes.
-  let tbQueue = $derived(tickerItems.filter((i) => !tbShown.has(i.id)).slice(-6));
+  let tbQueue = $derived(tickerItems.slice(-6));
   let tbHead = $derived(tbQueue[0] ?? null);
   // The same thresholds the voice stage's meter uses, so the two readings of one mic agree.
   let tbMicBars = $derived([0, 0.25, 0.5, 0.75].filter((t) => micLevel > t).length);
-  const tbCrawlDur = (text: string) => Math.min(20, Math.max(6, 5.5 + text.length * 0.1));
+  const tbCrawlDur = (text: string) => Math.min(24, Math.max(10, 8.5 + text.length * 0.11));
   function tbAdvance(id: string) {
-    const next = new Set(tbShown);
-    next.add(id);
-    // Ids that have aged out of the feed can never come back, so the set stays bounded.
-    for (const k of next) if (!tickerItems.some((i) => i.id === k)) next.delete(k);
-    tbShown = next;
+    tickerItems = tickerItems.filter((item) => item.id !== id);
   }
 
   // ---- window chrome -------------------------------------------------------
@@ -7630,21 +12075,51 @@
   const syncMaximized = () => void appWindow.isMaximized().then((m) => (winMaximized = m));
 
   onMount(() => {
+    // First thing, before anything can fail: from here on, what the webview sees reaches the
+    // debug log rather than a devtools console nobody has open. The native side drops these when
+    // logging is off, so this costs nothing when the user has opted out.
+    installUiLogging(
+      (level, message) => {
+        void invoke("log_ui", { level, message }).catch(() => {
+          /* the log is not worth an error of its own */
+        });
+      },
+      { console: globalThis.console, addEventListener: window.addEventListener.bind(window) },
+    );
     syncMaximized();
+    // Reconnect a controller that was already granted and already plugged in, silently. Waiting
+    // for the instrument drawer to be opened once was half of why MIDI felt like a coin toss.
+    void primeMidi();
     // Look for a new release shortly after launch rather than during it: the first seconds
     // belong to unlocking and reconnecting, and nothing here is urgent.
     const updateTimer = setTimeout(() => void checkForUpdate(), 4000);
-    // Which gate to draw: unlock, or first-run setup. An older backend without the command
-    // has a vault by definition (it could only have been reached through the old gate), so a
-    // failure falls back to "unlock" rather than offering to found a second identity.
-    invoke<boolean>("vault_exists")
+    // F5/HMR remounts only this webview; the native process and unlocked actors are still alive.
+    // Resume that session unless the user explicitly pressed Ctrl+L. A cold launch still draws
+    // the ordinary vault gate.
+    let explicitlyLocked = false;
+    try { explicitlyLocked = sessionStorage.getItem("catcoms.explicit-lock") === "1"; } catch { /* best effort */ }
+    const chooseGate = () => invoke<boolean>("vault_exists")
       .then((v) => (vaultExists = v))
       .catch(() => (vaultExists = true));
+    if (explicitlyLocked) chooseGate();
+    else invoke<Reloaded[] | null>("resume_session")
+      .then((running) => {
+        if (running) {
+          vaultExists = true;
+          restoreReloaded(running);
+        } else chooseGate();
+      })
+      .catch(chooseGate);
     const subs: Promise<UnlistenFn>[] = [
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
+      listen<{ server: number }>("channels-changed", (e) => {
+        void refreshChannels(e.payload.server);
+      }),
       listen<{ server: number; channel: string }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        spaceActivityAt[server] = Date.now();
+        if (server === activeServerId && view === "moderation") void refreshModeration();
         // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
         scheduleInboxReload();
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
@@ -7653,17 +12128,25 @@
         if (inCall && server === callServer && channel === callChannel) void refreshJukebox();
         if (server === activeServerId && channel === cur?.active) {
           refreshTopic(); // topic edits ride the same channel-updated event
-          refresh().then(() => {
-            // You're looking at this channel: only chime if the window isn't focused; use the
-            // mention chime if the just-arrived (newest) message is aimed at you.
+          channelEventRefresh.request(true).then(() => {
+            // You're looking at this channel: only notify if the window isn't focused. The same
+            // stable message id gates its sound and its clickable ticker receipt exactly once.
             if (document.hasFocus()) return;
+            // request() hands back ONE promise for the whole drain, so this can resolve after a
+            // pass that loaded a different conversation: reading the shared array then would
+            // headline THIS channel with ANOTHER one's text, and the ticker click would try to
+            // land a foreign message id here and silently do nothing. Fetch our own rows in that
+            // case, exactly as the non-active-channel branch below always does.
+            if (!scopeHoldsConversation(messageWindowScope, server, channel)) {
+              void notifyLatestChannelMessage(server, channel, "detect");
+              return;
+            }
             const last = messages[messages.length - 1];
             const forMe =
               last &&
               last.author !== myFp &&
               (mentionsMe(last.text) || (!!last.reply_to && msgById.get(last.reply_to)?.author === myFp));
-            if (forMe) playMention();
-            else playNotify();
+            notifyMessage(server, channel, last, forMe ? "mention" : "message");
           });
           return;
         }
@@ -7672,28 +12155,20 @@
           if (!s.unread.includes(channel)) s.unread.push(channel);
           if (server !== activeServerId) s.dot = true;
           if (server !== activeServerId) {
-            playNotify(); // another server: no per-server identity here to detect a mention
+            // Another server: its profile identity is not loaded, so this is an ordinary-message
+            // alert, but its own server sound override still applies.
+            void notifyLatestChannelMessage(server, channel, "message");
           } else if (mentionChannels.has(channel)) {
-            playMention(); // already a known mention channel: new activity is still aimed at me
+            void notifyLatestChannelMessage(server, channel, "mention");
           } else {
-            // A non-active channel of the server I'm in: scan it for a message that @-mentions me or
-            // replies to one of mine. A hit gets the distinct mention chime + a badge; else the
-            // generic chime. (Already-badged channels are handled above without a re-scan.)
-            invoke<Msg[]>("get_messages", { server, channel })
-              .then((msgs) => {
-                if (server !== activeServerId) return; // switched servers mid-fetch: drop it
-                if (targetsMe(channel, msgs)) {
-                  if (!mentionChannels.has(channel)) mentionChannels = new Set(mentionChannels).add(channel);
-                  playMention();
-                } else {
-                  playNotify();
-                }
-              })
-              .catch(() => playNotify());
+            // A non-active channel of the server I'm in: scan for a message aimed at me, then use
+            // that same fetched row for the ticker so its click target and sound cannot diverge.
+            void notifyLatestChannelMessage(server, channel, "detect");
           }
         }
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
           refreshMembers();
           if (view === "files") refreshFiles(); // membership change ⇒ re-check fetch availability
@@ -7701,33 +12176,87 @@
       }),
       listen<{ server: number }>("profiles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshProfiles();
+        // A rename on the room's server has to reach the dock even while another server is
+        // being viewed, which is precisely when the active-server refresh above does nothing.
+        if (e.payload.server === callServer) void refreshCallProfiles();
       }),
       listen<{ server: number }>("files-updated", (e) => {
-        if (e.payload.server === activeServerId) refreshFiles();
+        spaceActivityAt[e.payload.server] = Date.now();
+        if (e.payload.server === activeServerId) {
+          refreshFiles();
+          if (view === "storage" || view === "downloads") refreshStorageHealth();
+        }
       }),
       listen<{
         server: number;
         cid: string;
         done: number;
         total: number;
+        bytes_done: number;
+        bytes_total: number;
+        network_bytes_done: number;
         provider: string | null;
       }>("download-progress", (e) => {
+        // The deck reads the same events the Downloads surface does. It has no download of its
+        // own to key off: the media element pulls ranges, and the backend emits progress for the
+        // chunks it needs, so this is the only view the deck gets of how a track is coming in.
+        if (jukeNow?.cid === e.payload.cid) jukeFetch = fetchPhase(e.payload);
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
         if (!d) return; // only track explicitly-initiated downloads
-        d.progress = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+        const now = Date.now();
+        if (e.payload.network_bytes_done > d.networkBytesDone) {
+          d.speed = sampleRate(
+            d.speed,
+            d.networkBytesDone,
+            d.lastRateAt,
+            e.payload.network_bytes_done,
+            now,
+          );
+          d.lastRateAt = now;
+        }
+        d.networkBytesDone = e.payload.network_bytes_done;
+        d.total = e.payload.total;
+        d.done = Math.max(d.heldBefore, e.payload.done);
+        d.bytesTotal = e.payload.bytes_total;
+        d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
+        d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
+        d.updatedAt = now;
         if (e.payload.done === 0) d.provider = undefined; // fresh transfer: drop any prior provider
         if (e.payload.provider) d.provider = e.payload.provider; // keep the latest live provider
-        if (e.payload.done >= e.payload.total) d.status = "done";
-        else if (d.status === "queued") d.status = "downloading";
+        if (e.payload.done >= e.payload.total) d.status = "verifying";
+        else if (!d.provider && onlineCount <= 1) d.status = "waiting";
+        else d.status = "downloading";
+      }),
+      listen<{ server: number; upload_id: string; done: number; total: number }>("upload-progress", (e) => {
+        const u = uploads[uploadKey(e.payload.server, e.payload.upload_id)];
+        if (!u || u.status === "done" || u.status === "failed") return;
+        const chunkTotal = Math.max(1, e.payload.total - 1);
+        u.total = chunkTotal;
+        u.done = Math.min(chunkTotal, e.payload.done);
+        u.status = e.payload.done >= e.payload.total - 1 ? "publishing" : "uploading";
+        u.updatedAt = Date.now();
+        // Reading owns 0..10%. Backend work owns the rest, but only the completed invoke marks
+        // the row Done: keep event progress just shy of 100% until persistence has also returned.
+        const backend = e.payload.total > 0 ? e.payload.done / e.payload.total : 0;
+        u.progress = Math.max(u.progress, Math.min(0.99, 0.1 + backend * 0.89));
       }),
       listen<{ server: number }>("status-updated", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) refreshStatuses();
+        if (!(e.payload.server === activeServerId && view === "status" && document.hasFocus())) {
+          newsUnseen = true;
+        }
+        if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
       }),
       listen<{ server: number }>("wiki-updated", (e) => {
-        if (e.payload.server === activeServerId && view === "wiki") refreshWiki();
+        spaceActivityAt[e.payload.server] = Date.now();
+        if (e.payload.server === activeServerId) refreshWiki();
       }),
       listen<{ server: number }>("roles-updated", (e) => {
         if (e.payload.server === activeServerId) refreshRoles();
+      }),
+      listen<{ server: number }>("moderation-updated", (e) => {
+        if (e.payload.server === activeServerId) refreshModeration();
       }),
       listen<{ server: number }>("livery-changed", (e) => {
         refreshServerIconFor(e.payload.server); // rail icon may have changed for any server
@@ -7741,7 +12270,12 @@
         if (e.payload.server === activeServerId) refreshBadges();
       }),
       listen<{ server: number }>("events-changed", (e) => {
+        spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) refreshEvents();
+        if (!(e.payload.server === activeServerId && view === "events" && document.hasFocus())) {
+          newsUnseen = true;
+        }
+        if (inboxView && inboxMode === "news") { newsUnseen = false; loadNews(); }
       }),
       listen<{ server: number }>("devices-changed", (e) => {
         if (e.payload.server === activeServerId) refreshDevices();
@@ -7754,6 +12288,7 @@
         void handleCallSignal(e.payload.from_fp, e.payload.payload, e.payload.server);
       }),
       listen<{ server: number; online: string[] }>("connectivity-changed", (e) => {
+        spaceOnlineCounts[e.payload.server] = e.payload.online.length + 1;
         if (e.payload.server === activeServerId) {
           const next = new Set(e.payload.online);
           const t = Date.now();
@@ -7772,20 +12307,55 @@
           refreshFiles(); // a peer came/went: re-evaluate the availability hint (has_peers)
         }
       }),
+      listen<JoinReplyReady>("join-reply-ready", (e) => {
+        // The native join command deliberately remains pending while its listener and NAT mapping
+        // stay alive. This event gives the human the return signalling channel without moving the
+        // punch deadline into a throttled webview timer.
+        joinReplyReady = e.payload;
+        notice = "Send the connection reply back to the inviter now; keep this app open.";
+      }),
+      listen<number>("reachability-changed", (e) => {
+        // Router mapping and AutoNAT settle after founding/joining returns. Both onboarding and
+        // Settings use this same report. Refresh that server's cached invite too: the event can
+        // arrive while another server is active, and copied codes must never retain an expired
+        // mapping or relay route.
+        if (locked) return;
+        if (reachabilityEventAffectsReport(connectivity, e.payload)) refreshConnectivity();
+        if (e.payload === activeServerId && view === "connectivity") refreshSwitchboards();
+        void refreshInviteFor(e.payload);
+      }),
+      listen<number>("switchboard-changed", (e) => {
+        const decision = switchboardEventRefreshDecision(locked, activeServerId, e.payload);
+        if (decision.refreshStatus) refreshSwitchboards();
+        if (decision.refreshInvite) void refreshInviteFor(e.payload);
+      }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
       }),
       listen<{ server: number }>("server-closed", (e) => {
         servers = servers.filter((s) => s.id !== e.payload.server);
         if (activeServerId === e.payload.server) {
-          activeServerId = servers.length ? servers[0].id : null;
-          if (activeServerId !== null) switchServer(activeServerId);
+          if (servers.length) void switchServer(servers[0].id);
+          else {
+            beginViewSwitch();
+            activeServerId = null;
+            clearServerView();
+          }
         }
       }),
     ];
     // Global keyboard shortcuts: Escape closes the top-most overlay/menu; Ctrl/Cmd+1–5 switch
     // tabs; Ctrl/Cmd+K opens the quick switcher.
     const onKey = (e: KeyboardEvent) => {
+      if (!locked && !e.repeat) {
+        const target = activeTextEffectTarget();
+        const effect = target ? effectForKeybind(textEffectKeybinds, keybindFromEvent(e)) : "";
+        if (target && effect) {
+          e.preventDefault();
+          if (captureTextEffectSelection(target)) void applyTextEffect(effect, target);
+          return;
+        }
+      }
       // Melody unlock: the home row is a piano while the lock screen's melody tab is up.
       if (gateEntry && unlockMethod === "melody" && !e.ctrlKey && !e.metaKey && !e.altKey) {
         const k = e.key.toLowerCase();
@@ -7846,8 +12416,16 @@
         else navForward();
         return;
       }
+      if (spaceOpen && (e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoSpaceLayout();
+        else undoSpaceLayout();
+        return;
+      }
+      if (handleSpaceKey(e)) return;
       if (e.key === "Escape") {
-        if (showQuickSwitch) closeQuickSwitch();
+        if (textEffectTarget) { textEffectTarget = null; showTextEffectCatalog = false; }
+        else if (showQuickSwitch) closeQuickSwitch();
         else if (scanOpen) closeScan(null);
         else if (showLinkDevice) closeLinkDevice();
         else if (verifyFor) verifyFor = null;
@@ -7870,13 +12448,28 @@
         // furniture rather than modals, so they only fold once nothing else on screen wants it.
         else if (focusOpen) exitFocus();
         else if (stageOpen) stageOpen = false;
-        // The space folds last: carrying and the tray release first, then the view itself.
-        else if (spaceOpen && spaceCarried) spaceCarried = null;
+        // The space folds last: entry, carrying, and the tray release first, then the view itself.
+        else if (spaceOpen && spaceEntering !== null) {
+          clearTimeout(spaceEnterTimer);
+          stopSpaceCameraTween();
+          spaceEntering = null;
+          spaceEntryPhase = null;
+        }
+        else if (spaceOpen && spaceCarried) {
+          spaceCarried = null;
+          spaceDrag = null;
+        }
         else if (spaceOpen && spaceTrayPinned) spaceTrayPinned = false;
-        else if (spaceOpen) spaceOpen = false;
+        else if (spaceOpen) {
+          clearTimeout(spaceEnterTimer);
+          stopSpaceCameraTween();
+          spaceEntering = null;
+          spaceEntryPhase = null;
+          spaceOpen = false;
+        }
         return;
       }
-      // Hold T while the space is up: the tray of unplaced servers slides out.
+      // Hold T while the space is up: the draggable server tray slides out.
       if (spaceOpen && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "t" && !typingTarget(e.target)) {
         e.preventDefault();
         if (!e.repeat) spaceTrayHeld = true;
@@ -7935,6 +12528,8 @@
     };
     // Losing focus mid-hold would otherwise strand a sounding note and an open chord group.
     const onBlur = () => {
+      textEffectTarget = null;
+      showTextEffectCatalog = false;
       keyNotes.clear();
       releaseAll();
       stopPlayback();
@@ -7954,11 +12549,18 @@
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
     window.addEventListener("mousedown", onMouseNav);
+    const stopTextEffects = mountTextEffectRuntime();
     // Keep relative presence times current.
     const tick = setInterval(() => {
       nowTick = Date.now();
       pruneTicker(); // stale news stops being news
     }, 60_000);
+    // A moving transfer must stop looking active when no new chunk has arrived. This small UI-only
+    // clock drives that freshness check; it does not poll the network or alter transfer state.
+    const transferTick = setInterval(() => {
+      transferNow = Date.now();
+      joinReplyNow = transferNow;
+    }, 1_000);
     // One slow blink about every half minute, and only while somebody is actually looking.
     const blink = setInterval(() => {
       if (!windowFocused || locked) return;
@@ -7985,12 +12587,15 @@
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mousedown", onMouseNav);
+      stopTextEffects();
       releaseAll();
       stopPlayback();
       clearInterval(tick);
+      clearInterval(transferTick);
       clearInterval(blink);
       clearInterval(callCleanup);
       clearTimeout(inboxTimer);
+      if (inboxIdle !== undefined && "cancelIdleCallback" in window) window.cancelIdleCallback(inboxIdle);
       clearTimeout(updateTimer);
       clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
@@ -7999,17 +12604,61 @@
 </script>
 
 {#snippet styledName(name: string, color: string, font: string, effect: string)}
-  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color) + fxStyle(effect)}>{name}</span>
+  {@const effects = decodeNameEffects(effect)}
+  {@const letters = nameLetters(name)}
+  {@const mexican = effectEnabled(effects, "mexican")}
+  {@const mexicanOptions = effectOptions(effects, "mexican")}
+  <span class="name {fontClass(font)} {fxClass(effect)}" style={colorStyle(color) + fxStyle(effect)} aria-label={name} data-name={name}>
+    {#if mexican}
+      {#each letters as letter, i (i)}
+        <span
+          class="fx-letter"
+          aria-hidden="true"
+          style={`animation-delay:${(-1 * (mexicanOptions.direction === -1 ? letters.length - i - 1 : i) * (0.025 + (mexicanOptions.spread ?? 4) * 0.0095)).toFixed(3)}s`}
+        >{letter === " " ? "\u00a0" : letter}</span>
+      {/each}
+    {:else}{name}{/if}
+  </span>
 {/snippet}
 
 <!-- The connectivity detail, rendered by BOTH the create/join screen and Settings ->
      Diagnostics: one panel, two doors. It reports what was TRIED, never a verdict the code
-     cannot support (see `reachabilitySummary`: AutoNAT does not exist, so "can the internet
-     reach me" is honestly unknown). -->
+     cannot support (see `reachabilitySummary`: AutoNAT v2 proves one address/observer pair at
+     one moment, not universal reachability). -->
 {#snippet connDetail(c: Connectivity)}
+  {@const status = connectivityStatus(c)}
   <div class="conn-detail">
-    <h4>Router port mapping (UPnP)</h4>
+    <div class="reach-status-line" data-tone={status.tone}>
+      <span class="reach-status-dot" aria-hidden="true"></span>
+      <span class="reach-status-key">{status.key}</span>
+      <span class="reach-status-body">{status.sentence}</span>
+    </div>
+    <pre class="conn-readout">{connectivityReadout(c)}</pre>
+    {#if status.tone === "warn"}
+      <div class="conn-diagnosis">
+        <b>No outside route is proven yet.</b>
+        {#if automaticMappingUnavailable(c.upnp)}
+          This router did not provide an automatic mapping. A manual port forward, a known public
+          address, or a relay can provide the missing route.
+        {:else}
+          Refresh after the remote check settles, or configure a relay when this network does not
+          accept incoming connections.
+        {/if}
+      </div>
+    {/if}
+    <h4>Automatic port mapping (UPnP / PCP / NAT-PMP)</h4>
     <p class="muted small">{c.upnp || "not attempted"}</p>
+    <h4>Remote dial-back (AutoNAT)</h4>
+    <p class="muted small">{c.autonat || "not tested"}</p>
+    <h4>What connected peers observed ({c.mesh_observations?.length ?? 0})</h4>
+    {#if c.mesh_observations?.length}
+      <ul class="conn-addrs">
+        {#each c.mesh_observations as observation, i (i)}<li class="fp">{observation}</li>{/each}
+      </ul>
+      <p class="muted small">Diagnostic only. These are outbound source sockets reported by peers, not verified listener addresses; Mewtual never puts them in an invite or dials them.</p>
+    {:else}
+      <p class="muted small">No connected peer has reported an outbound source address yet.</p>
+    {/if}
     <h4>Addresses this device offers ({c.advertised.length})</h4>
     {#if c.advertised.length}
       <ul class="conn-addrs">
@@ -8059,6 +12708,67 @@
   {/if}
 {/snippet}
 
+<!--
+  The call's own address: which server the room is on, and which channel. Rendered by both dock
+  shapes. While the viewed server IS the call's server the channel alone is unambiguous, so the
+  server name is dropped to keep the bar tight; the moment they diverge the full identity
+  appears and becomes the way back. Advisory gold, not danger: nothing is wrong, you are just
+  looking somewhere else.
+-->
+{#snippet callServerTag()}
+  {#if callElsewhere}
+    <button
+      class="call-srv away"
+      title={`This call is on ${callSrvLabel}: click to go back to it`}
+      onclick={() => { if (callServer !== null) switchServer(callServer); }}
+    >
+      {#if callServer !== null && serverIcons[callServer]}
+        <img class="call-srv-ico" src={imgSrc(serverIcons[callServer])} alt="" />
+      {/if}
+      <span class="call-srv-nm">{callSrvLabel}</span>
+      <span class="call-srv-ch">#{callChannelName}</span>
+    </button>
+  {:else}
+    <span class="call-srv">
+      {#if callServer !== null && serverIcons[callServer]}
+        <img class="call-srv-ico" src={imgSrc(serverIcons[callServer])} alt="" />
+      {/if}
+      <span class="call-srv-ch">#{callChannelName}</span>
+    </span>
+  {/if}
+{/snippet}
+
+<!--
+  Call-surface twins of nameTag/avatarTag. Identical rendering, different lookup: these resolve
+  through the room server's profile map so switching servers mid-call cannot rename the room.
+-->
+{#snippet callNameTag(fp: string)}
+  {@const p = callProfileFor(fp)}
+  {@render styledName(callNameOf(fp), p?.color ?? "", p?.font ?? "", p?.effect ?? "")}
+{/snippet}
+
+{#snippet callAvatarTag(fp: string)}
+  {@const p = callProfileFor(fp)}
+  {#if p?.avatar}
+    <img class="avatar" src={imgSrc(p.avatar)} alt="" />
+  {:else}
+    <span class="avatar fallback" style={p?.color ? `background:${p.color}` : ""}>
+      {callNameOf(fp).slice(0, 1).toUpperCase()}
+    </span>
+  {/if}
+{/snippet}
+
+{#snippet textEffectButton(target: TextEffectTarget, label = "Text effects")}
+  <button
+    type="button"
+    class="text-fx-trigger"
+    class:active={textEffectTarget === target}
+    title={`${label}: select text for the quick Aa strip, or open the full catalog`}
+    aria-label={label}
+    onclick={() => openTextEffectCatalog(target)}
+  ><span>Aa</span><b>FX</b></button>
+{/snippet}
+
 <!-- The profile editor, rendered by BOTH the profile surface (Ctrl+5) and Settings → My
      Profile: one form, two doors, so the two can never drift apart. -->
 {#snippet profileEditor()}
@@ -8083,6 +12793,41 @@
       <span class="muted">Name</span>
       <input bind:value={pName} placeholder="display name" />
     </label>
+    <div class="field name-studio">
+      <div class="name-studio-head">
+        <span class="muted">Name Style Studio</span>
+        <div class="name-studio-actions">
+          <button type="button" class="ghost small" disabled={!styleUndo.length} onclick={undoNameStyle} title="Undo the last unsaved style change">↶ Undo</button>
+          <button type="button" class="ghost small" disabled={!styleRedo.length} onclick={redoNameStyle} title="Redo the last undone style change">↷ Redo</button>
+          <button type="button" class="ghost small" onclick={randomizeNameStyle}>⚄ Randomise</button>
+        </div>
+      </div>
+      <span class="muted small">Recipes change the draft only; Save profile publishes it to this server.</span>
+      <div class="name-recipes">
+        {#each BUILTIN_NAME_RECIPES as recipe (recipe.id)}
+          <button type="button" class="name-recipe" title={`Load ${recipe.name}`} onclick={() => applyNameRecipe(recipe)}>
+            {@render styledName(recipe.name, recipe.color, recipe.font, recipe.effect)}
+          </button>
+        {/each}
+      </div>
+      {#if savedNameRecipes.length}
+        <span class="name-studio-label">MY LIBRARY · AVAILABLE ON EVERY SERVER</span>
+        <div class="saved-recipes">
+          {#each savedNameRecipes as recipe (recipe.id)}
+            <span class="saved-recipe">
+              <button type="button" class="name-recipe" title={`Load ${recipe.name}`} onclick={() => applyNameRecipe(recipe)}>
+                {@render styledName(recipe.name, recipe.color, recipe.font, recipe.effect)}
+              </button>
+              <button type="button" class="recipe-delete" aria-label={`Delete saved recipe ${recipe.name}`} title="Delete this saved recipe" onclick={() => deleteNameRecipe(recipe.id)}>✕</button>
+            </span>
+          {/each}
+        </div>
+      {/if}
+      <div class="recipe-save">
+        <input value={recipeNameDraft} maxlength="32" placeholder="Recipe name" aria-label="New recipe name" oninput={(e) => (recipeNameDraft = e.currentTarget.value)} onkeydown={(e) => { if (e.key === "Enter") { e.preventDefault(); saveNameRecipe(); } }} />
+        <button type="button" class="ghost small" disabled={!recipeNameDraft.trim()} onclick={saveNameRecipe}>Save current to library</button>
+      </div>
+    </div>
     <div class="field">
       <span class="muted">Font</span>
       <div class="ns-tiles">
@@ -8094,66 +12839,224 @@
             title={f.label}
             aria-label={f.label}
             aria-pressed={pFont === f.id}
-            onclick={() => (pFont = f.id)}
+            onclick={() => setNameFont(f.id)}
           ><span class="name {fontClass(f.id)}">Gg</span></button>
         {/each}
       </div>
     </div>
+    <div class="field type-studio">
+      <span class="muted">Typography</span>
+      <div class="fx-option-grid">
+        <label class="fx-option"><span>Weight <output>{effectOptions(pEffects, "typography").weight}</output></span><input type="range" min="400" max="900" step="100" value={effectOptions(pEffects, "typography").weight} oninput={(e) => updateStudioOption("typography", "weight", e.currentTarget.valueAsNumber)} /></label>
+        <label class="fx-option"><span>Letter spacing <output>{effectOptions(pEffects, "typography").tracking}px</output></span><input type="range" min="-1" max="6" step="0.1" value={effectOptions(pEffects, "typography").tracking} oninput={(e) => updateStudioOption("typography", "tracking", e.currentTarget.valueAsNumber)} /></label>
+        <label class="fx-option"><span>Bubble thickness <output>{effectOptions(pEffects, "typography").bubble}px</output></span><input type="range" min="0" max="3" step="0.25" value={effectOptions(pEffects, "typography").bubble} oninput={(e) => updateStudioOption("typography", "bubble", e.currentTarget.valueAsNumber)} /></label>
+      </div>
+      <div class="type-toggles">
+        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").italic} onchange={(e) => updateStudioOption("typography", "italic", e.currentTarget.checked)} /> Italic</label>
+        <label><input type="checkbox" checked={effectOptions(pEffects, "typography").uppercase} onchange={(e) => updateStudioOption("typography", "uppercase", e.currentTarget.checked)} /> Uppercase</label>
+        <button type="button" class="ghost small" onclick={() => resetNameEffect("typography")}>Reset typography</button>
+      </div>
+    </div>
     <div class="field">
-      <span class="muted">Effect</span>
-      <div class="ns-tiles">
-        {#each NAME_EFFECTS as fx}
-          {@const dead = fxMotionOff && ANIM_FX.has(fx.id)}
-          <button
-            type="button"
-            class="ns-tile"
-            class:active={pEffect === fx.id}
-            class:motion-dead={dead}
-            title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : fx.label}
-            aria-label={fx.label}
-            aria-pressed={pEffect === fx.id}
-            onclick={() => (pEffect = fx.id)}
-          ><span class="name {fxClass(fx.id)}" style={colorStyle(pColor)}>{fx.label}</span></button>
-        {/each}
+      <div class="effect-field-head">
+        <span class="muted">Effects</span>
         <button
           type="button"
-          class="ns-tile"
-          class:active={GRAD2_RE.test(pEffect)}
-          title="Custom gradient: your stops, your angle"
-          aria-label="Custom gradient"
-          aria-pressed={GRAD2_RE.test(pEffect)}
-          onclick={() => (pEffect = grad2Id())}
-        ><span class="name fx-grad2" style={`color:${pGradStops[0]}` + fxStyle(grad2Id())}>Gradient</span></button>
+          class="ghost small"
+          class:active={!appliedEffects.some((effect) => effect.enabled)}
+          title="Temporarily turn every effect off without losing its settings"
+          aria-label="All effects off"
+          aria-pressed={!appliedEffects.some((effect) => effect.enabled)}
+          onclick={disableAllNameEffects}
+        >All off</button>
       </div>
-      {#if GRAD2_RE.test(pEffect)}
-        <div class="grad-maker">
-          {#each pGradStops as stop, si (si)}
-            <span class="grad-stop">
-              <input type="color" value={stop} aria-label={`Gradient stop ${si + 1}`} oninput={(e) => { pGradStops[si] = e.currentTarget.value; pEffect = grad2Id(); }} />
-              {#if pGradStops.length > 2}
-                <button type="button" class="grad-del" title="Remove this stop" aria-label={`Remove gradient stop ${si + 1}`} onclick={() => { pGradStops.splice(si, 1); pEffect = grad2Id(); }}>✕</button>
+      <div class="effect-catalog">
+        {#each EFFECT_GROUPS as group}
+          <div class="effect-catalog-group">
+            <span class="name-studio-label">{group}</span>
+            <div class="ns-tiles">
+              {#each NAME_EFFECTS.filter((effect) => effect.group === group) as fx}
+                {@const dead = fxMotionOff && movingNameEffect(fx.id)}
+                {@const configured = effectConfigured(pEffects, fx.id)}
+                <button
+                  type="button"
+                  class="ns-tile"
+                  class:active={configured}
+                  class:effect-off={configured && !effectEnabled(pEffects, fx.id)}
+                  class:motion-dead={dead}
+                  title={dead ? `${fx.label}: this one animates, and motion is off (Appearance: Hover motion, or the system's reduced-motion)` : configured && effectEnabled(pEffects, fx.id) ? `${fx.label}: turn off (settings kept)` : configured ? `${fx.label}: turn back on` : `Add ${fx.label}`}
+                  aria-label={fx.label}
+                  aria-pressed={effectEnabled(pEffects, fx.id)}
+                  onclick={() => selectNameEffect(fx.id)}
+                >{@render styledName(fx.label, pColor, pFont, encodeNameEffects([defaultNameEffect(fx.id)]))}</button>
+              {/each}
+            </div>
+          </div>
+        {/each}
+      </div>
+      <span class="muted small">Add as many as you like; click a lit tile to switch it off without losing its settings. Fill effects, and Bounce/Wobble, preserve every setup while enabling one compatible choice at a time.</span>
+
+      <div class="fx-master">
+        <label class="fx-option"><span>Master intensity <output>{effectOptions(pEffects, "master").intensity}%</output></span><input type="range" min="25" max="175" step="5" value={effectOptions(pEffects, "master").intensity} oninput={(e) => updateStudioOption("master", "intensity", e.currentTarget.valueAsNumber)} /></label>
+        <label class="fx-option"><span>Animation speed <output>{effectOptions(pEffects, "master").speed}%</output></span><input type="range" min="25" max="200" step="5" value={effectOptions(pEffects, "master").speed} oninput={(e) => updateStudioOption("master", "speed", e.currentTarget.valueAsNumber)} /></label>
+        <button type="button" class="ghost small" onclick={() => resetNameEffect("master")}>Reset master</button>
+      </div>
+
+      {#if appliedEffects.length}
+        <div class="fx-settings-list" aria-label="Applied effect options">
+          {#each appliedEffects as active, ai (active.id)}
+            {@const definition = NAME_EFFECTS.find((effect) => effect.id === active.id)}
+            <section
+              class="fx-settings"
+              class:effect-off={!active.enabled}
+              class:dragging={draggedNameEffect === active.id}
+              role="group"
+              aria-label={`${definition?.label ?? active.id} effect settings`}
+              ondragover={(e) => e.preventDefault()}
+              ondrop={(e) => { e.preventDefault(); dropNameEffect(active.id); }}
+            >
+              <div class="fx-settings-head">
+                <div class="fx-settings-label">
+                  <button
+                    type="button"
+                    class="fx-drag"
+                    draggable="true"
+                    aria-label={`Drag ${definition?.label ?? active.id} to reorder; arrow controls are also available`}
+                    title="Drag to reorder"
+                    ondragstart={() => (draggedNameEffect = active.id)}
+                    ondragend={() => (draggedNameEffect = null)}
+                  >⠿</button>
+                  <button
+                    type="button"
+                    class="fx-settings-title"
+                    aria-expanded={!collapsedEffects[active.id]}
+                    onclick={() => (collapsedEffects[active.id] = !collapsedEffects[active.id])}
+                  >
+                    <span class="fx-chevron" aria-hidden="true">{collapsedEffects[active.id] ? "▸" : "▾"}</span>
+                    <span>
+                      <strong>{definition?.label ?? active.id}</strong>
+                      <span class="muted small">{definition?.description ?? ""}</span>
+                    </span>
+                  </button>
+                </div>
+                <div class="fx-settings-actions">
+                  <label class="fx-enabled">
+                    <input type="checkbox" checked={active.enabled} onchange={(e) => setNameEffectEnabled(active.id, e.currentTarget.checked)} />
+                    <span>{active.enabled ? "On" : "Off"}</span>
+                  </label>
+                  <button type="button" class="ghost fx-order" disabled={ai === 0} aria-label={`Move ${definition?.label ?? active.id} up`} onclick={() => moveNameEffect(active.id, -1)}>↑</button>
+                  <button type="button" class="ghost fx-order" disabled={ai === appliedEffects.length - 1} aria-label={`Move ${definition?.label ?? active.id} down`} onclick={() => moveNameEffect(active.id, 1)}>↓</button>
+                  <button type="button" class="ghost small" onclick={() => resetNameEffect(active.id)}>Reset</button>
+                  <button type="button" class="ghost small" aria-label={`Remove ${definition?.label ?? active.id} and forget its settings`} onclick={() => removeNameEffect(active.id)}>Remove</button>
+                </div>
+              </div>
+
+              {#if !collapsedEffects[active.id]}
+                <div class="fx-settings-body">
+                {#if active.id === "gradient"}
+                <div class="grad-maker">
+                  {#each active.options.stops ?? [] as stop, si (si)}
+                    <span class="grad-stop">
+                      <input type="color" value={stop} aria-label={`Gradient stop ${si + 1}`} oninput={(e) => updateGradientStop(si, e.currentTarget.value)} />
+                      {#if (active.options.stops?.length ?? 0) > 2}
+                        <button type="button" class="grad-del" title="Remove this stop" aria-label={`Remove gradient stop ${si + 1}`} onclick={() => removeGradientStop(si)}>✕</button>
+                      {/if}
+                    </span>
+                  {/each}
+                  {#if (active.options.stops?.length ?? 0) < GRAD_MAX_STOPS}
+                    <button type="button" class="ghost small" onclick={addGradientStop}>＋ stop</button>
+                  {/if}
+                </div>
+                <label class="fx-option"><span>Angle <output>{active.options.angle}°</output></span><input type="range" min="0" max="360" step="15" value={active.options.angle} oninput={(e) => updateNameEffect(active.id, "angle", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Scroll <output>{active.options.speed ? `speed ${active.options.speed}` : "still"}</output></span><input type="range" min="0" max="10" step="1" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" disabled={!active.options.speed} onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ reverse" : "▶ forward"}</button>
+              {:else if active.id === "rainbow"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ reverse" : "▶ forward"}</button>
+              {:else if active.id === "neon"}
+                <label class="fx-option"><span>Glow size <output>{active.options.glow}px</output></span><input type="range" min="2" max="18" value={active.options.glow} oninput={(e) => updateNameEffect(active.id, "glow", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Brightness <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "wave"}
+                <label class="fx-option"><span>Height <output>{active.options.height}px</output></span><input type="range" min="1" max="8" value={active.options.height} oninput={(e) => updateNameEffect(active.id, "height", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "mexican"}
+                <label class="fx-option"><span>Height <output>{active.options.height}px</output></span><input type="range" min="1" max="10" value={active.options.height} oninput={(e) => updateNameEffect(active.id, "height", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Letter spread <output>{active.options.spread}</output></span><input type="range" min="1" max="10" value={active.options.spread} oninput={(e) => updateNameEffect(active.id, "spread", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ right to left" : "▶ left to right"}</button>
+              {:else if active.id === "pulse"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Fade depth <output>{active.options.depth}%</output></span><input type="range" min="15" max="85" step="5" value={active.options.depth} oninput={(e) => updateNameEffect(active.id, "depth", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "outline"}
+                <label class="fx-option"><span>Thickness <output>{active.options.width}px</output></span><input type="range" min="0.5" max="3" step="0.5" value={active.options.width} oninput={(e) => updateNameEffect(active.id, "width", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-color-option"><span>Outline colour</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+              {:else if active.id === "shadow"}
+                <div class="fx-option-grid">
+                  <label class="fx-option"><span>X <output>{active.options.x}px</output></span><input type="range" min="-8" max="8" value={active.options.x} oninput={(e) => updateNameEffect(active.id, "x", e.currentTarget.valueAsNumber)} /></label>
+                  <label class="fx-option"><span>Y <output>{active.options.y}px</output></span><input type="range" min="-8" max="8" value={active.options.y} oninput={(e) => updateNameEffect(active.id, "y", e.currentTarget.valueAsNumber)} /></label>
+                  <label class="fx-option"><span>Blur <output>{active.options.blur}px</output></span><input type="range" min="0" max="16" value={active.options.blur} oninput={(e) => updateNameEffect(active.id, "blur", e.currentTarget.valueAsNumber)} /></label>
+                  <label class="fx-option"><span>Opacity <output>{active.options.opacity}%</output></span><input type="range" min="10" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+                </div>
+                <label class="fx-color-option"><span>Shadow colour</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+              {:else if active.id === "retro"}
+                <label class="fx-option"><span>Offset <output>{active.options.offset}px</output></span><input type="range" min="1" max="6" value={active.options.offset} oninput={(e) => updateNameEffect(active.id, "offset", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Strength <output>{active.options.opacity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "glitch"}
+                <label class="fx-option"><span>Spread <output>{active.options.spread}px</output></span><input type="range" min="1" max="5" value={active.options.spread} oninput={(e) => updateNameEffect(active.id, "spread", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Strength <output>{active.options.opacity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "shimmer"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Highlight <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ reverse" : "▶ forward"}</button>
+              {:else if active.id === "sparkle"}
+                <label class="fx-option"><span>Twinkle speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Brightness <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "wobble"}
+                <label class="fx-option"><span>Speed <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Tilt <output>{active.options.amount}°</output></span><input type="range" min="1" max="8" step="0.5" value={active.options.amount} oninput={(e) => updateNameEffect(active.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "candy"}
+                <div class="fx-colour-pair">
+                  <label class="fx-color-option"><span>Stripe one</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+                  <label class="fx-color-option"><span>Stripe two</span><input type="color" value={active.options.secondary} oninput={(e) => updateNameEffect(active.id, "secondary", e.currentTarget.value)} /></label>
+                </div>
+                <label class="fx-option"><span>Angle <output>{active.options.angle}°</output></span><input type="range" min="0" max="360" step="15" value={active.options.angle} oninput={(e) => updateNameEffect(active.id, "angle", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Scroll <output>{active.options.speed ? `speed ${active.options.speed}` : "still"}</output></span><input type="range" min="0" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "ghost"}
+                <label class="fx-option"><span>Opacity <output>{active.options.opacity}%</output></span><input type="range" min="20" max="95" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Frost <output>{active.options.blur}px</output></span><input type="range" min="0" max="3" step="0.25" value={active.options.blur} oninput={(e) => updateNameEffect(active.id, "blur", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Glow <output>{active.options.glow}px</output></span><input type="range" min="2" max="14" value={active.options.glow} oninput={(e) => updateNameEffect(active.id, "glow", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "fire"}
+                <label class="fx-option"><span>Flame height <output>{active.options.height}px</output></span><input type="range" min="1" max="10" value={active.options.height} oninput={(e) => updateNameEffect(active.id, "height", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Heat <output>{active.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.intensity} oninput={(e) => updateNameEffect(active.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Flicker <output>{active.options.speed}</output></span><input type="range" min="1" max="10" value={active.options.speed} oninput={(e) => updateNameEffect(active.id, "speed", e.currentTarget.valueAsNumber)} /></label>
+              {:else if active.id === "extrude"}
+                <label class="fx-option"><span>Depth <output>{active.options.depth}</output></span><input type="range" min="1" max="7" value={active.options.depth} oninput={(e) => updateNameEffect(active.id, "depth", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-option"><span>Strength <output>{active.options.opacity}%</output></span><input type="range" min="20" max="100" step="5" value={active.options.opacity} oninput={(e) => updateNameEffect(active.id, "opacity", e.currentTarget.valueAsNumber)} /></label>
+                <label class="fx-color-option"><span>Depth colour</span><input type="color" value={active.options.color} oninput={(e) => updateNameEffect(active.id, "color", e.currentTarget.value)} /></label>
+                <button type="button" class="ghost small fx-direction" onclick={() => updateNameEffect(active.id, "direction", active.options.direction === -1 ? 1 : -1)}>{active.options.direction === -1 ? "◀ left" : "▶ right"}</button>
               {/if}
-            </span>
+                {#if fxMotionOff && active.enabled && movingNameEffect(active.id)}
+                  <span class="muted small">Motion is off, so this effect is shown paused.</span>
+                {/if}
+                </div>
+              {/if}
+            </section>
           {/each}
-          {#if pGradStops.length < GRAD_MAX_STOPS}
-            <button type="button" class="ghost small" onclick={() => { pGradStops.push(pGradStops[pGradStops.length - 1]); pEffect = grad2Id(); }}>＋ stop</button>
-          {/if}
-          <input type="range" min="0" max="360" step="15" value={pGradDeg} aria-label="Gradient angle" oninput={(e) => { pGradDeg = +e.currentTarget.value; pEffect = grad2Id(); }} />
-          <span class="muted small">{pGradDeg}°</span>
         </div>
-        <div class="grad-maker">
-          <span class="muted small">Scroll</span>
-          <input type="range" min="0" max="10" step="1" value={pGradSpeed} aria-label="Gradient scroll speed" oninput={(e) => { pGradSpeed = +e.currentTarget.value; pEffect = grad2Id(); }} />
-          <button type="button" class="ghost small" disabled={!pGradSpeed} onclick={() => { pGradRev = !pGradRev; pEffect = grad2Id(); }}>{pGradRev ? "◀ reverse" : "▶ forward"}</button>
-          <span class="muted small">{pGradSpeed ? `speed ${pGradSpeed}` : "still"}</span>
+      {/if}
+      {#if styleWarnings.length}
+        <div class="fx-warnings" role="status">
+          <strong>READABILITY CHECK</strong>
+          {#each styleWarnings as warning}<span>△ {warning}</span>{/each}
         </div>
-        <span class="muted small">Up to {GRAD_MAX_STOPS} stops. Scroll follows the gradient's angle{fxMotionOff ? " (motion is off, so it holds still for you)" : ""}. Builds that predate gradients show your flat colour instead.</span>
+      {:else}
+        <span class="fx-readable">✓ Readable at compact chat sizes</span>
       {/if}
     </div>
     <div class="field">
       <span class="muted">Colour</span>
       <div class="ns-swatches">
-        <input type="color" bind:value={pColor} aria-label="Custom name colour" />
+        <input type="color" value={pColor} aria-label="Custom name colour" oninput={(e) => setNameColor(e.currentTarget.value)} />
         {#each NAME_COLORS as c}
           <button
             type="button"
@@ -8163,44 +13066,226 @@
             aria-label={`Name colour ${c}`}
             aria-pressed={pColor === c}
             style={`background:${c}`}
-            onclick={() => (pColor = c)}
+            onclick={() => setNameColor(c)}
           ></button>
         {/each}
       </div>
     </div>
-    <label class="field">
-      <span class="muted">About you</span>
-      <textarea bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…"></textarea>
-    </label>
-    <div class="field">
-      <span class="muted">Message bubble</span>
-      <div class="bubble-presets">
+    <div class="field text-fx-field">
+      <div class="text-fx-field-head"><label class="muted" for="profile-bio">About you</label>{@render textEffectButton("bio", "Bio text effects")}</div>
+      <textarea id="profile-bio" bind:this={profileBioEl} bind:value={pDescription} rows="3" maxlength="280" placeholder="A short bio shown on your profile card…" onselect={() => onTextEffectSelection("bio")}></textarea>
+    </div>
+    <div class="field message-frame-field frame-studio">
+      <div class="message-frame-head">
+        <div>
+          <span class="name-studio-label">MESSAGE FRAME STUDIO</span>
+          <strong>Frame &amp; arrival</strong>
+        </div>
+        <button type="button" class="ghost small" disabled={!pBubble} onclick={resetMessageStudio}>Reset all</button>
+      </div>
+      <span class="muted small">Style your posts without widening the message lane. Consecutive posts join into one continuous, translucent frame.</span>
+      <span class="name-studio-label">SURFACE</span>
+      <div class="bubble-presets" aria-label="Message frame preset">
         {#each BUBBLE_PRESETS as b}
           <button
             type="button"
             class="bubble-swatch"
-            class:active={pBubble === b.value}
+            class:active={pFrame.surface === b.value}
             title={b.label}
-            style={b.value ? `background:${b.value}` : ""}
-            onclick={() => (pBubble = b.value)}
-          >{#if !b.value}Aa{/if}</button>
+            aria-pressed={pFrame.surface === b.value}
+            onclick={() => updateFrame({ surface: b.value })}
+          >
+            <span class="bubble-swatch-demo" class:open={!b.value} style={b.value ? `--message-surface:${b.value};--message-opacity:${pFrame.opacity / 100}` : ""}>
+              <i></i><i></i><i></i>
+            </span>
+            <span class="bubble-swatch-label"><b>{b.code}</b>{b.label}</span>
+          </button>
         {/each}
         <button
           type="button"
           class="bubble-swatch"
-          class:active={pBubble === customBubble()}
+          class:active={pFrame.surface === customBubble()}
           title="Custom gradient"
-          style={`background:${customBubble()}`}
-          onclick={() => (pBubble = customBubble())}
-        ></button>
+          aria-pressed={pFrame.surface === customBubble()}
+          onclick={() => updateFrame({ surface: customBubble() })}
+        >
+          <span class="bubble-swatch-demo" style={`--message-surface:${customBubble()};--message-opacity:${pFrame.opacity / 100}`}><i></i><i></i><i></i></span>
+          <span class="bubble-swatch-label"><b>USR</b>Custom mix</span>
+        </button>
       </div>
-      {#if pBubble === customBubble()}
-        <div class="grad-maker">
-          <input type="color" value={pBubA} aria-label="Bubble gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; pBubble = customBubble(); }} />
-          <input type="color" value={pBubB} aria-label="Bubble gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; pBubble = customBubble(); }} />
+      {#if pFrame.surface === customBubble()}
+        <div class="grad-maker bubble-customizer">
+          <label><span>A / SRC</span><input type="color" value={pBubA} aria-label="Frame gradient start colour" oninput={(e) => { pBubA = e.currentTarget.value; updateFrame({ surface: customBubble() }); }} /></label>
+          <span class="bubble-gradient-link" aria-hidden="true"></span>
+          <label><span>B / DST</span><input type="color" value={pBubB} aria-label="Frame gradient end colour" oninput={(e) => { pBubB = e.currentTarget.value; updateFrame({ surface: customBubble() }); }} /></label>
         </div>
-        <span class="muted small">Keep it dark enough to read white text on: a text shadow backs it up, but not by much.</span>
+        <span class="muted small">Keep both nodes dark enough for white terminal text; the signal rail adds structure, not contrast.</span>
       {/if}
+      <span class="name-studio-label">CHASSIS</span>
+      <div class="frame-preset-grid" aria-label="Message frame chassis">
+        {#each FRAME_SHAPES as shape}
+          <button
+            type="button"
+            class="frame-preset-tile"
+            class:active={pFrame.shape === shape.id}
+            title={shape.description}
+            aria-pressed={pFrame.shape === shape.id}
+            disabled={!pFrame.surface}
+            onclick={() => updateFrame({ shape: shape.id })}
+          >
+            <span
+              class="frame-preset-demo frame-{shape.id}"
+              style={`--message-surface:${pFrame.surface || "#3a3f4b"};--message-opacity:${pFrame.opacity / 100};--message-edge:${pFrame.edge}%`}
+              aria-hidden="true"
+            ><i></i><i></i></span>
+            <span class="bubble-swatch-label"><b>{shape.code}</b>{shape.label}</span>
+          </button>
+        {/each}
+      </div>
+      <div class="frame-control-grid">
+        <label class="frame-control">
+          <span><b>Frame opacity</b><output>{pFrame.opacity}%</output></span>
+          <input type="range" min="20" max="90" step="1" value={pFrame.opacity} disabled={!pFrame.surface} oninput={(e) => updateFrame({ opacity: e.currentTarget.valueAsNumber })} />
+        </label>
+        <label class="frame-control">
+          <span><b>Signal edge</b><output>{pFrame.edge}%</output></span>
+          <input type="range" min="0" max="100" step="1" value={pFrame.edge} disabled={!pFrame.surface} oninput={(e) => updateFrame({ edge: e.currentTarget.valueAsNumber })} />
+        </label>
+      </div>
+      <div class="effect-field-head frame-layer-head">
+        <div>
+          <span class="name-studio-label">FRAME LAYER STUDIO</span>
+          <strong>Ambient effects</strong>
+        </div>
+        <button
+          type="button"
+          class="ghost small"
+          class:active={!pFrame.effects.some((layer) => layer.enabled)}
+          disabled={!pFrame.effects.length}
+          title="Turn every frame layer off without losing its settings"
+          onclick={disableAllFrameEffects}
+        >All off</button>
+      </div>
+      <div class="frame-preset-grid" aria-label="Ambient message frame effect catalog">
+        {#each FRAME_EFFECTS as effect}
+          {@const configured = pFrame.effects.some((layer) => layer.id === effect.id)}
+          {@const demoLayer = pFrame.effects.find((layer) => layer.id === effect.id) ?? defaultMessageFrameLayer(effect.id)}
+          <button
+            type="button"
+            class="frame-preset-tile"
+            class:active={configured}
+            class:effect-off={configured && !demoLayer.enabled}
+            title={configured ? `${effect.label}: show its saved settings` : `Add ${effect.label}`}
+            aria-pressed={configured && demoLayer.enabled}
+            disabled={!pFrame.surface}
+            onclick={() => selectFrameEffect(effect.id)}
+          >
+            <span
+              class="frame-preset-demo frame-{pFrame.shape}"
+              style={`--message-surface:${pFrame.surface || "#3a3f4b"};--message-opacity:${pFrame.opacity / 100};--message-edge:${pFrame.edge}%`}
+              aria-hidden="true"
+            >
+              <span class="message-frame-fx"><i class="frame-fx-layer frame-fx-{effect.id}" class:reverse={effect.id !== "scan" && demoLayer.options.direction < 0} style={messageFrameLayerStyle(demoLayer)}></i></span>
+              <i></i><i></i>
+            </span>
+            <span class="bubble-swatch-label"><b>{effect.code}</b>{effect.label}</span>
+          </button>
+        {/each}
+      </div>
+      <span class="muted small">Add and combine layers, then tune, reorder, or temporarily disable them below. Later layers render above earlier ones.</span>
+      {#if pFrame.effects.length}
+        <div class="fx-settings-list frame-layer-list" aria-label="Applied frame layer options">
+          {#each pFrame.effects as layer, li (layer.id)}
+            {@const definition = FRAME_EFFECTS.find((effect) => effect.id === layer.id)}
+            <section class="fx-settings" class:effect-off={!layer.enabled} aria-label={`${definition?.label ?? layer.id} frame layer settings`}>
+              <div class="fx-settings-head">
+                <div class="fx-settings-label">
+                  <span class="frame-layer-index" aria-hidden="true">L{li + 1}</span>
+                  <button type="button" class="fx-settings-title" aria-expanded={!collapsedFrameEffects[layer.id]} onclick={() => (collapsedFrameEffects[layer.id] = !collapsedFrameEffects[layer.id])}>
+                    <span class="fx-chevron" aria-hidden="true">{collapsedFrameEffects[layer.id] ? "▸" : "▾"}</span>
+                    <span><strong>{definition?.label ?? layer.id}</strong><span class="muted small">{definition?.description ?? ""}</span></span>
+                  </button>
+                </div>
+                <div class="fx-settings-actions">
+                  <label class="fx-enabled"><input type="checkbox" checked={layer.enabled} onchange={(e) => setFrameEffectEnabled(layer.id, e.currentTarget.checked)} /><span>{layer.enabled ? "On" : "Off"}</span></label>
+                  <button type="button" class="ghost fx-order" disabled={li === 0} aria-label={`Move ${definition?.label ?? layer.id} down a visual layer`} onclick={() => moveFrameEffect(layer.id, -1)}>↑</button>
+                  <button type="button" class="ghost fx-order" disabled={li === pFrame.effects.length - 1} aria-label={`Move ${definition?.label ?? layer.id} up a visual layer`} onclick={() => moveFrameEffect(layer.id, 1)}>↓</button>
+                  <button type="button" class="ghost small" onclick={() => resetFrameEffect(layer.id)}>Reset</button>
+                  <button type="button" class="ghost small" onclick={() => removeFrameEffect(layer.id)}>Remove</button>
+                </div>
+              </div>
+              {#if !collapsedFrameEffects[layer.id]}
+                <div class="fx-settings-body">
+                  <div class="fx-option-grid">
+                    {#if layer.id !== "scan"}<label class="fx-option"><span>Speed <output>{layer.options.speed}</output></span><input type="range" min="1" max="10" value={layer.options.speed} oninput={(e) => updateFrameEffect(layer.id, "speed", e.currentTarget.valueAsNumber)} /></label>{/if}
+                    <label class="fx-option"><span>Strength <output>{layer.options.intensity}%</output></span><input type="range" min="20" max="100" step="5" value={layer.options.intensity} oninput={(e) => updateFrameEffect(layer.id, "intensity", e.currentTarget.valueAsNumber)} /></label>
+                  </div>
+                  {#if layer.id === "scan"}
+                    <label class="fx-option"><span>Beam width <output>{layer.options.amount}px</output></span><input type="range" min="1" max="8" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                    <span class="muted small">Shares one top-to-bottom sweep across the visible message stack with every Scan-enabled frame.</span>
+                  {:else if layer.id === "pulse"}
+                    <label class="fx-option"><span>Breathing depth <output>{layer.options.amount}%</output></span><input type="range" min="10" max="80" step="5" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                  {:else if layer.id === "trace"}
+                    <label class="fx-option"><span>Trace length <output>{layer.options.amount}%</output></span><input type="range" min="10" max="70" step="5" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                    <button type="button" class="ghost small fx-direction" onclick={() => updateFrameEffect(layer.id, "direction", layer.options.direction < 0 ? 1 : -1)}>{layer.options.direction < 0 ? "◀ right to left" : "▶ left to right"}</button>
+                  {:else}
+                    <label class="fx-option"><span>Refresh variance <output>{layer.options.amount}%</output></span><input type="range" min="5" max="80" step="5" value={layer.options.amount} oninput={(e) => updateFrameEffect(layer.id, "amount", e.currentTarget.valueAsNumber)} /></label>
+                  {/if}
+                </div>
+              {/if}
+            </section>
+          {/each}
+        </div>
+      {/if}
+      <div class="message-frame-head motion-studio-head">
+        <div>
+          <span class="name-studio-label">MESSAGE ARRIVAL STUDIO</span>
+          <strong>New-message arrival</strong>
+        </div>
+        <span class="message-frame-kicker">PROFILE MOTION</span>
+      </div>
+      <div class="frame-motion-grid" aria-label="New message arrival animation">
+        {#each FRAME_MOTIONS as motion}
+          <button
+            type="button"
+            class="frame-motion-tile motion-demo-{motion.id}"
+            class:active={pFrame.motion === motion.id}
+            title={motion.description}
+            aria-pressed={pFrame.motion === motion.id}
+            onclick={() => updateFrame({ motion: motion.id })}
+          >
+            <span aria-hidden="true">{motion.glyph}</span>
+            <b>{motion.label}</b>
+          </button>
+        {/each}
+      </div>
+      {#if pFrame.motion !== "none"}
+        <div class="arrival-settings">
+          <div class="fx-option-grid">
+            <label class="fx-option"><span>Duration <output>{pFrame.arrival.duration}ms</output></span><input type="range" min="240" max="1200" step="20" value={pFrame.arrival.duration} oninput={(e) => updateFrameArrival({ duration: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option"><span>{pFrame.motion === "pop" ? "Scale depth" : "Travel"} <output>{pFrame.arrival.distance}</output></span><input type="range" min="4" max="80" step="2" value={pFrame.arrival.distance} oninput={(e) => updateFrameArrival({ distance: e.currentTarget.valueAsNumber })} /></label>
+            <label class="fx-option"><span>Starting visibility <output>{pFrame.arrival.fade}%</output></span><input type="range" min="0" max="80" step="5" value={pFrame.arrival.fade} oninput={(e) => updateFrameArrival({ fade: e.currentTarget.valueAsNumber })} /></label>
+            <div class="arrival-direction">
+              <span class="muted small">ENTRY VECTOR</span>
+              <button type="button" class="ghost small" disabled={pFrame.motion === "pop"} onclick={() => updateFrameArrival({ direction: pFrame.arrival.direction < 0 ? 1 : -1 })}>
+                {#if pFrame.motion === "fly"}{pFrame.arrival.direction < 0 ? "← from left" : "from right →"}
+                {:else if pFrame.motion === "glide"}{pFrame.arrival.direction < 0 ? "↑ from above" : "from below ↓"}
+                {:else if pFrame.motion === "drift"}{pFrame.arrival.direction < 0 ? "↖ drift left" : "drift right ↗"}
+                {:else}centred{/if}
+              </button>
+            </div>
+          </div>
+          <div class="arrival-curve-picker" aria-label="Arrival easing">
+            <span class="name-studio-label">RESPONSE CURVE</span>
+            <div>
+              {#each FRAME_EASINGS as easing}
+                <button type="button" class:active={pFrame.arrival.easing === easing.id} title={easing.description} aria-pressed={pFrame.arrival.easing === easing.id} onclick={() => updateFrameArrival({ easing: easing.id })}>{easing.label}</button>
+              {/each}
+            </div>
+          </div>
+        </div>
+      {/if}
+      <span class="muted small">Chassis, layer stack, and arrival recipe travel with your profile. Viewers may flatten peer frames or disable arrivals locally in Settings - Appearance.</span>
     </div>
     <div class="field">
       <span class="muted">Avatar</span>
@@ -8219,20 +13304,39 @@
       </div>
       <span class="muted small">A GIF or WebP under 64KiB keeps its animation; anything else becomes a 128px square.</span>
     </div>
-    <p class="preview">
-      Preview: {@render styledName(pName || displayName, pColor, pFont, pEffect)}
-    </p>
     <button onclick={saveProfile}>Save profile</button>
   </div>
 {/snippet}
 
+{#snippet frameLayers(frame: MessageFrame, visible = true)}
+  {#if visible && frame.surface && frame.effects.some((layer) => layer.enabled)}
+    <span class="message-frame-fx" aria-hidden="true">
+      {#each frame.effects as layer (layer.id)}
+        {#if layer.enabled}
+          <i class="frame-fx-layer frame-fx-{layer.id}" class:reverse={layer.id !== "scan" && layer.options.direction < 0} style={messageFrameLayerStyle(layer)}></i>
+        {/if}
+      {/each}
+    </span>
+  {/if}
+{/snippet}
+
 <!-- The settings live preview: the REAL message-log markup at miniature scale, fed by the
      profile DRAFT, so it can never drift from the log and every knob (density, text size,
-     clock, flatten, bubble, name style) applies the moment you turn it. -->
+     clock, flatten, message frame, name style) applies the moment you turn it. -->
 {#snippet previewLog()}
-  {@const pv = appearance.flat || !pBubble ? "" : `background:${pBubble}`}
-  <ul class="messages stx-plog">
-    <li class:has-bubble={!!pv} style={pv}>
+  {@const pv = messageFrameStyle(pBubble)}
+  {@const previewMotion = pFrame.motion}
+  <ul
+    class="messages stx-plog frame-motion-preview"
+    class:preview-arrival={previewMotion !== "none"}
+    class:arrival-glide={previewMotion === "glide"}
+    class:arrival-fly={previewMotion === "fly"}
+    class:arrival-pop={previewMotion === "pop"}
+    class:arrival-drift={previewMotion === "drift"}
+    style={messageFrameArrivalStyle(pBubble)}
+    use:channelScan
+  >
+    <li class="frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-start={!!pv} style={pv}>
       <span class="t">
         <span class="gutter-avatar">
           {#if pAvatar}
@@ -8243,6 +13347,7 @@
         </span>
       </span>
       <div class="m-body">
+        {@render frameLayers(pFrame)}
         <span class="author">
           <span class="author-link">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
           {#if myFp && badges[myFp]}
@@ -8254,11 +13359,80 @@
         <span class="text">tea is ready when you are <span class="mention mention-me">@you</span></span>
       </div>
     </li>
-    <li class="grouped" class:has-bubble={!!pv} style={pv}>
+    <li class="grouped frame-{pFrame.shape}" class:has-bubble={!!pv} class:frame-end={!!pv} style={pv}>
       <span class="t">{fmtTime(Date.now())}</span>
-      <div class="m-body"><span class="text">bringing biscuits too</span></div>
+      <div class="m-body">{@render frameLayers(pFrame)}<span class="text">bringing biscuits too</span></div>
     </li>
   </ul>
+{/snippet}
+
+<!-- Shared by the standalone Profile surface and Settings → My Profile: both keep this full
+     card-and-chat preview pinned to the editor's right instead of duplicating a smaller preview
+     below a potentially long effect-options list. -->
+{#snippet profilePreview()}
+  <div class="name-preview-stack" class:name-preview-paused={namePreviewPaused}>
+    <div class="stx-ph"><i></i>LIVE PREVIEW</div>
+    <div class="name-preview-tools">
+      {#each ["all", "profile", "chat", "member", "mention"] as mode}
+        <button type="button" class:active={namePreviewMode === mode} onclick={() => (namePreviewMode = mode as typeof namePreviewMode)}>{mode}</button>
+      {/each}
+      <button type="button" class:active={namePreviewPaused} onclick={() => (namePreviewPaused = !namePreviewPaused)}>{namePreviewPaused ? "▶" : "Ⅱ"}</button>
+    </div>
+    {#if namePreviewMode === "all" || namePreviewMode === "profile"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">PROFILE CARD</div>
+        <div class="stx-prof">
+          {#if pBanner}
+            <img class="stx-pbanner" src={imgSrc(pBanner)} alt="" />
+          {:else}
+            <div class="stx-pbanner"></div>
+          {/if}
+          {#if pAvatar}
+            <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
+          {:else}
+            <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
+          {/if}
+          <div class="stx-prof-body">
+            <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+            {#if myFp}<div class="stx-pfp">FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</div>{/if}
+            {#if pDescription}<span class="stx-prof-desc" use:richClicks>{@html renderMessage(pDescription, "")}</span>{/if}
+          </div>
+        </div>
+      </div>
+    {/if}
+    {#if namePreviewMode === "all" || namePreviewMode === "chat"}
+      <div class="stx-pcard">
+        <div class="stx-pcap frame-preview-cap">
+          <span>IN CHAT</span>
+          <button type="button" title="Replay the selected arrival" disabled={pFrame.motion === "none"} onclick={() => (framePreviewReplay += 1)}>REPLAY</button>
+        </div>
+        {#key `${pBubble}:${framePreviewReplay}`}
+          {@render previewLog()}
+        {/key}
+      </div>
+    {/if}
+    {#if namePreviewMode === "all" || namePreviewMode === "member"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">MEMBER LIST · COMPACT</div>
+        <div class="stx-member-preview">
+          <span class="presence online">●</span>
+          {#if pAvatar}<img class="avatar" src={imgSrc(pAvatar)} alt="" />{:else}<span class="avatar fallback" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>{/if}
+          <span class="stx-member-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+          <span class="you-badge">you</span>
+        </div>
+      </div>
+    {/if}
+    {#if namePreviewMode === "all" || namePreviewMode === "mention"}
+      <div class="stx-pcard">
+        <div class="stx-pcap">MENTION / NOTIFICATION</div>
+        <div class="stx-mention-preview">
+          <span>{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
+          <span class="muted small">mentioned you in #lounge</span>
+        </div>
+      </div>
+    {/if}
+    <p class="muted small stx-pnote">Draft preview · {namePreviewPaused ? "animations paused" : "animations live"}</p>
+  </div>
 {/snippet}
 
 <!-- One roster row in the member column (rendered under the online / offline group heads). -->
@@ -8406,6 +13580,25 @@
   </svg>
 {/snippet}
 
+{#snippet icoShield()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M12 2.8 20 6v5.6c0 5-3.2 8.2-8 9.7-4.8-1.5-8-4.7-8-9.7V6z" />
+    <path d="m8.5 12 2.2 2.2 4.8-5" />
+  </svg>
+{/snippet}
+
+{#snippet icoStorage()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <ellipse cx="12" cy="5.5" rx="8" ry="3" /><path d="M4 5.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="M4 11.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="m9 17.2 1.8 1.8 4-4" />
+  </svg>
+{/snippet}
+
+{#snippet icoConnectivity()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4.2 9.4a11 11 0 0 1 15.6 0M7.2 12.5a6.8 6.8 0 0 1 9.6 0M10.2 15.6a2.6 2.6 0 0 1 3.6 0" /><circle cx="12" cy="19" r="1" fill="currentColor" stroke="none" />
+  </svg>
+{/snippet}
+
 {#snippet icoPin()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M20 10c0 5.6-8 12-8 12s-8-6.4-8-12a8 8 0 0 1 16 0z" />
@@ -8536,6 +13729,32 @@
         <path d="M0 72L36 62L70 76L100 68L100 100L0 100Z" style="fill: color-mix(in oklab, var(--panel) 35%, var(--bg-0))" />
       {/if}
     </svg>
+  {:else if b === "garden"}
+    <svg class="sp-art sp-garden-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <!-- One continuous bioluminescent conservatory: glass ribs repeat across
+           walls while each cardinal face gets its own little garden landmark. -->
+      <path d="M8 100V38Q8 10 50 7Q92 10 92 38V100M8 38Q50 21 92 38M50 7V100" style="fill:none; stroke:color-mix(in oklab, var(--text-2) 20%, transparent); stroke-width:0.65" />
+      <path d="M0 80Q18 68 36 78T70 76T100 78V100H0Z" style="fill:color-mix(in oklab, var(--ok) 11%, var(--bg-0))" />
+      <path d="M0 85Q24 75 48 84T100 82" style="fill:none; stroke:color-mix(in oklab, var(--accent) 28%, transparent); stroke-width:0.5" />
+      {#if fy === 0}
+        <ellipse cx="50" cy="76" rx="18" ry="6" style="fill:color-mix(in oklab, var(--accent) 18%, var(--bg-0)); stroke:color-mix(in oklab, var(--accent) 52%, transparent); stroke-width:0.45" />
+        <path d="M50 75Q43 59 49 45Q55 57 50 75M48 58Q39 51 36 42Q46 43 50 51M51 62Q60 55 65 46Q55 47 50 55" style="fill:color-mix(in oklab, var(--ok) 38%, var(--panel)); stroke:color-mix(in oklab, var(--ok) 58%, transparent); stroke-width:0.35" />
+        <circle cx="49" cy="43" r="2.8" style="fill:color-mix(in oklab, var(--accent) 78%, white); opacity:0.72" />
+      {:else if fy === 90}
+        <path d="M22 80Q20 60 28 47M35 79Q37 58 32 39M72 80Q76 58 67 44M82 81Q79 65 86 53" style="fill:none; stroke:color-mix(in oklab, var(--ok) 62%, var(--panel)); stroke-width:1.1" />
+        <path d="M27 58q-10-8-12 4q8 3 12-4M33 51q10-9 13 3q-8 5-13-3M68 55q-9-8-12 3q8 4 12-3M78 66q10-8 13 3q-8 4-13-3" style="fill:color-mix(in oklab, var(--ok) 34%, var(--panel))" />
+      {:else if fy === 180}
+        <rect x="28" y="49" width="44" height="29" rx="3" style="fill:color-mix(in oklab, var(--panel) 54%, transparent); stroke:color-mix(in oklab, var(--accent) 30%, var(--border)); stroke-width:0.5" />
+        <path d="M31 75Q39 56 46 72Q54 48 61 70Q67 58 70 75" style="fill:color-mix(in oklab, var(--ok) 24%, var(--bg-elev)); stroke:color-mix(in oklab, var(--ok) 58%, transparent); stroke-width:0.4" />
+        <circle cx="46" cy="65" r="1.6" style="fill:var(--accent); opacity:0.75" /><circle cx="61" cy="64" r="1.3" style="fill:var(--text-2); opacity:0.68" />
+      {:else}
+        <path d="M18 22Q26 38 18 55M42 12Q48 31 40 48M69 16Q75 34 68 51M88 25Q81 39 86 56" style="fill:none; stroke:color-mix(in oklab, var(--ok) 48%, var(--panel)); stroke-width:0.8" />
+        <path d="M17 35q-8-6-9 3q6 3 9-3M41 26q9-7 11 3q-7 3-11-3M69 31q-8-7-10 3q7 3 10-3M86 42q8-6 10 3q-7 3-10-3" style="fill:color-mix(in oklab, var(--ok) 32%, var(--panel))" />
+      {/if}
+      {#each [[18, 30], [30, 20], [57, 29], [77, 37], [88, 19], [40, 39], [64, 17]] as [cx, cy], i}
+        <circle class="sp-firefly" cx={cx} cy={cy} r={i % 2 ? 0.65 : 0.45} style={`--fly-delay:${-i * 0.43}s; fill:${i % 3 ? "var(--accent)" : "var(--ok)"}`} />
+      {/each}
+    </svg>
   {:else}
     <svg class="sp-art" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
       {#if fy === 0}
@@ -8657,6 +13876,25 @@
 {#snippet icoChevDown()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="M6 9.2 12 15.2l6-6" />
+  </svg>
+{/snippet}
+
+<!-- Dock slot: a frame with one edge weighted, so the glyph reads as "which end it sits at".
+     The CSS flips it vertically when the dock is already at the top. -->
+<!-- Fullscreen: the window losing its chrome, distinct from the focus view's layout. -->
+{#snippet icoFullscreen()}
+  <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9" />
+    <path d="M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9" />
+    <path d="M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15" />
+    <path d="M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15" />
+  </svg>
+{/snippet}
+
+{#snippet icoDock()}
+  <svg class="ico ico-dock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="4" y="4" width="16" height="16" rx="2.5" />
+    <path d="M4 15.5h16" fill="none" />
   </svg>
 {/snippet}
 
@@ -8794,21 +14032,35 @@
   Everything here reads the transport and presses it; none of it owns any of it.
 -->
 {#snippet jukeDock()}
-  <div class="juke-dock">
+  <div class="juke-dock" class:folded={!jukeOpen}>
     <div class="juke-head">
       <span class="juke-head-ico">{@render icoNote()}</span>
       <span class="stage-label">JUKEBOX</span>
-      <!-- One chip, in the order that matters: a pull in flight beats a dead DJ beats "we agree". -->
-      {#if jukeFetching}
-        <span class="juke-chip info" title="Pulling the track off the share">FETCHING</span>
+      <!-- One chip, in the order that matters: bytes in flight beats a dead DJ beats "we agree".
+           Reading a held file off this disk and pulling one off a peer feel completely different
+           to wait through, so they are named differently rather than both being "FETCHING". -->
+      {#if jukeFetch}
+        <span
+          class="juke-chip info"
+          title={jukeFetch.source === "network"
+            ? `Pulling this track off ${jukeFetch.provider ? callNameOf(jukeFetch.provider) : "a peer"}`
+            : "Reading this track from your vault"}
+        >{jukeFetch.source === "network" ? "PULLING" : "LOADING"} {jukeFetch.percent}%</span>
+      {:else if jukeBuffering}
+        <span class="juke-chip warn" title="The deck ran out of data mid-track">BUFFERING</span>
+      {:else if jukeNudging}
+        <span class="juke-chip info" title="Easing playback back onto the DJ's clock">SYNCING</span>
       {:else if jukeStale}
         <span class="juke-chip warn" title="The DJ went quiet: the deck is frozen until someone presses">DECK STALE</span>
       {:else if jukeNow}
         <span class="juke-chip ok" title="You are where the DJ says the room is">SYNCED</span>
       {/if}
+      {#if !jukeOpen && jukeUpNext.length}
+        <span class="stage-label juke-qn" title={`${jukeUpNext.length} queued`}>Q{jukeUpNext.length}</span>
+      {/if}
       <span class="stage-spacer"></span>
       {#if jukeNow}
-        <span class="stage-label juke-dj" title="Whoever pressed last owns the deck">dj {jukeIsDj() ? "you" : nameOf(jukeNow.dj)}</span>
+        <span class="stage-label juke-dj" title="Whoever pressed last owns the deck">dj {jukeIsDj() ? "you" : callNameOf(jukeNow.dj)}</span>
       {/if}
       <span class="juke-vol-ico">{@render icoSpeaker()}</span>
       <input
@@ -8822,16 +14074,44 @@
         title="Jukebox volume (yours only)"
         oninput={(e) => setJukeVol(Number(e.currentTarget.value))}
       />
+      <button
+        class="ghost stage-chev juke-chev"
+        aria-expanded={jukeOpen}
+        title={jukeOpen ? "Fold the jukebox to one line" : "Open the jukebox"}
+        aria-label={jukeOpen ? "Fold the jukebox" : "Open the jukebox"}
+        onclick={toggleJukeOpen}
+      >{#if jukeOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
     </div>
 
-    {#if jukeNow}
+    {#if jukeNow && !jukeOpen}
+      <!-- Folded: one line of the room's shared state, plus a hairline of progress. -->
+      <div class="juke-min">
+        <button
+          class="juke-play mini"
+          title={jukeNow.paused || jukeStale ? "Play for the room" : "Pause the room"}
+          aria-label={jukeNow.paused || jukeStale ? "Play" : "Pause"}
+          onclick={jukeToggle}
+        >{#if jukeNow.paused || jukeStale}{@render icoPlay()}{:else}{@render icoPause()}{/if}</button>
+        <span class="juke-min-nm" title={jukeNow.name}>{jukeNow.name}</span>
+        <span class="juke-time">{jukeElapsed(jukePaint)} / {jukeDur > 0 ? jukeClock(jukeDur) : "?:??"}</span>
+      </div>
+      <div class="juke-bar slim"><i class="juke-bar-fill" style={`width:${jukePct(jukePaint)}%`}></i></div>
+    {:else if jukeNow}
       {@const cur = jukeQueue.find((e) => e.id === jukeNow?.entry)}
       <div class="juke-now">
         <div class="juke-now-top">
           <span class="juke-now-nm" title={jukeNow.name}>{jukeNow.name}</span>
           <span class="juke-time">{jukeElapsed(jukePaint)} / {jukeDur > 0 ? jukeClock(jukeDur) : "?:??"}</span>
         </div>
-        <div class="juke-bar"><i class="juke-bar-fill" style={`width:${jukePct(jukePaint)}%`}></i></div>
+        <!-- Two bars, never at once: how much of the track has arrived, then where the room is
+             in it. Showing the play head over a track that has not arrived would be a lie. -->
+        {#if jukeFetch}
+          <div class="juke-bar load {jukeFetch.source}" title={jukeFetch.source === "network" ? "Coming off a peer" : "Coming off your vault"}>
+            <i class="juke-bar-fill" style={`width:${jukeFetch.percent}%`}></i>
+          </div>
+        {:else}
+          <div class="juke-bar"><i class="juke-bar-fill" style={`width:${jukePct(jukePaint)}%`}></i></div>
+        {/if}
         <div class="juke-transport">
           <!-- No previous: the transport has no rewind, and a fake one would desync the room. -->
           <button
@@ -8843,7 +14123,7 @@
           <button class="ghost juke-tbtn" title="Skip: takes the deck and moves everyone on" aria-label="Skip" onclick={jukeSkip}>{@render icoSkip()}</button>
           <span class="stage-spacer"></span>
           {#if cur}
-            <span class="stage-label juke-by" style={`color:${instColor(cur.author)}`} title={`Queued by ${nameOf(cur.author)}`}>added by {nameOf(cur.author)}</span>
+            <span class="stage-label juke-by" style={`color:${instColor(cur.author)}`} title={`Queued by ${callNameOf(cur.author)}`}>added by {callNameOf(cur.author)}</span>
           {/if}
         </div>
       </div>
@@ -8854,6 +14134,7 @@
       </div>
     {/if}
 
+    {#if jukeOpen}
     <div class="juke-rule">
       <span class="stage-label">UP NEXT</span>
       <span class="juke-rule-line"></span>
@@ -8873,10 +14154,13 @@
           {@const gone = jukeGone(e.cid)}
           {@const days = jukeExpiryDays(e.cid)}
           <li class="juke-row" class:gone>
-            <span class="juke-dot" style={`background:${instColor(e.author)}`} title={`Queued by ${nameOf(e.author)}`}></span>
+            <span class="juke-dot" style={`background:${instColor(e.author)}`} title={`Queued by ${callNameOf(e.author)}`}></span>
             <button class="juke-nm" title={gone ? `${e.name} is no longer in the share` : `Play ${e.name} for the room`} onclick={() => jukePlayEntry(e.id)}>{e.name}</button>
-            {#if jukeFetching === e.cid}
-              <span class="juke-chip info">FETCHING</span>
+            {#if jukeFetch && jukeNow?.cid === e.cid}
+              <span class="juke-chip info">{jukeFetch.percent}%</span>
+            {/if}
+            {#if mediaKind(e.name) === "video"}
+              <span class="juke-kind" title="A video: it plays on the focus view">VID</span>
             {/if}
             {#if gone}
               <span class="juke-chip gone" title="Nobody is sharing this any more">GONE</span>
@@ -8887,6 +14171,7 @@
           </li>
         {/each}
       </ul>
+    {/if}
     {/if}
   </div>
 {/snippet}
@@ -8904,7 +14189,7 @@
     <div class="ip-tabs" role="tablist">
       <button type="button" role="tab" aria-selected={insertTab === "files"} class:active={insertTab === "files"} onclick={() => (insertTab = "files")}>Files</button>
       {#if !cur?.isDm}
-        <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Status</button>
+        <button type="button" role="tab" aria-selected={insertTab === "status"} class:active={insertTab === "status"} onclick={() => (insertTab = "status")}>Announcements</button>
         <button type="button" role="tab" aria-selected={insertTab === "wiki"} class:active={insertTab === "wiki"} onclick={() => (insertTab = "wiki")}>Wiki</button>
         <button type="button" role="tab" aria-selected={insertTab === "events"} class:active={insertTab === "events"} onclick={() => (insertTab = "events")}>Events</button>
       {/if}
@@ -8915,7 +14200,7 @@
       bind:this={insertInput}
       class="ip-search"
       bind:value={insertQuery}
-      placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your posts…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
+      placeholder={insertTab === "files" ? "Find a file…" : insertTab === "status" ? "Find one of your announcements…" : insertTab === "events" ? "Find an event…" : "Find a wiki page…"}
       onkeydown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeInsert(); (insertTarget === "wiki" ? wikiTextarea : composerEl)?.focus(); } }}
     />
     <div class="ip-list">
@@ -8944,7 +14229,7 @@
       {:else if insertTab === "status"}
         {#each insertStatuses as s}
           <div class="ip-row">
-            <button type="button" class="ip-item" title="Insert a link to this post" onclick={() => insertStatusRef(s)}>
+            <button type="button" class="ip-item" title="Insert a link to this announcement" onclick={() => insertStatusRef(s)}>
               <span class="ip-ico">◈</span>
               <span class="ip-name">{msgSnippet(s.text, 70) || "(empty post)"}</span>
               <span class="ip-meta">{fmtTime(s.ts)}</span>
@@ -8952,14 +14237,14 @@
             <span class="ip-mode">link</span>
           </div>
         {:else}
-          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your posts match that." : "You haven't posted a status on this server yet."}</p>
+          <p class="ip-empty muted">{insertLoading ? "Loading…" : insertQuery.trim() ? "None of your announcements match that." : "You haven't posted an announcement on this server yet."}</p>
         {/each}
       {:else if insertTab === "events"}
         {#each insertEvents as ev (ev.id)}
           <div class="ip-row">
             <button type="button" class="ip-item" title="Insert a link to this event" onclick={() => insertEventRef(ev)}>
               <span class="ip-ico">⧗</span>
-              <span class="ip-name">{ev.title}</span>
+              <span class="ip-name">{msgSnippet(ev.title, 70)}</span>
               <span class="ip-meta">{fmtEventWhen(ev)}</span>
             </button>
             <span class="ip-mode">link</span>
@@ -9000,7 +14285,7 @@
       <label class="wiki-review-days">
         <span>review window</span>
         <select
-          value={wikiReviewDays}
+          value={Math.max(wikiReviewDays, 0)}
           title="How long a member's edit waits for review before it auto-accepts; off publishes edits immediately"
           onchange={(e) => setWikiReviewWindow(Number(e.currentTarget.value))}
         >
@@ -9071,6 +14356,16 @@
     <form class="new-page" onsubmit={(e) => { e.preventDefault(); createWikiPage(); }}>
       <input bind:value={newWikiPage} placeholder="+ new page (use / to nest)" />
     </form>
+  {:else if view === "moderation"}
+    <h3><span>Moderation plane</span></h3>
+    <p class="muted small">Signed warnings, evidence-backed cases and the server-wide event timeline.</p>
+    <p class="muted small">Votes advise the owner; they never remove a member by themselves.</p>
+  {:else if view === "storage"}
+    <h3><span>Storage health</span></h3>
+    <p class="muted small">Verifies seals, content addresses and file references. Repair only fetches from authenticated members.</p>
+  {:else if view === "connectivity"}
+    <h3><span>Connectivity</span></h3>
+    <p class="muted small">Evidence from the last connection attempt, plus the live member count. “Started” is not presented as “reachable”.</p>
   {:else if view === "files"}
     <h3><span>Folders</span></h3>
     <ul class="channel-list folder-nav">
@@ -9083,14 +14378,14 @@
     </ul>
     <label class="upload-btn">
       {uploading ? "Uploading…" : "＋ Share a file here"}
-      <input type="file" disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
+      <input type="file" multiple disabled={uploading} onchange={(e) => { uploadFile(e.currentTarget.files); e.currentTarget.value = ''; }} />
     </label>
     <form class="new-folder" onsubmit={(e) => { e.preventDefault(); const n = newFolder.trim(); if (n) { enterFolder(n); newFolder = ''; } }}>
       <input bind:value={newFolder} placeholder="＋ new folder…" />
     </form>
   {:else if view === "downloads"}
     <h3><span>Transfers</span></h3>
-    <button class="ghost small ctx-action" onclick={clearFinishedDownloads}>Clear finished</button>
+    <button class="ghost small ctx-action" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
   {:else if view === "events"}
     <h3><span>Upcoming</span></h3>
     {#each upcomingEvents.slice(0, 5) as e (e.id)}
@@ -9102,7 +14397,7 @@
       <p class="muted small">Nothing scheduled: add an event on the right.</p>
     {/each}
   {:else if view === "status" && !dm}
-    <h3><span>Status</span></h3>
+    <h3><span>Announcements</span></h3>
     <p class="muted small">A slow feed for this server: one post at a time, no replies.</p>
   {:else if !dm}
     <h3><span>Channels</span> <span class="key">[ctrl+k]</span></h3>
@@ -9200,7 +14495,7 @@
   <!-- One thing at a time, by priority: a shut vault shows nothing here at all, since this strip
        is in every screenshot of the lock screen. -->
   <div class="tb-slot" data-tauri-drag-region>
-    {#if locked}
+    {#if locked || changingVaultSecret}
       <!-- Deliberately empty: the wordmark is the whole bar while the vault is shut. -->
     {:else if inCall}
       <span class="tb-call" data-tauri-drag-region title="Your mic, live in this room">
@@ -9221,6 +14516,7 @@
             style="--crawl: {tbCrawlDur(head.text)}s"
             title={head.text}
             onclick={head.go}
+            onanimationstart={() => { if (head.kind !== "message") playNewsTicker(head.server); }}
             onanimationend={() => tbAdvance(head.id)}
           >
             <span class="tb-tick-glyph" aria-hidden="true"></span>
@@ -9232,7 +14528,6 @@
       <span class="tb-ident" data-tauri-drag-region>mewtual@{tbPreset} · {APP_VERSION}</span>
     {/if}
   </div>
-  <span class="tb-drag" data-tauri-drag-region></span>
   <div class="tb-controls">
     <button type="button" class="tb-btn" aria-label="Minimise" title="Minimise" onclick={() => appWindow.minimize()}>
       <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M0.5 5.5h9" /></svg>
@@ -9257,12 +14552,12 @@
 </div>
 
 <main>
-  {#if eclipseCaution && activeServerId !== null && !locked}
+  {#if eclipseCaution && activeServerId !== null && !locked && !changingVaultSecret}
     <div class="eclipse-banner" role="status">
       ⚠ You may be isolated from this server: few members are reachable. Verify a member out of band.
     </div>
   {/if}
-  {#if locked}
+  {#if locked || changingVaultSecret}
     <div class="start gate" class:setup={inSetup}>
       {#if vaultExists === null}
         <!-- One frame of nothing beats guessing: showing "unlock" to a new user, or "set up" to
@@ -9390,6 +14685,17 @@
             passphrase is the strongest.
           </p>
         {/if}
+      {:else if changingVaultSecret}
+        {@render brandMark(`vault secret · ${vaultChangeStep === "current" ? "verify" : vaultChangeStep === "new" ? "choose" : "confirm"}`)}
+        <p class="muted">
+          {vaultChangeStep === "current"
+            ? "Enter your current vault secret. It is checked only when the replacement is ready, so a failed change cannot leave the vault half-updated."
+            : vaultChangeStep === "new"
+              ? "Choose a new passphrase, sigil, or tune. This rewraps the same random vault key; it does not expose or rewrite your server data."
+              : "Enter the new secret again. After this succeeds, the old secret opens only backups that were exported before the change."}
+        </p>
+        {#if vaultChangeMismatch}<p class="error">That did not match the new secret. Cleared: try the confirmation again.</p>{/if}
+        {#if vaultChangeError}<p class="error">{vaultChangeError}</p>{/if}
       {:else}
         {@render brandMark("")}
         <p class="muted">
@@ -9399,13 +14705,13 @@
       {/if}
       <!-- Locked while confirming: the two performances are compared as encoded strings, so
            switching method between them could only ever mismatch. -->
-      {@const tabsLocked = inSetup && setupStep === "confirm"}
+      {@const tabsLocked = (inSetup && setupStep === "confirm") || vaultChangeStep === "confirm"}
       <div class="ul-tabs" role="tablist">
         <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "pass"} aria-selected={unlockMethod === "pass"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "pass"; }}>
           Passphrase <span class="ul-rec">recommended</span>
         </button>
         <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "sigil"} aria-selected={unlockMethod === "sigil"} onclick={() => { stopPlayback(); releaseAll(); unlockMethod = "sigil"; }}>Sigil</button>
-        <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; initMidi(); }}>Melody</button>
+        <button type="button" role="tab" disabled={tabsLocked} title={tabsLocked ? "Confirming: go back to change how you unlock" : ""} class:active={unlockMethod === "melody"} aria-selected={unlockMethod === "melody"} onclick={() => { unlockMethod = "melody"; void initMidi(); }}>Melody</button>
       </div>
       {#if unlockMethod === "pass"}
         <label class="field">
@@ -9414,7 +14720,7 @@
           <input
             type="password"
             bind:value={passphrase}
-            onkeydown={(e) => e.key === "Enter" && passphrase && gateSubmit()}
+            onkeydown={(e) => e.key === "Enter" && passphrase && (changingVaultSecret ? submitVaultSecretChange() : gateSubmit())}
             placeholder="passphrase"
             autofocus
           />
@@ -9684,6 +14990,13 @@
             {setupStep === "confirm" ? "Confirm" : "Continue"}
           </button>
         </div>
+      {:else if changingVaultSecret}
+        <div class="setup-actions">
+          <button class="ghost" disabled={vaultChangeBusy} onclick={cancelVaultSecretChange}>Cancel</button>
+          <button disabled={vaultChangeBusy || !unlockSecret()} onclick={submitVaultSecretChange}>
+            {vaultChangeBusy ? "Rewrapping vault…" : vaultChangeStep === "confirm" ? "Change vault secret" : "Continue"}
+          </button>
+        </div>
       {:else}
         <button onclick={() => unlock()} disabled={unlocking || !unlockSecret()}>
           {unlocking ? "Unlocking…" : "Unlock"}
@@ -9707,48 +15020,211 @@
         <span class="muted">Display name</span>
         <input bind:value={displayName} placeholder="display name" />
       </label>
-      <details>
-        <summary>Network (optional)</summary>
-        <label class="field">
-          <span class="muted">
-            Reachable address so others can join over a network: your LAN IP (e.g.
-            192.168.1.5), or a public IP / host:port if port-forwarded. Leave blank for
-            same-machine only.
-          </span>
-          <input bind:value={advertise} placeholder="LAN/public IP (optional)" />
-        </label>
-        <label class="field">
-          <span class="muted">
-            Relay address (optional): paste a relay node's multiaddr to be reachable over
-            the internet with no port-forward (zero-config NAT traversal).
-          </span>
-          <input bind:value={relay} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-        </label>
-        <label class="field">
-          <span class="muted">
-            Rendezvous address (optional): paste a rendezvous node's multiaddr to register there,
-            so people can join with <em>just the invite</em> (no address needed). Saved as your
-            default.
-          </span>
-          <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
-        </label>
-      </details>
-      <button onclick={found} disabled={busy}>
-        {busy ? "Working…" : "Found a server"}
-      </button>
-      <hr />
-      <p class="muted">…or join an existing server with an invite:</p>
-      <textarea class="invite-code" bind:value={joinInvite} rows="3" placeholder="paste invite here"></textarea>
-      <div class="pc-actions">
-        <button onclick={join} disabled={busy || !joinInvite.trim()}>Join</button>
-        <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => { if (t) joinInvite = t; })}>⛶ Scan invite QR</button>
+      <div class="start-tabs" role="tablist" aria-label="Join or found a server">
+        <button
+          type="button"
+          role="tab"
+          id="start-tab-join"
+          aria-selected={startTab === "join"}
+          aria-controls="start-panel-join"
+          tabindex={startTab === "join" ? 0 : -1}
+          onclick={() => (startTab = "join")}
+          onkeydown={startTabArrows}
+        >
+          Join a server
+          <span class="st-hint">someone sent me an invite</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="start-tab-found"
+          aria-selected={startTab === "found"}
+          aria-controls="start-panel-found"
+          tabindex={startTab === "found" ? 0 : -1}
+          onclick={() => (startTab = "found")}
+          onkeydown={startTabArrows}
+        >
+          Found a server
+          <span class="st-hint">I'm starting a new one</span>
+        </button>
       </div>
+      {#if startTab === "join"}
+        <div class="start-pane" role="tabpanel" id="start-panel-join" aria-labelledby="start-tab-join">
+          <p class="muted">
+            Paste the invite you were sent: it carries everything your app needs to find the group.
+          </p>
+          <textarea
+            class="invite-code"
+            bind:value={joinInvite}
+            oninput={() => {
+              joinPreview = null;
+              joinPreviewCode = "";
+              joinSwitchboardConsent = false;
+            }}
+            rows="3"
+            placeholder="paste invite here"
+          ></textarea>
+          {#if joinPreview?.switchboards}
+            <section class="repair-card switchboard-consent">
+              <div>
+                <h3>Direct first; member fallback only with your permission</h3>
+                <p class="muted small">
+                  This signed invite offers {joinPreview.switchboards} standing switchboard{joinPreview.switchboards === 1 ? "" : "s"}.
+                  Mewtual will try the named inviter directly first. If that fails, a switchboard can
+                  forward the admission handshake and remain your first encrypted group connection.
+                  That member learns your IP address and connection timing and may carry encrypted
+                  catch-up traffic. It already has ordinary member access, but helping grants no
+                  additional content access, and it cannot admit you itself.
+                </p>
+                <label class="check-row">
+                  <input type="checkbox" bind:checked={joinSwitchboardConsent} />
+                  Allow the signed member fallback after the direct attempt fails
+                </label>
+                <p class="muted small">Leave this off to try direct routes only. You can retry with fallback later.</p>
+              </div>
+            </section>
+          {/if}
+          <div class="pc-actions">
+            <button onclick={join} disabled={busy || !joinInvite.trim()}>
+              {joinPreview?.switchboards
+                ? joinSwitchboardConsent
+                  ? "Join with fallback"
+                  : "Join directly"
+                : busy
+                  ? "Working…"
+                  : "Join"}
+            </button>
+            <button class="ghost" disabled={scanOpen} onclick={() => scanQr((t) => {
+              if (t) {
+                joinInvite = t;
+                joinPreview = null;
+                joinPreviewCode = "";
+                joinSwitchboardConsent = false;
+              }
+            })}>⛶ Scan invite QR</button>
+            <span class="aside muted small">invites are single-use and time-limited</span>
+          </div>
+          {#if joinReplyReady && !joinReplyExpired}
+            <section class="repair-card reply-card">
+              <div>
+                <h3>Nobody answered: meet in the middle</h3>
+                <p class="muted small">
+                  Your invite is fine; the routes it carried did not answer. Send this reply code
+                  back to the person who invited you, in the same chat the invite arrived in. When
+                  they paste it, both apps dial at the same moment, which can open a path one-sided
+                  dialling cannot. A member whose app confirms a current live route to the named
+                  inviter can paste it instead. It offers {joinReplyCandidateLabel(joinReplyReady.candidate_count)};
+                  it dials rather than relays, so it cannot cross symmetric NAT/CGNAT on its own.
+                  It works for 60 seconds: keep both apps open.
+                </p>
+                <textarea class="invite-code" readonly rows="3" value={joinReplyReady.code}></textarea>
+              </div>
+              <button class="ghost small" onclick={() => copyText(joinReplyReady?.code ?? "")}>Copy reply</button>
+            </section>
+          {:else if joinReplyReady}
+            <section class="repair-card reply-card">
+              <div><h3>Connection reply expired</h3><p class="muted small">Start the join again to mint a fresh 60-second route. The expired code is no longer copyable.</p></div>
+            </section>
+          {/if}
+        </div>
+      {:else}
+        <div class="start-pane" role="tabpanel" id="start-panel-found" aria-labelledby="start-tab-found">
+          <div class="field">
+            <span class="muted">Who is this server for?</span>
+            <div class="mode-cards">
+              <label class="mode-card" class:selected={serverMode === "friends"}>
+                <input type="radio" class="mc-radio" name="server-mode" value="friends" bind:group={serverMode} />
+                <span class="mc-pick">{serverMode === "friends" ? "◉" : "○"}</span>
+                <span class="mc-title">People I know</span>
+                <span class="mc-sub">friend circle</span>
+                <p>You connect to each other directly. Nothing to set up, nothing to run, no one in charge of the wires.</p>
+                <p class="mc-trade">Members may see each other's IP addresses, and bans depend on everyone's app playing fair.</p>
+                <span class="mc-foot">shields you from an operator · trusts your friends</span>
+              </label>
+              <label class="mode-card" class:selected={serverMode === "hosted"}>
+                <input type="radio" class="mc-radio" name="server-mode" value="hosted" bind:group={serverMode} />
+                <span class="mc-pick">{serverMode === "hosted" ? "◉" : "○"}</span>
+                <span class="mc-title">People I don't know</span>
+                <span class="mc-sub">hosted community</span>
+                <p>Everyone connects through a node you run. Removing someone takes effect instantly: the group changes its keys, and they're locked out of everything said afterwards.</p>
+                <p class="mc-trade">You, the operator, can see who is a member and who talks to whom, never what is said.</p>
+                <span class="mc-foot">removal that holds · trusts you</span>
+              </label>
+            </div>
+            <p class="muted small">Neither is the safer one: they guard against different people.</p>
+          </div>
+          {#if serverMode === "hosted"}
+            <label class="field">
+              <span class="muted small">
+                Your node's address: a hosted community runs through a small always-on machine you
+                operate. Set one up with <span class="fp">catcomsctl relay</span>; if you don't have
+                one yet, pick "People I know" instead.
+              </span>
+              <input bind:value={relay} placeholder="/dns4/your-host/udp/7220/quic-v1/p2p/12D3Koo…" />
+            </label>
+          {/if}
+          <details>
+            <summary>Advanced: connectivity</summary>
+            <label class="field">
+              <span class="muted small">
+                Known address (optional): if this machine already has a reachable address, a LAN IP
+                or a public host:port you've forwarded, paste it to skip discovery.
+              </span>
+              <input bind:value={advertise} placeholder="192.168.1.5 or example.net:7220" />
+            </label>
+            {#if serverMode === "friends"}
+              <label class="field">
+                <span class="muted small">
+                  Relay node (optional): a relay's address makes this server reachable over the
+                  internet with no port-forward.
+                </span>
+                <input bind:value={relay} placeholder="/ip4/…/udp/…/quic-v1/p2p/… (optional)" />
+              </label>
+            {/if}
+            <label class="field">
+              <span class="muted small">
+                Introducer node (optional): register at a rendezvous node so people can join with
+                <em>just the invite</em>, no address needed. Saved as your default.
+              </span>
+              <input bind:value={rendezvous} placeholder="/ip4/…/tcp/…/p2p/… (optional)" />
+            </label>
+          </details>
+          <div class="pc-actions">
+            <button onclick={found} disabled={busy}>
+              {busy ? "Working…" : "Found server"}
+            </button>
+            <span class="aside muted small">most people never open Advanced</span>
+          </div>
+        </div>
+      {/if}
+      <hr />
+      {#if servers.length && activeServerId !== null}
+        <details class="conn-panel reply-apply">
+          <summary>I received a connection reply</summary>
+          <p class="muted small">
+            Paste the reply from the person joining <b>{cur?.name ?? "the active server"}</b>.
+            Their app must still be waiting. If this device did not issue the invite, it acts only
+            as a handshake helper; the named inviter and normal MLS admission rules still decide.
+          </p>
+          <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
+          <div class="pc-actions">
+            <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>
+              {joinReplyApplying ? "Dialling…" : "Dial joiner"}
+            </button>
+            {#if joinReplyNeedsReplace}
+              <button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>
+                Confirm different joiner
+              </button>
+            {/if}
+          </div>
+        </details>
+      {/if}
       <details open={syncIntent}>
         <summary>Link this device to another device you own</summary>
         <p class="muted small">
           Your other device stays the master: it will show a code and ask permission before
-          this device gets anything. Server admission for linked devices arrives with the
-          next protocol slice: the grant is stored until then.
+          this device gets anything. Once approved, open the grant here and join its servers;
+          admission completes when each server's owner is online to serialize it safely.
         </p>
         {#if !pairBlob}
           <button class="ghost" onclick={pairBegin}>Generate pairing code</button>
@@ -9804,7 +15280,7 @@
             Last attempt: <b>{connectivity.action === "found" ? "founding a server" : "joining"}</b>
             {connectivity.subject ? ` (${connectivity.subject})` : ""} at {fmtLocal(connectivity.at)}.
           </p>
-          <p class="muted small">Reachable from the internet: <b>{reach.verdict}</b>. {reach.detail}</p>
+          <p class="muted small">Observed reachability: <b>{reach.verdict}</b>. {reach.detail}</p>
           {@render connDetail(connectivity)}
           <div class="pc-actions">
             <button class="ghost small" onclick={refreshConnectivity}>Refresh</button>
@@ -9854,12 +15330,12 @@
           <button
             class="server-icon inbox-circle"
             class:active={inboxView}
-            title="Inbox: mentions & replies"
+            title="Inbox: mentions, replies & server news"
             onclick={openInbox}
           >
             {@render icoInbox()}
-            {#if inboxUnseenCount}
-              <span class="rail-badge">{inboxUnseenCount}</span>
+            {#if inboxUnseenCount || newsUnseen}
+              <span class="rail-badge">{inboxUnseenCount + (newsUnseen ? 1 : 0)}</span>
             {/if}
           </button>
           <div class="rail-sep"></div>
@@ -9901,10 +15377,10 @@
             <h2>Inbox</h2>
             <div class="inbox-mode">
               <button class:active={inboxMode === "mentions"} onclick={() => (inboxMode = "mentions")}>Mentions</button>
-              <button class:active={inboxMode === "news"} onclick={() => { inboxMode = "news"; loadNews(); }}>News</button>
+              <button class:active={inboxMode === "news"} onclick={() => { inboxMode = "news"; newsUnseen = false; loadNews(); }}>News</button>
             </div>
             <span class="muted small">
-              {inboxMode === "mentions" ? "Mentions & replies, across every server & DM" : "Status posts & upcoming events, across your servers"}
+              {inboxMode === "mentions" ? "Mentions & replies, across every server & DM" : "Announcements & upcoming events, across your servers"}
             </span>
             <button class="ghost small inbox-refresh" onclick={() => (inboxMode === "mentions" ? loadInbox() : loadNews())} disabled={inboxMode === "mentions" ? inboxLoading : newsLoading}>↻ Refresh</button>
           </div>
@@ -9914,31 +15390,31 @@
             {:else}
               {#if newsUpcoming.length}
                 <h3 class="ev-h"><span>Upcoming events</span></h3>
-                <ul class="inbox-list">
+                <ul class="inbox-list" use:richClicks>
                   {#each newsUpcoming as n (n.server + ":" + n.kind + ":" + n.ts + n.text)}
                     <li class="inbox-item">
-                      <button class="inbox-jump" onclick={() => jumpToNews(n)}>
+                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
                         <div class="inbox-meta">
                           <span class="inbox-tag event-tag">⧗ event</span>
                           <span class="inbox-where">{n.serverName}</span>
                           <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{dayLabel(n.ts)}</span>
                         </div>
-                        <div class="inbox-body"><span class="inbox-text">{n.text}</span></div>
+                        <div class="inbox-body"><span class="inbox-text">{@html renderMessage(n.text, "")}</span></div>
                       </button>
                     </li>
                   {/each}
                 </ul>
               {/if}
-              <h3 class="ev-h"><span>Recent status</span></h3>
+              <h3 class="ev-h"><span>Recent announcements</span></h3>
               {#if !newsFeed.length}
-                <p class="muted inbox-empty">No status posts yet: servers' Status surfaces feed this.</p>
+                <p class="muted inbox-empty">No announcements yet: servers' Announcements surfaces feed this.</p>
               {:else}
-                <ul class="inbox-list">
+                <ul class="inbox-list" use:richClicks>
                   {#each newsFeed as n (n.server + ":" + n.ts + ":" + n.author)}
                     <li class="inbox-item">
-                      <button class="inbox-jump" onclick={() => jumpToNews(n)}>
+                      <button class="inbox-jump" onclick={(event) => { if (!(event.target as HTMLElement).closest("[data-text-fx='censor']:not(.revealed)")) jumpToNews(n); }}>
                         <div class="inbox-meta">
-                          <span class="inbox-tag reply-tag">◇ status</span>
+                          <span class="inbox-tag reply-tag">◇ announcement</span>
                           <span class="inbox-where">{n.serverName}</span>
                           <span class="inbox-time" title={new Date(n.ts).toLocaleString()}>{fmtTime(n.ts)}</span>
                         </div>
@@ -9966,7 +15442,13 @@
                         {#if it.mention}<span class="inbox-tag mention-tag">@ mention</span>{/if}
                         {#if it.reply}<span class="inbox-tag reply-tag">↰ reply</span>{/if}
                       </span>
-                      <span class="inbox-where">{it.is_dm ? "Direct message" : it.server_name} · #{inboxChannelName(it)}</span>
+                      <span class="inbox-where">
+                        {#if it.is_dm}
+                          Direct message · @{it.server_name}
+                        {:else}
+                          {it.server_name} · #{inboxChannelName(it)}
+                        {/if}
+                      </span>
                       <span class="inbox-time" title={new Date(it.ts).toLocaleString()}>{fmtTime(it.ts)}</span>
                     </div>
                     <div class="inbox-body">
@@ -10051,7 +15533,7 @@
             <div class="dm-code">
               <span class="muted small">Friend code for {cur.name}: share it to connect:</span>
               <textarea class="invite-code" readonly rows="2" value={cur.invite}></textarea>
-              <button class="ghost small" onclick={copyInvite}>Copy code</button>
+              <button class="ghost small" onclick={copyInvite}>{copied ? "Copied!" : "Copy code"}</button>
             </div>
           {/if}
           {#if cur?.isDm}
@@ -10068,6 +15550,18 @@
         {#if canInvite || cur?.invite}
           <button class="ghost invite-quick" onclick={() => openServerSettings(null, "invites")}>＋ Invite someone</button>
         {/if}
+        <div class="sidebar-utility" aria-label="Server safety and operations">
+          {#if canModerate}
+            <button type="button" class="sidebar-mod" class:active={view === "moderation"} onclick={() => switchView("moderation")}>
+              {@render icoShield()}<span>Moderation</span>
+              {#if moderationCases.length}<b>{moderationCases.length}</b>{/if}
+            </button>
+          {/if}
+          <div class="sidebar-ops">
+            <button type="button" class:active={view === "storage"} title="Storage health & repair" aria-label="Storage health and repair" onclick={() => switchView("storage")}>{@render icoStorage()}<span>Storage</span></button>
+            <button type="button" class:active={view === "connectivity"} title="Connectivity assistant" aria-label="Connectivity assistant" onclick={() => switchView("connectivity")}>{@render icoConnectivity()}<span>Connect</span></button>
+          </div>
+        </div>
         {@render youPanel()}
         {/if}
       </aside>
@@ -10098,7 +15592,7 @@
               {#if files.length}<span class="tab-count">{files.length}</span>{/if}
             </button>
             <button type="button" class:active={view === "status"} onclick={() => switchView("status")}>
-              <span class="sb-ico">◇</span>status
+              <span class="sb-ico">◇</span>announcements
             </button>
             <button type="button" class:active={view === "wiki"} onclick={() => switchView("wiki")}>
               <span class="sb-ico">✎</span>wiki
@@ -10109,15 +15603,19 @@
             </button>
             <button type="button" class:active={view === "downloads"} onclick={() => switchView("downloads")}>
               <span class="sb-ico">↓</span>transfers
-              {#if activeDownloads}<span class="tab-count">{activeDownloads}</span>{/if}
+              {#if activeTransfers}<span class="tab-count">{activeTransfers}</span>{/if}
             </button>
           </nav>
         {/if}
         {#if view === "chat"}
           <!-- Header: identity on the left, the channel's description filling the middle, every
                action on the right. The member count lives in the members column, not here. -->
-          <h2 class="chan-head">
-            <span class="chan-title"><span class="ch-hash">#</span>{activeName()}</span>
+          <h2 class="chan-head" use:headBottom>
+            {#if cur?.isDm}
+              <span class="chan-title"><span class="ch-hash">@</span>{cur.name}</span>
+            {:else}
+              <span class="chan-title"><span class="ch-hash">#</span>{activeName()}</span>
+            {/if}
             {#if editingTopic}
               <!-- svelte-ignore a11y_autofocus -->
               <input
@@ -10136,7 +15634,7 @@
             {/if}
             <span class="head-actions">
               {#if firstUnreadIdx >= 0}
-                <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => scrollToMatch(firstUnreadIdx)}>↑ {unreadCount} new</button>
+                <button class="ghost small jump-unread" title="Jump to where you left off" onclick={() => void scrollToMatch(firstUnreadIdx)}>↑ {unreadCount} new</button>
               {/if}
               <span class="chip ok" title="Messages in this group are end-to-end encrypted (MLS)">MLS · E2E</span>
               <button class="ghost icon-btn search-toggle" title="Search messages (Ctrl+F · Ctrl+Shift+F for filters)" aria-label="Search messages" onclick={() => openSearch()}>{@render icoSearch()}</button>
@@ -10174,6 +15672,24 @@
                 {/each}
               </ul>
             </div>
+          {/if}
+          {#if !canModerate && !cur?.isDm && moderationCases.length}
+            <section class="community-votes" aria-label="Community kick votes">
+              {#each moderationCases as kick (kick.id)}
+                {@const tally = voteTally(moderation.votes, kick.id)}
+                {@const evidence = signedWarnings.filter((warning) => kick.evidence_ids.includes(warning.id))}
+                <article>
+                  <span class="community-vote-mark">?</span>
+                  <div>
+                    <strong>Community vote: remove {nameOf(kick.target)}?</strong>
+                    <p>{kick.reason}</p>
+                    {#if evidence.length}<details><summary>{evidence.length} warned post{evidence.length === 1 ? "" : "s"} attached as evidence</summary>{#each evidence as warning (warning.id)}<blockquote><b>{warning.reason}</b><span>{msgSnippet(warning.message_text, 180)}</span></blockquote>{/each}</details>{/if}
+                    <span class="muted small">{tally.yes} yes · {tally.no} no · advisory only; the owner makes the final MLS removal decision</span>
+                  </div>
+                  <div class="community-vote-actions"><button class="ghost small" onclick={() => voteKick(kick.id, true)}>Vote yes</button><button class="ghost small" onclick={() => voteKick(kick.id, false)}>Vote no</button></div>
+                </article>
+              {/each}
+            </section>
           {/if}
           {#if showSearch}
             <div class="msg-search">
@@ -10313,9 +15829,28 @@
               {/if}
             </div>
           {/if}
-          <ul class="messages" bind:this={messagesEl} use:richClicks>
-            {#each messages as m, mi}
-              {@const newDay = mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <ul
+            class="messages"
+            class:drag-over={dragOver}
+            bind:this={messagesEl}
+            use:richClicks
+            use:channelScan
+            onscroll={onChatScroll}
+            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={(e) => onComposerDrop("chat", e)}
+          >
+            {#if messageWindow.start > 0}
+              <li class="message-window-edge">
+                <button class="ghost small" type="button" onclick={revealOlderMessages}>
+                  Load {Math.min(CHAT_WINDOW_STEP, messageWindow.start)} older messages
+                </button>
+              </li>
+            {/if}
+            {#each renderedMessages as m, visibleIndex (messageDomKey(m, messageWindow.start + visibleIndex))}
+              {@const mi = messageWindow.start + visibleIndex}
+              {@const newDay = visibleIndex === 0 || mi === 0 || !sameDay(messages[mi - 1].ts, m.ts)}
               {#if newDay}
                 <li class="day-divider" aria-hidden="true"><span>{dayLabel(m.ts)}</span></li>
               {/if}
@@ -10329,21 +15864,40 @@
                 !m.reply_to &&
                 messages[mi - 1].author === m.author &&
                 m.ts - messages[mi - 1].ts < 300000}
-              {@const bubble = appearance.flat ? "" : bubbleStyle(m.author)}
-              {@const tick = deliveryTick(m)}
+              {@const framePosition = CHAT_MESSAGE_FRAMES_ENABLED
+                ? messageFramePosition(messages, mi, messageFrameBreaks)
+                : "single"}
+              {@const bubble = bubbleStyle(m.author)}
+              {@const messageFrame = CHAT_MESSAGE_FRAMES_ENABLED
+                ? parseMessageFrame(profileFor(m.author)?.bubble)
+                : DEFAULT_MESSAGE_FRAME}
+              {@const arrival = arrivalMotion(m.author, m.id)}
+              {@const arrivalVars = arrivalStyle(m.author)}
+              {@const tick = mi === lastOwnIdx ? deliveryTick(m) : null}
               {@const ident = identityOf(m.author)}
+              {@const warning = warningFor(cur?.active ?? "", m.id)}
               <li
+                class="frame-{messageFrame.shape}"
                 data-mi={mi}
                 class:own={m.author === myFp}
                 class:grouped
                 class:unread={isUnread(m)}
                 class:pings-me={m.author !== myFp && mentionsMe(m.text)}
                 class:has-bubble={!!bubble}
+                class:frame-start={!!bubble && framePosition === "start"}
+                class:frame-middle={!!bubble && framePosition === "middle"}
+                class:frame-end={!!bubble && framePosition === "end"}
+                class:message-arrival={arrival !== "none"}
+                class:arrival-glide={arrival === "glide"}
+                class:arrival-fly={arrival === "fly"}
+                class:arrival-pop={arrival === "pop"}
+                class:arrival-drift={arrival === "drift"}
                 class:search-match={showSearch && searchMatchSet.has(mi)}
                 class:search-current={showSearch && searchCur?.ch === cur?.active && searchCur?.idx === mi}
                 class:flash={!!m.id && m.id === flashId}
-                style={bubble}
+                style={[bubble, arrivalVars].filter(Boolean).join(";")}
                 use:contextMenu={() => messageMenu(m)}
+                use:resolveChatRow={m}
               >
                 {#if grouped}
                   <span class="t" title={new Date(m.ts).toLocaleString()}>
@@ -10359,6 +15913,7 @@
                   </span>
                 {/if}
                 <div class="m-body">
+                {@render frameLayers(messageFrame, !!bubble)}
                 {#if m.reply_to}
                   {@const parent = msgById.get(m.reply_to)}
                   <button
@@ -10410,18 +15965,29 @@
                 {#if m.id && editingId === m.id}
                   <div class="msg-edit">
                     <textarea
+                      bind:this={editMessageEl}
                       bind:value={editDraft}
                       rows="2"
+                      onselect={() => onTextEffectSelection("chat-edit")}
                       onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); saveEdit(m); } else if (e.key === "Escape") { e.preventDefault(); cancelEdit(); } }}
                     ></textarea>
                     <div class="msg-edit-actions">
+                      {@render textEffectButton("chat-edit", "Edited message text effects")}
                       <button class="ghost small" onclick={() => saveEdit(m)}>Save</button>
                       <button class="ghost small" onclick={cancelEdit}>Cancel</button>
                       <span class="muted small">Enter to save · Esc to cancel</span>
                     </div>
                   </div>
+                {:else if warning && !expandedWarnings.has(warning.id)}
+                  <button type="button" class="warned-collapse" onclick={() => toggleWarning(warning.id)}>
+                    <span class="warned-mark">!</span>
+                    <span><b>A moderator warned this post</b><small>{warning.reason} · expand for context</small></span>
+                  </button>
                 {:else}
-                  <span class="text">{@html renderMessage(m.text, myMentionName)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
+                  {#if warning}
+                    <button type="button" class="warning-banner" onclick={() => toggleWarning(warning.id)} title="Collapse this warned post"><b>Warning:</b> {warning.reason}<span>collapse</span></button>
+                  {/if}
+                  <span class="text">{@html renderedMessage(m)}{#if m.edited}<span class="edited-tag muted" title={"edited " + new Date(m.edited).toLocaleString()}> (edited)</span>{/if}</span>
                 {/if}
                 {#if m.id && replyCounts.get(m.id)}
                   {@const n = replyCounts.get(m.id)}
@@ -10475,8 +16041,15 @@
                 </div>
               </li>
             {:else}
-              <li class="muted">No messages yet: say hello.</li>
+              <li class="muted">{groupLoading ? "Loading messages…" : "No messages yet: say hello."}</li>
             {/each}
+            {#if messageWindow.end < messages.length}
+              <li class="message-window-edge">
+                <button class="ghost small" type="button" onclick={revealNewerMessages}>
+                  Load {Math.min(CHAT_WINDOW_STEP, messages.length - messageWindow.end)} newer messages
+                </button>
+              </li>
+            {/if}
           </ul>
           <div class="composer-wrap">
             {#if mentionQuery !== null && mentionCandidates.length}
@@ -10542,7 +16115,7 @@
                 type="button"
                 class="attach ip-toggle"
                 class:on={showInsert && insertTarget === "chat"}
-                title="Link or embed a file, one of your status posts, or a wiki page"
+                title="Link or embed a file, one of your announcements, or a wiki page"
                 aria-label="Insert a link or embed"
                 aria-expanded={showInsert && insertTarget === "chat"}
                 onclick={() => toggleInsert("chat")}
@@ -10557,20 +16130,321 @@
                   onchange={(e) => { embedFiles("chat", e.currentTarget.files); e.currentTarget.value = ''; }}
                 />
               </label>
-              <textarea
-                bind:this={composerEl}
-                bind:value={draft}
-                rows="1"
-                class="composer-input"
-                placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
-                oninput={onComposerInput}
-                onkeydown={onComposerKeydown}
-                onblur={() => queueMicrotask(() => (mentionQuery = null))}
-              ></textarea>
-              <span class="c-hint">enter to send · shift+enter newline</span>
+              <div class="composer-entry">
+                <textarea
+                  bind:this={composerEl}
+                  bind:value={draft}
+                  rows="1"
+                  class="composer-input"
+                  placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Message #" + activeName()}
+                  oninput={onComposerInput}
+                  onselect={() => onTextEffectSelection("chat")}
+                  onkeydown={onComposerKeydown}
+                  onblur={() => queueMicrotask(() => (mentionQuery = null))}
+                ></textarea>
+                {#if !draft}<span class="c-hint">enter to send · shift+enter newline</span>{/if}
+              </div>
+              {@render textEffectButton("chat", "Message text effects")}
               <button type="button" class="attach" title="Emoji" onclick={() => (showEmoji = !showEmoji)}>{@render icoCat()}</button>
-              <button type="submit" disabled={uploading}>Send</button>
+              <button type="submit" disabled={uploading || sending}>Send</button>
             </form>
+          </div>
+        {:else if view === "moderation" && canModerate}
+          <div class="moderation-pane tab-pane">
+            <header class="ops-head">
+              <div>
+                <span class="stx-crumb">SERVER // SAFETY // MODERATION</span>
+                <h2>Moderation plane</h2>
+                <p class="muted small">A public, signed history. Warnings preserve what was seen; kick votes advise the owner and never bypass MLS authorization.</p>
+              </div>
+              <button class="ghost small" disabled={moderationLoading} onclick={() => refreshModeration(true)}>{moderationLoading ? "Loading…" : "Refresh"}</button>
+            </header>
+            {#if canModerate}
+              <section class="mod-batch">
+                <div><strong>{selectedModerationMessages().length} message{selectedModerationMessages().length === 1 ? "" : "s"} selected</strong><span class="muted small">Click a box; Shift-click extends the range.</span></div>
+                <input bind:value={moderationReason} maxlength="2048" placeholder="Public warning reason…" />
+                <button disabled={!selectedModerationMessages().length || !moderationReason.trim()} onclick={warnModerationSelection}>Warn &amp; collapse</button>
+                <button class="danger-btn" disabled={!selectedModerationMessages().length} onclick={deleteModerationSelection}>{moderationDeleteArmed ? `Confirm delete ${selectedModerationMessages().length}` : "Delete selected"}</button>
+              </section>
+            {/if}
+            <section class="mod-visual">
+              <header>
+                <div>
+                  <h3>ACTIVITY FLOW <span>{filteredModerationTimeline.length}</span></h3>
+                  <p class="muted small">Each rail is a member. Lines connect a moderator action to the person it concerns; the detailed evidence remains in the scroll below.</p>
+                </div>
+                <label class="mod-user-filter">
+                  <span>View user</span>
+                  <select value={moderationUserFilter} onchange={(event) => setModerationUserFilter(event.currentTarget.value)}>
+                    <option value="">All users</option>
+                    {#each moderationUsers as identity (identity)}
+                      <option value={identity}>{nameOf(identity)}</option>
+                    {/each}
+                  </select>
+                </label>
+              </header>
+              <div class="mod-graph-scroll">
+                <svg
+                  class="mod-graph"
+                  viewBox={`0 0 ${moderationGraph.width} ${moderationGraph.height}`}
+                  style={`min-width:${Math.max(760, moderationGraph.nodes.length * 14)}px`}
+                  role="img"
+                  aria-label={`Moderation activity flow across ${moderationGraph.lanes.length} user lanes`}
+                >
+                  {#each moderationGraph.lanes as lane (lane.identity)}
+                    <g class="mod-lane">
+                      <text x="8" y={lane.y + 4}>{nameOf(lane.identity)}</text>
+                      <line x1="150" y1={lane.y} x2={moderationGraph.width - 24} y2={lane.y}></line>
+                    </g>
+                  {/each}
+                  {#each moderationGraph.nodes as node (node.key)}
+                    {#if node.fromY !== node.y}
+                      <path class="mod-branch" d={`M ${node.x - 10} ${node.fromY} C ${node.x - 3} ${node.fromY}, ${node.x - 3} ${node.y}, ${node.x} ${node.y}`}></path>
+                    {/if}
+                    <a href={`#mod-row-${node.key}`} aria-label={`${node.kind} at ${new Date(node.ts).toLocaleString()}`}>
+                      <circle class="mod-node" class:message={node.kind === "message"} class:warning={node.kind === "warning"} class:case={node.kind === "kick_case"} class:resolution={node.kind === "case_resolution"} cx={node.x} cy={node.y} r={node.kind === "message" ? 4 : 6}></circle>
+                      <title>{node.kind.replace("_", " ")} · {new Date(node.ts).toLocaleString()}</title>
+                    </a>
+                  {/each}
+                </svg>
+              </div>
+              <div class="mod-legend muted small"><span><i class="message"></i>message</span><span><i class="warning"></i>warning</span><span><i class="case"></i>kick case</span><span><i class="resolution"></i>resolution</span></div>
+            </section>
+            <div class="mod-grid">
+              <section class="mod-timeline">
+                <h3>EVENT DETAIL <span>{filteredModerationTimeline.length}</span></h3>
+                <ol>
+                  {#each [...filteredModerationTimeline].reverse() as row (row.key)}
+                    <li id={`mod-row-${row.key}`} class:mod-event={row.kind === "event"} class:selected={moderationSelected.has(row.key)}>
+                      {#if row.kind === "message"}
+                        <label class="mod-check" title="Select this message">
+                          <input type="checkbox" checked={moderationSelected.has(row.key)} onclick={(e) => selectModerationRow(row.key, e.shiftKey)} />
+                        </label>
+                        <div class="mod-row-copy">
+                          <div class="mod-row-meta"><b>#{row.message.channelName}</b><span>{nameOf(row.message.author)}</span><time>{new Date(row.ts).toLocaleString()}</time></div>
+                          <p>{msgSnippet(row.message.text, 220)}</p>
+                        </div>
+                      {:else}
+                        <span class="mod-glyph">{row.event.kind === "warning" ? "!" : row.event.kind === "kick_case" ? "?" : "✓"}</span>
+                        <div class="mod-row-copy">
+                          <div class="mod-row-meta"><b>{row.event.kind.replace("_", " ")}</b><span>by {nameOf(row.event.actor)}</span><time>{new Date(row.ts).toLocaleString()}</time></div>
+                          <p>{row.event.reason || row.event.outcome}</p>
+                          {#if !row.event.signature_valid}<span class="mod-proof bad">invalid signature · ignored</span>{:else if !row.event.authorized}<span class="mod-proof warn">signer lacks current authority · ignored</span>{:else}<span class="mod-proof ok">signed · attributed</span>{/if}
+                        </div>
+                      {/if}
+                    </li>
+                  {:else}
+                    <li class="muted">No user events yet.</li>
+                  {/each}
+                </ol>
+              </section>
+              <aside class="mod-cases">
+                <section>
+                  <h3>OPEN KICK CASES <span>{moderationCases.length}</span></h3>
+                  {#each moderationCases as kick (kick.id)}
+                    {@const tally = voteTally(moderation.votes, kick.id)}
+                    <article class="kick-case">
+                      <div class="kick-case-head"><strong>{nameOf(kick.target)}</strong><span>{tally.yes} yes · {tally.no} no</span></div>
+                      <p>{kick.reason}</p>
+                      {#if kick.evidence_ids.length}<span class="muted small">{kick.evidence_ids.length} signed warning{kick.evidence_ids.length === 1 ? "" : "s"} attached</span>{/if}
+                      <div class="kick-actions">
+                        <button class="ghost small" onclick={() => voteKick(kick.id, true)}>Vote yes</button>
+                        <button class="ghost small" onclick={() => voteKick(kick.id, false)}>Vote no</button>
+                        {#if myRole === "owner"}
+                          <button class="ghost small" onclick={() => resolveKick(kick.id, false)}>Dismiss</button>
+                          <button class="danger-btn small" onclick={() => resolveKick(kick.id, true)}>Remove member</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {:else}<p class="muted small">No case is awaiting an owner decision.</p>{/each}
+                </section>
+                {#if canModerate}
+                  <section class="case-builder">
+                    <h3>MAKE A CASE</h3>
+                    <label><span>Member</span><select bind:value={caseTarget}><option value="">Choose…</option>{#each roster.filter((member) => !member.you) as member (member.fingerprint)}<option value={member.fingerprint}>{nameOf(member.fingerprint)}</option>{/each}</select></label>
+                    <label><span>Public reason</span><textarea bind:value={caseReason} maxlength="2048" rows="3" placeholder="Explain why removal is being proposed…"></textarea></label>
+                    <div class="evidence-list">
+                      <span class="muted small">Evidence: signed warnings for this member</span>
+                      {#each signedWarnings.filter((warning) => !caseTarget || warning.target === caseTarget) as warning (warning.id)}
+                        <label><input type="checkbox" checked={caseEvidence.has(warning.id)} onchange={() => toggleCaseEvidence(warning.id)} /><span><b>{warning.reason}</b><small>{msgSnippet(warning.message_text, 100)}</small></span></label>
+                      {:else}<p class="muted small">Warn a relevant message first, then attach it here.</p>{/each}
+                    </div>
+                    <button disabled={!caseTarget || !caseReason.trim()} onclick={openKickCase}>Publish case for a vote</button>
+                  </section>
+                {/if}
+              </aside>
+            </div>
+          </div>
+        {:else if view === "storage"}
+          <div class="operations-pane tab-pane">
+            <header class="ops-head">
+              <div><span class="stx-crumb">SERVER // OPERATIONS // STORAGE</span><h2>Storage health &amp; repair</h2><p class="muted small">The first visit verifies every referenced chunk once and saves a session snapshot. Revisiting this page never starts another scan; Repair explicitly verifies again after recovery.</p></div>
+              <span class="storage-snapshot">{storageChecking ? "Checking once…" : storageHealth ? `Saved · ${new Date(storageHealth.checked_at_ms).toLocaleTimeString()}` : "Waiting"}</span>
+            </header>
+            {#if storageHealth}
+              <div class="health-score" class:healthy={!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests}>
+                <div class="health-ring"><b>{storageHealth.referenced_chunks ? Math.round(storageHealth.verified_chunks / storageHealth.referenced_chunks * 100) : 100}%</b><span>verified</span></div>
+                <div><h3>{!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests ? "Storage is healthy" : "Storage needs attention"}</h3><p>{storageHealth.verified_chunks} of {storageHealth.referenced_chunks} unique chunks verified · {fmtSize(storageHealth.verified_bytes)} encrypted content</p></div>
+              </div>
+              <div class="health-cards">
+                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing chunks</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
+              </div>
+              <div class="storage-breakdown">
+                <section class="storage-categories">
+                  <h3>SPACE BY TYPE <span>local estimate</span></h3>
+                  <p class="muted small">The integrity total above is exact ciphertext bytes. These bars estimate locally held plaintext from chunk availability, while “logical” is the full deduplicated share size.</p>
+                  {#each storageHealth.categories as category (category.name)}
+                    <div class="storage-category-row">
+                      <div><b>{category.name}</b><span>{category.files} file{category.files === 1 ? "" : "s"}{category.pinned_files ? ` · ${category.pinned_files} pinned` : ""}</span></div>
+                      <div class="storage-bar"><i style={`width:${Math.max(2, category.local_estimated_bytes / storageCategoryMax * 100)}%`}></i></div>
+                      <strong>{fmtSize(category.local_estimated_bytes)} <small>/ {fmtSize(category.logical_bytes)} logical</small></strong>
+                    </div>
+                  {:else}<p class="muted small">No shared file content is listed.</p>{/each}
+                </section>
+                <section class="storage-largest">
+                  <h3>LARGEST FILES <span>top {storageHealth.largest_files.length}</span></h3>
+                  <ol>
+                    {#each storageHealth.largest_files as file (file.cid)}
+                      <li>
+                        <span class="storage-rank">{file.pinned ? "📌" : "·"}</span>
+                        <div><b>{file.name}</b><small>{file.path || "root"} · {file.held}/{file.total} chunks local</small></div>
+                        <strong>{fmtSize(file.local_estimated_bytes)}<small>{fmtSize(file.logical_bytes)} logical</small></strong>
+                      </li>
+                    {:else}<li class="muted small">No files to rank.</li>{/each}
+                  </ol>
+                </section>
+              </div>
+              <section class="storage-pinned">
+                <span class="storage-pin-icon">📌</span>
+                <div><h3>Pinned by the wiki</h3><p class="muted small">{storageHealth.pinned_files} unique file{storageHealth.pinned_files === 1 ? "" : "s"} · {fmtSize(storageHealth.pinned_local_estimated_bytes)} local estimate · {fmtSize(storageHealth.pinned_logical_bytes)} logical. Wiki embeds are retained regardless of their circulation date.</p></div>
+              </section>
+              <section class="repair-card">
+                <div><h3>Authenticated repair</h3><p class="muted small">Re-fetches only missing or unreadable CIDs. A peer signs the response and the bytes must hash to the requested address before they replace a corrupt local record.</p><span class:ok-t={storageHealth.has_peers} class:fail-t={!storageHealth.has_peers}>{storageHealth.has_peers ? "A member was connected at check time" : "No member was connected at check time"}</span></div>
+                <button disabled={storageRepairing || (!storageHealth.missing_chunks && !storageHealth.unreadable_chunks)} onclick={repairStorage}>{storageRepairing ? "Repairing…" : "Repair now"}</button>
+              </section>
+              {#if storageRepairNote}<p class="storage-note">{storageRepairNote}</p>{/if}
+            {:else if storageChecking}<p class="muted">Reading and authenticating this server's local file records…</p>{:else}<p class="muted">The storage snapshot could not be loaded.</p>{/if}
+          </div>
+        {:else if view === "connectivity"}
+          <div class="operations-pane tab-pane">
+            <header class="ops-head"><div><span class="stx-crumb">SERVER // OPERATIONS // CONNECTIVITY</span><h2>Connectivity assistant</h2><p class="muted small">What this device can prove, what it merely attempted, and what to try next.</p></div><button class="ghost small" onclick={refreshConnectivity}>Refresh</button></header>
+            {#if connectivity?.action}
+              {@render connDetail(connectivity)}
+              <div class="connect-actions"><button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied" : "Copy diagnostic"}</button><button class="ghost small" onclick={() => openSettings("network")}>Open network settings</button><button class="ghost small" onclick={() => openSettings("diagnostics")}>Debug logging</button></div>
+            {:else}<section class="repair-card"><div><h3>No attempt recorded this session</h3><p class="muted small">Founding or joining a server populates the detailed action log. Live peer presence above is still current.</p></div><button onclick={() => (showAdd = true)}>Add or join a server</button></section>{/if}
+            <!-- The media plane's own evidence. It lives here rather than in a panel of its own
+                 because "why will my call not connect" and "why will my server not connect" are
+                 the same question asked about two stacks, and answering them in two places is how
+                 you end up with a user reading the wrong one. -->
+            <section class="connection-voice" aria-labelledby="connection-voice-title">
+              <header>
+                <div>
+                  <h3 id="connection-voice-title">VOICE AND VIDEO</h3>
+                  <p class="muted small">The call media path is separate from the mesh: chat working does not mean a call will.</p>
+                </div>
+                <button class="ghost small" onclick={refreshCallTransport}>Refresh</button>
+              </header>
+              {#if callTransport}
+                <ul class="conn-facts">
+                  <li>
+                    <span class="stage-label">DIRECT ROUTE</span>
+                    <span class={callTransport.public_direct ? "ok-t" : "fail-t"}>
+                      {callTransport.public_direct ? "this device is directly reachable" : "behind NAT"}
+                    </span>
+                  </li>
+                  <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
+                  <li>
+                    <span class="stage-label">ROUTER</span>
+                    <span class={callTransport.router_maps ? "ok-t" : "muted small"}>
+                      {callTransport.router_maps
+                        ? "opens ports on request; each call's media socket is offered a mapped route"
+                        : "has not granted a mapping; calls rely on STUN hole punching or TURN"}
+                    </span>
+                  </li>
+                  {#if callTransport.public_ipv6.length}
+                    <li><span class="stage-label">PUBLIC IPV6</span><span class="ok-t">{callTransport.public_ipv6.join(", ")}</span></li>
+                  {/if}
+                  {#if callTransport.public_ipv4.length}
+                    <li><span class="stage-label">PUBLIC IPV4</span><span class="muted small">{callTransport.public_ipv4.join(", ")}</span></li>
+                  {/if}
+                  <li>
+                    <span class="stage-label">RELAY HOSTS</span>
+                    <span class={callTransport.bridges.length ? "ok-t" : "muted small"}>
+                      {callTransport.bridges.length
+                        ? `${callTransport.bridges.length} member(s) offering, ${callTransport.bridges.filter((b) => b.direct).length} with a public route`
+                        : "none offering"}
+                    </span>
+                  </li>
+                </ul>
+                <p class="muted small">{callTransport.advice}</p>
+              {:else}
+                <p class="muted small">No report yet. Press Refresh, or join a voice room.</p>
+              {/if}
+              {#if inCall && callParticipants.length}
+                <ul class="conn-facts">
+                  {#each callParticipants as fp (fp)}
+                    <li>
+                      <span class="stage-label">{callNameOf(fp).slice(0, 18)}</span>
+                      <span class="muted small">
+                        link {callPeerStates[fp] ?? "new"}{peerTransport[fp] ? `, ${peerTransport[fp] === "relayed" ? "relayed through a TURN" : "direct peer to peer"}` : ", path not known yet"}
+                      </span>
+                    </li>
+                  {/each}
+                </ul>
+              {/if}
+            </section>
+
+            <section class="connection-hosting" aria-labelledby="connection-hosting-title">
+              <header>
+                <div>
+                  <h3 id="connection-hosting-title">GROUP HOSTING</h3>
+                  <p><b>{Math.max(onlineCount - 1, 0)}</b> of <b>{Math.max(members - 1, 0)}</b> other members are connected now.</p>
+                </div>
+                <span class="hosting-state" data-ready={(switchboardStatus?.online.length ?? 0) > 0}>{switchboardStatus?.online.length ?? 0} SWITCHBOARD{switchboardStatus?.online.length === 1 ? "" : "S"} ONLINE</span>
+              </header>
+              <div class="hosting-depths">
+                <article>
+                  <span class="hosting-depth">ONE-TIME</span>
+                  <div><b>Help with this join</b><p>An eligible member may approve one short reply window. It forwards only the inviter's admission handshake, then remains the joiner's first live group path.</p></div>
+                  <span class="ok-t">available below</span>
+                </article>
+                <article>
+                  <span class="hosting-depth">STANDING</span>
+                  <div><b>Switchboard role</b><p>Fresh invites may advertise opted-in, connected members as reusable fallbacks after the inviter's direct route fails. No device is enrolled silently.</p></div>
+                  <button class="ghost small" class:danger-btn={switchboardStatus?.offered} disabled={switchboardBusy || (!switchboardStatus?.offered && !switchboardStatus?.eligible)} title={switchboardStatus?.reason ?? "Reading this device's route eligibility"} onclick={toggleSwitchboard}>{switchboardBusy ? "Saving…" : switchboardStatus?.offered ? "Stop hosting" : "Offer to host from this device"}</button>
+                </article>
+              </div>
+              {#if switchboardStatus?.online.length}
+                <ul class="switchboard-list">
+                  {#each switchboardStatus.online as host}
+                    <li><span class="switchboard-badge">⇄ switchboard</span><b>{nameOf(host.fingerprint)}</b><span>{host.addresses} advertised candidate route{host.addresses === 1 ? "" : "s"}</span></li>
+                  {/each}
+                </ul>
+              {/if}
+              <p class="muted small hosting-disclosure">A switchboard is already a group member, so it gains no new content access, but carrying a connection uses its bandwidth and exposes the joiner's IP address and timing. Fresh assisted invites disclose this host's stable device fingerprint, transport identity, and advertised public or relay candidate addresses to their recipients. Admission still requires the invite's named inviter to sign the Welcome. Turning hosting off refuses new forwards immediately; an already-cached signed offer can remain visible in newly copied invites, and already-copied invites can retain the old address, only until that offer's short deadline.</p>
+            </section>
+            <section class="connection-fallback" aria-labelledby="connection-fallback-title">
+              <div>
+                <h3 id="connection-fallback-title">FALLBACK NODE</h3>
+                <b>No Mewtual-operated fallback required</b>
+                <p class="muted small">Mewtual starts without an owned service. A group can use direct routes and opted-in member switchboards, or configure its own relay/rendezvous address. The first two mutually unreachable people still need a public route, router mapping, or third party.</p>
+              </div>
+              <button class="ghost small" onclick={() => openSettings("network")}>Configure your own</button>
+            </section>
+            {#if activeServerId !== null}
+              <section class="repair-card reply-card">
+                <div>
+                  <h3>One-time connection help</h3>
+                  <p class="muted small">If a joiner sent back a <code>mewtual-reply-v1</code> code, paste it here. The assistant validates the original signed invite and dials only the reply's claimed public TCP/QUIC routes for the remaining 60-second window; Noise still requires the claimed peer identity. The named inviter admits directly. Another current member may help only when it is already connected to that inviter: it forwards the admission handshake and keeps the resulting member connection alive, but it never makes the admission decision.</p>
+                  <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste connection reply"></textarea>
+                  {#if joinReplyNeedsReplace}<p class="muted small fail-t">This invite already has a different active joiner. Replace it only if you deliberately switched people.</p>{/if}
+                </div>
+                <div class="connect-actions">
+                  <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>{joinReplyApplying ? "Dialling…" : "Dial joiner"}</button>
+                  {#if joinReplyNeedsReplace}<button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>Confirm replacement</button>{/if}
+                </div>
+              </section>
+            {/if}
           </div>
         {:else if view === "files"}
           <div class="files-head">
@@ -10583,7 +16457,14 @@
               {/each}
             </nav>
           </div>
-          <ul class="file-list tab-pane">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <ul
+            class="file-list tab-pane"
+            class:drag-over={dragOver}
+            ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={onFilesDrop}
+          >
             {#each folderView.subs as sub}
               <li>
                 <button class="folder-name" onclick={() => enterFolder(sub)}>📁 {sub}</button>
@@ -10607,7 +16488,7 @@
             {/if}
           </ul>
         {:else if view === "status"}
-          <h2>Status</h2>
+          <h2>Announcements</h2>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <form
             class="composer"
@@ -10627,7 +16508,8 @@
                 onchange={(e) => { embedFiles("status", e.currentTarget.files); e.currentTarget.value = ''; }}
               />
             </label>
-            <input bind:value={statusDraft} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Post a status…"} />
+            {@render textEffectButton("announcement", "Announcement text effects")}
+            <textarea bind:this={announcementInputEl} bind:value={statusDraft} rows="1" onselect={() => onTextEffectSelection("announcement")} placeholder={uploading ? "Uploading…" : dragOver ? "Drop to embed…" : "Write an announcement…"}></textarea>
             <button type="submit" disabled={uploading}>Post</button>
           </form>
           <ul class="status-list tab-pane" bind:this={statusEl} use:richClicks>
@@ -10641,11 +16523,18 @@
                 <span class="status-text">{@html renderMessage(s.text, myMentionName)}</span>
               </li>
             {:else}
-              <li class="muted">No status posts yet.</li>
+              <li class="muted">No announcements yet.</li>
             {/each}
           </ul>
         {:else if view === "wiki"}
-          <div class="wiki">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="wiki"
+            class:drag-over={dragOver}
+            ondragover={(e) => { if (activeWikiPage) { e.preventDefault(); dragOver = true; } }}
+            ondragleave={() => (dragOver = false)}
+            ondrop={onWikiDrop}
+          >
             {#if wikiReviewOpen && canModerate}
               <!-- The admin review surface replaces the article area: every pending member
                    edit on this server, oldest first, each diffed against the live page. -->
@@ -10717,7 +16606,7 @@
                   <div class="wiki-head-tools">
                     {#if !wikiRenaming && wikiPages.includes(activeWikiPage)}
                       <button class="ghost small" class:active={showWikiHistory} title="Every revision of this page: who changed what, when; restore any of them" onclick={() => (showWikiHistory ? (showWikiHistory = false) : openWikiHistory())}>history</button>
-                      {#if wikiReviewDays === 0 || canModerate}
+                      {#if mayEditWikiStructure(wikiReviewDays, canModerate)}
                         <button class="ghost small" title="Rename this page (links to the old name go red; they aren't rewritten)" onclick={startWikiRename}>rename</button>
                         {#if wikiDeleteArmed}
                           <button class="ghost small wiki-del armed" title="This deletes the page for every member" onclick={() => deleteWikiPage(activeWikiPage)}>confirm delete</button>
@@ -10748,12 +16637,13 @@
                     <button class="wiki-tb" title="Numbered list" onclick={() => wikiList(true)}>1≡</button>
                     <button class="wiki-tb" title="Insert a table" onclick={insertWikiTable}>⊞</button>
                     <button class="wiki-tb" title="Insert an infobox: the summary card that floats at the top right of the page (one per page)" onclick={insertWikiInfobox}>▤</button>
+                    {@render textEffectButton("wiki", "Wiki text effects")}
                     <span class="wiki-tb-sep"></span>
                     <div class="wiki-ip-anchor">
                       <button
                         class="wiki-tb"
                         class:active={showInsert && insertTarget === "wiki"}
-                        title="Link or embed a shared file, a status post, another page, or an event"
+                        title="Link or embed a shared file, an announcement, another page, or an event"
                         aria-expanded={showInsert && insertTarget === "wiki"}
                         onclick={() => toggleInsert("wiki")}
                       >+ insert</button>
@@ -10778,7 +16668,7 @@
                     ondragleave={() => (dragOver = false)}
                     ondrop={onWikiDrop}
                   >
-                    <textarea bind:this={wikiTextarea} bind:value={wikiBody} oninput={() => (wikiDirty = true)} onkeydown={onWikiEditKey} rows="18"
+                    <textarea bind:this={wikiTextarea} bind:value={wikiBody} oninput={() => (wikiDirty = true)} onselect={() => onTextEffectSelection("wiki")} onkeydown={onWikiEditKey} rows="18"
                       placeholder={wikiFormat === "wiki"
                         ? "Wikitext. == Heading ==, '''bold''', ''italic'', [[Page]] or [[Page|label]] links, * bullet / # numbered lists; drop or attach a file to embed it."
                         : "Markdown. # Heading, **bold**, *italic*, [[Page]] or [[Page|label]] links, - lists; drop or attach a file to embed it."}></textarea>
@@ -10883,17 +16773,30 @@
           </div>
         {:else if view === "profile"}
           <h2>Your profile</h2>
-          {@render profileEditor()}
+          <div class="profile-workspace">
+            {@render profileEditor()}
+            <aside class="stx-prev profile-surface-preview">
+              {@render profilePreview()}
+            </aside>
+          </div>
         {:else if view === "events"}
           <h2>Events</h2>
           <div class="events-tab tab-pane">
-            <form class="event-form" onsubmit={(e) => { e.preventDefault(); createEvent(); }}>
-              <input bind:value={evTitle} maxlength="120" placeholder="Event title" />
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <form
+              class="event-form"
+              class:drag-over={dragOver}
+              ondragover={(e) => { e.preventDefault(); dragOver = true; }}
+              ondragleave={() => (dragOver = false)}
+              ondrop={onEventDrop}
+              onsubmit={(e) => { e.preventDefault(); createEvent(); }}
+            >
+              <div class="text-fx-input-row"><input bind:this={eventTitleEl} bind:value={evTitle} maxlength="120" placeholder="Event title" onselect={() => onTextEffectSelection("event-title")} />{@render textEffectButton("event-title", "Event title effects")}</div>
               <div class="event-times">
                 <label><span class="muted small">Starts</span><input type="datetime-local" bind:value={evStart} /></label>
                 <label><span class="muted small">Ends (optional)</span><input type="datetime-local" bind:value={evEnd} /></label>
               </div>
-              <textarea bind:value={evBody} rows="2" maxlength="1024" placeholder="Details (optional)"></textarea>
+              <div class="text-fx-input-row"><textarea bind:this={eventBodyEl} bind:value={evBody} rows="2" maxlength="1024" placeholder="Details (optional)" onselect={() => onTextEffectSelection("event-body")}></textarea>{@render textEffectButton("event-body", "Event detail effects")}</div>
               <div class="ev-image-row">
                 {#if evImage}
                   <span class="ev-image-pick">
@@ -10920,17 +16823,17 @@
               <button disabled={!evTitle.trim() || !evStart}>Create event</button>
             </form>
             <h3 class="ev-h"><span>Upcoming: {upcomingEvents.length}</span></h3>
-            <ul class="event-list">
+            <ul class="event-list" use:richClicks>
               {#each upcomingEvents as e (e.id)}
                 <li class="event-row" class:flash={flashEventId === e.id}>
                   <div class="ev-when">{fmtEventWhen(e)}</div>
                   <div class="ev-main">
-                    <div class="ev-title">{e.title}</div>
-                    {#if e.body}<div class="ev-body">{e.body}</div>{/if}
+                    <div class="ev-title">{@html renderMessage(e.title, "")}</div>
+                    {#if e.body}<div class="ev-body">{@html renderMessage(e.body, "")}</div>{/if}
                     <div class="ev-meta">by {@render nameTag(e.author)}</div>
                   </div>
                   {#if e.image && mediaUrls[e.image]}
-                    <img class="ev-poster" src={mediaUrls[e.image]} alt={`Poster for ${e.title}`} />
+                    <img class="ev-poster" src={mediaUrls[e.image]} alt={`Poster for ${plainSummary(e.title, 100)}`} />
                   {/if}
                   {#if e.author === myFp || canModerate}
                     {#if confirmDeleteEventId === e.id}
@@ -10946,12 +16849,13 @@
             </ul>
             {#if pastEvents.length}
               <h3 class="ev-h"><span>Past: {pastEvents.length}</span></h3>
-              <ul class="event-list past">
+              <ul class="event-list past" use:richClicks>
                 {#each pastEvents as e (e.id)}
                   <li class="event-row">
                     <div class="ev-when">{fmtEventWhen(e)}</div>
                     <div class="ev-main">
-                      <div class="ev-title">{e.title}</div>
+                      <div class="ev-title">{@html renderMessage(e.title, "")}</div>
+                      {#if e.body}<div class="ev-body">{@html renderMessage(e.body, "")}</div>{/if}
                       <div class="ev-meta">by {@render nameTag(e.author)}</div>
                     </div>
                     {#if e.author === myFp || canModerate}
@@ -10967,32 +16871,69 @@
             {/if}
           </div>
         {:else if view === "downloads"}
-          <h2>Downloads</h2>
+          <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
-            {#if downloadList.length === 0}
-              <p class="muted">No downloads yet. Open a file and click <strong>↓ Download</strong> to start one.</p>
+            <button class="transfer-health" onclick={() => switchView("storage")}>
+              {@render icoStorage()}
+              {#if storageHealth}
+                <span><b>{storageHealth.missing_chunks || storageHealth.unreadable_chunks || storageHealth.invalid_manifests ? "Storage needs attention" : "Storage verified"}</b><small>{storageHealth.verified_chunks}/{storageHealth.referenced_chunks} chunks · {storageHealth.missing_chunks + storageHealth.unreadable_chunks} need repair</small></span>
+              {:else}
+                <span><b>Storage health</b><small>Verify seals, addresses and file keys</small></span>
+              {/if}
+              <i>Open →</i>
+            </button>
+            {#if transferList.length === 0}
+              <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
             {:else}
               <div class="dl-toolbar">
-                <span class="muted small">{activeDownloads} active · {downloadList.length} total</span>
+                <span class="muted small">
+                  {movingTransfers} active{#if waitingTransfers} · {waitingTransfers} waiting{/if} · {transferList.length} total
+                </span>
+                <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+              </div>
+              <div class="transfer-legend" aria-label="Transfer piece colours">
+                <span><i class="transfer-piece held"></i>ready</span>
+                <span><i class="transfer-piece active"></i>transferring</span>
+                <span><i class="transfer-piece pending"></i>pending</span>
+                <span><i class="transfer-piece offline"></i>no connection</span>
               </div>
               <ul class="dl-list">
-                {#each downloadList as d (d.cid)}
+                {#each transferList as d (d.key)}
+                  {@const pieces = transferPieceStates(d)}
                   <li class="dl-item">
                     <div class="dl-item-main">
-                      <span class="dl-item-name">{d.name}</span>
+                      <span class="dl-item-name">{#if d.direction === "upload"}↑{:else}↓{/if} {d.name}</span>
                       <span class="muted small">
-                        {#if d.provider}from {nameOf(d.provider)}{:else}shared by {nameOf(d.author)}{/if}
+                        {#if d.direction === "upload"}
+                          {#if d.path}sharing to /{d.path}{:else}sharing to the group{/if}
+                        {:else if d.provider}receiving from {nameOf(d.provider)}
+                        {:else if !transferConnected(d)}waiting for a connected member
+                        {:else}shared by {nameOf(d.author)}{/if}
                       </span>
                     </div>
-                    <div class="dl-item-status {d.status}">
-                      {#if d.status === "downloading"}{Math.round(d.progress * 100)}%
-                      {:else if d.status === "queued"}Queued
-                      {:else if d.status === "done"}✓ Done
-                      {:else}✗ Failed{/if}
+                    <div class="dl-item-status {transferTone(d)}">
+                      {#if transferIsActive(d)}<span class="transfer-pulse" aria-hidden="true"></span>{/if}
+                      {transferStatus(d)}
                     </div>
-                    {#if d.status === "downloading" || d.status === "queued"}
-                      <progress class="dl-item-bar" value={d.progress} max="1"></progress>
+                    {#if d.status === "failed" && d.error}
+                      <span class="dl-item-error" title={d.error}>{d.error}</span>
                     {/if}
+                    <div
+                      class="transfer-piece-bar"
+                      role="progressbar"
+                      aria-label={`Transfer progress for ${d.name}`}
+                      aria-valuemin="0"
+                      aria-valuemax={d.total}
+                      aria-valuenow={Math.min(d.done, d.total)}
+                      title={transferHover(d)}
+                    >
+                      {#each pieces as piece}
+                        <span class="transfer-piece {piece}" aria-hidden="true"></span>
+                      {/each}
+                    </div>
+                    <span class="transfer-piece-count muted" title={transferHover(d)}>
+                      {Math.min(d.done, d.total)}/{d.total} chunks
+                    </span>
                   </li>
                 {/each}
               </ul>
@@ -11015,7 +16956,7 @@
             <input class="list-search" bind:value={rosterFilter} placeholder="Search members…" />
           {/if}
           {#if !filteredRoster.length}
-            <p class="muted small">No matching members.</p>
+            <p class="muted small">{groupLoading ? "Loading members…" : rosterFilter.trim() ? "No matching members." : "No members to show."}</p>
           {/if}
           {#if onlineRoster.length}
             <h3><span>online: {onlineRoster.length}</span></h3>
@@ -11049,7 +16990,26 @@
         {@render icoLock()} vault <span class="ok-t">unlocked</span>
       </button>
       {#if rendezvous.trim()}<span class="seg">rendezvous <span class="ok-t">set</span></span>{/if}
-      {#if activeDownloads}<span class="seg"><span class="warn-t">⇣ {activeDownloads} transfer{activeDownloads === 1 ? "" : "s"}</span></span>{/if}
+      {#if transferList.length}
+        <button
+          class="seg sb-transfers"
+          class:active={view === "downloads"}
+          title="Open Transfers"
+          onclick={() => switchView("downloads")}
+        >
+          {#if movingTransfers}
+            <span class="transfer-live"><span class="transfer-pulse" aria-hidden="true"></span>⇅ {movingTransfers} active</span>
+            {#if waitingTransfers}<span class="fail-t">· {waitingTransfers} waiting</span>{/if}
+            {#if failedTransfers}<span class="fail-t">· ✗ {failedTransfers} failed</span>{/if}
+          {:else if waitingTransfers}
+            <span class="fail-t">○ {waitingTransfers} waiting for connection</span>
+          {:else if failedTransfers}
+            <span class="fail-t">✗ {failedTransfers} failed</span>
+          {:else}
+            <span class="ok-t">✓ {finishedTransfers} finished</span>
+          {/if}
+        </button>
+      {/if}
       <span class="sb-spacer"></span>
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
@@ -11060,30 +17020,62 @@
       danger treatment plus an empty meter in both shapes.
     -->
     {#if inCall && !stageOpen && !focusOpen}
-      <div class="call-bar">
+      <div class="call-bar" class:top={callDockTop} class:away={callElsewhere}>
         <span class="call-dot">{@render icoSpeaker()}</span>
-        <span class="call-title">Voice · #{callChannelName}</span>
+        <span class="call-title">Voice</span>
+        {@render callServerTag()}
         <span class="call-status">{callStatusText}</span>
+        {#if roomPath}
+          <span
+            class="stage-path {roomPath}"
+            title={roomPath === "relayed"
+              ? "Relayed: end to end encrypted, but a relay carries it and sees who, when, and from which IP"
+              : "Direct: peer to peer, nobody in the media path"}
+          >{roomPath === "relayed" ? "RLY" : "P2P"}</span>
+        {/if}
+        <button
+          class="ghost stage-sec"
+          title="Open the connection report for this call"
+          onclick={openCallDiagnostics}
+        >CONN</button>
         <div class="call-avatars">
-          {@render avatarTag(myFp)}
-          {#each callParticipants as fp}{@render avatarTag(fp)}{/each}
+          {@render callAvatarTag(callSelfFp)}
+          {#each callParticipants as fp}{@render callAvatarTag(fp)}{/each}
         </div>
         {@render micMeter()}
-        {#if videoAnnounced}
-          <button class="ghost focus-chip" title="Open the video focus view" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
+        <button class="ghost focus-chip" title="Open the focus view: the call takes the window" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
+        {#if micOn}
+          <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
+        {:else}
+          <button class="ghost small btn-ico stage-mute nomic" title="You are in this room without a microphone: the jukebox and the instruments still work. Click to turn a mic on." onclick={enableMic}>{@render icoMicOff()} No mic</button>
         {/if}
-        <button class="ghost small btn-ico stage-mute" class:muted={callMuted} title={callMuted ? "Unmute" : "Mute"} onclick={toggleMute}>{#if callMuted}{@render icoMicOff()} Muted{:else}{@render icoMic()} Mute{/if}</button>
         <button class="call-hangup btn-ico" title="Leave voice" onclick={leaveVoice}>{@render icoHangup()} Leave</button>
-        <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{@render icoChevUp()}</button>
+        <button class="ghost stage-chev" title="Open the voice stage" aria-label="Open the voice stage" onclick={() => (stageOpen = true)}>{#if callDockTop}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
       </div>
     {/if}
 
     {#if inCall && stageOpen && !focusOpen}
-      <div class="stage">
+      <div class="stage" class:top={callDockTop} class:away={callElsewhere}>
         <header class="stage-head">
           <span class="stage-live"></span>
-          <span class="stage-label">VOICE · #{callChannelName}</span>
+          <span class="stage-label">VOICE</span>
+          {@render callServerTag()}
           <span class="stage-spacer"></span>
+          {#if roomPath}
+            <button
+              class="ghost stage-sec {roomPath}"
+              aria-expanded={secInfoOpen}
+              title={roomPath === "relayed"
+                ? "At least one leg goes through a relay: click for what that means"
+                : "Every leg is peer to peer"}
+              onclick={() => (secInfoOpen = !secInfoOpen)}
+            >E2E · {roomPath === "relayed" ? "RELAY" : "DIRECT"}</button>
+          {/if}
+          <button
+            class="ghost stage-sec"
+            title="Open the connection report for this call"
+            onclick={openCallDiagnostics}
+          >CONN</button>
           {#if callParticipants.length === 0}
             <span class="stage-tally solo">solo</span>
           {:else}
@@ -11091,11 +17083,24 @@
               {linksUp}/{callParticipants.length} links up
             </span>
           {/if}
-          {#if videoAnnounced}
-            <button class="ghost focus-chip" title="Open the video focus view" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
-          {/if}
-          <button class="ghost stage-chev" title="Collapse to the call bar" aria-label="Collapse to the call bar" onclick={() => (stageOpen = false)}>{@render icoChevDown()}</button>
+          <button class="ghost focus-chip" title="Open the focus view: the call takes the window" onclick={openFocus}>{@render icoCam()}<span class="stage-label">FOCUS</span></button>
+          <button class="ghost stage-chev" title={winFullscreen ? "Leave fullscreen" : "Fullscreen"} aria-label={winFullscreen ? "Leave fullscreen" : "Fullscreen"} onclick={toggleFullscreen}>{@render icoFullscreen()}</button>
+          <button
+            class="ghost stage-chev"
+            title={callDockTop ? "Dock the voice bar at the bottom" : "Dock the voice bar at the top"}
+            aria-label={callDockTop ? "Dock the voice bar at the bottom" : "Dock the voice bar at the top"}
+            onclick={toggleDockSlot}
+          >{@render icoDock()}</button>
+          <button class="ghost stage-chev" title="Collapse to the call bar" aria-label="Collapse to the call bar" onclick={() => (stageOpen = false)}>{#if callDockTop}{@render icoChevUp()}{:else}{@render icoChevDown()}{/if}</button>
         </header>
+
+        {#if secInfoOpen}
+          <p class="stage-secinfo">
+            Media is end to end encrypted on every path; no relay or server can hear or decrypt it.
+            A relayed leg passes through a TURN relay, which can see who is talking to whom, when,
+            and from which IP address. A direct leg has nobody in the path at all.
+          </p>
+        {/if}
 
         {#if callParticipants.length === 0}
           <div class="stage-solo">
@@ -11109,8 +17114,8 @@
               {@const vol = peerVolumes[fp] ?? 1}
               <li class="stage-peer">
                 <div class="stage-row">
-                  <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render avatarTag(fp)}</span>
-                  <span class="stage-nm">{@render nameTag(fp)}</span>
+                  <span class="stage-av" class:talking={speaking[fp]}>{@render catEars(fp)}{@render callAvatarTag(fp)}</span>
+                  <span class="stage-nm">{@render callNameTag(fp)}</span>
                   <span class="stage-spacer"></span>
                   {#if (remoteHeld[fp] ?? []).length > 0}
                     <span class="stage-playing" title="Playing right now">{@render icoNote()}</span>
@@ -11120,6 +17125,14 @@
                   {/if}
                   {#if peerMeta[fp]?.inst}
                     <span class="stage-chip struck" title="They have muted incoming instruments: they can't hear you play">INST</span>
+                  {/if}
+                  {#if link === "est" && peerTransport[fp]}
+                    <span
+                      class="stage-path {peerTransport[fp]}"
+                      title={peerTransport[fp] === "relayed"
+                        ? "Relayed: end to end encrypted, but a relay carries it and sees who, when, and from which IP"
+                        : "Direct: peer to peer, nobody in the media path"}
+                    >{peerTransport[fp] === "relayed" ? "RLY" : "P2P"}</span>
                   {/if}
                   <span class="stage-link {link}" title={`Link: ${callPeerStates[fp] ?? "new"}`}>{link === "est" ? "EST" : link === "neg" ? "NEG" : "LOST"}</span>
                 </div>
@@ -11159,9 +17172,9 @@
 
         <div class="stage-self">
           <div class="stage-row">
-            <span class="stage-av" class:talking={speaking.me}>{@render avatarTag(myFp)}</span>
-            <span class="stage-nm">{@render nameTag(myFp)}</span>
-            <span class="stage-fp">{myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>
+            <span class="stage-av" class:talking={speaking.me}>{@render callAvatarTag(callSelfFp)}</span>
+            <span class="stage-nm">{@render callNameTag(callSelfFp)}</span>
+            <span class="stage-fp">{callSelfFp.slice(0, 4)}·{callSelfFp.slice(4, 8)}</span>
             <span class="stage-spacer"></span>
             {@render micMeter()}
           </div>
@@ -11175,11 +17188,11 @@
               <span class="stage-act-lbl">{callDeafened ? "Deafened" : "Deafen"}</span>
             </button>
             <!-- Camera and share share one video slot, so lighting one always dims the other. -->
-            <button class="ghost stage-act" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} onclick={() => (myVideo === "cam" ? stopVideo() : void startVideo("cam"))}>
+            <button class="ghost stage-act" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} onclick={() => toggleVideo("cam")}>
               {@render icoCam()}
               <span class="stage-act-lbl">Cam</span>
             </button>
-            <button class="ghost stage-act" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} onclick={() => (myVideo === "screen" ? stopVideo() : void startVideo("screen"))}>
+            <button class="ghost stage-act" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} onclick={() => toggleVideo("screen")}>
               {@render icoScreen()}
               <span class="stage-act-lbl">Share</span>
             </button>
@@ -11251,13 +17264,43 @@
               {linksUp}/{callParticipants.length} links up
             </span>
           {/if}
-          <span class="focus-e2e" title="Every frame rides the same end-to-end encrypted peer link as the voice">MLS·E2E</span>
+          <!-- Says what is actually true. The media key is derived but the frame layer that would
+               use it is not implemented, so today's guarantee is DTLS-SRTP plus signalling that
+               cannot be MITM'd, which is E2E but is not MLS-keyed media. -->
+          {#if roomPath}
+            <span
+              class="focus-e2e {roomPath}"
+              title={roomPath === "relayed"
+                ? "End to end encrypted. At least one leg goes through a relay, which sees who and when, never the frames"
+                : "End to end encrypted, peer to peer, nobody in the media path"}
+            >E2E · {roomPath === "relayed" ? "RELAY" : "DIRECT"}</span>
+          {:else}
+            <span class="focus-e2e" title="Every frame rides an end-to-end encrypted peer link">E2E</span>
+          {/if}
+          <button class="ghost focus-exit" title={winFullscreen ? "Leave fullscreen" : "Fullscreen"} aria-label={winFullscreen ? "Leave fullscreen" : "Fullscreen"} onclick={toggleFullscreen}>{@render icoFullscreen()}</button>
           <button class="ghost focus-exit" title="Leave focus: back to chat and the voice dock" aria-label="Leave focus" onclick={exitFocus}>{@render icoFocusOut()}</button>
         </header>
 
-        <div class="focus-grid" style={`--focus-cols:${focusCols}`}>
+        <!-- The shared screen: a video the room is watching together gets the top band, and the
+             faces drop to a filmstrip underneath rather than competing with it. -->
+        {#if jukeNow && jukeKind === "video"}
+          <div class="focus-deck" use:jukeHost>
+            {#if jukeFetch}
+              <div class="focus-deck-load">
+                <span class="stage-label">
+                  {jukeFetch.source === "network" ? "PULLING" : "LOADING"} {jukeFetch.percent}%
+                </span>
+                <div class="juke-bar load {jukeFetch.source}">
+                  <i class="juke-bar-fill" style={`width:${jukeFetch.percent}%`}></i>
+                </div>
+              </div>
+            {/if}
+          </div>
+        {/if}
+
+        <div class="focus-grid" class:strip={jukeNow && jukeKind === "video"} style={`--focus-cols:${focusCols}`}>
           {#each focusTiles as fp (fp)}
-            {@const me = fp === myFp}
+            {@const me = fp === callSelfFp}
             {@const vid = me ? (myVideo === "screen" ? 2 : myVideo === "cam" ? 1 : 0) : peerMeta[fp]?.vid ?? 0}
             {@const stream = me ? localVideoStream : remoteStreams[fp] ?? null}
             {@const held = me ? callHeld : remoteHeld[fp] ?? []}
@@ -11269,7 +17312,7 @@
                 <!-- svelte-ignore a11y_media_has_caption -->
                 <video class="focus-vid" class:contain={vid === 2} autoplay playsinline muted use:srcObject={stream}></video>
               {:else}
-                <span class="focus-face">{@render catEars(me ? "me" : fp)}{@render avatarTag(fp)}</span>
+                <span class="focus-face">{@render catEars(me ? "me" : fp)}{@render callAvatarTag(fp)}</span>
               {/if}
               <span class="focus-name">
                 <span class="focus-nm">{me ? "you" : nameOf(fp)}</span>
@@ -11293,10 +17336,10 @@
           <button class="ghost focus-btn" class:muted={callDeafened} title={callDeafened ? "Hear the room again" : "Deafen: stop hearing everyone"} aria-label="Deafen" onclick={toggleDeafen}>
             {@render icoSpeaker()}
           </button>
-          <button class="ghost focus-btn" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} aria-label="Camera" onclick={() => (myVideo === "cam" ? stopVideo() : void startVideo("cam"))}>
+          <button class="ghost focus-btn" class:on={myVideo === "cam"} aria-pressed={myVideo === "cam"} title={myVideo === "cam" ? "Stop your camera" : "Send your camera"} aria-label="Camera" onclick={() => toggleVideo("cam")}>
             {@render icoCam()}
           </button>
-          <button class="ghost focus-btn" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} aria-label="Share your screen" onclick={() => (myVideo === "screen" ? stopVideo() : void startVideo("screen"))}>
+          <button class="ghost focus-btn" class:on={myVideo === "screen"} aria-pressed={myVideo === "screen"} title={myVideo === "screen" ? "Stop sharing your screen" : "Share your screen"} aria-label="Share your screen" onclick={() => toggleVideo("screen")}>
             {@render icoScreen()}
           </button>
           <button class="ghost focus-btn" class:on={instOpen} aria-expanded={instOpen} title="Instrument drawer" aria-label="Instruments" onclick={toggleInstDrawer}>
@@ -11330,13 +17373,13 @@
           </header>
           <div class="overlay-body">
             {#if jukeAudioFiles.length === 0}
-              <p class="juke-pick-empty">no audio in this server's share yet: drop a file in chat or the Files surface to share it</p>
+              <p class="juke-pick-empty">no audio or video in this server's share yet: drop a file in chat or the Files surface to share it</p>
             {:else}
               <ul class="juke-pick-list">
                 {#each jukeAudioFiles as f (f.cid + "|" + f.path)}
                   {@const days = jukeExpiryDays(f.cid)}
                   <li class="juke-pick-row">
-                    <span class="juke-ext">{jukeExt(f)}</span>
+                    <span class="juke-ext" class:vid={mediaKind(f.name, f.mime) === "video"}>{jukeExt(f)}</span>
                     <span class="juke-pick-main">
                       <span class="juke-pick-nm" title={f.name}>{f.name}</span>
                       <span class="juke-pick-sub">{fmtSize(f.size)} · shared by {nameOf(f.author)}</span>
@@ -11366,6 +17409,70 @@
         <span class="btn-ico">{@render icoPhone()} Voice call in <strong>#{voiceAlert.name}</strong></span>
         <button onclick={() => voiceAlert && joinVoice(voiceAlert.channel, voiceAlert.server, voiceAlert.name)}>Join</button>
         <button class="ghost" onclick={() => (voiceAlert = null)}>Dismiss</button>
+      </div>
+    {/if}
+
+    {#if textEffectTarget && !showTextEffectCatalog && textEffectSelection.start !== textEffectSelection.end}
+      {@const fxTarget = textEffectTarget}
+      <div
+        class="text-fx-selection-bar"
+        style={`left:${textEffectBubble.x}px;top:${textEffectBubble.y}px`}
+        role="toolbar"
+        aria-label={`Apply a text effect to selected ${textEffectTargetLabel(fxTarget)}`}
+      >
+        {#each quickTextEffects as effect (effect.id)}
+          <button
+            type="button"
+            class="text-fx-aa"
+            aria-label={`Apply ${effect.label}`}
+            onmousedown={(e) => e.preventDefault()}
+            onclick={() => applyTextEffect(effect.id, fxTarget)}
+          >
+            <span class="text-fx-aa-live" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
+            <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}{#if textEffectKeybinds[effect.id]}<kbd>{textEffectKeybinds[effect.id]}</kbd>{/if}</span>
+          </button>
+        {/each}
+        <button type="button" class="text-fx-aa more" title="Every text effect and copyable code" onmousedown={(e) => e.preventDefault()} onclick={() => (showTextEffectCatalog = true)}>＋</button>
+      </div>
+    {/if}
+
+    {#if textEffectTarget && showTextEffectCatalog}
+      {@const fxTarget = textEffectTarget}
+      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) { showTextEffectCatalog = false; textEffectTarget = null; } }}>
+        <div class="overlay-card text-fx-catalog" role="dialog" aria-modal="true" aria-labelledby="text-fx-title">
+          <header class="overlay-head">
+            <div><span class="name-studio-label">TEXT EFFECTS // {textEffectTargetLabel(fxTarget).toUpperCase()}</span><h2 id="text-fx-title">Make the selected words act</h2></div>
+            <button class="ghost" title="Close" onclick={() => { showTextEffectCatalog = false; textEffectTarget = null; }}>✕</button>
+          </header>
+          <div class="text-fx-catalog-intro">
+            <p>Select an Aa preview to wrap the current selection. Hover any preview for its plain-language behavior.</p>
+            <code>[fx:cyber]copy/pasteable text[/fx]</code>
+            <span class="muted small">Full mode animates and reacts to the pointer. Low is static and silent. Plain removes the decoration. Censor stays concealed until revealed.</span>
+          </div>
+          <input class="text-fx-search" bind:value={textEffectQuery} placeholder="Find shaky, trans pride, cyber, CRT…" aria-label="Search text effects" />
+          <div class="text-fx-catalog-scroll">
+            {#each TEXT_EFFECT_GROUPS as group}
+              {@const effects = filteredTextEffects.filter((effect) => effect.group === group)}
+              {#if effects.length}
+                <section class="text-fx-group">
+                  <h3>{group}</h3>
+                  <div class="text-fx-grid">
+                    {#each effects as effect (effect.id)}
+                      <div class="text-fx-choice">
+                        <button type="button" class="text-fx-choice-main" onclick={() => applyTextEffect(effect.id, fxTarget)}>
+                          <span class="text-fx-choice-preview">{@html textEffectHtml(effect.id, effect.preview)}</span>
+                          <span class="text-fx-choice-name"><strong>{effect.label}</strong><code>[fx:{effect.id}]</code></span>
+                          <span class="text-fx-speech" role="tooltip"><strong>{effect.label}</strong>{effect.description}<span>{effect.animated ? "Full: animated · Low: static" : "Static in every motion mode"}</span></span>
+                        </button>
+                        <button type="button" class="text-fx-copy" title={`Copy ${effect.label} markup`} aria-label={`Copy ${effect.label} markup`} onclick={() => copyText(`[fx:${effect.id}]text[/fx]`)}>⧉</button>
+                      </div>
+                    {/each}
+                  </div>
+                </section>
+              {/if}
+            {/each}
+          </div>
+        </div>
       </div>
     {/if}
 
@@ -11404,7 +17511,7 @@
               </div>
             </div>
             {#if p?.description}
-              <p class="pc-desc">{p.description}</p>
+              <p class="pc-desc" use:richClicks>{@html renderMessage(p.description, "")}</p>
             {:else}
               <p class="muted small">No description yet.</p>
             {/if}
@@ -11560,7 +17667,15 @@
       <div
         class="space-view"
         class:sp-carrying={!!spaceCarried}
+        class:sp-lassoing={!!spaceLasso}
+        class:sp-focusing={spaceEntryPhase === "focus"}
+        class:sp-entering={spaceEntryPhase === "zoom"}
         data-backdrop={spaceBackdropEff}
+        data-shape={spaceState.shape}
+        data-shake={spaceState.hoverShake ? "on" : "off"}
+        style={`--sp-server-size:${spaceState.serverSize}px; --sp-ambience:${spaceState.ambience / 100}; --sp-links:${spaceState.links / 100}; --sp-glow:${spaceState.glow / 100}; --sp-glow-pct:${Math.round(spaceState.glow * 0.75)}%; --sp-backdrop-blur:${spaceState.backdropBlur}px; --sp-backdrop-scale:${(1 + spaceState.backdropBlur * 0.004).toFixed(3)}`}
+        tabindex="-1"
+        aria-label="Server Space"
         bind:this={spaceRoot}
         bind:clientWidth={spaceVw}
         bind:clientHeight={spaceVh}
@@ -11570,64 +17685,216 @@
         onpointercancel={onSpaceUp}
         onclickcapture={onSpaceClickCapture}
       >
-        <div class="sp-scene" style={`perspective:${spaceF}px`}>
-          <!-- translateZ(f) first: CSS puts the eye f in front of the scene plane, so the cube
-               must slide forward to centre on it. Without this the backdrop pans at roughly
-               half the icons' angular rate (the icons' projection assumes an eye-centred cube). -->
-          <div class="sp-cube" style={`transform: translateZ(${spaceF}px) rotateX(${spaceCam.pitch}deg) rotateY(${spaceCam.yaw}deg)`}>
-            {#each [0, 90, 180, 270] as fy (fy)}
-              <div
-                class="sp-face sp-wall"
-                style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateY(${-fy}deg) translateZ(${-spaceF}px);${
-                  spaceBackdropEff === "custom"
-                    ? ` background-image:url(${spaceState.custom}); background-size:400% 200%; background-repeat:repeat-x; background-position:${panoPos(fy)};`
-                    : ""
-                }`}
-              >
-                {#if spaceBackdropEff !== "custom"}
-                  {@render spaceWall(spaceBackdropEff, fy)}
-                {/if}
-              </div>
-            {/each}
-            <div class="sp-face sp-ceil" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(-90deg) translateZ(${-spaceF}px)`}></div>
-            <div class="sp-face sp-floor" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(90deg) translateZ(${-spaceF}px)`}></div>
+        <div class="sp-world">
+          <div class="sp-scene" style={`perspective:${spaceF}px`}>
+            <!-- translateZ(f) first: CSS puts the eye f in front of the scene plane, so the cube
+                 must slide forward to centre on it. Without this the backdrop pans at roughly
+                 half the icons' angular rate (the icons' projection assumes an eye-centred cube). -->
+            <div class="sp-cube" style={`transform: translateZ(${spaceF}px) rotateX(${spaceCam.pitch}deg) rotateY(${spaceCam.yaw}deg)`}>
+              {#each [0, 90, 180, 270] as fy (fy)}
+                <div
+                  class="sp-face sp-wall"
+                  style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateY(${-fy}deg) translateZ(${-spaceF}px);${
+                    spaceBackdropEff === "custom"
+                      ? ` background-image:url(${spaceState.custom}); background-size:400% 200%; background-repeat:repeat-x; background-position:${panoPos(fy)};`
+                      : ""
+                  }`}
+                >
+                  {#if spaceBackdropEff !== "custom"}
+                    {@render spaceWall(spaceBackdropEff, fy)}
+                  {/if}
+                </div>
+              {/each}
+              <div class="sp-face sp-ceil" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(-90deg) translateZ(${-spaceF}px)`}></div>
+              <div class="sp-face sp-floor" style={`width:${2 * spaceF + 2}px; height:${2 * spaceF + 2}px; margin:${-spaceF - 1}px 0 0 ${-spaceF - 1}px; transform: rotateX(90deg) translateZ(${-spaceF}px)`}></div>
+            </div>
           </div>
+          <div class="sp-atmosphere" aria-hidden="true"></div>
+          <svg class="sp-constellations" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">
+            {#each spaceZones as zone (zone.cluster.id)}
+              <g class="sp-zone" style={`--sp-zone:${zone.cluster.color}`}>
+                <ellipse cx={spaceVw / 2 + zone.x} cy={spaceVh / 2 + zone.y} rx={zone.rx} ry={zone.ry} />
+              </g>
+            {/each}
+            {#each spaceLinks as link (link.key)}
+              <line x1={spaceVw / 2 + link.x1} y1={spaceVh / 2 + link.y1} x2={spaceVw / 2 + link.x2} y2={spaceVh / 2 + link.y2} />
+            {/each}
+          </svg>
+
+          <div class="sp-zone-actions" aria-label="Visible neighbourhoods">
+            {#each spaceZones as zone (zone.cluster.id)}
+              <button
+                type="button"
+                class:drop-target={spaceClusterDrop === zone.cluster.id}
+                data-space-cluster={zone.cluster.id}
+                style={`left:${spaceVw / 2 + zone.x}px; top:${spaceVh / 2 + zone.y - zone.ry + 13}px; --sp-zone:${zone.cluster.color}`}
+                aria-label={`Focus ${zone.cluster.name} neighbourhood, ${zone.count} server${zone.count === 1 ? "" : "s"}`}
+                title="Click to focus · drag servers here to assign"
+                onpointerdown={(e) => { if (!spaceCarried) e.stopPropagation(); }}
+                onclick={() => focusSpaceCluster(zone.cluster.id)}
+              >
+                <i></i><span>{zone.cluster.name}</span><b>{zone.count}</b>
+              </button>
+            {/each}
+          </div>
+
+          <svg class="sp-reticle" viewBox="0 0 40 40" aria-hidden="true">
+            <circle cx="20" cy="20" r="9" />
+            <path d="M20 4v8M20 28v8M4 20h8M28 20h8" />
+          </svg>
+
+          <div class="sp-icons">
+            {#each spacePlaced as it (it.s.id)}
+              {@const online = spaceOnlineCounts[it.s.id] ?? 1}
+              {@const mentions = spaceMentionCounts[it.s.id] ?? 0}
+              {@const voice = spaceVoiceCount(it.s.id)}
+              {@const recent = it.s.dot || it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
+              <button
+                class="sp-srv"
+                class:sp-unread={it.s.unread.length > 0 || it.s.dot}
+                class:sp-recent={recent}
+                class:sp-carried={it.carried}
+                class:sp-enter-target={spaceEntering === it.s.id}
+                class:sp-focus-target={spaceFocusedServer === it.s.id}
+                class:sp-search-dim={!!spaceSearch && !spaceSearchMatches.some((s) => s.id === it.s.id)}
+                style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)}; --sp-delay:${-((it.s.id % 13) * 0.17).toFixed(2)}s;${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
+                data-name={it.s.name}
+                title={`${it.s.name} · ${online} online${mentions ? ` · ${mentions} mention${mentions === 1 ? "" : "s"}` : ""}${voice ? ` · ${voice} in voice` : ""}`}
+                onpointerdown={(e) => onSpaceServerDown(e, it.s.id)}
+                onclick={() => spaceIconClick(it.s.id)}
+                use:contextMenu={() => spaceServerMenu(it.s)}
+              >
+                {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
+                  <img class="rail-img" src={imgSrc(serverIcons[it.s.id])} alt="" draggable="false" />
+                {:else}
+                  {monogram(it.s.name)}
+                {/if}
+                {#if it.s.unread.length}
+                  <span class="rail-badge">{it.s.unread.length}</span>
+                {/if}
+                {#if online > 1}
+                  <span class="sp-orbiters" aria-label={`${online} online`}>
+                    {#each Array(Math.min(8, online - 1)) as _, i}<i style={`--sp-dot:${i}; --sp-dots:${Math.min(8, online - 1)}`}></i>{/each}
+                    {#if online > 9}<b>+{online - 9}</b>{/if}
+                  </span>
+                {/if}
+                {#if mentions}<span class="sp-mention-flare" title={`${mentions} unseen mention${mentions === 1 ? "" : "s"}`}>!</span>{/if}
+                {#if voice}<span class="sp-voice-signal" title={`${voice} in voice`}><i></i><i></i><i></i></span>{/if}
+              </button>
+            {/each}
+          </div>
+
+          {#if spaceLasso}
+            <svg class="sp-lasso" viewBox={`0 0 ${spaceVw} ${spaceVh}`} preserveAspectRatio="none" aria-hidden="true">
+              <path d={spaceLassoPath(spaceLasso.points)} />
+            </svg>
+          {/if}
         </div>
 
-        <svg class="sp-reticle" viewBox="0 0 40 40" aria-hidden="true">
-          <circle cx="20" cy="20" r="9" />
-          <path d="M20 4v8M20 28v8M4 20h8M28 20h8" />
-        </svg>
+        {#if spaceSearchOpen}
+          <div class="sp-search" onpointerdown={(e) => e.stopPropagation()}>
+            <span>⌕</span>
+            <input bind:this={spaceSearchEl} bind:value={spaceSearch} placeholder="Find a server or neighbourhood" oninput={() => (spaceSearchIdx = 0)} onkeydown={onSpaceSearchKey} />
+            <kbd>enter</kbd>
+            {#if spaceSearch}
+              <div class="sp-search-results">
+                {#each spaceSearchMatches.slice(0, 8) as s, i (s.id)}
+                  <button class:active={i === spaceSearchIdx} onclick={() => { spaceSearchIdx = i; pickSpaceSearch(true); }} onmouseenter={() => { spaceSearchIdx = i; pickSpaceSearch(false); }}>
+                    <span>{s.name}</span>
+                    <small>{spaceState.clusters.find((c) => c.id === spaceState.serverClusters[s.id])?.name ?? (spaceState.placements[s.id] ? "Unsorted" : "Unplaced")}</small>
+                  </button>
+                {/each}
+                {#if !spaceSearchMatches.length}<p>No server or neighbourhood matches.</p>{/if}
+              </div>
+            {/if}
+          </div>
+        {/if}
 
-        <div class="sp-icons">
-          {#each spacePlaced as it (it.s.id)}
-            <button
-              class="sp-srv"
-              class:sp-unread={it.s.unread.length > 0 || it.s.dot}
-              class:sp-carried={it.carried}
-              style={`left:${spaceVw / 2 + it.x}px; top:${spaceVh / 2 + it.y}px; --sp-s:${it.scale.toFixed(3)};${spaceAccents[it.s.id] ? ` --sp-a:${spaceAccents[it.s.id]};` : ""}`}
-              data-name={it.s.name}
-              onclick={() => spaceIconClick(it.s.id)}
-              use:contextMenu={() => spaceServerMenu(it.s)}
-            >
-              {#if serverIcons[it.s.id] && appearance.icons !== "flat"}
-                <img class="rail-img" src={imgSrc(serverIcons[it.s.id])} alt="" />
-              {:else}
-                {monogram(it.s.name)}
-              {/if}
-              {#if it.s.unread.length}
-                <span class="rail-badge">{it.s.unread.length}</span>
-              {/if}
-            </button>
-          {/each}
-        </div>
+        {#if spaceState.showMinimap}
+          <div class="sp-minimap" aria-label="Space compass">
+            <div class="sp-minimap-head"><span>COMPASS</span><b>{Math.round(spaceCam.yaw)}°</b></div>
+            <div class="sp-minimap-field">
+              <span class="sp-map-centre"></span>
+              {#each spaceMapServers as item (item.s.id)}
+                <button
+                  class:active={spaceFocusedServer === item.s.id}
+                  style={`left:${item.x}%; top:${Math.max(8, Math.min(92, item.y))}%`}
+                  title={item.s.name}
+                  onclick={() => focusSpaceServer(item.s.id)}
+                ></button>
+              {/each}
+            </div>
+            <div class="sp-cardinals"><span>−180</span><span>FRONT</span><span>+180</span></div>
+          </div>
+        {/if}
 
-        {#if spaceLasso}
-          <div class="sp-lasso" style={`left:${spaceVw / 2 + spaceLasso.x}px; top:${spaceVh / 2 + spaceLasso.y}px; width:${spaceLasso.r * 2}px; height:${spaceLasso.r * 2}px`}></div>
+        {#if spaceState.clusters.length}
+          <aside class="sp-neighbourhoods" aria-label="Neighbourhoods" onpointerdown={(e) => { if (!spaceCarried) e.stopPropagation(); }}>
+            <div class="sp-neighbourhood-head">
+              <span>NEIGHBOURHOODS</span>
+              <small>drop servers here</small>
+            </div>
+            <div class="sp-neighbourhood-list">
+              {#each spaceState.clusters as cluster (cluster.id)}
+                {@const clusterIds = spaceClusterServerIds(cluster.id)}
+                <div
+                  class="sp-neighbourhood"
+                  class:open={spaceClusterOpen === cluster.id}
+                  class:drop-target={spaceClusterDrop === cluster.id}
+                  data-space-cluster={cluster.id}
+                  style={`--sp-zone:${cluster.color}`}
+                >
+                  <div class="sp-neighbourhood-row">
+                    <button type="button" class="sp-neighbourhood-focus" onclick={() => focusSpaceCluster(cluster.id)} title={`Focus ${cluster.name}`}>
+                      <i></i>
+                      <span>{cluster.name}<small>{clusterIds.length} server{clusterIds.length === 1 ? "" : "s"}</small></span>
+                    </button>
+                    <button
+                      type="button"
+                      class="sp-neighbourhood-edit"
+                      class:active={spaceClusterOpen === cluster.id}
+                      aria-label={`${spaceClusterOpen === cluster.id ? "Close" : "Edit"} ${cluster.name}`}
+                      title="Add or remove servers"
+                      onclick={(e) => { e.stopPropagation(); spaceClusterOpen = spaceClusterOpen === cluster.id ? null : cluster.id; }}
+                    >{spaceClusterOpen === cluster.id ? "−" : "+"}</button>
+                  </div>
+                  {#if spaceClusterOpen === cluster.id}
+                    <div class="sp-neighbourhood-editor">
+                      <p>Click to add or remove. You can also drag a server onto this neighbourhood.</p>
+                      {#if railServers.length}
+                        <div class="sp-neighbourhood-servers">
+                          {#each railServers as server (server.id)}
+                            {@const assigned = spaceState.serverClusters[server.id] === cluster.id}
+                            <button
+                              type="button"
+                              class:assigned
+                              onclick={(e) => { e.stopPropagation(); toggleSpaceClusterServer(server.id, cluster.id); }}
+                              title={assigned ? `Remove ${server.name} from ${cluster.name}` : `Add ${server.name} to ${cluster.name}`}
+                            >
+                              <span>{assigned ? "✓" : "+"}</span>{server.name}
+                            </button>
+                          {/each}
+                        </div>
+                      {:else}
+                        <p>No servers yet.</p>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+            <button type="button" class="sp-neighbourhood-tidy" onclick={tidySpace}>Arrange neighbourhoods</button>
+          </aside>
+        {:else}
+          <aside class="sp-neighbourhoods sp-neighbourhood-empty" aria-label="Neighbourhoods" onpointerdown={(e) => e.stopPropagation()}>
+            <div class="sp-neighbourhood-head"><span>NEIGHBOURHOODS</span></div>
+            <p>Group related servers into visible areas of your Space.</p>
+            <button type="button" onclick={() => openSettings("space")}>Create a neighbourhood…</button>
+          </aside>
         {/if}
 
         <div class="sp-hud">
-          <div class="sp-hud-line">orbit · {spaceBackdropEff === "custom" ? "custom" : (SPACE_BACKDROP_TILES.find((b) => b.id === spaceBackdropEff)?.name ?? spaceBackdropEff)}</div>
+          <div class="sp-hud-line">orbit · {spaceBackdropEff === "custom" ? "custom" : (SPACE_BACKDROP_TILES.find((b) => b.id === spaceBackdropEff)?.name ?? spaceBackdropEff)} · {spaceState.shape}</div>
           <div class="sp-hud-sub">yaw {Math.round(spaceCam.yaw)}° · pitch {Math.round(spaceCam.pitch)}°</div>
           {#if spaceCarried}
             <div class="sp-hud-carry">carrying {Object.keys(spaceCarried).length} · click to drop · esc cancels</div>
@@ -11636,35 +17903,52 @@
 
         <div class="sp-keys">
           <span class="sp-key"><b>[drag]</b> look</span>
-          <span class="sp-key"><b>[hold]</b> lasso</span>
+          <span class="sp-key"><b>[icon drag]</b> move</span>
+          <span class="sp-key"><b>[hold + draw]</b> lasso</span>
+          <button class="sp-key sp-key-btn" onclick={undoSpaceLayout} disabled={!spaceUndo.length}><b>[ctrl+z]</b> undo</button>
+          <button class="sp-key sp-key-btn" onclick={tidySpace}><b>[tidy]</b> arrange</button>
+          <button class="sp-key sp-key-btn" onclick={() => startSpaceSearch()}><b>[/]</b> find</button>
           <button class="sp-key sp-key-btn" class:active={spaceTray} onclick={() => (spaceTrayPinned = !spaceTrayPinned)}><b>[t]</b> tray</button>
           <button class="sp-key sp-key-btn" onclick={toggleSpace}><b>[esc]</b> exit</button>
         </div>
 
         {#if spaceTray}
-          <div class="sp-tray">
+          <div class="sp-tray" onpointerdown={(e) => e.stopPropagation()}>
             <div class="sp-tray-head">
               <span class="sp-micro">server tray</span>
-              <span class="sp-chip">unplaced · {spaceUnplaced.length}</span>
-              <span class="sp-tray-hint">tap a server: it flies to where you aim</span>
+              <span class="sp-chip">{railServers.length} servers · {spaceUnplaced.length} unplaced</span>
+              <label class="sp-tray-size">
+                <span>size {spaceState.serverSize}</span>
+                <input type="range" min="32" max="88" step="2" value={spaceState.serverSize} aria-label="Server size" oninput={(e) => setSpaceServerSize(+e.currentTarget.value)} />
+              </label>
+              <span class="sp-tray-hint">drag into the room · tap places at the reticle</span>
             </div>
-            {#if spaceUnplaced.length}
+            {#if railServers.length}
               <div class="sp-tray-row">
-                {#each spaceUnplaced as s (s.id)}
-                  <button class="sp-tray-item" onclick={() => placeFromTray(s.id)}>
-                    <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
-                      {#if serverIcons[s.id] && appearance.icons !== "flat"}
-                        <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" />
-                      {:else}
-                        {monogram(s.name)}
-                      {/if}
-                    </span>
-                    <span class="sp-tray-name">{s.name}</span>
-                  </button>
+                {#each railServers as s (s.id)}
+                  <div class="sp-tray-slot">
+                    <button class="sp-tray-item" class:sp-already-placed={!!spaceState.placements[s.id]} onpointerdown={(e) => onSpaceTrayServerDown(e, s.id)} onclick={() => placeFromTray(s.id)}>
+                      <span class="sp-disc" style={spaceAccents[s.id] ? `--sp-a:${spaceAccents[s.id]}` : ""}>
+                        {#if serverIcons[s.id] && appearance.icons !== "flat"}
+                          <img class="rail-img" src={imgSrc(serverIcons[s.id])} alt="" draggable="false" />
+                        {:else}
+                          {monogram(s.name)}
+                        {/if}
+                        {#if spaceState.placements[s.id]}<span class="sp-placed-mark" aria-hidden="true">✓</span>{/if}
+                      </span>
+                      <span class="sp-tray-name">{s.name}</span>
+                    </button>
+                    {#if spaceState.clusters.length}
+                      <select aria-label={`Neighbourhood for ${s.name}`} value={spaceState.serverClusters[s.id] ?? ""} onchange={(e) => assignSpaceCluster(s.id, e.currentTarget.value)}>
+                        <option value="">Unsorted</option>
+                        {#each spaceState.clusters as cluster (cluster.id)}<option value={cluster.id}>{cluster.name}</option>{/each}
+                      </select>
+                    {/if}
+                  </div>
                 {/each}
               </div>
             {:else}
-              <p class="sp-tray-empty">Every server is placed. Hold anywhere to lasso and rearrange.</p>
+              <p class="sp-tray-empty">Your servers will appear here.</p>
             {/if}
           </div>
         {/if}
@@ -11678,7 +17962,7 @@
             <label class="stx-search">
               <input bind:value={setSearch} placeholder="Search settings" />
             </label>
-            {#each ["Account", "App", "Connection"] as cat (cat)}
+            {#each ["Help", "Account", "App", "Connection"] as cat (cat)}
               {@const pages = filterPages(USER_SET_PAGES, setSearch).filter((p) => p.cat === cat)}
               {#if pages.length}
                 <div class="stx-cat">{cat}</div>
@@ -11696,7 +17980,43 @@
         </div>
         <div class="stx-content-zone">
           <div class="stx-content">
-            {#if settingsPage === "profile"}
+            {#if settingsPage === "guide"}
+              <div class="stx-crumb">SETTINGS // HELP // FEATURE GUIDE</div>
+              <h1>Feature Guide</h1>
+              <p class="muted small">Everything currently in this build, with the shortest route to it. Search by feature, action or location.</p>
+              <label class="feature-search">
+                <span class="muted small">Find a feature</span>
+                <input bind:value={featureQuery} placeholder="Try wiki, invite, screen share, diagnostics…" />
+              </label>
+              {#each FEATURE_GUIDE_GROUPS as group (group)}
+                {@const items = filteredFeatures.filter((item) => item.group === group)}
+                {#if items.length}
+                  <section class="set-section feature-section">
+                    <h3>{group}</h3>
+                    <div class="feature-list">
+                      {#each items as item (item.title)}
+                        <article class="feature-item">
+                          <div class="feature-copy">
+                            <strong>{item.title}</strong>
+                            <p>{item.detail}</p>
+                            <span class="feature-path">{item.where}</span>
+                          </div>
+                          <div class="feature-actions">
+                            {#if item.shortcut}<kbd>{item.shortcut}</kbd>{/if}
+                            {#if item.target}<button type="button" class="ghost small" onclick={() => item.target && openFeatureTarget(item.target)}>Open</button>{/if}
+                          </div>
+                        </article>
+                      {/each}
+                    </div>
+                  </section>
+                {/if}
+              {/each}
+              {#if !filteredFeatures.length}
+                <section class="set-section">
+                  <p class="muted small">No feature matches “{featureQuery}”. Try a broader word, or send the idea through Feedback if it is not here yet.</p>
+                </section>
+              {/if}
+            {:else if settingsPage === "profile"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // MY PROFILE</div>
               <h1>My Profile</h1>
               {#if cur && !cur.isDm}
@@ -11709,14 +18029,103 @@
               <div class="stx-crumb">SETTINGS // ACCOUNT // DEVICES</div>
               <h1>Devices</h1>
               <section class="set-section">
+                <h3>Linked devices</h3>
                 <p class="muted small">
                   Link another device to your identity. The new device gets its own key: nothing
                   is copied: and nothing at all happens until you approve it here on this device.
                 </p>
                 <button class="ghost" onclick={() => (showLinkDevice = true)}>⛓ Link a new device…</button>
+                <p class="muted small">Your linked devices are listed per server (each server sees its own identity): find them under a server's Settings → Devices.</p>
+              </section>
+              <!--
+                MIDI hardware, deliberately on the same page as linked devices: from where the user
+                stands both are "things I plugged into Mewtual". Nothing here touches identity, and
+                the panel says so, because a keyboard listed next to key-bearing companions would
+                otherwise read as something that can see your messages.
+              -->
+              <section class="set-section">
+                <h3>MIDI controllers</h3>
+                <p class="muted small">
+                  A USB or Bluetooth music keyboard plays the melody unlock lock and the instrument
+                  in a voice call. It is input hardware only: it carries no identity, joins no
+                  server, and Mewtual never sends it anything. Notes reach other people only when
+                  you are in a call, mixed the same way your voice is.
+                </p>
+                <div class="midi-status" data-level={midiStat.level}>
+                  <span class="midi-dot" aria-hidden="true"></span>
+                  <span class="midi-verdict">
+                    <strong>{midiStat.title}</strong>
+                    <small class="muted">{midiStat.detail}</small>
+                  </span>
+                  <button
+                    type="button"
+                    class="ghost small"
+                    disabled={midiBusy || !midiSupported}
+                    onclick={() => void initMidi(true)}
+                  >{midiBusy ? "Scanning…" : midiRequested ? "Rescan" : "Turn on MIDI input"}</button>
+                </div>
+                {#if midiDevices.length}
+                  <ul class="dev-panel midi-list">
+                    {#each midiDevices as d (d.id)}
+                      <li class:gone={!d.connected} title={d.id}>
+                        <span class="midi-live" class:on={d.connected && d.routed} aria-hidden="true"></span>
+                        <span class="midi-nm">{d.label}</span>
+                        {#if d.maker}<span class="dev-tag">· {d.maker}</span>{/if}
+                        <span class="stage-spacer"></span>
+                        <span class="midi-state">{#if !d.connected}unplugged{:else if !d.routed}filtered out{:else if d.listening}routed{:else}opening{/if}</span>
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+                <label class="field midi-route">
+                  <span class="muted small">
+                    Input routing: leave this on every input unless one specific port is the one
+                    carrying your keys.
+                  </span>
+                  <select value={midiInput} onchange={(e) => setMidiInput(e.currentTarget.value)}>
+                    <option value="">Every connected input</option>
+                    {#each midiDevices as d (d.id)}
+                      <option value={d.id}>{d.label}{d.connected ? "" : " (not connected)"}</option>
+                    {/each}
+                    <!-- A pinned port saved by name, or one that has since vanished entirely: keep
+                         it selectable so the picker never looks empty and can always be undone. -->
+                    {#if midiInput && !midiDevices.some((d) => d.id === midiInput)}
+                      <option value={midiInput}>{midiInput} (saved, not found)</option>
+                    {/if}
+                  </select>
+                </label>
+                <div class="midi-mon" role="log" aria-live="polite" aria-label="Incoming MIDI messages">
+                  {#if midiMonitor.length}
+                    {#each midiMonitor as line (line.seq)}
+                      <span class="midi-mon-line" class:ignored={!line.routed}>
+                        <b>{line.port}</b><i>{line.text}</i>{#if !line.routed}<em>filtered out</em>{/if}
+                      </span>
+                    {/each}
+                  {:else if midiRealtime}
+                    <span class="muted">The cable is alive ({midiRealtime} timing messages) but no notes have arrived. Play a key, and check nothing else is holding the port.</span>
+                  {:else}
+                    <span class="muted">Play a key on the controller: everything it sends shows up here, whether or not anything is listening for it.</span>
+                  {/if}
+                </div>
+                <div class="midi-actions">
+                  <button type="button" class="ghost small" onclick={releaseMidiNotes}>Release stuck notes</button>
+                  <button type="button" class="ghost small" onclick={() => { midiMonitor = []; midiRealtime = 0; }}>Clear monitor</button>
+                  {#if midiLastAt}<span class="muted small">last message {relTime(Math.max(0, nowTick - midiLastAt))} ago</span>{/if}
+                </div>
               </section>
               <section class="set-section">
-                <p class="muted small">Your linked devices are listed per server (each server sees its own identity): find them under a server's Settings → Devices.</p>
+                <h3>Setting up a controller</h3>
+                <ol class="midi-help">
+                  {#each MIDI_SETUP_STEPS as step (step.title)}
+                    <li><strong>{step.title}</strong><span class="muted small">{step.detail}</span></li>
+                  {/each}
+                </ol>
+                <h4 class="midi-subhead">When it does not work</h4>
+                <ul class="midi-help fixes">
+                  {#each MIDI_FIXES as fix (fix.title)}
+                    <li><strong>{fix.title}</strong><span class="muted small">{fix.detail}</span></li>
+                  {/each}
+                </ul>
               </section>
             {:else if settingsPage === "vault"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VAULT &amp; LOCK</div>
@@ -11730,7 +18139,43 @@
                 <button class="ghost" onclick={lockScreen}>Lock now [Ctrl+L]</button>
               </section>
               <section class="set-section">
-                <p class="muted small">Changing the secret re-seals the vault, which is not wired up yet: it is on the list.</p>
+                <h3>Change vault secret</h3>
+                <p class="muted small">Authenticate with the current passphrase, sigil or tune, then choose and confirm any new method. Mewtual atomically rewraps the same random root key under a fresh Argon2 salt: server history and files never become plaintext and do not need a risky bulk rewrite.</p>
+                <button onclick={beginVaultSecretChange}>Change vault secret…</button>
+                <p class="muted small">This changes the live vault only. Every backup made earlier remains protected by—and openable with—the secret it had when exported.</p>
+              </section>
+            {:else if settingsPage === "backup"}
+              <div class="stx-crumb">SETTINGS // ACCOUNT // BACKUP &amp; RECOVERY</div>
+              <h1>Backup &amp; Recovery</h1>
+              <section class="set-section backup-hero">
+                <div class="backup-lock">{@render icoLock()}</div>
+                <div>
+                  <h3>Encrypted offline backup</h3>
+                  <p class="muted small">Creates a coherent copy of the entire sealed vault in Downloads: identities, server history, files, drafts and read positions. The export remains encrypted by your current vault secret.</p>
+                </div>
+                <button disabled={backupBusy} onclick={createBackup}>{backupBusy ? "Creating…" : "Create backup"}</button>
+              </section>
+              {#if backupResult}
+                <section class="set-section backup-result">
+                  <span class="ok-t">✓ Backup created</span>
+                  <strong>{backupResult.files} files · {fmtSize(backupResult.bytes)}</strong>
+                  <code>{backupResult.path}</code>
+                  {#if backupResult.warning}<p class="fail-t small">{backupResult.warning}</p>{/if}
+                </section>
+              {/if}
+              <section class="set-section">
+                <h3>Recovery contract</h3>
+                <p class="muted small">Keep the vault secret somewhere separate: the backup cannot reset or bypass it. Automated restore is intentionally unavailable while the app is unlocked; safe restore needs a locked-screen, staged verification and rollback flow. For now, keep this folder intact as the recoverable source copy.</p>
+              </section>
+              <section class="set-section backup-risk">
+                <h3>What exporting changes</h3>
+                <p class="muted small"><strong>No plaintext is exported</strong>, so the cryptographic confidentiality of each record is unchanged. The tradeoff is exposure: Downloads now holds another offline target that can be copied and guessed indefinitely, plus visible folder names, file sizes, timestamps and blob layout.</p>
+                <ul class="muted small">
+                  <li>It preserves the state and key material present at backup time, including material later deleted from the live vault.</li>
+                  <li>Changing the live vault secret does not revoke an older copy; that copy continues to use its old secret.</li>
+                  <li>Record authentication detects tampering when opened, but this export does not yet include a separately verified whole-backup manifest.</li>
+                  <li>A compromised unlocked process, malware or keylogger remains outside at-rest encryption's protection.</li>
+                </ul>
               </section>
             {:else if settingsPage === "verify"}
               <div class="stx-crumb">SETTINGS // ACCOUNT // VERIFICATION</div>
@@ -11814,11 +18259,11 @@
                 <h3>Text</h3>
                 <div class="stx-duo">
                   <label class="field">
-                    <span class="muted small">Chat text size: {appearance.scale || 100}%</span>
+                    <span class="muted small">Interface text size: {appearance.scale || 100}%</span>
                     <input
                       type="range"
                       min="70"
-                      max="140"
+                      max="200"
                       step="2"
                       value={appearance.scale || 100}
                       oninput={(e) => (appearance = { ...appearance, scale: +e.currentTarget.value })}
@@ -11833,6 +18278,26 @@
                     </div>
                   </div>
                 </div>
+              </section>
+              <section class="set-section">
+                <h3>Message text effects</h3>
+                <p class="muted small">
+                  Your local comfort setting for effects other people add to prose. The operating
+                  system's reduced-motion preference also forces Low. Censored text always stays
+                  concealed until you reveal it.
+                </p>
+                <div class="field">
+                  <span class="muted small">Playback</span>
+                  <div class="stx-seg text-fx-mode">
+                    <button type="button" class:on={!appearance.textEffects} onclick={() => (appearance = { ...appearance, textEffects: "" })}>FULL</button>
+                    <button type="button" class:on={appearance.textEffects === "low"} onclick={() => (appearance = { ...appearance, textEffects: "low" })}>LOW</button>
+                    <button type="button" class:on={appearance.textEffects === "off"} onclick={() => (appearance = { ...appearance, textEffects: "off" })}>PLAIN</button>
+                  </div>
+                </div>
+                <p class="muted small">
+                  Full includes animation, pointer reactions, and authored effect audio. Low keeps
+                  a static visual identity and stays silent. Plain shows ordinary readable text.
+                </p>
               </section>
               {#if liveryActive && activeServerId !== null && !cur?.isDm}
                 <section class="set-section">
@@ -11881,11 +18346,23 @@
                 <label class="toggle">
                   <input
                     type="checkbox"
+                    checked={appearance.messageMotion !== "off"}
+                    onchange={() => (appearance = { ...appearance, messageMotion: appearance.messageMotion === "off" ? "" : "off" })}
+                  />
+                  <span>Message arrivals: let each member's messages use that member's chosen entrance</span>
+                </label>
+                <label class="toggle">
+                  <input
+                    type="checkbox"
                     checked={appearance.flat}
+                    disabled={!CHAT_MESSAGE_FRAMES_ENABLED}
                     onchange={() => (appearance = { ...appearance, flat: !appearance.flat })}
                   />
-                  <span>Flatten messages: ignore other members' custom bubble backgrounds</span>
+                  <span>{CHAT_MESSAGE_FRAMES_ENABLED
+                    ? "Flatten other members' custom message frames (mine stays visible)"
+                    : "Custom message frames are temporarily disabled in live chats"}</span>
                 </label>
+                <p class="muted small">Arrival motion remains available. Frame choices and previews are preserved while live-chat backgrounds are paused.</p>
                 <label class="toggle">
                   <input
                     type="checkbox"
@@ -11899,6 +18376,7 @@
               <div class="stx-crumb">SETTINGS // APP // SERVER SPACE</div>
               <h1>Server Space</h1>
               <section class="set-section">
+                <h3>Room</h3>
                 <p class="muted small">The 360° room your servers hang in (Ctrl+O). Backdrop:</p>
                 <div class="space-set-row">
                   {#each SPACE_BACKDROP_TILES as b (b.id)}
@@ -11911,22 +18389,178 @@
                     {spaceState.custom ? "Replace image…" : "Custom image…"}
                     <input type="file" accept="image/*" onchange={(e) => loadSpacePano(e.currentTarget.files)} />
                   </label>
-                  <button type="button" class="ghost small" onclick={() => { spaceState.placements = {}; saveSpace(); }}>Forget placements</button>
+                  <button type="button" class="ghost small" onclick={tidySpace}>Auto-arrange</button>
+                  <button type="button" class="ghost small" onclick={undoSpaceLayout} disabled={!spaceUndo.length}>Undo move</button>
+                  <button type="button" class="ghost small" onclick={redoSpaceLayout} disabled={!spaceRedo.length}>Redo</button>
+                  <button type="button" class="ghost small" onclick={forgetSpacePlacements}>Forget placements</button>
                 </div>
-                <p class="muted small">A custom backdrop is one equirectangular (2:1) image. Backdrop and placements stay on this device, like desktop icon positions.</p>
+                <div class="stx-duo space-controls">
+                  <div class="field">
+                    <span class="muted small">Viewport shape</span>
+                    <div class="stx-seg">
+                      <button type="button" class:on={spaceState.shape === "circle"} onclick={() => setSpaceShape("circle")}>CIRCLE</button>
+                      <button type="button" class:on={spaceState.shape === "square"} onclick={() => setSpaceShape("square")}>SQUARE</button>
+                    </div>
+                  </div>
+                  <label class="field">
+                    <span class="muted small">Server size: {spaceState.serverSize}px</span>
+                    <input type="range" min="32" max="88" step="2" value={spaceState.serverSize} oninput={(e) => setSpaceServerSize(+e.currentTarget.value)} />
+                  </label>
+                </div>
+                <label class="toggle">
+                  <input type="checkbox" checked={spaceState.zoomOnOpen} onchange={() => { spaceState.zoomOnOpen = !spaceState.zoomOnOpen; saveSpace(); }} />
+                  <span>Zoom through a server when opening it</span>
+                </label>
+                <label class="toggle">
+                  <input type="checkbox" checked={spaceState.entrySound} onchange={() => { spaceState.entrySound = !spaceState.entrySound; saveSpace(); }} />
+                  <span>Play the painted-portal sound when entering a server</span>
+                </label>
+                <label class="toggle">
+                  <input type="checkbox" checked={spaceState.showMinimap} onchange={() => { spaceState.showMinimap = !spaceState.showMinimap; saveSpace(); }} />
+                  <span>Show the orientation compass and off-screen servers</span>
+                </label>
+                <p class="muted small">Backdrop, shape, size, and placements stay on this device, like desktop icon positions. Drops automatically make room so servers cannot overlap.</p>
+                <div class="space-layout-actions">
+                  <button type="button" class="ghost" onclick={exportSpaceLayout} disabled={spaceLayoutBusy}>{spaceLayoutBusy ? "Exporting…" : "Export layout"}</button>
+                  <label class="ghost space-file">
+                    Import layout…
+                    <input bind:this={spaceLayoutInput} type="file" accept="application/json,.json" onchange={(e) => importSpaceLayout(e.currentTarget.files)} />
+                  </label>
+                </div>
+                <div class="space-input-help" aria-label="Server Space controls">
+                  <span><kbd>Arrows</kbd> look</span>
+                  <span><kbd>Tab</kbd> cycle servers</span>
+                  <span><kbd>Enter</kbd> open focused</span>
+                  <span><kbd>/</kbd> search</span>
+                  <span><kbd>Gamepad</kbd> left stick · bumpers · A/X/B</span>
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Neighbourhoods</h3>
+                <p class="muted small">Group servers into named areas. In Space, use the neighbourhood panel's ＋ list or drag a server onto a neighbourhood; auto-arrange gives every group its own part of the sky.</p>
+                <div class="space-cluster-add">
+                  <input value={spaceNewCluster} maxlength="32" placeholder="Friends, Games, Work…" oninput={(e) => (spaceNewCluster = e.currentTarget.value)} onkeydown={(e) => { if (e.key === "Enter") addSpaceCluster(); }} />
+                  <input type="color" value={spaceNewClusterColor} aria-label="Neighbourhood colour" oninput={(e) => (spaceNewClusterColor = e.currentTarget.value)} />
+                  <button type="button" class="ghost" onclick={addSpaceCluster} disabled={!spaceNewCluster.trim()}>Add neighbourhood</button>
+                </div>
+                {#if spaceState.clusters.length}
+                  <div class="space-cluster-list">
+                    {#each spaceState.clusters as cluster (cluster.id)}
+                      <div class="space-cluster-row">
+                        <input type="color" value={cluster.color} aria-label={`${cluster.name} colour`} oninput={(e) => updateSpaceCluster(cluster.id, { color: e.currentTarget.value })} />
+                        <input value={cluster.name} maxlength="32" aria-label="Neighbourhood name" oninput={(e) => updateSpaceCluster(cluster.id, { name: e.currentTarget.value.slice(0, 32) })} />
+                        <span>{Object.values(spaceState.serverClusters).filter((id) => id === cluster.id).length} servers</span>
+                        <button type="button" class="ghost small" onclick={() => removeSpaceCluster(cluster.id)}>Remove</button>
+                      </div>
+                    {/each}
+                  </div>
+                {/if}
+              </section>
+              <section class="set-section">
+                <h3>Atmosphere &amp; motion</h3>
+                <div class="stx-duo space-fx-controls">
+                  <label class="field"><span class="muted small">Ambient particles: {spaceState.ambience}%</span><input type="range" min="0" max="100" step="5" value={spaceState.ambience} oninput={(e) => { spaceState.ambience = +e.currentTarget.value; saveSpace(); }} /></label>
+                  <label class="field"><span class="muted small">Constellation lines: {spaceState.links}%</span><input type="range" min="0" max="100" step="5" value={spaceState.links} oninput={(e) => { spaceState.links = +e.currentTarget.value; saveSpace(); }} /></label>
+                  <label class="field"><span class="muted small">Server glow &amp; rings: {spaceState.glow}%</span><input type="range" min="0" max="100" step="5" value={spaceState.glow} oninput={(e) => { spaceState.glow = +e.currentTarget.value; saveSpace(); }} /></label>
+                  <label class="field"><span class="muted small">Backdrop blur: {spaceState.backdropBlur}px</span><input type="range" min="0" max="12" step="1" value={spaceState.backdropBlur} oninput={(e) => { spaceState.backdropBlur = +e.currentTarget.value; saveSpace(); }} /></label>
+                </div>
+                <label class="toggle"><input type="checkbox" checked={spaceState.hoverShake} onchange={() => { spaceState.hoverShake = !spaceState.hoverShake; saveSpace(); }} /><span>Shake a server strongly on hover</span></label>
+              </section>
+              <section class="set-section">
+                <h3>Custom image guide</h3>
+                <div class="space-guide">
+                  <div>
+                    <strong>Use a 2:1 equirectangular panorama</strong>
+                    <p>2048 × 1024 works best. Keep important detail near the horizon and inside the middle half; make the left and right edges seamless. Other aspect ratios are centre-cropped automatically.</p>
+                    <p>The template marks all four viewing directions, cube seams, and circle-safe areas. It saves to Downloads and opens in your default image viewer; use it as an overlay in your image editor, then hide the guide before exporting.</p>
+                    {#if spaceImageNote}<p class="space-image-note">{spaceImageNote}</p>{/if}
+                  </div>
+                  <button type="button" class="ghost" onclick={downloadSpaceTemplate} disabled={spaceGuideSaving}>
+                    {spaceGuideSaving ? "Opening guide…" : "Save & open 2048 × 1024 guide"}
+                  </button>
+                </div>
+                {#if spaceState.custom}
+                  <div class="space-pano-tools">
+                    <div class="space-pano-preview" style={`background-image:url(${spaceState.custom})`}>
+                      <span class="sp-pano-horizon"></span>
+                      {#each [[0, "BACK"], [25, "LEFT"], [50, "FRONT"], [75, "RIGHT"], [100, "BACK"]] as [left, label]}
+                        <span class="sp-pano-cardinal" style={`left:${left}%`}>{label}</span>
+                      {/each}
+                    </div>
+                    <label class="field"><span class="muted small">Preview direction: {spacePanoYaw}°</span><input type="range" min="0" max="270" step="90" value={spacePanoYaw} oninput={(e) => (spacePanoYaw = +e.currentTarget.value)} /></label>
+                    <div class="space-pano-window" style={`background-image:url(${spaceState.custom}); background-position:${panoPos(spacePanoYaw)}`}></div>
+                    <label class="toggle"><input type="checkbox" checked={spaceSeamPreview} onchange={() => (spaceSeamPreview = !spaceSeamPreview)} /><span>Show the left/right seam check</span></label>
+                    {#if spaceSeamPreview}
+                      <div class="space-seam-preview">
+                        <span style={`background-image:url(${spaceState.custom}); background-position:left center`}></span>
+                        <span style={`background-image:url(${spaceState.custom}); background-position:right center`}></span>
+                        <b>SEAM</b>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
               </section>
             {:else if settingsPage === "notifications"}
               <div class="stx-crumb">SETTINGS // APP // NOTIFICATIONS</div>
               <h1>Notifications</h1>
               <section class="set-section">
+                <h3>Global sound defaults</h3>
                 <label class="toggle">
                   <input type="checkbox" checked={soundOn} onchange={toggleSound} />
-                  <span>Play a sound for new messages</span>
+                  <span>Play app sounds on this device</span>
                 </label>
-                <button class="ghost small" onclick={playNotify} disabled={!soundOn}>Test sound</button>
+                <p class="muted small">This master switch silences notification tones and Server Space effects. Each server can inherit or override the three notification categories below.</p>
               </section>
               <section class="set-section">
-                <p class="muted small">Voice-call notifications are per server: each server's Settings → Overview has the toggle.</p>
+                <h3>Notification tones</h3>
+                <div class="sound-settings-list">
+                  {#each NOTIFICATION_SOUND_KINDS as kind (kind)}
+                    {@const pref = globalSoundPrefs[kind]}
+                    <article class="sound-setting-row">
+                      <div class="sound-setting-head">
+                        <div><strong>{SOUND_LABELS[kind].title}</strong><span>{SOUND_LABELS[kind].detail}</span></div>
+                        <label class="toggle compact">
+                          <input type="checkbox" checked={pref.enabled} onchange={(e) => setGlobalSoundEnabled(kind, e.currentTarget.checked)} />
+                          <span>{pref.enabled ? "On" : "Off"}</span>
+                        </label>
+                      </div>
+                      <div class="sound-setting-controls">
+                        <label>
+                          <span>Tone</span>
+                          <select value={pref.tone} onchange={(e) => setGlobalToneMode(kind, e.currentTarget.value as "default" | "crunch" | "custom")}>
+                            <option value="default">Built-in chime</option>
+                            <option value="crunch">Paper scrunch</option>
+                            <option value="custom" disabled={!pref.custom}>Custom{pref.custom ? ` · ${pref.custom.name}` : ""}</option>
+                          </select>
+                        </label>
+                        <button type="button" class="ghost small" disabled={!soundOn || !pref.enabled} onclick={() => playConfiguredSound(kind, null)}>Test</button>
+                        <label class="ghost small sound-file">
+                          {pref.custom ? "Replace custom…" : "Choose custom…"}
+                          <input type="file" accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.ogg,.webm,.m4a,.aac,.flac" onchange={(e) => { const input = e.currentTarget; void importCustomTone("global", kind, input.files).finally(() => (input.value = "")); }} />
+                        </label>
+                        {#if pref.custom}
+                          <button type="button" class="ghost small" onclick={() => removeCustomTone("global", kind)}>Remove custom</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+                <p class="muted small">Custom tones stay on this device. MP3/WAV/OGG/WebM/M4A/AAC/FLAC · up to {MAX_CUSTOM_TONE_SECONDS}s and {Math.round(MAX_CUSTOM_TONE_BYTES / 1024)} KiB.</p>
+              </section>
+              <section class="set-section">
+                <h3>Current server</h3>
+                {#if activeServerId !== null && cur}
+                  <div class="sound-effective-list">
+                    {#each NOTIFICATION_SOUND_KINDS as kind (kind)}
+                      {@const effective = soundPolicy(kind, activeServerId)}
+                      <span><b>{SOUND_LABELS[kind].title}</b><i class:on={effective.enabled}>{effective.enabled ? "enabled" : "disabled"}</i><small>{effective.source}</small></span>
+                    {/each}
+                    <span><b>Voice-call banner</b><i class:on={acceptCallsHere}>{acceptCallsHere ? "enabled" : "disabled"}</i><small>server setting</small></span>
+                  </div>
+                  <button type="button" class="ghost small" onclick={() => { showSettings = false; openServerSettings(null, "notifications"); }}>Open {cur.name} overrides</button>
+                {:else}
+                  <p class="muted small">Open a server to inspect or change its overrides.</p>
+                {/if}
               </section>
             {:else if settingsPage === "voice"}
               <div class="stx-crumb">SETTINGS // APP // VOICE &amp; CALLS</div>
@@ -11934,6 +18568,8 @@
               <section class="set-section">
                 <h3>Devices</h3>
                 <p class="muted small">Microphone and output pickers live on the call stage (they swap live, mid-call) and are remembered here between calls.</p>
+                <p class="muted small">A MIDI keyboard for the call instrument is set up in Settings → Devices, along with a monitor for checking one that is not behaving.</p>
+                <button type="button" class="ghost small" onclick={() => (settingsPage = "devices")}>Open Devices</button>
               </section>
               <section class="set-section">
                 <h3>NAT traversal</h3>
@@ -11974,6 +18610,7 @@
                   <li><code>~~strike~~</code> → <s>strike</s></li>
                   <li><code>`code`</code> → <code>code</code> (inline) · <code>```</code> for a block</li>
                   <li><code>||spoiler||</code> → a blacked-out spoiler you click to reveal</li>
+                  <li><code>[fx:cyber]signal[/fx]</code> → a text effect; select words or use the Aa FX button for the catalog</li>
                   <li><code>&gt; quote</code> → a block quote</li>
                   <li><code>@</code> then a name → mention a member (notifies them)</li>
                   <li><code>:name:</code> → a custom emoji (added in a server's Settings → Emoji), or use the 😀 picker</li>
@@ -11987,7 +18624,7 @@
               <section class="set-section">
                 <ul class="stx-keys">
                   <li><kbd>Ctrl+K</kbd><span>Quick switcher: channels, surfaces, servers, DMs</span></li>
-                  <li><kbd>Ctrl+1…7</kbd><span>Surfaces: chat, files, status, wiki, profile, downloads, events</span></li>
+                  <li><kbd>Ctrl+1…7</kbd><span>Surfaces: chat, files, announcements, wiki, profile, downloads, events</span></li>
                   <li><kbd>Ctrl+B / Ctrl+I</kbd><span>Bold / italic in the composer</span></li>
                   <li><kbd>Ctrl+Shift+F</kbd><span>Search with the filter panel open</span></li>
                   <li><kbd>Ctrl+L</kbd><span>Lock the session</span></li>
@@ -11997,7 +18634,36 @@
                   <li><kbd>Z / X</kbd><span>Piano octave down / up (lock screen and instrument drawer)</span></li>
                   <li><kbd>Esc</kbd><span>Close the topmost thing, one layer at a time</span></li>
                 </ul>
-                <p class="muted small">Remapping is not wired up yet: it is on the list.</p>
+              </section>
+              <section class="set-section text-fx-keybinds">
+                <div class="text-fx-keybind-head">
+                  <div>
+                    <h3>Text-effect shortcuts</h3>
+                    <p class="muted small">Select text in any supported editor, then use its shortcut. Custom bindings stay on this device.</p>
+                  </div>
+                  <button type="button" class="ghost small" onclick={resetTextEffectKeybinds}>Reset defaults</button>
+                </div>
+                {#if textEffectKeyError}<p class="form-error" role="alert">{textEffectKeyError}</p>{/if}
+                {#each TEXT_EFFECT_GROUPS as group}
+                  <h4 class="text-fx-keygroup">{group}</h4>
+                  <ul class="text-fx-keylist">
+                    {#each TEXT_EFFECTS.filter((effect) => effect.group === group) as effect (effect.id)}
+                      <li>
+                        <span class="text-fx-key-preview" aria-hidden="true">{@html textEffectHtml(effect.id, "Aa")}</span>
+                        <span class="text-fx-key-name"><strong>{effect.label}</strong><small>{effect.description}</small></span>
+                        <kbd>{textEffectKeybinds[effect.id] || "Unassigned"}</kbd>
+                        <button
+                          type="button"
+                          class="ghost small text-fx-record"
+                          class:active={recordingTextEffect === effect.id}
+                          onclick={() => { recordingTextEffect = effect.id; textEffectKeyError = ""; }}
+                          onkeydown={(event) => recordTextEffectKey(event, effect.id)}
+                        >{recordingTextEffect === effect.id ? "Press keys…" : "Change"}</button>
+                        <button type="button" class="ghost small" disabled={!textEffectKeybinds[effect.id]} onclick={() => clearTextEffectKeybind(effect.id)}>Clear</button>
+                      </li>
+                    {/each}
+                  </ul>
+                {/each}
               </section>
             {:else if settingsPage === "network"}
               <div class="stx-crumb">SETTINGS // CONNECTION // NETWORK</div>
@@ -12024,7 +18690,7 @@
                     The last thing this app tried: <b>{connectivity.action === "found" ? "founding" : "joining"}</b>
                     {connectivity.subject ? ` (${connectivity.subject})` : ""}, {fmtLocal(connectivity.at)}.
                   </p>
-                  <p class="muted small">Reachable from the internet: <b>{reach.verdict}</b>. {reach.detail}</p>
+                  <p class="muted small">Observed reachability: <b>{reach.verdict}</b>. {reach.detail}</p>
                   <div class="invite-actions">
                     <button class="ghost small" onclick={refreshConnectivity}>Refresh</button>
                     <button class="ghost small" onclick={copyConnectivity}>{connCopied ? "Copied!" : "Copy report"}</button>
@@ -12118,31 +18784,7 @@
             </aside>
           {:else if settingsPage === "profile"}
             <aside class="stx-prev">
-              <div class="stx-ph"><i></i>LIVE PREVIEW</div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">PROFILE CARD</div>
-                <div class="stx-prof">
-                  {#if pBanner}
-                    <img class="stx-pbanner" src={imgSrc(pBanner)} alt="" />
-                  {:else}
-                    <div class="stx-pbanner"></div>
-                  {/if}
-                  {#if pAvatar}
-                    <img class="avatar lg stx-pav" src={imgSrc(pAvatar)} alt="" />
-                  {:else}
-                    <span class="avatar lg fallback stx-pav" style={`background:${pColor}`}>{(pName || displayName).slice(0, 1).toUpperCase()}</span>
-                  {/if}
-                  <div class="stx-prof-body">
-                    <span class="stx-prof-name">{@render styledName(pName || displayName, pColor, pFont, pEffect)}</span>
-                    {#if myFp}<div class="stx-pfp">FP {fmtFp(myFp.slice(0, 16).toUpperCase())}</div>{/if}
-                  </div>
-                </div>
-              </div>
-              <div class="stx-pcard">
-                <div class="stx-pcap">IN CHAT</div>
-                {@render previewLog()}
-              </div>
-              <p class="muted small stx-pnote">Exactly what members of this server see, card and chat both.</p>
+              {@render profilePreview()}
             </aside>
           {/if}
           <button type="button" class="stx-esc" onclick={() => (showSettings = false)} title="Close (Esc)">
@@ -12195,10 +18837,63 @@
                 <button class="ghost small" disabled={!serverNameDraft.trim() || serverNameDraft.trim() === cur?.name}>Rename</button>
               </form>
               <p class="muted small">The name is your own label for this server (not shared with other members).</p>
-              <label class="toggle">
-                <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
-                <span>Notify me of voice calls on this server</span>
-              </label>
+              </section>
+            {:else if serverSettingsPage === "notifications"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // NOTIFICATIONS</div>
+              <h1>Notifications</h1>
+              <section class="set-section">
+                <h3>Sound overrides</h3>
+                <p class="muted small">Inherit follows Settings → Notifications. “On” or “Off” overrides that category for this server; the device-wide master switch can still silence everything.</p>
+                <div class="sound-settings-list">
+                  {#each NOTIFICATION_SOUND_KINDS as kind (kind)}
+                    {@const pref = serverSoundPrefs[kind]}
+                    {@const effective = soundPolicy(kind, activeServerId)}
+                    <article class="sound-setting-row">
+                      <div class="sound-setting-head">
+                        <div><strong>{SOUND_LABELS[kind].title}</strong><span>{SOUND_LABELS[kind].detail}</span></div>
+                        <span class="sound-effective" class:on={effective.enabled}>{effective.enabled ? "Enabled" : "Disabled"} · {effective.source}</span>
+                      </div>
+                      <div class="sound-setting-controls">
+                        <label>
+                          <span>Enabled</span>
+                          <select value={pref.enabled} onchange={(e) => setServerSoundEnabled(kind, e.currentTarget.value as SoundOverride)}>
+                            <option value="inherit">Inherit global</option>
+                            <option value="on">On for this server</option>
+                            <option value="off">Off for this server</option>
+                          </select>
+                        </label>
+                        <label>
+                          <span>Tone</span>
+                          <select value={pref.tone} onchange={(e) => setServerToneMode(kind, e.currentTarget.value as ToneOverride)}>
+                            <option value="inherit">Inherit global</option>
+                            <option value="default">Built-in chime</option>
+                            <option value="crunch">Paper scrunch</option>
+                            <option value="custom" disabled={!pref.custom}>Custom{pref.custom ? ` · ${pref.custom.name}` : ""}</option>
+                          </select>
+                        </label>
+                        <button type="button" class="ghost small" disabled={!effective.enabled} onclick={() => playConfiguredSound(kind, activeServerId)}>Test</button>
+                        <label class="ghost small sound-file">
+                          {pref.custom ? "Replace custom…" : "Choose custom…"}
+                          <input type="file" accept="audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/mp4,audio/aac,audio/flac,.mp3,.wav,.ogg,.webm,.m4a,.aac,.flac" onchange={(e) => { const input = e.currentTarget; void importCustomTone("server", kind, input.files).finally(() => (input.value = "")); }} />
+                        </label>
+                        {#if pref.custom}
+                          <button type="button" class="ghost small" onclick={() => removeCustomTone("server", kind)}>Remove custom</button>
+                        {/if}
+                      </div>
+                    </article>
+                  {/each}
+                </div>
+              </section>
+              <section class="set-section">
+                <h3>Voice calls</h3>
+                <label class="toggle">
+                  <input type="checkbox" checked={acceptCallsHere} onchange={toggleAcceptCalls} />
+                  <span>Notify me when a voice room becomes active on this server</span>
+                </label>
+                <p class="muted small">The voice banner uses the effective Mentions &amp; replies tone. Turning this off suppresses the banner and its sound.</p>
+              </section>
+              <section class="set-section">
+                <button type="button" class="ghost small" onclick={() => { showServerSettings = false; openSettings("notifications"); }}>Open global sound defaults</button>
               </section>
             {:else if serverSettingsPage === "calls"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // CALLS &amp; RELAY</div>
@@ -12493,7 +19188,31 @@
                 {#if myRole === "admin"}
                   <p class="muted small">As an admin, the newcomer is admitted once the owner is next online.</p>
                 {/if}
-                {#if cur?.invite}
+                {#if invitePre}
+                  {@const internetReady = invitePre.public_direct || invitePre.relay}
+                  <div class="invite-scope">
+                    <span class="scope-chip" class:ok={invitePre.lan}>Your network: {invitePre.lan ? "ready" : "unknown"}</span>
+                    <span class="scope-chip" class:ok={internetReady} class:warn={!internetReady && !invitePre.waiting}>
+                      Internet: {internetReady ? "ready" : invitePre.waiting ? "checking…" : "not reachable yet"}
+                    </span>
+                    <button
+                      class="ghost small"
+                      disabled={invitePreRunning || mintingInvite}
+                      onclick={() => { if (activeServerId !== null) void precheckInviteRoutes(activeServerId); }}
+                    >{invitePreRunning ? "Checking…" : "Run check again"}</button>
+                  </div>
+                  {#if !internetReady && !invitePre.waiting}
+                    <p class="muted small">
+                      Automatic router setup got no answer, so an invite made now only works for someone on
+                      your own network. You can usually fix that by enabling UPnP on your
+                      router{#if invitePre.port > 0}, or by forwarding port {invitePre.port} (TCP and UDP) to
+                      this computer{invitePre.lan_ip ? ` at ${invitePre.lan_ip}` : ""}{/if}. If your provider
+                      shares one public address between homes (CGNAT), forwarding won't help; a relay or
+                      switchboard is the way through.
+                    </p>
+                  {/if}
+                {/if}
+                {#if cur?.invite && inviteRevealed === cur.id}
                   <textarea class="invite-code" readonly rows="3" value={wrapInvite(cur.invite, cur.id)}></textarea>
                   {#if wrapInvite(cur.invite, cur.id).length <= QR_MAX_CHARS}
                     <canvas class="qr-canvas" use:qr={wrapInvite(cur.invite, cur.id)}></canvas>
@@ -12502,14 +19221,44 @@
                     <button onclick={copyInvite}>{copied ? "Copied!" : "Copy invite"}</button>
                     {#if canInvite}
                       <button class="ghost" disabled={mintingInvite} onclick={generateInvite}>
-                        {mintingInvite ? "Generating…" : "Generate new invite"}
+                        {!mintingInvite ? "Generate new invite" : inviteCheck && inviteCheck.pct < 100 ? "Checking route…" : "Generating…"}
                       </button>
                     {/if}
                   </div>
                 {:else if canInvite}
                   <button disabled={mintingInvite} onclick={generateInvite}>
-                    {mintingInvite ? "Generating…" : "Generate an invite"}
+                    {!mintingInvite ? "Generate an invite" : inviteCheck && inviteCheck.pct < 100 ? "Checking route…" : "Generating…"}
                   </button>
+                {/if}
+                {#if inviteCheck}
+                  <div class="invite-check">
+                    <div class="invite-check-bar"><span style={`width:${inviteCheck.pct}%`}></span></div>
+                    <p class="muted small">{inviteCheck.label}</p>
+                  </div>
+                {/if}
+              </section>
+              <section class="set-section">
+                <h3>If their join fails: meet in the middle</h3>
+                <p class="muted small">
+                  When the invite alone can't get through, the person joining is shown a one-time
+                  connection reply (a code starting with <span class="fp">mewtual-reply-v1</span>)
+                  to send back to you in the same chat where you sent the invite. Paste it here and
+                  this app dials them instead; their app must still be open and waiting.
+                </p>
+                <textarea class="invite-code" rows="3" bind:value={joinReplyInput} placeholder="paste mewtual-reply-v1 code"></textarea>
+                <div class="pc-actions">
+                  <button class="ghost small" disabled={joinReplyApplying || !joinReplyInput.trim()} onclick={() => applyJoinReply(false)}>
+                    {joinReplyApplying ? "Dialling…" : "Connect"}
+                  </button>
+                  {#if joinReplyNeedsReplace}
+                    <button class="ghost small danger-btn" disabled={joinReplyApplying} onclick={() => applyJoinReply(true)}>
+                      Confirm different joiner
+                    </button>
+                  {/if}
+                  <span class="muted small">codes expire about a minute after they're made</span>
+                </div>
+                {#if joinReplyNeedsReplace}
+                  <p class="muted small fail-t">This invite already has a different active joiner. Replace it only if you deliberately switched people.</p>
                 {/if}
               </section>
               {:else}
@@ -12714,6 +19463,67 @@
               </div>
             {/if}
 
+            {#if fileTextKind}
+              <div class="file-text">
+                <div class="file-text-bar">
+                  {#if fileTextKind === "markdown"}
+                    <div class="file-text-toggle" role="group" aria-label="Markdown view">
+                      <button
+                        type="button"
+                        class:active={fileTextMode === "render"}
+                        aria-pressed={fileTextMode === "render"}
+                        onclick={() => (fileTextMode = "render")}
+                      >rendered</button>
+                      <button
+                        type="button"
+                        class:active={fileTextMode === "source"}
+                        aria-pressed={fileTextMode === "source"}
+                        onclick={() => (fileTextMode = "source")}
+                      >source</button>
+                    </div>
+                  {:else}
+                    <span class="muted small">{fileInfo.mime || "plain text"}</span>
+                  {/if}
+                  <span class="file-text-spacer"></span>
+                  {#if fileTextState === "ready"}
+                    <span class="muted small">{lineCountLabel(fileTextLines)}</span>
+                    {#if !fileTextRendered}
+                      <div class="file-text-toggle">
+                        <button
+                          type="button"
+                          class:active={fileTextWrap}
+                          aria-pressed={fileTextWrap}
+                          title="Wrap long lines instead of scrolling sideways"
+                          onclick={() => (fileTextWrap = !fileTextWrap)}
+                        >↩ wrap</button>
+                      </div>
+                    {/if}
+                  {/if}
+                </div>
+
+                {#if fileTextState === "loading"}
+                  <p class="muted small file-text-note">Loading…</p>
+                {:else if fileTextState === "too-big"}
+                  <p class="muted small file-text-note">
+                    {fmtSize(fileInfo.size)} is past the {fmtSize(TEXT_PREVIEW_MAX_BYTES)} inline limit.
+                    <button class="ghost small" onclick={() => fileInfo && loadFileText(fileInfo, true)}>Read it anyway</button>
+                  </p>
+                {:else if fileTextState === "binary"}
+                  <p class="muted small file-text-note">This isn't readable text: download it and open it in the right app.</p>
+                {:else if fileTextState === "error"}
+                  <p class="muted small file-text-note">Can't read it: the file isn't downloaded yet and no peer is sharing it right now.</p>
+                {:else if fileTextState === "ready"}
+                  {#if !fileText.trim()}
+                    <p class="muted small file-text-note">This file is empty.</p>
+                  {:else if fileTextRendered}
+                    <div class="file-text-body wiki-render" use:richClicks>{@html fileTextHtml}</div>
+                  {:else}
+                    <pre class="file-text-body source" class:wrap={fileTextWrap}>{fileText}</pre>
+                  {/if}
+                {/if}
+              </div>
+            {/if}
+
             <dl class="file-meta">
               <dt>Availability</dt>
               <dd>
@@ -12754,7 +19564,7 @@
                       <span class="usage-count">{fileInfoUsage.chat_count} chat message{fileInfoUsage.chat_count === 1 ? "" : "s"}</span>
                     {/if}
                     {#if fileInfoUsage.status_count > 0}
-                      <span class="usage-count">{fileInfoUsage.status_count} status post{fileInfoUsage.status_count === 1 ? "" : "s"}</span>
+                      <span class="usage-count">{fileInfoUsage.status_count} announcement{fileInfoUsage.status_count === 1 ? "" : "s"}</span>
                     {/if}
                     {#if fileInfoUsage.event_count > 0}
                       <span class="usage-count">{fileInfoUsage.event_count} event{fileInfoUsage.event_count === 1 ? "" : "s"}</span>
@@ -12770,11 +19580,14 @@
               anyone's device, and the file stays fetchable by address for as long as any member still holds it.
             </p>
 
-            {#if activeServerId !== null && downloads[dlKey(activeServerId, fileInfo.cid)] && (downloads[dlKey(activeServerId, fileInfo.cid)].status === "downloading" || downloads[dlKey(activeServerId, fileInfo.cid)].status === "queued")}
+            {#if activeServerId !== null && downloads[dlKey(activeServerId, fileInfo.cid)] && downloads[dlKey(activeServerId, fileInfo.cid)].status !== "done" && downloads[dlKey(activeServerId, fileInfo.cid)].status !== "failed"}
               {@const di = downloads[dlKey(activeServerId, fileInfo.cid)]}
               <label class="dl-progress">
                 <span class="muted small">
-                  {di.status === "queued" ? "Queued…" : `Downloading… ${Math.round(di.progress * 100)}%`}
+                  {#if di.status === "verifying"}Verifying…
+                  {:else if !di.provider && onlineCount <= 1 && di.done < di.total}No connection · waiting for a member
+                  {:else if di.status === "queued" || di.status === "waiting"}Waiting for source…
+                  {:else}Receiving… {Math.round(di.progress * 100)}%{/if}
                 </span>
                 <progress value={di.progress} max="1"></progress>
               </label>
@@ -12806,113 +19619,40 @@
     {/if}
 
     {#if showFeedback}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showFeedback = false; }}>
-        <div class="overlay-card">
-          <header class="overlay-head">
-            <h2>💬 Send feedback</h2>
-            <button class="ghost" onclick={() => (showFeedback = false)}>✕</button>
-          </header>
-          <div class="overlay-body feedback">
-            <div class="seg fb-seg">
-              <button class:active={feedbackKind === "bug"} onclick={() => (feedbackKind = "bug")}>🐞 Bug report</button>
-              <button class:active={feedbackKind === "feature"} onclick={() => (feedbackKind = "feature")}>✨ Feature request</button>
-            </div>
-            <label class="fb-label" for="fb-title">Title</label>
-            <input
-              id="fb-title"
-              class="fb-text"
-              bind:value={feedbackTitle}
-              maxlength="120"
-              placeholder={feedbackKind === "bug" ? "Short summary of the problem" : "Short summary of the idea"}
-            />
-            <label class="fb-label" for="fb-text">
-              {feedbackKind === "bug"
-                ? "What went wrong? Steps to reproduce, and what you expected to happen."
-                : "What would you like Mewtual to do?"}
-            </label>
-            <textarea id="fb-text" class="fb-text" bind:value={feedbackText} rows="7" placeholder="Describe it here…"></textarea>
-            <p class="muted small">
-              Filing opens a prefilled issue on the
-              <strong>{feedbackKind === "bug" ? "bug tracker" : "feature request tracker"}</strong>
-              in your browser: review it and press Submit there. Mewtual sends nothing on its own and holds no GitHub
-              account of yours, so nothing is posted until you submit it. Your app version and environment are included
-              to help debugging. No GitHub account? Copy the report and send it to the maintainer instead.
-            </p>
-            <div class="file-info-actions">
-              <button class="primary" disabled={!feedbackText.trim()} onclick={openFeedbackIssue}>
-                {feedbackOpened ? "✓ Opened in your browser" : feedbackKind === "bug" ? "🐞 File on GitHub" : "✨ File on GitHub"}
-              </button>
-              <button class="ghost" disabled={!feedbackText.trim()} onclick={copyFeedback}>
-                {feedbackCopied ? "✓ Copied to clipboard" : "Copy report"}
-              </button>
+      {#if FeedbackOverlay}
+        <FeedbackOverlay
+          version={APP_VERSION}
+          onclose={() => (showFeedback = false)}
+          onerror={(message) => (error = message)}
+        />
+      {:else}
+        <!-- Keep failure local and retryable; a failed optional chunk must not destabilize chat. -->
+        <div class="overlay" role="presentation">
+          <div class="overlay-card">
+            <header class="overlay-head"><h2>Send feedback</h2><button class="ghost" onclick={() => (showFeedback = false)}>✕</button></header>
+            <div class="overlay-body">
+              <p class="muted">{feedbackOverlayError ? "The feedback view could not be loaded." : "Loading feedback…"}</p>
+              {#if feedbackOverlayError}<button class="ghost" onclick={loadFeedbackOverlay}>Retry</button>{/if}
             </div>
           </div>
         </div>
-      </div>
+      {/if}
     {/if}
 
     {#if showWikiHelp}
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="overlay" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) showWikiHelp = false; }}>
-        <div class="overlay-card">
-          <header class="overlay-head">
-            <h2>Wiki formatting</h2>
-            <button class="ghost" onclick={() => (showWikiHelp = false)}>✕</button>
-          </header>
-          <div class="overlay-body wiki-help">
-            <p>Each page is written in <strong>Markdown</strong> or <strong>Wikitext</strong>: pick per page with the
-              <code>md / wiki</code> switch in Edit mode. The choice is a page property shared with every member.
-              Pages with 3+ headings get an automatic <strong>Contents</strong> box.</p>
-            <h3>Link to another page (both formats)</h3>
-            <p><code>[[Getting Started]]</code>, or with display text: <code>[[Getting Started|the guide]]</code>.
-              Click a link to open it; a <span class="wikilink missing">red link</span> means the page doesn't exist
-              yet: click it to create it.</p>
-            <h3>Embed an image / video / audio (both formats)</h3>
-            <p>In Edit mode, <strong>drag a file onto the editor</strong> or use the 📎 button. It's stored in the
-              fileshare under <code>wiki/&lt;page&gt;/</code> and shown inline.</p>
-            <h3>Infobox (both formats)</h3>
-            <p>The summary card that floats at the top right of a page. Write one block, anywhere on the
-              page, with the <code>▤</code> toolbar button; <code>title</code>, <code>image</code> and
-              <code>caption</code> are the card's own chrome, every other line is a row, and a line with an
-              empty value becomes a section band. One infobox per page.</p>
-            <pre class="wiki-help-block">{`{{Infobox
-| title   = Whiskers
-| image   = (use 📎 or + insert to place a file here)
-| caption = At the cafe
-| Species = Cat
-| Owner   = [[Alice]]
-| Details =
-| Age     = 4
-}}`}</pre>
-            <h3>Markdown pages</h3>
-            <ul>
-              <li><code>**bold**</code>, <code>*italic*</code>, <code>`code`</code></li>
-              <li><code># Heading</code>, <code>## Subheading</code></li>
-              <li><code>- bullet</code> lists, <code>1. numbered</code> lists</li>
-              <li><code>&gt; quote</code>, <code>---</code> divider, <code>[text](https://link)</code></li>
-            </ul>
-            <h3>Wikitext pages</h3>
-            <ul>
-              <li><code>'''bold'''</code>, <code>''italic''</code>, <code>'''''both'''''</code></li>
-              <li><code>== Heading ==</code>, <code>=== Subheading ===</code></li>
-              <li><code>* bullet</code> / <code># numbered</code> lists; nest by repeating (<code>**</code>, <code>##</code>)</li>
-              <li><code>; term : definition</code>, <code>:</code> indent, <code>----</code> divider</li>
-              <li><code>[https://link label]</code> external link</li>
-              <li><code>{"{|"}</code> … <code>{"|}"}</code> table, with <code>|-</code> rows, <code>!</code> header cells, <code>|+</code> caption</li>
-              <li><code>&lt;nowiki&gt;…&lt;/nowiki&gt;</code> shows markup literally</li>
-            </ul>
-            <h3>Page tools</h3>
-            <ul>
-              <li><strong>Contents box</strong>: automatic at 3+ headings; force with <code>__TOC__</code>, suppress with <code>__NOTOC__</code>.</li>
-              <li><strong>Sections</strong>: hover a heading in Read mode for a per-section <em>edit</em> jump.</li>
-              <li><strong>Redirects</strong>: a page whose first line is <code>#REDIRECT [[Target]]</code> forwards readers there.</li>
-              <li><strong>Rename / delete</strong>: in the page header (rename doesn't rewrite links: old links go red).</li>
-              <li><strong>What links here</strong>: pages linking to the open page, listed under it.</li>
-            </ul>
+      {#if WikiHelpOverlay}
+        <WikiHelpOverlay onclose={() => (showWikiHelp = false)} />
+      {:else}
+        <div class="overlay" role="presentation">
+          <div class="overlay-card">
+            <header class="overlay-head"><h2>Wiki formatting</h2><button class="ghost" onclick={() => (showWikiHelp = false)}>✕</button></header>
+            <div class="overlay-body">
+              <p class="muted">{wikiHelpLoadError ? "Wiki help could not be loaded." : "Loading wiki help…"}</p>
+              {#if wikiHelpLoadError}<button class="ghost" onclick={loadWikiHelpOverlay}>Retry</button>{/if}
+            </div>
           </div>
         </div>
-      </div>
+      {/if}
     {/if}
 
     {#if showQuickSwitch}

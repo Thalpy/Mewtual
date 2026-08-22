@@ -47,17 +47,29 @@ updates, and move between several separate communities—all without creating an
 
 ## What can it do?
 
-- **Group chat:** multiple channels, replies, reactions, pins, mentions, unread markers,
-  message editing, rich search, Markdown, and custom emoji.
-- **Shared knowledge:** collaborative Markdown/Wikitext wiki pages with links, backlinks,
-  media embeds, redirects, and concurrent editing.
-- **Files and media:** encrypted file sharing, folders, inline image/audio/video embeds,
-  content-addressed fetching, and configurable circulation periods.
-- **Community spaces:** member profiles, avatars, status posts, events, owner/admin badges,
-  server themes, and multiple servers in one app.
-- **Private calls:** peer-to-peer call signalling and media without a central call service.
-- **Offline use:** read local history while disconnected and catch up with another member
-  when a peer becomes reachable again.
+The desktop app has a searchable **Settings → Feature Guide** with direct links to most of these
+surfaces. The short map is:
+
+| Feature | What is included | Where it is in the desktop app |
+|---|---|---|
+| **Channels and chat** | Multiple channels, Markdown, replies, reactions, editing/deletion, pins, mentions, unread markers, drafts and evidence-based delivery ticks | Open a server → **Chat** (`Ctrl+1`) |
+| **Search and inbox** | Server-wide filters for people, dates, media, links, replies and reactions; a cross-server mentions/replies inbox | Chat → magnifier (`Ctrl+F` / `Ctrl+Shift+F`); left rail → **Inbox** |
+| **DMs and friends** | Unlinkable 1:1 spaces, friend codes, activity sorting and authenticated in-server friend requests | Left rail → **DMs** |
+| **Files and media** | Encrypted chunked sharing, folders, previews, inline image/audio/video, deduplication, circulation controls, wiki pins, usage tracking and a once-per-session storage report with repair, category, pin and largest-file breakdowns | **Files** (`Ctrl+2`), **Transfers** (`Ctrl+6`), or the sidebar **Storage** button |
+| **Shared knowledge** | Collaborative Markdown/Wikitext pages, nested pages, links/backlinks, redirects, infoboxes, history, rollback and optional edit review | **Wiki** (`Ctrl+4`) |
+| **Updates and planning** | Rich status posts, a cross-server News feed and shared events with optional artwork | **Status** (`Ctrl+3`), **Inbox → News**, and **Events** (`Ctrl+7`) |
+| **Profiles and identity** | Per-server profiles, bios, banners, animated avatars, message bubbles, composable name effects and private fingerprint verification marks | **Profile** (`Ctrl+5`); **Settings → My Profile / Verification** |
+| **Community management** | Owner/admin roles, protocol-enforced member removal, member badges, single-use invites, custom emoji/stickers and linked-device visibility | Right-click a server → **Server settings** |
+| **Moderation and accountability** | A signed per-user activity graph and detailed event timeline, range-selected warnings/deletion, collapsible warned posts, evidence-backed kick cases, member votes and owner-enforced removal | Owner/admin: server sidebar → **Moderation**; members receive active vote cards in chat |
+| **Voice and shared play** | Channel voice rooms, camera/screen sharing, per-peer controls, a MIDI-capable shared instrument and a room jukebox backed by server files | Chat header → **Join voice**, then open the call stage |
+| **Appearance and spaces** | Local themes, text/density/motion controls, safe shared server liveries and a configurable 360° server room | **Settings → Appearance / Server Space**; server settings → **Livery** |
+| **Devices, vault and recovery** | Passphrase, sigil or melody unlock and atomic secret changes; session lock; encrypted backups with explicit exposure warnings; multi-device grants carried by paste, QR or sound; per-device revocation | **Settings → Vault & Lock / Backup & Recovery / Devices** |
+| **Connectivity and operations** | Direct, UPnP-assisted, relayed and rendezvous-discovered connections; a per-server connectivity assistant; post-join rediscovery, connection reports, join logs, opt-in diagnostics and signed app updates | Sidebar **Connectivity**; **Settings → Network / Diagnostics / Updates**; server settings → **Join Log** |
+| **Offline and durable history** | Read sealed local history while disconnected; vault-sealed drafts and read positions survive restarts; catch up when another member becomes reachable | Automatic after the vault is unlocked |
+
+The feature guide and [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) describe the UI; the
+implementation-status details and security caveats live in [`docs/HANDOVER.md`](docs/HANDOVER.md)
+and [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 
 ## How it works
 
@@ -161,7 +173,8 @@ seal local data; on later launches, the same passphrase unlocks it.
 To start talking:
 
 1. Choose **Found a server** and give it a name.
-2. Open **Settings → Invite someone** and copy the generated invite.
+2. Right-click the server icon, open **Server settings → Invites**, and copy or generate an
+   invite.
 3. Have another Mewtual instance choose **Join**, paste the invite, and connect.
 4. Open `#general` and send a message.
 
@@ -195,8 +208,11 @@ The founder advertises one or more addresses in the invite:
 | Across the internet | Enter a public address and forward the selected TCP port |
 | Behind NAT without port forwarding | Run a reachable relay and paste its multiaddress |
 
-Relays forward encrypted bytes; they do not join the MLS group or receive its keys. Automatic
-rendezvous discovery exists in the core/CLI but is not yet fully wired into the desktop flow.
+Relays forward encrypted bytes; they do not join the MLS group or receive its keys. When a
+rendezvous address is configured, the desktop registers there, discovers the inviter from the
+invite, and keeps re-registering after the join so existing members can find one another again.
+Rendezvous is private reachability infrastructure, not a public server directory: joining still
+requires a valid single-use invite.
 
 ## Build a Windows release
 
@@ -342,11 +358,11 @@ licences. Read the licence document for the actual terms.
 
 ## Current status
 
-The encrypted group core, peer-to-peer transport, direct and relayed joining, replication,
-encrypted persistence, file transfer, and desktop product experience are implemented and
-covered by the repository's test suites. Work is still ongoing around easier automatic
-discovery in the desktop UI, chunked large-file transfer, retention hardening, packaging,
-mobile support, and broader security review.
+The encrypted group core, peer-to-peer transport, direct/relayed/rendezvous joining, replication,
+encrypted persistence, chunked file transfer, post-join rediscovery, multi-device admission and
+the desktop product experience are implemented and covered by the repository's test suites.
+Work is still ongoing around last-copy-safe retention and disk quotas, recovery/export UX,
+reachability diagnosis, packaging, mobile support, voice hardening and broader security review.
 
 This repository deliberately documents unfinished security properties instead of presenting
 them as complete. Start with:

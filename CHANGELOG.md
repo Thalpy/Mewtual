@@ -4,8 +4,32 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.3] - 2026-08-22
+
+First release cut by the signed release pipeline: installed copies of this version and later
+update themselves in-app. Copies installed from the hand-uploaded alpha.2 builds have no update
+channel and need this installer once, by hand.
+
 ### Added
 
+- **Moderation plane**: servers now have a signed event timeline with Shift-range message
+  selection, public warning reasons, collapsible warned posts, evidence-backed kick cases,
+  advisory member votes and owner-only removal. The timeline discloses its honest-client audit-log
+  limitation; votes never grant membership authority. The plane is owner/admin-only and now opens
+  with a per-user lane graph above the detailed scroll; ordinary members vote from focused chat cards.
+- **Storage and connectivity operations**: paired sidebar controls open authenticated local storage
+  verification/peer repair and an evidence-based connectivity assistant. Transfers repeats storage
+  health so a corrupt local chunk is distinguishable from an unavailable peer. Storage verification
+  runs once per server/process session and adds category, wiki-pin and largest-file inventory views.
+- **Durable history and encrypted backup export**: composer drafts and read positions are sealed in
+  the vault across restarts, including safe migration of legacy plaintext read marks. Settings →
+  Backup & Recovery creates a coherent encrypted export in Downloads; staged restore remains
+  deliberately deferred until it can verify and roll back from the locked screen. Export risks are
+  explicit, and Vault & Lock can atomically change a passphrase/sigil/melody by rewrapping the DEK.
+- **Searchable Feature Guide**: Settings now includes a complete feature directory with plain
+  descriptions, exact UI locations, shortcuts and direct **Open** actions for chat surfaces,
+  DMs, Inbox/News, Server Space and both settings areas. The repository README carries the same
+  high-level map so substantial features are no longer hidden in handover notes.
 - **Wiki page history**: every page keeps its revisions (who changed what, when), with a line
   diff against the previous version and one-click restore. Rollbacks, renames, deletions and
   review decisions are all recorded, so nothing is silently erased.

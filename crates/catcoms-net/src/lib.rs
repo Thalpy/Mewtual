@@ -33,9 +33,12 @@
 
 pub mod addr;
 pub mod admission;
+pub mod autonat_server;
 pub mod fdlimit;
 pub mod infra_transport;
+pub mod join_reply;
 pub mod metering;
+mod pcp_ipv6;
 pub mod relay_node;
 pub mod rendezvous_node;
 
@@ -47,6 +50,7 @@ pub use addr::{
 pub use infra_transport::{
     is_advertisable, is_websocket_addr, is_wildcard_addr, load_ws_tls_pem, WsTlsConfig,
 };
+pub use join_reply::{JoinReply, JoinReplyError, JOIN_REPLY_LIFETIME_MS};
 pub use metering::ByteMeters;
 pub use relay_node::{
     build_memory_relay_swarm, build_relay_swarm, build_relay_swarm_with_key, run_relay,
@@ -58,31 +62,44 @@ pub use rendezvous_node::{
     RendezvousNode,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::convert::Infallible;
 use std::future::Future;
 use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::num::NonZeroU16;
 use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use catcoms_rt::{
-    DiscoveredPeer, MeshTransport, PeerId, ProtocolId, Responder, Topic, TransportError,
-    TransportEvent,
+    Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, OsCryptoRng, PeerId, ProtocolId,
+    Responder, SystemClock, Topic, TransportError, TransportEvent,
 };
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
 use libp2p::core::transport::MemoryTransport;
+use libp2p::core::transport::PortUse;
 use libp2p::core::upgrade::Version;
+use libp2p::core::Endpoint;
 use libp2p::multiaddr::Protocol;
 use libp2p::request_response::{OutboundRequestId, ResponseChannel};
+use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
-use libp2p::swarm::{NetworkBehaviour, SwarmEvent};
+use libp2p::swarm::{
+    dummy, ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, NewExternalAddrCandidate,
+    SwarmEvent, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
+};
 use libp2p::{
-    connection_limits, dcutr, gossipsub, identify, noise, relay, rendezvous, request_response,
-    yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
+    allow_block_list, autonat, connection_limits, dcutr, gossipsub, identify, noise, relay,
+    rendezvous, request_response, yamux, Multiaddr, StreamProtocol, Swarm, SwarmBuilder, Transport,
 };
 use thiserror::Error;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::net::UdpSocket;
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::task::JoinHandle;
 
 /// Max request/response frame size.
 const MAX_FRAME: usize = 16 * 1024 * 1024;
@@ -141,6 +158,203 @@ pub struct Registered {
     pub ttl: u64,
     /// The rendezvous node that granted it.
     pub rendezvous_node: libp2p::PeerId,
+}
+
+/// The result of one AutoNAT v2 dial-back for one candidate address.
+///
+/// Reachability is deliberately **per address and per observer**, not a permanent property of the
+/// node. A successful v2 result means the named server really opened a fresh connection and the
+/// client received the matching nonce; a failure means only that this server could not reach this
+/// address at this moment. Callers must not generalise either result to every transport or network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoNatResult {
+    /// The local external-address candidate the server tested.
+    pub address: Multiaddr,
+    /// The public relay/rendezvous node that performed the dial-back.
+    pub server: libp2p::PeerId,
+    /// `true` only after the callback connection carrying the expected nonce arrived.
+    pub reachable: bool,
+    /// The upstream error for a failed test. Empty on success.
+    pub error: Option<String>,
+}
+
+/// The router protocol that produced (or failed to produce) an inbound port mapping.
+///
+/// UPnP IGD has two cooperating sources: libp2p's behaviour (unbound discovery socket, the OS
+/// picks the multicast egress interface) and this crate's bound worker, which repeats the search
+/// from the default-route interface because the OS routinely picks a virtual adapter (WSL
+/// vEthernet, VirtualBox host-only) and the router never hears the unbound search. Their events
+/// share this mechanism but are keyed apart by `local_address` (`None` = libp2p, `Some(v4)` =
+/// bound), and a shared lease renewed by both is idempotent at the gateway. The separate
+/// `portmapper` clients keep UPnP disabled; they probe PCP first and then NAT-PMP, and report
+/// which protocol the gateway actually advertised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PortMappingMechanism {
+    /// Universal Plug and Play Internet Gateway Device protocol.
+    Upnp,
+    /// Port Control Protocol (RFC 6887).
+    Pcp,
+    /// NAT Port Mapping Protocol.
+    NatPmp,
+}
+
+impl std::fmt::Display for PortMappingMechanism {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Upnp => "UPnP",
+            Self::Pcp => "PCP",
+            Self::NatPmp => "NAT-PMP",
+        })
+    }
+}
+
+/// IP transport whose stable listen port is being mapped through the router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PortMappingTransport {
+    /// The libp2p TCP listener.
+    Tcp,
+    /// The libp2p QUIC listener (a UDP mapping).
+    Udp,
+}
+
+impl std::fmt::Display for PortMappingTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Tcp => "TCP",
+            Self::Udp => "UDP/QUIC",
+        })
+    }
+}
+
+/// A best-effort router port-mapping lifecycle event.
+///
+/// A mapping is evidence of a candidate public address, not proof that the wider internet can
+/// reach it. The actor separately offers successful candidates to AutoNAT for a remote callback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortMappingEvent {
+    /// A gateway created an inbound mapping to this node's stable listen port.
+    Mapped {
+        /// The protocol that created the mapping.
+        mechanism: PortMappingMechanism,
+        /// TCP or UDP/QUIC.
+        transport: PortMappingTransport,
+        /// Exact local address whose listener owns this lease. `None` identifies the legacy
+        /// IPv4/default-gateway owner used by UPnP, PCPv4 and NAT-PMP.
+        local_address: Option<IpAddr>,
+        /// The public multiaddr, without this node's `/p2p/<peer-id>` suffix.
+        address: Multiaddr,
+    },
+    /// A protocol probe found no usable gateway for this transport.
+    Unavailable {
+        /// Protocol that was unavailable.
+        mechanism: PortMappingMechanism,
+        /// TCP or UDP/QUIC.
+        transport: PortMappingTransport,
+        /// Exact local address whose attempt failed, or `None` for the IPv4/default-gateway path.
+        local_address: Option<IpAddr>,
+        /// Scoped diagnostic; callers must not interpret one protocol's failure as every mapping
+        /// mechanism having failed.
+        detail: String,
+    },
+    /// A previously surfaced mapping expired. Callers must stop advertising it unless a renewed
+    /// mapping has already replaced it.
+    Expired {
+        /// Protocol that owned the mapping.
+        mechanism: PortMappingMechanism,
+        /// TCP or UDP/QUIC.
+        transport: PortMappingTransport,
+        /// Exact local address whose lease ended, or `None` for the IPv4/default-gateway path.
+        local_address: Option<IpAddr>,
+        /// The public address that is no longer known to be mapped.
+        address: Multiaddr,
+    },
+}
+
+/// One currently active public router mapping in [`PortMappingSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivePortMapping {
+    /// Protocol that owns the lease.
+    pub mechanism: PortMappingMechanism,
+    /// TCP or UDP/QUIC.
+    pub transport: PortMappingTransport,
+    /// Exact local address that owns the lease. IPv6 pinholes need this to coexist with IPv4 and
+    /// with another interface's IPv6 lease.
+    pub local_address: Option<IpAddr>,
+    /// Public multiaddr, without this node's peer-id suffix.
+    pub address: Multiaddr,
+}
+
+/// The latest scoped failure for one router protocol and transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortMappingFailure {
+    /// Protocol that failed or whose previous lease expired.
+    pub mechanism: PortMappingMechanism,
+    /// TCP or UDP/QUIC.
+    pub transport: PortMappingTransport,
+    /// Exact local address whose attempt failed, or `None` for the IPv4/default-gateway path.
+    pub local_address: Option<IpAddr>,
+    /// Bounded upstream/context detail.
+    pub detail: String,
+}
+
+/// Coalesced authoritative router-mapping state.
+///
+/// A snapshot rather than an unbounded event log is important for library users that do not show
+/// diagnostics: retaining a `MeshService` without draining diagnostics must consume constant
+/// memory. A slow consumer can skip intermediate telemetry but cannot miss the current address set
+/// or resurrect an expired route.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortMappingSnapshot {
+    /// All live leases, one per mechanism/transport/local-address owner.
+    pub active: Vec<ActivePortMapping>,
+    /// Latest failures for keys that do not currently have a live lease.
+    pub unavailable: Vec<PortMappingFailure>,
+}
+
+/// Coalesced AutoNAT evidence, retaining the latest result for every address/server pair.
+///
+/// `latest` preserves the event-style convenience API used by integration tests, while `results`
+/// lets the product rank all still-relevant routes without forgetting a second successful one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoNatSnapshot {
+    /// Latest result for each distinct candidate/server pair.
+    pub results: Vec<AutoNatResult>,
+    /// Result that caused this snapshot update.
+    pub latest: Option<AutoNatResult>,
+}
+
+/// Current relay-circuit listen addresses owned by this mesh node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelayAddressSnapshot {
+    /// Every live `/p2p-circuit` address. Empty after the reservation/listener expires.
+    pub addresses: Vec<Multiaddr>,
+}
+
+/// Addresses the Swarm has actually reported through `NewListenAddr`, withdrawn again through
+/// `ExpiredListenAddr`. This is stronger than a successful `listen_on` request, whose OS bind can
+/// still fail asynchronously.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListenerSnapshot {
+    /// Current direct and relay listen addresses.
+    pub addresses: Vec<Multiaddr>,
+}
+
+/// One low-trust observation of this node's outbound socket, reported by a connected Identify
+/// peer.  It is diagnostics only: TCP source ports are commonly ephemeral and a peer may lie, so
+/// this address must never be advertised or dialled as a listener route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshObservation {
+    /// Connected peer that reported the observation.
+    pub observer: libp2p::PeerId,
+    /// Address the peer says it observed for this connection.
+    pub address: Multiaddr,
+}
+
+/// Coalesced, bounded observations keyed by connected peer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeshObservationSnapshot {
+    /// At most one latest observation per peer; removed when that peer disconnects.
+    pub observations: Vec<MeshObservation>,
 }
 
 // ----- request/response codec ------------------------------------------------
@@ -254,6 +468,18 @@ pub(crate) fn identify_config(key: &libp2p::identity::Keypair) -> identify::Conf
 #[derive(NetworkBehaviour)]
 #[allow(missing_debug_implementations)]
 pub struct MeshBehaviour {
+    // The two refusal behaviours are declared FIRST, and the order is load-bearing rather than
+    // cosmetic. The derive runs each field's connection handlers in declaration order and stops
+    // at the first refusal, so anything declared ahead of a protocol behaviour refuses before
+    // that behaviour has allocated per-connection state for a caller it is about to lose.
+    /// Connection caps so a discovery/registration flood cannot exhaust us.
+    pub connection_limits: connection_limits::Behaviour,
+    /// The **eviction gate** (P6): refuses every connection to a peer a Remove commit detached,
+    /// including the first. See [`Eviction`] for why it is here and not behind `gossipsub`.
+    pub eviction: Eviction,
+    /// Closes connections that were **already live** when an eviction landed. [`Eviction`]
+    /// refuses new ones; this is the half that severs what is already attached.
+    pub blocked_peers: allow_block_list::Behaviour<allow_block_list::BlockedPeers>,
     /// Topic fan-out.
     pub gossipsub: gossipsub::Behaviour,
     /// Addressed request/response.
@@ -267,18 +493,31 @@ pub struct MeshBehaviour {
     /// Rendezvous client: register our (signed) peer record under a blinded namespace
     /// and discover other members, without hard-coded bootstrap addresses.
     pub rendezvous_client: rendezvous::client::Behaviour,
-    /// UPnP/NAT-PMP: best-effort ask the home router to open a port, so this node becomes directly
-    /// reachable (the discovered public address is advertised + folded into a fresh invite); no
-    /// relay needed when the router cooperates.
-    pub upnp: libp2p::upnp::tokio::Behaviour,
-    /// Connection caps so a discovery/registration flood cannot exhaust us.
-    pub connection_limits: connection_limits::Behaviour,
+    /// AutoNAT v2 client: asks a connected public relay/rendezvous node to dial an external
+    /// address candidate back from a fresh socket. The corresponding **server** behaviour lives
+    /// only on those infrastructure swarms; ordinary members must not become public dial-back
+    /// services merely by joining a group.
+    pub autonat_client: autonat::v2::client::Behaviour<OsCryptoRng>,
+    /// UPnP IGD: best-effort ask a compatible home router to open a port. PCP and NAT-PMP are
+    /// separate actor-owned clients because libp2p's behaviour does not implement them.
+    pub upnp: Toggle<libp2p::upnp::tokio::Behaviour>,
 }
 
 impl MeshBehaviour {
     fn new(
         key: &libp2p::identity::Keypair,
         relay_client: relay::client::Behaviour,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::new_with_port_mapping(key, relay_client, false)
+    }
+
+    /// Router mapping is an explicit product capability, not a side effect of constructing any
+    /// TCP swarm. Keeping it off in the general/library builders prevents loopback tests, CLI
+    /// probes and callers that never opted in from touching the user's gateway.
+    fn new_with_port_mapping(
+        key: &libp2p::identity::Keypair,
+        relay_client: relay::client::Behaviour,
+        enable_port_mapping: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let gossipsub = gossipsub::Behaviour::new(
             gossipsub::MessageAuthenticity::Signed(key.clone()),
@@ -295,7 +534,14 @@ impl MeshBehaviour {
         let dcutr = dcutr::Behaviour::new(key.public().to_peer_id());
         let identify = identify::Behaviour::new(identify_config(key));
         let rendezvous_client = rendezvous::client::Behaviour::new(key.clone());
-        let upnp = libp2p::upnp::tokio::Behaviour::default();
+        // Use the repository's sanctioned OS-randomness seam rather than the behaviour's ambient
+        // default. AutoNAT v2 nonces are security-sensitive and must follow the same dependency
+        // boundary as every other random value in the application.
+        let autonat_client = autonat::v2::client::Behaviour::new(
+            OsCryptoRng,
+            autonat::v2::client::Config::default(),
+        );
+        let upnp = Toggle::from(enable_port_mapping.then(libp2p::upnp::tokio::Behaviour::default));
         let connection_limits = connection_limits::Behaviour::new(
             connection_limits::ConnectionLimits::default()
                 .with_max_pending_incoming(Some(64))
@@ -303,17 +549,46 @@ impl MeshBehaviour {
                 // this node is trivially enumerable, so a stranger flood has to hit a ceiling
                 // well below resource exhaustion. Far above any real roster.
                 .with_max_established_incoming(Some(256))
-                .with_max_established_per_peer(Some(8)),
+                .with_max_established_per_peer(Some(8))
+                // P5, the two caps that were still unset.
+                //
+                // Pending **outgoing**: the bound on how much dialling this node can be *told*
+                // to do. A dial plan is assembled from address sets this node did not author
+                // (up to `MAX_PEX_ADDRESSES` per member record, plus a rendezvous response, plus
+                // an invite's bootstrap list), and each pending dial holds a socket, a DNS
+                // resolution and a half-open TCP or QUIC handshake. 32 is comfortably above the
+                // widest legitimate burst (one member's addresses raced in a single dial, times
+                // a few members reconnecting at once after an outage) and far below the point
+                // where a fanned-out dial set costs this machine its file descriptors or gets
+                // it flagged as a scanner by a home router's connection tracker. What it costs:
+                // during a genuine reconnect storm the 33rd dial is refused rather than queued,
+                // so convergence takes another discovery tick.
+                .with_max_pending_outgoing(Some(32))
+                // Total **established**, inbound and outbound together. The inbound cap above
+                // does not bound this: relay circuits, rendezvous nodes and every peer this node
+                // dialled are outbound, so a node that has been fed a large address set can hold
+                // an unbounded number of connections while sitting at zero inbound. 320 is the
+                // inbound ceiling plus 64 of headroom for this node's own dials (a roster of any
+                // realistic size, plus its infra nodes, plus the second connection DCUtR opens
+                // per peer while an upgrade is in flight). What it costs: past 320 the swarm
+                // refuses new connections *including outbound ones this node wanted*, so a node
+                // deliberately configured with hundreds of peers would stop dialling rather than
+                // degrade; that is the intended failure, because the alternative is failing on
+                // file descriptors with no diagnosis.
+                .with_max_established(Some(320)),
         );
         Ok(Self {
+            connection_limits,
+            eviction: Eviction::default(),
+            blocked_peers: allow_block_list::Behaviour::default(),
             gossipsub,
             request_response,
             relay_client,
             dcutr,
             identify,
             rendezvous_client,
+            autonat_client,
             upnp,
-            connection_limits,
         })
     }
 }
@@ -371,13 +646,26 @@ pub fn build_tcp_swarm() -> Result<Swarm<MeshBehaviour>, NetError> {
 pub fn build_tcp_swarm_with_key(
     key: libp2p::identity::Keypair,
 ) -> Result<Swarm<MeshBehaviour>, NetError> {
+    build_tcp_swarm_with_key_and_port_mapping(key, false)
+}
+
+/// Build the product TCP swarm with automatic UPnP/PCP/NAT-PMP explicitly enabled.
+///
+/// General library/CLI constructors deliberately use [`build_tcp_swarm_with_key`] instead, where
+/// mapping is disabled: merely binding a test loopback socket must never change a real router.
+pub fn build_tcp_swarm_with_key_and_port_mapping(
+    key: libp2p::identity::Keypair,
+    enable_port_mapping: bool,
+) -> Result<Swarm<MeshBehaviour>, NetError> {
     Ok(SwarmBuilder::with_existing_identity(key)
         .with_tokio()
         .with_other_transport(infra_transport::client_transport)
         .map_err(|e| NetError::Build(e.to_string()))?
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|e| NetError::Build(e.to_string()))?
-        .with_behaviour(MeshBehaviour::new)
+        .with_behaviour(move |key, relay| {
+            MeshBehaviour::new_with_port_mapping(key, relay, enable_port_mapping)
+        })
         .map_err(|e| NetError::Build(e.to_string()))?
         .build())
 }
@@ -590,6 +878,10 @@ enum Command {
     /// does not need a relay circuit to be registerable at a rendezvous. Flushes any
     /// deferred registrations.
     AddExternalAddress(Multiaddr),
+    /// Withdraw one address previously asserted through [`Command::AddExternalAddress`]. Router
+    /// mappings may independently own the same socket, so the actor removes it from Swarm only
+    /// after the final configured/mapping owner is gone.
+    RemoveExternalAddress(Multiaddr),
     /// Register our peer record under `namespace` at the rendezvous node `rz_node`
     /// (must already be connected to it). Deferred until we have an external address.
     RendezvousRegister {
@@ -601,21 +893,1837 @@ enum Command {
         namespace: rendezvous::Namespace,
         rz_node: libp2p::PeerId,
     },
+    /// **Evict** a peer (P6): close every connection to it and refuse the next one. Issued by
+    /// the membership layer when a Remove commit is applied. See
+    /// [`catcoms_rt::MeshTransport::evict_peer`] for why it is best-effort.
+    Evict(PeerId),
+    /// Lift an eviction, because the peer's device is a **member again**. The product ships a
+    /// re-invite button and node identities are stable across restarts, so without this an
+    /// ex-member who is later re-invited dials the founder, is refused at the connection handler,
+    /// and the join times out with nothing to diagnose.
+    Unevict(PeerId),
+}
+
+/// Cap on the eviction deny list.
+///
+/// 256 removals is far more membership churn than any friend circle or community server will
+/// see in one process lifetime, so in practice the list never reaches the bound and nothing is
+/// ever silently re-admitted. The cap exists because an unbounded list is a defect regardless of
+/// how slowly it fills, not because this one is expected to fill.
+const MAX_EVICTED_PEERS: usize = 256;
+
+/// The eviction deny list: peers a Remove commit detached, keyed by the **phase-0** [`PeerId`]
+/// (the BLAKE3-of-libp2p-peer-id form every layer above the transport addresses peers by, and the
+/// only form the membership layer holds; see `PeerDescriptor::peer_id`).
+///
+/// Keying on the phase-0 id is what lets the deny be enforced at connection time. `to_peer` is a
+/// **forward** hash: the wire always supplies the `libp2p::PeerId`, so the phase-0 id is always
+/// computable from it, even though the reverse is not. An earlier version keyed on the
+/// `libp2p::PeerId` instead, and could therefore only recognise an evicted peer *after* letting a
+/// connection establish, which meant the first post-eviction connection was fully set up (with
+/// every behaviour ahead of the deny allocating for it) before being torn down.
+///
+/// The `Option<libp2p::PeerId>` is not used for recognition; it records whether a **live**
+/// connection was closed for this entry via `allow_block_list`, so the same block can be lifted
+/// when the entry is dropped by the bound or by [`Command::Unevict`]. One store, so the deny set
+/// and the block set cannot drift apart.
+///
+/// # Expiry
+///
+/// Entries do **not** expire on a timer. `admission.rs` uses time windows because the peers it
+/// denies are anonymous strangers whose ids cost a keypair, so a permanent entry there is both
+/// useless (evaded for free) and a memory-growth vector an attacker drives. Neither holds here:
+/// the fill rate is one entry per membership removal in one group, which nothing hostile can
+/// drive, and a timer would re-admit a peer at a moment nobody chose. What *does* lift an entry
+/// is the membership layer saying so: a re-invited member is un-evicted as soon as the group
+/// contains its device again (`ChannelSync::drain_evictions`). Readmission is the right signal,
+/// time is not.
+///
+/// The list is process-local and is deliberately **not** persisted: a restart brings up a fresh
+/// swarm with no connections and no reservations, and an ex-member reconnecting to it is an
+/// unauthenticated stranger holding none of the group's keys. The attachment this exists to break
+/// does not survive the restart either.
+#[derive(Debug, Default)]
+struct EvictedPeers {
+    /// Insertion order, so the bound drops the **oldest** eviction first: the newest removals
+    /// are the ones whose connections are most likely to still be live.
+    order: VecDeque<PeerId>,
+    /// Each evicted peer, and the `libp2p::PeerId` whose live connections were closed for it,
+    /// if any (see the type docs).
+    entries: HashMap<PeerId, Option<libp2p::PeerId>>,
+}
+
+impl EvictedPeers {
+    /// Record an eviction. Returns the entry pushed out by the bound, if it had a live block, so
+    /// the caller can lift it and keep `allow_block_list`'s set the same size as this one.
+    fn deny(&mut self, peer: PeerId) -> Option<libp2p::PeerId> {
+        if self.entries.contains_key(&peer) {
+            return None; // already evicted; do not disturb the ordering
+        }
+        self.entries.insert(peer, None);
+        self.order.push_back(peer);
+        if self.order.len() > MAX_EVICTED_PEERS {
+            if let Some(old) = self.order.pop_front() {
+                return self.entries.remove(&old).flatten();
+            }
+        }
+        None
+    }
+
+    /// Lift an eviction. Returns the live block to release, if one was installed.
+    fn allow(&mut self, peer: &PeerId) -> Option<libp2p::PeerId> {
+        self.order.retain(|p| p != peer);
+        self.entries.remove(peer).flatten()
+    }
+
+    /// Whether `peer` is currently denied.
+    fn is_denied(&self, peer: &PeerId) -> bool {
+        self.entries.contains_key(peer)
+    }
+
+    /// Note that `allow_block_list` was asked to close live connections to this entry, so the
+    /// block can be released again when the entry goes.
+    fn note_blocked(&mut self, peer: PeerId, libp2p_peer: libp2p::PeerId) {
+        if let Some(slot) = self.entries.get_mut(&peer) {
+            *slot = Some(libp2p_peer);
+        }
+    }
+
+    /// How many peers are currently denied (diagnostics/tests).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+/// A connection was refused because the peer has been evicted from the group.
+#[derive(Debug)]
+pub struct Evicted(PeerId);
+
+impl std::fmt::Display for Evicted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "peer {:?} has been evicted from the group", self.0)
+    }
+}
+
+impl std::error::Error for Evicted {}
+
+/// The eviction gate: a [`NetworkBehaviour`] that refuses **every** connection to an evicted
+/// peer, including the first one.
+///
+/// It exists rather than leaning on `allow_block_list` alone because of *where in the pipeline*
+/// the refusal has to happen. The `NetworkBehaviour` derive calls each field's
+/// `handle_established_inbound_connection` in **declaration order** and stops at the first
+/// refusal, so a deny sitting behind `gossipsub` is a deny that runs after gossipsub has already
+/// allocated a peer entry, a sender and a handler for the connection, and after
+/// `ConnectionEstablished` has been dispatched to the behaviours; that is where gossipsub queues
+/// a Subscribe for every mesh topic, and those topic hashes are the freshly-rotated member-only
+/// ones, addressed to the member just removed. Whether they reach the wire before the close is a
+/// scheduling race nobody here controls, so the refusal has to come first rather than be timed.
+/// This behaviour is therefore declared **ahead of** every protocol behaviour in
+/// [`MeshBehaviour`].
+///
+/// The same ordering fixes a leak. A connection refused *behind* gossipsub leaves gossipsub's
+/// entry in place forever: it ignores `ListenFailure`, and no close is ever dispatched for a
+/// connection that never established, so an evicted peer redialling in a loop grows that entry's
+/// connection vector at a rate it chooses. Refused in front of gossipsub, none of it is
+/// allocated in the first place.
+///
+/// `allow_block_list` is still carried alongside, for the one thing this cannot do: closing
+/// connections that are **already live** when the eviction lands.
+#[derive(Debug, Default)]
+pub struct Eviction {
+    denied: EvictedPeers,
+}
+
+impl Eviction {
+    fn enforce(&self, peer: &libp2p::PeerId) -> Result<(), ConnectionDenied> {
+        let phase0 = to_peer(peer);
+        if self.denied.is_denied(&phase0) {
+            tracing::debug!(peer = %peer, "refusing a connection to an evicted peer");
+            return Err(ConnectionDenied::new(Evicted(phase0)));
+        }
+        Ok(())
+    }
+}
+
+impl NetworkBehaviour for Eviction {
+    type ConnectionHandler = dummy::ConnectionHandler;
+    type ToSwarm = Infallible;
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: libp2p::PeerId,
+        _: &Multiaddr,
+        _: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        // The earliest point at which an inbound connection's peer id is known at all (it comes
+        // out of Noise) and, because this behaviour is declared first, the earliest point at
+        // which anything in this swarm has spent state on it.
+        self.enforce(&peer)?;
+        Ok(dummy::ConnectionHandler)
+    }
+
+    fn handle_pending_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: Option<libp2p::PeerId>,
+        _: &[Multiaddr],
+        _: Endpoint,
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        if let Some(peer) = peer {
+            self.enforce(&peer)?;
+        }
+        Ok(Vec::new())
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: ConnectionId,
+        peer: libp2p::PeerId,
+        _: &Multiaddr,
+        _: Endpoint,
+        _: PortUse,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        // An address with no `/p2p/` names no peer, so the pending hook above cannot judge it;
+        // this catches the dial that only learns who it reached once Noise completed.
+        self.enforce(&peer)?;
+        Ok(dummy::ConnectionHandler)
+    }
+
+    fn on_swarm_event(&mut self, _event: FromSwarm<'_>) {}
+
+    fn on_connection_handler_event(
+        &mut self,
+        _peer: libp2p::PeerId,
+        _: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
+        libp2p::core::util::unreachable(event)
+    }
+
+    fn poll(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        Poll::Pending
+    }
 }
 
 type InboundResponses = FuturesUnordered<
     Pin<Box<dyn Future<Output = (ResponseChannel<Vec<u8>>, Option<Bytes>)> + Send>>,
 >;
 
+/// A PCP/NAT-PMP worker is tied to exactly one stable TCP or UDP listen port. Dropping the actor
+/// aborts these workers and stops lease renewal; the router's bounded lease then expires naturally.
+/// A detached renewal task must never outlive the server that owned the port.
+#[derive(Debug)]
+struct PortMapperTask {
+    port: NonZeroU16,
+    generation: u64,
+    handle: Option<JoinHandle<()>>,
+    /// The bound-interface UPnP worker running alongside the IPv4 PCP/NAT-PMP worker (`None` for
+    /// PCPv6 tasks). Same key, port and generation; its events differ only by `local_address`.
+    companion: Option<JoinHandle<()>>,
+    /// IPv6 PCP can explicitly delete its lease when a listener disappears. IPv4's retained
+    /// `portmapper` implementation has no equivalent cancellation API, so those tasks are simply
+    /// aborted and their library-managed bounded lease expires.
+    stop: Option<oneshot::Sender<()>>,
+}
+
+/// One independently managed listener/router path. IPv4 protocols discover their default route
+/// internally and retain their historical single owner; PCPv6 must bind the exact GUA so two
+/// interfaces and IPv4 can coexist without overwriting each other's lease state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum PortMappingTarget {
+    Ipv4,
+    Ipv6(Ipv6Addr),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct PortMapperTaskKey {
+    transport: PortMappingTransport,
+    target: PortMappingTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortMappingEndpoint {
+    key: PortMapperTaskKey,
+    port: NonZeroU16,
+}
+
+/// Private worker envelope used to reject buffered events from a stopped/replaced listener. The
+/// public snapshot deliberately does not expose this process-local generation.
+#[derive(Debug)]
+struct PortMapperReport {
+    key: PortMapperTaskKey,
+    port: NonZeroU16,
+    generation: u64,
+    event: PortMappingEvent,
+}
+
+#[derive(Debug, Clone)]
+struct PortMapperReporter {
+    tx: mpsc::Sender<PortMapperReport>,
+    key: PortMapperTaskKey,
+    port: NonZeroU16,
+    generation: u64,
+}
+
+impl PortMapperReporter {
+    async fn send(&self, event: PortMappingEvent) -> Result<(), ()> {
+        self.tx
+            .send(PortMapperReport {
+                key: self.key,
+                port: self.port,
+                generation: self.generation,
+                event,
+            })
+            .await
+            .map_err(|_| ())
+    }
+}
+
+type PortMappingKey = (PortMappingMechanism, PortMappingTransport, Option<IpAddr>);
+
+/// AutoNAT servers and identify candidates are network input. Retaining one observation for every
+/// peer/address ever seen would let churn grow a long-lived node without bound, even though the
+/// public watch channel itself is coalesced.
+const MAX_AUTONAT_OBSERVATIONS: usize = 64;
+const MAX_MESH_OBSERVATIONS: usize = 32;
+
+fn record_mesh_observation(
+    observations: &mut HashMap<libp2p::PeerId, Multiaddr>,
+    order: &mut VecDeque<libp2p::PeerId>,
+    observer: libp2p::PeerId,
+    address: Multiaddr,
+) {
+    order.retain(|candidate| candidate != &observer);
+    observations.insert(observer, address);
+    order.push_back(observer);
+    while observations.len() > MAX_MESH_OBSERVATIONS {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        observations.remove(&oldest);
+    }
+}
+
+type AutoNatKey = (Multiaddr, libp2p::PeerId);
+
+fn record_autonat_result(
+    results: &mut HashMap<AutoNatKey, AutoNatResult>,
+    order: &mut VecDeque<AutoNatKey>,
+    result: AutoNatResult,
+) {
+    let key = (result.address.clone(), result.server);
+    // An updated pair becomes newest. Removing the old occurrence also keeps the order queue at
+    // exactly one entry per map key, which makes the bound deterministic.
+    order.retain(|candidate| candidate != &key);
+    results.insert(key.clone(), result);
+    order.push_back(key);
+    while results.len() > MAX_AUTONAT_OBSERVATIONS {
+        let Some(oldest) = order.pop_front() else {
+            break;
+        };
+        results.remove(&oldest);
+    }
+}
+
+fn forget_autonat_address(
+    results: &mut HashMap<AutoNatKey, AutoNatResult>,
+    order: &mut VecDeque<AutoNatKey>,
+    address: &Multiaddr,
+) -> bool {
+    let old_len = results.len();
+    results.retain(|(candidate, _), _| candidate != address);
+    order.retain(|(candidate, _)| candidate != address);
+    results.len() != old_len
+}
+
+fn autonat_candidate_is_current(
+    configured: &HashSet<Multiaddr>,
+    mappings: &HashMap<PortMappingKey, Multiaddr>,
+    address: &Multiaddr,
+) -> bool {
+    configured.contains(address) || mappings.values().any(|candidate| candidate == address)
+}
+
+/// Automatic discovery must pass the global classifier, while an explicit caller assertion is an
+/// independent owner and may intentionally be a LAN-only route. This distinction is load-bearing
+/// when a broken gateway returns the exact private socket an operator configured manually.
+/// Whether a "router mapping unavailable" answer is worth an info line, or is the same answer
+/// this probe already gave.
+///
+/// A router with no PCP/NAT-PMP re-answers "no" on every discovery cycle, for every mechanism,
+/// transport and interface. Logged unconditionally, that was 356 of one real debug log's 601
+/// lines: the same sentence as eighteen seconds earlier, burying everything worth reading. The
+/// first answer for a probe is news; an identical repeat is not; a *changed* detail is news
+/// again, because that is a router whose behaviour actually moved.
+fn mapping_unavailable_is_news(previous: Option<&str>, detail: &str) -> bool {
+    previous != Some(detail)
+}
+
+fn external_address_is_allowed(configured: &HashSet<Multiaddr>, address: &Multiaddr) -> bool {
+    configured.contains(address) || addr_is_globally_routable(address)
+}
+
+/// Retire one caller-configured external-address owner. `true` means the address has no remaining
+/// configured or router-mapping owner and must be removed from Swarm. Keeping this decision pure
+/// pins the important IPv6 case where a raw GUA and a PCP firewall pinhole name the same socket.
+fn retire_configured_external_address(
+    configured: &mut HashSet<Multiaddr>,
+    mappings: &HashMap<PortMappingKey, Multiaddr>,
+    address: &Multiaddr,
+) -> bool {
+    configured.remove(address) && !mappings.values().any(|candidate| candidate == address)
+}
+
+/// Record a mechanism's ownership of one external address. The returned old address is safe to
+/// remove from libp2p only when no other mapping still owns it; `add_new` is false when the
+/// address was already present through another mechanism. Manual/configured ownership is checked
+/// separately by the actor because it is not a router lease.
+fn activate_port_mapping(
+    active: &mut HashMap<PortMappingKey, Multiaddr>,
+    key: PortMappingKey,
+    address: Multiaddr,
+) -> (Option<Multiaddr>, bool) {
+    let add_new = !active.values().any(|candidate| candidate == &address);
+    let previous = active.insert(key, address.clone());
+    let remove_old = previous
+        .filter(|old| old != &address && !active.values().any(|candidate| candidate == old));
+    (remove_old, add_new)
+}
+
+/// Drop one matching mapping owner and answer whether the external address has no mapping owner
+/// left. A late expiry for an address already replaced under the same key is deliberately inert.
+fn expire_port_mapping(
+    active: &mut HashMap<PortMappingKey, Multiaddr>,
+    key: PortMappingKey,
+    address: &Multiaddr,
+) -> bool {
+    if active.get(&key) != Some(address) {
+        return false;
+    }
+    active.remove(&key);
+    !active.values().any(|candidate| candidate == address)
+}
+
+impl Drop for PortMapperTask {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+        if let Some(companion) = self.companion.take() {
+            companion.abort();
+        }
+    }
+}
+
+impl PortMapperTask {
+    /// Whether every worker this task spawned is still alive. A dead half (either the PCP/NAT-PMP
+    /// worker or its bound-UPnP companion) retires the whole task so both respawn together.
+    fn is_fully_running(&self) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+            && self
+                .companion
+                .as_ref()
+                .is_none_or(|companion| !companion.is_finished())
+    }
+
+    /// Withdraw product state before calling this; deletion at the router is best effort and must
+    /// never delay removal from invites. Give PCPv6 a short grace period to send lifetime zero.
+    fn stop_gracefully(mut self) {
+        // The companion has no stop channel and no lease-deletion API; abort it and let its
+        // bounded lease expire, the same policy as the IPv4 portmapper worker.
+        if let Some(companion) = self.companion.take() {
+            companion.abort();
+        }
+        let sent_stop = self.stop.take().is_some_and(|stop| stop.send(()).is_ok());
+        let Some(mut handle) = self.handle.take() else {
+            return;
+        };
+        if !sent_stop {
+            handle.abort();
+            return;
+        }
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = &mut handle => {}
+                _ = SystemClock.sleep(Duration::from_secs(1)) => handle.abort(),
+            }
+        });
+    }
+}
+
+/// Extract the mapping-relevant endpoint from a concrete direct listen address. IPv4 is handled by
+/// the established `portmapper` client; an exact global IPv6 listener gets an independent PCP MAP
+/// firewall-pinhole worker. Wildcard, loopback and relay routes must never alter the user's router.
+fn port_mapping_endpoint(addr: &Multiaddr) -> Option<PortMappingEndpoint> {
+    if is_relayed(addr) {
+        return None;
+    }
+
+    let mut protocols = addr.iter();
+    let mut target = None;
+    while let Some(protocol) = protocols.next() {
+        match protocol {
+            Protocol::Ip4(ip) => {
+                // Mapping the route-selected LAN interface cannot make a socket that is bound
+                // only to localhost accept the forwarded packets.
+                target =
+                    (!ip.is_loopback() && !ip.is_unspecified()).then_some(PortMappingTarget::Ipv4);
+            }
+            Protocol::Ip6(ip) => {
+                target = crate::addr::ipv6_is_pcp_pinhole_candidate(&ip)
+                    .then_some(PortMappingTarget::Ipv6(ip));
+            }
+            Protocol::Tcp(port) if target.is_some() => {
+                return NonZeroU16::new(port).map(|port| PortMappingEndpoint {
+                    key: PortMapperTaskKey {
+                        transport: PortMappingTransport::Tcp,
+                        target: target.expect("guarded above"),
+                    },
+                    port,
+                });
+            }
+            Protocol::Udp(port)
+                if target.is_some() && protocols.any(|p| matches!(p, Protocol::QuicV1)) =>
+            {
+                return NonZeroU16::new(port).map(|port| PortMappingEndpoint {
+                    key: PortMapperTaskKey {
+                        transport: PortMappingTransport::Udp,
+                        target: target.expect("guarded above"),
+                    },
+                    port,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract only the transport/port from a router result. Unlike `port_mapping_endpoint`, this
+/// deliberately accepts a non-public result so the actor can turn it into a truthful scoped
+/// failure instead of silently discarding the gateway response.
+fn port_mapping_transport(addr: &Multiaddr) -> Option<(PortMappingTransport, NonZeroU16)> {
+    let mut protocols = addr.iter();
+    while let Some(protocol) = protocols.next() {
+        match protocol {
+            Protocol::Tcp(port) => {
+                return NonZeroU16::new(port).map(|port| (PortMappingTransport::Tcp, port));
+            }
+            Protocol::Udp(port) if protocols.any(|p| matches!(p, Protocol::QuicV1)) => {
+                return NonZeroU16::new(port).map(|port| (PortMappingTransport::Udp, port));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn desired_port_mapping_endpoints(
+    listeners: &HashSet<Multiaddr>,
+) -> HashMap<PortMapperTaskKey, NonZeroU16> {
+    const MAX_IPV6_TARGETS: usize = 2;
+    let mut endpoints: Vec<_> = listeners.iter().filter_map(port_mapping_endpoint).collect();
+    endpoints.sort_by_key(|endpoint| (endpoint.key, endpoint.port));
+    let ipv6_candidates: Vec<_> = endpoints
+        .iter()
+        .filter_map(|endpoint| match endpoint.key.target {
+            PortMappingTarget::Ipv6(address) => Some(address),
+            PortMappingTarget::Ipv4 => None,
+        })
+        .collect();
+    let ipv6_targets = select_ipv6_mapping_targets(ipv6_candidates, MAX_IPV6_TARGETS, |address| {
+        pcp_ipv6::discover_gateway(address).is_ok()
+    });
+    let mut desired = HashMap::new();
+    for endpoint in endpoints {
+        if let PortMappingTarget::Ipv6(address) = endpoint.key.target {
+            if !ipv6_targets.contains(&address) {
+                continue;
+            }
+        }
+        desired.entry(endpoint.key).or_insert(endpoint.port);
+    }
+    desired
+}
+
+/// Bound interface churn without letting unrouted VPN/privacy addresses crowd out the actual
+/// default-route interface. If no candidate currently has a PCP route, deterministic fallbacks
+/// still get workers so their retry loops can observe a later network change.
+fn select_ipv6_mapping_targets(
+    mut candidates: Vec<Ipv6Addr>,
+    limit: usize,
+    mut has_gateway: impl FnMut(Ipv6Addr) -> bool,
+) -> HashSet<Ipv6Addr> {
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut ranked: Vec<_> = candidates
+        .into_iter()
+        .map(|address| (has_gateway(address), address))
+        .collect();
+    ranked.sort_by_key(|(routed, address)| (!*routed, *address));
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, address)| address)
+        .collect()
+}
+
+fn port_mapper_report_is_current(
+    tasks: &HashMap<PortMapperTaskKey, PortMapperTask>,
+    report: &PortMapperReport,
+) -> bool {
+    tasks
+        .get(&report.key)
+        .is_some_and(|task| task.port == report.port && task.generation == report.generation)
+}
+
+/// A retired listener generation must leave neither a lease nor a failure behind. Failures are
+/// current-state diagnostics, not history: retaining a removed privacy address grows the map and
+/// keeps telling the user a worker that no longer exists is "retrying".
+fn clear_retired_port_mapping_failures(
+    unavailable: &mut HashMap<PortMappingKey, String>,
+    key: PortMapperTaskKey,
+) -> bool {
+    let local_address = match key.target {
+        PortMappingTarget::Ipv4 => None,
+        PortMappingTarget::Ipv6(address) => Some(IpAddr::V6(address)),
+    };
+    let mechanisms: &[PortMappingMechanism] = match key.target {
+        PortMappingTarget::Ipv4 => &[PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp],
+        PortMappingTarget::Ipv6(_) => &[PortMappingMechanism::Pcp],
+    };
+    let before = unavailable.len();
+    for &mechanism in mechanisms {
+        unavailable.remove(&(mechanism, key.transport, local_address));
+    }
+    // The IPv4 task's bound-UPnP companion keys its failures by the concrete interface address;
+    // sweep those too so a retired worker stops claiming it is "retrying".
+    if key.target == PortMappingTarget::Ipv4 {
+        unavailable.retain(|&(mechanism, transport, local_address), _| {
+            !(mechanism == PortMappingMechanism::Upnp
+                && transport == key.transport
+                && matches!(local_address, Some(IpAddr::V4(_))))
+        });
+    }
+    unavailable.len() != before
+}
+
+/// Convert a router's IPv4 socket into the transport-specific libp2p address other peers dial.
+fn mapped_multiaddr(addr: SocketAddrV4, transport: PortMappingTransport) -> Multiaddr {
+    let base = Multiaddr::empty().with(Protocol::Ip4(*addr.ip()));
+    match transport {
+        PortMappingTransport::Tcp => base.with(Protocol::Tcp(addr.port())),
+        PortMappingTransport::Udp => base.with(Protocol::Udp(addr.port())).with(Protocol::QuicV1),
+    }
+}
+
+/// Convert an IPv6 PCP MAP result into the exact libp2p route peers should dial.
+fn mapped_ipv6_multiaddr(addr: SocketAddrV6, transport: PortMappingTransport) -> Multiaddr {
+    let base = Multiaddr::empty().with(Protocol::Ip6(*addr.ip()));
+    match transport {
+        PortMappingTransport::Tcp => base.with(Protocol::Tcp(addr.port())),
+        PortMappingTransport::Udp => base.with(Protocol::Udp(addr.port())).with(Protocol::QuicV1),
+    }
+}
+
+/// Ordered mechanisms a mapping attempt should try. PCP is the standards-track successor and is
+/// preferred, but a successful PCP discovery does not suppress NAT-PMP: if its MAP request times
+/// out or is denied, the caller continues to the next entry.
+fn mapping_attempt_plan(pcp: bool, nat_pmp: bool) -> Vec<PortMappingMechanism> {
+    let mut plan = Vec::with_capacity(2);
+    if pcp {
+        plan.push(PortMappingMechanism::Pcp);
+    }
+    if nat_pmp {
+        plan.push(PortMappingMechanism::NatPmp);
+    }
+    plan
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MappingLeaseAction {
+    /// The watch repeated the same socket; no product state changes.
+    Continue,
+    /// The lease disappeared. Withdraw it and return to the outer retry loop.
+    Retry,
+    /// The gateway renewed at a different public socket. Withdraw the old route, then publish this
+    /// replacement while retaining the same worker.
+    Replace(SocketAddrV4),
+}
+
+fn mapping_lease_action(previous: SocketAddrV4, next: Option<SocketAddrV4>) -> MappingLeaseAction {
+    match next {
+        Some(next) if next == previous => MappingLeaseAction::Continue,
+        Some(next) => MappingLeaseAction::Replace(next),
+        None => MappingLeaseAction::Retry,
+    }
+}
+
+/// Probe PCP/NAT-PMP, create one mapping, and retain/renew it for the lifetime of the worker.
+/// UPnP is disabled here because libp2p's behaviour already owns that protocol. Keeping the two
+/// implementations disjoint prevents duplicate IGD leases and makes diagnostics truthful.
+async fn run_port_mapper_attempt(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: &PortMapperReporter,
+) -> Result<(), ()> {
+    let protocol = match transport {
+        PortMappingTransport::Tcp => portmapper::Protocol::Tcp,
+        PortMappingTransport::Udp => portmapper::Protocol::Udp,
+    };
+    let probe_client = portmapper::Client::new(portmapper::Config {
+        enable_upnp: false,
+        enable_pcp: true,
+        enable_nat_pmp: true,
+        protocol,
+    });
+
+    // Probe before requesting the mapping. Besides producing an honest diagnostic, this lets the
+    // library choose NAT-PMP when PCP is absent; an unprobed one-shot would optimistically try PCP
+    // and stop after that protocol's timeout without falling through.
+    let probe = match probe_client.probe().await {
+        Ok(Ok(probe)) => probe,
+        Ok(Err(error)) => {
+            let detail = error.to_string();
+            for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism,
+                        transport,
+                        local_address: None,
+                        detail: detail.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Err(());
+                }
+            }
+            return Ok(());
+        }
+        Err(error) => {
+            let detail = format!("port-mapping probe stopped: {error}");
+            for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism,
+                        transport,
+                        local_address: None,
+                        detail: detail.clone(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Err(());
+                }
+            }
+            return Ok(());
+        }
+    };
+
+    let plan = mapping_attempt_plan(probe.pcp, probe.nat_pmp);
+    for mechanism in [PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp] {
+        if !plan.contains(&mechanism)
+            && tx
+                .send(PortMappingEvent::Unavailable {
+                    mechanism,
+                    transport,
+                    local_address: None,
+                    detail: "no compatible gateway answered the probe".to_string(),
+                })
+                .await
+                .is_err()
+        {
+            return Err(());
+        }
+    }
+
+    drop(probe_client);
+
+    // A probe result says a protocol answered discovery; it does not say the subsequent MAP
+    // request will be granted. `portmapper` 0.18 only logs that request's error and leaves its
+    // watch channel open at `None`, so waiting on `changed()` alone can hang forever. Give each
+    // advertised protocol its own bounded attempt, allowing NAT-PMP to follow a failed PCP MAP.
+    const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
+    for mechanism in plan {
+        let client = portmapper::Client::new(portmapper::Config {
+            enable_upnp: false,
+            enable_pcp: mechanism == PortMappingMechanism::Pcp,
+            enable_nat_pmp: mechanism == PortMappingMechanism::NatPmp,
+            protocol,
+        });
+        let mut external = client.watch_external_address();
+        client.update_local_port(port);
+        let first = tokio::select! {
+            changed = external.changed() => {
+                match changed {
+                    Ok(()) => *external.borrow_and_update(),
+                    Err(_) => None,
+                }
+            }
+            _ = SystemClock.sleep(ACQUIRE_WITHIN) => None,
+        };
+        let Some(first) = first else {
+            tx.send(PortMappingEvent::Unavailable {
+                mechanism,
+                transport,
+                local_address: None,
+                detail: format!(
+                    "gateway answered discovery but did not grant a mapping within {}s",
+                    ACQUIRE_WITHIN.as_secs()
+                ),
+            })
+            .await
+            .map_err(|_| ())?;
+            continue;
+        };
+
+        tx.send(PortMappingEvent::Mapped {
+            mechanism,
+            transport,
+            local_address: None,
+            address: mapped_multiaddr(first, transport),
+        })
+        .await
+        .map_err(|_| ())?;
+        let mut previous = first;
+        while external.changed().await.is_ok() {
+            let next = *external.borrow_and_update();
+            match mapping_lease_action(previous, next) {
+                MappingLeaseAction::Continue => continue,
+                MappingLeaseAction::Retry => {
+                    tx.send(PortMappingEvent::Expired {
+                        mechanism,
+                        transport,
+                        local_address: None,
+                        address: mapped_multiaddr(previous, transport),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    // The old lease really expired and the library's renewal attempt did not
+                    // replace it. Return to the outer retry instead of waiting forever at `None`.
+                    return Ok(());
+                }
+                MappingLeaseAction::Replace(next) => {
+                    tx.send(PortMappingEvent::Expired {
+                        mechanism,
+                        transport,
+                        local_address: None,
+                        address: mapped_multiaddr(previous, transport),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    tx.send(PortMappingEvent::Mapped {
+                        mechanism,
+                        transport,
+                        local_address: None,
+                        address: mapped_multiaddr(next, transport),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    previous = next;
+                }
+            }
+        }
+        tx.send(PortMappingEvent::Expired {
+            mechanism,
+            transport,
+            local_address: None,
+            address: mapped_multiaddr(previous, transport),
+        })
+        .await
+        .map_err(|_| ())?;
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Retrying matters on laptops: the first probe may run before Wi-Fi has a default route, or the
+/// user may move between networks without the stable listener changing. A successful mapping's
+/// own lease task renews internally; this interval is reached only after an attempt ended without
+/// a live watcher (or that watcher closed).
+async fn run_port_mapper(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: PortMapperReporter,
+) {
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    loop {
+        if run_port_mapper_attempt(transport, port, &tx).await.is_err() {
+            return;
+        }
+        SystemClock.sleep(RETRY_AFTER).await;
+    }
+}
+
+/// How long a bound-search UPnP lease asks for. Bounded so an aborted worker's mapping dies on
+/// its own; renewal at half-life keeps a live one continuous.
+const UPNP_BOUND_LEASE_SECS: u32 = 2 * 60 * 60;
+/// One IGD search from the bound socket. A router answers the multicast within a second on a
+/// sane LAN; three seconds keeps the retry loop responsive without spamming discovery.
+const UPNP_BOUND_SEARCH_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The IPv4 source address the kernel would route toward the public internet, learned by
+/// "connecting" an unbound UDP socket to a documentation address (RFC 5737; nothing is sent, the
+/// kernel just resolves the route). This names the interface whose LAN hosts the default
+/// gateway, i.e. the only interface where an IGD search can possibly be answered.
+fn default_route_ipv4() -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
+}
+
+/// One bound-interface UPnP IGD attempt: search from the default-route interface, create the
+/// mapping, then hold and renew it for the lifetime of the worker.
+///
+/// This exists because libp2p's UPnP behaviour searches from an unbound `0.0.0.0` socket and
+/// lets the OS choose the multicast egress interface. On a machine with virtual adapters (WSL
+/// vEthernet, VirtualBox host-only) the OS routinely picks one of those, the router never hears
+/// the M-SEARCH, and diagnostics report "no gateway" while the router's UPnP is fine. (Proven
+/// live 2026-08-22: the identical SSDP search bound to the LAN interface was answered while the
+/// unbound one was not, correlating across twenty debug logs with whether the WSL adapter was
+/// up.) Both implementations run and feed one event path, keyed apart by `local_address`
+/// (`None` = libp2p, `Some(v4)` = this worker), so whichever hears the gateway supplies the
+/// route; a shared lease renewed by both is an idempotent AddPortMapping at the gateway.
+async fn run_upnp_bound_mapper_attempt(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: &PortMapperReporter,
+) -> Result<(), ()> {
+    let Some(local_ip) = default_route_ipv4() else {
+        // No IPv4 default route: nothing to bind to. Stay silent rather than write over the
+        // unbound behaviour's diagnostic key; it reports its own status for this state.
+        return Ok(());
+    };
+    let local_address = Some(IpAddr::V4(local_ip));
+    let unavailable = |detail: String| PortMappingEvent::Unavailable {
+        mechanism: PortMappingMechanism::Upnp,
+        transport,
+        local_address,
+        detail,
+    };
+    let gateway = match igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
+        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
+        ..Default::default()
+    })
+    .await
+    {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            tx.send(unavailable(format!(
+                "no IGD gateway answered a search bound to {local_ip}: {error}"
+            )))
+            .await
+            .map_err(|_| ())?;
+            return Ok(());
+        }
+    };
+    let protocol = match transport {
+        PortMappingTransport::Tcp => igd_next::PortMappingProtocol::TCP,
+        PortMappingTransport::Udp => igd_next::PortMappingProtocol::UDP,
+    };
+    let add_lease = || {
+        gateway.add_port(
+            protocol,
+            port.get(),
+            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
+            UPNP_BOUND_LEASE_SECS,
+            "Mewtual",
+        )
+    };
+    if let Err(error) = add_lease().await {
+        tx.send(unavailable(format!("gateway refused the mapping: {error}")))
+            .await
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    // The gateway's own answer, over the interface that demonstrably reaches it; a CGNAT/double-
+    // NAT private answer is converted to an honest Unavailable by the actor's event fold.
+    let external = match gateway.get_external_ip().await {
+        Ok(IpAddr::V4(ip)) => ip,
+        Ok(IpAddr::V6(ip)) => {
+            tx.send(unavailable(format!(
+                "gateway reported an IPv6 external address ({ip}) for an IPv4 mapping"
+            )))
+            .await
+            .map_err(|_| ())?;
+            return Ok(());
+        }
+        Err(error) => {
+            tx.send(unavailable(format!(
+                "gateway granted the mapping but the external-address query failed: {error}"
+            )))
+            .await
+            .map_err(|_| ())?;
+            return Ok(());
+        }
+    };
+    let mut current = mapped_multiaddr(SocketAddrV4::new(external, port.get()), transport);
+    tx.send(PortMappingEvent::Mapped {
+        mechanism: PortMappingMechanism::Upnp,
+        transport,
+        local_address,
+        address: current.clone(),
+    })
+    .await
+    .map_err(|_| ())?;
+    loop {
+        SystemClock
+            .sleep(Duration::from_secs(u64::from(UPNP_BOUND_LEASE_SECS / 2)))
+            .await;
+        // Renewal is the same AddPortMapping. A failure (router rebooted, moved networks, lease
+        // slot reclaimed) expires the route and returns to the outer retry, which rediscovers
+        // the gateway and recomputes the default-route interface.
+        let renewed = match add_lease().await {
+            Ok(()) => gateway.get_external_ip().await.ok(),
+            Err(_) => None,
+        };
+        match renewed {
+            Some(IpAddr::V4(ip)) => {
+                let address = mapped_multiaddr(SocketAddrV4::new(ip, port.get()), transport);
+                if address != current {
+                    tx.send(PortMappingEvent::Expired {
+                        mechanism: PortMappingMechanism::Upnp,
+                        transport,
+                        local_address,
+                        address: current,
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    tx.send(PortMappingEvent::Mapped {
+                        mechanism: PortMappingMechanism::Upnp,
+                        transport,
+                        local_address,
+                        address: address.clone(),
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                    current = address;
+                }
+            }
+            _ => {
+                tx.send(PortMappingEvent::Expired {
+                    mechanism: PortMappingMechanism::Upnp,
+                    transport,
+                    local_address,
+                    address: current,
+                })
+                .await
+                .map_err(|_| ())?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// How long a media-socket UPnP mapping asks for. The UPnP path has no renewal loop (the webview
+/// owns the socket, not this crate), so the lease must outlive a long call on its own; four hours
+/// covers the realistic ones and still dies unattended after a crash. PCP/NAT-PMP leases are
+/// short and renewed by the retained client instead.
+const MEDIA_MAP_LEASE_SECS: u32 = 4 * 60 * 60;
+
+/// A live media-port mapping: the public socket to advertise plus whatever keeps the route
+/// alive. A UPnP lease is bounded and self-sufficient; a PCP/NAT-PMP lease is short and renewed
+/// by the retained `portmapper` client, so dropping this struct is what ends that route.
+pub struct MediaPortMapping {
+    /// The public socket a remote peer can be told about.
+    pub external: SocketAddrV4,
+    /// Which router protocol granted the route.
+    pub mechanism: PortMappingMechanism,
+    /// Whether the router's own state confirmed the mapping beyond the grant response: for UPnP,
+    /// the mapping table was read back and the entry was present (some gateways acknowledge
+    /// AddPortMapping and silently keep nothing); a PCP/NAT-PMP lease is the router's direct
+    /// answer, so it counts as confirmed. True external reachability still needs an outside
+    /// caller, which is the AutoNAT tier's job, not this field's claim.
+    pub confirmed: bool,
+    local_port: NonZeroU16,
+    keepalive: Option<portmapper::Client>,
+}
+
+// `portmapper::Client` is a live handle, not data; report only whether one is retained.
+impl std::fmt::Debug for MediaPortMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaPortMapping")
+            .field("external", &self.external)
+            .field("mechanism", &self.mechanism)
+            .field("confirmed", &self.confirmed)
+            .field("local_port", &self.local_port)
+            .field("keepalive", &self.keepalive.is_some())
+            .finish()
+    }
+}
+
+impl MediaPortMapping {
+    /// Release the route. Best-effort for UPnP (the bounded lease dies on its own regardless);
+    /// dropping the retained client is the whole release for PCP/NAT-PMP.
+    pub async fn release(self) {
+        if self.keepalive.is_none() {
+            unmap_media_udp_port(self.local_port).await;
+        }
+    }
+}
+
+/// Whether provably *nothing* is listening at this machine's `(local_ip, port)` UDP socket.
+///
+/// With several adapters up the caller cannot tell which interface an ICE port belongs to, and
+/// mapping a port nothing listens on would advertise a dead candidate. Windows surfaces "nothing
+/// there" as an ICMP port-unreachable that errors the next receive on a *connected* UDP socket,
+/// so a positive disproof is detectable. A silent timeout proves nothing either way (an ICE
+/// agent discards non-STUN datagrams without replying), so only the explicit error blocks.
+async fn media_socket_disproven(local_ip: Ipv4Addr, port: NonZeroU16) -> bool {
+    let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
+        return false;
+    };
+    if socket.connect((local_ip, port.get())).await.is_err() {
+        return false;
+    }
+    if socket.send(&[0u8; 8]).await.is_err() {
+        return true;
+    }
+    let mut response = [0u8; 32];
+    tokio::select! {
+        received = socket.recv(&mut response) => received.is_err(),
+        _ = SystemClock.sleep(Duration::from_millis(600)) => false,
+    }
+}
+
+/// Scan the router's own mapping table for the UDP entry on `port`. The strongest check
+/// available from inside the NAT; a gateway that does not implement the table reads as
+/// unconfirmed, never as failure. Bounded: no home router legitimately needs more entries.
+async fn upnp_mapping_confirmed(
+    gateway: &igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>,
+    port: NonZeroU16,
+) -> bool {
+    for index in 0..64u32 {
+        match gateway.get_generic_port_mapping_entry(index).await {
+            Ok(entry) => {
+                if entry.external_port == port.get()
+                    && entry.protocol == igd_next::PortMappingProtocol::UDP
+                    && entry.enabled
+                {
+                    return true;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+async fn map_media_port_upnp(
+    local_ip: Ipv4Addr,
+    port: NonZeroU16,
+) -> Result<MediaPortMapping, String> {
+    let gateway = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
+        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
+        ..Default::default()
+    })
+    .await
+    .map_err(|error| format!("no IGD gateway answered a search bound to {local_ip}: {error}"))?;
+    gateway
+        .add_port(
+            igd_next::PortMappingProtocol::UDP,
+            port.get(),
+            SocketAddr::new(IpAddr::V4(local_ip), port.get()),
+            MEDIA_MAP_LEASE_SECS,
+            "Mewtual call",
+        )
+        .await
+        .map_err(|error| format!("gateway refused the mapping: {error}"))?;
+    let external = match gateway.get_external_ip().await {
+        Ok(IpAddr::V4(ip)) => ip,
+        Ok(IpAddr::V6(ip)) => {
+            return Err(format!(
+                "gateway reported an IPv6 external address ({ip}) for an IPv4 mapping"
+            ))
+        }
+        Err(error) => return Err(format!("external-address query failed: {error}")),
+    };
+    if !ipv4_is_globally_routable(&external) {
+        return Err(format!(
+            "gateway returned non-public address {external} (likely CGNAT or double NAT)"
+        ));
+    }
+    let confirmed = upnp_mapping_confirmed(&gateway, port).await;
+    Ok(MediaPortMapping {
+        external: SocketAddrV4::new(external, port.get()),
+        mechanism: PortMappingMechanism::Upnp,
+        confirmed,
+        local_port: port,
+        keepalive: None,
+    })
+}
+
+/// The PCP/NAT-PMP rung for a media port, for routers that don't speak UPnP. Probe first (an
+/// unprobed one-shot optimistically tries PCP and stops at its timeout without falling through,
+/// same trap as [`run_port_mapper_attempt`]), then give each advertised protocol a bounded
+/// attempt. The client that succeeds is retained: it owns the short lease's renewal.
+async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+    const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
+    let probe_client = portmapper::Client::new(portmapper::Config {
+        enable_upnp: false,
+        enable_pcp: true,
+        enable_nat_pmp: true,
+        protocol: portmapper::Protocol::Udp,
+    });
+    let probe = match probe_client.probe().await {
+        Ok(Ok(probe)) => probe,
+        Ok(Err(error)) => return Err(error.to_string()),
+        Err(error) => return Err(format!("port-mapping probe stopped: {error}")),
+    };
+    drop(probe_client);
+    let plan = mapping_attempt_plan(probe.pcp, probe.nat_pmp);
+    if plan.is_empty() {
+        return Err("no compatible gateway answered the probe".to_string());
+    }
+    for mechanism in plan {
+        let client = portmapper::Client::new(portmapper::Config {
+            enable_upnp: false,
+            enable_pcp: mechanism == PortMappingMechanism::Pcp,
+            enable_nat_pmp: mechanism == PortMappingMechanism::NatPmp,
+            protocol: portmapper::Protocol::Udp,
+        });
+        let mut external = client.watch_external_address();
+        client.update_local_port(port);
+        let first = tokio::select! {
+            changed = external.changed() => match changed {
+                Ok(()) => *external.borrow_and_update(),
+                Err(_) => None,
+            },
+            _ = SystemClock.sleep(ACQUIRE_WITHIN) => None,
+        };
+        if let Some(socket) = first {
+            if !ipv4_is_globally_routable(socket.ip()) {
+                return Err(format!(
+                    "gateway returned non-public address {} (likely CGNAT or double NAT)",
+                    socket.ip()
+                ));
+            }
+            return Ok(MediaPortMapping {
+                external: socket,
+                mechanism,
+                confirmed: true,
+                local_port: port,
+                keepalive: Some(client),
+            });
+        }
+    }
+    Err("a gateway answered discovery but granted no mapping".to_string())
+}
+
+/// Map one webview media UDP port through the router and return the live mapping. One-shot by
+/// design: the mesh's mapping workers own the stable listen port, but a call's ICE agent binds
+/// fresh ephemeral ports the mesh never sees. The caller signals the mapping's public socket as
+/// an extra ICE candidate; a router mapping forwards from **any** source, which is what makes
+/// one mapped side sufficient for a call regardless of the other side's NAT type.
+///
+/// Tries UPnP over the bound-interface search first (the proven path; see
+/// [`run_upnp_bound_mapper_attempt`]), then PCP and NAT-PMP for routers that speak those
+/// instead. Before touching the router at all, the socket itself is probed so a port that
+/// belongs to another interface is refused rather than advertised as a dead candidate.
+pub async fn map_media_udp_port(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+    let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
+    if media_socket_disproven(local_ip, port).await {
+        return Err(format!(
+            "nothing is listening at {local_ip}:{port}; this ICE port belongs to another interface"
+        ));
+    }
+    match map_media_port_upnp(local_ip, port).await {
+        Ok(mapping) => Ok(mapping),
+        Err(upnp_error) => match map_media_port_pcp_natpmp(port).await {
+            Ok(mapping) => Ok(mapping),
+            Err(pcp_error) => Err(format!("UPnP: {upnp_error}; PCP/NAT-PMP: {pcp_error}")),
+        },
+    }
+}
+
+/// Best-effort removal of a mapping created by [`map_media_udp_port`]. Failure is acceptable:
+/// the lease is bounded and dies on its own.
+pub async fn unmap_media_udp_port(port: NonZeroU16) {
+    let Some(local_ip) = default_route_ipv4() else {
+        return;
+    };
+    let Ok(gateway) = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
+        bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
+        timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
+        ..Default::default()
+    })
+    .await
+    else {
+        return;
+    };
+    let _ = gateway
+        .remove_port(igd_next::PortMappingProtocol::UDP, port.get())
+        .await;
+}
+
+/// The bound-interface UPnP companion to [`run_port_mapper`], with the same retry cadence and
+/// the same laptop rationale: the first search may run before Wi-Fi has a default route.
+async fn run_upnp_bound_mapper(
+    transport: PortMappingTransport,
+    port: NonZeroU16,
+    tx: PortMapperReporter,
+) {
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    loop {
+        if run_upnp_bound_mapper_attempt(transport, port, &tx)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        SystemClock.sleep(RETRY_AFTER).await;
+    }
+}
+
+/// Result of one bounded PCPv6 acquisition. Cancellation is distinct from a gateway failure so a
+/// listener removal does not leave a misleading "unavailable" status behind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PcpIpv6Acquire {
+    Lease(pcp_ipv6::MapLease),
+    Stopped,
+}
+
+async fn acquire_pcp_ipv6_lease(
+    socket: &UdpSocket,
+    local_ip: Ipv6Addr,
+    local_port: NonZeroU16,
+    protocol: pcp_ipv6::MapProtocol,
+    nonce: [u8; 12],
+    stop: &mut oneshot::Receiver<()>,
+    clock: &impl Clock,
+) -> Result<PcpIpv6Acquire, pcp_ipv6::PcpIpv6Error> {
+    const RETRANSMIT_AFTER: Duration = Duration::from_secs(3);
+    const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
+    let request = pcp_ipv6::encode_map_request(
+        local_ip,
+        local_port,
+        protocol,
+        nonce,
+        pcp_ipv6::REQUESTED_LIFETIME_SECONDS,
+        None,
+    );
+    socket
+        .send(&request)
+        .await
+        .map_err(|error| pcp_ipv6::PcpIpv6Error::Io(error.to_string()))?;
+    let started = clock.monotonic_ms();
+    let deadline = started.saturating_add(ACQUIRE_WITHIN.as_millis() as u64);
+    let mut next_send = started.saturating_add(RETRANSMIT_AFTER.as_millis() as u64);
+    let mut packet = [0u8; pcp_ipv6::RECEIVE_BUFFER_SIZE];
+    loop {
+        let now = clock.monotonic_ms();
+        if now >= deadline {
+            return Err(pcp_ipv6::PcpIpv6Error::Timeout);
+        }
+        let wake_at = next_send.min(deadline);
+        let wait = Duration::from_millis(wake_at.saturating_sub(now));
+        tokio::select! {
+            received = socket.recv(&mut packet) => {
+                let length = received
+                    .map_err(|error| pcp_ipv6::PcpIpv6Error::Io(error.to_string()))?;
+                match pcp_ipv6::decode_response(&packet[..length])
+                    .and_then(|response| {
+                        pcp_ipv6::validate_map_response(response, nonce, protocol, local_port)
+                    })
+                {
+                    Ok(lease) => return Ok(PcpIpv6Acquire::Lease(lease)),
+                    // A connected UDP socket already pins the gateway source. Still ignore
+                    // unrelated/malformed datagrams rather than allowing them to end acquisition.
+                    Err(pcp_ipv6::PcpIpv6Error::NonceMismatch
+                        | pcp_ipv6::PcpIpv6Error::ProtocolMismatch
+                        | pcp_ipv6::PcpIpv6Error::PortMismatch
+                        | pcp_ipv6::PcpIpv6Error::Malformed(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            _ = clock.sleep(wait) => {
+                if wake_at == next_send && next_send < deadline {
+                    // RFC 6887 requires retransmission with the exact same nonce. Reusing the
+                    // encoded packet also guarantees every other request field remains identical.
+                    socket
+                        .send(&request)
+                        .await
+                        .map_err(|error| pcp_ipv6::PcpIpv6Error::Io(error.to_string()))?;
+                    next_send = deadline;
+                }
+            }
+            _ = &mut *stop => return Ok(PcpIpv6Acquire::Stopped),
+        }
+    }
+}
+
+async fn delete_pcp_ipv6_lease(
+    socket: &UdpSocket,
+    local_ip: Ipv6Addr,
+    local_port: NonZeroU16,
+    protocol: pcp_ipv6::MapProtocol,
+    nonce: [u8; 12],
+) {
+    // Publication is withdrawn synchronously by the actor before this best-effort packet is sent.
+    // Zero suggested fields avoid accidentally creating or extending a replacement socket.
+    let request = pcp_ipv6::encode_map_request(local_ip, local_port, protocol, nonce, 0, None);
+    let _ = socket.send(&request).await;
+}
+
+/// Maintain one IPv6 PCP firewall pinhole. The UDP socket is bound to the exact global listener
+/// address and connected to that interface's scoped default router, which enforces both the PCP
+/// Client IP and response-source invariants at the operating-system boundary.
+async fn run_ipv6_port_mapper(
+    local_ip: Ipv6Addr,
+    transport: PortMappingTransport,
+    local_port: NonZeroU16,
+    tx: PortMapperReporter,
+    stop: oneshot::Receiver<()>,
+) {
+    run_ipv6_port_mapper_with(
+        local_ip,
+        transport,
+        local_port,
+        tx,
+        stop,
+        Ipv6MapperDeps {
+            clock: SystemClock,
+            random: OsCryptoRng,
+            discover_gateway: pcp_ipv6::discover_gateway,
+        },
+    )
+    .await;
+}
+
+/// Injected runtime boundary for the PCPv6 worker. Grouping these dependencies keeps the worker's
+/// protocol inputs readable while allowing deterministic clock, nonce and route tests.
+struct Ipv6MapperDeps<C, R, D> {
+    clock: C,
+    random: R,
+    discover_gateway: D,
+}
+
+async fn run_ipv6_port_mapper_with<C, R, D>(
+    local_ip: Ipv6Addr,
+    transport: PortMappingTransport,
+    local_port: NonZeroU16,
+    tx: PortMapperReporter,
+    mut stop: oneshot::Receiver<()>,
+    deps: Ipv6MapperDeps<C, R, D>,
+) where
+    C: Clock,
+    R: CryptoRngCore + Send,
+    D: FnMut(Ipv6Addr) -> Result<SocketAddrV6, pcp_ipv6::PcpIpv6Error> + Send,
+{
+    let Ipv6MapperDeps {
+        clock,
+        mut random,
+        mut discover_gateway,
+    } = deps;
+    const RETRY_AFTER: Duration = Duration::from_secs(60);
+    let protocol = match transport {
+        PortMappingTransport::Tcp => pcp_ipv6::MapProtocol::Tcp,
+        PortMappingTransport::Udp => pcp_ipv6::MapProtocol::Udp,
+    };
+    let local_address = Some(IpAddr::V6(local_ip));
+    let mut gateway_and_nonce = None::<(SocketAddrV6, [u8; 12])>;
+
+    loop {
+        let gateway = match discover_gateway(local_ip) {
+            Ok(gateway) => gateway,
+            Err(error) => {
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism: PortMappingMechanism::Pcp,
+                        transport,
+                        local_address,
+                        detail: format!("IPv6 firewall pinhole unavailable: {error}"),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::select! {
+                    _ = clock.sleep(RETRY_AFTER) => continue,
+                    _ = &mut stop => return,
+                }
+            }
+        };
+        let nonce = if let Some((previous_gateway, nonce)) = gateway_and_nonce {
+            if previous_gateway == gateway {
+                nonce
+            } else {
+                let mut nonce = [0u8; 12];
+                random.fill_bytes(&mut nonce);
+                gateway_and_nonce = Some((gateway, nonce));
+                nonce
+            }
+        } else {
+            let mut nonce = [0u8; 12];
+            random.fill_bytes(&mut nonce);
+            gateway_and_nonce = Some((gateway, nonce));
+            nonce
+        };
+        let socket = match UdpSocket::bind(SocketAddrV6::new(local_ip, 0, 0, 0)).await {
+            Ok(socket) => socket,
+            Err(error) => {
+                let detail = format!("IPv6 firewall pinhole source bind failed: {error}");
+                let _ = tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism: PortMappingMechanism::Pcp,
+                        transport,
+                        local_address,
+                        detail,
+                    })
+                    .await;
+                tokio::select! {
+                    _ = clock.sleep(RETRY_AFTER) => continue,
+                    _ = &mut stop => return,
+                }
+            }
+        };
+        if let Err(error) = socket.connect(gateway).await {
+            let _ = tx
+                .send(PortMappingEvent::Unavailable {
+                    mechanism: PortMappingMechanism::Pcp,
+                    transport,
+                    local_address,
+                    detail: format!("IPv6 PCP gateway connection failed: {error}"),
+                })
+                .await;
+            tokio::select! {
+                _ = clock.sleep(RETRY_AFTER) => continue,
+                _ = &mut stop => return,
+            }
+        }
+
+        let mut lease = match acquire_pcp_ipv6_lease(
+            &socket, local_ip, local_port, protocol, nonce, &mut stop, &clock,
+        )
+        .await
+        {
+            Ok(PcpIpv6Acquire::Lease(lease)) => lease,
+            Ok(PcpIpv6Acquire::Stopped) => {
+                delete_pcp_ipv6_lease(&socket, local_ip, local_port, protocol, nonce).await;
+                return;
+            }
+            Err(error) => {
+                let retry_after = match &error {
+                    pcp_ipv6::PcpIpv6Error::ServerResult {
+                        retry_after_seconds,
+                        ..
+                    } if *retry_after_seconds > 0 => {
+                        Duration::from_secs(u64::from(*retry_after_seconds))
+                    }
+                    _ => RETRY_AFTER,
+                };
+                if tx
+                    .send(PortMappingEvent::Unavailable {
+                        mechanism: PortMappingMechanism::Pcp,
+                        transport,
+                        local_address,
+                        detail: format!("IPv6 firewall pinhole unavailable: {error}"),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                tokio::select! {
+                    _ = clock.sleep(retry_after) => continue,
+                    _ = &mut stop => return,
+                }
+            }
+        };
+        let mut address = mapped_ipv6_multiaddr(
+            SocketAddrV6::new(lease.external_ip, lease.external_port.get(), 0, 0),
+            transport,
+        );
+        // Start the monotonic lease timer at acceptance, before awaiting downstream publication.
+        // A slow UI/snapshot consumer must not extend router state.
+        let granted_at_ms = clock.monotonic_ms();
+        let mut previous_epoch = lease.epoch;
+        let mut previous_received_ms = granted_at_ms;
+        let first_jitter = (random.next_u32() & 0xff) as u8;
+        let mut schedule =
+            pcp_ipv6::LeaseSchedule::new(granted_at_ms, lease.lifetime_seconds, first_jitter);
+        if tx
+            .send(PortMappingEvent::Mapped {
+                mechanism: PortMappingMechanism::Pcp,
+                transport,
+                local_address,
+                address: address.clone(),
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let mut packet = [0u8; pcp_ipv6::RECEIVE_BUFFER_SIZE];
+        let ended_with_error = loop {
+            let now = clock.monotonic_ms();
+            let expires_at_ms = schedule.expires_at_ms();
+            if schedule.is_expired(now) {
+                break Some("IPv6 PCP firewall pinhole lease expired; retrying".to_string());
+            }
+            let wake_at = schedule.next_wake_ms();
+            tokio::select! {
+                _ = &mut stop => {
+                    delete_pcp_ipv6_lease(
+                        &socket, local_ip, local_port, protocol, nonce,
+                    ).await;
+                    break None;
+                }
+                _ = clock.sleep(Duration::from_millis(wake_at.saturating_sub(now))) => {
+                    if wake_at >= expires_at_ms {
+                        break Some("IPv6 PCP firewall pinhole lease expired; retrying".to_string());
+                    }
+                    let renew = pcp_ipv6::encode_map_request(
+                        local_ip,
+                        local_port,
+                        protocol,
+                        nonce,
+                        pcp_ipv6::REQUESTED_LIFETIME_SECONDS,
+                        Some((lease.external_ip, lease.external_port)),
+                    );
+                    if let Err(error) = socket.send(&renew).await {
+                        tracing::debug!(%error, %local_ip, %transport, "IPv6 PCP renewal send failed");
+                    }
+                    schedule.renewal_sent(now);
+                }
+                received = socket.recv(&mut packet) => {
+                    let length = match received {
+                        Ok(length) => length,
+                        Err(error) => {
+                            // A broken local receive path prevents further renewal, but it does
+                            // not revoke the lease the router already granted. Keep the address
+                            // published through that lease's monotonic deadline.
+                            let detail = format!(
+                                "IPv6 PCP socket failed; existing pinhole retained until expiry: {error}"
+                            );
+                            let remaining = Duration::from_millis(
+                                schedule.expires_at_ms().saturating_sub(clock.monotonic_ms()),
+                            );
+                            tokio::select! {
+                                _ = clock.sleep(remaining) => break Some(detail),
+                                _ = &mut stop => {
+                                    delete_pcp_ipv6_lease(
+                                        &socket, local_ip, local_port, protocol, nonce,
+                                    ).await;
+                                    break None;
+                                }
+                            }
+                        },
+                    };
+                    let response = match pcp_ipv6::decode_response(&packet[..length]) {
+                        Ok(response) => response,
+                        Err(error) => {
+                            tracing::debug!(%error, %local_ip, %transport, "ignored malformed IPv6 PCP response");
+                            continue;
+                        }
+                    };
+                    if let pcp_ipv6::DecodedResponse::Announce { result_code, .. } = response {
+                        let received_ms = clock.monotonic_ms();
+                        if result_code == 0 && pcp_ipv6::epoch_may_have_reset(
+                            previous_epoch,
+                            previous_received_ms,
+                            response.epoch(),
+                            received_ms,
+                        ) {
+                            // Randomize rapid recovery so a restarted gateway does not receive a
+                            // synchronized burst from every client on the link. This worker owns
+                            // one lease; the documented narrow-client limitation is that sibling
+                            // transport leases learn the epoch independently.
+                            let delay = Duration::from_millis(u64::from(random.next_u32() % 5_001));
+                            schedule.renew_after(received_ms, delay);
+                        }
+                        previous_epoch = response.epoch();
+                        previous_received_ms = received_ms;
+                        if result_code != 0 {
+                            tracing::debug!(
+                                %local_ip,
+                                %transport,
+                                result_code,
+                                "ignored unsuccessful IPv6 PCP ANNOUNCE"
+                            );
+                        }
+                        continue;
+                    }
+                    let received_epoch = response.epoch();
+                    let received_ms = clock.monotonic_ms();
+                    let renewed = match pcp_ipv6::validate_map_response(
+                        response, nonce, protocol, local_port,
+                    ) {
+                        Ok(renewed) => renewed,
+                        Err(pcp_ipv6::PcpIpv6Error::NonceMismatch
+                            | pcp_ipv6::PcpIpv6Error::ProtocolMismatch
+                            | pcp_ipv6::PcpIpv6Error::PortMismatch
+                            | pcp_ipv6::PcpIpv6Error::Malformed(_)) => continue,
+                        Err(pcp_ipv6::PcpIpv6Error::ServerResult {
+                            retry_after_seconds,
+                            reason,
+                            code,
+                        }) => {
+                            // A renewal refusal is not a deletion: the previously granted lease
+                            // remains router state through its original deadline. Honor a nonzero
+                            // retry horizon while never moving that deadline.
+                            if retry_after_seconds > 0 {
+                                schedule.defer_retry(
+                                    received_ms,
+                                    Duration::from_secs(u64::from(retry_after_seconds)),
+                                );
+                            }
+                            previous_epoch = received_epoch;
+                            previous_received_ms = received_ms;
+                            tracing::debug!(
+                                %local_ip,
+                                %transport,
+                                code,
+                                reason,
+                                retry_after_seconds,
+                                "IPv6 PCP renewal refused; retaining existing lease until expiry"
+                            );
+                            continue;
+                        }
+                        Err(error) => break Some(format!("IPv6 PCP renewal failed: {error}")),
+                    };
+                    let renewed_address = mapped_ipv6_multiaddr(
+                        SocketAddrV6::new(
+                            renewed.external_ip,
+                            renewed.external_port.get(),
+                            0,
+                            0,
+                        ),
+                        transport,
+                    );
+                    if renewed_address != address {
+                        if tx.send(PortMappingEvent::Expired {
+                            mechanism: PortMappingMechanism::Pcp,
+                            transport,
+                            local_address,
+                            address: address.clone(),
+                        }).await.is_err() {
+                            return;
+                        }
+                        if tx.send(PortMappingEvent::Mapped {
+                            mechanism: PortMappingMechanism::Pcp,
+                            transport,
+                            local_address,
+                            address: renewed_address.clone(),
+                        }).await.is_err() {
+                            return;
+                        }
+                        address = renewed_address;
+                    }
+                    lease = renewed;
+                    let granted_at_ms = clock.monotonic_ms();
+                    previous_epoch = lease.epoch;
+                    previous_received_ms = granted_at_ms;
+                    let jitter = (random.next_u32() & 0xff) as u8;
+                    schedule.renewed(granted_at_ms, lease.lifetime_seconds, jitter);
+                }
+            }
+        };
+
+        if tx
+            .send(PortMappingEvent::Expired {
+                mechanism: PortMappingMechanism::Pcp,
+                transport,
+                local_address,
+                address,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Some(detail) = ended_with_error else {
+            return;
+        };
+        if tx
+            .send(PortMappingEvent::Unavailable {
+                mechanism: PortMappingMechanism::Pcp,
+                transport,
+                local_address,
+                detail,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        // The old gateway may have disappeared. Discovery on the next pass decides whether this
+        // remains the same nonce generation or a new router needs a fresh nonce.
+        tokio::select! {
+            _ = clock.sleep(RETRY_AFTER) => {}
+            _ = &mut stop => return,
+        }
+    }
+}
+
 struct Actor {
     swarm: Swarm<MeshBehaviour>,
+    /// Whether this product instance explicitly opted into changing the local gateway.
+    enable_port_mapping: bool,
     cmd_rx: mpsc::Receiver<Command>,
     event_tx: mpsc::Sender<TransportEvent>,
     listen_tx: mpsc::Sender<Multiaddr>,
-    /// UPnP outcome: `Some(addr)` = the router opened a port and reported this public address
-    /// (surfaced so a fresh invite can carry a directly-dialable bootstrap, no relay);
-    /// `None` = no usable gateway (so a waiter stops promptly instead of timing out).
-    upnp_tx: mpsc::Sender<Option<Multiaddr>>,
+    active_listeners: HashSet<Multiaddr>,
+    listener_snapshot_tx: watch::Sender<ListenerSnapshot>,
+    /// Unified UPnP/PCP/NAT-PMP lifecycle stream for the product layer. It persists successful
+    /// addresses into invites/peer records and removes them again on lease expiry.
+    port_mapping_tx: watch::Sender<PortMappingSnapshot>,
+    /// PCP/NAT-PMP workers report back here so the swarm actor alone mutates external addresses.
+    port_mapper_tx: mpsc::Sender<PortMapperReport>,
+    port_mapper_rx: mpsc::Receiver<PortMapperReport>,
+    /// One worker for each transport and independently routed address family/interface. The exact
+    /// key is load-bearing: a PCPv6/TCP lease must not overwrite PCPv4/TCP or another GUA.
+    port_mapper_tasks: HashMap<PortMapperTaskKey, PortMapperTask>,
+    /// Monotonic task identity. A listener can disappear and reappear with the same address/port;
+    /// buffered events from its former worker must not become ownership for the new generation.
+    next_port_mapper_generation: u64,
+    /// Router-lease ownership by mechanism, transport and local-address generation. Libp2p stores
+    /// external addresses as a set, so this layer supplies reference counting when mechanisms or
+    /// families expose the same dial address.
+    active_port_mappings: HashMap<PortMappingKey, Multiaddr>,
+    /// Latest scoped failure for keys without a live lease. Coalesced with the active map into a
+    /// watch snapshot so an idle/non-UI `MeshService` does not accumulate diagnostic events.
+    port_mapping_unavailable: HashMap<PortMappingKey, String>,
+    /// Explicit/operator-provided addresses are independent owners. Expiry of an identical router
+    /// mapping must never withdraw a still-configured manual forward.
+    configured_external_addrs: HashSet<Multiaddr>,
+    /// Per-address AutoNAT v2 outcomes. Kept separate from transport connectivity because a
+    /// failed dial-back does not mean a peer connection failed, and a successful one is
+    /// diagnostic evidence rather than a membership event.
+    autonat_tx: watch::Sender<AutoNatSnapshot>,
+    /// Latest observation for every address/server pair. A second successful route must survive a
+    /// later failure of the first, and a consumer that starts late still needs the full evidence.
+    /// The FIFO order enforces `MAX_AUTONAT_OBSERVATIONS` under peer/address churn.
+    autonat_results: HashMap<AutoNatKey, AutoNatResult>,
+    autonat_order: VecDeque<AutoNatKey>,
+    /// Live relay-circuit listen addresses. The product must withdraw one when the reservation's
+    /// listener expires instead of continuing to present a dead circuit as "relay ready".
+    relay_addresses: HashSet<Multiaddr>,
+    relay_address_tx: watch::Sender<RelayAddressSnapshot>,
+    /// Latest outbound-address observation from each connected Identify peer. This is kept wholly
+    /// separate from external-address ownership so telemetry can never become a dial candidate by
+    /// accident.
+    mesh_observations: HashMap<libp2p::PeerId, Multiaddr>,
+    mesh_observation_order: VecDeque<libp2p::PeerId>,
+    mesh_observation_tx: watch::Sender<MeshObservationSnapshot>,
     /// Peers whose relayed connection DCUtR upgraded to a direct one (diagnostics).
     upgrade_tx: mpsc::Sender<PeerId>,
     /// Rendezvous-discovered peer records, surfaced but never auto-dialed. Unbounded
@@ -639,6 +2747,18 @@ struct Actor {
     /// Member-peer dials accumulated during one drain of the command queue, so a peer's addresses
     /// are handed to libp2p as one racing dial rather than N sequential ones.
     pending_dials: HashMap<libp2p::PeerId, Vec<Multiaddr>>,
+    /// Peers **this node's own configuration** named as infrastructure or as a bootstrap: the
+    /// relays it reserves on, the rendezvous nodes it registers/discovers at, and the addresses
+    /// it was constructed to dial. They are never deniable by a membership action.
+    ///
+    /// This is the transport's half of the defence against an eviction aimed at a third party.
+    /// The membership layer resolves a removed device to a peer id that the removed device
+    /// *asserted*, and nothing binds that assertion to the device, so a member with a modified
+    /// client can name the group's relay in its own peer record and have every other member
+    /// block it on removal, taking NAT traversal down group-wide. What a peer *is* to this node
+    /// is decided here, locally, by what this node was told to dial; no record from the wire can
+    /// change it. Kept separate from `infra_peers`, which carries dial-gating semantics.
+    protected: HashSet<libp2p::PeerId>,
 }
 
 impl Actor {
@@ -667,6 +2787,18 @@ impl Actor {
                 event = self.swarm.select_next_some() => {
                     self.on_swarm_event(event, &mut inbound).await;
                 }
+                Some(report) = self.port_mapper_rx.recv() => {
+                    let current = port_mapper_report_is_current(&self.port_mapper_tasks, &report);
+                    if current {
+                        self.on_port_mapping_event(report.event);
+                    } else {
+                        tracing::debug!(
+                            ?report.key,
+                            generation = report.generation,
+                            "ignoring stale router-mapping worker event"
+                        );
+                    }
+                }
                 Some((channel, resp)) = inbound.next(), if !inbound.is_empty() => {
                     if let Some(bytes) = resp {
                         let _ = self
@@ -678,6 +2810,380 @@ impl Actor {
                 }
             }
         }
+    }
+
+    /// Reconcile router workers from the authoritative live listener set. This runs for both
+    /// `NewListenAddr` and `ExpiredListenAddr`; start-only lifecycle management leaves a router
+    /// pinhole and advertised route behind after an interface disappears.
+    fn reconcile_port_mappers(&mut self) {
+        // Bound privacy-address/interface churn. Select at most two distinct GUAs, then keep both
+        // TCP and QUIC workers for those chosen interfaces.
+        let desired = desired_port_mapping_endpoints(&self.active_listeners);
+
+        let stale: Vec<_> = self
+            .port_mapper_tasks
+            .iter()
+            .filter_map(|(key, task)| {
+                (desired.get(key) != Some(&task.port) || !task.is_fully_running()).then_some(*key)
+            })
+            .collect();
+        for key in stale {
+            if let Some(task) = self.port_mapper_tasks.remove(&key) {
+                let local_address = match key.target {
+                    PortMappingTarget::Ipv4 => None,
+                    PortMappingTarget::Ipv6(address) => Some(IpAddr::V6(address)),
+                };
+                let mechanisms: &[PortMappingMechanism] = match key.target {
+                    PortMappingTarget::Ipv4 => {
+                        &[PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp]
+                    }
+                    PortMappingTarget::Ipv6(_) => &[PortMappingMechanism::Pcp],
+                };
+                // Router deletion is best effort, but live product state is not: withdraw every
+                // owner before asking the worker to stop so a late packet cannot keep a stale
+                // route in an invite.
+                for &mechanism in mechanisms {
+                    if let Some(address) = self
+                        .active_port_mappings
+                        .get(&(mechanism, key.transport, local_address))
+                        .cloned()
+                    {
+                        self.on_port_mapping_event(PortMappingEvent::Expired {
+                            mechanism,
+                            transport: key.transport,
+                            local_address,
+                            address,
+                        });
+                    }
+                }
+                // The IPv4 task's bound-UPnP companion keys its routes by the concrete interface
+                // address, which the actor does not track; withdraw whatever it published.
+                if key.target == PortMappingTarget::Ipv4 {
+                    let scoped: Vec<_> = self
+                        .active_port_mappings
+                        .iter()
+                        .filter(|((mechanism, transport, local_address), _)| {
+                            *mechanism == PortMappingMechanism::Upnp
+                                && *transport == key.transport
+                                && matches!(local_address, Some(IpAddr::V4(_)))
+                        })
+                        .map(|(&(mechanism, transport, local_address), address)| {
+                            (mechanism, transport, local_address, address.clone())
+                        })
+                        .collect();
+                    for (mechanism, transport, local_address, address) in scoped {
+                        self.on_port_mapping_event(PortMappingEvent::Expired {
+                            mechanism,
+                            transport,
+                            local_address,
+                            address,
+                        });
+                    }
+                }
+                // `Expired` normally records "retrying" and an unavailable-only worker has no
+                // active owner to expire at all. This task is being retired, so remove both forms
+                // of stale failure before publishing the final coalesced state.
+                if clear_retired_port_mapping_failures(&mut self.port_mapping_unavailable, key) {
+                    self.publish_port_mapping_snapshot();
+                }
+                task.stop_gracefully();
+            }
+        }
+
+        for (key, port) in desired {
+            if self.port_mapper_tasks.contains_key(&key) {
+                continue;
+            }
+            let generation = self.next_port_mapper_generation;
+            self.next_port_mapper_generation = self.next_port_mapper_generation.wrapping_add(1);
+            let tx = PortMapperReporter {
+                tx: self.port_mapper_tx.clone(),
+                key,
+                port,
+                generation,
+            };
+            let (handle, companion, stop) = match key.target {
+                PortMappingTarget::Ipv4 => (
+                    tokio::spawn(run_port_mapper(key.transport, port, tx.clone())),
+                    Some(tokio::spawn(run_upnp_bound_mapper(key.transport, port, tx))),
+                    None,
+                ),
+                PortMappingTarget::Ipv6(local_ip) => {
+                    let (stop_tx, stop_rx) = oneshot::channel();
+                    (
+                        tokio::spawn(run_ipv6_port_mapper(
+                            local_ip,
+                            key.transport,
+                            port,
+                            tx,
+                            stop_rx,
+                        )),
+                        None,
+                        Some(stop_tx),
+                    )
+                }
+            };
+            self.port_mapper_tasks.insert(
+                key,
+                PortMapperTask {
+                    port,
+                    generation,
+                    handle: Some(handle),
+                    companion,
+                    stop,
+                },
+            );
+        }
+    }
+
+    /// Apply a mapper event to the swarm before surfacing it. Successful mappings become AutoNAT
+    /// candidates and rendezvous/identify addresses; expired leases are withdrawn immediately so
+    /// a stale public address is not kept in the live peer record.
+    fn on_port_mapping_event(&mut self, event: PortMappingEvent) {
+        // A router behind CGNAT/double NAT can successfully map its *private* upstream socket.
+        // That is useful diagnostic evidence but not an internet route, so never advertise it as
+        // one or ask AutoNAT to waste a callback on it.
+        let event = match event {
+            PortMappingEvent::Mapped {
+                mechanism,
+                transport,
+                local_address,
+                address,
+            } if !addr_is_globally_routable(&address) => {
+                // libp2p-UPnP may already have promoted the address before its behaviour event is
+                // surfaced. Remove it unless an explicit/manual owner independently configured
+                // the identical socket; the router lease itself is still refused below.
+                if !external_address_is_allowed(&self.configured_external_addrs, &address) {
+                    self.swarm.remove_external_address(&address);
+                    self.forget_autonat_address(&address);
+                }
+                if let Some(old) = self
+                    .active_port_mappings
+                    .get(&(mechanism, transport, local_address))
+                    .cloned()
+                {
+                    self.on_port_mapping_event(PortMappingEvent::Expired {
+                        mechanism,
+                        transport,
+                        local_address,
+                        address: old,
+                    });
+                }
+                PortMappingEvent::Unavailable {
+                    mechanism,
+                    transport,
+                    local_address,
+                    detail: format!(
+                        "gateway returned non-public address {address} (likely CGNAT or double NAT)"
+                    ),
+                }
+            }
+            event => event,
+        };
+        match &event {
+            PortMappingEvent::Mapped {
+                mechanism,
+                transport,
+                local_address,
+                address,
+            } => {
+                tracing::info!(
+                    %mechanism,
+                    %transport,
+                    %address,
+                    "router mapped a public address; offering it to AutoNAT"
+                );
+                let (remove_old, add_new) = activate_port_mapping(
+                    &mut self.active_port_mappings,
+                    (*mechanism, *transport, *local_address),
+                    address.clone(),
+                );
+                self.port_mapping_unavailable
+                    .remove(&(*mechanism, *transport, *local_address));
+                if let Some(old) = remove_old {
+                    if !self.configured_external_addrs.contains(&old) {
+                        self.swarm.remove_external_address(&old);
+                        self.forget_autonat_address(&old);
+                    }
+                }
+                if add_new && !self.configured_external_addrs.contains(address) {
+                    self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                        FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate {
+                            addr: address,
+                        }),
+                    );
+                    self.swarm.add_external_address(address.clone());
+                } else if local_address.is_some() {
+                    // An IPv6 listener can already be a configured candidate before its firewall
+                    // pinhole exists. Re-offer it after a new PCP lease so stale pre-pinhole
+                    // AutoNAT evidence cannot be the only observation for this ownership epoch.
+                    self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                        FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate {
+                            addr: address,
+                        }),
+                    );
+                }
+                self.flush_pending_registers();
+            }
+            PortMappingEvent::Unavailable {
+                mechanism,
+                transport,
+                local_address,
+                detail,
+            } => {
+                // A router with no PCP/NAT-PMP re-answers "no" on every discovery cycle, for
+                // every mechanism, transport and interface. Logged unconditionally that was 356
+                // of one debug log's 601 lines: the single most common message, saying the same
+                // thing it said eighteen seconds earlier, burying everything worth reading.
+                // The first answer for a given probe is news and stays at info; an identical
+                // repeat drops to debug. A *changed* detail is news again.
+                let previous = self
+                    .port_mapping_unavailable
+                    .insert((*mechanism, *transport, *local_address), detail.clone());
+                if !mapping_unavailable_is_news(previous.as_deref(), detail) {
+                    tracing::debug!(%mechanism, %transport, %detail, "router mapping still unavailable");
+                } else {
+                    tracing::info!(%mechanism, %transport, %detail, "router mapping unavailable");
+                }
+            }
+            PortMappingEvent::Expired {
+                mechanism,
+                transport,
+                local_address,
+                address,
+            } => {
+                tracing::info!(%mechanism, %transport, %address, "router port mapping expired");
+                let matched =
+                    self.active_port_mappings
+                        .get(&(*mechanism, *transport, *local_address))
+                        == Some(address);
+                let last_mapping_owner = expire_port_mapping(
+                    &mut self.active_port_mappings,
+                    (*mechanism, *transport, *local_address),
+                    address,
+                );
+                let still_owned = self
+                    .active_port_mappings
+                    .values()
+                    .any(|candidate| candidate == address)
+                    || self.configured_external_addrs.contains(address);
+                if *mechanism == PortMappingMechanism::Upnp && still_owned {
+                    // libp2p-UPnP emits `ToSwarm::ExternalAddrExpired` before its public expiry
+                    // event. Re-add an identical address still owned by PCP/NAT-PMP or a manual
+                    // forward; libp2p's external-address set has no ownership count of its own.
+                    self.swarm.add_external_address(address.clone());
+                } else if last_mapping_owner && !still_owned {
+                    self.swarm.remove_external_address(address);
+                    self.forget_autonat_address(address);
+                }
+                if matched {
+                    self.port_mapping_unavailable.insert(
+                        (*mechanism, *transport, *local_address),
+                        format!("previous mapping {address} expired; retrying"),
+                    );
+                    if local_address.is_some() {
+                        // A direct callback result observed before a firewall pinhole ended is not
+                        // evidence for a future lease, even when the GUA itself remains configured.
+                        self.forget_autonat_address(address);
+                    }
+                }
+            }
+        }
+        self.publish_port_mapping_snapshot();
+    }
+
+    /// Publish the current mapping state as one bounded/coalesced value. A consumer can miss
+    /// intermediate retries but never observes an expired address as current.
+    fn publish_port_mapping_snapshot(&self) {
+        let mut active: Vec<_> = self
+            .active_port_mappings
+            .iter()
+            .map(
+                |(&(mechanism, transport, local_address), address)| ActivePortMapping {
+                    mechanism,
+                    transport,
+                    local_address,
+                    address: address.clone(),
+                },
+            )
+            .collect();
+        active.sort_by(|a, b| {
+            (
+                a.mechanism,
+                a.transport,
+                a.local_address,
+                a.address.to_string(),
+            )
+                .cmp(&(
+                    b.mechanism,
+                    b.transport,
+                    b.local_address,
+                    b.address.to_string(),
+                ))
+        });
+        let mut unavailable: Vec<_> = self
+            .port_mapping_unavailable
+            .iter()
+            .filter(|(key, _)| !self.active_port_mappings.contains_key(key))
+            .map(
+                |(&(mechanism, transport, local_address), detail)| PortMappingFailure {
+                    mechanism,
+                    transport,
+                    local_address,
+                    detail: detail.clone(),
+                },
+            )
+            .collect();
+        unavailable
+            .sort_by_key(|failure| (failure.mechanism, failure.transport, failure.local_address));
+        self.port_mapping_tx.send_replace(PortMappingSnapshot {
+            active,
+            unavailable,
+        });
+    }
+
+    /// Publish all bounded current AutoNAT observations. `latest` is present only for an actual
+    /// dial-back result; lifecycle pruning publishes `None` so an expired route cannot be mistaken
+    /// for fresh evidence by event-style consumers.
+    fn publish_autonat_snapshot(&self, latest: Option<AutoNatResult>) {
+        let mut results: Vec<_> = self.autonat_results.values().cloned().collect();
+        results.sort_by(|a, b| {
+            (a.address.to_string(), a.server.to_string())
+                .cmp(&(b.address.to_string(), b.server.to_string()))
+        });
+        self.autonat_tx
+            .send_replace(AutoNatSnapshot { results, latest });
+    }
+
+    fn publish_mesh_observations(&self) {
+        let mut observations: Vec<_> = self
+            .mesh_observations
+            .iter()
+            .map(|(observer, address)| MeshObservation {
+                observer: *observer,
+                address: address.clone(),
+            })
+            .collect();
+        observations.sort_by(|a, b| {
+            (a.observer.to_string(), a.address.to_string())
+                .cmp(&(b.observer.to_string(), b.address.to_string()))
+        });
+        self.mesh_observation_tx
+            .send_replace(MeshObservationSnapshot { observations });
+    }
+
+    fn forget_autonat_address(&mut self, address: &Multiaddr) {
+        if forget_autonat_address(&mut self.autonat_results, &mut self.autonat_order, address) {
+            self.publish_autonat_snapshot(None);
+        }
+    }
+
+    fn autonat_address_is_current(&self, address: &Multiaddr) -> bool {
+        autonat_candidate_is_current(
+            &self.configured_external_addrs,
+            &self.active_port_mappings,
+            address,
+        )
     }
 
     fn handle_command(&mut self, cmd: Command) {
@@ -733,7 +3239,7 @@ impl Actor {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
                 // relay named in it is an infra target from here on.
                 if let Some(relay) = relay_peer_in_circuit_addr(&addr) {
-                    self.infra_peers.insert(relay);
+                    self.note_infra(relay);
                 }
                 if let Err(e) = self.swarm.listen_on(addr.clone()) {
                     tracing::warn!(%addr, error = %e, "listen failed");
@@ -742,19 +3248,40 @@ impl Actor {
             Command::Dial(addr) => self.dial_gated(addr),
             Command::AddExternalAddress(addr) => {
                 tracing::debug!(%addr, "add external address");
+                // `Swarm::add_external_address` is an assertion: it marks the address confirmed
+                // immediately. The caller may have strong local evidence (a UPnP mapping or an
+                // operator-configured address), so preserve that behaviour for rendezvous and
+                // invites, but separately offer the same address to AutoNAT for an actual remote
+                // dial-back. The upstream v2 client has no public `probe_address` method; feeding
+                // the standard behaviour event is its supported candidate input.
+                self.swarm.behaviour_mut().autonat_client.on_swarm_event(
+                    FromSwarm::NewExternalAddrCandidate(NewExternalAddrCandidate { addr: &addr }),
+                );
+                self.configured_external_addrs.insert(addr.clone());
                 self.swarm.add_external_address(addr);
                 // A registration may have been waiting on exactly this.
                 self.flush_pending_registers();
             }
+            Command::RemoveExternalAddress(addr) => {
+                tracing::debug!(%addr, "remove configured external address");
+                if retire_configured_external_address(
+                    &mut self.configured_external_addrs,
+                    &self.active_port_mappings,
+                    &addr,
+                ) {
+                    self.swarm.remove_external_address(&addr);
+                    self.forget_autonat_address(&addr);
+                }
+            }
             Command::RendezvousRegister { namespace, rz_node } => {
-                self.infra_peers.insert(rz_node);
+                self.note_infra(rz_node);
                 // Defer until we have an external address to advertise; flushed on
                 // the next confirmed external address (e.g. a circuit reservation).
                 self.pending_registers.push((namespace, rz_node));
                 self.flush_pending_registers();
             }
             Command::RendezvousDiscover { namespace, rz_node } => {
-                self.infra_peers.insert(rz_node);
+                self.note_infra(rz_node);
                 tracing::debug!(%rz_node, namespace = %namespace, "rendezvous discover");
                 self.swarm.behaviour_mut().rendezvous_client.discover(
                     Some(namespace),
@@ -763,6 +3290,89 @@ impl Actor {
                     rz_node,
                 );
             }
+            Command::Evict(peer) => self.evict(peer),
+            Command::Unevict(peer) => self.unevict(peer),
+        }
+    }
+
+    /// Learn that `peer` is infrastructure this node uses, and make it undeniable.
+    ///
+    /// Lifting an eviction here is what closes an ordering window: a relay or rendezvous is
+    /// dialed before it is *named* as infra (the dial comes first, the reservation or the
+    /// registration second), so a hostile eviction landing in between would otherwise stick. A
+    /// peer this node has decided to use as infrastructure outranks anything a removed member
+    /// claimed about it.
+    fn note_infra(&mut self, peer: libp2p::PeerId) {
+        self.infra_peers.insert(peer);
+        if self.protected.insert(peer) {
+            self.lift_eviction(to_peer(&peer));
+        }
+    }
+
+    /// Whether a phase-0 id names a peer this node's own configuration protects.
+    ///
+    /// Linear over a set that holds a handful of relays and rendezvous nodes, deliberately: a
+    /// second map keyed on the phase-0 id could drift out of step with this one, and the whole
+    /// point of the check is that it cannot be talked out of.
+    fn is_protected(&self, peer: PeerId) -> bool {
+        self.protected.iter().any(|p| to_peer(p) == peer)
+    }
+
+    /// Detach an evicted peer (P6) and keep it detached.
+    ///
+    /// Two halves, because refusing and severing are different operations. [`Eviction`] refuses
+    /// every future connection, and it can do so from the phase-0 id alone because `to_peer` is a
+    /// forward hash. `allow_block_list` closes the connections that are **already live**, which
+    /// needs the `libp2p::PeerId`; that is known exactly when the peer is connected, which is the
+    /// only case in which there is anything to close.
+    ///
+    /// Closing the connection is also what revokes anything scoped to it: a relay reservation
+    /// lives on the connection it was granted over, so a node acting as a relay (rung 2's
+    /// switchboards) drops the ex-member's circuit slot here rather than holding it until it
+    /// expires. This node runs `relay_client` only, so today there is nothing of the sort to drop.
+    fn evict(&mut self, peer: PeerId) {
+        // A membership action must never be able to disconnect this node's own infrastructure.
+        // The peer id an eviction names came off the wire in a removed member's self-signed
+        // record, and nothing binds that value to its signer, so without this check any member
+        // could name the group's relay and have everyone block it on the way out.
+        if self.is_protected(peer) {
+            tracing::warn!(
+                ?peer,
+                "refusing to evict a peer this node uses as infrastructure or bootstrap"
+            );
+            return;
+        }
+        if peer == to_peer(self.swarm.local_peer_id()) {
+            tracing::warn!("refusing to evict this node itself");
+            return;
+        }
+        let b = self.swarm.behaviour_mut();
+        if let Some(displaced) = b.eviction.denied.deny(peer) {
+            // The bound pushed an older eviction out; release its block so `allow_block_list`'s
+            // set stays the same size as the deny list rather than growing behind it.
+            b.blocked_peers.unblock_peer(displaced);
+        }
+        match self.peers.get(&peer).copied() {
+            Some(libp2p_peer) => {
+                tracing::info!(peer = %libp2p_peer, "evicting peer: closing live connections");
+                let b = self.swarm.behaviour_mut();
+                b.blocked_peers.block_peer(libp2p_peer);
+                b.eviction.denied.note_blocked(peer, libp2p_peer);
+            }
+            None => tracing::info!(?peer, "evicted peer is not connected; refused from here on"),
+        }
+    }
+
+    /// Lift an eviction: the peer's device is a member again (or the peer turned out to be
+    /// infrastructure). Idempotent, and a no-op for a peer that was never evicted.
+    fn unevict(&mut self, peer: PeerId) {
+        self.lift_eviction(peer);
+    }
+
+    fn lift_eviction(&mut self, peer: PeerId) {
+        let b = self.swarm.behaviour_mut();
+        if let Some(blocked) = b.eviction.denied.allow(&peer) {
+            b.blocked_peers.unblock_peer(blocked);
         }
     }
 
@@ -799,6 +3409,16 @@ impl Actor {
     /// An address with no `/p2p/<id>` names no peer, so it cannot be gated; it is dialed as
     /// before. (The jitter half of P11 lives in the caller that drives the timer.)
     fn dial_gated(&mut self, addr: Multiaddr) {
+        // Routing *through* a relay makes it this node's infrastructure just as surely as
+        // reserving on it does, and only the reservation path was noting it. The gate below
+        // resolves the LAST `/p2p/` component, which for `…/p2p/RELAY/p2p-circuit/p2p/TARGET` is
+        // the target, so a relay used purely as transit was never protected: a companion device
+        // claiming the relay's transport id (no *device* legitimately claims one, so both sync
+        // checks pass) and then being removed in an ordinary "drop my old phone" would have had
+        // every member evict the relay it routes through.
+        if let Some(relay) = relay_peer_in_circuit_addr(&addr) {
+            self.note_infra(relay);
+        }
         let Some(target) = target_peer_in_multiaddr(&addr) else {
             if let Err(e) = self.swarm.dial(addr.clone()) {
                 tracing::warn!(%addr, error = %e, "dial failed");
@@ -845,7 +3465,15 @@ impl Actor {
             Err(libp2p::swarm::DialError::DialPeerConditionFalse(cond)) => {
                 tracing::trace!(%addr, peer = %target, ?cond, "infra dial suppressed: already dialing");
             }
-            Err(e) => tracing::warn!(%addr, error = %e, "dial failed"),
+            Err(e) => {
+                // Drop the ledger entry so the next tick retries. A dial refused *before* it
+                // starts (`max_pending_outgoing` at its cap, say) produces no
+                // `OutgoingConnectionError`, so nothing else would ever clear it and the node
+                // would stop dialing its own relay or rendezvous for the rest of the process.
+                // `flush_dials` already does this for member peers.
+                tracing::warn!(%addr, error = %e, "dial failed");
+                self.release_failed_dial(Some(target), &e);
+            }
         }
     }
 
@@ -960,25 +3588,65 @@ impl Actor {
         event: SwarmEvent<MeshBehaviourEvent>,
         inbound: &mut InboundResponses,
     ) {
-        // Opportunistically retry deferred registrations: an external address may
-        // have become available (and propagated to the behaviour) since the last try.
-        if !self.pending_registers.is_empty() {
-            self.flush_pending_registers();
-        }
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
                 tracing::info!(%address, "listening");
+                self.active_listeners.insert(address.clone());
+                let mut addresses: Vec<_> = self.active_listeners.iter().cloned().collect();
+                addresses.sort_by_key(ToString::to_string);
+                self.listener_snapshot_tx
+                    .send_replace(ListenerSnapshot { addresses });
+                if self.enable_port_mapping {
+                    self.reconcile_port_mappers();
+                }
                 // A granted relay-circuit reservation is how a NAT'd node becomes
                 // reachable; confirm it as an external address so rendezvous
                 // registrations advertise it, then flush any deferred registrations.
                 if is_relayed(&address) {
                     self.swarm.add_external_address(address.clone());
+                    self.relay_addresses.insert(address.clone());
+                    let mut addresses: Vec<_> = self.relay_addresses.iter().cloned().collect();
+                    addresses.sort_by_key(ToString::to_string);
+                    self.relay_address_tx
+                        .send_replace(RelayAddressSnapshot { addresses });
                     self.flush_pending_registers();
                 }
                 let _ = self.listen_tx.try_send(address);
             }
-            SwarmEvent::ExternalAddrConfirmed { .. } => {
-                self.flush_pending_registers();
+            SwarmEvent::ExpiredListenAddr { address, .. } => {
+                if self.active_listeners.remove(&address) {
+                    let mut addresses: Vec<_> = self.active_listeners.iter().cloned().collect();
+                    addresses.sort_by_key(ToString::to_string);
+                    self.listener_snapshot_tx
+                        .send_replace(ListenerSnapshot { addresses });
+                    if self.enable_port_mapping {
+                        self.reconcile_port_mappers();
+                    }
+                }
+                if self.relay_addresses.remove(&address) {
+                    self.swarm.remove_external_address(&address);
+                    self.forget_autonat_address(&address);
+                    let mut addresses: Vec<_> = self.relay_addresses.iter().cloned().collect();
+                    addresses.sort_by_key(ToString::to_string);
+                    self.relay_address_tx
+                        .send_replace(RelayAddressSnapshot { addresses });
+                }
+            }
+            SwarmEvent::ExternalAddrConfirmed { address } => {
+                let has_ip_literal = address
+                    .iter()
+                    .any(|protocol| matches!(protocol, Protocol::Ip4(_) | Protocol::Ip6(_)));
+                if has_ip_literal
+                    && !external_address_is_allowed(&self.configured_external_addrs, &address)
+                {
+                    // UPnP confirms its address in the Swarm before its public behaviour event.
+                    // Enforce the canonical classifier here, before any pending rendezvous
+                    // registration can publish a multicast/reserved/non-public gateway result.
+                    self.swarm.remove_external_address(&address);
+                    self.forget_autonat_address(&address);
+                } else {
+                    self.flush_pending_registers();
+                }
             }
             SwarmEvent::ConnectionEstablished {
                 peer_id, endpoint, ..
@@ -991,6 +3659,23 @@ impl Actor {
                 // a relayed connection instead of the pair staying pinned to the relay.
                 self.cover_addr(peer_id, endpoint.get_remote_address().clone());
                 let peer = to_peer(&peer_id);
+                // Race closer. `Eviction` refuses *new* connections, but a connection that
+                // passed the gate before the deny was installed is already established, and
+                // whether this arm or the command channel runs first is `select!`'s random
+                // choice. When the command won, `Actor::evict` looked in `peers`, found nothing
+                // and never asked `allow_block_list` to close anything, leaving a live
+                // connection that neither half would ever tear down. Closing it here costs one
+                // set lookup per connection and keeps both sets consistent.
+                //
+                // Deliberately NOT an early return: the peer is still recorded and still
+                // announced, so the close below produces a matched `PeerDisconnected` rather
+                // than an unpaired one. This is a race closer, never the enforcement.
+                if self.swarm.behaviour().eviction.denied.is_denied(&peer) {
+                    tracing::info!(peer = %peer_id, "evicted peer raced the deny; closing");
+                    let b = self.swarm.behaviour_mut();
+                    b.blocked_peers.block_peer(peer_id);
+                    b.eviction.denied.note_blocked(peer, peer_id);
+                }
                 // Only surface `PeerConnected` on the *first* connection to a peer;
                 // a DCUtR upgrade opens a second (direct) connection to a peer we
                 // already know, and must not look like a new peer to layers above.
@@ -1017,6 +3702,14 @@ impl Actor {
                     self.clear_dial_ledger(&peer_id);
                     let peer = to_peer(&peer_id);
                     self.peers.remove(&peer);
+                    if self.mesh_observations.remove(&peer_id).is_some() {
+                        self.mesh_observation_order
+                            .retain(|candidate| candidate != &peer_id);
+                        self.publish_mesh_observations();
+                    }
+                    // Always paired: an evicted peer is refused by `Eviction` before a connection
+                    // is ever established, so it cannot reach this arm without having been
+                    // announced as connected first.
                     let _ = self
                         .event_tx
                         .send(TransportEvent::PeerDisconnected(peer))
@@ -1100,36 +3793,125 @@ impl Actor {
                     tracing::debug!(peer = %remote_peer_id, error = %e, "DCUtR hole-punch failed; staying relayed");
                 }
             },
-            // identify drives DCUtR's external-address candidates (and a relay learns
-            // a client's addresses through it). Noisy; trace only.
+            // Identify's `observed_addr` is useful NAT telemetry but is not a listener address:
+            // TCP source ports are usually ephemeral and the reporting peer is untrusted. Keep a
+            // bounded, connected-peer snapshot for the assistant and never feed it into Swarm.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                info,
+                ..
+            })) => {
+                record_mesh_observation(
+                    &mut self.mesh_observations,
+                    &mut self.mesh_observation_order,
+                    peer_id,
+                    info.observed_addr.clone(),
+                );
+                self.publish_mesh_observations();
+                tracing::trace!(peer = %peer_id, observed = %info.observed_addr, "identify observation recorded");
+            }
             SwarmEvent::Behaviour(MeshBehaviourEvent::Identify(e)) => {
                 tracing::trace!(?e, "identify event");
+            }
+            // AutoNAT v2 only reports success after this process receives a fresh callback
+            // carrying the nonce it generated. That makes a positive result materially stronger
+            // than a server merely claiming it dialled us. Failures remain address- and
+            // observer-specific; they are surfaced without turning them into a node-wide state.
+            SwarmEvent::Behaviour(MeshBehaviourEvent::AutonatClient(e)) => {
+                if !self.autonat_address_is_current(&e.tested_addr) {
+                    // Ignore callbacks delivered during the unowned interval after expiry. If the
+                    // same socket is later reacquired it becomes eligible again: a callback that
+                    // succeeds then really did reach the newly-current route at that moment.
+                    tracing::debug!(
+                        address = %e.tested_addr,
+                        server = %e.server,
+                        "ignoring AutoNAT result for an address with no current owner"
+                    );
+                } else {
+                    let reachable = e.result.is_ok();
+                    let error = e.result.err().map(|err| err.to_string());
+                    if reachable {
+                        tracing::info!(
+                            address = %e.tested_addr,
+                            server = %e.server,
+                            "AutoNAT dial-back succeeded"
+                        );
+                    } else {
+                        tracing::info!(
+                            address = %e.tested_addr,
+                            server = %e.server,
+                            error = error.as_deref().unwrap_or("unknown"),
+                            "AutoNAT dial-back failed"
+                        );
+                    }
+                    let result = AutoNatResult {
+                        address: e.tested_addr,
+                        server: e.server,
+                        reachable,
+                        error,
+                    };
+                    record_autonat_result(
+                        &mut self.autonat_results,
+                        &mut self.autonat_order,
+                        result.clone(),
+                    );
+                    self.publish_autonat_snapshot(Some(result));
+                }
             }
             // Relay-client lifecycle (reservation accepted/expired, circuit opened).
             SwarmEvent::Behaviour(MeshBehaviourEvent::RelayClient(e)) => {
                 tracing::debug!(?e, "relay-client event");
             }
-            // UPnP/NAT-PMP: the router mapped our port and told us our public address. Promote it
-            // to an external address (so identify/rendezvous advertise it) and surface it so a
-            // fresh invite can carry a directly-dialable bootstrap; direct connect, no relay.
+            // libp2p's behaviour is UPnP IGD only (PCP/NAT-PMP are driven by the workers above).
+            // Fold both implementations through one event path so candidates, diagnostics and
+            // expiry all have identical semantics.
             SwarmEvent::Behaviour(MeshBehaviourEvent::Upnp(e)) => match e {
                 libp2p::upnp::Event::NewExternalAddr(addr) => {
-                    tracing::info!(%addr, "UPnP mapped a public address; node is directly reachable");
-                    self.swarm.add_external_address(addr.clone());
-                    self.flush_pending_registers();
-                    let _ = self.upnp_tx.try_send(Some(addr));
+                    if let Some((transport, _)) = port_mapping_transport(&addr) {
+                        self.on_port_mapping_event(PortMappingEvent::Mapped {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            local_address: None,
+                            address: addr,
+                        });
+                    } else {
+                        tracing::warn!(%addr, "UPnP returned an address with no TCP or QUIC port");
+                    }
                 }
                 libp2p::upnp::Event::ExpiredExternalAddr(addr) => {
-                    tracing::info!(%addr, "UPnP port mapping expired");
-                    self.swarm.remove_external_address(&addr);
+                    if let Some((transport, _)) = port_mapping_transport(&addr) {
+                        self.on_port_mapping_event(PortMappingEvent::Expired {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            local_address: None,
+                            address: addr,
+                        });
+                    } else {
+                        self.swarm.remove_external_address(&addr);
+                        self.forget_autonat_address(&addr);
+                    }
                 }
                 libp2p::upnp::Event::GatewayNotFound => {
-                    tracing::info!("no UPnP gateway found; direct reachability needs a port-forward or a relay");
-                    let _ = self.upnp_tx.try_send(None);
+                    for transport in [PortMappingTransport::Tcp, PortMappingTransport::Udp] {
+                        self.on_port_mapping_event(PortMappingEvent::Unavailable {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            local_address: None,
+                            detail: "no UPnP IGD gateway answered discovery".to_string(),
+                        });
+                    }
                 }
                 libp2p::upnp::Event::NonRoutableGateway => {
-                    tracing::info!("UPnP gateway is not internet-routable (likely CGNAT/double-NAT); a relay is required");
-                    let _ = self.upnp_tx.try_send(None);
+                    for transport in [PortMappingTransport::Tcp, PortMappingTransport::Udp] {
+                        self.on_port_mapping_event(PortMappingEvent::Unavailable {
+                            mechanism: PortMappingMechanism::Upnp,
+                            transport,
+                            local_address: None,
+                            detail:
+                                "UPnP gateway is not internet-routable (likely CGNAT or double NAT)"
+                                    .to_string(),
+                        });
+                    }
                 }
             },
             // Rendezvous client: surface discovered records (NEVER auto-dial them) and
@@ -1201,9 +3983,16 @@ pub struct MeshService {
     cmd_tx: mpsc::Sender<Command>,
     event_rx: Mutex<mpsc::Receiver<TransportEvent>>,
     listen_rx: Mutex<mpsc::Receiver<Multiaddr>>,
-    /// `None` once [`MeshService::take_external_addrs`] has handed the receiver to a background
-    /// waiter (UPnP discovery outlives any call a UI can block on).
-    upnp_rx: Mutex<Option<mpsc::Receiver<Option<Multiaddr>>>>,
+    listener_snapshot_rx: Mutex<watch::Receiver<ListenerSnapshot>>,
+    /// `None` once the desktop has taken the coalesced router-mapping state.
+    port_mapping_rx: Mutex<Option<watch::Receiver<PortMappingSnapshot>>>,
+    /// `None` once the desktop has taken the AutoNAT evidence snapshot for its background
+    /// reachability collector.
+    autonat_rx: Mutex<Option<watch::Receiver<AutoNatSnapshot>>>,
+    /// `None` once the desktop has taken the live relay-circuit address set.
+    relay_address_rx: Mutex<Option<watch::Receiver<RelayAddressSnapshot>>>,
+    /// `None` once a product collector has taken the connected-peer observation snapshot.
+    mesh_observation_rx: Mutex<Option<watch::Receiver<MeshObservationSnapshot>>>,
     upgrade_rx: Mutex<mpsc::Receiver<PeerId>>,
     discovered_rx: Mutex<mpsc::UnboundedReceiver<Discovered>>,
     registered_rx: Mutex<mpsc::UnboundedReceiver<Registered>>,
@@ -1219,20 +4008,55 @@ impl std::fmt::Debug for Command {
 impl MeshService {
     /// Spawn the actor for an already-built (listening/dialing) swarm.
     pub fn spawn(swarm: Swarm<MeshBehaviour>) -> Self {
+        Self::spawn_protecting(swarm, Vec::new(), false)
+    }
+
+    /// [`MeshService::spawn`], plus the peers this node was **constructed to dial** (its
+    /// bootstrap/infra set). Those are never deniable by an eviction: see `Actor::protected`.
+    fn spawn_protecting(
+        swarm: Swarm<MeshBehaviour>,
+        protected: Vec<libp2p::PeerId>,
+        enable_port_mapping: bool,
+    ) -> Self {
         let local = to_peer(swarm.local_peer_id());
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = mpsc::channel(256);
         let (listen_tx, listen_rx) = mpsc::channel(16);
-        let (upnp_tx, upnp_rx) = mpsc::channel(16);
+        let (listener_snapshot_tx, listener_snapshot_rx) =
+            watch::channel(ListenerSnapshot::default());
+        let (port_mapping_tx, port_mapping_rx) = watch::channel(PortMappingSnapshot::default());
+        let (port_mapper_tx, port_mapper_rx) = mpsc::channel(32);
+        let (autonat_tx, autonat_rx) = watch::channel(AutoNatSnapshot::default());
+        let (relay_address_tx, relay_address_rx) = watch::channel(RelayAddressSnapshot::default());
+        let (mesh_observation_tx, mesh_observation_rx) =
+            watch::channel(MeshObservationSnapshot::default());
         let (upgrade_tx, upgrade_rx) = mpsc::channel(16);
         let (discovered_tx, discovered_rx) = mpsc::unbounded_channel();
         let (registered_tx, registered_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             swarm,
+            enable_port_mapping,
             cmd_rx,
             event_tx,
             listen_tx,
-            upnp_tx,
+            active_listeners: HashSet::new(),
+            listener_snapshot_tx,
+            port_mapping_tx,
+            port_mapper_tx,
+            port_mapper_rx,
+            port_mapper_tasks: HashMap::new(),
+            next_port_mapper_generation: 1,
+            active_port_mappings: HashMap::new(),
+            port_mapping_unavailable: HashMap::new(),
+            configured_external_addrs: HashSet::new(),
+            autonat_tx,
+            autonat_results: HashMap::new(),
+            autonat_order: VecDeque::new(),
+            relay_addresses: HashSet::new(),
+            relay_address_tx,
+            mesh_observations: HashMap::new(),
+            mesh_observation_order: VecDeque::new(),
+            mesh_observation_tx,
             upgrade_tx,
             discovered_tx,
             registered_tx,
@@ -1243,6 +4067,7 @@ impl MeshService {
             infra_peers: HashSet::new(),
             covered_addrs: HashMap::new(),
             pending_dials: HashMap::new(),
+            protected: protected.into_iter().collect(),
         };
         tokio::spawn(actor.run());
         Self {
@@ -1250,7 +4075,11 @@ impl MeshService {
             cmd_tx,
             event_rx: Mutex::new(event_rx),
             listen_rx: Mutex::new(listen_rx),
-            upnp_rx: Mutex::new(Some(upnp_rx)),
+            listener_snapshot_rx: Mutex::new(listener_snapshot_rx),
+            port_mapping_rx: Mutex::new(Some(port_mapping_rx)),
+            autonat_rx: Mutex::new(Some(autonat_rx)),
+            relay_address_rx: Mutex::new(Some(relay_address_rx)),
+            mesh_observation_rx: Mutex::new(Some(mesh_observation_rx)),
             upgrade_rx: Mutex::new(upgrade_rx),
             discovered_rx: Mutex::new(discovered_rx),
             registered_rx: Mutex::new(registered_rx),
@@ -1264,26 +4093,64 @@ impl MeshService {
         self.listen_rx.lock().await.recv().await
     }
 
-    /// Await the next public address discovered via **UPnP** (the home router opened a port and
-    /// reported our internet-facing address). It is already added as an external address; callers
-    /// (e.g. invite minting) can fold it into a directly-dialable bootstrap so a peer can connect
-    /// with no relay. UPnP is best-effort: this resolves to `None` both when there is no usable
-    /// gateway (signalled promptly, so the caller doesn't wait out a full timeout) and once the
-    /// actor stops; either way the caller simply proceeds without a UPnP bootstrap. Also `None`
-    /// once [`MeshService::take_external_addrs`] has moved the channel to a background waiter.
-    pub async fn next_external_addr(&self) -> Option<Multiaddr> {
-        let mut guard = self.upnp_rx.lock().await;
-        guard.as_mut()?.recv().await.flatten()
+    /// Await the next authoritative live-listener snapshot. The receiver retains a change that
+    /// happened before this call, closing the startup race in UI diagnostics.
+    pub async fn next_listener_snapshot(&self) -> Option<ListenerSnapshot> {
+        let mut rx = self.listener_snapshot_rx.lock().await;
+        rx.changed().await.ok()?;
+        let snapshot = rx.borrow_and_update().clone();
+        Some(snapshot)
     }
 
-    /// Take ownership of the UPnP external-address channel so a **background** task can wait out a
-    /// realistic router-discovery window after this `MeshService` has been moved into the layers
-    /// above it. SSDP/IGD discovery routinely needs tens of seconds, which is far longer than
-    /// founding a server may block for; the answer therefore has to be collected by somebody who
-    /// outlives the call. Returns the receiver on the first call and `None` after that, so exactly
-    /// one consumer ever sees each address; [`MeshService::next_external_addr`] then yields `None`.
-    pub async fn take_external_addrs(&self) -> Option<mpsc::Receiver<Option<Multiaddr>>> {
-        self.upnp_rx.lock().await.take()
+    /// Await the next coalesced UPnP/PCP/NAT-PMP state snapshot.
+    pub async fn next_port_mapping_snapshot(&self) -> Option<PortMappingSnapshot> {
+        let mut guard = self.port_mapping_rx.lock().await;
+        let rx = guard.as_mut()?;
+        rx.changed().await.ok()?;
+        let snapshot = rx.borrow_and_update().clone();
+        Some(snapshot)
+    }
+
+    /// Take the single-consumer coalesced mapping state for a background collector. The current
+    /// value is retained even when it changed before the collector started.
+    pub async fn take_port_mapping_snapshots(
+        &self,
+    ) -> Option<watch::Receiver<PortMappingSnapshot>> {
+        self.port_mapping_rx.lock().await.take()
+    }
+
+    /// Await the next coalesced AutoNAT v2 evidence snapshot.
+    ///
+    /// A success proves only that the named server reached that address at that moment. A failure
+    /// is likewise scoped to one address/server pair; callers should keep listening because a
+    /// second candidate (IPv6 rather than IPv4, or QUIC rather than TCP) may still succeed.
+    pub async fn next_autonat_snapshot(&self) -> Option<AutoNatSnapshot> {
+        let mut guard = self.autonat_rx.lock().await;
+        let rx = guard.as_mut()?;
+        rx.changed().await.ok()?;
+        let snapshot = rx.borrow_and_update().clone();
+        Some(snapshot)
+    }
+
+    /// Take the single-consumer coalesced AutoNAT evidence for a background collector.
+    pub async fn take_autonat_snapshots(&self) -> Option<watch::Receiver<AutoNatSnapshot>> {
+        self.autonat_rx.lock().await.take()
+    }
+
+    /// Take the current relay-circuit address set. An empty later snapshot means the reservation
+    /// listener expired and callers must withdraw the circuit from invites/peer records.
+    pub async fn take_relay_address_snapshots(
+        &self,
+    ) -> Option<watch::Receiver<RelayAddressSnapshot>> {
+        self.relay_address_rx.lock().await.take()
+    }
+
+    /// Take the current connected-peer Identify observations. These values are diagnostics only:
+    /// consumers must not add them to invites, external addresses, rendezvous records, or dials.
+    pub async fn take_mesh_observation_snapshots(
+        &self,
+    ) -> Option<watch::Receiver<MeshObservationSnapshot>> {
+        self.mesh_observation_rx.lock().await.take()
     }
 
     /// Await the next peer whose relayed connection DCUtR **upgraded to a direct
@@ -1369,6 +4236,15 @@ impl MeshService {
             .map_err(|_| TransportError::Closed)
     }
 
+    /// Withdraw an address previously asserted with [`MeshService::add_external_address`]. An
+    /// identical active router mapping remains advertised until its own lease expires.
+    pub async fn remove_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::RemoveExternalAddress(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
     /// Build a memory-transport node that listens on `listen` and dials `dial`,
     /// then spawn it. For deterministic local testing.
     pub fn new_memory(listen: Option<Multiaddr>, dial: &[Multiaddr]) -> Result<Self, NetError> {
@@ -1383,7 +4259,8 @@ impl MeshService {
                 .dial(addr.clone())
                 .map_err(|e| NetError::Dial(e.to_string()))?;
         }
-        Ok(Self::spawn(swarm))
+        let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
+        Ok(Self::spawn_protecting(swarm, protected, false))
     }
 
     /// Build a **TCP + QUIC** node that listens on `listen` and dials `dial`, then spawn it. Also
@@ -1398,7 +4275,7 @@ impl MeshService {
     ) -> Result<(Self, libp2p::PeerId), NetError> {
         let listen: Vec<Multiaddr> = listen.into_iter().collect();
         let swarm = build_tcp_swarm()?;
-        let (svc, id, _bound) = Self::listen_dial_spawn(swarm, &listen, dial)?;
+        let (svc, id, _bound) = Self::listen_dial_spawn(swarm, &listen, dial, false)?;
         Ok((svc, id))
     }
 
@@ -1414,7 +4291,18 @@ impl MeshService {
         dial: &[Multiaddr],
     ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
         let swarm = build_tcp_swarm_with_key(key)?;
-        Self::listen_dial_spawn(swarm, listen, dial)
+        Self::listen_dial_spawn(swarm, listen, dial, false)
+    }
+
+    /// Product constructor that explicitly enables UPnP/PCP/NAT-PMP for the supplied stable
+    /// all-interface listeners. General TCP constructors keep router mutation disabled.
+    pub fn new_tcp_with_key_and_port_mapping(
+        key: libp2p::identity::Keypair,
+        listen: &[Multiaddr],
+        dial: &[Multiaddr],
+    ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
+        let swarm = build_tcp_swarm_with_key_and_port_mapping(key, true)?;
+        Self::listen_dial_spawn(swarm, listen, dial, true)
     }
 
     /// Apply the listen/dial set to a freshly-built swarm and spawn its actor. Shared by the
@@ -1423,6 +4311,7 @@ impl MeshService {
         mut swarm: Swarm<MeshBehaviour>,
         listen: &[Multiaddr],
         dial: &[Multiaddr],
+        enable_port_mapping: bool,
     ) -> Result<(Self, libp2p::PeerId, Vec<Multiaddr>), NetError> {
         let libp2p_id = *swarm.local_peer_id();
         let mut bound = Vec::new();
@@ -1446,7 +4335,14 @@ impl MeshService {
                 .dial(addr.clone())
                 .map_err(|e| NetError::Dial(e.to_string()))?;
         }
-        Ok((Self::spawn(swarm), libp2p_id, bound))
+        // Whatever this node was constructed to dial is its bootstrap/infra set, chosen locally
+        // and never by a peer record, so no eviction may take it away (see `Actor::protected`).
+        let protected = dial.iter().filter_map(target_peer_in_multiaddr).collect();
+        Ok((
+            Self::spawn_protecting(swarm, protected, enable_port_mapping),
+            libp2p_id,
+            bound,
+        ))
     }
 
     /// A cheap, clonable [`MeshHandle`] to this node's command channel, for driving rendezvous
@@ -1515,10 +4411,54 @@ impl MeshHandle {
             .map_err(|_| TransportError::Closed)
     }
 
+    /// Queue one small address set as a single actor-drain dial batch.
+    ///
+    /// The actor groups adjacent `Command::Dial` values by their terminal peer id before touching
+    /// libp2p, so TCP/QUIC candidates race inside one `DialOpts` and the normal `(peer,address)`
+    /// ledger suppresses duplicates. This helper intentionally caps at four: its caller is the
+    /// pre-membership two-way invite path, where every target came from an untrusted paste.
+    pub async fn dial_join_candidates(
+        &self,
+        addresses: &[Multiaddr],
+    ) -> Result<(), TransportError> {
+        for address in addresses.iter().take(4) {
+            self.cmd_tx
+                .send(Command::Dial(address.clone()))
+                .await
+                .map_err(|_| TransportError::Closed)?;
+        }
+        Ok(())
+    }
+
+    /// Send one bounded control request without routing it through the group `ChannelSync` actor.
+    /// Used by the short pre-member reply proof so a quiet joiner cannot stall every group
+    /// command while the network request waits for its timeout.
+    pub async fn request_control(
+        &self,
+        peer: PeerId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::Request { peer, data, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
     /// See [`MeshService::add_external_address`].
     pub async fn add_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
             .send(Command::AddExternalAddress(addr))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    /// Withdraw an address previously asserted with [`MeshHandle::add_external_address`]. The
+    /// command is actor-owned so it can preserve an identical live router-mapping owner.
+    pub async fn remove_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::RemoveExternalAddress(addr))
             .await
             .map_err(|_| TransportError::Closed)
     }
@@ -1612,11 +4552,979 @@ impl MeshTransport for MeshService {
             seq: d.seq,
         })
     }
+
+    async fn evict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Evict(peer))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
+    async fn unevict_peer(&self, peer: PeerId) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Unevict(peer))
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catcoms_rt::rng::RngError;
+    use catcoms_rt::{CryptoRng, ManualClock, RngCore};
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedRng(u8);
+
+    impl RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            0
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            0
+        }
+
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(self.0);
+        }
+
+        fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), RngError> {
+            self.fill_bytes(dest);
+            Ok(())
+        }
+    }
+
+    impl CryptoRng for FixedRng {}
+
+    /// A helper peer id distinct per `n`.
+    fn ev_peer(n: u64) -> PeerId {
+        PeerId::from_u64(n)
+    }
+
+    fn libp2p_peer() -> libp2p::PeerId {
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+    }
+
+    #[test]
+    fn router_mapping_uses_the_tcp_and_quic_listen_ports_only() {
+        let tcp: Multiaddr = "/ip4/192.168.1.4/tcp/22487".parse().unwrap();
+        let quic: Multiaddr = "/ip4/192.168.1.4/udp/22487/quic-v1".parse().unwrap();
+        let ipv6_tcp: Multiaddr = "/ip6/2606:4700::10/tcp/22487".parse().unwrap();
+        let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/22487".parse().unwrap();
+        let plain_udp: Multiaddr = "/ip4/0.0.0.0/udp/22487".parse().unwrap();
+        let wildcard: Multiaddr = "/ip4/0.0.0.0/tcp/22487".parse().unwrap();
+        let ipv6_only: Multiaddr = "/ip6/::/udp/22487/quic-v1".parse().unwrap();
+        let relayed: Multiaddr = "/ip4/198.51.100.8/tcp/4001/p2p/12D3KooWJvFzZpCWKjQbGvYQ8uY4rMw1qQznfKqcxpN6qjHVVqUd/p2p-circuit"
+            .parse()
+            .unwrap();
+        let memory: Multiaddr = "/memory/7".parse().unwrap();
+
+        assert_eq!(
+            port_mapping_endpoint(&tcp),
+            Some(PortMappingEndpoint {
+                key: PortMapperTaskKey {
+                    transport: PortMappingTransport::Tcp,
+                    target: PortMappingTarget::Ipv4,
+                },
+                port: NonZeroU16::new(22487).unwrap(),
+            })
+        );
+        assert_eq!(
+            port_mapping_endpoint(&quic),
+            Some(PortMappingEndpoint {
+                key: PortMapperTaskKey {
+                    transport: PortMappingTransport::Udp,
+                    target: PortMappingTarget::Ipv4,
+                },
+                port: NonZeroU16::new(22487).unwrap(),
+            })
+        );
+        assert_eq!(
+            port_mapping_endpoint(&ipv6_tcp),
+            Some(PortMappingEndpoint {
+                key: PortMapperTaskKey {
+                    transport: PortMappingTransport::Tcp,
+                    target: PortMappingTarget::Ipv6("2606:4700::10".parse().unwrap()),
+                },
+                port: NonZeroU16::new(22487).unwrap(),
+            })
+        );
+        assert_eq!(port_mapping_endpoint(&plain_udp), None);
+        assert_eq!(port_mapping_endpoint(&wildcard), None);
+        assert_eq!(port_mapping_endpoint(&loopback), None);
+        assert_eq!(port_mapping_endpoint(&ipv6_only), None);
+        assert_eq!(port_mapping_endpoint(&relayed), None);
+        assert_eq!(port_mapping_endpoint(&memory), None);
+    }
+
+    #[test]
+    fn desired_mapping_workers_bound_ipv6_interfaces_and_follow_listener_loss() {
+        let listeners: HashSet<Multiaddr> = [
+            "/ip4/192.168.1.4/tcp/22487",
+            "/ip4/192.168.1.4/udp/22487/quic-v1",
+            "/ip6/2001:569::1/tcp/22487",
+            "/ip6/2001:569::1/udp/22487/quic-v1",
+            "/ip6/2606:4700::1/tcp/22487",
+            "/ip6/2606:4700::1/udp/22487/quic-v1",
+            "/ip6/2a00:1450::1/tcp/22487",
+            "/ip6/2a00:1450::1/udp/22487/quic-v1",
+        ]
+        .into_iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+        let desired = desired_port_mapping_endpoints(&listeners);
+        assert_eq!(desired.len(), 6, "two IPv4 and at most four IPv6 workers");
+        let selected_v6: HashSet<_> = desired
+            .keys()
+            .filter_map(|key| match key.target {
+                PortMappingTarget::Ipv6(address) => Some(address),
+                PortMappingTarget::Ipv4 => None,
+            })
+            .collect();
+        assert_eq!(selected_v6.len(), 2);
+
+        let remaining: HashSet<_> = listeners
+            .into_iter()
+            .filter(|address| !address.to_string().contains("2001:569::1"))
+            .collect();
+        let reconciled = desired_port_mapping_endpoints(&remaining);
+        assert!(!reconciled
+            .keys()
+            .any(|key| { key.target == PortMappingTarget::Ipv6("2001:569::1".parse().unwrap()) }));
+    }
+
+    #[test]
+    fn retired_ipv6_listener_clears_mapped_and_unavailable_state() {
+        let local: Ipv6Addr = "2606:4700::10".parse().unwrap();
+        let local_owner = Some(IpAddr::V6(local));
+        let task = PortMapperTaskKey {
+            transport: PortMappingTransport::Tcp,
+            target: PortMappingTarget::Ipv6(local),
+        };
+        let owner = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            local_owner,
+        );
+        let mapped: Multiaddr = "/ip6/2606:4700::10/tcp/22487".parse().unwrap();
+        let unrelated = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Udp,
+            Some(IpAddr::V6("2a00:1450::10".parse().unwrap())),
+        );
+        let mut active = HashMap::from([(owner, mapped.clone())]);
+        let mut unavailable = HashMap::from([
+            (owner, "previous mapping expired; retrying".to_string()),
+            (unrelated, "no IPv6 PCP target discovered".to_string()),
+        ]);
+
+        assert!(expire_port_mapping(&mut active, owner, &mapped));
+        assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
+        assert!(!active.contains_key(&owner));
+        assert!(!unavailable.contains_key(&owner));
+        assert!(unavailable.contains_key(&unrelated));
+
+        unavailable.insert(owner, "no IPv6 PCP target discovered".to_string());
+        assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
+        assert!(!unavailable.contains_key(&owner));
+    }
+
+    /// The IPv4 task owns three diagnostic keys: PCP and NAT-PMP under `None`, plus the
+    /// bound-UPnP companion under its concrete interface address. Retiring the task must sweep
+    /// all three, while libp2p-UPnP's own `None`-keyed entry and other transports survive.
+    #[test]
+    fn retired_ipv4_task_sweeps_the_bound_upnp_companion_failures() {
+        let task = PortMapperTaskKey {
+            transport: PortMappingTransport::Tcp,
+            target: PortMappingTarget::Ipv4,
+        };
+        let bound = (
+            PortMappingMechanism::Upnp,
+            PortMappingTransport::Tcp,
+            Some(IpAddr::V4("192.168.0.231".parse().unwrap())),
+        );
+        let unbound_upnp = (PortMappingMechanism::Upnp, PortMappingTransport::Tcp, None);
+        let other_transport = (
+            PortMappingMechanism::Upnp,
+            PortMappingTransport::Udp,
+            Some(IpAddr::V4("192.168.0.231".parse().unwrap())),
+        );
+        let mut unavailable = HashMap::from([
+            (
+                (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None),
+                "no compatible gateway answered the probe".to_string(),
+            ),
+            (bound, "no IGD gateway answered a search".to_string()),
+            (
+                unbound_upnp,
+                "no UPnP IGD gateway answered discovery".to_string(),
+            ),
+            (
+                other_transport,
+                "no IGD gateway answered a search".to_string(),
+            ),
+        ]);
+        assert!(clear_retired_port_mapping_failures(&mut unavailable, task));
+        assert!(!unavailable.contains_key(&bound));
+        // libp2p's own UPnP diagnostics are not this task's to clear, and the UDP task's
+        // companion entry belongs to the UDP retirement.
+        assert!(unavailable.contains_key(&unbound_upnp));
+        assert!(unavailable.contains_key(&other_transport));
+    }
+
+    /// The media-port gate: a socket that provably has no listener must be refused before any
+    /// router work, and a live socket must not be (its silence proves nothing, and blocking on
+    /// silence would kill the feature, since an ICE agent discards non-STUN datagrams).
+    #[tokio::test]
+    async fn a_dead_media_socket_is_disproven_and_a_live_one_is_not() {
+        let live = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let live_port = NonZeroU16::new(live.local_addr().unwrap().port()).unwrap();
+        assert!(
+            !media_socket_disproven(Ipv4Addr::LOCALHOST, live_port).await,
+            "a bound socket that stays silent must not be disproven"
+        );
+        drop(live);
+
+        let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = NonZeroU16::new(dead.local_addr().unwrap().port()).unwrap();
+        drop(dead);
+        assert!(
+            media_socket_disproven(Ipv4Addr::LOCALHOST, dead_port).await,
+            "the OS reports nothing listening; mapping it would advertise a dead candidate"
+        );
+    }
+
+    #[test]
+    fn routed_ipv6_interfaces_win_the_bounded_worker_slots() {
+        let routed: Ipv6Addr = "2a00:1450::1".parse().unwrap();
+        let selected = select_ipv6_mapping_targets(
+            vec![
+                "2001:569::1".parse().unwrap(),
+                "2606:4700::1".parse().unwrap(),
+                routed,
+            ],
+            2,
+            |candidate| candidate == routed,
+        );
+        assert!(selected.contains(&routed));
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_mapping_worker_cannot_replay_buffered_events() {
+        let key = PortMapperTaskKey {
+            transport: PortMappingTransport::Tcp,
+            target: PortMappingTarget::Ipv6("2606:4700::10".parse().unwrap()),
+        };
+        let port = NonZeroU16::new(22487).unwrap();
+        let tasks = HashMap::from([(
+            key,
+            PortMapperTask {
+                port,
+                generation: 8,
+                handle: Some(tokio::spawn(std::future::pending())),
+                companion: None,
+                stop: None,
+            },
+        )]);
+        let report = |generation| PortMapperReport {
+            key,
+            port,
+            generation,
+            event: PortMappingEvent::Unavailable {
+                mechanism: PortMappingMechanism::Pcp,
+                transport: PortMappingTransport::Tcp,
+                local_address: Some(IpAddr::V6("2606:4700::10".parse().unwrap())),
+                detail: "test".to_string(),
+            },
+        };
+        assert!(port_mapper_report_is_current(&tasks, &report(8)));
+        assert!(!port_mapper_report_is_current(&tasks, &report(7)));
+    }
+
+    #[test]
+    fn mesh_observations_replace_per_peer_and_stay_bounded() {
+        let mut observations = HashMap::new();
+        let mut order = VecDeque::new();
+        let first = test_peer(1);
+        record_mesh_observation(
+            &mut observations,
+            &mut order,
+            first,
+            "/ip4/198.51.100.1/tcp/40000".parse().unwrap(),
+        );
+        record_mesh_observation(
+            &mut observations,
+            &mut order,
+            first,
+            "/ip4/198.51.100.2/tcp/40001".parse().unwrap(),
+        );
+        assert_eq!(observations.len(), 1);
+        assert_eq!(
+            observations[&first].to_string(),
+            "/ip4/198.51.100.2/tcp/40001"
+        );
+
+        for n in 2..=(MAX_MESH_OBSERVATIONS as u8 + 2) {
+            record_mesh_observation(
+                &mut observations,
+                &mut order,
+                test_peer(n),
+                format!("/ip4/198.51.100.{n}/tcp/40000").parse().unwrap(),
+            );
+        }
+        assert_eq!(observations.len(), MAX_MESH_OBSERVATIONS);
+        assert!(
+            !observations.contains_key(&first),
+            "the oldest peer is evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn router_mapping_behaviour_requires_the_explicit_product_builder() {
+        let disabled = build_tcp_swarm_with_key(libp2p::identity::Keypair::generate_ed25519())
+            .expect("default TCP swarm");
+        assert!(!disabled.behaviour().upnp.is_enabled());
+
+        let enabled = build_tcp_swarm_with_key_and_port_mapping(
+            libp2p::identity::Keypair::generate_ed25519(),
+            true,
+        )
+        .expect("mapping-enabled TCP swarm");
+        assert!(enabled.behaviour().upnp.is_enabled());
+    }
+
+    #[test]
+    fn mapper_falls_back_from_pcp_to_nat_pmp_and_classifies_lease_changes() {
+        assert_eq!(
+            mapping_attempt_plan(true, true),
+            vec![PortMappingMechanism::Pcp, PortMappingMechanism::NatPmp],
+            "a PCP MAP timeout must leave NAT-PMP as the next attempt"
+        );
+        assert_eq!(
+            mapping_attempt_plan(false, true),
+            vec![PortMappingMechanism::NatPmp]
+        );
+
+        let old: SocketAddrV4 = "8.8.8.8:22487".parse().unwrap();
+        let new: SocketAddrV4 = "9.9.9.9:22487".parse().unwrap();
+        assert_eq!(
+            mapping_lease_action(old, Some(old)),
+            MappingLeaseAction::Continue
+        );
+        assert_eq!(
+            mapping_lease_action(old, None),
+            MappingLeaseAction::Retry,
+            "Some -> None withdraws the route and returns to the outer retry loop"
+        );
+        assert_eq!(
+            mapping_lease_action(old, Some(new)),
+            MappingLeaseAction::Replace(new),
+            "Some(old) -> Some(new) replaces the published socket in the live worker"
+        );
+    }
+
+    #[test]
+    fn autonat_observations_are_bounded_updated_and_pruned_by_address() {
+        let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        let mut results = HashMap::new();
+        let mut order = VecDeque::new();
+
+        for n in 0..=MAX_AUTONAT_OBSERVATIONS {
+            record_autonat_result(
+                &mut results,
+                &mut order,
+                AutoNatResult {
+                    address: address.clone(),
+                    server: test_peer(n as u8),
+                    reachable: n % 2 == 0,
+                    error: None,
+                },
+            );
+        }
+        assert_eq!(results.len(), MAX_AUTONAT_OBSERVATIONS);
+        assert_eq!(order.len(), MAX_AUTONAT_OBSERVATIONS);
+        assert!(
+            !results.contains_key(&(address.clone(), test_peer(0))),
+            "the oldest observation is evicted under server churn"
+        );
+
+        let newest = test_peer(MAX_AUTONAT_OBSERVATIONS as u8);
+        record_autonat_result(
+            &mut results,
+            &mut order,
+            AutoNatResult {
+                address: address.clone(),
+                server: newest,
+                reachable: true,
+                error: None,
+            },
+        );
+        assert_eq!(results.len(), MAX_AUTONAT_OBSERVATIONS);
+        assert_eq!(order.back(), Some(&(address.clone(), newest)));
+        assert!(forget_autonat_address(&mut results, &mut order, &address));
+        assert!(results.is_empty());
+        assert!(order.is_empty());
+
+        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None);
+        let reacquired = HashMap::from([(pcp, address.clone())]);
+        assert!(
+            autonat_candidate_is_current(&HashSet::new(), &reacquired, &address,),
+            "same-address remapping establishes a new current route that can be tested again"
+        );
+        assert!(
+            !autonat_candidate_is_current(&HashSet::new(), &HashMap::new(), &address,),
+            "a late result in the unowned interval is rejected"
+        );
+    }
+
+    #[test]
+    fn router_mapping_addresses_preserve_the_transport_a_joiner_must_dial() {
+        let public: SocketAddrV4 = "203.0.113.7:22487".parse().unwrap();
+        assert_eq!(
+            mapped_multiaddr(public, PortMappingTransport::Tcp).to_string(),
+            "/ip4/203.0.113.7/tcp/22487"
+        );
+        assert_eq!(
+            mapped_multiaddr(public, PortMappingTransport::Udp).to_string(),
+            "/ip4/203.0.113.7/udp/22487/quic-v1"
+        );
+    }
+
+    #[test]
+    fn a_repeated_router_answer_is_not_news_twice() {
+        // Regression: a router with no PCP/NAT-PMP re-answers "no" every discovery cycle, for
+        // every mechanism, transport and interface. Logged unconditionally that was 356 of one
+        // real debug log's 601 lines, burying the sixty-odd entries that actually mattered.
+        let detail = "no compatible gateway answered the probe";
+
+        // The first answer for a probe is worth saying.
+        assert!(mapping_unavailable_is_news(None, detail));
+        // Saying it again eighteen seconds later is not.
+        assert!(!mapping_unavailable_is_news(Some(detail), detail));
+        // A router whose answer actually changed is news again: that is behaviour moving, which
+        // is exactly what someone reading the log is looking for.
+        assert!(mapping_unavailable_is_news(
+            Some(detail),
+            "the UPnP IGD gateway answered discovery"
+        ));
+        // ...and the new answer then goes quiet in its turn.
+        assert!(!mapping_unavailable_is_news(
+            Some("the UPnP IGD gateway answered discovery"),
+            "the UPnP IGD gateway answered discovery"
+        ));
+    }
+
+    #[test]
+    fn different_probes_do_not_suppress_each_other() {
+        // Suppression is per probe, keyed by mechanism, transport and interface. If one probe's
+        // answer could silence another's, a genuinely new failure would vanish because an
+        // unrelated one had already reported the same string.
+        let mut seen: HashMap<(&str, &str), String> = HashMap::new();
+        let detail = "no compatible gateway answered the probe".to_string();
+        for probe in [("PCP", "UDP"), ("NAT-PMP", "UDP"), ("PCP", "TCP")] {
+            let previous = seen.insert(probe, detail.clone());
+            assert!(
+                mapping_unavailable_is_news(previous.as_deref(), &detail),
+                "{probe:?} is a distinct probe and its first answer is news"
+            );
+        }
+        // Second time around, every one of them has already said it.
+        for probe in [("PCP", "UDP"), ("NAT-PMP", "UDP"), ("PCP", "TCP")] {
+            let previous = seen.insert(probe, detail.clone());
+            assert!(!mapping_unavailable_is_news(previous.as_deref(), &detail));
+        }
+    }
+
+    #[test]
+    fn a_quiet_router_costs_one_line_per_probe_rather_than_one_per_cycle() {
+        // The shape of the original bug, counted: twenty cycles over four probes was 80 lines.
+        let detail = "no compatible gateway answered the probe".to_string();
+        let mut seen: HashMap<(&str, &str), String> = HashMap::new();
+        let mut lines = 0;
+        for _cycle in 0..20 {
+            for probe in [
+                ("PCP", "UDP"),
+                ("NAT-PMP", "UDP"),
+                ("PCP", "TCP"),
+                ("NAT-PMP", "TCP"),
+            ] {
+                let previous = seen.insert(probe, detail.clone());
+                if mapping_unavailable_is_news(previous.as_deref(), &detail) {
+                    lines += 1;
+                }
+            }
+        }
+        assert_eq!(
+            lines, 4,
+            "one line per probe for the whole session, not one per cycle"
+        );
+    }
+
+    #[test]
+    fn router_mapping_ownership_keeps_shared_addresses_until_the_last_lease() {
+        let address: Multiaddr = "/ip4/8.8.8.8/tcp/22487".parse().unwrap();
+        let replacement: Multiaddr = "/ip4/9.9.9.9/tcp/22487".parse().unwrap();
+        let upnp = (PortMappingMechanism::Upnp, PortMappingTransport::Tcp, None);
+        let pcp = (PortMappingMechanism::Pcp, PortMappingTransport::Tcp, None);
+        let mut active = HashMap::new();
+
+        assert_eq!(
+            activate_port_mapping(&mut active, upnp, address.clone()),
+            (None, true)
+        );
+        assert_eq!(
+            activate_port_mapping(&mut active, pcp, address.clone()),
+            (None, false),
+            "the swarm already owns this address through UPnP"
+        );
+        assert!(!expire_port_mapping(&mut active, upnp, &address));
+        assert!(expire_port_mapping(&mut active, pcp, &address));
+
+        activate_port_mapping(&mut active, pcp, address.clone());
+        assert_eq!(
+            activate_port_mapping(&mut active, pcp, replacement.clone()),
+            (Some(address.clone()), true),
+            "replacing one key retires its unshared old address"
+        );
+        assert!(
+            !expire_port_mapping(&mut active, pcp, &address),
+            "a stale expiry cannot remove the replacement"
+        );
+        assert_eq!(active.get(&pcp), Some(&replacement));
+
+        let private: Multiaddr = "/ip4/192.168.1.9/tcp/22487".parse().unwrap();
+        assert!(!external_address_is_allowed(&HashSet::new(), &private));
+        assert!(
+            external_address_is_allowed(&HashSet::from([private.clone()]), &private),
+            "a rejected private router result cannot remove an identical manual LAN route"
+        );
+
+        let shared_v6: Multiaddr = "/ip6/2606:4700::10/tcp/22487".parse().unwrap();
+        let mut configured = HashSet::from([shared_v6.clone()]);
+        let mapped_v6 = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            Some(IpAddr::V6("2606:4700::10".parse().unwrap())),
+        );
+        let mappings = HashMap::from([(mapped_v6, shared_v6.clone())]);
+        assert!(
+            !retire_configured_external_address(&mut configured, &mappings, &shared_v6),
+            "removing a raw-interface owner must preserve an identical PCPv6 pinhole"
+        );
+        assert!(!configured.contains(&shared_v6));
+        assert!(retire_configured_external_address(
+            &mut HashSet::from([shared_v6.clone()]),
+            &HashMap::new(),
+            &shared_v6,
+        ));
+
+        let v6_owner = (
+            PortMappingMechanism::Pcp,
+            PortMappingTransport::Tcp,
+            Some(IpAddr::V6("2606:4700::10".parse().unwrap())),
+        );
+        activate_port_mapping(
+            &mut active,
+            v6_owner,
+            "/ip6/2606:4700::10/tcp/22487".parse().unwrap(),
+        );
+        assert!(active.contains_key(&pcp));
+        assert!(active.contains_key(&v6_owner));
+        assert_eq!(
+            active.len(),
+            2,
+            "PCPv4 and PCPv6/TCP are independent lease owners"
+        );
+    }
+
+    fn pcp_map_response(
+        request: &[u8],
+        result_code: u8,
+        lifetime_seconds: u32,
+        external_ip: Ipv6Addr,
+        external_port: u16,
+        epoch: u32,
+    ) -> [u8; 60] {
+        assert_eq!(request.len(), 60);
+        let mut response = [0u8; 60];
+        response[0] = 2;
+        response[1] = 0x80 | 1;
+        response[3] = result_code;
+        response[4..8].copy_from_slice(&lifetime_seconds.to_be_bytes());
+        response[8..12].copy_from_slice(&epoch.to_be_bytes());
+        response[24..36].copy_from_slice(&request[24..36]);
+        response[36] = request[36];
+        response[40..42].copy_from_slice(&request[40..42]);
+        response[42..44].copy_from_slice(&external_port.to_be_bytes());
+        response[44..60].copy_from_slice(&external_ip.octets());
+        response
+    }
+
+    #[tokio::test]
+    async fn ipv6_pcp_worker_retains_failed_renewal_replaces_and_expires_monotonically() {
+        let server = UdpSocket::bind("[::1]:0").await.unwrap();
+        let server_addr = match server.local_addr().unwrap() {
+            std::net::SocketAddr::V6(address) => address,
+            std::net::SocketAddr::V4(_) => unreachable!("bound IPv6 loopback"),
+        };
+        let local_ip = Ipv6Addr::LOCALHOST;
+        let external_ip: Ipv6Addr = "2606:4700::20".parse().unwrap();
+        let port = NonZeroU16::new(22487).unwrap();
+        let key = PortMapperTaskKey {
+            transport: PortMappingTransport::Udp,
+            target: PortMappingTarget::Ipv6(local_ip),
+        };
+        let (report_tx, mut report_rx) = mpsc::channel(16);
+        let reporter = PortMapperReporter {
+            tx: report_tx,
+            key,
+            port,
+            generation: 11,
+        };
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let clock = ManualClock::new(10_000);
+        let worker_clock = clock.clone();
+        let worker = tokio::spawn(run_ipv6_port_mapper_with(
+            local_ip,
+            PortMappingTransport::Udp,
+            port,
+            reporter,
+            stop_rx,
+            Ipv6MapperDeps {
+                clock: worker_clock,
+                random: FixedRng(0x42),
+                discover_gateway: move |_| Ok(server_addr),
+            },
+        ));
+
+        let mut request = [0u8; 60];
+        let (length, client) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!(length, 60);
+        server
+            .send_to(
+                &pcp_map_response(&request, 0, 10, external_ip, port.get(), 100),
+                client,
+            )
+            .await
+            .unwrap();
+        let first = report_rx.recv().await.unwrap();
+        assert_eq!(first.generation, 11);
+        assert!(matches!(first.event, PortMappingEvent::Mapped { .. }));
+
+        // The first renewal is at half the ten-second grant with deterministic zero jitter.
+        clock.advance_ms(5_000);
+        let (length, renewal_client) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!((length, renewal_client), (60, client));
+        server
+            .send_to(
+                &pcp_map_response(&request, 8, 2, external_ip, port.get(), 105),
+                client,
+            )
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            report_rx.try_recv().is_err(),
+            "a renewal refusal must not withdraw a still-live lease"
+        );
+
+        clock.advance_ms(1_999);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(server.try_recv_from(&mut request).is_err());
+        clock.advance_ms(1);
+        let (length, _) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!(length, 60);
+        let replacement_port = port.get() + 1;
+        server
+            .send_to(
+                &pcp_map_response(&request, 0, 4, external_ip, replacement_port, 107),
+                client,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Expired { .. }
+        ));
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Mapped { ref address, .. }
+                if address.to_string().contains(&format!("/{replacement_port}"))
+        ));
+
+        // A wall-clock correction cannot extend the replacement's four-second router lease.
+        clock.set_wall_ms(1);
+        clock.advance_ms(2_000);
+        let (length, _) = server.recv_from(&mut request).await.unwrap();
+        assert_eq!(length, 60);
+        server
+            .send_to(
+                &pcp_map_response(&request, 8, 100, external_ip, replacement_port, 109),
+                client,
+            )
+            .await
+            .unwrap();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(report_rx.try_recv().is_err());
+        clock.advance_ms(2_000);
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Expired { .. }
+        ));
+        assert!(matches!(
+            report_rx.recv().await.unwrap().event,
+            PortMappingEvent::Unavailable { ref detail, .. }
+                if detail.contains("expired")
+        ));
+
+        let _ = stop_tx.send(());
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ipv6_pcp_adapter_sends_exact_map_and_best_effort_delete() {
+        let server = UdpSocket::bind("[::1]:0").await.unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let local_ip: Ipv6Addr = "2606:4700::10".parse().unwrap();
+        let external_ip: Ipv6Addr = "2606:4700::20".parse().unwrap();
+        let port = NonZeroU16::new(22487).unwrap();
+        let nonce = [0x42; 12];
+        let gateway = tokio::spawn(async move {
+            let mut packet = [0u8; pcp_ipv6::MAX_PACKET_SIZE];
+            let (length, from) = server.recv_from(&mut packet).await.unwrap();
+            assert_eq!(length, 60);
+            assert_eq!(&packet[8..24], &local_ip.octets());
+            assert_eq!(&packet[24..36], &nonce);
+            assert_eq!(packet[36], 17);
+            assert_eq!(
+                u16::from_be_bytes(packet[40..42].try_into().unwrap()),
+                22487
+            );
+            assert_eq!(
+                u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+                pcp_ipv6::REQUESTED_LIFETIME_SECONDS
+            );
+
+            let mut response = [0u8; 60];
+            response[0] = 2;
+            response[1] = 0x80 | 1;
+            response[4..8].copy_from_slice(&300u32.to_be_bytes());
+            response[8..12].copy_from_slice(&91u32.to_be_bytes());
+            response[24..36].copy_from_slice(&nonce);
+            response[36] = 17;
+            response[40..42].copy_from_slice(&22487u16.to_be_bytes());
+            response[42..44].copy_from_slice(&22487u16.to_be_bytes());
+            response[44..60].copy_from_slice(&external_ip.octets());
+            server.send_to(&response, from).await.unwrap();
+
+            let (delete_length, delete_from) = server.recv_from(&mut packet).await.unwrap();
+            assert_eq!(delete_from, from);
+            assert_eq!(delete_length, 60);
+            assert_eq!(u32::from_be_bytes(packet[4..8].try_into().unwrap()), 0);
+            assert_eq!(&packet[24..36], &nonce);
+            assert_eq!(&packet[42..60], &[0u8; 18]);
+        });
+        let client = UdpSocket::bind("[::1]:0").await.unwrap();
+        client.connect(server_addr).await.unwrap();
+        let (_stop_tx, mut stop_rx) = oneshot::channel();
+        let clock = ManualClock::new(1_000);
+        let acquired = acquire_pcp_ipv6_lease(
+            &client,
+            local_ip,
+            port,
+            pcp_ipv6::MapProtocol::Udp,
+            nonce,
+            &mut stop_rx,
+            &clock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            acquired,
+            PcpIpv6Acquire::Lease(pcp_ipv6::MapLease {
+                external_ip,
+                external_port: port,
+                lifetime_seconds: 300,
+                epoch: 91,
+            })
+        );
+        delete_pcp_ipv6_lease(&client, local_ip, port, pcp_ipv6::MapProtocol::Udp, nonce).await;
+        gateway.await.unwrap();
+    }
+
+    /// The eviction deny list is bounded, and the bound drops the **oldest** eviction.
+    ///
+    /// Proved by pushing past the cap rather than by reading the constant: a list that grows
+    /// without limit is its own defect, and the only way to know the bound binds is to exceed it.
+    #[test]
+    fn the_eviction_list_is_bounded_and_drops_the_oldest_entry() {
+        let mut ev = EvictedPeers::default();
+        for n in 0..MAX_EVICTED_PEERS as u64 {
+            assert!(
+                ev.deny(ev_peer(n)).is_none(),
+                "no displacement below the cap"
+            );
+        }
+        assert_eq!(ev.len(), MAX_EVICTED_PEERS);
+        assert!(ev.is_denied(&ev_peer(0)));
+
+        // One past the cap: the list stays at the cap and the FIRST eviction is the one dropped.
+        assert!(ev.deny(ev_peer(MAX_EVICTED_PEERS as u64)).is_none());
+        assert_eq!(ev.len(), MAX_EVICTED_PEERS, "the cap binds");
+        assert!(
+            !ev.is_denied(&ev_peer(0)),
+            "the oldest eviction is the one dropped"
+        );
+        assert!(ev.is_denied(&ev_peer(1)), "the next-oldest survives");
+        assert!(
+            ev.is_denied(&ev_peer(MAX_EVICTED_PEERS as u64)),
+            "the newest eviction is retained"
+        );
+    }
+
+    /// Displacing an entry whose live connections were closed hands its `libp2p::PeerId` back, so
+    /// the caller can lift that block. Without it `allow_block_list`'s set would keep growing
+    /// behind this one's bound, which would make the bound cosmetic.
+    #[test]
+    fn a_displaced_eviction_returns_its_block_to_be_lifted() {
+        let mut ev = EvictedPeers::default();
+        let first = ev_peer(0);
+        let blocked = libp2p_peer();
+        ev.deny(first);
+        ev.note_blocked(first, blocked);
+
+        let mut displaced = None;
+        for n in 1..=MAX_EVICTED_PEERS as u64 {
+            if let Some(d) = ev.deny(ev_peer(n)) {
+                displaced = Some(d);
+            }
+        }
+        assert_eq!(
+            displaced,
+            Some(blocked),
+            "the displaced entry's block must come back so it can be lifted"
+        );
+
+        // An entry that never had a live connection closed has no block to lift.
+        let mut ev2 = EvictedPeers::default();
+        for n in 0..=MAX_EVICTED_PEERS as u64 {
+            assert!(ev2.deny(ev_peer(n)).is_none());
+        }
+    }
+
+    /// Lifting an eviction removes it from **both** halves: the peer stops being denied, and the
+    /// block installed for it comes back to be released. This is the re-invite path; an entry
+    /// that survived a lift would make a re-invited member permanently unreachable.
+    #[test]
+    fn lifting_an_eviction_clears_the_deny_and_returns_the_block() {
+        let mut ev = EvictedPeers::default();
+        let p = ev_peer(7);
+        let blocked = libp2p_peer();
+        ev.deny(p);
+        ev.note_blocked(p, blocked);
+        assert!(ev.is_denied(&p));
+
+        assert_eq!(ev.allow(&p), Some(blocked));
+        assert!(!ev.is_denied(&p), "a lifted eviction stops denying");
+        assert_eq!(ev.len(), 0);
+        assert_eq!(ev.allow(&p), None, "lifting twice is a no-op");
+
+        // A lift must also free the slot in the ordering, or the bound would count ghosts.
+        for n in 0..MAX_EVICTED_PEERS as u64 {
+            ev.deny(ev_peer(n));
+        }
+        assert_eq!(ev.len(), MAX_EVICTED_PEERS);
+        assert!(ev.is_denied(&ev_peer(0)), "no premature displacement");
+    }
+
+    /// Re-evicting an already-evicted peer is a no-op and does not disturb the ordering, so a
+    /// repeated removal cannot walk an entry to the front of the bound.
+    #[test]
+    fn re_denying_an_evicted_peer_does_not_disturb_the_ordering() {
+        let mut ev = EvictedPeers::default();
+        let p = ev_peer(7);
+        ev.deny(p);
+        assert!(ev.deny(p).is_none());
+        assert_eq!(ev.len(), 1);
+    }
+
+    /// The gate recognises an evicted peer from the **libp2p** id the wire supplies, by hashing
+    /// it forward to the phase-0 id the membership layer works in. This is the property that lets
+    /// the refusal happen at connection time instead of after a connection is established.
+    #[test]
+    fn the_gate_refuses_an_evicted_peer_by_forward_hashing_the_wire_identity() {
+        let mut gate = Eviction::default();
+        let victim = libp2p_peer();
+        let bystander = libp2p_peer();
+
+        assert!(
+            gate.enforce(&victim).is_ok(),
+            "nothing is denied by default"
+        );
+
+        gate.denied.deny(to_peer(&victim));
+        assert!(
+            gate.enforce(&victim).is_err(),
+            "an evicted peer is refused from its libp2p id alone"
+        );
+        assert!(
+            gate.enforce(&bystander).is_ok(),
+            "the refusal is targeted, not a blanket close"
+        );
+
+        gate.denied.allow(&to_peer(&victim));
+        assert!(
+            gate.enforce(&victim).is_ok(),
+            "a lifted eviction lets the peer back in"
+        );
+    }
+
+    /// A circuit address names **two** peers, and which one you resolve decides whether the
+    /// relay is protected from eviction.
+    ///
+    /// `dial_gated` gates on `target_peer_in_multiaddr`, which returns the LAST `/p2p/`, i.e. the
+    /// target. So a relay used purely as dial transit was never recorded as infrastructure, and a
+    /// companion device claiming its transport id could get every member to evict the relay they
+    /// route through by being removed in the ordinary way. `dial_gated` now notes the relay half
+    /// as well; this pins the discrimination the whole fix rests on.
+    #[test]
+    fn a_circuit_address_names_the_relay_and_the_target_separately() {
+        let relay = libp2p_peer();
+        let target = libp2p_peer();
+        let circuit: Multiaddr =
+            format!("/ip4/198.51.100.1/tcp/4000/p2p/{relay}/p2p-circuit/p2p/{target}")
+                .parse()
+                .unwrap();
+
+        assert_eq!(
+            target_peer_in_multiaddr(&circuit),
+            Some(target),
+            "the dial gate resolves the TARGET, which is why the relay needed noting separately"
+        );
+        assert_eq!(
+            relay_peer_in_circuit_addr(&circuit),
+            Some(relay),
+            "and the relay is recoverable from the same address"
+        );
+
+        // A plain direct address has a target and no relay, so noting infra off it is a no-op.
+        let direct: Multiaddr = format!("/ip4/198.51.100.1/tcp/4000/p2p/{target}")
+            .parse()
+            .unwrap();
+        assert_eq!(target_peer_in_multiaddr(&direct), Some(target));
+        assert_eq!(relay_peer_in_circuit_addr(&direct), None);
+    }
 
     #[test]
     fn a_seed_pins_a_stable_peer_id() {
