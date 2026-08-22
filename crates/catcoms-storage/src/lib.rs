@@ -31,8 +31,11 @@ pub mod vault;
 use thiserror::Error;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
-pub use cid::Cid;
+pub use cid::{Cid, CidHasher};
 pub use filecrypto::{open_file, seal_file, FileManifest, FileRef};
+// `FileRef::wrapped_key` is a public field of this type, so a caller cannot read or build a
+// `FileRef` without being able to name it.
+pub use catcoms_crypto::SealedBlob;
 pub use pad::{
     pad, padded_len, unpad, CHUNK_PAD_CEILING, CHUNK_PAD_FLOOR, OP_PAD_CEILING, OP_PAD_FLOOR,
     PAD_FOOTER_BYTES,

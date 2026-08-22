@@ -19,7 +19,7 @@ use catcoms_rt::{CryptoRngCore, MeshTransport, PeerId};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use catcoms_storage::Cid;
+use catcoms_storage::{Cid, FileRef};
 
 use crate::{
     ChannelInfo, ChatMessage, DeliveryState, DeviceEntry, FileEntry, FileRange, FileUsage,
@@ -241,6 +241,25 @@ pub enum AppCommand {
         progress: Option<mpsc::Sender<(usize, usize)>>,
         reply: oneshot::Sender<Result<String, String>>,
     },
+    /// Seal + store ONE chunk of a streamed upload; replies with the chunk's [`FileRef`].
+    SealUploadChunk {
+        bytes: Vec<u8>,
+        mime: String,
+        reply: oneshot::Sender<Result<FileRef, String>>,
+    },
+    /// Publish the index entry for a streamed upload whose chunks are already sealed and stored;
+    /// replies with the file's content-address hex, or an error.
+    PublishUpload {
+        name: String,
+        mime: String,
+        path: String,
+        plaintext_cid: [u8; 32],
+        total_size: u64,
+        chunks: Vec<FileRef>,
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Drop the sealed chunk blobs of a streamed upload that will never be published.
+    DiscardUpload { chunks: Vec<FileRef> },
     /// Query the shared file list.
     Files {
         reply: oneshot::Sender<Vec<FileEntry>>,
@@ -1392,6 +1411,63 @@ impl ServerActor {
             return Err("server stopped".into());
         }
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Seal + store ONE chunk of a streamed upload, returning the chunk's [`FileRef`] for the
+    /// manifest [`publish_upload`](Self::publish_upload) writes at the end.
+    ///
+    /// One chunk per command is the point: a whole-file `add_file` holds this actor for the entire
+    /// upload, so the server stops syncing and every other command for it queues behind the
+    /// transfer. Between these the actor returns to its loop and interleaves everything else.
+    pub async fn seal_upload_chunk(&self, bytes: Vec<u8>, mime: String) -> Result<FileRef, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::SealUploadChunk { bytes, mime, reply })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Publish the index entry for a streamed upload whose chunks are already stored; returns the
+    /// file's content-address hex.
+    pub async fn publish_upload(
+        &self,
+        name: String,
+        mime: String,
+        path: String,
+        plaintext_cid: [u8; 32],
+        total_size: u64,
+        chunks: Vec<FileRef>,
+    ) -> Result<String, String> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::PublishUpload {
+                name,
+                mime,
+                path,
+                plaintext_cid,
+                total_size,
+                chunks,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err("server stopped".into());
+        }
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    /// Drop the sealed chunk blobs of a streamed upload that was abandoned or failed, so an
+    /// interrupted transfer does not leave bytes on disk no manifest names. Fire-and-forget:
+    /// this runs on a cancellation path, where there is nothing useful to do about a failure.
+    pub async fn discard_upload(&self, chunks: Vec<FileRef>) {
+        let _ = self.cmd_tx.send(AppCommand::DiscardUpload { chunks }).await;
     }
 
     /// Fetch the shared file list.
@@ -2711,6 +2787,41 @@ where
                         if files_changed(&server, &mut file_count) {
                             let _ = event_tx.send(AppEvent::FilesUpdated).await;
                         }
+                    }
+                    Some(AppCommand::SealUploadChunk { bytes, mime, reply }) => {
+                        let res = server
+                            .seal_upload_chunk(&bytes, &mime)
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                    }
+                    Some(AppCommand::PublishUpload {
+                        name,
+                        mime,
+                        path,
+                        plaintext_cid,
+                        total_size,
+                        chunks,
+                        reply,
+                    }) => {
+                        let res = server
+                            .publish_upload(
+                                &name,
+                                &mime,
+                                &path,
+                                Cid::from_bytes(plaintext_cid),
+                                total_size,
+                                chunks,
+                            )
+                            .await
+                            .map(|cid| cid.to_hex())
+                            .map_err(|e| e.to_string());
+                        let _ = reply.send(res);
+                        if files_changed(&server, &mut file_count) {
+                            let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                        }
+                    }
+                    Some(AppCommand::DiscardUpload { chunks }) => {
+                        server.discard_upload_chunks(&chunks);
                     }
                     Some(AppCommand::Files { reply }) => {
                         let _ = reply.send(server.files());

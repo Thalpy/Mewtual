@@ -41,7 +41,12 @@ export const TAURI_COMMAND_GROUPS = {
   authenticated_content_writes: {
     boundary: "Member/content mutations through the actor; validate sizes, ids and wire-safe fields natively.",
     commands: [
-      "open_channel", "set_profile", "add_file", "repair_storage", "send_dm_invite",
+      "open_channel", "set_profile", "repair_storage", "send_dm_invite",
+      // The streamed upload replaces the old single-shot add_file: begin reserves a slot, each
+      // push seals exactly one chunk into the vault, finish publishes the index entry, cancel
+      // releases the reservation and collects whatever was sealed. Same authority as add_file
+      // had, split so neither the webview nor the server actor is occupied for a whole file.
+      "begin_file_upload", "push_file_chunk", "finish_file_upload", "cancel_file_upload",
       "send_call_signal", "dismiss_dm_request", "download_file", "post_status", "create_event",
       "save_wiki_page", "send_message", "edit_message", "delete_message", "toggle_reaction",
       "set_channel_topic", "jukebox_add", "jukebox_remove",
@@ -74,7 +79,10 @@ export const TAURI_COMMAND_GROUPS = {
   operating_system_boundary: {
     boundary: "URLs and files cross into the OS; exact allowlists, bounds and non-shell launch/write paths required.",
     commands: [
-      "open_issue_url", "open_external_url", "save_and_open_space_guide", "save_space_layout", "save_download",
+      "open_issue_url", "open_external_url", "save_and_open_space_guide", "save_space_layout",
+      // Writes a shared file to Downloads by streaming it from the actor: the name is sanitized
+      // native-side and the reserved path is the only thing that reaches the webview.
+      "save_group_file",
     ],
   },
 } as const;

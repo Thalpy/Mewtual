@@ -4,6 +4,24 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sharing a file took the whole app down with it.** An upload would stop at 10% and everything
+  around it would stop responding until it finished, or looked like it never would. Two separate
+  bottlenecks, both of which scaled with the size of the file. The file was handed to the desktop
+  in one piece, so the window spent the transfer building and posting a single message the size of
+  the file rather than drawing anything; and the server then encrypted and stored the whole thing
+  in one uninterrupted step, during which it stopped talking to the group and stopped answering
+  anything else you asked it. A share now moves in slices and is encrypted a chunk at a time, so
+  the window keeps painting, the server keeps syncing, and the progress bar reflects work that has
+  genuinely happened. An upload that fails or is cancelled now cleans up after itself instead of
+  leaving encrypted fragments on disk.
+- **Saving a shared file to Downloads pulled it through the window twice.** The file was read out
+  in full, handed to the window, and handed straight back to be written, so saving a large file
+  froze the app for the same reason sharing one did. It now goes from the server to the file
+  directly, checking as it lands that what was written is what was shared. Nothing is left in
+  Downloads if the transfer fails partway.
+
 ## [0.3.0-alpha.5] - 2026-08-22
 
 ### Added

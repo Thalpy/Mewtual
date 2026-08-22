@@ -1,7 +1,9 @@
 # Design; chunked large-file transfer
 
-Status: **design approved, implementing.** Removes the ~16 MiB file ceiling by splitting a file
-into chunks, each transferred as its own content-addressed blob, described by a manifest.
+Status: **done, including streaming** (see § Streaming). Removes the ~16 MiB file ceiling by
+splitting a file into chunks, each transferred as its own content-addressed blob, described by a
+manifest; and moves those chunks across the desktop bridge one at a time so a transfer never
+occupies the webview or the server actor for longer than a chunk.
 
 See also: [`HANDOVER.md`](HANDOVER.md) fileshare; the 8l blob layer.
 
@@ -53,18 +55,48 @@ with a **fixed-window bytes budget** per requester: allow up to `BLOB_BUDGET_BYT
   CID re-hash, and the response-size cap unchanged. Only the throttle accounting changes.
 The per-requester map stays bounded (`max_known_peers`), now holding `(window_start, bytes)`.
 
+## Streaming (the two deferred items above, now done)
+
+The two "deferred" notes below turned out to be the same bug, and it was not a slow transfer: it
+was the app hanging. Sharing a ~17 MiB file stuck the progress bar at 10% and froze everything
+around it, because a transfer occupied **both** single-threaded surfaces end to end.
+
+- **The webview.** `add_file` took the whole file as one base64 `invoke` argument. A 17 MiB file is
+  a 23 MB JS string, serialized whole on the main thread; 256 MiB (the declared cap) is 341 MB.
+- **The server actor.** `catcoms-app`'s actor is one `select!` loop over `(commands, sync_once)`,
+  biased to commands, and each command runs to completion inline. Sealing every chunk inside one
+  `AddFile` meant that for the whole upload the server drained no inbound sync and answered no
+  other command, so every other UI call for that server queued behind the transfer.
+
+Both are now bounded by a chunk instead of by the file:
+
+- **Upload.** `begin_file_upload` → N × `push_file_chunk` → `finish_file_upload` (+
+  `cancel_file_upload`). The IPC unit is a **slice** (`UPLOAD_SLICE_BYTES`, 1 MiB, mirrored as
+  `TRANSFER_SLICE_BYTES` in the frontend) and the seal unit stays the **chunk** (`CHUNK_BYTES`,
+  8 MiB); the bridge buffers slices until it has a chunk, which is why a slice must divide a chunk
+  exactly (uniform chunks are what the media reader's `offset / CHUNK_BYTES` depends on). Each
+  chunk is sealed by its own actor command (`Server::seal_upload_chunk`), so the actor returns to
+  its loop between chunks. `Server::publish_upload` writes the manifest at the end. Slices are
+  offset-addressed and must arrive in order, exactly once, full-size until the file ends; a
+  violation fails the upload, because the running whole-file address (`CidHasher`, streaming
+  BLAKE3) cannot be rewound. Dedup therefore lands *after* sealing, so `publish_upload` collects
+  the redundant chunks it just wrote (`discard_upload_chunks`, dedup-safe like `delete_file`'s GC).
+- **Download.** Already one chunk per actor command (`file_download_plan` + `fetch_file_chunk`).
+  What remained was the saved-file path: `download_file` returned the whole file as base64 and the
+  webview handed it straight back to `save_download`, crossing the bridge twice whole.
+  `save_group_file` replaces both: the bridge reserves the Downloads name, streams chunk to file,
+  verifies the whole-file address, and reveals it. The plaintext never enters the webview.
+  `download_file` remains for the small in-page cases (embeds, emoji, previews).
+
 ## Scope / deferred
 
-- **Actor-blocking:** `download_file` stays a synchronous command; a 256 MiB download (~a few
-  seconds at the new budget) blocks that server's actor for its duration. A background/streaming
-  download with progress events, GB-scale files, multi-holder fan-out, and a holder index are
-  follow-ups. 256 MiB covers typical photos/video/docs.
 - **No transport-protocol change:** the per-blob RR codec, signing, member gate, and CID re-verify
   are unchanged; chunking is additive above them.
-- **No bridge/frontend change:** `add_file`/`download_file` keep their signatures (the cid is passed
-  opaquely), so chunking is transparent to the desktop app. The Tauri IPC still moves the whole file
-  as one base64 buffer, so practical desktop limits are bounded by IPC/RAM, not the protocol;
-  streaming the chunks across IPC (and a progress bar) is the same background-download follow-up.
+- **Still one holder at a time:** multi-holder fan-out, a holder index, GB-scale files and
+  resumable-across-restart transfers are follow-ups. 256 MiB covers typical photos/video/docs.
+- **Sealing is still on the async runtime:** a chunk's AEAD + blob write runs on the actor's
+  thread rather than `spawn_blocking`. At 8 MiB that is tens of milliseconds per chunk, which the
+  loop absorbs; it only matters if `CHUNK_BYTES` grows.
 
 ## Security
 

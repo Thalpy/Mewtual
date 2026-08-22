@@ -135,9 +135,12 @@ Issues observed, in the user's words, to be worked after the outstanding P-defec
    media plane is a WebRTC mesh in the webview and does not ride the libp2p transport at all, so
    UPnP on the libp2p port buys it nothing and it needs STUN, or TURN under symmetric NAT. See
    `design-voice.md` phase 4 (move media onto the relay/DCUtR fabric).
-3. **No upload progress, and an upload appeared to finish and then hang.** Download progress
-   exists (per-chunk `DownloadProgress`); the upload side has no equivalent. The Transfers tab
-   needs to track uploads as first-class, not just downloads.
+3. ~~**No upload progress, and an upload appeared to finish and then hang.**~~ Fixed. Uploads
+   became first-class in the Transfers tab, and the hang (an upload stuck at 10% taking the whole
+   app with it) turned out to be a second, deeper fault: the entire file crossed the IPC bridge as
+   one base64 string and was then sealed inside a single actor command, so both the webview and
+   the server actor were occupied for the whole transfer. Both halves are now streamed; see
+   [`design-chunked-transfer.md`](design-chunked-transfer.md) § Streaming.
 4. **Messages do not clearly indicate when they have been sent.** The delivery-states design
    (D1-D3) is listed as in progress and is what this needs.
 5. **In a DM you appear as the person you are DMing** (identity/label bug in the DM view). The

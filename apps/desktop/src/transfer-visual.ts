@@ -1,5 +1,15 @@
 export type TransferPiece = "held" | "active" | "pending" | "offline" | "failed";
 export const TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
+/**
+ * How much of an upload crosses the IPC bridge in one message.
+ *
+ * Deliberately far smaller than TRANSFER_CHUNK_BYTES, which is the size a chunk is *sealed* at
+ * and cannot change: an invoke argument becomes a base64 string that both sides serialize whole,
+ * so the message size, not the chunk size, is what decides whether the webview stutters. The
+ * native side buffers slices until it has a whole chunk, so this only has to divide
+ * TRANSFER_CHUNK_BYTES exactly, which is what keeps chunk boundaries uniform.
+ */
+export const TRANSFER_SLICE_BYTES = 1024 * 1024;
 
 /** Build a small, bounded piece strip. Files currently have at most 32 chunks. */
 export function transferPieces(

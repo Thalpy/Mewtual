@@ -30,10 +30,10 @@ use catcoms_crypto::verify_with_public_bytes;
 pub use catcoms_crypto::{DeviceCertificate, DeviceRevocation};
 use catcoms_mls::{InviteToken, MlsDevice, MlsError, ServerGroup};
 use catcoms_rt::{Clock, CryptoRngCore, DiscoveredPeer, MeshTransport, PeerId};
-use catcoms_storage::{BlobStore, FileManifest, FileRef};
+use catcoms_storage::{BlobStore, FileManifest};
 // Re-export the content-address type: it's part of the app's public file surface, and the bridge
 // verifies a reassembled download against it.
-pub use catcoms_storage::Cid;
+pub use catcoms_storage::{Cid, CidHasher, FileRef, SealedBlob};
 use catcoms_sync::{
     fingerprint, read_published_roster, request_device_join, request_join, request_join_from_reply,
     request_join_from_switchboards, request_join_via_helper, ChannelSync, SyncError, ROLES_DOC,
@@ -3215,25 +3215,124 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         }
         let mut chunks = Vec::new();
         for (i, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
-            let (file_ref, ciphertext) = self.sync.seal_file(chunk, mime)?;
-            self.sync.put_blob(&ciphertext)?;
-            chunks.push(file_ref);
+            chunks.push(self.seal_upload_chunk(chunk, mime)?);
             if let Some(p) = progress {
                 let _ = p.send((i + 1, total_steps)).await;
             }
         }
         if chunks.is_empty() {
             // An empty file is still one (empty) chunk, so the manifest always has >= 1.
-            let (file_ref, ciphertext) = self.sync.seal_file(&[], mime)?;
-            self.sync.put_blob(&ciphertext)?;
-            chunks.push(file_ref);
+            chunks.push(self.seal_upload_chunk(&[], mime)?);
             if let Some(p) = progress {
                 let _ = p.send((1, total_steps)).await;
             }
         }
+        // The dedup fast path above already returned, so this publishes the fresh manifest.
+        let cid = self
+            .publish_upload(name, mime, path, plaintext_cid, bytes.len() as u64, chunks)
+            .await?;
+        if let Some(p) = progress {
+            let _ = p.send((total_steps, total_steps)).await;
+        }
+        Ok(cid)
+    }
+
+    /// Seal + store **one** chunk of a *streamed* upload, returning the [`FileRef`] that the final
+    /// [`publish_upload`](Self::publish_upload) records in the file's manifest.
+    ///
+    /// This is the upload twin of [`fetch_file_chunk`](Self::fetch_file_chunk). Sealing a whole
+    /// file in one call occupies the server actor for the entire upload: nothing else that server
+    /// does (inbound sync, presence, every other UI command) runs meanwhile, and the caller has to
+    /// hold every byte at once as well. Driving one of these per chunk keeps the longest
+    /// uninterruptible unit of upload work at one chunk, and lets a caller stream a file it never
+    /// holds whole.
+    ///
+    /// `bytes` must be exactly [`CHUNK_BYTES`] for every chunk except the last: the media reader
+    /// maps a byte offset to a chunk index by dividing, so a manifest's chunks are uniformly sized
+    /// by construction. The caller owns that ordering; this call is deliberately stateless.
+    pub fn seal_upload_chunk(&mut self, bytes: &[u8], mime: &str) -> Result<FileRef, AppError> {
+        if bytes.len() > CHUNK_BYTES {
+            return Err(AppError::Invalid(format!(
+                "upload chunk too large: {} bytes (max {CHUNK_BYTES})",
+                bytes.len()
+            )));
+        }
+        if !self.sync.has_file_key() {
+            return Err(AppError::Invalid(
+                "no group file key yet (still joining?)".into(),
+            ));
+        }
+        let (file_ref, ciphertext) = self.sync.seal_file(bytes, mime)?;
+        self.sync.put_blob(&ciphertext)?;
+        Ok(file_ref)
+    }
+
+    /// Publish the file-index entry for an upload whose chunks are already sealed and stored,
+    /// making it visible to the group. `plaintext_cid` is the address of the **whole** file (a
+    /// streaming caller accumulates it with [`CidHasher`](catcoms_storage::CidHasher)) and becomes
+    /// the file's identity, exactly as in [`add_file`](Self::add_file).
+    ///
+    /// Content dedup works the same way, with one difference forced by streaming: a streamed
+    /// upload only learns its whole-file address after its last chunk, so the twin check lands
+    /// *after* sealing rather than before it. When a twin is found the new listing reuses the
+    /// twin's ref (or is skipped entirely, for an identical name + folder) and the chunk blobs
+    /// this upload just wrote are garbage-collected, so a dedup still ends with exactly one sealed
+    /// copy of the content rather than a second, byte-different one.
+    pub async fn publish_upload(
+        &mut self,
+        name: &str,
+        mime: &str,
+        path: &str,
+        plaintext_cid: Cid,
+        total_size: u64,
+        chunks: Vec<FileRef>,
+    ) -> Result<Cid, AppError> {
+        if total_size > MAX_FILE_BYTES as u64 {
+            return Err(AppError::Invalid(format!(
+                "file too large: {total_size} bytes (max {MAX_FILE_BYTES})"
+            )));
+        }
+        if chunks.is_empty() {
+            return Err(AppError::Invalid("an upload has at least one chunk".into()));
+        }
+        if !self.sync.has_file_key() {
+            return Err(AppError::Invalid(
+                "no group file key yet (still joining?)".into(),
+            ));
+        }
+        let author = self.my_fingerprint();
+        let folder = normalize_path(path);
+        // Clock-injected (never ambient): the default one-month circulation deadline.
+        let expires = FileExpiry::At(self.sync.now_ms().saturating_add(FILE_EXPIRY_DEFAULT_MS));
+        let listed = self.files();
+        let twin = listed
+            .iter()
+            .find(|e| e.cid.as_slice() == plaintext_cid.as_bytes())
+            .map(|e| {
+                (
+                    e.file_ref.clone(),
+                    listed
+                        .iter()
+                        .any(|o| o.cid == e.cid && o.name == name && o.path == folder),
+                )
+            });
+        if let Some((twin_ref, already_here)) = twin {
+            self.discard_upload_chunks(&chunks);
+            if already_here {
+                return Ok(plaintext_cid); // already shared under this exact name + folder
+            }
+            // Same content, new name/folder: list it again against the SAME sealed blobs; but
+            // with its own fresh deadline, not the twin's.
+            self.sync
+                .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
+                    write_file_entry(d, name, &author, &folder, &twin_ref, expires)
+                })
+                .await?;
+            return Ok(plaintext_cid);
+        }
         let manifest = FileManifest {
             plaintext_cid,
-            total_size: bytes.len() as u64,
+            total_size,
             mime: mime.to_string(),
             chunks,
         };
@@ -3243,10 +3342,28 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                 write_file_entry(d, name, &author, &folder, &ref_bytes, expires)
             })
             .await?;
-        if let Some(p) = progress {
-            let _ = p.send((total_steps, total_steps)).await;
-        }
         Ok(plaintext_cid)
+    }
+
+    /// Drop the sealed chunk blobs of an upload that will never be published: an abandoned or
+    /// failed streamed upload, or one whose content the dedup in
+    /// [`publish_upload`](Self::publish_upload) found already held. Without this, an interrupted
+    /// upload would leave sealed bytes on disk that no manifest ever names.
+    ///
+    /// Dedup-safe, like the GC in [`delete_file`](Self::delete_file): a chunk some *listed* file
+    /// references is kept, so this can never delete storage a shared file depends on.
+    pub fn discard_upload_chunks(&mut self, chunks: &[FileRef]) {
+        let live: HashSet<Cid> = self
+            .files()
+            .iter()
+            .filter_map(|e| FileManifest::decode_or_legacy(&e.file_ref).ok())
+            .flat_map(|m| m.chunks.into_iter().map(|c| c.ciphertext_cid))
+            .collect();
+        for chunk in chunks {
+            if !live.contains(&chunk.ciphertext_cid) {
+                let _ = self.sync.delete_blob(&chunk.ciphertext_cid);
+            }
+        }
     }
 
     /// The shared files listed in the index (metadata only; bytes are fetched on download).
@@ -9049,6 +9166,170 @@ mod tests {
         assert_eq!(rx.recv().await, Some((2, 3)));
         assert_eq!(rx.recv().await, Some((3, 3)));
         assert_eq!(alice.files().len(), 1, "100% means the listing is visible");
+    }
+
+    /// Push `data` through the streaming upload path one chunk at a time, exactly as the desktop
+    /// bridge does: seal each `CHUNK_BYTES` slice on its own, accumulate the whole-file address,
+    /// then publish the manifest.
+    async fn stream_upload(
+        server: &mut Server<MemNetwork, ChaCha20Rng>,
+        name: &str,
+        path: &str,
+        data: &[u8],
+    ) -> Cid {
+        let mime = "application/octet-stream";
+        let mut address = catcoms_storage::CidHasher::new();
+        let mut chunks = Vec::new();
+        for chunk in data.chunks(CHUNK_BYTES) {
+            address.update(chunk);
+            chunks.push(server.seal_upload_chunk(chunk, mime).unwrap());
+        }
+        if chunks.is_empty() {
+            chunks.push(server.seal_upload_chunk(&[], mime).unwrap());
+        }
+        server
+            .publish_upload(name, mime, path, address.cid(), data.len() as u64, chunks)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_streamed_upload_is_identical_to_a_whole_file_one() {
+        // The bridge streams a file chunk by chunk so neither the webview nor the actor is ever
+        // occupied for a whole transfer. The result must be indistinguishable from add_file's:
+        // same identity, same chunk boundaries, and it reassembles byte-for-byte.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let n = CHUNK_BYTES * 2 + 77;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+
+        let cid = stream_upload(&mut alice, "streamed.bin", "", &data).await;
+
+        assert_eq!(
+            cid,
+            Cid::of(&data),
+            "the identity is the whole-file address"
+        );
+        let entry = alice
+            .files()
+            .into_iter()
+            .find(|e| e.cid == cid.as_bytes().to_vec())
+            .expect("the streamed file is listed");
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).unwrap();
+        assert_eq!(manifest.chunks.len(), 3, "one chunk per CHUNK_BYTES slice");
+        assert_eq!(manifest.total_size, n as u64);
+        assert!(alice.file_available(&cid), "every chunk is held locally");
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn an_empty_streamed_upload_still_publishes_one_chunk() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let cid = stream_upload(&mut alice, "empty.bin", "", &[]).await;
+        assert_eq!(cid, Cid::of(b""));
+        assert_eq!(alice.download_file(&cid).await.unwrap(), Vec::<u8>::new());
+    }
+
+    #[tokio::test]
+    async fn a_streamed_upload_of_already_shared_content_dedups_and_drops_its_chunks() {
+        // A streamed upload only learns its whole-file address after the last chunk, so its dedup
+        // check lands after sealing. The second listing must reuse the first's ref and the blobs
+        // the second upload sealed must be gone: dedup that left a second sealed copy behind
+        // would defeat the point of dedup.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data: Vec<u8> = (0..CHUNK_BYTES + 9).map(|i| (i % 251) as u8).collect();
+
+        let first = stream_upload(&mut alice, "twin.bin", "", &data).await;
+        let after_first = alice.sync().blob_cids().len();
+
+        let second = stream_upload(&mut alice, "twin.bin", "elsewhere", &data).await;
+
+        assert_eq!(second, first, "identical content keeps one identity");
+        assert_eq!(
+            alice.sync().blob_cids().len(),
+            after_first,
+            "the redundant sealed chunks were collected"
+        );
+        let listings: Vec<FileEntry> = alice
+            .files()
+            .into_iter()
+            .filter(|e| e.cid == first.as_bytes().to_vec())
+            .collect();
+        assert_eq!(listings.len(), 2, "both folders list the content");
+        assert_eq!(
+            listings[0].file_ref, listings[1].file_ref,
+            "the second listing names the first upload's blobs"
+        );
+        assert_eq!(alice.download_file(&first).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn re_streaming_the_same_name_and_folder_changes_nothing() {
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![3u8; 4096];
+        let first = stream_upload(&mut alice, "same.bin", "docs", &data).await;
+        let blobs = alice.sync().blob_cids().len();
+
+        let again = stream_upload(&mut alice, "same.bin", "docs", &data).await;
+
+        assert_eq!(again, first);
+        assert_eq!(alice.files().len(), 1, "no duplicate listing");
+        assert_eq!(alice.sync().blob_cids().len(), blobs, "nothing new sealed");
+    }
+
+    #[tokio::test]
+    async fn discarding_an_abandoned_upload_keeps_chunks_a_listed_file_still_needs() {
+        // Cancelling an upload collects what it sealed. The GC is dedup-safe, so a cancelled
+        // upload can never delete storage a shared file depends on.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let data = vec![5u8; 2048];
+        let cid = stream_upload(&mut alice, "kept.bin", "", &data).await;
+        let listed = alice
+            .files()
+            .into_iter()
+            .find(|e| e.cid == cid.as_bytes().to_vec())
+            .unwrap();
+        let live = FileManifest::decode_or_legacy(&listed.file_ref)
+            .unwrap()
+            .chunks;
+
+        // An upload that got one chunk in and was then abandoned.
+        let orphan = alice
+            .seal_upload_chunk(b"never published", "application/octet-stream")
+            .unwrap();
+        assert!(alice.sync().has_blob(&orphan.ciphertext_cid));
+
+        let mut both = live.clone();
+        both.push(orphan.clone());
+        alice.discard_upload_chunks(&both);
+
+        assert!(
+            !alice.sync().has_blob(&orphan.ciphertext_cid),
+            "the abandoned chunk was collected"
+        );
+        for chunk in &live {
+            assert!(
+                alice.sync().has_blob(&chunk.ciphertext_cid),
+                "a chunk the listed file references is kept"
+            );
+        }
+        assert_eq!(alice.download_file(&cid).await.unwrap(), data);
+    }
+
+    #[tokio::test]
+    async fn a_streamed_upload_refuses_an_oversized_chunk() {
+        // Chunks are uniform by construction (the media reader divides a byte offset by
+        // CHUNK_BYTES to get an index), so an over-long chunk is rejected rather than sealed.
+        let mut alice = founder();
+        alice.open_files().await.unwrap();
+        let too_big = vec![0u8; CHUNK_BYTES + 1];
+        assert!(alice
+            .seal_upload_chunk(&too_big, "application/octet-stream")
+            .is_err());
     }
 
     #[tokio::test]

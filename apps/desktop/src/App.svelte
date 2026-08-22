@@ -52,7 +52,7 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupDownload, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
   } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
@@ -62,7 +62,8 @@
   } from "./jukebox";
   import { installUiLogging } from "./uilog";
   import {
-    TRANSFER_CHUNK_BYTES, formatBytes, formatRate, sampleRate, transferPieces,
+    TRANSFER_CHUNK_BYTES, TRANSFER_SLICE_BYTES,
+    formatBytes, formatRate, sampleRate, transferPieces,
     type TransferPiece,
   } from "./transfer-visual";
   import { plainSummary } from "./wikitext";
@@ -7098,16 +7099,14 @@
     }
   }
 
-  // Read a File as raw base64 (strips the data: prefix), reporting the browser-side read before
-  // the backend starts sealing/storing chunks. The Transfers UI reserves its first 10% for this.
-  function readBase64(
-    file: File,
-    onProgress: ((done: number, total: number) => void) | undefined = undefined,
-  ): Promise<string> {
+  // Read a Blob as raw base64 (strips the data: prefix). Deliberately a Blob and not a File: a
+  // streamed upload reads one TRANSFER_SLICE_BYTES slice at a time, so the whole file never
+  // becomes a JS string. FileReader decodes off the main thread, which is why this is not a
+  // btoa loop over the bytes.
+  function readBase64(file: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onerror = () => reject(new Error("could not read file"));
-      reader.onprogress = (e) => onProgress?.(e.loaded, e.lengthComputable ? e.total : file.size);
       reader.onload = () => {
         const r = reader.result;
         resolve(typeof r === "string" ? (r.split(",")[1] ?? "") : "");
@@ -7193,6 +7192,13 @@
 
   // The one upload path used by files, embeds, wiki attachments, event art and custom emoji.
   // Keeping it central means every group upload gets the same progress and terminal state.
+  //
+  // The file is streamed one TRANSFER_SLICE_BYTES slice at a time: read the slice, hand it to the
+  // backend, repeat. Sending a whole file in one invoke turned it into a single base64 string the
+  // size of the file, and the native side then sealed the lot inside one actor command, so a large
+  // share froze the webview and stopped the server syncing until it finished. A slice at a time
+  // bounds both: the UI keeps painting between slices, and the native side seals a chunk at a
+  // time so the server actor keeps running between them.
   async function addSharedFile(
     file: File,
     path: string,
@@ -7204,6 +7210,7 @@
     const uploadId = crypto.randomUUID();
     const key = uploadKey(server, uploadId);
     const started = Date.now();
+    const chunkTotal = Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES));
     uploads[key] = {
       server,
       id: uploadId,
@@ -7211,27 +7218,35 @@
       path,
       size: file.size,
       done: 0,
-      total: Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES)),
+      total: chunkTotal,
       status: "reading",
       progress: 0,
       updatedAt: started,
       ts: started,
     };
+    // Publishing the index entry is the step after the last chunk, so the bar is chunkTotal + 1
+    // spans wide. The native upload-progress event lands once per sealed chunk; between those,
+    // this loop fills the bar from the bytes it has actually handed over, so a single-chunk file
+    // still shows movement.
+    const spans = chunkTotal + 1;
     try {
-      const data = await readBase64(file, (done, total) => {
+      await invoke("begin_file_upload", { server, uploadId, mime, size: file.size });
+      for (let offset = 0; offset < file.size; offset += TRANSFER_SLICE_BYTES) {
+        const end = Math.min(file.size, offset + TRANSFER_SLICE_BYTES);
+        const data = await readBase64(file.slice(offset, end));
         const u = uploads[key];
         if (u && u.status === "reading") {
-          u.progress = total > 0 ? 0.1 * done / total : 0;
+          u.status = "uploading";
           u.updatedAt = Date.now();
         }
-      });
-      const u = uploads[key];
-      if (u) {
-        u.status = "uploading";
-        u.progress = Math.max(u.progress, 0.1);
-        u.updatedAt = Date.now();
+        await invoke("push_file_chunk", { server, uploadId, offset, data });
+        const sent = uploads[key];
+        if (sent && sent.status !== "done" && sent.status !== "failed") {
+          sent.progress = Math.max(sent.progress, (end / file.size) * (chunkTotal / spans));
+          sent.updatedAt = Date.now();
+        }
       }
-      const cid = await invoke<string>("add_file", { server, name, mime, path, data, uploadId });
+      const cid = await invoke<string>("finish_file_upload", { server, uploadId, name, path });
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
@@ -7240,6 +7255,13 @@
       }
       return cid;
     } catch (e) {
+      // Release the native reservation and let it garbage-collect whatever was already sealed;
+      // an upload left open holds a slot until the session is locked.
+      try {
+        await invoke("cancel_file_upload", { server, uploadId });
+      } catch {
+        // Cancelling a failed upload is best-effort: the original error is the one to report.
+      }
       if (uploads[key]) {
         uploads[key].status = "failed";
         uploads[key].error = String(e);
@@ -7702,8 +7724,7 @@
       ts: started,
     };
     try {
-      const base64 = await invoke<string>("download_file", { server, cid: f.cid });
-      const saved = await saveGroupDownload(invoke, f.name, base64);
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name);
       if (downloads[key]) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
