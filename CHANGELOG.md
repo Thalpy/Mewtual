@@ -4,6 +4,8 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.5] - 2026-08-22
+
 ### Added
 
 - **The jukebox shows the film it is playing.** A shared video used to have nowhere to be unless
@@ -29,7 +31,6 @@ All notable changes to Mewtual are documented here.
   fullscreen display the video band claimed a 16:9 height off the full width and the filmstrip
   and dock went off the edge; the band now takes the space that is actually left and letterboxes
   inside it.
-
 - **The jukebox plays on Windows again.** Shared tracks were requested through a URL scheme
   WebView2 has no handler for, so every track failed the moment it was pressed and the deck
   reported it as one nobody would serve. Windows now uses the host form the toolkit actually

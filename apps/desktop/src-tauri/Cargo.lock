@@ -4035,7 +4035,7 @@ dependencies = [
 
 [[package]]
 name = "mewtual-desktop"
-version = "0.3.0-alpha.4"
+version = "0.3.0-alpha.5"
 dependencies = [
  "base64 0.22.1",
  "bytes",
