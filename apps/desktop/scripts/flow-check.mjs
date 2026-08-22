@@ -14,7 +14,7 @@
 // Usage: node scripts/flow-check.mjs   (from apps/desktop; starts its own vite on FLOW_PORT
 // or 5177, so a dev server you already have running on 5173 is left alone)
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +31,41 @@ const EDGE_CANDIDATES = [
 ].filter(Boolean);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const isWindows = process.platform === "win32";
+
+// vite runs behind a shell, so child.kill() reaps only the cmd.exe wrapper: the node process
+// holding the port and the esbuild helper it started both survive as orphans. Those orphans
+// keep node_modules/@esbuild/*/esbuild.exe open, which makes the next npm install abort
+// mid-unlink with EPERM and leaves a node_modules with no .bin directory at all.
+function killTree(pid) {
+  if (!pid) return;
+  if (isWindows) {
+    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+    return;
+  }
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    /* already gone */
+  }
+}
+
+// Backstop for a vite that outlives its wrapper anyway. Only ever called once our own server
+// has answered on this port, so it cannot take down a stranger that happened to hold it.
+function killPortListener(port) {
+  if (!isWindows) {
+    const found = spawnSync("lsof", ["-ti", `tcp:${port}`], { encoding: "utf8" });
+    for (const pid of (found.stdout ?? "").split("\n").filter(Boolean)) killTree(Number(pid));
+    return;
+  }
+  const found = spawnSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8" });
+  const pids = new Set();
+  for (const line of (found.stdout ?? "").split("\n")) {
+    const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
+    if (m && Number(m[1]) === port) pids.add(Number(m[2]));
+  }
+  for (const pid of pids) killTree(pid);
+}
 
 async function findEdge() {
   const { access } = await import("node:fs/promises");
@@ -273,8 +308,29 @@ const vite = spawn("npm", ["run", "dev", "--", "--port", String(PORT), "--strict
 const profileDir = mkdtempSync(join(tmpdir(), "catcoms-flow-"));
 let edge = null;
 let failed = false;
+let viteUp = false;
+let cleanedUp = false;
+
+function cleanup() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  edge?.kill();
+  killTree(vite.pid);
+  if (viteUp) killPortListener(PORT);
+}
+
+// Ctrl-C skips the finally block, which would leak exactly the orphans cleanup exists to
+// prevent. The temp profile is left behind on this path; it lives in tmpdir and is disposable.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    cleanup();
+    process.exit(130);
+  });
+}
+
 try {
   await waitForVite();
+  viteUp = true;
   edge = spawn(
     await findEdge(),
     [
@@ -325,9 +381,7 @@ try {
   console.error(`FAIL harness: ${e.message}`);
   failed = true;
 } finally {
-  edge?.kill();
-  vite.kill();
-  // vite is spawned through a shell on Windows, so kill the listener by port as well.
+  cleanup();
   await sleep(300);
   try {
     rmSync(profileDir, { recursive: true, force: true });

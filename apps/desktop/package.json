@@ -10,7 +10,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "test:flows": "node scripts/flow-check.mjs",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "fix-brick": "node scripts/fix-brick.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

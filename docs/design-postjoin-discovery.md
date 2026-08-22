@@ -8,6 +8,8 @@ the 6e-3d primitives (`rendezvous_namespaces`, the `DiscoveryPolicy`, PEX), driv
 
 See also: [`design-6e-rendezvous.md`](design-6e-rendezvous.md), [`design-rendezvous-ui.md`](design-rendezvous-ui.md).
 
+Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
+
 ## Implementation checklist
 
 - [x] Periodic member-only rendezvous registration/discovery.
@@ -151,36 +153,72 @@ the invite); steady-state adds the rotation-aware namespaces on top.
   this member's fresh candidate now” signal or report which address/transport worked from its own
   vantage point.
 
-## Reciprocal-dial candidate for adversarial review
+## Reciprocal-dial design after adversarial review
 
-The smallest zero-server design is a **targeted member-control gossip**, not a new public service.
-If A has B's current signed record but cannot establish a direct link, A publishes a request on the
-existing member-only control topic. Any already-connected overlay path may carry it, but only B is
-named to act. A simultaneously retries B's current candidates; B dials A's authenticated candidates
-when the request arrives. The overlap is useful for QUIC/NAT punching. It does not claim general TCP
-simultaneous-open and cannot help when A has no surviving group connection at all.
+Targeted member-control gossip is rejected. Pubsub forwarding occurs below the application-level
+authorization handler, so a removed member that still knows a grandfathered topic could cause a
+stale subscriber to relay a dial request. Gossip would also disclose attempted peer pairs and timing
+to every subscriber.
 
-The proposed frame binds `(domain, group, target device, requester PeerDescriptor hash, issued_at,
-nonce)` under A's device signature. B must verify that A and B are current members, the embedded
-descriptor is A's own valid newer-or-equal record, the request is fresh, and every route passes the
-existing PEX shape/peer-id/global-address checks. The signal then enters an actor-owned dial queue;
-it must not dial synchronously in the gossip handler or bypass `DiscoveryPolicy`, connection limits,
-the retry ledger, or the transport peer suffix.
+The zero-server design instead uses a small **addressed, capability-gated helper protocol**. If A
+cannot reach B but remains connected to C, A asks C to deliver a request to B. C catches up and
+revalidates its current roster before forwarding; C never dials A and does not carry the resulting
+connection. B validates the request and then dials A's already accepted current signed record. A
+simultaneously retries B, which may help QUIC NAT traversal. This does not claim general TCP
+simultaneous-open and cannot repair a completely partitioned group with no surviving path.
 
-Before implementation, an adversarial pass needs to settle these boundaries:
+The request contains references to the exact canonical hashes and sequences of A and B's already
+accepted descriptors, not embedded addresses or replacement descriptors. An equal sequence with a
+different hash is equivocation and is rejected. A descriptor replacement, route withdrawal, member
+removal, session change, shutdown, or server deletion cancels the corresponding pending intent.
 
-- a per-requester, per-target and whole-node budget, plus a bounded nonce/dedupe ledger;
-- whether embedding a newer descriptor is safe or the signal must reference a record already
-  learned through PEX;
-- how one member's self-signed public endpoints can be prevented from becoming a distributed port
-  scanner beyond the existing address validation and dial budgets;
-- whether targeted control gossip leaks unacceptable pairwise-attempt metadata to other current or
-  grandfathered-topic members, and whether an addressed one-hop helper protocol is worth its extra
-  state and blocking surface;
-- the automatic trigger: at most a small number of due disconnected peers per discovery pass, with
-  a fresh signed epoch/disconnect allowed to bypass ordinary delay but never create a dial storm;
-- deterministic proof that unknown old clients ignore the additive control tag, relaying survives
-  A→C→B, repeated requests coalesce, and removal/label rotation immediately ends authorization.
+B advertises a signed reciprocal-dial capability containing a random receiver-session identifier,
+its current descriptor reference, routing label, protocol version, and a short expiry. The request
+binds the group, requester and target devices, both descriptor references, receiver session,
+attempt identifier, and expiry. One or two currently connected capable helpers may forward it and
+attach an authenticated delivery attestation. Helpers never invent or substitute routes. B applies
+the same current-roster, current-session, exact-record, replay, rate, and expiry checks regardless of
+which helper delivered it.
+
+Accepted work becomes a reference-only actor intent. Immediately before dialing, the actor resolves
+A's current record again and sends at most two direct peer-bound QUIC candidates (preferably one
+IPv4 and one IPv6) through the shared endpoint scheduler. There is no bare-address fallback. The
+scheduler accounts for every endpoint at pair, device, address/prefix, server, and process scopes;
+new address epochs and native network-change events refresh records but never directly trigger a
+reciprocal-dial storm.
+
+Rollout is capability-gated: receivers and helpers ship before automatic senders. An old client that
+does not advertise support is `feature unavailable`, not `offline`. The UI must derive presence and
+route claims from typed evidence; a transport connection alone does not prove which route, family,
+descriptor epoch, or helper path worked.
+
+### Baseline participation versus optional hosting
+
+Every online, current, compatible member participates in the group mesh. This baseline is part of
+joining the P2P network and is not disabled by opting out of hosting. It includes maintaining the
+member's own outbound connections, distributing authenticated group traffic and signed address
+epochs over already established paths, bounded PEX and health responses, and forwarding small,
+addressed, authenticated reciprocal-dial control requests when the member is already on a viable
+path. These duties must remain tightly bounded so an ordinary member cannot be conscripted into
+arbitrary dialing or meaningful third-party bandwidth use.
+
+Opt-in roles begin where the device accepts additional exposure or resource cost: accepting
+pre-member traffic, serving as a standing switchboard, carrying another pair's application traffic,
+opening a public relay/rendezvous/AutoNAT service, or accepting materially higher bandwidth/storage
+budgets. Opting out of those roles therefore does not turn a member into a passive consumer; it only
+prevents silent promotion into a public listener or general relay. A user can always cease all
+participation by disconnecting or leaving the group.
+
+Before reciprocal dialing is enabled, implementation must:
+
+- enforce one canonical direct-route grammar with a mandatory terminal `/p2p/<PeerId>` matching the
+  signed descriptor and remove every discovery bare-address dial path;
+- meter endpoints rather than peers through a process-wide scheduler shared by existing discovery
+  and reciprocal dialing;
+- add a typed peer-bound batch transport API;
+- implement bounded session/replay state, addressed helper forwarding, actor cancellation, and
+  deterministic topology-aware A-to-C-to-B tests; and
+- complete another adversarial review of each implementation slice before handoff.
 
 ## Address-history policy
 
