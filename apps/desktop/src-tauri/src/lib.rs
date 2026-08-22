@@ -4538,13 +4538,22 @@ async fn check_invite_routes(
         mapping,
         ..Default::default()
     };
-    for address in &bootstrap {
+    classify_invite_routes(&mut check, &bootstrap);
+    Ok(check)
+}
+
+/// Classify the live bootstrap set into the scopes an invite could reach. Split out so the
+/// rules are regression-tested: a routable direct address is "internet", a routable circuit is
+/// "relay" (`addr_is_globally_routable` judges every IP literal, so for a circuit it is the
+/// relay host being judged, matching `switchboard_route_usable`), and a private non-loopback
+/// address is "LAN". The first plain LAN entry also supplies the exact ip/port the manual
+/// port-forward suggestion names; a LAN-hosted circuit never does, because its socket is the
+/// relay's machine, not the one the user would forward to.
+fn classify_invite_routes(check: &mut InviteRouteCheck, bootstrap: &[String]) {
+    for address in bootstrap {
         let Ok(addr) = address.parse::<Multiaddr>() else {
             continue;
         };
-        // `addr_is_globally_routable` judges every IP literal in the multiaddr, so for a circuit
-        // address it is the relay host being judged: a LAN-hosted relay earns no confidence here,
-        // matching `switchboard_route_usable`.
         if addr_is_globally_routable(&addr) {
             if address.contains("/p2p-circuit") {
                 check.relay = true;
@@ -4553,7 +4562,7 @@ async fn check_invite_routes(
             }
         } else if addr_is_private(&addr) && !addr_is_loopback(&addr) {
             check.lan = true;
-            if check.lan_ip.is_empty() {
+            if check.lan_ip.is_empty() && !address.contains("/p2p-circuit") {
                 for part in addr.iter() {
                     match part {
                         Protocol::Ip4(ip) => check.lan_ip = ip.to_string(),
@@ -4565,7 +4574,6 @@ async fn check_invite_routes(
             }
         }
     }
-    Ok(check)
 }
 
 /// Rename a server; a **local** display label in this client's rail (server names are not
@@ -8475,6 +8483,62 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The scope rules behind the invite page's "Your network / Internet" chips and the manual
+    /// port-forward suggestion. Each address kind must land in exactly one scope, and only a
+    /// plain LAN listener may supply the ip/port the suggestion names.
+    #[test]
+    fn invite_route_classification_pins_the_scope_rules() {
+        let peer = "12D3KooWSaXFXMFgkGxgBF6UPEojspeSj2KaDiP4ks5poLzieKKN";
+        let mut check = InviteRouteCheck::default();
+        classify_invite_routes(
+            &mut check,
+            &[
+                "not a multiaddr".to_string(),
+                format!("/ip4/127.0.0.1/tcp/31484/p2p/{peer}"),
+                format!("/ip4/192.168.0.231/udp/31484/quic-v1/p2p/{peer}"),
+                format!("/ip4/213.105.231.38/udp/31484/quic-v1/p2p/{peer}"),
+            ],
+        );
+        assert!(check.lan, "a private listener is the LAN scope");
+        assert!(check.public_direct, "a routable listener is the internet scope");
+        assert!(!check.relay);
+        // The suggestion names the LAN listener's exact socket; loopback supplies nothing.
+        assert_eq!(check.lan_ip, "192.168.0.231");
+        assert_eq!(check.port, 31484);
+
+        // A routable relay circuit is reachability, but through the relay, never "direct".
+        let mut relayed = InviteRouteCheck::default();
+        classify_invite_routes(
+            &mut relayed,
+            &[format!(
+                "/ip4/213.105.231.38/udp/7220/quic-v1/p2p/{peer}/p2p-circuit/p2p/{peer}"
+            )],
+        );
+        assert!(relayed.relay);
+        assert!(!relayed.public_direct);
+
+        // A LAN-hosted circuit is dialable on this network, but its socket is the relay's
+        // machine: it must never supply the port-forward suggestion's values.
+        let mut lan_relay = InviteRouteCheck::default();
+        classify_invite_routes(
+            &mut lan_relay,
+            &[format!(
+                "/ip4/192.168.0.50/tcp/7220/p2p/{peer}/p2p-circuit/p2p/{peer}"
+            )],
+        );
+        assert!(lan_relay.lan);
+        assert!(!lan_relay.relay, "a LAN relay earns no internet confidence");
+        assert_eq!(lan_relay.lan_ip, "", "the relay's socket is not this machine's");
+        assert_eq!(lan_relay.port, 0);
+
+        // Loopback alone reaches neither scope: same-machine only.
+        let mut loopback = InviteRouteCheck::default();
+        classify_invite_routes(&mut loopback, &[format!("/ip4/127.0.0.1/tcp/31484/p2p/{peer}")]);
+        assert!(!loopback.lan);
+        assert!(!loopback.public_direct);
+        assert!(!loopback.relay);
+    }
 
     fn test_libp2p_peer(n: u8) -> libp2p::PeerId {
         let mut seed = [21; 32];

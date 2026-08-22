@@ -123,6 +123,7 @@
     assistedJoinAction, joinReplyCandidateLabel, joinReplyIsExpired, joinReplyNeedsReplacement,
     withOrderedSwitchboardStatus,
   } from "./joinreply";
+  import { callBarStatus, mappableIcePort, routerMappedCandidate, type MappedPort } from "./callroutes";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -10560,49 +10561,39 @@
   // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
   // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
   // port that was tried and refused, so renegotiations don't re-ask the router every time.
-  type MappedPort = { ip: string; port: number; mechanism: string; confirmed: boolean };
+  // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
+  // where they are unit-tested.
   const mappedCallPorts = new Map<number, MappedPort | null>();
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
-    // Host UDP candidates only: srflx/relay already traversed something, and a TCP candidate's
-    // port is not a socket the router mapping would reach.
-    if (c.type !== "host" || c.protocol !== "udp" || !c.port) return;
-    if (!mappedCallPorts.has(c.port)) {
-      mappedCallPorts.set(c.port, null); // claim before the await so a concurrent candidate doesn't double-map
+    if (!mappableIcePort(c)) return;
+    const port = c.port as number;
+    if (!mappedCallPorts.has(port)) {
+      mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
       try {
-        const granted = await invoke<MappedPort>("map_call_port", { port: c.port });
-        mappedCallPorts.set(c.port, granted);
+        const granted = await invoke<MappedPort>("map_call_port", { port });
+        mappedCallPorts.set(port, granted);
         callMappedRoutes += 1;
         console.info("voice: router mapped the media port", {
-          port: c.port,
+          port,
           via: granted.mechanism,
           confirmed: granted.confirmed,
         });
       } catch (e) {
         // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
-        console.warn("voice: router would not map the media port", { port: c.port, error: String(e) });
+        console.warn("voice: router would not map the media port", { port, error: String(e) });
         return;
       }
     }
-    const ext = mappedCallPorts.get(c.port);
+    const ext = mappedCallPorts.get(port);
     if (!ext) return;
-    const component = c.component === "rtcp" ? 2 : 1;
-    const priority = Math.max(1, (c.priority ?? 1694498815) - 1);
     void sendSignal(peer.server, peer.fp, {
       callId: peer.channel,
       type: "ice",
-      candidate: {
-        // A hand-built server-reflexive candidate carrying the router-granted socket. The
-        // receiving side treats it like any other remote candidate; its connectivity checks
-        // reach the mapped port and our ICE agent answers them from the host socket.
-        candidate: `candidate:${c.foundation ?? "rmap"}R ${component} udp ${priority} ${ext.ip} ${ext.port} typ srflx raddr 0.0.0.0 rport ${c.port}`,
-        sdpMid: c.sdpMid,
-        sdpMLineIndex: c.sdpMLineIndex,
-        usernameFragment: c.usernameFragment,
-      },
+      candidate: routerMappedCandidate(c, ext),
     });
   }
 
@@ -10709,23 +10700,17 @@
     const { [fp]: _vs, ...vs } = remoteStreams;
     remoteStreams = vs;
   }
-  // A short status for the call bar: how many peers are connected, or "connecting" while ICE works.
-  let callStatusText = $derived.by(() => {
-    const n = callParticipants.length;
-    if (n === 0) return "waiting for others…";
-    const connected = callParticipants.filter((fp) => callPeerStates[fp] === "connected").length;
-    if (connected === n) return `${n} connected`;
-    const failed = callParticipants.some(
-      (fp) => callPeerStates[fp] === "failed" || callPeerStates[fp] === "disconnected",
-    );
-    if (!failed) return `${connected}/${n} · connecting…`;
-    // Say which half of the path is missing: with a router-mapped route on offer, this side did
-    // its part and the block is on the peer's side; without one, this side has no direct route
-    // either and the honest ask is TURN or a router that maps.
-    return callMappedRoutes > 0
-      ? `${connected}/${n} connected · direct route offered; their side may need TURN`
-      : `${connected}/${n} connected · no direct route; set a TURN server or allow router mapping`;
-  });
+  // A short status for the call bar; the phrasing rules live (tested) in callroutes.ts.
+  let callStatusText = $derived.by(() =>
+    callBarStatus(
+      callParticipants.length,
+      callParticipants.filter((fp) => callPeerStates[fp] === "connected").length,
+      callParticipants.some(
+        (fp) => callPeerStates[fp] === "failed" || callPeerStates[fp] === "disconnected",
+      ),
+      callMappedRoutes,
+    ),
+  );
 
   // --- Voice stage: speaking detection + mic meter -----------------------------------------------
   // One AudioContext, one analyser per source, one 120ms timer. Time-domain RMS is enough to light

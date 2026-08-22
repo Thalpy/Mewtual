@@ -4758,6 +4758,28 @@ mod tests {
         assert!(unavailable.contains_key(&other_transport));
     }
 
+    /// The media-port gate: a socket that provably has no listener must be refused before any
+    /// router work, and a live socket must not be (its silence proves nothing, and blocking on
+    /// silence would kill the feature, since an ICE agent discards non-STUN datagrams).
+    #[tokio::test]
+    async fn a_dead_media_socket_is_disproven_and_a_live_one_is_not() {
+        let live = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let live_port = NonZeroU16::new(live.local_addr().unwrap().port()).unwrap();
+        assert!(
+            !media_socket_disproven(Ipv4Addr::LOCALHOST, live_port).await,
+            "a bound socket that stays silent must not be disproven"
+        );
+        drop(live);
+
+        let dead = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let dead_port = NonZeroU16::new(dead.local_addr().unwrap().port()).unwrap();
+        drop(dead);
+        assert!(
+            media_socket_disproven(Ipv4Addr::LOCALHOST, dead_port).await,
+            "the OS reports nothing listening; mapping it would advertise a dead candidate"
+        );
+    }
+
     #[test]
     fn routed_ipv6_interfaces_win_the_bounded_worker_slots() {
         let routed: Ipv6Addr = "2a00:1450::1".parse().unwrap();
