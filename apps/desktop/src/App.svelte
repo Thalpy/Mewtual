@@ -5404,6 +5404,7 @@
     public_ipv6: string[];
     bridges: CallBridge[];
     relay_likely_required: boolean;
+    router_maps: boolean;
     advice: string;
   };
   let callTransport = $state<CallTransport | null>(null);
@@ -10559,7 +10560,11 @@
   // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
   // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
   // port that was tried and refused, so renegotiations don't re-ask the router every time.
-  const mappedCallPorts = new Map<number, { ip: string; port: number } | null>();
+  type MappedPort = { ip: string; port: number; mechanism: string; confirmed: boolean };
+  const mappedCallPorts = new Map<number, MappedPort | null>();
+  // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
+  // plain Map mutation is invisible to $derived.
+  let callMappedRoutes = $state(0);
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
     // Host UDP candidates only: srflx/relay already traversed something, and a TCP candidate's
@@ -10568,7 +10573,14 @@
     if (!mappedCallPorts.has(c.port)) {
       mappedCallPorts.set(c.port, null); // claim before the await so a concurrent candidate doesn't double-map
       try {
-        mappedCallPorts.set(c.port, await invoke<{ ip: string; port: number }>("map_call_port", { port: c.port }));
+        const granted = await invoke<MappedPort>("map_call_port", { port: c.port });
+        mappedCallPorts.set(c.port, granted);
+        callMappedRoutes += 1;
+        console.info("voice: router mapped the media port", {
+          port: c.port,
+          via: granted.mechanism,
+          confirmed: granted.confirmed,
+        });
       } catch (e) {
         // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
         console.warn("voice: router would not map the media port", { port: c.port, error: String(e) });
@@ -10599,6 +10611,7 @@
       if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
     }
     mappedCallPorts.clear();
+    callMappedRoutes = 0;
   }
 
   function createPeer(fp: string): CallPeer | null {
@@ -10705,7 +10718,13 @@
     const failed = callParticipants.some(
       (fp) => callPeerStates[fp] === "failed" || callPeerStates[fp] === "disconnected",
     );
-    return failed ? `${connected}/${n} connected · check NAT/TURN` : `${connected}/${n} · connecting…`;
+    if (!failed) return `${connected}/${n} · connecting…`;
+    // Say which half of the path is missing: with a router-mapped route on offer, this side did
+    // its part and the block is on the peer's side; without one, this side has no direct route
+    // either and the honest ask is TURN or a router that maps.
+    return callMappedRoutes > 0
+      ? `${connected}/${n} connected · direct route offered; their side may need TURN`
+      : `${connected}/${n} connected · no direct route; set a TURN server or allow router mapping`;
   });
 
   // --- Voice stage: speaking detection + mic meter -----------------------------------------------
@@ -16229,6 +16248,14 @@
                     </span>
                   </li>
                   <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
+                  <li>
+                    <span class="stage-label">ROUTER</span>
+                    <span class={callTransport.router_maps ? "ok-t" : "muted small"}>
+                      {callTransport.router_maps
+                        ? "opens ports on request; each call's media socket is offered a mapped route"
+                        : "has not granted a mapping; calls rely on STUN hole punching or TURN"}
+                    </span>
+                  </li>
                   {#if callTransport.public_ipv6.length}
                     <li><span class="stage-label">PUBLIC IPV6</span><span class="ok-t">{callTransport.public_ipv6.join(", ")}</span></li>
                   {/if}

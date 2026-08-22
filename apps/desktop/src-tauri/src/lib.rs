@@ -165,6 +165,10 @@ struct AppState {
     /// Serialize the state-map transition with the actor's revoke/authorize commands. Without
     /// this, concurrent replacement completions can re-install a displaced helper capability.
     join_reply_apply: Mutex<()>,
+    /// Live router mappings for the active call's media UDP ports, keyed by the local port. A
+    /// PCP/NAT-PMP entry's short lease is renewed by the client retained inside the mapping, so
+    /// dropping the entry (call end, or the app closing) is what ends that route.
+    media_mappings: Mutex<HashMap<u16, catcoms_net::MediaPortMapping>>,
     next_id: Mutex<u64>,
     store: Mutex<Option<ServerStore>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
@@ -5635,6 +5639,9 @@ struct CallTransport {
     bridges: Vec<CallBridge>,
     /// Whether a third-party relay is likely to be required for this node to be heard at all.
     relay_likely_required: bool,
+    /// Whether this node's router has granted the mesh a port mapping. The media plane asks the
+    /// same router for each call's socket, so this is the "your router can help calls" signal.
+    router_maps: bool,
     /// One line the call UI can show verbatim when a link will not come up.
     advice: String,
 }
@@ -5645,12 +5652,16 @@ async fn get_call_transport(
     server: u64,
 ) -> Result<CallTransport, String> {
     require_unlocked_session(&state).await?;
-    let (actor, advertised) = {
+    let (actor, advertised, router_maps) = {
         let servers = state.servers.lock().await;
         let entry = servers
             .get(&server)
             .ok_or_else(|| "unknown server".to_string())?;
-        (entry.actor.clone(), entry.bootstrap.clone())
+        let router_maps = entry
+            .bootstrap_owners
+            .values()
+            .any(|owners| owners.contains(&BootstrapOwner::PortMapping));
+        (entry.actor.clone(), entry.bootstrap.clone(), router_maps)
     };
     let public_direct = advertised.iter().any(|address| {
         address
@@ -5689,8 +5700,8 @@ async fn get_call_transport(
             .then_with(|| b.addresses.cmp(&a.addresses))
     });
 
-    let relay_likely_required = !public_direct && public_ipv6.is_empty();
-    let advice = if public_direct {
+    let relay_likely_required = !public_direct && public_ipv6.is_empty() && !router_maps;
+    let mut advice = if public_direct {
         "This device is directly reachable, so a call should connect without a relay. A peer that still fails is behind the stricter NAT.".to_string()
     } else if !public_ipv6.is_empty() {
         "This device has a public IPv6 route but no verified IPv4 path. Calls will connect directly to IPv6 peers once the router permits inbound UDP to the app; IPv4-only peers will need a relay.".to_string()
@@ -5702,6 +5713,11 @@ async fn get_call_transport(
             bridges.len()
         )
     };
+    if router_maps {
+        advice.push_str(
+            " Your router opens ports on request, so each call also offers a router-mapped direct route; one mapped side is enough for the pair.",
+        );
+    }
 
     Ok(CallTransport {
         public_direct,
@@ -5710,6 +5726,7 @@ async fn get_call_transport(
         public_ipv6,
         bridges,
         relay_likely_required,
+        router_maps,
         advice,
     })
 }
@@ -5719,31 +5736,49 @@ async fn get_call_transport(
 struct MappedCallPort {
     ip: String,
     port: u16,
+    /// Which protocol granted it, for the log and the call panel.
+    mechanism: String,
+    /// The router's own state confirmed the mapping beyond the grant response (see
+    /// `MediaPortMapping::confirmed`); not a claim of verified external reachability.
+    confirmed: bool,
 }
 
 /// Ask the router to forward one of the active call's media UDP ports to this machine, over the
-/// bound-interface IGD path the invite reachability fix proved out. The webview signals the
-/// returned public socket to the peer as an extra ICE candidate; a router mapping forwards from
-/// any source, so one mapped side connects the pair regardless of the other side's NAT type.
-/// This is the media-plane counterpart of the mesh's mapping workers, which only ever cover the
-/// stable libp2p listen port and never the ICE agent's ephemeral sockets.
+/// bound-interface IGD path the invite reachability fix proved out, with PCP/NAT-PMP as the
+/// fallback rung for routers that don't speak UPnP. The webview signals the returned public
+/// socket to the peer as an extra ICE candidate; a router mapping forwards from any source, so
+/// one mapped side connects the pair regardless of the other side's NAT type. This is the
+/// media-plane counterpart of the mesh's mapping workers, which only ever cover the stable
+/// libp2p listen port and never the ICE agent's ephemeral sockets.
 #[tauri::command]
 async fn map_call_port(state: State<'_, AppState>, port: u16) -> Result<MappedCallPort, String> {
     require_unlocked_session(&state).await?;
+    let key = port;
     let port = std::num::NonZeroU16::new(port).ok_or("port must be nonzero")?;
     let mapped = catcoms_net::map_media_udp_port(port).await?;
-    Ok(MappedCallPort {
-        ip: mapped.ip().to_string(),
-        port: mapped.port(),
-    })
+    let result = MappedCallPort {
+        ip: mapped.external.ip().to_string(),
+        port: mapped.external.port(),
+        mechanism: mapped.mechanism.to_string(),
+        confirmed: mapped.confirmed,
+    };
+    // Retain the mapping: a PCP/NAT-PMP lease is renewed by the client inside it, and call end
+    // releases it. A same-port remap (shouldn't happen; ICE ports are fresh per call) releases
+    // the entry it replaces rather than leaking its renewal task.
+    if let Some(previous) = state.media_mappings.lock().await.insert(key, mapped) {
+        previous.release().await;
+    }
+    Ok(result)
 }
 
-/// Best-effort removal of a call mapping when the call ends; the lease is bounded regardless.
+/// Release a call mapping when the call ends. Best-effort at the router; the UPnP lease is
+/// bounded and a dropped PCP/NAT-PMP client stops renewing, so nothing outlives a crash long.
 #[tauri::command]
 async fn unmap_call_port(state: State<'_, AppState>, port: u16) -> Result<(), String> {
     require_unlocked_session(&state).await?;
-    if let Some(port) = std::num::NonZeroU16::new(port) {
-        catcoms_net::unmap_media_udp_port(port).await;
+    let mapping = state.media_mappings.lock().await.remove(&port);
+    if let Some(mapping) = mapping {
+        mapping.release().await;
     }
     Ok(())
 }

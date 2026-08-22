@@ -1931,19 +1931,91 @@ async fn run_upnp_bound_mapper_attempt(
     }
 }
 
-/// How long a media-socket mapping asks for. A call has no renewal loop (the webview owns the
-/// socket, not this crate), so the lease must outlive a long call on its own; four hours covers
-/// the realistic ones and still dies unattended after a crash.
+/// How long a media-socket UPnP mapping asks for. The UPnP path has no renewal loop (the webview
+/// owns the socket, not this crate), so the lease must outlive a long call on its own; four hours
+/// covers the realistic ones and still dies unattended after a crash. PCP/NAT-PMP leases are
+/// short and renewed by the retained client instead.
 const MEDIA_MAP_LEASE_SECS: u32 = 4 * 60 * 60;
 
-/// Map one webview media UDP port through the router (bound-interface IGD search, same rationale
-/// as [`run_upnp_bound_mapper_attempt`]) and return the public socket a remote peer can be told
-/// about. One-shot by design: the mesh's mapping workers own the stable listen port, but a call's
-/// ICE agent binds fresh ephemeral ports the mesh never sees. The caller signals the returned
-/// socket as an extra ICE candidate; a router mapping forwards from **any** source, which is what
-/// makes one mapped side sufficient for a call regardless of the other side's NAT type.
-pub async fn map_media_udp_port(port: NonZeroU16) -> Result<SocketAddrV4, String> {
-    let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
+/// A live media-port mapping: the public socket to advertise plus whatever keeps the route
+/// alive. A UPnP lease is bounded and self-sufficient; a PCP/NAT-PMP lease is short and renewed
+/// by the retained `portmapper` client, so dropping this struct is what ends that route.
+pub struct MediaPortMapping {
+    /// The public socket a remote peer can be told about.
+    pub external: SocketAddrV4,
+    /// Which router protocol granted the route.
+    pub mechanism: PortMappingMechanism,
+    /// Whether the router's own state confirmed the mapping beyond the grant response: for UPnP,
+    /// the mapping table was read back and the entry was present (some gateways acknowledge
+    /// AddPortMapping and silently keep nothing); a PCP/NAT-PMP lease is the router's direct
+    /// answer, so it counts as confirmed. True external reachability still needs an outside
+    /// caller, which is the AutoNAT tier's job, not this field's claim.
+    pub confirmed: bool,
+    local_port: NonZeroU16,
+    keepalive: Option<portmapper::Client>,
+}
+
+impl MediaPortMapping {
+    /// Release the route. Best-effort for UPnP (the bounded lease dies on its own regardless);
+    /// dropping the retained client is the whole release for PCP/NAT-PMP.
+    pub async fn release(self) {
+        if self.keepalive.is_none() {
+            unmap_media_udp_port(self.local_port).await;
+        }
+    }
+}
+
+/// Whether provably *nothing* is listening at this machine's `(local_ip, port)` UDP socket.
+///
+/// With several adapters up the caller cannot tell which interface an ICE port belongs to, and
+/// mapping a port nothing listens on would advertise a dead candidate. Windows surfaces "nothing
+/// there" as an ICMP port-unreachable that errors the next receive on a *connected* UDP socket,
+/// so a positive disproof is detectable. A silent timeout proves nothing either way (an ICE
+/// agent discards non-STUN datagrams without replying), so only the explicit error blocks.
+async fn media_socket_disproven(local_ip: Ipv4Addr, port: NonZeroU16) -> bool {
+    let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await else {
+        return false;
+    };
+    if socket.connect((local_ip, port.get())).await.is_err() {
+        return false;
+    }
+    if socket.send(&[0u8; 8]).await.is_err() {
+        return true;
+    }
+    let mut response = [0u8; 32];
+    tokio::select! {
+        received = socket.recv(&mut response) => received.is_err(),
+        _ = SystemClock.sleep(Duration::from_millis(600)) => false,
+    }
+}
+
+/// Scan the router's own mapping table for the UDP entry on `port`. The strongest check
+/// available from inside the NAT; a gateway that does not implement the table reads as
+/// unconfirmed, never as failure. Bounded: no home router legitimately needs more entries.
+async fn upnp_mapping_confirmed(
+    gateway: &igd_next::aio::Gateway<igd_next::aio::tokio::Tokio>,
+    port: NonZeroU16,
+) -> bool {
+    for index in 0..64u32 {
+        match gateway.get_generic_port_mapping_entry(index).await {
+            Ok(entry) => {
+                if entry.external_port == port.get()
+                    && entry.protocol == igd_next::PortMappingProtocol::UDP
+                    && entry.enabled
+                {
+                    return true;
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+async fn map_media_port_upnp(
+    local_ip: Ipv4Addr,
+    port: NonZeroU16,
+) -> Result<MediaPortMapping, String> {
     let gateway = igd_next::aio::tokio::search_gateway(igd_next::SearchOptions {
         bind_addr: SocketAddr::new(IpAddr::V4(local_ip), 0),
         timeout: Some(UPNP_BOUND_SEARCH_TIMEOUT),
@@ -1975,7 +2047,97 @@ pub async fn map_media_udp_port(port: NonZeroU16) -> Result<SocketAddrV4, String
             "gateway returned non-public address {external} (likely CGNAT or double NAT)"
         ));
     }
-    Ok(SocketAddrV4::new(external, port.get()))
+    let confirmed = upnp_mapping_confirmed(&gateway, port).await;
+    Ok(MediaPortMapping {
+        external: SocketAddrV4::new(external, port.get()),
+        mechanism: PortMappingMechanism::Upnp,
+        confirmed,
+        local_port: port,
+        keepalive: None,
+    })
+}
+
+/// The PCP/NAT-PMP rung for a media port, for routers that don't speak UPnP. Probe first (an
+/// unprobed one-shot optimistically tries PCP and stops at its timeout without falling through,
+/// same trap as [`run_port_mapper_attempt`]), then give each advertised protocol a bounded
+/// attempt. The client that succeeds is retained: it owns the short lease's renewal.
+async fn map_media_port_pcp_natpmp(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+    const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
+    let probe_client = portmapper::Client::new(portmapper::Config {
+        enable_upnp: false,
+        enable_pcp: true,
+        enable_nat_pmp: true,
+        protocol: portmapper::Protocol::Udp,
+    });
+    let probe = match probe_client.probe().await {
+        Ok(Ok(probe)) => probe,
+        Ok(Err(error)) => return Err(error.to_string()),
+        Err(error) => return Err(format!("port-mapping probe stopped: {error}")),
+    };
+    drop(probe_client);
+    let plan = mapping_attempt_plan(probe.pcp, probe.nat_pmp);
+    if plan.is_empty() {
+        return Err("no compatible gateway answered the probe".to_string());
+    }
+    for mechanism in plan {
+        let client = portmapper::Client::new(portmapper::Config {
+            enable_upnp: false,
+            enable_pcp: mechanism == PortMappingMechanism::Pcp,
+            enable_nat_pmp: mechanism == PortMappingMechanism::NatPmp,
+            protocol: portmapper::Protocol::Udp,
+        });
+        let mut external = client.watch_external_address();
+        client.update_local_port(port);
+        let first = tokio::select! {
+            changed = external.changed() => match changed {
+                Ok(()) => *external.borrow_and_update(),
+                Err(_) => None,
+            },
+            _ = SystemClock.sleep(ACQUIRE_WITHIN) => None,
+        };
+        if let Some(socket) = first {
+            if !ipv4_is_globally_routable(socket.ip()) {
+                return Err(format!(
+                    "gateway returned non-public address {} (likely CGNAT or double NAT)",
+                    socket.ip()
+                ));
+            }
+            return Ok(MediaPortMapping {
+                external: socket,
+                mechanism,
+                confirmed: true,
+                local_port: port,
+                keepalive: Some(client),
+            });
+        }
+    }
+    Err("a gateway answered discovery but granted no mapping".to_string())
+}
+
+/// Map one webview media UDP port through the router and return the live mapping. One-shot by
+/// design: the mesh's mapping workers own the stable listen port, but a call's ICE agent binds
+/// fresh ephemeral ports the mesh never sees. The caller signals the mapping's public socket as
+/// an extra ICE candidate; a router mapping forwards from **any** source, which is what makes
+/// one mapped side sufficient for a call regardless of the other side's NAT type.
+///
+/// Tries UPnP over the bound-interface search first (the proven path; see
+/// [`run_upnp_bound_mapper_attempt`]), then PCP and NAT-PMP for routers that speak those
+/// instead. Before touching the router at all, the socket itself is probed so a port that
+/// belongs to another interface is refused rather than advertised as a dead candidate.
+pub async fn map_media_udp_port(port: NonZeroU16) -> Result<MediaPortMapping, String> {
+    let local_ip = default_route_ipv4().ok_or("no IPv4 default route")?;
+    if media_socket_disproven(local_ip, port).await {
+        return Err(format!(
+            "nothing is listening at {local_ip}:{port}; this ICE port belongs to another interface"
+        ));
+    }
+    match map_media_port_upnp(local_ip, port).await {
+        Ok(mapping) => Ok(mapping),
+        Err(upnp_error) => match map_media_port_pcp_natpmp(port).await {
+            Ok(mapping) => Ok(mapping),
+            Err(pcp_error) => Err(format!("UPnP: {upnp_error}; PCP/NAT-PMP: {pcp_error}")),
+        },
+    }
 }
 
 /// Best-effort removal of a mapping created by [`map_media_udp_port`]. Failure is acceptable:
