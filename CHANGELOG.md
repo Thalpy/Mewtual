@@ -4,6 +4,19 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+## [0.3.0-alpha.4] - 2026-08-22
+
+### Added
+
+- **About & Licences**: Settings → Help now names what this build is, summarises Mewtual's own
+  terms in plain language, and reproduces the full licence text of every open-source component
+  Mewtual is built from.
+
+### Fixed
+
+- The licence's source-disclosure clause no longer reads as though it required relicensing
+  third-party components that their own licences forbid relicensing.
+
 ## [0.3.0-alpha.3] - 2026-08-22
 
 First release cut by the signed release pipeline: installed copies of this version and later
