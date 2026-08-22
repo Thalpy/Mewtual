@@ -114,7 +114,7 @@ pub fn open_file(
     let sealed_payload = unseal(&content_key, &content)?;
     if let Ok(body) = pad::unpad(&sealed_payload, CHUNK_PAD_FLOOR, CHUNK_PAD_CEILING) {
         if Cid::of(body) == file_ref.plaintext_cid {
-            return Ok(body.to_vec());
+            return checked_len(body.to_vec(), file_ref);
         }
     }
     // Pre-padding blob (or a frame that does not describe this file). The address check below is
@@ -122,7 +122,22 @@ pub fn open_file(
     if Cid::of(&sealed_payload) != file_ref.plaintext_cid {
         return Err(StorageError::CidMismatch);
     }
-    Ok(sealed_payload)
+    checked_len(sealed_payload, file_ref)
+}
+
+/// Hold a decrypted chunk to the length its [`FileRef`] declares.
+///
+/// The address check above pins *which* bytes these are, but not how many the ref claimed they
+/// were, and `size` is the field a manifest's layout is checked against. Without this, a member
+/// can declare a small size on a large chunk and every size-derived bound upstream (the file's
+/// total, a range request, a progress total) describes something other than what was decrypted.
+/// An honestly sealed ref always carries the true plaintext length, so this only ever rejects a
+/// ref that was authored to disagree with its own content.
+fn checked_len(plaintext: Vec<u8>, file_ref: &FileRef) -> Result<Vec<u8>, StorageError> {
+    if plaintext.len() as u64 != file_ref.size {
+        return Err(StorageError::Malformed);
+    }
+    Ok(plaintext)
 }
 
 impl FileRef {
@@ -180,9 +195,18 @@ impl FileRef {
 /// `0xF1` first byte unambiguously marks a manifest.
 const MANIFEST_TAG: u8 = 0xF1;
 
-/// Hard upper bound on the chunk count a manifest may declare; a parse guard against a hostile
-/// count, well above the real maximum (the product caps files at 256 MiB / 8 MiB chunks = 32).
-const MAX_CHUNKS: u32 = 4096;
+/// Hard upper bound on the chunk count a manifest may declare: the product's real maximum
+/// (256 MiB files / 8 MiB chunks). This is a parse guard against a hostile count, so it must be
+/// the true maximum and not a comfortable margin above it; a manifest is authored by a member, and
+/// every extra chunk it is allowed to name is a chunk a reader will fetch, decrypt and write.
+/// Raising the product's file-size limit means raising this in step (`catcoms-app` static-asserts
+/// that its own `MAX_FILE_BYTES` still fits).
+pub const MAX_CHUNKS: u32 = 32;
+
+/// The largest single blob a **legacy** (pre-chunking) entry could name: one blob-fetch response.
+/// A legacy entry is one un-chunked `FileRef`, so it is the one shape allowed to exceed the chunk
+/// size, and only up to here.
+const LEGACY_MAX_SINGLE_BLOB: u64 = 16 * 1024 * 1024;
 
 /// A file described as an ordered list of independently-sealed **chunks** plus the whole-file
 /// identity, so a file larger than one blob-fetch response can be transferred chunk-by-chunk. The
@@ -248,21 +272,64 @@ impl FileManifest {
             chunks.push(FileRef::decode(raw)?);
         }
         d.finish().map_err(|_| StorageError::Malformed)?;
-        Ok(Self {
+        let manifest = Self {
             plaintext_cid: Cid::from_bytes(plaintext_cid),
             total_size,
             mime,
             chunks,
-        })
+        };
+        // Decoding is where the layout is enforced, so no reader can forget to. See
+        // [`validate_layout`](Self::validate_layout): `total_size` and `chunks` are two
+        // member-authored fields describing one thing, and nothing else ties them together.
+        manifest.validate_layout()?;
+        Ok(manifest)
+    }
+
+    /// Check that the chunk list is the one and only layout `total_size` implies.
+    ///
+    /// `total_size` and `chunks.len()` are both written by whoever authored the listing, and they
+    /// are used for different things: the declared size bounds the file and drives the UI, while
+    /// the chunk count decides how much a reader actually fetches, decrypts and writes. Left
+    /// independent, a member can declare one byte and attach 32 full chunks, and the whole-file
+    /// address check does not catch it: the author simply computes that address over the expanded
+    /// plaintext. The reader then does 256 MiB of work for a file its own UI called one byte.
+    ///
+    /// So the layout is not a range check, it is an equality: for a file of `total_size` there is
+    /// exactly one legal chunk list, and this is it.
+    pub fn validate_layout(&self) -> Result<(), StorageError> {
+        // An empty file is still one (empty) chunk, so every manifest names at least one.
+        let expected = (self.total_size.max(1)).div_ceil(CHUNK_PAD_CEILING as u64);
+        if expected > MAX_CHUNKS as u64 || self.chunks.len() as u64 != expected {
+            return Err(StorageError::Malformed);
+        }
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            // Every chunk but the last is full; the last carries the remainder (0 for an empty
+            // file). Uniform chunks are also what lets the media reader turn a byte offset into a
+            // chunk index by dividing.
+            let start = i as u64 * CHUNK_PAD_CEILING as u64;
+            let expected_len = (self.total_size - start).min(CHUNK_PAD_CEILING as u64);
+            if chunk.size != expected_len {
+                return Err(StorageError::Malformed);
+            }
+        }
+        Ok(())
     }
 
     /// Read a ref field that is either a tagged `FileManifest` (new) or a legacy single `FileRef`
     /// (old): try the manifest, else decode one `FileRef` and present it as a 1-chunk manifest.
+    ///
+    /// The legacy shape predates chunking, when a whole file was one blob-fetch response, so it is
+    /// the one entry allowed to name a single chunk larger than the chunk size. It is still bounded
+    /// (one ref, at most one response), which is what keeps it out of the amplification the tagged
+    /// layout check exists to stop.
     pub fn decode_or_legacy(bytes: &[u8]) -> Result<Self, StorageError> {
         match Self::decode(bytes) {
             Ok(m) => Ok(m),
             Err(_) => {
                 let r = FileRef::decode(bytes)?;
+                if r.size > LEGACY_MAX_SINGLE_BLOB {
+                    return Err(StorageError::Malformed);
+                }
                 Ok(Self {
                     plaintext_cid: r.plaintext_cid,
                     total_size: r.size,
@@ -299,31 +366,19 @@ mod tests {
 
     #[test]
     fn manifest_round_trips_and_reassembles() {
-        let mut r = rng(7);
-        let wrap = [9u8; 32];
-        // Three chunks of a "file".
-        let parts: [&[u8]; 3] = [b"alpha-", b"bravo-", b"charlie"];
-        let whole: Vec<u8> = parts.concat();
-        let mut chunks = Vec::new();
-        for p in parts {
-            let (file_ref, _stored) =
-                seal_file(p, "application/octet-stream", &wrap, &mut r).unwrap();
-            chunks.push(file_ref);
-        }
-        let manifest = FileManifest {
-            plaintext_cid: Cid::of(&whole),
-            total_size: whole.len() as u64,
-            mime: "application/octet-stream".into(),
-            chunks,
-        };
+        // A real multi-chunk file: full chunks and one short tail. The sizes matter, because a
+        // manifest's layout has to be the one its declared total implies; a three-chunk manifest
+        // of six-byte chunks is not a shape any file can have.
+        let whole_len = CHUNK_PAD_CEILING * 2 + 7;
+        let manifest = manifest_over(&whole_of(whole_len));
         let encoded = manifest.encode();
         // The tag distinguishes it from a legacy single FileRef.
         assert_eq!(encoded[0], MANIFEST_TAG);
 
         let decoded = FileManifest::decode(&encoded).unwrap();
-        assert_eq!(decoded.total_size, whole.len() as u64);
+        assert_eq!(decoded.total_size, whole_len as u64);
         assert_eq!(decoded.chunks.len(), 3);
-        assert_eq!(decoded.plaintext_cid, Cid::of(&whole));
+        assert_eq!(decoded.plaintext_cid, Cid::of(&whole_of(whole_len)));
         // decode_or_legacy also accepts it.
         assert_eq!(
             FileManifest::decode_or_legacy(&encoded)
@@ -332,6 +387,38 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    /// A position-dependent "file" of `len` bytes, so a mis-ordered chunk changes the result.
+    fn whole_of(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Seal `whole` the way `add_file` does: `CHUNK_PAD_CEILING` chunks with a short tail.
+    fn manifest_over(whole: &[u8]) -> FileManifest {
+        let mut r = rng(7);
+        let wrap = [9u8; 32];
+        let mut chunks = Vec::new();
+        for part in whole.chunks(CHUNK_PAD_CEILING) {
+            chunks.push(
+                seal_file(part, "application/octet-stream", &wrap, &mut r)
+                    .unwrap()
+                    .0,
+            );
+        }
+        if chunks.is_empty() {
+            chunks.push(
+                seal_file(&[], "application/octet-stream", &wrap, &mut r)
+                    .unwrap()
+                    .0,
+            );
+        }
+        FileManifest {
+            plaintext_cid: Cid::of(whole),
+            total_size: whole.len() as u64,
+            mime: "application/octet-stream".into(),
+            chunks,
+        }
     }
 
     #[test]
@@ -349,6 +436,95 @@ mod tests {
             FileManifest::decode(&bytes),
             Err(StorageError::Malformed)
         ));
+    }
+
+    #[test]
+    fn a_manifest_cannot_declare_a_small_file_and_attach_a_large_one() {
+        // The amplification a member gets if `total_size` and `chunks` are allowed to disagree.
+        // One valid full chunk, repeated, under a one-byte declared size: the UI would show a
+        // one-byte file, and the reader would fetch, decrypt and write 256 MiB of it. The
+        // whole-file address is no defence, because the author computes it over the expansion.
+        let mut hostile = manifest_over(&whole_of(CHUNK_PAD_CEILING));
+        let chunk = hostile.chunks[0].clone();
+        hostile.chunks = vec![chunk; MAX_CHUNKS as usize];
+        hostile.total_size = 1;
+        assert!(hostile.validate_layout().is_err());
+        assert!(matches!(
+            FileManifest::decode(&hostile.encode()),
+            Err(StorageError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn a_manifest_must_have_exactly_the_chunks_its_size_implies() {
+        let legal = manifest_over(&whole_of(CHUNK_PAD_CEILING + 5));
+        assert_eq!(legal.chunks.len(), 2);
+        legal.validate_layout().unwrap();
+
+        // One chunk too few, and one too many, for the same declared size.
+        let mut short = legal.clone();
+        short.chunks.pop();
+        assert!(short.validate_layout().is_err());
+        let mut long = legal.clone();
+        long.chunks.push(legal.chunks[0].clone());
+        assert!(long.validate_layout().is_err());
+
+        // The right count, but the tail claims to be full: the sizes must add up to the total.
+        let mut fat_tail = legal.clone();
+        fat_tail.chunks[1].size = CHUNK_PAD_CEILING as u64;
+        assert!(fat_tail.validate_layout().is_err());
+
+        // A short chunk anywhere but the end shifts every later boundary.
+        let mut short_head = legal.clone();
+        short_head.chunks[0].size = 5;
+        assert!(short_head.validate_layout().is_err());
+
+        // A manifest with no chunks at all describes nothing.
+        let mut none = legal;
+        none.chunks.clear();
+        assert!(none.validate_layout().is_err());
+    }
+
+    #[test]
+    fn an_empty_file_is_exactly_one_empty_chunk() {
+        let empty = manifest_over(&[]);
+        assert_eq!(empty.chunks.len(), 1);
+        assert_eq!(empty.chunks[0].size, 0);
+        empty.validate_layout().unwrap();
+        assert!(FileManifest::decode(&empty.encode()).is_ok());
+    }
+
+    #[test]
+    fn a_chunk_that_decrypts_to_more_than_it_declared_is_refused() {
+        // `size` is what the layout check is made of, so a ref that lies about it would let a
+        // legal-looking manifest carry more data than it accounts for. The address check pins
+        // *which* bytes these are; this pins how many the ref said there would be.
+        let mut r = rng(11);
+        let wrap = [6u8; 32];
+        let plaintext = whole_of(4096);
+        let (mut file_ref, stored) =
+            seal_file(&plaintext, "application/octet-stream", &wrap, &mut r).unwrap();
+        // Honest ref: opens.
+        assert_eq!(open_file(&stored, &file_ref, &wrap).unwrap(), plaintext);
+        // Same bytes, understated size: refused.
+        file_ref.size = 1;
+        assert!(matches!(
+            open_file(&stored, &file_ref, &wrap),
+            Err(StorageError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn a_legacy_entry_is_bounded_by_one_blob_response() {
+        // The legacy shape is the one entry allowed a chunk larger than the chunk size, because
+        // it predates chunking. It is still one ref and still bounded, so it cannot amplify.
+        let mut r = rng(5);
+        let wrap = [4u8; 32];
+        let (mut file_ref, _stored) = seal_file(b"old file", "text/plain", &wrap, &mut r).unwrap();
+        file_ref.size = LEGACY_MAX_SINGLE_BLOB + 1;
+        assert!(FileManifest::decode_or_legacy(&file_ref.encode()).is_err());
+        file_ref.size = LEGACY_MAX_SINGLE_BLOB;
+        assert!(FileManifest::decode_or_legacy(&file_ref.encode()).is_ok());
     }
 
     #[test]

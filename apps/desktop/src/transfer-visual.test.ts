@@ -1,18 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  formatBytes, formatRate, sampleRate, transferPieces,
-  TRANSFER_CHUNK_BYTES, TRANSFER_SLICE_BYTES,
-} from "./transfer-visual.ts";
-
-test("an upload slice divides a seal chunk exactly", () => {
-  // The native side seals a chunk once its buffer reaches TRANSFER_CHUNK_BYTES. If a slice did
-  // not divide a chunk, a buffer would overshoot and chunks would stop being uniformly sized,
-  // which the media reader (offset / chunk size = chunk index) depends on.
-  assert.ok(TRANSFER_SLICE_BYTES > 0);
-  assert.ok(TRANSFER_SLICE_BYTES < TRANSFER_CHUNK_BYTES, "a slice is smaller than a chunk");
-  assert.equal(TRANSFER_CHUNK_BYTES % TRANSFER_SLICE_BYTES, 0);
-});
+import { formatBytes, formatRate, sampleRate, transferPieces } from "./transfer-visual.ts";
 
 test("piece strips distinguish held, active and pending chunks", () => {
   assert.deepEqual(transferPieces(5, 2, true, true, false, false), [

@@ -14,13 +14,24 @@ All notable changes to Mewtual are documented here.
   in one uninterrupted step, during which it stopped talking to the group and stopped answering
   anything else you asked it. A share now moves in slices and is encrypted a chunk at a time, so
   the window keeps painting, the server keeps syncing, and the progress bar reflects work that has
-  genuinely happened. An upload that fails or is cancelled now cleans up after itself instead of
-  leaving encrypted fragments on disk.
+  genuinely happened. An upload that fails or is cancelled cleans up after itself instead of
+  leaving encrypted fragments behind, and one whose window went away (a reload, say) is now
+  collected rather than holding space until you lock.
 - **Saving a shared file to Downloads pulled it through the window twice.** The file was read out
   in full, handed to the window, and handed straight back to be written, so saving a large file
   froze the app for the same reason sharing one did. It now goes from the server to the file
-  directly, checking as it lands that what was written is what was shared. Nothing is left in
-  Downloads if the transfer fails partway.
+  directly, checking as it lands that what was written is what was shared. It is written under a
+  `.part` name and only becomes the real file once that check passes, so a failed or interrupted
+  save never leaves something in Downloads that looks like the finished thing.
+
+### Security
+
+- **A shared file can no longer claim to be small and arrive huge.** A file's listing says both how
+  big it is and which pieces it is made of, and nothing required those two to agree. A member
+  running a modified client could publish a listing that reads as one byte and expands to gigabytes
+  when anyone saved or previewed it, filling their disk from what the app showed as a trivial file.
+  A listing whose pieces do not match its stated size is now rejected outright, before anything is
+  fetched or written, and a transfer stops the moment more data arrives than the file declared.
 
 ## [0.3.0-alpha.5] - 2026-08-22
 

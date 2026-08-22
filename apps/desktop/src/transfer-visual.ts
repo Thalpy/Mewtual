@@ -1,15 +1,25 @@
 export type TransferPiece = "held" | "active" | "pending" | "offline" | "failed";
-export const TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
+
 /**
- * How much of an upload crosses the IPC bridge in one message.
- *
- * Deliberately far smaller than TRANSFER_CHUNK_BYTES, which is the size a chunk is *sealed* at
- * and cannot change: an invoke argument becomes a base64 string that both sides serialize whole,
- * so the message size, not the chunk size, is what decides whether the webview stutters. The
- * native side buffers slices until it has a whole chunk, so this only has to divide
- * TRANSFER_CHUNK_BYTES exactly, which is what keeps chunk boundaries uniform.
+ * The seal chunk size, used only to guess a transfer's piece count before the native side says
+ * what it actually is. Not the streaming contract: an upload takes its real chunk count and slice
+ * size from the UploadTicket that begin_file_upload returns, because two languages holding
+ * copies of the same protocol constant is a drift neither language's tests can see.
  */
-export const TRANSFER_SLICE_BYTES = 1024 * 1024;
+export const TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/**
+ * What the native side says about one upload when it opens: the whole streaming contract, stated
+ * per upload so the caller never has to hold its own copy of it.
+ */
+export type UploadTicket = {
+  /** Identifies this upload's work to every later native call. Not the caller's own upload id. */
+  token: string;
+  /** How many chunks the file will be sealed into; the denominator of its progress. */
+  chunkTotal: number;
+  /** How many bytes to put in each push_file_chunk call (the last slice may be shorter). */
+  sliceBytes: number;
+};
 
 /** Build a small, bounded piece strip. Files currently have at most 32 chunks. */
 export function transferPieces(

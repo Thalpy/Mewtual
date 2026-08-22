@@ -280,8 +280,19 @@ struct AppState {
     /// Polling remains active, so monitor initialization failure affects latency, not correctness.
     network_changes: NetworkChangeSignal,
     /// Streamed uploads in flight, keyed by `(server, upload id)`. See [`PendingUpload`].
-    uploads: Mutex<HashMap<(u64, String), PendingUpload>>,
+    uploads: Mutex<HashMap<UploadKey, PendingUpload>>,
 }
+
+/// Identity of one streamed upload: the server, and a **backend-minted** generation token.
+///
+/// Deliberately not the caller's upload id. Sealing a chunk releases the map lock across an actor
+/// round-trip, and the completion has to find its own upload again afterwards. Keyed by the public
+/// id, a caller that restarted that id in the meantime would receive the earlier generation's
+/// chunk: begin/cancel/begin is documented as a restart, so the earlier entry is gone and a new one
+/// sits under the same key. That mis-attachment is silent and produces a listing whose chunks are
+/// not the file its address names, which no member can ever download. A fresh token per `begin`
+/// makes a stale completion look up an entry that no longer exists, which it can only discard.
+type UploadKey = (u64, String);
 
 /// One streamed upload between `begin_file_upload` and `finish_file_upload`.
 ///
@@ -290,6 +301,10 @@ struct AppState {
 /// bridge once, is sealed straight into the blob store, and is dropped.
 struct PendingUpload {
     server: u64,
+    /// The caller's own id for this upload. Not the identity of the work (see [`UploadKey`]);
+    /// carried only so progress events are tagged with what the frontend is displaying, and so a
+    /// restart can retire the previous generation of the same visible transfer.
+    upload_id: String,
     /// Declared at `begin_file_upload` and used for every chunk, so the manifest cannot end up
     /// describing chunks sealed under a type the caller changed halfway through.
     mime: String,
@@ -300,15 +315,19 @@ struct PendingUpload {
     /// this is where the smaller one is assembled into the larger. It never exceeds one chunk.
     buffer: Vec<u8>,
     chunks: Vec<FileRef>,
-    /// A chunk of this upload is being sealed right now. The map lock is released across that
-    /// actor round-trip, so without this two concurrent pushes could both pass the offset check.
-    sealing: bool,
+    /// Which chunk is being sealed right now, if any. The map lock is released across that actor
+    /// round-trip, so this both stops a second concurrent slice and pins where the returning
+    /// `FileRef` belongs: a completion is attached only if the upload is still waiting for exactly
+    /// that chunk, so refs can never be appended in completion order rather than file order.
+    sealing: Option<usize>,
     /// Bytes accepted so far; also the only offset the next slice may claim. Slices must arrive
     /// in order and exactly once: the media reader maps a byte offset to a chunk index by
     /// dividing, so a hole or a repeat would produce a manifest whose boundaries do not line up.
     bytes_seen: u64,
     declared_size: u64,
     chunk_total: usize,
+    /// When this upload last made progress, for the idle sweep.
+    touched_at: u64,
 }
 
 impl PendingUpload {
@@ -323,7 +342,7 @@ impl PendingUpload {
     /// the running whole-file address has already absorbed the earlier slices and cannot be
     /// rewound, so there is no consistent state to continue from.
     fn admit_slice(&mut self, offset: u64, bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        if self.sealing {
+        if self.sealing.is_some() {
             return Err("a chunk of this upload is already being sealed".into());
         }
         if offset != self.bytes_seen {
@@ -339,11 +358,12 @@ impl PendingUpload {
         self.address.update(bytes);
         self.buffer.extend_from_slice(bytes);
         self.bytes_seen = end;
+        self.touched_at = SystemClock.now_ms();
         // A slice divides a chunk exactly, so the buffer lands on the boundary rather than past it.
         if self.buffer.len() < CHUNK_BYTES {
             return Ok(None);
         }
-        self.sealing = true;
+        self.sealing = Some(self.chunks.len());
         Ok(Some(std::mem::take(&mut self.buffer)))
     }
 
@@ -351,7 +371,7 @@ impl PendingUpload {
     /// size is not a whole number of chunks ends short, and an empty file is still one (empty)
     /// chunk, so a manifest always has at least one.
     fn take_tail(&mut self) -> Result<Option<Vec<u8>>, String> {
-        if self.sealing {
+        if self.sealing.is_some() {
             return Err("a chunk of this upload is still being sealed".into());
         }
         if self.bytes_seen != self.declared_size {
@@ -360,14 +380,24 @@ impl PendingUpload {
         if self.buffer.is_empty() && !self.chunks.is_empty() {
             return Ok(None);
         }
-        self.sealing = true;
+        self.sealing = Some(self.chunks.len());
         Ok(Some(std::mem::take(&mut self.buffer)))
     }
 
-    /// Record a sealed chunk's reference and release the sealing claim.
+    /// Whether a chunk that has just finished sealing still belongs here.
+    ///
+    /// False means the returning `FileRef` is work this generation is not waiting for: a chunk
+    /// already recorded, or one claimed before a restart/cancel moved the upload on. Attaching it
+    /// would put a ref at the wrong index, so the caller collects the sealed blob instead.
+    fn can_accept(&self, index: usize) -> bool {
+        self.sealing == Some(index) && index == self.chunks.len()
+    }
+
+    /// Record a sealed chunk's reference and release the sealing claim. Only call after
+    /// [`can_accept`](Self::can_accept).
     fn chunk_sealed(&mut self, file_ref: FileRef) -> usize {
         self.chunks.push(file_ref);
-        self.sealing = false;
+        self.sealing = None;
         self.chunks.len()
     }
 
@@ -379,19 +409,41 @@ impl PendingUpload {
             && self.buffer.is_empty()
             && self.chunks.len() == self.chunk_total
     }
+
+    /// Sealed vault bytes this upload is holding but has not published. What a quota on staged
+    /// data has to count: an entry cap alone bounds nothing, because one entry can stage a whole
+    /// 256 MiB file.
+    fn staged_bytes(&self) -> u64 {
+        self.chunks.len() as u64 * CHUNK_BYTES as u64
+    }
+
+    /// Whether nothing has been added to this upload since `cutoff`. An upload whose caller went
+    /// away (a webview reload loses its ids while the native process lives on) otherwise keeps
+    /// both its slot and its staged bytes until the session is locked.
+    fn idle_since(&self, cutoff: u64) -> bool {
+        self.sealing.is_none() && self.touched_at < cutoff
+    }
 }
 
 /// Streamed uploads one session may have open at once. Each holds at most one chunk of buffered
 /// bytes plus its chunk references, so this bounds both map growth and buffered memory from a
 /// webview that starts uploads and never finishes them.
 const MAX_PENDING_UPLOADS: usize = 16;
+/// Total sealed-but-unpublished bytes all in-flight uploads may hold. The entry cap does not bound
+/// this on its own: sixteen uploads that each seal every chunk and never finish would stage 4 GiB
+/// of vault data that no manifest names.
+const MAX_STAGED_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
+/// How long an upload may go untouched before a later `begin` collects it. A caller that vanished
+/// (most commonly a webview reload, which loses the ids while the native side keeps running) has
+/// no way to cancel its own uploads, so nothing else would ever release them.
+const UPLOAD_IDLE_TIMEOUT_MS: u64 = 10 * 60 * 1000;
 /// Longest accepted upload id. The webview mints these (a UUID); the bound plus the character
 /// check keeps a malformed one out of the key space.
 const MAX_UPLOAD_ID_BYTES: usize = 64;
-/// How much of an upload crosses the IPC bridge in one `push_file_chunk` call. Mirrors
-/// `TRANSFER_SLICE_BYTES` in the frontend, and must divide [`CHUNK_BYTES`] exactly so buffered
-/// slices always land on a chunk boundary. Sealing happens at [`CHUNK_BYTES`]; this is only about
-/// keeping any single IPC message small enough that serializing it does not stall the webview.
+/// How much of an upload crosses the IPC bridge in one `push_file_chunk` call. Reported to the
+/// caller in its [`UploadTicket`], and must divide [`CHUNK_BYTES`] exactly so buffered slices
+/// always land on a chunk boundary. Sealing happens at [`CHUNK_BYTES`]; this is only about keeping
+/// any single IPC message small enough that serializing it does not stall the webview.
 const UPLOAD_SLICE_BYTES: usize = 1024 * 1024;
 const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES % UPLOAD_SLICE_BYTES == 0);
 
@@ -403,6 +455,9 @@ fn upload_chunk_count(size: u64) -> usize {
 
 /// Drop a pending upload's sealed-but-unpublished chunk blobs. Uses the unchecked actor lookup so
 /// cleanup still runs when the vault has just been locked, which is one of the ways an upload ends.
+///
+/// Awaited rather than fire-and-forget: cancel and lock report that the upload has been cleaned
+/// up, so they must not return while the blobs are still queued for deletion.
 async fn discard_pending_upload(state: &AppState, upload: PendingUpload) {
     if upload.chunks.is_empty() {
         return;
@@ -410,6 +465,15 @@ async fn discard_pending_upload(state: &AppState, upload: PendingUpload) {
     if let Ok(actor) = actor_of_unchecked(state, upload.server).await {
         actor.discard_upload(upload.chunks).await;
     }
+}
+
+/// A fresh generation token for one `begin_file_upload`. See [`UploadKey`]: this is the identity
+/// asynchronous seal work is matched against, so it has to be unguessable-fresh per begin rather
+/// than derived from anything the caller supplies.
+fn mint_upload_token() -> String {
+    let mut raw = [0u8; 16];
+    OsCryptoRng.fill_bytes(&mut raw);
+    hex::encode(raw)
 }
 
 #[derive(Debug, Clone)]
@@ -1093,6 +1157,13 @@ struct UiModerationState {
 struct ChannelEvt {
     server: u64,
     channel: String,
+    /// What actually moved. One channel document holds the message log, the topic and the jukebox
+    /// queue, so an untyped event forced the UI to read a queue edit as an unread chat message.
+    /// Only `messages_appended` may create unread state.
+    messages_appended: bool,
+    messages_changed: bool,
+    topic: bool,
+    jukebox: bool,
 }
 #[derive(Serialize, Clone)]
 struct CountEvt {
@@ -1128,6 +1199,23 @@ struct UploadProgressEvt {
     upload_id: String,
     done: usize,
     total: usize,
+}
+
+/// What `begin_file_upload` hands back: the whole streaming contract for this one upload, so the
+/// caller never has to hold its own copy of the protocol's constants.
+///
+/// The frontend used to compute the chunk count from a TypeScript copy of the chunk size and slice
+/// with a TypeScript copy of the slice size. Two languages holding the same two numbers is a drift
+/// no test in either language can see; here the native side states them per upload and the caller
+/// simply obeys.
+#[derive(Serialize, Clone)]
+struct UploadTicket {
+    /// Identifies this upload's work for the rest of its life. See [`UploadKey`].
+    token: String,
+    /// How many chunks the file will be sealed into, and so the denominator of its progress.
+    chunk_total: usize,
+    /// How many bytes the caller should put in each `push_file_chunk` (the last may be shorter).
+    slice_bytes: usize,
 }
 #[derive(Serialize, Clone)]
 struct EclipseEvt {
@@ -1375,13 +1463,17 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 AppEvent::ChannelsUpdated => {
                     let _ = app.emit("channels-changed", ServerEvt { server });
                 }
-                AppEvent::ChannelUpdated { channel } => {
+                AppEvent::ChannelUpdated { channel, change } => {
                     // Channel ids are u128; send as a string (JS numbers lose precision).
                     let _ = app.emit(
                         "channel-updated",
                         ChannelEvt {
                             server,
                             channel: channel.to_string(),
+                            messages_appended: change.messages_appended,
+                            messages_changed: change.messages_changed,
+                            topic: change.topic,
+                            jukebox: change.jukebox,
                         },
                     );
                 }
@@ -5053,6 +5145,9 @@ async fn get_badges(
 /// until the last chunk was written. A large share therefore looked like the whole app hanging.
 /// A streamed upload moves and seals one [`CHUNK_BYTES`] chunk at a time, so neither side is ever
 /// occupied for longer than one chunk and the server keeps syncing throughout.
+///
+/// Returns the upload's **token** along with its chunk count. Every later call carries the token;
+/// see [`UploadKey`] for why the caller's own id cannot be the identity of the work.
 #[tauri::command]
 async fn begin_file_upload(
     state: State<'_, AppState>,
@@ -5060,7 +5155,7 @@ async fn begin_file_upload(
     upload_id: String,
     mime: String,
     size: u64,
-) -> Result<usize, String> {
+) -> Result<UploadTicket, String> {
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
     actor_of(&state, server).await?;
@@ -5078,32 +5173,56 @@ async fn begin_file_upload(
         ));
     }
     let chunk_total = upload_chunk_count(size);
-    let key = (server, upload_id);
+    let token = mint_upload_token();
+    let now = SystemClock.now_ms();
     let mut uploads = state.uploads.lock().await;
-    // Re-beginning an id restarts it; whatever the abandoned attempt sealed is dropped below.
-    let replaced = uploads.remove(&key);
+    // Retire what this begin supersedes, in one pass:
+    //  - the previous generation of the same visible transfer (a restart). It is retired rather
+    //    than reused, so an earlier seal still in flight finds nothing to attach to and collects.
+    //  - anything untouched for long enough that its caller is plainly gone.
+    let retired: Vec<UploadKey> = uploads
+        .iter()
+        .filter(|(k, v)| {
+            (k.0 == server && v.upload_id == upload_id)
+                || v.idle_since(now.saturating_sub(UPLOAD_IDLE_TIMEOUT_MS))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    let retired: Vec<PendingUpload> = retired.iter().filter_map(|k| uploads.remove(k)).collect();
     if uploads.len() >= MAX_PENDING_UPLOADS {
         return Err("too many uploads are already in flight".into());
     }
+    // The entry cap does not bound vault growth; this does. Counted against what is already
+    // staged plus what this upload would add if it ran to the end and never finished.
+    let staged: u64 = uploads.values().map(PendingUpload::staged_bytes).sum();
+    if staged.saturating_add(chunk_total as u64 * CHUNK_BYTES as u64) > MAX_STAGED_UPLOAD_BYTES {
+        return Err("too much upload data is already waiting to be published".into());
+    }
     uploads.insert(
-        key,
+        (server, token.clone()),
         PendingUpload {
             server,
+            upload_id,
             mime,
             address: CidHasher::new(),
             buffer: Vec::new(),
             chunks: Vec::new(),
-            sealing: false,
+            sealing: None,
             bytes_seen: 0,
             declared_size: size,
             chunk_total,
+            touched_at: now,
         },
     );
     drop(uploads);
-    if let Some(old) = replaced {
+    for old in retired {
         discard_pending_upload(&state, old).await;
     }
-    Ok(chunk_total)
+    Ok(UploadTicket {
+        token,
+        chunk_total,
+        slice_bytes: UPLOAD_SLICE_BYTES,
+    })
 }
 
 /// Take ONE slice of a streamed upload (base64-encoded bytes at byte `offset`), sealing a chunk
@@ -5123,23 +5242,26 @@ async fn push_file_chunk(
     app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
-    upload_id: String,
+    token: String,
     offset: u64,
     data: String,
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
-    // Bound the decode before doing it: base64 expands by 4/3, so anything past this cannot be a
-    // legal slice however it decodes.
+    // Bound the decode before doing it: base64 expands by 4/3, so this cannot be a legal slice
+    // however it decodes. The decoded length is then held to the exact bound below.
     if data.len() > UPLOAD_SLICE_BYTES * 2 {
         return Err("upload slice is larger than one slice".into());
     }
     let bytes = B64
         .decode(data.as_bytes())
         .map_err(|e| format!("bad slice data: {e}"))?;
-    let key = (server, upload_id.clone());
+    if bytes.len() > UPLOAD_SLICE_BYTES {
+        return Err("upload slice is larger than one slice".into());
+    }
+    let key = (server, token);
     // Validate and buffer under the lock, then seal outside it: an actor round-trip must never
     // happen while holding a lock every other upload needs.
-    let (full_chunk, mime, chunk_total) = {
+    let (full_chunk, mime, chunk_total, upload_id) = {
         let mut uploads = state.uploads.lock().await;
         let up = uploads
             .get_mut(&key)
@@ -5148,6 +5270,7 @@ async fn push_file_chunk(
             up.admit_slice(offset, &bytes)?,
             up.mime.clone(),
             up.chunk_total,
+            up.upload_id.clone(),
         )
     };
     let Some(chunk) = full_chunk else {
@@ -5169,28 +5292,47 @@ async fn push_file_chunk(
 }
 
 /// Seal one assembled chunk into the vault and record its reference against the pending upload;
-/// returns how many chunks that upload has sealed. The caller has already set `sealing`, so this
-/// owns clearing it (and, on failure, tearing the whole upload down: the running whole-file
-/// address has absorbed these bytes and cannot be rewound).
+/// returns how many chunks that upload has sealed. The caller has already claimed the sealing
+/// slot, so this owns releasing it (and, on failure, tearing the whole upload down: the running
+/// whole-file address has absorbed these bytes and cannot be rewound).
+///
+/// The upload is re-looked-up by token after the await, and the returning `FileRef` is attached
+/// only if that generation is still waiting for exactly this chunk. Anything else, a cancel, a
+/// lock, a restart of the same visible transfer, means the sealed blob belongs to nothing, and
+/// the only safe thing to do with it is collect it.
 async fn seal_pending_chunk(
     state: &AppState,
     actor: &ServerActor,
-    key: &(u64, String),
+    key: &UploadKey,
     chunk: Vec<u8>,
     mime: String,
 ) -> Result<usize, String> {
+    let index = {
+        let uploads = state.uploads.lock().await;
+        uploads
+            .get(key)
+            .and_then(|up| up.sealing)
+            .ok_or_else(|| "no such upload".to_string())?
+    };
     let sealed = actor.seal_upload_chunk(chunk, mime).await;
     let mut uploads = state.uploads.lock().await;
     match sealed {
-        Ok(file_ref) => match uploads.get_mut(key) {
-            Some(up) => Ok(up.chunk_sealed(file_ref)),
-            // Cancelled or locked mid-seal: the chunk is stored but nothing will ever name it.
-            None => {
-                drop(uploads);
-                actor.discard_upload(vec![file_ref]).await;
-                Err("this upload was cancelled".into())
+        Ok(file_ref) => {
+            let attached = uploads
+                .get_mut(key)
+                .filter(|up| up.can_accept(index))
+                .map(|up| up.chunk_sealed(file_ref.clone()));
+            match attached {
+                Some(done) => Ok(done),
+                // Cancelled, locked, or restarted mid-seal: the blob is stored but nothing will
+                // ever name it, so it goes back out rather than onto whatever now holds this key.
+                None => {
+                    drop(uploads);
+                    actor.discard_upload(vec![file_ref]).await;
+                    Err("this upload is no longer waiting for that chunk".into())
+                }
             }
-        },
+        }
         Err(e) => {
             let abandoned = uploads.remove(key);
             drop(uploads);
@@ -5212,12 +5354,12 @@ async fn finish_file_upload(
     app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
-    upload_id: String,
+    token: String,
     name: String,
     path: String,
 ) -> Result<String, String> {
     let actor = actor_of(&state, server).await?;
-    let key = (server, upload_id.clone());
+    let key = (server, token);
     // Seal whatever the last slices left buffered: a file whose size is not a whole number of
     // chunks ends with a short one, and an empty file is still one (empty) chunk.
     let tail = {
@@ -5229,6 +5371,17 @@ async fn finish_file_upload(
     };
     if let Some((chunk, mime)) = tail {
         seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
+    }
+    // Publishing is irreversible and visible to the group, so the lock is re-checked here, after
+    // the last await that could have run across it, and while the upload is still in the map for
+    // `lock_session_inner` to have taken. A lock that lands after this point is racing a
+    // publication already authorized; one that lands before it stops the publication entirely.
+    if let Err(e) = require_unlocked_session(&state).await {
+        let abandoned = state.uploads.lock().await.remove(&key);
+        if let Some(up) = abandoned {
+            discard_pending_upload(&state, up).await;
+        }
+        return Err(e);
     }
     let pending = state
         .uploads
@@ -5242,6 +5395,7 @@ async fn finish_file_upload(
     }
     let cid = pending.address.cid();
     let chunk_total = pending.chunk_total;
+    let upload_id = pending.upload_id;
     // Kept for the failure path: a failed publish must not leave sealed bytes nothing names.
     let sealed = pending.chunks.clone();
     let published = actor
@@ -5281,10 +5435,10 @@ async fn finish_file_upload(
 async fn cancel_file_upload(
     state: State<'_, AppState>,
     server: u64,
-    upload_id: String,
+    token: String,
 ) -> Result<(), String> {
     require_unlocked_session(&state).await?;
-    let pending = state.uploads.lock().await.remove(&(server, upload_id));
+    let pending = state.uploads.lock().await.remove(&(server, token));
     if let Some(up) = pending {
         discard_pending_upload(&state, up).await;
     }
@@ -5604,6 +5758,12 @@ async fn download_file(
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
+        // This buffer is held whole in memory and then base64'd into the webview, so a manifest
+        // whose chunks exceed its declared size must be stopped before the next append rather
+        // than at the address check after the last one.
+        if out.len() as u64 + chunk.len() as u64 > size {
+            return Err("this file's chunks hold more data than it declares".into());
+        }
         out.extend_from_slice(&chunk);
         let _ = app.emit(
             "download-progress",
@@ -5618,6 +5778,9 @@ async fn download_file(
                 provider,
             },
         );
+    }
+    if out.len() as u64 != size {
+        return Err("this file's chunks hold less data than it declares".into());
     }
     if Cid::of(&out).as_bytes() != &target {
         return Err("the reassembled file failed its integrity check".into());
@@ -7059,6 +7222,46 @@ async fn get_messages(
         .collect())
 }
 
+/// One channel's newest activity, with no message text: what unread state is rebuilt from.
+#[derive(Serialize)]
+struct UiChannelHead {
+    /// Channel id as a string; u128 ids do not survive a JS number.
+    channel: String,
+    count: u64,
+    latest_ts: u64,
+    /// Newest timestamp among messages this device did not write (`0` if there are none). Own
+    /// messages never make a channel unread, so this is what a read mark is compared against.
+    latest_incoming_ts: u64,
+    latest_incoming_id: String,
+}
+
+/// Read one compact activity head per channel.
+///
+/// The live `channel-updated` stream only reports what happened while the UI was listening, and it
+/// is deliberately dropped at the native boundary while the vault is locked. Unread badges that
+/// were outstanding across an explicit lock, a restart or an offline catch-up therefore cannot be
+/// recovered from events at all: the client rebuilds them by comparing these heads with its own
+/// durable read marks.
+#[tauri::command]
+async fn get_channel_heads(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<UiChannelHead>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .channel_heads()
+        .await
+        .into_iter()
+        .map(|h| UiChannelHead {
+            channel: h.channel.to_string(),
+            count: h.count,
+            latest_ts: h.latest_ts,
+            latest_incoming_ts: h.latest_incoming_ts,
+            latest_incoming_id: h.latest_incoming_id,
+        })
+        .collect())
+}
+
 /// The cross-server mention/reply inbox: every message addressed to me, across all servers/DMs,
 /// newest first. Each server's actor scans its own channels (and resolves author names, since they
 /// are per-server); the bridge tags each item with its server context.
@@ -7533,6 +7736,48 @@ fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Resul
     Ok(path)
 }
 
+/// Extension for a download still being written. A streamed save fills one of these and renames it
+/// onto the real name only once the whole file has been verified, so the peer-chosen name never
+/// exists holding bytes Mewtual has not authenticated. Crash, kill or power loss during a transfer
+/// therefore leaves a `.part`, not something that looks like the file.
+const DOWNLOAD_STAGING_SUFFIX: &str = "part";
+
+/// Reserve a staging file and the final name it will be renamed onto.
+///
+/// Both are reserved up front with `create_new`, so a second save of the same file cannot pick the
+/// same final name while this one is still writing, and the rename at the end cannot collide.
+fn create_staged_download(
+    downloads: &Path,
+    requested_name: &str,
+) -> Result<(std::fs::File, PathBuf, PathBuf), String> {
+    let (final_file, final_path) = create_download(downloads, requested_name)?;
+    // The reservation is a placeholder, not the download: hold the name, write elsewhere.
+    drop(final_file);
+    let staging_name = format!(
+        "{}.{DOWNLOAD_STAGING_SUFFIX}",
+        final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("mewtual-download")
+    );
+    match create_download(downloads, &staging_name) {
+        Ok((file, staging_path)) => Ok((file, staging_path, final_path)),
+        Err(e) => {
+            let _ = std::fs::remove_file(&final_path);
+            Err(e)
+        }
+    }
+}
+
+/// Move a verified staging file onto its reserved final name.
+///
+/// The reservation is an empty file this same call created, so replacing it is not clobbering
+/// anyone: `rename` over it is the atomic publish, and no window exists in which the final name
+/// holds a partial download.
+fn publish_staged_download(staging: &Path, final_path: &Path) -> Result<(), String> {
+    std::fs::rename(staging, final_path).map_err(|e| e.to_string())
+}
+
 fn launch_path(path: &Path) -> Result<(), String> {
     // As with URLs, never involve a shell: the path is one literal argument to the OS launcher.
     #[cfg(target_os = "windows")]
@@ -7854,12 +8099,14 @@ async fn save_group_file(
         ));
     }
     let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
-    // Reserving the name up front means a second save of the same file cannot land on it, and
-    // gives one path to clean up if anything below fails.
-    let (mut file, path) = create_download(&downloads, &name)?;
-    let failed = |path: &Path, error: String| -> String {
-        // A partial or unverified file must not be left looking like the real one.
-        let _ = std::fs::remove_file(path);
+    // Write into a `.part` and rename onto the reserved name only once the whole file has been
+    // verified. Reserving the final name up front stops a second save landing on it; writing
+    // elsewhere until the end means neither an error here nor a crash can leave the peer's chosen
+    // filename holding bytes this device has not authenticated.
+    let (mut file, staging, path) = create_staged_download(&downloads, &name)?;
+    let failed = |error: String| -> String {
+        let _ = std::fs::remove_file(&staging);
+        let _ = std::fs::remove_file(&path);
         error
     };
     let _ = app.emit(
@@ -7879,22 +8126,38 @@ async fn save_group_file(
     let mut bytes_done = 0u64;
     let mut network_bytes_done = 0u64;
     for i in 0..total {
-        // A transfer can outlive the click that started it. Do not keep writing decrypted bytes
-        // to disk after an explicit lock closes the webview session.
+        // A transfer can outlive the click that started it, and a chunk fetch can be in flight
+        // across a lock. Check before asking for bytes and again before writing them: the second
+        // check is the one that matters, because the first says nothing about a session that
+        // closed while the fetch was outstanding.
         if let Err(e) = require_unlocked_session(&state).await {
-            return Err(failed(&path, e));
+            return Err(failed(e));
         }
         let (chunk, provider) = match actor.fetch_file_chunk(raw.clone(), i).await {
             Ok(got) => got,
-            Err(e) => return Err(failed(&path, e)),
+            Err(e) => return Err(failed(e)),
         };
+        if let Err(e) = require_unlocked_session(&state).await {
+            return Err(failed(e));
+        }
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
+        // Independent of the manifest's own layout check: never write more bytes than the file
+        // said it was. The declared size is what the user was shown and what this download was
+        // sized against, so anything past it is not this file, whatever the manifest claims.
+        let next = bytes_done
+            .checked_add(chunk.len() as u64)
+            .filter(|n| *n <= size);
+        let Some(next) = next else {
+            return Err(failed(
+                "this file's chunks hold more data than it declares".into(),
+            ));
+        };
         address.update(&chunk);
-        bytes_done = bytes_done.saturating_add(chunk.len() as u64);
+        bytes_done = next;
         if let Err(e) = file.write_all(&chunk) {
-            return Err(failed(&path, e.to_string()));
+            return Err(failed(e.to_string()));
         }
         let _ = app.emit(
             "download-progress",
@@ -7911,16 +8174,27 @@ async fn save_group_file(
         );
     }
     if let Err(e) = file.sync_all() {
-        return Err(failed(&path, e.to_string()));
+        return Err(failed(e.to_string()));
     }
     drop(file);
+    if bytes_done != size {
+        return Err(failed(
+            "this file's chunks hold less data than it declares".into(),
+        ));
+    }
     // End-to-end integrity, the same check the all-in-one download makes: individually valid
     // chunks in the wrong order (or a manifest that lied) must not be saved as the file.
     if address.cid().as_bytes() != &target {
         return Err(failed(
-            &path,
             "the reassembled file failed its integrity check".into(),
         ));
+    }
+    // Last gate before the file becomes visible under its real name and Downloads is opened.
+    if let Err(e) = require_unlocked_session(&state).await {
+        return Err(failed(e));
+    }
+    if let Err(e) = publish_staged_download(&staging, &path) {
+        return Err(failed(e));
     }
     let warning = reveal_path(&path)
         .err()
@@ -8976,6 +9250,7 @@ pub fn run() {
             get_jukebox,
             get_inbox,
             get_messages,
+            get_channel_heads,
             pairing_begin,
             pairing_read,
             pairing_mint,
@@ -9106,14 +9381,16 @@ mod tests {
     fn pending(size: u64) -> PendingUpload {
         PendingUpload {
             server: 1,
+            upload_id: "transfer-1".into(),
             mime: "application/octet-stream".into(),
             address: CidHasher::new(),
             buffer: Vec::new(),
             chunks: Vec::new(),
-            sealing: false,
+            sealing: None,
             bytes_seen: 0,
             declared_size: size,
             chunk_total: upload_chunk_count(size),
+            touched_at: 0,
         }
     }
 
@@ -9142,13 +9419,17 @@ mod tests {
         while offset < size {
             let end = (offset + UPLOAD_SLICE_BYTES).min(size);
             if let Some(chunk) = up.admit_slice(offset as u64, &data[offset..end]).unwrap() {
+                let index = up.sealing.expect("a claimed chunk names its index");
                 sealed.push(chunk);
+                assert!(up.can_accept(index));
                 up.chunk_sealed(stub_ref());
             }
             offset = end;
         }
         if let Some(tail) = up.take_tail().unwrap() {
+            let index = up.sealing.expect("a claimed tail names its index");
             sealed.push(tail);
+            assert!(up.can_accept(index));
             up.chunk_sealed(stub_ref());
         }
         (up, sealed)
@@ -9254,11 +9535,56 @@ mod tests {
                 break;
             }
         }
-        assert!(up.sealing, "the completed chunk claimed the upload");
+        assert_eq!(up.sealing, Some(0), "the completed chunk claimed index 0");
         assert!(up.admit_slice(offset, &slice).is_err());
         assert!(up.take_tail().is_err(), "finishing mid-seal is refused too");
         up.chunk_sealed(stub_ref());
         assert!(up.admit_slice(offset, &slice).is_ok(), "sealing released");
+    }
+
+    #[test]
+    fn a_seal_is_only_attached_to_the_chunk_it_was_started_for() {
+        // The map lock is released across the seal, so a completion has to prove it is still the
+        // work this upload is waiting for. Anything else would append a ref at the wrong index:
+        // the manifest would then be in completion order rather than file order, and every member
+        // would fail the whole-file check on a listing nobody can ever repair.
+        let slice = vec![0u8; UPLOAD_SLICE_BYTES];
+        let mut up = pending(CHUNK_BYTES as u64 * 2);
+        let mut offset = 0u64;
+        while up.admit_slice(offset, &slice).unwrap().is_none() {
+            offset += UPLOAD_SLICE_BYTES as u64;
+        }
+        assert!(up.can_accept(0), "the chunk it is actually sealing");
+        assert!(!up.can_accept(1), "a chunk it has not started");
+        up.chunk_sealed(stub_ref());
+
+        // The same completion arriving twice: the second is not owed a slot.
+        assert!(!up.can_accept(0), "already recorded");
+        assert!(!up.can_accept(1), "nothing is being sealed now");
+    }
+
+    #[test]
+    fn a_completion_from_a_retired_generation_is_never_attached() {
+        // begin/begin under one visible upload id: the second generation is a different entry, so
+        // the first generation's outstanding seal cannot be mistaken for work it is waiting for.
+        // Keyed by the caller's id instead, this is the schedule that publishes one upload's
+        // chunk under another upload's identity.
+        let slice = vec![0u8; UPLOAD_SLICE_BYTES];
+        let mut old = pending(CHUNK_BYTES as u64 * 2);
+        let mut offset = 0u64;
+        while old.admit_slice(offset, &slice).unwrap().is_none() {
+            offset += UPLOAD_SLICE_BYTES as u64;
+        }
+        let claimed = old.sealing.expect("a chunk is in flight");
+
+        // The restart: same visible transfer, brand new state. Notably an empty one, whose
+        // complete shape is "one chunk and no bytes"; exactly what a stray ref would forge.
+        let fresh = pending(0);
+        assert!(
+            !fresh.can_accept(claimed),
+            "a fresh generation is not waiting for the old one's chunk"
+        );
+        assert!(!fresh.is_complete(), "and it has not silently become whole");
     }
 
     #[test]
@@ -9302,6 +9628,86 @@ mod tests {
                 .sum::<u64>();
             assert_eq!(sliced, size, "the chunks cover the file exactly");
         }
+    }
+
+    #[test]
+    fn staged_upload_bytes_are_bounded_by_more_than_an_entry_count() {
+        // MAX_PENDING_UPLOADS alone bounds nothing: one entry can stage a whole file. The quota
+        // has to be in bytes, because that is what actually accumulates in the vault.
+        let mut up = pending(CHUNK_BYTES as u64 * 3);
+        assert_eq!(up.staged_bytes(), 0, "nothing sealed yet");
+        up.chunks.push(stub_ref());
+        up.chunks.push(stub_ref());
+        assert_eq!(up.staged_bytes(), CHUNK_BYTES as u64 * 2);
+
+        // Sixteen full uploads would blow well past the quota, which is the case the entry cap
+        // silently allowed.
+        let worst = MAX_PENDING_UPLOADS as u64 * MAX_FILE_BYTES as u64;
+        assert!(
+            worst > MAX_STAGED_UPLOAD_BYTES,
+            "the byte quota is the binding limit, not the entry cap"
+        );
+    }
+
+    #[test]
+    fn an_upload_whose_caller_vanished_is_collectable() {
+        // A webview reload loses the ids while the native side keeps running, so nothing will ever
+        // cancel these. They must age out rather than hold their slot and their bytes forever.
+        let mut up = pending(CHUNK_BYTES as u64 * 2);
+        up.touched_at = 1_000;
+        assert!(up.idle_since(2_000), "untouched since the cutoff");
+        assert!(!up.idle_since(500), "still within the window");
+
+        // Never collect one that is mid-seal: a chunk is in flight and will come back looking
+        // for it.
+        up.sealing = Some(0);
+        assert!(!up.idle_since(2_000));
+    }
+
+    #[test]
+    fn a_download_in_progress_never_occupies_its_final_name() {
+        // The peer's chosen filename must not exist holding bytes this device has not verified.
+        // Removing the file on a handled error is not enough: a crash, a kill or power loss during
+        // the transfer would leave an indexer, an antivirus scanner or the user looking at a
+        // partial file under the real name.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut file, staging, final_path) =
+            create_staged_download(dir.path(), "notes.txt").unwrap();
+        assert_eq!(final_path.file_name().unwrap(), "notes.txt");
+        assert_eq!(staging.file_name().unwrap(), "notes.txt.part");
+        file.write_all(b"half a file").unwrap();
+        assert_eq!(
+            std::fs::metadata(&final_path).unwrap().len(),
+            0,
+            "the reserved name stays empty while bytes land in the staging file"
+        );
+
+        // A second save cannot take the reserved name, nor the staging file, while this one runs.
+        let (_f2, staging2, final2) = create_staged_download(dir.path(), "notes.txt").unwrap();
+        assert_eq!(final2.file_name().unwrap(), "notes (1).txt");
+        assert_ne!(staging2, staging);
+
+        drop(file);
+        publish_staged_download(&staging, &final_path).unwrap();
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"half a file");
+        assert!(!staging.exists(), "publishing consumes the staging file");
+    }
+
+    #[test]
+    fn an_abandoned_download_leaves_neither_a_partial_nor_a_reservation() {
+        // What the failure path has to undo: both the staging file and the name it was holding.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut file, staging, final_path) =
+            create_staged_download(dir.path(), "cat.png").unwrap();
+        file.write_all(b"partial").unwrap();
+        drop(file);
+        let _ = std::fs::remove_file(&staging);
+        let _ = std::fs::remove_file(&final_path);
+        assert!(!staging.exists());
+        assert!(!final_path.exists());
+        // And the name is free again for a later, honest save.
+        let (_f, _s, again) = create_staged_download(dir.path(), "cat.png").unwrap();
+        assert_eq!(again, final_path);
     }
 
     #[test]

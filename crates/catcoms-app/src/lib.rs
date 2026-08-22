@@ -125,6 +125,27 @@ pub struct Reaction {
     pub by: Vec<String>,
 }
 
+/// The newest activity in one channel, without its text. Enough for a client to rebuild unread
+/// state from its own durable read marks after an explicit lock, a restart or an offline
+/// catch-up, none of which can be reconstructed from a live event stream that was not running.
+/// See [`Server::channel_heads`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChannelHead {
+    /// The channel this head describes.
+    pub channel: u128,
+    /// Total messages in the channel.
+    pub count: u64,
+    /// Newest message timestamp of any author (epoch-millis), or `0` if the channel is empty.
+    pub latest_ts: u64,
+    /// Newest timestamp among messages this device did NOT write, or `0` if there are none.
+    /// Own messages never make a channel unread, so this is the value a read mark is measured
+    /// against.
+    pub latest_incoming_ts: u64,
+    /// The id of the message `latest_incoming_ts` came from (empty when there is none, or when
+    /// the message predates stable ids).
+    pub latest_incoming_id: String,
+}
+
 /// Lightweight activity stats over a conversation (no message text), for the friends-list
 /// sortings. See [`Server::message_stats`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1954,6 +1975,10 @@ pub const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
 /// paying a whole bucket step and the product's bulk traffic doubles.
 pub const CHUNK_BYTES: usize = catcoms_storage::CHUNK_PAD_CEILING;
 
+// A manifest's chunk count is a hostile-input parse guard set to the product's true maximum, so
+// raising the file-size limit without raising it would make the largest legal file undecodable.
+const _: () = assert!(MAX_FILE_BYTES.div_ceil(CHUNK_BYTES) <= catcoms_storage::MAX_CHUNKS as usize);
+
 /// One window of a shared file's plaintext, as served to the media protocol.
 #[derive(Debug, Clone)]
 pub struct FileRange {
@@ -3336,6 +3361,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             mime: mime.to_string(),
             chunks,
         };
+        // Never publish a listing this node's own reader would reject. A streamed upload assembles
+        // its chunks across many commands, so this is also where a caller that mis-sliced the file
+        // is caught, rather than every peer discovering it at download time.
+        manifest
+            .validate_layout()
+            .map_err(|_| AppError::Invalid("the upload's chunk layout is invalid".into()))?;
         let ref_bytes = manifest.encode();
         self.sync
             .post(DocType::FileIndex, FILE_INDEX_DOC, |d| {
@@ -5514,6 +5545,38 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             .doc(DocType::Channel, channel)
             .map(|d| read_messages(d.doc()))
             .unwrap_or_default()
+    }
+
+    /// One activity head per known channel: what the newest message is, and what the newest
+    /// message somebody ELSE wrote is, with no text attached.
+    ///
+    /// This is the projection unread state is rebuilt from. A live `ChannelUpdated` stream only
+    /// reports what happened while the UI was listening, so an explicit lock, a restart or an
+    /// offline catch-up all lose outstanding indicators; comparing these heads against the
+    /// client's durable read marks recovers them from state rather than from event history.
+    pub fn channel_heads(&self) -> Vec<ChannelHead> {
+        let me = self.my_fingerprint();
+        self.channels()
+            .into_iter()
+            .map(|c| {
+                let msgs = self.messages(c.id);
+                let mut head = ChannelHead {
+                    channel: c.id,
+                    count: msgs.len() as u64,
+                    ..ChannelHead::default()
+                };
+                for m in &msgs {
+                    head.latest_ts = head.latest_ts.max(m.ts);
+                    // `>=` so that among equal timestamps the last one materialized wins, which is
+                    // the same row the UI shows at the bottom of the log.
+                    if m.author != me && m.ts >= head.latest_incoming_ts {
+                        head.latest_incoming_ts = m.ts;
+                        head.latest_incoming_id = m.id.clone();
+                    }
+                }
+                head
+            })
+            .collect()
     }
 
     /// Lightweight activity stats over a channel's messages; total count, first/last wall-clock

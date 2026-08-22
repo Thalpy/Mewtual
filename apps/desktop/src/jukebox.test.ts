@@ -17,7 +17,11 @@ import {
   playableQueue,
   resolveCallName,
   stallChip,
+  jukeClaimWins,
+  nextJukeSeq,
+  validJukeSeq,
   HAVE_FUTURE_DATA,
+  MAX_JUKE_SEQ,
   STALL_ANNOUNCE_MS,
   type JukeEntry,
 } from "./jukebox.ts";
@@ -511,4 +515,47 @@ test("a companion device renders under its origin's name from the room's server"
     resolveCallName("dev9", inRoom, {}, (fp) => (fp === "dev9" ? "origin1" : undefined)),
     "Bam",
   );
+});
+
+test("a transport revision the deck cannot count past is refused", () => {
+  assert.equal(validJukeSeq(0), true);
+  assert.equal(validJukeSeq(7), true);
+  assert.equal(validJukeSeq(MAX_JUKE_SEQ), true);
+  // The regression: `1e308` passes `Number.isInteger`, survives JSON, and satisfies
+  // `1e308 + 1 === 1e308`, so adopting it left no press able to outrank it.
+  assert.equal(validJukeSeq(1e308), false);
+  assert.equal(1e308 + 1 === 1e308, true); // why the bound has to exist at all
+  assert.equal(validJukeSeq(Number.MAX_SAFE_INTEGER), false);
+  assert.equal(validJukeSeq(Number.MAX_SAFE_INTEGER + 1), false);
+  assert.equal(validJukeSeq(MAX_JUKE_SEQ + 1), false);
+  assert.equal(validJukeSeq(-1), false);
+  assert.equal(validJukeSeq(1.5), false);
+  assert.equal(validJukeSeq(Number.NaN), false);
+  assert.equal(validJukeSeq(Number.POSITIVE_INFINITY), false);
+  assert.equal(validJukeSeq("3"), false);
+  assert.equal(validJukeSeq(undefined), false);
+});
+
+test("a press always outranks what it has heard, and the bound holds", () => {
+  assert.equal(nextJukeSeq(0, null), 1);
+  assert.equal(nextJukeSeq(3, 9), 10); // someone else's press is what I have to beat
+  assert.equal(nextJukeSeq(9, 3), 10);
+  // An unusable value on either side is treated as nothing heard rather than as a ceiling.
+  assert.equal(nextJukeSeq(1e308, null), 1);
+  assert.equal(nextJukeSeq(0, 1e308), 1);
+  assert.equal(nextJukeSeq(MAX_JUKE_SEQ, MAX_JUKE_SEQ), MAX_JUKE_SEQ);
+});
+
+test("the deck goes to the newest press, with a stable tiebreak", () => {
+  assert.equal(jukeClaimWins(null, { seq: 0, fromFp: "a" }), true);
+  assert.equal(jukeClaimWins({ seq: 4, fromFp: "b" }, { seq: 5, fromFp: "a" }), true);
+  assert.equal(jukeClaimWins({ seq: 5, fromFp: "b" }, { seq: 4, fromFp: "a" }), false);
+  // Two people pressing at the same moment must resolve identically on every machine.
+  assert.equal(jukeClaimWins({ seq: 5, fromFp: "b" }, { seq: 5, fromFp: "c" }), true);
+  assert.equal(jukeClaimWins({ seq: 5, fromFp: "c" }, { seq: 5, fromFp: "b" }), false);
+  // The DJ's own five-second re-announce is not newer, but it keeps the deck alive.
+  assert.equal(jukeClaimWins({ seq: 5, fromFp: "b" }, { seq: 5, fromFp: "b" }), true);
+  // And a frame nobody can order is never adopted, whatever it claims.
+  assert.equal(jukeClaimWins(null, { seq: 1e308, fromFp: "z" }), false);
+  assert.equal(jukeClaimWins({ seq: 2, fromFp: "a" }, { seq: 1e308, fromFp: "z" }), false);
 });

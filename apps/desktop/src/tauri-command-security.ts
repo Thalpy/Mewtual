@@ -36,6 +36,9 @@ export const TAURI_COMMAND_GROUPS = {
       // Route booleans + the mapping status line only; concrete addresses stay native-side.
       "check_invite_routes",
       "get_messages",
+      // Counts and timestamps only, no message text: the projection unread badges are rebuilt
+      // from after a lock or a restart, neither of which the live event stream survives.
+      "get_channel_heads",
     ],
   },
   authenticated_content_writes: {

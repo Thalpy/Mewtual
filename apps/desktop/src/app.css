@@ -8774,6 +8774,16 @@ button.focus-leave:hover {
   color: var(--faint);
   text-decoration: line-through;
 }
+/* A chip that is also the fix: the webview wants a gesture before it will start audio, so the
+   thing that says so is the thing you click. It has to read as pressable, not as a label. */
+.juke-chip-btn {
+  cursor: pointer;
+  font-weight: 600;
+}
+.juke-chip-btn:hover,
+.juke-chip-btn:focus-visible {
+  background: color-mix(in oklab, var(--warn) 28%, transparent);
+}
 
 /* Now playing: the audible truth, then the two presses that can change it. */
 .juke-now {

@@ -490,3 +490,58 @@ The bridge's `change_vault_secret(current_secret,new_secret)` holds the store mu
 `ServerStore::change_passphrase`. The storage layer authenticates the current wrapper and atomically
 rewraps the unchanged root DEK under a fresh salt/nonce. Existing derived data keys do not rotate;
 older exported vaults remain bound to their old secret.
+
+---
+
+## 10. Channel deltas & unread state  *(catcoms-app / Tauri bridge / desktop)*
+
+```rust
+pub struct ChannelChange {          // WHAT moved, carried by every ChannelUpdated
+    messages_appended: bool,        // a message id that was not there before: a real arrival
+    messages_changed: bool,         // the log re-rendered without one: edit/delete/reaction/pin
+    topic: bool,
+    jukebox: bool,
+}
+pub enum AppEvent { ChannelUpdated { channel: u128, change: ChannelChange }, /* … */ }
+
+pub struct ChannelHead {            // one per directory channel; no message text
+    channel: u128, count: u64, latest_ts: u64,
+    latest_incoming_ts: u64,        // newest message THIS device did not write (0 if none)
+    latest_incoming_id: String,
+}
+impl Server { fn channel_heads(&self) -> Vec<ChannelHead>; }
+impl ServerActor { async fn channel_heads(&self) -> Vec<ChannelHead>; }
+```
+
+One channel document holds the message log, the topic and the jukebox queue, so an untyped "it
+changed" event is ambiguous exactly where the UI needs certainty. **Only `messages_appended` may
+create unread state**; the other three refresh what is on screen and nothing else. The actor keeps
+a per-channel signature of the three parts plus the set of message ids, and an arrival is "an id
+never seen before" rather than a count that grew: a concurrent append+delete batch or a catch-up
+merge can leave the count untouched. First sight of a channel reports nothing, because the UI
+fetches messages when it opens one. The bridge forwards the flags on the `channel-updated` payload
+(`messages_appended`, `messages_changed`, `topic`, `jukebox`).
+
+`get_channel_heads(server)` is how unread badges survive what the event stream cannot. Actor
+notifications are deliberately dropped at the native boundary while the vault is locked, and a
+restart begins with no event history at all, so anything that arrived in the meantime has no event
+left to raise a badge. The desktop compares each head's `latest_incoming_ts` with its own durable
+read marks at unlock, at resume and after each server's channel directory settles.
+
+**Read marks are never advanced by a refresh.** The desktop's `chatIsObserved` predicate
+(`unread.ts`, pure and unit-tested) requires the chat surface to be the active one, no takeover
+overlay or call focus surface over it, the window focused, `document.visibilityState === "visible"`
+and the log pinned to its newest row. Anything else marks the selected channel unread exactly as an
+inactive one would. Notification noise uses the same predicate with the scroll condition relaxed,
+so reading history stays unread but stays quiet.
+
+A message timestamp is the **sender's** clock. `readCeiling(timestamps, now)` is the newest
+timestamp present that is within `CLOCK_SKEW_GRACE_MS` (5 min) of this machine's clock, and
+`effectiveTs` pulls anything above it down to it. Read cursors, the unread divider, mention
+detection and the inbox's unseen test all measure the clamped value, so one broken or hostile clock
+can neither park the cursor in the future (hiding every later message) nor stick as a permanently
+unread row. Wall time remains display metadata only.
+
+The single record of a server's outstanding activity is its `unread` channel-id list. The rail
+badge, the orbit glow and the DM circle's dot are all derived from it, so no separate mutable
+"activity" flag can disagree with the channel list.

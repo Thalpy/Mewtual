@@ -56,15 +56,20 @@
   } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
-    deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, mediaChoices,
-    mediaKind, mediaUrl, nudgeRate, playableQueue, resolveCallName, stallChip, STALL_ANNOUNCE_MS,
+    deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
+    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, resolveCallName, stallChip,
+    validJukeSeq, STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
+  import {
+    CLOCK_SKEW_GRACE_MS, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
+    unreadFromHeads, type ChannelHead,
+  } from "./unread";
   import { installUiLogging } from "./uilog";
   import {
-    TRANSFER_CHUNK_BYTES, TRANSFER_SLICE_BYTES,
+    TRANSFER_CHUNK_BYTES,
     formatBytes, formatRate, sampleRate, transferPieces,
-    type TransferPiece,
+    type TransferPiece, type UploadTicket,
   } from "./transfer-visual";
   import { plainSummary } from "./wikitext";
   import { refLabel, fileMarker, statusMarker, wikiMarker, eventMarker, insertInto } from "./refs";
@@ -154,9 +159,11 @@
     name: string;
     channels: Channel[];
     active: string; // active channel id
-    unread: string[]; // channel ids with unread
+    // Channel ids with unread. The ONE record of this server's outstanding activity: the rail's
+    // badge, the orbit view's glow and the DM circle's dot all read it, so none of them can
+    // disagree with the channel list about whether there is anything to see.
+    unread: string[];
     invite: string; // founder's invite ("" for a joiner)
-    dot: boolean; // activity while not the active server
     isDm: boolean; // a 1:1 DM (shown behind the DMs circle) rather than a server
   };
 
@@ -2483,22 +2490,40 @@
     const k = chanKey();
     dividerTs = k ? (readMarks[k] ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
   }
+  // The newest timestamp in the loaded conversation this machine is willing to believe. A message
+  // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
+  // choosing the value) parks the read mark years ahead and every later message silently counts as
+  // already read. Recomputed only when the rows change, so it is stable while a channel is open.
+  let readTsCeiling = $derived(readCeiling(messages.map((m) => m.ts), Date.now()));
+  // A row's timestamp as read state may use it. Display still shows what the sender wrote.
+  function readTs(m: Msg): number {
+    return effectiveTs(m.ts, readTsCeiling);
+  }
   function advanceReadMark() {
     const k = chanKey();
     if (!k || !messages.length) return;
-    const latest = messages.reduce((a, m) => Math.max(a, m.ts), 0);
+    const latest = messages.reduce((a, m) => Math.max(a, readTs(m)), 0);
     if ((readMarks[k] ?? 0) < latest) {
       readMarks[k] = latest;
       scheduleUiStateSave();
     }
   }
+  // Is there a message here from somebody else that this device has not read past yet? Measured
+  // against the saved mark rather than `dividerTs`, which is deliberately frozen at the value the
+  // channel was opened with so the "new messages" line stays put while you read.
+  function activeChannelHasUnseen(): boolean {
+    const k = chanKey();
+    if (!k) return false;
+    const mark = readMarks[k] ?? 0;
+    return messages.some((m) => m.author !== myFp && readTs(m) > mark);
+  }
   // Index of the first message newer than the read boundary (-1 if all read).
   // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
-  let firstUnreadIdx = $derived(messages.findIndex((m) => m.ts > dividerTs && m.author !== myFp));
+  let firstUnreadIdx = $derived(messages.findIndex((m) => effectiveTs(m.ts, readTsCeiling) > dividerTs && m.author !== myFp));
   // How many messages sit past that boundary; the divider and the header jump both name it.
   let unreadCount = $derived(firstUnreadIdx < 0 ? 0 : messages.slice(firstUnreadIdx).filter((m) => m.author !== myFp).length);
   // Is this row one of the unread ones? Own messages never count (you just sent them).
-  const isUnread = (m: Msg) => firstUnreadIdx >= 0 && m.ts > dividerTs && m.author !== myFp;
+  const isUnread = (m: Msg) => firstUnreadIdx >= 0 && readTs(m) > dividerTs && m.author !== myFp;
 
   // Day dividers in the log ("thu 2026-08-14" between messages from different days).
   function sameDay(a: number, b: number): boolean {
@@ -3971,7 +3996,7 @@
         const channel = await invoke<string>("open_channel", { server: r.server, name: "general" });
         servers = [
           ...servers,
-          { id: r.server, name: r.name, channels: [{ id: channel, name: "general" }], active: channel, unread: [], invite: "", dot: false, isDm: false },
+          { id: r.server, name: r.name, channels: [{ id: channel, name: "general" }], active: channel, unread: [], invite: "", isDm: false },
         ];
       }
       const first = results.find((r) => r.ok && r.server !== undefined && r.server !== null);
@@ -4456,7 +4481,6 @@
       active: r.channel,
       unread: [],
       invite: r.invite,
-      dot: false,
       isDm: r.is_dm,
     }));
     locked = false;
@@ -4466,7 +4490,14 @@
     // snapshots its divider. The native actors are already running, so this is only local UI state.
     const continuityGeneration = ++uiStateLoadGeneration;
     void loadUiContinuity(continuityGeneration).finally(() => {
-      if (continuityGeneration === uiStateLoadGeneration && !locked && firstServer) void switchServer(firstServer.id);
+      if (continuityGeneration !== uiStateLoadGeneration || locked) return;
+      if (firstServer) void switchServer(firstServer.id);
+      // Unread badges start empty here because nothing durable holds them. Anything that arrived
+      // while the vault was locked (the native bridge drops those events on purpose) or while the
+      // app was closed has no event left to raise a badge, so rebuild them from each channel's
+      // activity head against the read marks that just loaded. Without this pass, a message
+      // received during a lock or across a restart is silently lost from the indicators.
+      rebuildAllUnread();
     });
     refreshAllDmRequests();
     loadInbox();
@@ -4698,7 +4729,7 @@
     const channels = r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }];
     servers = [
       ...servers,
-      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", dot: false, isDm: r.is_dm },
+      { id: r.server, name, channels, active: r.channel, unread: [], invite: "", isDm: r.is_dm },
     ];
     showAdd = false;
     // A server adopts the name as your profile (existing behaviour); a DM's label is the friend's
@@ -4724,7 +4755,7 @@
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
-        { id: r.server, name, channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", dot: false, isDm: true },
+        { id: r.server, name, channels: r.channels?.length ? r.channels : [{ id: r.channel, name: "general" }], active: r.channel, unread: [], invite: "", isDm: true },
       ];
       const invite = (await invoke<string | null>("get_invite", { server: r.server })) ?? "";
       const sent = invite
@@ -4935,7 +4966,9 @@
     clearServerView();
     groupLoading = true;
     const s = servers.find((x) => x.id === id);
-    if (s) s.dot = false;
+    // Nothing is cleared here. Arriving at a server is not reading its channels, and the rail's
+    // badge is derived from the unread channel list rather than kept beside it, so opening one
+    // channel can no longer blank the evidence that the other eleven have something in them.
     // A brand already read this session repaints once, straight to the right one, instead of
     // default-then-brand a round-trip later. refreshLivery still confirms it below.
     const cachedLivery = s && !s.isDm ? liveryCache.get(id) : undefined;
@@ -4986,6 +5019,10 @@
     if (!viewCurrent(gen, id)) return; // moved on while this group was loading
     groupLoading = false;
     syncProfileEditor();
+    // The channel list is only certain now. Rebuilding here as well as at unlock is what makes the
+    // badges right for a server whose directory was still a stub when the session started, and for
+    // anything that arrived in a channel this session has never opened.
+    void rebuildUnread(id);
   }
 
   // Populate the Profile tab's editor from this member's own saved profile (so the tab shows
@@ -5082,17 +5119,15 @@
     delivery = {};
     cur.active = id;
     loadDraftFor(chanKey()); // restore the target channel's draft
-    cur.unread = cur.unread.filter((c) => c !== id);
     if (showSearch && !keepSearch) closeSearch();
     reactionPickerFor = "";
     replyingTo = "";
     mentionQuery = null;
     showPinned = false;
-    if (mentionChannels.has(id)) {
-      mentionChannels = new Set(mentionChannels);
-      mentionChannels.delete(id); // reading the channel clears its mention badge
-    }
-    captureDivider(); // snapshot the read boundary before refresh advances the mark
+    captureDivider(); // snapshot the read boundary before the load can advance the mark
+    // Badges are NOT cleared here. Navigating to a channel is a request to read it, not proof of
+    // having read it: a failed `get_messages` used to leave the channel selected, empty and
+    // marked read. `settleReadState` inside refresh clears them once the rows are actually up.
     await refresh(); // awaited so a search jump can address the target channel's loaded messages
     refreshTopic();
     refreshDelivery();
@@ -5160,10 +5195,124 @@
         // acknowledged, server-assigned id from replaying the entrance a second time.
         markMessageArrivals(next.filter((message) => message.author !== myFp && !previous.has(message.id)).map((message) => message.id));
       }
-      advanceReadMark();
+      // Loading rows is not reading them. `settleReadState` decides which this was.
+      settleReadState();
     } catch (e) {
       error = String(e);
     }
+  }
+
+  // Overlays that take the window whole. The channel stays selected behind every one of them, and
+  // a message that lands behind one was never seen.
+  function chatCoveredByOverlay(): boolean {
+    return (
+      showSettings || showServerSettings || showFeedback || showQuickSwitch || showLinkDevice ||
+      showAdd || !!lightbox
+    );
+  }
+  function chatSurfaceState(atBottom: boolean) {
+    return {
+      locked,
+      view,
+      inboxView,
+      dmPlaceholder: dmHome && !cur,
+      spaceOpen,
+      callFocusOpen: focusOpen,
+      overlayOpen: chatCoveredByOverlay(),
+      windowFocused,
+      documentVisible,
+      atBottom,
+    };
+  }
+  /**
+   * Is the message log actually in front of a person right now?
+   *
+   * Selecting a channel is not reading it, and neither is a `get_messages` completing. The app has
+   * a dozen surfaces that cover the log entirely (files, the wiki, settings, the inbox, the orbit
+   * view, a call taking the window), and it can be scrolled up in the middle of its own history.
+   * Treating any of those as "seen" is what let messages arrive already read.
+   */
+  function chatObservedNow(): boolean {
+    return chatIsObserved(chatSurfaceState(chatStickToBottom));
+  }
+  /**
+   * Is the log on screen at all, wherever it happens to be scrolled to?
+   *
+   * The looser question, and the right one for deciding whether to make noise. Reading back
+   * through history is not seeing what just landed at the bottom, so it must not clear the badge;
+   * but the channel IS in front of the reader, so a chime and a ticker for every arrival would be
+   * shouting about something already visible a scroll away.
+   */
+  function chatOnScreenNow(): boolean {
+    return chatIsObserved(chatSurfaceState(true));
+  }
+  /**
+   * Reconcile the active conversation's indicators with what is actually on screen.
+   *
+   * Observed: the read mark moves to the newest loaded row and the channel's badges clear.
+   * Not observed: an arrival marks the channel unread exactly as an inactive one would, so
+   * walking off to another surface with a channel still selected cannot swallow a message.
+   */
+  function settleReadState() {
+    const server = activeServerId;
+    const channel = cur?.active;
+    if (server === null || !channel) return;
+    // Only ever act on rows that actually loaded for THIS conversation. A failed or superseded
+    // read leaves the stamp elsewhere, and clearing a badge off it would drop a real message.
+    if (!scopeHoldsConversation(messageWindowScope, server, channel)) return;
+    if (chatObservedNow()) {
+      advanceReadMark();
+      clearChannelIndicators(server, channel);
+    } else if (activeChannelHasUnseen()) {
+      markChannelUnread(server, channel);
+    }
+  }
+  /** This channel has something new from somebody else; raise its badge (and its server's). */
+  function markChannelUnread(server: number, channel: string) {
+    const s = servers.find((x) => x.id === server);
+    if (!s || !s.channels.some((c) => c.id === channel)) return;
+    if (!s.unread.includes(channel)) s.unread.push(channel);
+  }
+  /** Reading a channel clears its badges. The server rail derives its own from these. */
+  function clearChannelIndicators(server: number, channel: string) {
+    const s = servers.find((x) => x.id === server);
+    if (s) s.unread = s.unread.filter((c) => c !== channel);
+    if (server === activeServerId && mentionChannels.has(channel)) {
+      mentionChannels = new Set(mentionChannels);
+      mentionChannels.delete(channel);
+    }
+  }
+  /**
+   * Rebuild one server's unread badges from durable state.
+   *
+   * The live event stream is deliberately dropped at the native boundary while the vault is
+   * locked, and a restart begins with no event history at all, so anything that arrived in the
+   * meantime has no event left to raise its badge. Comparing each channel's activity head with
+   * this device's own read marks recovers it. Unioned rather than assigned: an event that lands
+   * while the scan is in flight must not be thrown away by its answer.
+   */
+  async function rebuildUnread(server: number) {
+    try {
+      const heads = await invoke<ChannelHead[]>("get_channel_heads", { server });
+      if (locked) return;
+      const s = servers.find((x) => x.id === server);
+      if (!s) return;
+      const known = new Set(s.channels.map((c) => c.id));
+      const rebuilt = unreadFromHeads(
+        heads,
+        (channel) => readMarks[chatScopeKey(server, channel)] ?? 0,
+        Date.now(),
+        (channel) => known.has(channel),
+      );
+      if (rebuilt.length) s.unread = [...new Set([...s.unread, ...rebuilt])];
+      // The conversation on screen is the one exception: it is being looked at right now.
+      if (server === activeServerId && cur?.active) settleReadState();
+    } catch {
+      // An older backend or a closed actor: this session still has its live events.
+    }
+  }
+  function rebuildAllUnread() {
+    for (const s of servers) void rebuildUnread(s.id);
   }
 
   // A single network merge can emit several channel notifications. Serialize and coalesce their
@@ -7193,12 +7342,17 @@
   // The one upload path used by files, embeds, wiki attachments, event art and custom emoji.
   // Keeping it central means every group upload gets the same progress and terminal state.
   //
-  // The file is streamed one TRANSFER_SLICE_BYTES slice at a time: read the slice, hand it to the
-  // backend, repeat. Sending a whole file in one invoke turned it into a single base64 string the
-  // size of the file, and the native side then sealed the lot inside one actor command, so a large
-  // share froze the webview and stopped the server syncing until it finished. A slice at a time
-  // bounds both: the UI keeps painting between slices, and the native side seals a chunk at a
-  // time so the server actor keeps running between them.
+  // The file is streamed a slice at a time: read the slice, hand it to the backend, repeat.
+  // Sending a whole file in one invoke turned it into a single base64 string the size of the file,
+  // and the native side then sealed the lot inside one actor command, so a large share froze the
+  // webview and stopped the server syncing until it finished. A slice at a time bounds both: the
+  // UI keeps painting between slices, and the native side seals a chunk at a time so the server
+  // actor keeps running between them.
+  //
+  // begin_file_upload states the whole contract for this upload: the slice size to send, how many
+  // chunks it becomes, and the token every later call carries. None of those are recomputed here.
+  // The token in particular is not the uploadId: the native side needs an identity for the work
+  // that a restart of the same visible transfer cannot collide with.
   async function addSharedFile(
     file: File,
     path: string,
@@ -7210,7 +7364,6 @@
     const uploadId = crypto.randomUUID();
     const key = uploadKey(server, uploadId);
     const started = Date.now();
-    const chunkTotal = Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES));
     uploads[key] = {
       server,
       id: uploadId,
@@ -7218,35 +7371,43 @@
       path,
       size: file.size,
       done: 0,
-      total: chunkTotal,
+      total: Math.max(1, Math.ceil(file.size / TRANSFER_CHUNK_BYTES)),
       status: "reading",
       progress: 0,
       updatedAt: started,
       ts: started,
     };
-    // Publishing the index entry is the step after the last chunk, so the bar is chunkTotal + 1
-    // spans wide. The native upload-progress event lands once per sealed chunk; between those,
-    // this loop fills the bar from the bytes it has actually handed over, so a single-chunk file
-    // still shows movement.
-    const spans = chunkTotal + 1;
+    let ticket: UploadTicket | undefined;
     try {
-      await invoke("begin_file_upload", { server, uploadId, mime, size: file.size });
-      for (let offset = 0; offset < file.size; offset += TRANSFER_SLICE_BYTES) {
-        const end = Math.min(file.size, offset + TRANSFER_SLICE_BYTES);
+      ticket = await invoke<UploadTicket>("begin_file_upload", {
+        server,
+        uploadId,
+        mime,
+        size: file.size,
+      });
+      const { token, chunkTotal, sliceBytes } = ticket;
+      if (uploads[key]) uploads[key].total = chunkTotal;
+      // Publishing the index entry is the step after the last chunk, so the bar is chunkTotal + 1
+      // spans wide. The native upload-progress event lands once per sealed chunk; between those,
+      // this loop fills the bar from the bytes it has actually handed over, so a single-chunk file
+      // still shows movement.
+      const spans = chunkTotal + 1;
+      for (let offset = 0; offset < file.size; offset += sliceBytes) {
+        const end = Math.min(file.size, offset + sliceBytes);
         const data = await readBase64(file.slice(offset, end));
         const u = uploads[key];
         if (u && u.status === "reading") {
           u.status = "uploading";
           u.updatedAt = Date.now();
         }
-        await invoke("push_file_chunk", { server, uploadId, offset, data });
+        await invoke("push_file_chunk", { server, token, offset, data });
         const sent = uploads[key];
         if (sent && sent.status !== "done" && sent.status !== "failed") {
           sent.progress = Math.max(sent.progress, (end / file.size) * (chunkTotal / spans));
           sent.updatedAt = Date.now();
         }
       }
-      const cid = await invoke<string>("finish_file_upload", { server, uploadId, name, path });
+      const cid = await invoke<string>("finish_file_upload", { server, token, name, path });
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
@@ -7256,11 +7417,14 @@
       return cid;
     } catch (e) {
       // Release the native reservation and let it garbage-collect whatever was already sealed;
-      // an upload left open holds a slot until the session is locked.
-      try {
-        await invoke("cancel_file_upload", { server, uploadId });
-      } catch {
-        // Cancelling a failed upload is best-effort: the original error is the one to report.
+      // an upload left open holds a slot until the session is locked. Nothing to release if
+      // begin_file_upload is what failed.
+      if (ticket) {
+        try {
+          await invoke("cancel_file_upload", { server, token: ticket.token });
+        } catch {
+          // Cancelling a failed upload is best-effort: the original error is the one to report.
+        }
       }
       if (uploads[key]) {
         uploads[key].status = "failed";
@@ -8428,10 +8592,13 @@
     // by accident rather than on purpose.
     if (!myFp || activeServerId === null) return false;
     const seen = readMarks[chatScopeKey(activeServerId, channel)] ?? 0;
+    // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
+    // decide, either way, whether something addressed to me still counts as unseen.
+    const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
     const byId = new Map(msgs.map((m) => [m.id, m] as const));
     return msgs.some(
       (m) =>
-        m.ts > seen &&
+        effectiveTs(m.ts, ceiling) > seen &&
         m.author !== myFp &&
         (mentionsMe(m.text) || (!!m.reply_to && byId.get(m.reply_to)?.author === myFp)),
     );
@@ -8445,11 +8612,33 @@
       const next = await invoke<InboxEntry[]>("get_inbox");
       if (locked) return; // the lock cleared this list; it carries message text from every server
       inboxItems = next;
+      restoreMentionBadges();
     } catch (e) {
       error = String(e);
     } finally {
       inboxLoading = false;
     }
+  }
+  /**
+   * Re-raise the active server's mention badges from the inbox.
+   *
+   * `mentionChannels` is per-session memory of "someone said your name here", so it is empty after
+   * a lock or a restart even though the mention itself is still sitting there unread. The inbox is
+   * the durable native scan of the same fact, measured against the same read marks, so it can put
+   * the badges back. The conversation actually on screen is left alone: `settleReadState` owns it.
+   */
+  function restoreMentionBadges() {
+    if (activeServerId === null || !cur) return;
+    const observed = chatObservedNow() ? cur.active : "";
+    const known = new Set(cur.channels.map((c) => c.id));
+    const next = new Set(mentionChannels);
+    const before = next.size;
+    for (const it of inboxItems) {
+      if (it.server !== activeServerId || it.channel === observed) continue;
+      if (!known.has(it.channel) || !inboxUnseen(it)) continue;
+      next.add(it.channel);
+    }
+    if (next.size !== before) mentionChannels = next;
   }
   let inboxTimer: ReturnType<typeof setTimeout> | undefined;
   let inboxIdle: number | undefined;
@@ -8473,6 +8662,9 @@
   // An inbox entry is "unseen" until you've read past it in that channel (the same read marks that
   // drive jump-to-unread); resolved against the entry's own server, not the active one.
   function inboxUnseen(it: InboxEntry): boolean {
+    // An entry timestamped beyond any believable clock skew cannot be measured against a read mark
+    // honestly, and calling it unseen would hand it a badge that reading can never clear.
+    if (!Number.isFinite(it.ts) || it.ts > Date.now() + CLOCK_SKEW_GRACE_MS) return false;
     return it.ts > (readMarks[chatScopeKey(it.server, it.channel)] ?? 0);
   }
   let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
@@ -9974,6 +10166,10 @@
   // pull with a percentage. Fed by the same download-progress events the Downloads surface uses.
   let jukeFetch = $state<FetchPhase | null>(null);
   let jukeBuffering = $state(false); // the element ran out of data mid-track
+  // Local playback health, kept apart from the room's transport on purpose: the room can be
+  // perfectly in sync while THIS machine is silent, and the deck has to be able to say which.
+  let jukeBlocked = $state(false); // the webview refuses to start audio without a gesture
+  let jukeLocalFail = $state(""); // this listener could not fetch or decode the current track
   let bufferTimer: ReturnType<typeof setTimeout> | undefined; // debounce for the chip above
   let jukeNudging = $state(false); // easing back onto the DJ's clock rather than snapping
   // Audio or video, from the current track's name (a queue entry carries no mime) and the share's
@@ -10077,17 +10273,36 @@
   function jukePlayable(): JukeEntry[] {
     return playableQueue(jukeQueue, jukeFailed);
   }
+  // A room generation, exactly as the message view has one: several places ask for the queue
+  // (joining, a local edit, every jukebox event), and a slow answer from the room we just left
+  // must never land in the one we are in now.
+  let jukeQueueGeneration = 0;
+  let jukeQueueStale = $state(false); // the last read failed: what is shown is the last known list
+  /** Is this answer still about the room we are in? */
+  function jukeQueueCurrent(generation: number, server: number, channel: string): boolean {
+    return (
+      generation === jukeQueueGeneration && inCall && callServer === server && callChannel === channel
+    );
+  }
   async function refreshJukebox() {
     const server = callServer;
     const channel = callChannel;
+    const generation = ++jukeQueueGeneration;
     if (!inCall || server === null || !channel) {
       jukeQueue = [];
+      jukeQueueStale = false;
       return;
     }
     try {
-      jukeQueue = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
+      const next = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
+      if (!jukeQueueCurrent(generation, server, channel)) return;
+      jukeQueue = next;
+      jukeQueueStale = false;
     } catch {
-      jukeQueue = []; // no jukebox on this peer's build: an empty deck, not an error worth showing
+      if (!jukeQueueCurrent(generation, server, channel)) return;
+      // "The read failed" is not "the queue is empty". Blanking it here made a closed actor or a
+      // dropped call look exactly like a room whose playlist somebody had just cleared.
+      jukeQueueStale = true;
     }
   }
   async function jukeAddTrack(cid: string, name: string) {
@@ -10117,15 +10332,40 @@
   // path a receiver does, so the DJ is never a special case in the player.
   function jukeSend(entry: string, cid: string, name: string, off: number, paused: boolean) {
     if (!inCall || !callChannel) return;
-    jukeSeq = Math.max(jukeSeq, jukeAdopted?.seq ?? 0) + 1;
+    jukeSeq = nextJukeSeq(jukeSeq, jukeAdopted?.seq ?? null);
     jukeAdopt(jukeSeq, callSelfFp, entry, cid, name, off, paused);
     broadcast({ callId: callChannel, type: "juke", seq: jukeSeq, entry, cid, name, off, paused });
+  }
+  /**
+   * Tell one peer what is playing, right now.
+   *
+   * Transport is ephemeral: it lives in the DJ's webview and nowhere else, so somebody who joins a
+   * second after a press has nothing to read. Waiting for the next five-second re-announce meant a
+   * newcomer sat in silence in front of a queue everyone else was already listening to, and if the
+   * DJ left before that tick they never learned the room was playing at all. A "hello" is now
+   * answered with the current state directly, which also skips the online roster the periodic
+   * broadcast filters through and which is exactly what is stale for someone who just arrived.
+   */
+  function jukeAnnounceTo(server: number, targetFp: string) {
+    if (!jukeIsDj() || !jukeAdopted || !jukeNow || !callChannel) return;
+    void sendSignal(server, targetFp, {
+      callId: callChannel,
+      type: "juke",
+      seq: jukeAdopted.seq,
+      entry: jukeNow.entry,
+      cid: jukeNow.cid,
+      name: jukeNow.name,
+      off: jukePos(),
+      paused: jukeNow.paused,
+    });
   }
   function jukeAdopt(seq: number, fromFp: string, entry: string, cid: string, name: string, off: number, paused: boolean) {
     const same = jukeNow?.entry === entry && jukeNow?.cid === cid;
     jukeAdopted = { seq, fromFp, off, at: performance.now() };
     jukeHeard = jukeAdopted.at;
     jukeStale = false;
+    // Local health is per track: moving the room on clears whatever this machine could not play.
+    if (!same) jukeLocalFail = "";
     jukeNow = entry || cid ? { entry, cid, name, paused, dj: fromFp === callSelfFp ? "" : fromFp } : null;
     if (!jukeNow) {
       jukeDur = 0;
@@ -10182,8 +10422,37 @@
       }
     }
     const live = jukeNow;
-    if (!live || live.paused) el.pause();
-    else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
+    if (!live || live.paused) jukePause(el);
+    else void jukeStart(el);
+  }
+  /**
+   * Start the deck, and remember if the webview would not let us.
+   *
+   * A rejected `play()` is exactly how an autoplay policy or a gesture requirement arrives. It was
+   * swallowed, so the dock went on showing a healthy, progressing, synchronised track while this
+   * machine sat silent: the listener saw "the jukebox is out of sync" when the truth was "this
+   * webview will not start audio until you click something". Now it says so, and offers the click.
+   */
+  async function jukeStart(el: HTMLVideoElement) {
+    try {
+      await el.play();
+      jukeBlocked = false;
+    } catch (e) {
+      // Still loading is fine and transient; refusing to start is not. Only the second is a state
+      // worth showing, and `el.paused` against an unpaused transport is what tells them apart.
+      jukeBlocked = !!jukeNow && !jukeNow.paused && el.paused;
+      if (jukeBlocked) console.warn("the webview would not start shared playback", String(e));
+    }
+  }
+  function jukePause(el: HTMLVideoElement) {
+    el.pause();
+    jukeBlocked = false; // a deck that is meant to be silent is not a deck being held back
+  }
+  /** The user's click, which is the one thing an autoplay policy is waiting for. */
+  function jukeUnblock() {
+    const el = jukeAudio;
+    if (!el) return;
+    void jukeStart(el);
   }
   // True window fullscreen, distinct from the focus view. Focus is a layout (the call takes the
   // app); fullscreen is the window losing its chrome. They are separate wishes and either can be
@@ -10255,14 +10524,23 @@
   }
   /** The deck could not play what the DJ named: drop it, and move the room on if the deck is mine. */
   function jukeFail(cid: string) {
-    const advance = jukeNow?.cid === cid && jukeIsDj();
+    const onDeck = jukeNow?.cid === cid;
+    const advance = onDeck && jukeIsDj();
     // Read the order BEFORE blacklisting this cid, or the track we are leaving is already out of
     // the list and "the one after it" would be the top of the queue again.
     const list = jukePlayable();
     jukeFailed.add(cid);
     jukeFetch = null;
     // Nobody heard it, and whoever holds the file may come back: it stays on the queue.
-    if (advance) jukeAdvance(false, list);
+    if (advance) {
+      jukeAdvance(false, list);
+      return;
+    }
+    // A listener cannot move the room: only the DJ decides what plays. But every listener fetches
+    // the track through its own vault and network path, so one of them can lack a provider or fail
+    // to decode while the rest carry on. Saying so is the difference between a broken jukebox and
+    // a track this machine could not get.
+    if (onDeck) jukeLocalFail = jukeNow?.name || cid;
   }
   // Seek + play state on an element that may have just been handed a new src (currentTime only
   // takes once there is metadata, hence the second run from the loadedmetadata listener).
@@ -10274,10 +10552,12 @@
     if (Math.abs(el.currentTime - target) > 0.25) {
       try { el.currentTime = target; } catch { /* not seekable yet */ }
     }
-    if (jukeNow.paused) el.pause();
-    else void el.play().catch(() => { /* still loading, or the webview wants a gesture first */ });
+    if (jukeNow.paused) jukePause(el);
+    else void jukeStart(el);
   }
   function jukeStop() {
+    jukeBlocked = false; // nothing is loaded: there is no playback being held back
+    jukeLocalFail = "";
     const el = jukeAudio;
     if (!el) return;
     el.pause();
@@ -10336,16 +10616,18 @@
     const name = msg.name;
     const off = msg.off;
     const paused = msg.paused;
-    if (typeof seq !== "number" || !Number.isInteger(seq) || seq < 0) return;
+    // The revision has to be a number this deck can still count PAST, not merely a whole one.
+    // `1e308` is an integer to JavaScript, survives JSON, and satisfies `1e308 + 1 === 1e308`, so
+    // adopting one left every honest press unable to outrank it and froze the deck where it was.
+    if (!validJukeSeq(seq)) return;
     if (typeof entry !== "string" || entry.length > 200) return;
     if (typeof cid !== "string" || (cid !== "" && !/^[0-9a-f]{1,128}$/.test(cid))) return;
     if (typeof name !== "string") return;
     if (typeof off !== "number" || !Number.isFinite(off) || off < 0) return;
     if (typeof paused !== "boolean") return;
-    const cur = jukeAdopted;
-    const newer = !cur || seq > cur.seq || (seq === cur.seq && fromFp > cur.fromFp);
-    // Not newer, but a ping from the DJ we already follow: it keeps the deck alive and re-syncs it.
-    if (!newer && !(cur && seq === cur.seq && fromFp === cur.fromFp)) return;
+    // Newest press wins; a tie goes to the higher fingerprint so every machine agrees. A frame
+    // that is not newer is still taken from the DJ we already follow: that is the re-announce.
+    if (!jukeClaimWins(jukeAdopted, { seq, fromFp })) return;
     jukeAdopt(seq, fromFp, entry, cid, name.slice(0, 200), off, paused);
   }
   // Rides the 5s presence ping rather than owning a timer: as DJ I re-announce the transport (same
@@ -10360,6 +10642,7 @@
     if (jukeNow.paused || jukeStale || performance.now() - jukeHeard <= JUKE_DJ_GONE_MS) return;
     jukeAdopted = { ...jukeAdopted, off: jukePos(), at: performance.now() }; // freeze where we got to
     jukeStale = true; // anyone's next press claims the deck
+    jukeBlocked = false; // a frozen deck is not one the webview is refusing to start
     jukeAudio?.pause();
   }
   // Leaving the room takes the deck with it. There are no blobs to release any more: the element
@@ -10370,10 +10653,17 @@
     jukeAudio = null;
     jukeFailed.clear();
     jukeQueue = [];
+    jukeQueueGeneration++; // a queue read still in flight belongs to the room being left
+    jukeQueueStale = false;
     jukeNow = null;
     jukeAdopted = null;
+    // My own press counter goes with the room. It is scoped to a room session, and carrying a
+    // high one into the next room would let this machine outrank presses it never heard.
+    jukeSeq = 0;
     jukeStale = false;
     jukeFetch = null;
+    jukeBlocked = false;
+    jukeLocalFail = "";
     clearTimeout(bufferTimer);
     jukeBuffering = false;
     jukeNudging = false;
@@ -11121,6 +11411,10 @@
       return;
     }
     if (type === "hello") {
+      // Answer with the transport before anything else. Whoever just arrived has the queue (it is
+      // in the channel document) but no idea what is playing, and the periodic re-announce is up
+      // to five seconds away, if the DJ is still here to send it at all.
+      jukeAnnounceTo(server, fromFp);
       if (callPeers[fromFp]) { recoverPeer(callPeers[fromFp]); return; }
       playBlip(79); // audible arrival: there is no lobby, so the room itself says someone joined
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
@@ -11870,6 +12164,23 @@
   // so the rule for it is: colour and shape may persist, named content may not.
   const APP_VERSION = __APP_VERSION__;
   let windowFocused = $state(true);
+  // A focused window can still be invisible: minimised, or on another virtual desktop. Focus alone
+  // said "the user is reading this", which is how messages arrived already marked read.
+  let documentVisible = $state(typeof document === "undefined" || document.visibilityState === "visible");
+  // Whether the conversation counts as SEEN is a function of the whole app's state, not of any one
+  // event. Re-settle it whenever any input moves: opening the chat tab, coming back to the window,
+  // scrolling to the bottom and closing a takeover all mean "and now it is being looked at", and
+  // each of them has to be able to clear an indicator the same way arriving there does.
+  $effect(() => {
+    void [
+      locked, view, inboxView, dmHome, spaceOpen, focusOpen, windowFocused, documentVisible,
+      chatStickToBottom, activeServerId, cur?.active, messages, messageWindowScope,
+      showSettings, showServerSettings, showFeedback, showQuickSwitch, showLinkDevice, showAdd,
+      lightbox,
+    ];
+    // Untracked so the read mark and badge writes below cannot feed back into this effect's deps.
+    untrack(() => settleReadState());
+  });
   // The hairline carries the active server's published accent: an ambient "which world am I in"
   // that costs no space and, being a colour rather than a name, survives a screenshot.
   let tbEdge = $derived(locked || !followLiveryNow ? "" : livery.accent);
@@ -12239,22 +12550,40 @@
       listen<{ server: number }>("channels-changed", (e) => {
         void refreshChannels(e.payload.server);
       }),
-      listen<{ server: number; channel: string }>("channel-updated", (e) => {
+      listen<{
+        server: number;
+        channel: string;
+        messages_appended: boolean;
+        messages_changed: boolean;
+        topic: boolean;
+        jukebox: boolean;
+      }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // One channel document holds the message log, the topic and the jukebox queue, so the
+        // event says which of them moved. Only an arrival may raise an unread badge or ring:
+        // reacting to an old message, renaming the topic and queueing a track all used to look
+        // exactly like somebody talking.
+        const change = readChannelChange(e.payload);
         spaceActivityAt[server] = Date.now();
         if (server === activeServerId && view === "moderation") void refreshModeration();
-        // Any server's channel changed → the cross-server inbox may have a new entry (debounced).
-        scheduleInboxReload();
+        // A new or edited message may be addressed to me → the cross-server inbox may have a new
+        // entry (debounced). A queue or topic edit can never add one.
+        if (change.messagesAppended || change.messagesChanged) scheduleInboxReload();
         // A DM got a message → its activity stats changed; keep the friends sorting fresh.
-        if (dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
-        // Jukebox edits ride the same event, and the room I'm listening in need not be the one I'm looking at.
-        if (inCall && server === callServer && channel === callChannel) void refreshJukebox();
+        if (change.messagesAppended && dmHome && servers.find((x) => x.id === server)?.isDm) refreshDmStats();
+        // The room I'm listening in need not be the one I'm looking at.
+        if (change.jukebox && inCall && server === callServer && channel === callChannel) void refreshJukebox();
         if (server === activeServerId && channel === cur?.active) {
-          refreshTopic(); // topic edits ride the same channel-updated event
+          if (change.topic) refreshTopic();
+          if (!change.messagesAppended && !change.messagesChanged) return; // nothing in the log moved
           channelEventRefresh.request(true).then(() => {
-            // You're looking at this channel: only notify if the window isn't focused. The same
-            // stable message id gates its sound and its clickable ticker receipt exactly once.
-            if (document.hasFocus()) return;
+            // The refresh settles read state for us: seen if the log is genuinely on screen,
+            // unread if this channel is merely selected behind something else.
+            if (!change.messagesAppended) return; // an edit or a reaction never announces itself
+            // Announce unless the log is on screen. Focus alone was not enough: the window can be
+            // focused with Files, the wiki or a call surface over the channel. Scrolled-up counts
+            // as on screen, so reading history stays quiet even though it stays unread.
+            if (chatOnScreenNow()) return;
             // request() hands back ONE promise for the whole drain, so this can resolve after a
             // pass that loaded a different conversation: reading the shared array then would
             // headline THIS channel with ANOTHER one's text, and the ticker click would try to
@@ -12273,10 +12602,12 @@
           });
           return;
         }
+        // Everything below raises an indicator for a channel nobody is looking at, so it is for
+        // arrivals only. A jukebox add in #music is not an unread message in #music.
+        if (!change.messagesAppended) return;
         const s = servers.find((x) => x.id === server);
         if (s && s.channels.some((c) => c.id === channel)) {
-          if (!s.unread.includes(channel)) s.unread.push(channel);
-          if (server !== activeServerId) s.dot = true;
+          markChannelUnread(server, channel);
           if (server !== activeServerId) {
             // Another server: its profile identity is not loaded, so this is an ordinary-message
             // alert, but its own server sound override still applies.
@@ -12668,6 +12999,11 @@
       if (e.button === 3) navBack();
       else navForward();
     };
+    // Minimised, or on another virtual desktop: the window can hold focus and still show nobody
+    // anything, and read state must not treat that as having read the log.
+    const onVisibility = () => (documentVisible = document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onVisibility);
+    onVisibility();
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKeyUp);
     window.addEventListener("blur", onBlur);
@@ -12710,6 +13046,7 @@
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", onBlur);
       window.removeEventListener("mousedown", onMouseNav);
+      document.removeEventListener("visibilitychange", onVisibility);
       stopTextEffects();
       releaseAll();
       stopPlayback();
@@ -14159,10 +14496,21 @@
     <div class="juke-head">
       <span class="juke-head-ico">{@render icoNote()}</span>
       <span class="stage-label">JUKEBOX</span>
-      <!-- One chip, in the order that matters: bytes in flight beats a dead DJ beats "we agree".
-           Reading a held file off this disk and pulling one off a peer feel completely different
-           to wait through, so they are named differently rather than both being "FETCHING". -->
-      {#if jukeFetch}
+      <!-- One chip, in the order that matters: what is wrong HERE beats bytes in flight beats a
+           dead DJ beats "we agree". The two local states come first because the room can be
+           perfectly in sync while this machine is silent, and "SYNCED" over silence is the one
+           thing the chip must never say. Reading a held file off this disk and pulling one off a
+           peer feel completely different to wait through, so they are named differently rather
+           than both being "FETCHING". -->
+      {#if jukeBlocked}
+        <button
+          class="juke-chip warn juke-chip-btn"
+          title="This webview will not start audio until you interact with it. Click to start playing."
+          onclick={jukeUnblock}
+        >ENABLE PLAYBACK</button>
+      {:else if jukeLocalFail}
+        <span class="juke-chip gone" title={`This device could not fetch or decode "${jukeLocalFail}". The room is still playing it.`}>NOT PLAYABLE HERE</span>
+      {:else if jukeFetch}
         <span
           class="juke-chip info"
           title={jukeFetch.source === "network"
@@ -14180,6 +14528,9 @@
       {/if}
       {#if !jukeOpen && jukeUpNext.length}
         <span class="stage-label juke-qn" title={`${jukeUpNext.length} queued`}>Q{jukeUpNext.length}</span>
+      {/if}
+      {#if jukeQueueStale}
+        <span class="juke-chip warn" title="The queue could not be re-read; this is the last list this device saw">QUEUE STALE</span>
       {/if}
       <span class="stage-spacer"></span>
       {#if jukeNow}
@@ -15479,7 +15830,7 @@
             {@render icoDm()}
             {#if dmRequests.length}
               <span class="rail-badge">{dmRequests.length}</span>
-            {:else if dmList.some((d) => d.unread.length || d.dot)}
+            {:else if dmList.some((d) => d.unread.length)}
               <span class="rail-dot">●</span>
             {/if}
           </button>
@@ -15512,8 +15863,6 @@
               {/if}
               {#if s.unread.length}
                 <span class="rail-badge">{s.unread.length}</span>
-              {:else if s.dot}
-                <span class="rail-dot">●</span>
               {/if}
             </button>
           {/each}
@@ -17921,10 +18270,10 @@
               {@const online = spaceOnlineCounts[it.s.id] ?? 1}
               {@const mentions = spaceMentionCounts[it.s.id] ?? 0}
               {@const voice = spaceVoiceCount(it.s.id)}
-              {@const recent = it.s.dot || it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
+              {@const recent = it.s.unread.length > 0 || (spaceActivityAt[it.s.id] ?? 0) > nowTick - 5 * 60_000}
               <button
                 class="sp-srv"
-                class:sp-unread={it.s.unread.length > 0 || it.s.dot}
+                class:sp-unread={it.s.unread.length > 0}
                 class:sp-recent={recent}
                 class:sp-carried={it.carried}
                 class:sp-enter-target={spaceEntering === it.s.id}

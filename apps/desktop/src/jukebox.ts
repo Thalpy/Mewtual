@@ -210,6 +210,48 @@ export function deckAdvance(
   return { next: queue[i + 1] ?? null, drop: played && i >= 0 ? currentId : "" };
 }
 
+/**
+ * The largest transport revision the protocol will carry, well inside the range JavaScript can
+ * still count in whole numbers.
+ *
+ * The revision decides who owns the deck: a press adopts `max(mine, heard) + 1`. Any peer-supplied
+ * value that arithmetic cannot move past therefore freezes control wherever it happens to be. A
+ * `Number.isInteger` check is not enough, because `1e308` passes it, survives JSON, and satisfies
+ * `1e308 + 1 === 1e308`. Two to the fortieth is a trillion presses: unreachable by use, and a
+ * decade of headroom below `Number.MAX_SAFE_INTEGER` for the increment to stay exact.
+ */
+export const MAX_JUKE_SEQ = 2 ** 40;
+
+/** Is a peer-supplied transport revision one this deck can safely order and increment past? */
+export function validJukeSeq(seq: unknown): seq is number {
+  return typeof seq === "number" && Number.isSafeInteger(seq) && seq >= 0 && seq <= MAX_JUKE_SEQ;
+}
+
+/** The transport currently being followed, as far as deciding who wins is concerned. */
+export type JukeClaim = { seq: number; fromFp: string };
+
+/**
+ * Should an incoming transport frame be adopted?
+ *
+ * "newer" is a higher revision, or the same revision from a higher fingerprint so two people
+ * pressing at the same moment resolve identically on every machine. A frame that is not newer is
+ * still adopted when it comes from the DJ already being followed: that is the five-second
+ * re-announce, which keeps the deck alive and corrects drift.
+ */
+export function jukeClaimWins(current: JukeClaim | null, incoming: JukeClaim): boolean {
+  if (!validJukeSeq(incoming.seq)) return false;
+  if (!current) return true;
+  if (incoming.seq > current.seq) return true;
+  if (incoming.seq < current.seq) return false;
+  return incoming.fromFp >= current.fromFp;
+}
+
+/** The revision a press claims. Bounded, so a poisoned value cannot wedge the deck forever. */
+export function nextJukeSeq(mine: number, adopted: number | null): number {
+  const floor = Math.max(validJukeSeq(mine) ? mine : 0, validJukeSeq(adopted) ? adopted : 0);
+  return Math.min(floor + 1, MAX_JUKE_SEQ);
+}
+
 /** Everything the deck's position depends on. `element` is null unless it holds the live track. */
 export type DeckClock = {
   /** Whether the transport being followed is my own press. */
