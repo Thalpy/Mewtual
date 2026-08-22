@@ -4,7 +4,31 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **The jukebox shows the film it is playing.** A shared video used to have nowhere to be unless
+  someone opened the focus view by hand: the room heard a clip nobody could see. The deck now
+  carries its own screen, with one press to watch it full size, and the focus view still takes the
+  whole window when it is open.
+- **Add from share** can be narrowed to audio or video, with a count on each tab, so queueing a
+  film in a share full of music no longer means reading past all of it.
+
 ### Fixed
+
+- **Adding to the queue could take the whole app down.** A share may list the same file more than
+  once (in two folders, or twice in one after a simultaneous add) and the picker assumed it never
+  would, so opening it over such a share crashed with `each_key_duplicate`. Each piece of content
+  is now offered once, whatever the share calls it.
+- **A track already on this disk could still buffer.** Every media response read the file's first
+  chunk to learn a size and a type the file index already carried, which is a whole 8 MiB decrypt
+  on the single-threaded server, and with a small plaintext cache that read evicted the chunk
+  being played: each window threw away the chunk it needed to read it back again. Playing a file
+  through now decrypts each of its chunks exactly once, and the deck stops competing with the
+  rest of the app for the server it is reading from.
+- The focus view no longer pushes a shared film past the bottom of the window. On a wide
+  fullscreen display the video band claimed a 16:9 height off the full width and the filmstrip
+  and dock went off the edge; the band now takes the space that is actually left and letterboxes
+  inside it.
 
 - **The jukebox plays on Windows again.** Shared tracks were requested through a URL scheme
   WebView2 has no handler for, so every track failed the moment it was pressed and the deck

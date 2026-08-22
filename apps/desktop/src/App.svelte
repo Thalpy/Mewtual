@@ -56,9 +56,9 @@
   } from "./native-download";
   import { bufferIce, heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling";
   import {
-    deckAdvance, deckPosition, driftAction, fetchPhase, isStalled, mediaKind, mediaUrl, nudgeRate,
-    playableQueue, resolveCallName, STALL_ANNOUNCE_MS,
-    type FetchPhase, type JukeEntry, type MediaKind,
+    deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, mediaChoices,
+    mediaKind, mediaUrl, nudgeRate, playableQueue, resolveCallName, stallChip, STALL_ANNOUNCE_MS,
+    type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import { installUiLogging } from "./uilog";
   import {
@@ -10003,26 +10003,19 @@
     // it. Announcing the raw event made an ordinary playing track claim it had run dry.
     el.addEventListener("waiting", () => {
       clearTimeout(bufferTimer);
+      jukeBuffering = stallChip(jukeBuffering, "waiting", el);
       bufferTimer = setTimeout(() => {
-        if (jukeAudio && isStalled(jukeAudio)) jukeBuffering = true;
+        if (jukeAudio) jukeBuffering = stallChip(jukeBuffering, "deadline", jukeAudio);
       }, STALL_ANNOUNCE_MS);
     });
-    el.addEventListener("playing", () => {
-      clearTimeout(bufferTimer);
-      jukeBuffering = false;
-      jukeFetch = null;
-    });
-    el.addEventListener("canplay", () => {
-      clearTimeout(bufferTimer);
-      jukeBuffering = false;
-    });
     // Progress of any kind means it is not stalled, whatever `waiting` claimed a moment ago.
-    el.addEventListener("timeupdate", () => {
-      if (jukeBuffering) {
+    for (const ev of ["playing", "canplay", "timeupdate", "seeked"]) {
+      el.addEventListener(ev, () => {
         clearTimeout(bufferTimer);
-        jukeBuffering = false;
-      }
-    });
+        jukeBuffering = stallChip(jukeBuffering, "progress", el);
+        if (ev === "playing") jukeFetch = null;
+      });
+    }
     document.body.appendChild(el);
     jukeAudio = el;
     return el;
@@ -10231,7 +10224,11 @@
     node.appendChild(el);
     return {
       destroy() {
-        if (jukeAudio === el) document.body.appendChild(el);
+        // Only if this node still holds it. Handing the film from the dock to the focus view (or
+        // back) mounts the new host before the old one tears down, and a teardown that re-homed
+        // unconditionally would snatch the element straight back out of the surface that had just
+        // adopted it, leaving a black box behind.
+        if (jukeAudio === el && el.parentElement === node) document.body.appendChild(el);
       },
     };
   }
@@ -10375,8 +10372,24 @@
   });
   // The queue as the DJ will actually play it, minus whatever is already on the deck.
   let jukeUpNext = $derived(jukePlayable().filter((e) => e.id !== jukeNow?.entry));
-  // Anything the deck can play: audio and video both, since one element handles both.
-  let jukeAudioFiles = $derived(files.filter((f) => mediaKind(f.name, f.mime) !== "other"));
+  // What the picker offers: anything the deck can play (audio and video both, since one element
+  // handles both), narrowed to the kind being asked for, each piece of content listed once. The
+  // share can list one content address several times over (two folders, or a concurrent double
+  // add), and to the deck those are all one track.
+  const JUKE_PICK_KINDS: { key: MediaFilter; label: string }[] = [
+    { key: "all", label: "ALL" },
+    { key: "audio", label: "AUDIO" },
+    { key: "video", label: "VIDEO" },
+  ];
+  let jukePickKind = $state<MediaFilter>("all");
+  let jukePickFiles = $derived(mediaChoices(files, jukePickKind));
+  // Counts on the toggle, so an empty list is legible as "none of that kind" rather than as a
+  // broken picker, and so switching to a kind that has nothing is a choice you can decline.
+  let jukePickCounts = $derived({
+    all: mediaChoices(files, "all").length,
+    audio: mediaChoices(files, "audio").length,
+    video: mediaChoices(files, "video").length,
+  });
   // `files` is the ACTIVE server's share, while the room is on callServer: they are the same list
   // only while you are looking at the server you are called into. Every share-derived chip (gone,
   // expiring, the picker itself) is gated on this rather than lying about another server's share.
@@ -10515,6 +10528,13 @@
     focusOpen = false;
     focusDismissed = true; // otherwise the effect above re-opens it on the next frame
   }
+  // Where a shared film's picture goes. One deck element, adopted by re-parenting, so exactly one
+  // surface may claim it: the focus view when it is up, the deck's own screen in the stage
+  // otherwise, and nowhere at all for audio (which is heard from the hidden element in the body).
+  // A jukebox video deliberately does NOT auto-enter focus the way a camera does: a track someone
+  // queued must not seize the window from whoever is reading chat, so the dock shows it in place
+  // and the expand button is the way up.
+  let jukeScreen = $derived(deckSurface(jukeKind, !!jukeNow, focusOpen, jukeOpen));
   // Self first, then peers: one tile per person, and nothing else on the grid.
   let focusTiles = $derived([callSelfFp, ...callParticipants]);
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
@@ -14163,6 +14183,29 @@
       >{#if jukeOpen}{@render icoChevDown()}{:else}{@render icoChevUp()}{/if}</button>
     </div>
 
+    <!--
+      The deck's own screen. A shared film used to have nowhere to be outside the focus view: the
+      element played on, hidden in the body, so the room heard a video nobody could see unless
+      somebody thought to open focus. It sits above the transport because it IS the thing being
+      transported, and it hands the element back to the focus view the moment that opens.
+    -->
+    {#if jukeScreen === "dock"}
+      <div class="juke-screen" use:jukeHost>
+        <button
+          class="ghost juke-expand"
+          title="Watch it full size: the call takes the window"
+          aria-label="Watch full size"
+          onclick={openFocus}
+        >{@render icoFullscreen()}</button>
+        {#if jukeFetch}
+          <div class="juke-screen-load">
+            <span class="stage-label">{jukeFetch.source === "network" ? "PULLING" : "LOADING"} {jukeFetch.percent}%</span>
+            <div class="juke-bar load {jukeFetch.source}"><i class="juke-bar-fill" style={`width:${jukeFetch.percent}%`}></i></div>
+          </div>
+        {/if}
+      </div>
+    {/if}
+
     {#if jukeNow && !jukeOpen}
       <!-- Folded: one line of the room's shared state, plus a hairline of progress. -->
       <div class="juke-min">
@@ -14250,7 +14293,7 @@
               <span class="juke-chip info">{jukeFetch.percent}%</span>
             {/if}
             {#if mediaKind(e.name) === "video"}
-              <span class="juke-kind" title="A video: it plays on the focus view">VID</span>
+              <span class="juke-kind" title="A video: it plays on the deck's screen, and full size in the focus view">VID</span>
             {/if}
             {#if gone}
               <span class="juke-chip gone" title="Nobody is sharing this any more">GONE</span>
@@ -17373,7 +17416,7 @@
 
         <!-- The shared screen: a video the room is watching together gets the top band, and the
              faces drop to a filmstrip underneath rather than competing with it. -->
-        {#if jukeNow && jukeKind === "video"}
+        {#if jukeScreen === "focus"}
           <div class="focus-deck" use:jukeHost>
             {#if jukeFetch}
               <div class="focus-deck-load">
@@ -17388,7 +17431,7 @@
           </div>
         {/if}
 
-        <div class="focus-grid" class:strip={jukeNow && jukeKind === "video"} style={`--focus-cols:${focusCols}`}>
+        <div class="focus-grid" class:strip={jukeScreen === "focus"} style={`--focus-cols:${focusCols}`}>
           {#each focusTiles as fp (fp)}
             {@const me = fp === callSelfFp}
             {@const vid = me ? (myVideo === "screen" ? 2 : myVideo === "cam" ? 1 : 0) : peerMeta[fp]?.vid ?? 0}
@@ -17462,11 +17505,28 @@
             <button class="ghost" title="Close (Esc)" onclick={() => (jukePickerOpen = false)}>✕</button>
           </header>
           <div class="overlay-body">
-            {#if jukeAudioFiles.length === 0}
-              <p class="juke-pick-empty">no audio or video in this server's share yet: drop a file in chat or the Files surface to share it</p>
+            <!-- Audio and video are two different plans for the room (one plays in the background,
+                 the other asks everyone to watch), so the picker lets you ask for one of them. -->
+            <div class="juke-pick-tabs" role="tablist" aria-label="Kind of media">
+              {#each JUKE_PICK_KINDS as k (k.key)}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={jukePickKind === k.key}
+                  class:active={jukePickKind === k.key}
+                  onclick={() => (jukePickKind = k.key)}
+                >{k.label} <span class="juke-pick-n">{jukePickCounts[k.key]}</span></button>
+              {/each}
+            </div>
+            {#if jukePickFiles.length === 0}
+              <p class="juke-pick-empty">
+                {jukePickKind === "all"
+                  ? "no audio or video in this server's share yet: drop a file in chat or the Files surface to share it"
+                  : `no ${jukePickKind} in this server's share yet: share one, or ask for a different kind above`}
+              </p>
             {:else}
               <ul class="juke-pick-list">
-                {#each jukeAudioFiles as f (f.cid + "|" + f.path)}
+                {#each jukePickFiles as f (f.cid)}
                   {@const days = jukeExpiryDays(f.cid)}
                   <li class="juke-pick-row">
                     <span class="juke-ext" class:vid={mediaKind(f.name, f.mime) === "video"}>{jukeExt(f)}</span>

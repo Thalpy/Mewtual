@@ -3365,6 +3365,31 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         Some((manifest.chunks.len(), manifest.total_size))
     }
 
+    /// The plaintext size and declared type of a listed file, from the index alone.
+    ///
+    /// The media protocol needs both before it can answer anything: a suffix range, a
+    /// past-the-end probe and the `Content-Range` total are all relative to the size, and the
+    /// type decides what the player is even willing to decode. It used to learn them by reading
+    /// **chunk 0** of the file on every single response, which is a whole 8 MiB fetch-and-open on
+    /// the single-threaded actor to discover two numbers the manifest already carries. With a
+    /// two-chunk plaintext cache that read also evicted the chunk being played, so a player
+    /// walking a long track re-read chunk 0, dropped the chunk it was playing, and re-read that
+    /// too: a file every byte of which was already on this disk could still stall the deck. This
+    /// touches no blob, no disk and no network.
+    pub fn file_head(&self, cid: &Cid) -> Option<(u64, String)> {
+        let entry = self
+            .files()
+            .into_iter()
+            .find(|e| e.cid.as_slice() == &cid.as_bytes()[..])?;
+        let manifest = FileManifest::decode_or_legacy(&entry.file_ref).ok()?;
+        // The same guard `read_file_range` applies: a member authors the manifest, so an absurd
+        // declared size must not become a `Content-Range` the player then chases.
+        if manifest.total_size > MAX_FILE_BYTES as u64 {
+            return None;
+        }
+        Some((manifest.total_size, entry.mime))
+    }
+
     /// Read a byte range of a listed file's plaintext.
     ///
     /// This is the media path: a player asks for the window it is about to show rather than the

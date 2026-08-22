@@ -8002,6 +8002,10 @@ a.ref-card:hover {
   flex-direction: column;
   background: var(--bg-0);
   z-index: 70;
+  /* The column must never be taller than the window it is fixed to. Without this the shared
+     screen, the filmstrip and the dock could each claim their maximum and push the last of them
+     off the bottom edge, which is what a wide fullscreen window did every time. */
+  overflow: hidden;
 }
 
 .focus-head {
@@ -9102,6 +9106,97 @@ button.juke-q:hover {
   font-size: 0.78rem;
   line-height: 1.5;
   color: var(--muted);
+}
+/* Kind toggle: the same tab idiom the insert panel uses, because it is the same gesture. The
+   count rides each tab so an empty list reads as "none of that kind" and not as a broken picker. */
+.juke-pick-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.juke-pick-tabs button[role="tab"] {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 0.3rem 0.6rem;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  cursor: pointer;
+}
+.juke-pick-tabs button[role="tab"]:hover {
+  color: var(--text);
+  background: transparent;
+}
+.juke-pick-tabs button[role="tab"].active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.juke-pick-n {
+  color: var(--faint);
+}
+.juke-pick-tabs button[role="tab"].active .juke-pick-n {
+  color: var(--accent);
+}
+
+/* The deck's own screen, for a film outside the focus view. Same shape as the focus band, sized
+   to the dock: the picture is the point, so it takes the dock's full width. */
+.juke-screen {
+  position: relative;
+  width: 100%;
+  margin: 4px 0 6px;
+  background: #000;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-height: 34vh;
+}
+.juke-screen :global(video) {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+button.juke-expand {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r);
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
+}
+button.juke-expand:hover {
+  background: rgba(0, 0, 0, 0.78);
+  border-color: #fff;
+  color: #fff;
+}
+.juke-screen-load {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  width: min(260px, 78%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 5px 9px;
+  border-radius: var(--r);
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
 }
 
 /* --- update card: rides the toast column so both share one corner --- */
@@ -13173,15 +13268,18 @@ body > #jukebox-media {
 }
 
 /* The shared screen in the focus view. */
+/* The shared screen takes whatever height the column has left rather than claiming a shape of
+   its own. A fixed 16/9 box sized off the full width overflowed the window on any display wide
+   enough that width * 9/16 exceeded the space the filmstrip and the dock had not already taken;
+   the film letterboxes itself inside this band instead, which is what object-fit is for. */
 .focus-deck {
   position: relative;
   width: 100%;
   background: #000;
   border-radius: var(--r-lg);
   overflow: hidden;
-  aspect-ratio: 16 / 9;
-  max-height: 62vh;
-  flex: none;
+  flex: 1 1 auto;
+  min-height: 120px;
 }
 .focus-deck :global(video) {
   display: block;

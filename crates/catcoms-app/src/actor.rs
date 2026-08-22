@@ -303,6 +303,12 @@ pub enum AppCommand {
         idx: usize,
         reply: oneshot::Sender<ChunkResult>,
     },
+    /// The size and declared type of a listed file, read from the index without decrypting any
+    /// of it: what the media protocol needs before it can answer a `Range` request at all.
+    FileHead {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Option<(u64, String)>>,
+    },
     /// Read one window of a file's plaintext, for the media protocol: whole-file reads do not fit
     /// a player that wants to start on the first chunk and seek by the second.
     ReadFileRange {
@@ -1591,6 +1597,20 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// The size and declared type of a listed file. See [`AppCommand::FileHead`].
+    pub async fn file_head(&self, cid: Vec<u8>) -> Option<(u64, String)> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::FileHead { cid, reply })
+            .await
+            .is_err()
+        {
+            return None;
+        }
+        rx.await.ok().flatten()
+    }
+
     /// Read one window of a file's plaintext. See [`AppCommand::ReadFileRange`].
     pub async fn read_file_range(
         &self,
@@ -2770,6 +2790,12 @@ where
                             Err(_) => Err("bad content address".to_string()),
                         };
                         let _ = reply.send(res);
+                    }
+                    Some(AppCommand::FileHead { cid, reply }) => {
+                        let head = <[u8; 32]>::try_from(cid.as_slice())
+                            .ok()
+                            .and_then(|arr| server.file_head(&Cid::from_bytes(arr)));
+                        let _ = reply.send(head);
                     }
                     Some(AppCommand::ReadFileRange {
                         cid,

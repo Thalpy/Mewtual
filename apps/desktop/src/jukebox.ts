@@ -72,6 +72,66 @@ export function mediaKind(name: string, mime = ""): MediaKind {
   return "other";
 }
 
+/** What the "add from share" picker is currently listing. */
+export type MediaFilter = "all" | "audio" | "video";
+
+/** The least a file has to say for the picker to place it. */
+export type MediaChoice = { cid: string; name: string; mime: string };
+
+/**
+ * The share's media, as the picker offers it: the kinds asked for, each piece of content once.
+ *
+ * The de-duplication is the load-bearing half. A file index is an append-only list and `add_file`
+ * re-lists content it already holds rather than storing it twice, so one piece of content can
+ * appear several times over: in two folders, or twice in one folder after a concurrent double
+ * add. The deck plays a content address, so those listings are all the same track to it, and a
+ * keyed list that assumed otherwise crashed the whole app with `each_key_duplicate` the moment a
+ * share held one. First listing wins, so the order the share reports is preserved.
+ */
+export function mediaChoices<T extends MediaChoice>(
+  files: readonly T[],
+  filter: MediaFilter = "all",
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const f of files) {
+    const kind = mediaKind(f.name, f.mime);
+    if (kind === "other") continue;
+    if (filter !== "all" && kind !== filter) continue;
+    if (seen.has(f.cid)) continue;
+    seen.add(f.cid);
+    out.push(f);
+  }
+  return out;
+}
+
+/** Which surface holds the deck element: see [`deckSurface`]. */
+export type DeckSurface = "focus" | "dock" | "none";
+
+/**
+ * Where a playing track's picture goes.
+ *
+ * There is exactly one deck element and the surfaces adopt it by re-parenting, so at most one of
+ * them may claim it at a time: two claims means one surface shows an empty box and the other
+ * steals the frame back on the next render. Hence one function rather than a condition written
+ * twice.
+ *
+ * Audio never claims a surface (there is nothing to see, and the element is hidden in the body
+ * where the room can still hear it), the focus view outranks the dock because it is the surface
+ * asked for by name, and a folded dock is one line by definition: the picture is what the focus
+ * view is for.
+ */
+export function deckSurface(
+  kind: MediaKind,
+  playing: boolean,
+  focusOpen: boolean,
+  dockOpen: boolean,
+): DeckSurface {
+  if (!playing || kind !== "video") return "none";
+  if (focusOpen) return "focus";
+  return dockOpen ? "dock" : "none";
+}
+
 /** Below this, a listener is close enough to the DJ that correcting would be worse than drifting. */
 export const DRIFT_HOLD_S = 0.4;
 /** Above this, easing back would take longer than the drift is old; snap instead. */
@@ -243,6 +303,40 @@ export const HAVE_FUTURE_DATA = 3;
 
 export function isStalled(state: { readyState: number; paused: boolean }): boolean {
   return !state.paused && state.readyState < HAVE_FUTURE_DATA;
+}
+
+/**
+ * What moved the deck's buffering chip.
+ *
+ * `waiting` is the element saying it has run out for the moment, `progress` is any evidence to
+ * the contrary (it started playing, it can play, its time moved), and `deadline` is
+ * [`STALL_ANNOUNCE_MS`] having passed since the last `waiting` with nothing since.
+ */
+export type StallSignal = "waiting" | "progress" | "deadline";
+
+/**
+ * Whether the deck should be claiming it has run dry, after one signal.
+ *
+ * Worth stating as a rule rather than as three event handlers, because the interesting case is
+ * the one that reads wrong: a track streaming perfectly well fires `waiting` at every chunk
+ * boundary and every seek. Announcing that raw made an ordinary playing track claim it had
+ * stalled, so the chip waits out the deadline and then asks the element, whose `readyState` is
+ * the only witness that matters. Anything that proves progress clears the chip immediately,
+ * whatever the last `waiting` claimed.
+ *
+ * Note what this cannot tell you: **local is not the same as instant.** The deck streams out of
+ * the vault a window at a time, and every window is a sealed chunk that has to be opened by the
+ * single-threaded server actor before a byte of it can be served. A file entirely on this disk
+ * can still make a player wait, so a stall is never by itself proof that a peer is missing.
+ */
+export function stallChip(
+  announced: boolean,
+  signal: StallSignal,
+  el: { readyState: number; paused: boolean },
+): boolean {
+  if (signal === "progress") return false;
+  if (signal === "deadline") return isStalled(el);
+  return announced; // `waiting` only starts the clock; the deadline is what speaks
 }
 
 /**

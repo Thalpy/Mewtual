@@ -112,8 +112,63 @@ struct MediaChunk {
     cid: String,
     index: usize,
     bytes: Arc<Vec<u8>>,
+}
+
+/// A file's size and declared type, remembered so the media protocol asks the actor for them once
+/// per track instead of once per response. Neither can change for a content address, so there is
+/// nothing here to invalidate.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct MediaHead {
+    server: u64,
+    cid: String,
     total_size: u64,
     mime: String,
+}
+
+/// How many decrypted chunks stay resident. Two is enough for the straddle at a chunk boundary
+/// and a short seek back, and it is 16 MiB of plaintext: the cache exists to keep the actor free,
+/// not to hold the film.
+const MEDIA_CACHE_CHUNKS: usize = 2;
+/// How many file heads stay remembered. Tiny (two integers and a mime each), and more than one
+/// because a queue moves between tracks.
+const MEDIA_HEAD_ENTRIES: usize = 8;
+
+/// Take a chunk out of the cache, marking it as the most recently used.
+///
+/// Recency is what makes two entries enough. Without the refresh the vector is in insertion
+/// order, so a chunk that has been read a hundred times is evicted before one read once, and a
+/// player that alternates between two chunks (a container with its index at the end does exactly
+/// that) misses on every single request.
+fn media_cache_take(
+    cache: &mut Vec<MediaChunk>,
+    server: u64,
+    cid: &str,
+    index: usize,
+) -> Option<Arc<Vec<u8>>> {
+    let at = cache
+        .iter()
+        .position(|c| c.server == server && c.cid == cid && c.index == index)?;
+    let hit = cache.remove(at);
+    let bytes = Arc::clone(&hit.bytes);
+    cache.push(hit);
+    Some(bytes)
+}
+
+/// Put a chunk in the cache, displacing another track entirely and the oldest chunk of this one.
+fn media_cache_put(cache: &mut Vec<MediaChunk>, chunk: MediaChunk) {
+    // A different track displaces the whole cache: nothing about the old one will be asked for
+    // again, and holding two tracks' plaintext to serve one is the wrong trade.
+    if cache
+        .iter()
+        .any(|c| c.cid != chunk.cid || c.server != chunk.server)
+    {
+        cache.clear();
+    }
+    cache.retain(|c| c.index != chunk.index);
+    cache.push(chunk);
+    while cache.len() > MEDIA_CACHE_CHUNKS {
+        cache.remove(0);
+    }
 }
 
 /// Process-wide, coalesced notification that the operating system's interfaces or routes changed.
@@ -155,6 +210,9 @@ struct AppState {
     /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
     /// boundary and a short seek backwards, which is all the locality there is to exploit.
     media_cache: Mutex<Vec<MediaChunk>>,
+    /// Sizes and declared types of recently served files, so answering a `Range` request costs
+    /// one chunk read and not two. See [`MediaHead`].
+    media_heads: Mutex<Vec<MediaHead>>,
     /// Invite minting crosses actor and optional rendezvous awaits. Serialize it so two self-heal/
     /// explicit requests cannot finish out of order and overwrite a newer route-set token.
     invite_mint: Mutex<()>,
@@ -5889,7 +5947,11 @@ async fn serve_media(
     // is time the server cannot answer get_messages or get_channels. Serving a 2 MiB window out
     // of an 8 MiB chunk meant decrypting the same chunk four times over during ordinary
     // playback, which stalled the deck and made the whole server look like it was still loading.
-    let (total, declared, _) = match media_chunk(state, &actor, server, &cid, &raw, 0).await {
+    //
+    // The head comes from the index rather than from chunk 0 for the same reason: reading a whole
+    // chunk to learn a size and a mime put a second decrypt on every response and, because the
+    // cache is small, evicted the chunk the player was actually reading.
+    let (total, declared) = match media_head(state, &actor, server, &cid, &raw).await {
         Some(head) => head,
         None => return deny(http::StatusCode::NOT_FOUND),
     };
@@ -5909,7 +5971,7 @@ async fn serve_media(
     }
     let plan = media_window(start, len);
     let bytes = match media_chunk(state, &actor, server, &cid, &raw, plan.index).await {
-        Some((_, _, bytes)) => bytes,
+        Some(bytes) => bytes,
         None => return deny(http::StatusCode::SERVICE_UNAVAILABLE),
     };
     let lo = plan.offset.min(bytes.len());
@@ -5968,11 +6030,44 @@ fn media_window(start: u64, len: usize) -> MediaWindow {
     }
 }
 
+/// A shared file's plaintext size and declared type, remembered per track.
+///
+/// One actor round-trip the first time a track is served and none afterwards, against one round
+/// trip AND one 8 MiB decrypt per response before: see [`catcoms_app::Server::file_head`] for
+/// what that cost the deck.
+async fn media_head(
+    state: &AppState,
+    actor: &ServerActor,
+    server: u64,
+    cid: &str,
+    raw: &[u8],
+) -> Option<(u64, String)> {
+    {
+        let heads = state.media_heads.lock().await;
+        if let Some(hit) = heads.iter().find(|h| h.server == server && h.cid == cid) {
+            return Some((hit.total_size, hit.mime.clone()));
+        }
+    }
+    let (total_size, mime) = actor.file_head(raw.to_vec()).await?;
+    let mut heads = state.media_heads.lock().await;
+    heads.retain(|h| h.server != server || h.cid != cid);
+    heads.push(MediaHead {
+        server,
+        cid: cid.to_string(),
+        total_size,
+        mime: mime.clone(),
+    });
+    while heads.len() > MEDIA_HEAD_ENTRIES {
+        heads.remove(0);
+    }
+    Some((total_size, mime))
+}
+
 /// Fetch one whole decrypted chunk, from the cache when possible.
 ///
-/// Returns `(total plaintext size, declared mime, the chunk's bytes)`. The cache exists because
-/// the actor is single-threaded: every miss is time the server spends not answering anything
-/// else, so a player walking a track must not make us re-read a chunk it has already been served.
+/// The cache exists because the actor is single-threaded: every miss is time the server spends
+/// not answering anything else, so a player walking a track must not make us re-read a chunk it
+/// has already been served.
 async fn media_chunk(
     state: &AppState,
     actor: &ServerActor,
@@ -5980,14 +6075,11 @@ async fn media_chunk(
     cid: &str,
     raw: &[u8],
     index: usize,
-) -> Option<(u64, String, Arc<Vec<u8>>)> {
+) -> Option<Arc<Vec<u8>>> {
     {
-        let cache = state.media_cache.lock().await;
-        if let Some(hit) = cache
-            .iter()
-            .find(|c| c.server == server && c.cid == cid && c.index == index)
-        {
-            return Some((hit.total_size, hit.mime.clone(), Arc::clone(&hit.bytes)));
+        let mut cache = state.media_cache.lock().await;
+        if let Some(bytes) = media_cache_take(&mut cache, server, cid, index) {
+            return Some(bytes);
         }
     }
     let start = index as u64 * CHUNK_BYTES as u64;
@@ -5996,32 +6088,22 @@ async fn media_chunk(
         .await
         .ok()?;
     // A read past the end is how the caller learns the file is shorter than it guessed; it is not
-    // worth a cache entry, but the size and type it carries are still the truth.
+    // worth a cache entry.
     if range.bytes.is_empty() && start > 0 {
-        return Some((range.total_size, range.mime, Arc::new(Vec::new())));
+        return Some(Arc::new(Vec::new()));
     }
     let bytes = Arc::new(range.bytes);
     let mut cache = state.media_cache.lock().await;
-    // A different track displaces the whole cache: nothing about the old one will be asked for
-    // again, and holding two tracks' plaintext to serve one is the wrong trade.
-    if cache.iter().any(|c| c.cid != cid || c.server != server) {
-        cache.clear();
-    }
-    cache.retain(|c| c.index != index);
-    cache.push(MediaChunk {
-        server,
-        cid: cid.to_string(),
-        index,
-        bytes: Arc::clone(&bytes),
-        total_size: range.total_size,
-        mime: range.mime.clone(),
-    });
-    // Two chunks: enough for the straddle at a boundary and a short seek back, and no more
-    // decrypted plaintext resident than that.
-    while cache.len() > 2 {
-        cache.remove(0);
-    }
-    Some((range.total_size, range.mime, bytes))
+    media_cache_put(
+        &mut cache,
+        MediaChunk {
+            server,
+            cid: cid.to_string(),
+            index,
+            bytes: Arc::clone(&bytes),
+        },
+    );
+    Some(bytes)
 }
 
 /// Constrain what a shared file's declared MIME may become on a media response. The value is
@@ -7583,6 +7665,9 @@ async fn lock_session_inner(state: &AppState, ui_state_json: Option<String>) -> 
     // The media cache holds decrypted chunks of shared files. Locking must drop them along with
     // the rest of the session's plaintext, not leave a film resident until something evicts it.
     state.media_cache.lock().await.clear();
+    // The heads are only sizes and types, but they name what was being played: a locked vault
+    // should not still be able to answer that.
+    state.media_heads.lock().await.clear();
     save_result
 }
 
@@ -8686,6 +8771,96 @@ mod tests {
             vec![0, 1, 2, 3],
             "the walk must be forward-only and skip nothing"
         );
+    }
+
+    // --- Regression: the local file that still buffered ---------------------------------------
+    // Reaching a chunk is not the same as reading it once. Every response also read chunk 0, to
+    // learn a size and a mime the index already carried, so the actual sequence of decrypts was
+    // 0, N, 0, N, ... over a two-entry cache: each response threw away the chunk being played to
+    // make room for the header, then threw away the header to read the chunk back. A file with
+    // every byte on this disk buffered anyway, and because the actor is single-threaded, so did
+    // everything else the app wanted to do.
+
+    fn cached(server: u64, cid: &str, index: usize) -> MediaChunk {
+        MediaChunk {
+            server,
+            cid: cid.to_string(),
+            index,
+            bytes: Arc::new(vec![index as u8; 8]),
+        }
+    }
+
+    /// Walk a file the way a player does and report which chunks had to be decrypted.
+    fn walk_decrypts(total: u64) -> Vec<usize> {
+        let mut cache: Vec<MediaChunk> = Vec::new();
+        let mut decrypts = Vec::new();
+        let mut at = 0u64;
+        while at < total {
+            let w = media_window(at, MEDIA_WINDOW_BYTES);
+            if media_cache_take(&mut cache, 1, "cid", w.index).is_none() {
+                decrypts.push(w.index);
+                media_cache_put(&mut cache, cached(1, "cid", w.index));
+            }
+            at += w.len as u64;
+        }
+        decrypts
+    }
+
+    #[test]
+    fn playing_a_held_file_through_decrypts_each_chunk_exactly_once() {
+        let total = CHUNK_BYTES as u64 * 3 + 4242;
+        assert_eq!(
+            walk_decrypts(total),
+            vec![0, 1, 2, 3],
+            "four chunks, four decrypts: nothing is read twice and nothing is read early"
+        );
+    }
+
+    #[test]
+    fn the_cache_keeps_the_chunk_that_was_just_read() {
+        // Recency, not insertion order. The distinction only shows when a third chunk arrives:
+        // insertion order evicts whatever has been resident longest, which can be the chunk the
+        // player is reading right now.
+        let mut cache = Vec::new();
+        media_cache_put(&mut cache, cached(1, "cid", 0));
+        media_cache_put(&mut cache, cached(1, "cid", 1));
+        assert!(media_cache_take(&mut cache, 1, "cid", 0).is_some());
+        media_cache_put(&mut cache, cached(1, "cid", 2));
+        assert!(
+            media_cache_take(&mut cache, 1, "cid", 0).is_some(),
+            "the chunk that was just read must survive the next admission"
+        );
+        assert!(
+            media_cache_take(&mut cache, 1, "cid", 1).is_none(),
+            "the idle one is the one that goes"
+        );
+    }
+
+    #[test]
+    fn the_cache_never_holds_more_plaintext_than_it_promises() {
+        let mut cache = Vec::new();
+        for index in 0..10 {
+            media_cache_put(&mut cache, cached(1, "cid", index));
+            assert!(cache.len() <= MEDIA_CACHE_CHUNKS, "at index {index}");
+        }
+        // And a re-admission of a chunk already held replaces it rather than duplicating it.
+        media_cache_put(&mut cache, cached(1, "cid", 9));
+        assert_eq!(cache.iter().filter(|c| c.index == 9).count(), 1);
+    }
+
+    #[test]
+    fn a_new_track_takes_the_old_track_s_plaintext_out_of_memory() {
+        let mut cache = Vec::new();
+        media_cache_put(&mut cache, cached(1, "aaa", 0));
+        media_cache_put(&mut cache, cached(1, "aaa", 1));
+        media_cache_put(&mut cache, cached(1, "bbb", 0));
+        assert_eq!(cache.len(), 1, "nothing of the old track is kept");
+        assert!(media_cache_take(&mut cache, 1, "aaa", 0).is_none());
+        // The same content address on another server is another track, and must not be served
+        // from this one's cache.
+        assert!(media_cache_take(&mut cache, 2, "bbb", 0).is_none());
+        media_cache_put(&mut cache, cached(2, "bbb", 0));
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

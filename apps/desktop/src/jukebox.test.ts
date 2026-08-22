@@ -5,7 +5,9 @@ import {
   DRIFT_SEEK_S,
   deckAdvance,
   deckPosition,
+  deckSurface,
   driftAction,
+  mediaChoices,
   fetchPhase,
   mediaKind,
   mediaOrigin,
@@ -14,6 +16,7 @@ import {
   isStalled,
   playableQueue,
   resolveCallName,
+  stallChip,
   HAVE_FUTURE_DATA,
   STALL_ANNOUNCE_MS,
   type JukeEntry,
@@ -328,7 +331,141 @@ test("an empty queue advances to nothing rather than throwing", () => {
   assert.deepEqual(deckAdvance([], "", true), { next: null, drop: "" });
 });
 
+// --- Video: what the picker offers, and where the picture goes -----------------------------------
+
+const share = [
+  { cid: "c1", name: "Opening Theme.flac", mime: "audio/flac", path: "" },
+  { cid: "c2", name: "Holiday.mkv", mime: "", path: "clips" },
+  { cid: "c1", name: "Opening Theme.flac", mime: "audio/flac", path: "wiki/Lmao!" },
+  { cid: "c3", name: "notes.txt", mime: "text/plain", path: "" },
+  { cid: "c2", name: "Holiday.mkv", mime: "", path: "wiki/Lmao!" },
+];
+
+test("one piece of content is offered once, however many times the share lists it", () => {
+  // The regression, and it was fatal rather than cosmetic: a file index is append-only and
+  // add_file re-lists content it already holds, so the same cid turns up under two folders (or
+  // twice under one after a concurrent add). A keyed list that assumed cid+path was unique took
+  // the whole app down with each_key_duplicate as soon as a share held a double listing.
+  const offered = mediaChoices(share);
+  assert.deepEqual(offered.map((f) => f.cid), ["c1", "c2"]);
+  assert.equal(new Set(offered.map((f) => f.cid)).size, offered.length, "cid is a usable key");
+});
+
+test("the picker offers only what the deck can play", () => {
+  assert.ok(!mediaChoices(share).some((f) => f.name.endsWith(".txt")));
+});
+
+test("the kind toggle narrows to one kind, extension-only entries included", () => {
+  // A queue entry carries no mime and neither does a plain share listing, so the video here is
+  // recognised by its extension alone: filtering must go through the same rule playback does.
+  assert.deepEqual(mediaChoices(share, "audio").map((f) => f.cid), ["c1"]);
+  assert.deepEqual(mediaChoices(share, "video").map((f) => f.cid), ["c2"]);
+  assert.deepEqual(mediaChoices(share, "all").map((f) => f.cid), ["c1", "c2"]);
+  assert.deepEqual(mediaChoices([], "video"), []);
+});
+
+test("the picker keeps the share's own order", () => {
+  const flipped = [share[1]!, share[0]!];
+  assert.deepEqual(mediaChoices(flipped).map((f) => f.cid), ["c2", "c1"]);
+});
+
+test("a film has exactly one home, and audio has none", () => {
+  // One element, adopted by re-parenting: two claims would leave one surface showing a black box
+  // and the other losing the frame on the next render.
+  assert.equal(deckSurface("video", true, true, true), "focus", "focus outranks the dock");
+  assert.equal(deckSurface("video", true, true, false), "focus", "even with the dock folded");
+  assert.equal(deckSurface("video", true, false, true), "dock", "otherwise the deck's own screen");
+  assert.equal(deckSurface("video", true, false, false), "none", "folded is one line by definition");
+  // Audio is heard from the hidden element in the body: a surface for it would be a black box.
+  assert.equal(deckSurface("audio", true, true, true), "none");
+  assert.equal(deckSurface("other", true, true, true), "none");
+  // And nothing playing claims nothing.
+  assert.equal(deckSurface("video", false, true, true), "none");
+});
+
+test("no pair of states ever hands the film to two surfaces at once", () => {
+  for (const kind of ["audio", "video", "other"] as const) {
+    for (const playing of [true, false]) {
+      for (const focus of [true, false]) {
+        for (const dock of [true, false]) {
+          const where = deckSurface(kind, playing, focus, dock);
+          assert.ok(
+            where === "focus" || where === "dock" || where === "none",
+            `${kind}/${playing}/${focus}/${dock}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test("a video track is transported exactly like an audio one", () => {
+  // The picture is the only difference. Kind changes how drift is corrected (a snap is visible
+  // where it is inaudible) and where the element is hosted, and nothing else: same queue, same
+  // clock, same advance.
+  const list = playableQueue(
+    [
+      entry({ id: "v1", cid: "c2", name: "Holiday.mkv", added_ms: 1 }),
+      entry({ id: "a1", cid: "c1", name: "Opening Theme.flac", added_ms: 2 }),
+    ],
+    new Set(),
+  );
+  assert.deepEqual(deckAdvance(list, "v1", true), { next: list[1], drop: "v1" });
+  assert.equal(
+    deckPosition(clock({ isDj: true, off: 0, since: 4000, element: { currentTime: 2, readyState: 4 } })),
+    2,
+  );
+  // Video eases rather than snaps, which is the one place the kind reaches the transport.
+  assert.equal(driftAction(1, "video"), "nudge");
+  assert.equal(driftAction(1, "audio"), "hold");
+});
+
 // --- Regressions ------------------------------------------------------------------------------
+
+// --- Buffering: what the chip is allowed to say --------------------------------------------------
+
+test("a chunk boundary never raises the chip, however long the deadline waits", () => {
+  // `waiting` fires at every chunk boundary and every seek of a perfectly healthy stream. The
+  // element's readyState is the arbiter, so a deck that can keep playing never claims otherwise.
+  const fine = { readyState: HAVE_FUTURE_DATA, paused: false };
+  assert.equal(stallChip(false, "waiting", fine), false);
+  assert.equal(stallChip(false, "deadline", fine), false);
+});
+
+test("only the deadline speaks, and only about a starved element", () => {
+  const starved = { readyState: 1, paused: false };
+  assert.equal(stallChip(false, "waiting", starved), false, "the wait alone says nothing");
+  assert.equal(stallChip(false, "deadline", starved), true, "a real starve is announced");
+});
+
+test("any progress clears the chip immediately", () => {
+  // Whatever the last `waiting` claimed: playing, canplay, a moved currentTime and a landed seek
+  // are all proof the deck is not dry.
+  const starved = { readyState: 0, paused: false };
+  assert.equal(stallChip(true, "progress", starved), false);
+  assert.equal(stallChip(true, "progress", { readyState: 4, paused: false }), false);
+});
+
+test("an announced stall stays up while it is still starved", () => {
+  const starved = { readyState: 1, paused: false };
+  assert.equal(stallChip(true, "waiting", starved), true, "a second waiting does not clear it");
+  assert.equal(stallChip(true, "deadline", starved), true);
+});
+
+test("pausing takes the chip down rather than leaving it up forever", () => {
+  // A deck paused on an unbuffered track is not waiting for anything.
+  assert.equal(stallChip(true, "deadline", { readyState: 0, paused: true }), false);
+});
+
+test("buffering is possible on a file this device holds in full", () => {
+  // Worth pinning as a fact, because it reads as a contradiction: the deck streams out of the
+  // vault a window at a time and every window is a sealed chunk the single-threaded actor has to
+  // open first. "Local" is not "instant", so the chip's rules must depend on the element's own
+  // readyState and never on where the bytes were going to come from.
+  const openingAChunk = { readyState: 1, paused: false };
+  assert.equal(stallChip(false, "deadline", openingAChunk), true);
+  assert.equal(stallChip(true, "progress", openingAChunk), false, "and it clears on the bytes");
+});
 
 test("a chunk boundary is not a stall", () => {
   // `waiting` fires constantly while streaming. Announcing it raw made a playing track claim it
