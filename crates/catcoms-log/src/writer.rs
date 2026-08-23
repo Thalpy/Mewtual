@@ -56,6 +56,11 @@ const QUEUE_CAPACITY: usize = 8192;
 /// How long a caller waits for the queue to drain when it needs the file to be current.
 pub(crate) const SYNC_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How many times a flush barrier retries for a queue slot, and how long it pauses between tries.
+/// Together these bound the wait at roughly [`SYNC_TIMEOUT`] without reading a clock.
+const SYNC_SLOT_ATTEMPTS: usize = 1000;
+const SYNC_SLOT_WAIT: Duration = Duration::from_millis(2);
+
 // --- health --------------------------------------------------------------------------------
 
 /// What the debug-log file is doing, as distinct from what was asked of it.
@@ -161,16 +166,28 @@ impl std::fmt::Display for DiagnosticInitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DiagnosticInitError::Directory { path, source } => {
-                write!(f, "could not open the diagnostics directory {}: {source}", path.display())
+                write!(
+                    f,
+                    "could not open the diagnostics directory {}: {source}",
+                    path.display()
+                )
             }
             DiagnosticInitError::OpenFile { path, source } => {
-                write!(f, "could not open the log file {}: {source}", path.display())
+                write!(
+                    f,
+                    "could not open the log file {}: {source}",
+                    path.display()
+                )
             }
-            DiagnosticInitError::SubscriberInstalled => {
-                f.write_str("a tracing subscriber was already installed, so diagnostics are not attached")
-            }
+            DiagnosticInitError::SubscriberInstalled => f.write_str(
+                "a tracing subscriber was already installed, so diagnostics are not attached",
+            ),
             DiagnosticInitError::NoSessionRecord { path } => {
-                write!(f, "the log file {} accepted no session-start record", path.display())
+                write!(
+                    f,
+                    "the log file {} accepted no session-start record",
+                    path.display()
+                )
             }
         }
     }
@@ -278,7 +295,9 @@ impl Drop for LineWriter {
         match self.tx.try_send(Op::Line(line)) {
             Ok(()) => {
                 let depth = self.stats.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
-                self.stats.queue_high_water.fetch_max(depth, Ordering::Relaxed);
+                self.stats
+                    .queue_high_water
+                    .fetch_max(depth, Ordering::Relaxed);
             }
             Err(TrySendError::Full(_)) => {
                 self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
@@ -538,26 +557,33 @@ impl FileWriter {
     /// explicitly asking for the disk to be current, and the busiest moment (a full queue) is
     /// exactly when a shutdown flush most needs to land. Failing instead would drop the last
     /// events written, which are the ones a crash report is made of.
+    ///
+    /// Bounded by attempts rather than by a deadline. Reading the OS clock is forbidden outside
+    /// the `catcoms-rt` seam, and no clock is needed here anyway: either the worker drains and a
+    /// slot frees up, or it is wedged, and a fixed budget of attempts tells those apart just as
+    /// well as a wall-clock timeout would.
     pub(crate) fn sync(&self, timeout: Duration) -> bool {
-        let deadline = std::time::Instant::now() + timeout;
         let (ack_tx, ack_rx) = sync_channel(1);
         let mut pending = Op::Sync(ack_tx);
-        loop {
+        let mut queued = false;
+        for _ in 0..SYNC_SLOT_ATTEMPTS {
             match self.tx.try_send(pending) {
-                Ok(()) => break,
-                // Nobody is draining and nobody ever will be.
+                Ok(()) => {
+                    queued = true;
+                    break;
+                }
+                // Nobody is draining, and nobody ever will be again.
                 Err(TrySendError::Disconnected(_)) => return false,
                 Err(TrySendError::Full(returned)) => {
-                    if std::time::Instant::now() >= deadline {
-                        return false;
-                    }
                     pending = returned;
-                    std::thread::sleep(Duration::from_millis(2));
+                    std::thread::sleep(SYNC_SLOT_WAIT);
                 }
             }
         }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        match ack_rx.recv_timeout(left) {
+        if !queued {
+            return false;
+        }
+        match ack_rx.recv_timeout(timeout) {
             Ok(()) => true,
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => false,
         }
@@ -643,7 +669,10 @@ mod tests {
         for n in 0..10 {
             write_line(&sink, &format!("event {n}\n"));
         }
-        assert!(writer.sync(SYNC_TIMEOUT), "the worker acknowledged the barrier");
+        assert!(
+            writer.sync(SYNC_TIMEOUT),
+            "the worker acknowledged the barrier"
+        );
 
         let health = writer.health();
         assert_eq!(health.state, SinkState::Active);
@@ -671,15 +700,25 @@ mod tests {
         let health = writer.health();
         assert_eq!(health.state, SinkState::Failed);
         assert_eq!(health.last_error.as_deref(), Some("the disk filled"));
-        assert_eq!(health.events_written, 1, "the event after the stop never reached the file");
-        assert_eq!(health.events_dropped, 1, "and it is counted rather than forgotten");
+        assert_eq!(
+            health.events_written, 1,
+            "the event after the stop never reached the file"
+        );
+        assert_eq!(
+            health.events_dropped, 1,
+            "and it is counted rather than forgotten"
+        );
     }
 
     #[test]
     fn retention_keeps_the_newest_segments_and_never_the_open_one() {
         let dir = tempfile::tempdir().unwrap();
         for n in 1..=(MAX_SEGMENTS + 3) {
-            std::fs::write(dir.path().join(format!("debug_log_2026010{n}_000000.txt")), b"old").unwrap();
+            std::fs::write(
+                dir.path().join(format!("debug_log_2026010{n}_000000.txt")),
+                b"old",
+            )
+            .unwrap();
         }
         // Something else in the directory, to prove the quota only ever considers its own files.
         std::fs::write(dir.path().join("vault.db"), b"not a log").unwrap();
@@ -690,14 +729,26 @@ mod tests {
 
         let left = segments_on_disk(dir.path());
         assert_eq!(left.len(), MAX_SEGMENTS);
-        assert!(left.iter().any(|(p, _)| p == &current), "the open segment survives");
-        assert!(dir.path().join("vault.db").exists(), "unrelated files are untouched");
+        assert!(
+            left.iter().any(|(p, _)| p == &current),
+            "the open segment survives"
+        );
+        assert!(
+            dir.path().join("vault.db").exists(),
+            "unrelated files are untouched"
+        );
     }
 
     #[test]
     fn segment_names_keep_the_first_file_where_people_expect_it() {
-        assert_eq!(segment_name("debug_log_20260823_120000", 1), "debug_log_20260823_120000.txt");
-        assert_eq!(segment_name("debug_log_20260823_120000", 2), "debug_log_20260823_120000_002.txt");
+        assert_eq!(
+            segment_name("debug_log_20260823_120000", 1),
+            "debug_log_20260823_120000.txt"
+        );
+        assert_eq!(
+            segment_name("debug_log_20260823_120000", 2),
+            "debug_log_20260823_120000_002.txt"
+        );
     }
 
     /// The barrier has to survive the busiest moment, because that is when it is used: the last
@@ -736,7 +787,11 @@ mod tests {
         );
         assert!(health.queue_high_water > 0);
         if health.events_dropped > 0 {
-            assert_eq!(health.state, SinkState::Degraded, "loss is never reported as healthy");
+            assert_eq!(
+                health.state,
+                SinkState::Degraded,
+                "loss is never reported as healthy"
+            );
         }
     }
 }

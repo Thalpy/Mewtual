@@ -4822,8 +4822,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // Milliseconds until the backoff lets this member be dialled again; zero when
                     // it is eligible now. A member stuck at the cap is the visible symptom of a
                     // node burning every attempt on a route that cannot work.
-                    next_dial_in_ms: retry
-                        .map_or(0, |r| r.next_attempt_ms.saturating_sub(now)),
+                    next_dial_in_ms: retry.map_or(0, |r| r.next_attempt_ms.saturating_sub(now)),
                 }
             })
             .collect();

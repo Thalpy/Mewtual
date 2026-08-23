@@ -871,7 +871,10 @@ enum Command {
     },
     /// Send a request whose reply nobody is waiting for (see [`catcoms_rt::MeshTransport::notify`]).
     /// No `pending_req` entry is registered, so the outcome is logged here and goes nowhere else.
-    Notify { peer: PeerId, data: Bytes },
+    Notify {
+        peer: PeerId,
+        data: Bytes,
+    },
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
@@ -5067,7 +5070,9 @@ mod tests {
                 &mut order,
                 first,
                 test_peer(1),
-                format!("/ip4/198.51.100.1/tcp/{}", 40000 + n).parse().unwrap(),
+                format!("/ip4/198.51.100.1/tcp/{}", 40000 + n)
+                    .parse()
+                    .unwrap(),
             );
         }
         assert_eq!(
@@ -5077,7 +5082,10 @@ mod tests {
         );
         assert_eq!(
             recent[&first].addresses.back().unwrap().to_string(),
-            format!("/ip4/198.51.100.1/tcp/{}", 40000 + MAX_RECENT_PEER_ADDRS + 2),
+            format!(
+                "/ip4/198.51.100.1/tcp/{}",
+                40000 + MAX_RECENT_PEER_ADDRS + 2
+            ),
             "the freshest route is kept"
         );
 

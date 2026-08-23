@@ -223,7 +223,8 @@ struct FieldCollector(Vec<(String, String)>);
 
 impl tracing::field::Visit for FieldCollector {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.0.push((field.name().to_string(), format!("{value:?}")));
+        self.0
+            .push((field.name().to_string(), format!("{value:?}")));
     }
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         // Strings would otherwise arrive quoted and escaped by the `Debug` path above, which is
@@ -240,7 +241,11 @@ impl tracing::field::Visit for FieldCollector {
 }
 
 impl<S: tracing::Subscriber> Layer<S> for RingLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         let mut fields = FieldCollector(Vec::new());
         event.record(&mut fields);
         self.ring.push(
@@ -355,10 +360,7 @@ pub const APP_FILE_FILTER: &str = "info,catcoms_app=debug,catcoms_sync=debug,cat
 ///
 /// The file captures everything at `debug` and above, for every crate; see
 /// [`init_debug_with`] for a caller that wants a narrower one.
-pub fn init_debug(
-    debug: bool,
-    dir: impl AsRef<Path>,
-) -> Result<LogGuard, DiagnosticInitError> {
+pub fn init_debug(debug: bool, dir: impl AsRef<Path>) -> Result<LogGuard, DiagnosticInitError> {
     init_debug_with(debug, dir, "debug")
 }
 
@@ -425,7 +427,9 @@ pub fn init_debug_with(
         "DIAG.SESSION.STARTED"
     );
     file_writer.sync(SYNC_TIMEOUT);
-    let recorded = std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false);
+    let recorded = std::fs::metadata(&path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
     if !recorded {
         return Err(DiagnosticInitError::NoSessionRecord { path });
     }
@@ -471,9 +475,11 @@ mod tests {
         // A roll-up that reported "no errors" because the error had been evicted would be worse
         // than having no roll-up at all, so the counters are taken before the bound is applied.
         let ring = LogRing::default();
-        ring.push("ERROR", "catcoms_net".into(), vec![
-            ("message".into(), "the first failure".into()),
-        ]);
+        ring.push(
+            "ERROR",
+            "catcoms_net".into(),
+            vec![("message".into(), "the first failure".into())],
+        );
         for n in 0..LOG_RING_CAPACITY {
             ring.push(
                 "INFO",
@@ -541,14 +547,20 @@ mod tests {
             assert!(guard.sync(), "the queued event reached the disk");
 
             let after = guard.health();
-            assert!(after.events_written >= 2, "the session marker and the test event");
+            assert!(
+                after.events_written >= 2,
+                "the session marker and the test event"
+            );
             assert!(after.bytes_written > 0);
             assert_eq!(after.events_dropped, 0);
             assert!(after.last_write_at_ms.is_some());
         }
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("DIAG.SESSION.STARTED"), "{contents}");
-        assert!(contents.contains("hello from the debug log test"), "{contents}");
+        assert!(
+            contents.contains("hello from the debug log test"),
+            "{contents}"
+        );
     }
 
     /// A file that could not be opened must reach the caller as an error. The previous version

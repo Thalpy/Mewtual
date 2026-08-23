@@ -9508,14 +9508,15 @@ fn truncate_utf8_bytes(text: &mut String, max: usize) {
     text.truncate(end);
 }
 
-/// Wall-clock milliseconds. Only ever used for rate-limiter arithmetic and for stamping a
-/// self-test record, so a clock that steps is a cosmetic problem rather than a correctness one;
-/// the elapsed-time calculation clamps negatives.
+/// Wall-clock milliseconds, through the same `SystemClock` seam the rest of the bridge stamps
+/// with. Reading the OS clock directly is forbidden outside that seam, and for good reason: it is
+/// what makes every timing-dependent behaviour here testable.
+///
+/// Only ever used for rate-limiter arithmetic and for stamping a self-test record, so a clock that
+/// steps is a cosmetic problem rather than a correctness one; the elapsed calculation clamps
+/// negatives either way.
 fn wall_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    SystemClock.now_ms() as i64
 }
 
 /// How many webview records may arrive in a burst before the limiter starts suppressing.
