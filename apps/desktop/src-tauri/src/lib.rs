@@ -1460,7 +1460,7 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
             diag.advertised = bootstrap;
         }
     }
-    let _ = app.emit("reachability-changed", server);
+    emit_tracked(app, "reachability-changed", server);
     true
 }
 
@@ -1518,11 +1518,12 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
             }
             match ev {
                 AppEvent::ChannelsUpdated => {
-                    let _ = app.emit("channels-changed", ServerEvt { server });
+                    emit_tracked(&app, "channels-changed", ServerEvt { server });
                 }
                 AppEvent::ChannelUpdated { channel, change } => {
                     // Channel ids are u128; send as a string (JS numbers lose precision).
-                    let _ = app.emit(
+                    emit_tracked(
+                        &app,
                         "channel-updated",
                         ChannelEvt {
                             server,
@@ -1535,49 +1536,50 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                     );
                 }
                 AppEvent::MembersChanged { count } => {
-                    let _ = app.emit("members-changed", CountEvt { server, count });
+                    emit_tracked(&app, "members-changed", CountEvt { server, count });
                 }
                 AppEvent::ProfilesUpdated => {
-                    let _ = app.emit("profiles-updated", ServerEvt { server });
+                    emit_tracked(&app, "profiles-updated", ServerEvt { server });
                 }
                 AppEvent::LiveryUpdated => {
-                    let _ = app.emit("livery-changed", ServerEvt { server });
+                    emit_tracked(&app, "livery-changed", ServerEvt { server });
                 }
                 AppEvent::BadgesUpdated => {
-                    let _ = app.emit("badges-changed", ServerEvt { server });
+                    emit_tracked(&app, "badges-changed", ServerEvt { server });
                 }
                 AppEvent::DevicesUpdated => {
-                    let _ = app.emit("devices-changed", ServerEvt { server });
+                    emit_tracked(&app, "devices-changed", ServerEvt { server });
                 }
                 AppEvent::FilesUpdated => {
-                    let _ = app.emit("files-updated", ServerEvt { server });
+                    emit_tracked(&app, "files-updated", ServerEvt { server });
                 }
                 AppEvent::StatusUpdated => {
-                    let _ = app.emit("status-updated", ServerEvt { server });
+                    emit_tracked(&app, "status-updated", ServerEvt { server });
                 }
                 AppEvent::EventsUpdated => {
-                    let _ = app.emit("events-changed", ServerEvt { server });
+                    emit_tracked(&app, "events-changed", ServerEvt { server });
                 }
                 AppEvent::WikiUpdated => {
-                    let _ = app.emit("wiki-updated", ServerEvt { server });
+                    emit_tracked(&app, "wiki-updated", ServerEvt { server });
                 }
                 AppEvent::RolesUpdated => {
-                    let _ = app.emit("roles-updated", ServerEvt { server });
+                    emit_tracked(&app, "roles-updated", ServerEvt { server });
                 }
                 AppEvent::ModerationUpdated => {
-                    let _ = app.emit("moderation-updated", ServerEvt { server });
+                    emit_tracked(&app, "moderation-updated", ServerEvt { server });
                 }
                 AppEvent::EclipseChanged { caution } => {
-                    let _ = app.emit("eclipse-changed", EclipseEvt { server, caution });
+                    emit_tracked(&app, "eclipse-changed", EclipseEvt { server, caution });
                 }
                 AppEvent::ConnectivityChanged { online } => {
-                    let _ = app.emit("connectivity-changed", OnlineEvt { server, online });
+                    emit_tracked(&app, "connectivity-changed", OnlineEvt { server, online });
                 }
                 AppEvent::SwitchboardsChanged => {
-                    let _ = app.emit("switchboard-changed", server);
+                    emit_tracked(&app, "switchboard-changed", server);
                 }
                 AppEvent::DeliveryChanged { channel, states } => {
-                    let _ = app.emit(
+                    emit_tracked(
+                        &app,
                         "delivery-changed",
                         DeliveryEvt {
                             server,
@@ -1587,10 +1589,11 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                     );
                 }
                 AppEvent::DmRequestsChanged => {
-                    let _ = app.emit("dm-requests-changed", ServerEvt { server });
+                    emit_tracked(&app, "dm-requests-changed", ServerEvt { server });
                 }
                 AppEvent::CallSignal { from_fp, payload } => {
-                    let _ = app.emit(
+                    emit_tracked(
+                        &app,
                         "call-signal",
                         CallSignalEvt {
                             server,
@@ -1600,7 +1603,7 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                     );
                 }
                 AppEvent::Closed => {
-                    let _ = app.emit("server-closed", ServerEvt { server });
+                    emit_tracked(&app, "server-closed", ServerEvt { server });
                     break;
                 }
             }
@@ -1898,14 +1901,242 @@ fn choose_port(net: &ServerNet) -> u16 {
     os_chosen_port()
 }
 
-/// Insert a freshly-spawned server into the registry, forward its events, and return the
-/// new server id.
+/// One command's worth of stages, recorded as it goes.
+///
+/// The native half of the correlation wrapper. The frontend allocates a trace and passes it in;
+/// this stamps every stage with it, so an operation reads as one story across the boundary instead
+/// of as two unrelated halves that have to be lined up by timestamp.
+///
+/// Deliberately cheap. Constructing one is a parse and two clones; each stage is one `record`
+/// call, which costs two atomic loads when the section is not being captured. Instrumentation that
+/// slows a command becomes a cause of the latency it was added to explain.
+struct Operation {
+    trace: catcoms_diagnostics::TraceId,
+    section: catcoms_diagnostics::Section,
+    operation: &'static str,
+    server: Option<catcoms_diagnostics::SessionRef>,
+    channel: Option<catcoms_diagnostics::SessionRef>,
+    started_ms: u64,
+}
+
+impl Operation {
+    /// Begin an operation, continuing the frontend's trace when it supplied one.
+    ///
+    /// A missing or unparseable trace is not an error: most commands have not been migrated yet,
+    /// and an un-traced operation is still worth recording. It simply cannot be joined to the
+    /// frontend's half.
+    fn start(
+        trace: Option<String>,
+        section: catcoms_diagnostics::Section,
+        operation: &'static str,
+        server: u64,
+        channel: Option<&str>,
+    ) -> Self {
+        let hub = catcoms_log::hub();
+        let trace = trace
+            .and_then(|t| u64::from_str_radix(&t, 16).ok())
+            .map(catcoms_diagnostics::TraceId)
+            .unwrap_or_else(|| hub.new_trace());
+        let op = Operation {
+            trace,
+            section,
+            operation,
+            server: Some(
+                hub.reference_str(catcoms_diagnostics::RefDomain::Server, &server.to_string()),
+            ),
+            channel: channel.map(|c| hub.reference_str(catcoms_diagnostics::RefDomain::Channel, c)),
+            started_ms: SystemClock.now_ms(),
+        };
+        op.emit(
+            catcoms_diagnostics::Level::Debug,
+            catcoms_diagnostics::Phase::Start,
+            "IPC.COMMAND.RECEIVED",
+            None,
+        );
+        op
+    }
+
+    /// Note that the operation reached a stage, without ending it.
+    fn stage(&self, code: &'static str) {
+        self.emit(
+            catcoms_diagnostics::Level::Debug,
+            catcoms_diagnostics::Phase::Progress,
+            code,
+            None,
+        );
+    }
+
+    /// End the operation successfully, with how long the whole thing took.
+    fn succeeded(&self, code: &'static str) {
+        self.emit(
+            catcoms_diagnostics::Level::Debug,
+            catcoms_diagnostics::Phase::Success,
+            code,
+            Some(self.elapsed()),
+        );
+    }
+
+    /// End the operation in failure. Recorded at warn, because a command that did not do what the
+    /// user asked is the thing a person came to the log to find.
+    fn failed(&self, code: &'static str) {
+        self.emit(
+            catcoms_diagnostics::Level::Warn,
+            catcoms_diagnostics::Phase::Failure,
+            code,
+            Some(self.elapsed()),
+        );
+    }
+
+    fn elapsed(&self) -> u64 {
+        SystemClock.now_ms().saturating_sub(self.started_ms)
+    }
+
+    fn emit(
+        &self,
+        level: catcoms_diagnostics::Level,
+        phase: catcoms_diagnostics::Phase,
+        code: &'static str,
+        duration_ms: Option<u64>,
+    ) {
+        let mut event = catcoms_diagnostics::DiagnosticEvent::new(self.section, level, code)
+            .target("catcoms_app")
+            .phase(phase)
+            .operation(self.operation)
+            .trace(self.trace)
+            .refs(catcoms_diagnostics::Refs {
+                server: self.server.clone(),
+                channel: self.channel.clone(),
+                ..catcoms_diagnostics::Refs::default()
+            });
+        if let Some(duration) = duration_ms {
+            event = event.took(duration);
+        }
+        catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
+    }
+}
+
+/// Per-name sequence numbers for emitted events.
+///
+/// Guarded by a mutex, which is affordable here in a way it would not be on the logging path:
+/// these are UI refreshes, already throttled, and orders of magnitude rarer than diagnostic
+/// events. The map has about twenty entries and never grows beyond the set of event names in
+/// this file.
+static EVENT_SEQ: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, u64>>> =
+    std::sync::OnceLock::new();
+
+fn next_event_seq(name: &'static str) -> u64 {
+    let table = EVENT_SEQ.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = table.entry(name).or_insert(0);
+    *slot += 1;
+    *slot
+}
+
+/// Emit a Tauri event, numbered and recorded.
+///
+/// Two problems in one. Every emit in this file used to be `emit_tracked(&app,...)`, so a delivery
+/// failure was discarded at the exact moment it mattered: the backend had changed state, the
+/// webview was never told, and nothing anywhere recorded the disagreement. And without a sequence
+/// number the frontend cannot tell an event that was coalesced from one that was lost, which is the
+/// difference between correct behaviour and a stale unread badge.
+///
+/// The number is injected into the payload as `__seq` rather than added to each payload type. That
+/// keeps every existing listener working unchanged while giving the frontend what it needs to spot
+/// a gap. A payload that is not a JSON object (a bare server id) cannot carry one, so it is emitted
+/// as-is and the sequence is recorded natively only.
+fn emit_tracked<S: Serialize + Clone>(app: &AppHandle, name: &'static str, payload: S) {
+    let seq = next_event_seq(name);
+    let numbered = serde_json::to_value(&payload).ok().and_then(|mut value| {
+        let object = value.as_object_mut()?;
+        object.insert("__seq".to_string(), serde_json::json!(seq));
+        Some(value)
+    });
+
+    let sent = match numbered {
+        Some(value) => app.emit(name, value),
+        None => app.emit(name, payload),
+    };
+    if let Err(e) = sent {
+        // The failure this replaces. A backend that changed state while the webview never heard
+        // about it is a stale-UI bug with no evidence, and it used to leave none.
+        tracing::error!(
+            target: "catcoms_app",
+            event = name,
+            seq,
+            error = %e,
+            "IPC.EVENT.EMIT_FAILED"
+        );
+    }
+}
+
+/// The most of a panic payload that is recorded.
+const MAX_PANIC_SUMMARY: usize = 300;
+
+/// What a panic payload says, reduced to something safe to keep.
+///
+/// A payload can be any type. In this codebase they come from `expect` and `unwrap` with literal
+/// messages, so the text is developer-written rather than user data, but it is bounded and stripped
+/// anyway: a diagnostic that can carry an arbitrary payload is a diagnostic that can carry whatever
+/// was in scope when the panic happened.
+fn panic_summary(payload: &(dyn std::any::Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&'static str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic payload was not a string".to_string());
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_PANIC_SUMMARY)
+        .collect()
+}
+
+/// Watch a long-lived task and record how it ended.
+///
+/// Every spawn site used to destructure the handle as `_task` and drop it, so the shell could hold
+/// a perfectly live-looking actor whose task had exited minutes earlier. The symptoms surface much
+/// later as stale state, missing events, or a generic "actor stopped", with the panic or exit cause
+/// long gone: the one piece of evidence that would have explained it is exactly what was discarded.
+///
+/// Deliberately does not restart anything. These tasks own MLS and CRDT state, and a blind restart
+/// would trade a diagnosable stop for an undiagnosable inconsistency. The policy is to surface the
+/// failure and preserve the cause; recovery is a decision for a level that knows what was lost.
+fn supervise(kind: &'static str, server: u64, task: tokio::task::JoinHandle<()>) {
+    tauri::async_runtime::spawn(async move {
+        match task.await {
+            // The mailbox closed and the loop returned. Ordinary at shutdown, and worth a line
+            // either way because "the actor is gone" explains a lot of later symptoms.
+            Ok(()) => tracing::info!(
+                target: "catcoms_app",
+                kind,
+                server,
+                "RUNTIME.TASK.EXITED"
+            ),
+            Err(e) if e.is_cancelled() => tracing::warn!(
+                target: "catcoms_app",
+                kind,
+                server,
+                "RUNTIME.TASK.CANCELLED"
+            ),
+            Err(e) => tracing::error!(
+                target: "catcoms_app",
+                kind,
+                server,
+                cause = %panic_summary(&*e.into_panic()),
+                "RUNTIME.TASK.PANICKED"
+            ),
+        }
+    });
+}
+
+/// Insert a freshly-spawned server into the registry, supervise its task, forward its events, and
+/// return the new server id.
 #[allow(clippy::too_many_arguments)]
 async fn register_server(
     app: &AppHandle,
     state: &AppState,
     actor: ServerActor,
     events: mpsc::Receiver<AppEvent>,
+    task: tokio::task::JoinHandle<()>,
     group_id: Vec<u8>,
     device_id: DeviceId,
     invite: Option<String>,
@@ -1924,6 +2155,7 @@ async fn register_server(
         *n += 1;
         *n
     };
+    supervise("server_actor", id, task);
     forward_events(app.clone(), id, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
@@ -2829,7 +3061,7 @@ async fn store_port_mapping_status(
         .as_ref()
         != Some(&outcome);
     if changed {
-        let _ = app.emit("reachability-changed", server);
+        emit_tracked(app, "reachability-changed", server);
     }
 }
 
@@ -2984,7 +3216,7 @@ fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAd
         while rx.changed().await.is_ok() {
             let snapshot = rx.borrow_and_update().clone();
             apply_relay_snapshot(&app, server, snapshot, &mut previous).await;
-            let _ = app.emit("reachability-changed", server);
+            emit_tracked(&app, "reachability-changed", server);
         }
     });
 }
@@ -3019,7 +3251,7 @@ fn spawn_mesh_observation_fold(
                 .as_ref()
                 != Some(&observations);
             if changed {
-                let _ = app.emit("reachability-changed", server);
+                emit_tracked(&app, "reachability-changed", server);
             }
             if rx.changed().await.is_err() {
                 break;
@@ -3123,7 +3355,7 @@ async fn store_autonat_snapshot(
         .as_ref()
         != Some(&next);
     if changed {
-        let _ = app.emit("reachability-changed", server);
+        emit_tracked(app, "reachability-changed", server);
     }
 }
 
@@ -3665,7 +3897,7 @@ async fn found_server_inner(
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     let channels = ui_channels(actor.channels().await);
     let server_id = register_server(
@@ -3673,6 +3905,7 @@ async fn found_server_inner(
         state,
         actor,
         events,
+        task,
         group_id,
         device_id,
         Some(invite_hex),
@@ -4267,7 +4500,7 @@ async fn join_server_inner(
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.catch_up_channel_index(join_contact).await;
     actor.open_channel(general).await;
     actor.catch_up(join_contact, general).await;
@@ -4290,6 +4523,7 @@ async fn join_server_inner(
         state,
         actor,
         events,
+        task,
         group_id,
         device_id,
         None,
@@ -5349,7 +5583,8 @@ async fn push_file_chunk(
         return Ok(()); // buffered; the chunk it belongs to is not complete yet
     };
     let done = seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
-    let _ = app.emit(
+    emit_tracked(
+        &app,
         "upload-progress",
         UploadProgressEvt {
             server,
@@ -5500,7 +5735,8 @@ async fn finish_file_upload(
             return Err(e);
         }
     };
-    let _ = app.emit(
+    emit_tracked(
+        &app,
         "upload-progress",
         UploadProgressEvt {
             server,
@@ -5869,7 +6105,8 @@ async fn download_file(
     })?;
     inline_download_allowed(size)?;
     require_unlocked_session(&state).await?;
-    let _ = app.emit(
+    emit_tracked(
+        &app,
         "download-progress",
         DownloadProgressEvt {
             server,
@@ -5899,7 +6136,8 @@ async fn download_file(
             return Err("this file's chunks hold more data than it declares".into());
         }
         out.extend_from_slice(&chunk);
-        let _ = app.emit(
+        emit_tracked(
+            &app,
             "download-progress",
             DownloadProgressEvt {
                 server,
@@ -6243,7 +6481,7 @@ async fn set_switchboard_offered(
             entry.switchboard = true;
         }
     }
-    let _ = app.emit("switchboard-changed", server);
+    emit_tracked(&app, "switchboard-changed", server);
     get_switchboard_status(state, server).await
 }
 
@@ -7174,6 +7412,15 @@ async fn rename_wiki_page(
 }
 
 /// Send a chat message to a channel (by id).
+///
+/// The first command instrumented end to end, and the pattern every other one adopts. What it
+/// records is the *stages*, because "the message did not arrive" was previously unanswerable: the
+/// evidence could not say whether the command reached Rust, whether the actor was alive, whether
+/// the operation was accepted, or whether persistence completed. Each of those is a different bug
+/// with a different fix, and they all looked the same.
+///
+/// Note what is not recorded: the message. Not its text, not its length, not its recipient. The
+/// channel becomes a session reference, and the stage names carry the diagnosis.
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
@@ -7181,13 +7428,34 @@ async fn send_message(
     channel: String,
     text: String,
     reply_to: Option<String>,
+    trace: Option<String>,
 ) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "send_message",
+        server,
+        Some(&channel),
+    );
+    let id: u128 = channel.parse().map_err(|_| {
+        op.failed("CHANNEL.SEND.BAD_CHANNEL_ID");
+        "bad channel id".to_string()
+    })?;
+    let actor = actor_of(&state, server).await.inspect_err(|_| {
+        // The stage that used to be invisible. An actor whose task exited leaves a handle that
+        // looks fine and a command that fails with a string, and nothing said which.
+        op.failed("CHANNEL.SEND.NO_ACTOR");
+    })?;
+    op.stage("CHANNEL.SEND.ENQUEUED");
     actor
         .send_reply(id, text, reply_to.unwrap_or_default())
-        .await?;
+        .await
+        .inspect_err(|_| op.failed("CHANNEL.SEND.REJECTED"))?;
+    op.stage("CHANNEL.SEND.ACCEPTED");
     persist_server(&state, server).await;
+    // Deliberately after persistence. An operation reported as succeeding before its state reached
+    // the disk is the exact shape of "it worked and then it was gone after a restart".
+    op.succeeded("CHANNEL.SEND.PERSISTED");
     Ok(())
 }
 
@@ -7643,9 +7911,10 @@ async fn reload_one(
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     // Register under the SAME id as on disk (don't allocate a new one).
+    supervise("server_actor", record.id, task);
     forward_events(app.clone(), record.id, events);
     let timer_actor = actor.clone();
     state.servers.lock().await.insert(
@@ -9098,7 +9367,7 @@ async fn join_one_grant(
     let general = channel_id("general");
     let group_id = server.group_id();
     let device_id = server.device_id();
-    let (actor, events, _task) = spawn(server);
+    let (actor, events, task) = spawn(server);
     actor.open_channel(general).await;
     actor.catch_up_channel_index(contact).await;
     actor.catch_up(contact, general).await;
@@ -9128,6 +9397,7 @@ async fn join_one_grant(
         state,
         actor,
         events,
+        task,
         group_id,
         device_id,
         None,
@@ -9595,6 +9865,126 @@ fn ui_log_allowance(now_ms: i64) -> (bool, Option<u64>) {
     (false, None)
 }
 
+/// One structured observation from the webview.
+#[derive(Deserialize)]
+struct UiDiagnosticEvent {
+    section: String,
+    code: String,
+    level: String,
+    #[serde(default)]
+    trace: String,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    fields: HashMap<String, serde_json::Value>,
+}
+
+/// Record structured observations from the webview.
+///
+/// The difference between this and `log_ui_batch` is the difference the whole migration is about.
+/// A console line is prose that happens to have been written down; this is an event with a stable
+/// code, a section, a phase and a trace, so the half of an operation that happens in the webview
+/// is readable alongside the half that happens here rather than in a separate format that has to
+/// be correlated by eye.
+///
+/// Shares `log_ui`'s rate limiter, because it shares its threat model: the webview is the least
+/// trustworthy producer this process has, and a render loop must cost a counter rather than a disk.
+/// Also shares its reason for being outside the unlocked-session gate.
+#[tauri::command]
+async fn record_ui_events(events: Vec<UiDiagnosticEvent>) {
+    use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, SafeText, Section};
+
+    for event in events.into_iter().take(MAX_UI_LOG_BATCH) {
+        let (allowed, suppressed) = ui_log_allowance(wall_ms());
+        if let Some(count) = suppressed {
+            tracing::warn!(
+                target: "catcoms_ui",
+                suppressed = count,
+                "UI.LOG.RATE_LIMITED: records dropped to keep the log usable"
+            );
+        }
+        if !allowed {
+            continue;
+        }
+
+        // The code is data from the webview, so it cannot be the `&'static str` a structured event
+        // wants. It is bounded and carried as a field instead, and the event's own code says where
+        // it came from. A webview cannot mint an arbitrary code that later shows up in an issue
+        // title, which is the property that matters.
+        let mut recorded = DiagnosticEvent::new(
+            ui_section(&event.section),
+            ui_level(&event.level),
+            "UI.EVENT",
+        )
+        .target("catcoms_ui")
+        .phase(ui_phase(&event.phase))
+        .field("code", SafeText::describe(&event.code));
+
+        if let Some(duration) = event.duration_ms {
+            recorded = recorded.took(duration);
+        }
+        if !event.trace.is_empty() {
+            recorded = recorded.field("trace", SafeText::describe(&event.trace));
+        }
+        for (name, value) in event.fields {
+            recorded = recorded.field(name, ui_field(&value));
+        }
+        catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), recorded);
+    }
+
+    fn ui_section(name: &str) -> Section {
+        match name {
+            "ipc" => Section::Ipc,
+            "channels" => Section::Channels,
+            "voice" => Section::Voice,
+            "files" => Section::Files,
+            "sync" => Section::Sync,
+            "join" => Section::Join,
+            "startup" => Section::Startup,
+            _ => Section::Ui,
+        }
+    }
+    fn ui_level(name: &str) -> Level {
+        match name {
+            "error" => Level::Error,
+            "warn" => Level::Warn,
+            "debug" => Level::Debug,
+            _ => Level::Info,
+        }
+    }
+    fn ui_phase(name: &str) -> Phase {
+        match name {
+            "start" => Phase::Start,
+            "progress" => Phase::Progress,
+            "success" => Phase::Success,
+            "failure" => Phase::Failure,
+            "cancel" => Phase::Cancel,
+            "timeout" => Phase::Timeout,
+            _ => Phase::Observation,
+        }
+    }
+    /// Map a JSON field onto the typed value that can carry it.
+    ///
+    /// Numbers and booleans keep their type so a reader can sort on them. Anything else becomes
+    /// bounded text: the webview cannot put an object graph or a message body into a diagnostic
+    /// through this door.
+    fn ui_field(value: &serde_json::Value) -> catcoms_diagnostics::SafeValue {
+        use catcoms_diagnostics::SafeValue;
+        match value {
+            serde_json::Value::Bool(v) => SafeValue::Bool(*v),
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .map(SafeValue::Count)
+                .or_else(|| n.as_i64().map(SafeValue::Delta))
+                .unwrap_or_else(|| SafeValue::Text(SafeText::describe(&n.to_string()))),
+            serde_json::Value::String(s) => SafeValue::Text(SafeText::describe(s)),
+            other => SafeValue::Text(SafeText::describe(&other.to_string())),
+        }
+    }
+}
+
 /// Bound, rate-limit and emit one webview line.
 fn record_ui_log(level: &str, message: String, repeats: u32) {
     let (allowed, suppressed) = ui_log_allowance(wall_ms());
@@ -9769,6 +10159,7 @@ pub fn run() {
             clear_console_log,
             log_ui,
             log_ui_batch,
+            record_ui_events,
             set_admin,
             remove_member,
             revoke_device,
@@ -11653,8 +12044,14 @@ mod tests {
         assert!(reply.enabled, "the user did ask for a log");
         assert!(!reply.active, "and did not get one");
         assert_eq!(reply.state, "failed");
-        assert_eq!(reply.error, "permission denied opening the diagnostics directory");
-        assert!(reply.file.is_empty(), "no file is named when none was opened");
+        assert_eq!(
+            reply.error,
+            "permission denied opening the diagnostics directory"
+        );
+        assert!(
+            reply.file.is_empty(),
+            "no file is named when none was opened"
+        );
     }
 
     /// Loss must not read as health. A sink that is still writing but has dropped records is
@@ -11698,7 +12095,10 @@ mod tests {
                 let mut text = sample.to_string();
                 truncate_utf8_bytes(&mut text, max);
                 assert!(text.len() <= max.max(0), "{sample:?} at {max} grew");
-                assert!(sample.starts_with(&text), "{sample:?} at {max} is not a prefix");
+                assert!(
+                    sample.starts_with(&text),
+                    "{sample:?} at {max} is not a prefix"
+                );
             }
         }
     }
@@ -11723,13 +12123,20 @@ mod tests {
                 allowed += 1;
             }
         }
-        assert_eq!(allowed, UI_LOG_BURST as i32, "the burst is the burst, not a suggestion");
+        assert_eq!(
+            allowed, UI_LOG_BURST as i32,
+            "the burst is the burst, not a suggestion"
+        );
 
         // Time passing refills it, and the first record afterwards carries the summary of what was
         // lost, so the count reaches the log rather than a counter nobody reads.
         let (ok, suppressed) = ui_log_allowance(start + UI_LOG_REPORT_INTERVAL_MS + 1000);
         assert!(ok);
-        assert_eq!(suppressed, Some(800), "every suppressed record is accounted for");
+        assert_eq!(
+            suppressed,
+            Some(800),
+            "every suppressed record is accounted for"
+        );
     }
 
     #[test]

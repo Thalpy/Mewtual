@@ -20,6 +20,11 @@ export const TAURI_COMMAND_GROUPS = {
       // Both are rate-limited natively, because the webview is the least trustworthy producer
       // this process has and a render loop must cost a counter rather than a disk.
       "log_ui", "log_ui_batch",
+      // Structured observations from the webview: a stable code, a section, a phase and a trace,
+      // so the half of an operation that happens in the webview is readable alongside the half
+      // that happens natively. Shares log_ui's rate limiter and its bootstrap exemption, and
+      // cannot mint an arbitrary event code: the webview's code travels as a bounded field.
+      "record_ui_events",
       // Reads this session's in-memory diagnostics ring for the debug console, and clears the
       // view. Unlike log_ui these ARE gated on an unlocked session: the ring holds peer addresses
       // and stable identifiers, which a locked app must not show to whoever picks the machine up.

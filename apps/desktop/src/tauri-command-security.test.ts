@@ -33,10 +33,16 @@ function commandSegments(source: string): Map<string, string> {
   return segments;
 }
 
-/** Extract only literal `invoke("name")` calls, tolerating nested TypeScript generic types. */
+/**
+ * Extract literal `invoke("name")` calls, tolerating nested TypeScript generic types.
+ *
+ * `invokeDebugged` counts too. It is the instrumented wrapper, and its callers name their command
+ * exactly as a direct caller would; leaving it out would mean every migrated call site silently
+ * stopped being audited, which would make the instrumentation a way to bypass this check.
+ */
 function invokedCommands(source: string): string[] {
   const names: string[] = [];
-  const marker = /\binvoke\b/g;
+  const marker = /\binvoke(?:Debugged)?\b/g;
   for (let match = marker.exec(source); match; match = marker.exec(source)) {
     let cursor = marker.lastIndex;
     while (/\s/.test(source[cursor] ?? "")) cursor += 1;
@@ -61,12 +67,27 @@ function invokedCommands(source: string): string[] {
   return names;
 }
 
+/**
+ * The one module allowed to invoke a command it was handed rather than one it names.
+ *
+ * `diagnostics.ts` is the instrumented-invoke wrapper: it takes a command name from its caller,
+ * records the trace around the call, and forwards it. Every *caller* of it still passes a literal,
+ * so the guarantee this file exists for is unchanged, and the check below still sees those
+ * literals. Widening this list is a security decision: an indirect invoke is a command name that
+ * cannot be audited by reading the frontend.
+ */
+const INVOKE_WRAPPERS = ["diagnostics.ts"];
+
 function frontendSources(dir: string): string[] {
   const sources: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) sources.push(...frontendSources(path));
-    else if ([".ts", ".svelte"].includes(extname(entry.name)) && !entry.name.endsWith(".test.ts")) {
+    else if (
+      [".ts", ".svelte"].includes(extname(entry.name)) &&
+      !entry.name.endsWith(".test.ts") &&
+      !INVOKE_WRAPPERS.includes(entry.name)
+    ) {
       sources.push(readFileSync(path, "utf8"));
     }
   }
@@ -108,6 +129,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     "lock_session",
     "log_ui",
     "log_ui_batch",
+    "record_ui_events",
   ]);
   for (const [command, segment] of segments) {
     if (bootstrap.has(command)) continue;

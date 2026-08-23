@@ -4050,6 +4050,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "catcoms-app",
+ "catcoms-diagnostics",
  "catcoms-discovery",
  "catcoms-log",
  "catcoms-mls",

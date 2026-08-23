@@ -29,6 +29,7 @@ catcoms-net = { path = "../../../crates/catcoms-net" }
 catcoms-rt = { path = "../../../crates/catcoms-rt" }
 catcoms-sync = { path = "../../../crates/catcoms-sync" }
 catcoms-discovery = { path = "../../../crates/catcoms-discovery" }
+catcoms-diagnostics = { path = "../../../crates/catcoms-diagnostics" }
 catcoms-log = { path = "../../../crates/catcoms-log" }
 # The router-mapping stack already pins this monitor transitively. Declare it directly because the
 # desktop owns the process-wide OS route/interface watcher used by post-join self-healing.

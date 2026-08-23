@@ -75,6 +75,14 @@
   import { installUiLogging, type UiLogging } from "./uilog";
   import { drainStartupLog, endStartupCapture } from "./startup-log";
   import {
+    makeInvokeDebugged,
+    makeRecorder,
+    makeSeqTracker,
+    makeTraceSource,
+    // Aliased: this file already has a `UiEvent`, which is a calendar entry.
+    type UiEvent as DiagEvent,
+  } from "./diagnostics";
+  import {
     TRANSFER_CHUNK_BYTES,
     formatBytes, formatRate, sampleRate, transferPieces, uploadContract,
     type TransferPiece, type UploadTicket,
@@ -11704,7 +11712,11 @@
     markMessageArrivals([pendingId]);
     await tick();
     try {
-      await invoke("send_message", { server, channel, text, replyTo: reply_to });
+      // The one path instrumented end to end, and the pattern the rest adopt. The trace is
+      // allocated here, travels with the command, and stamps every native stage, so a send that
+      // goes nowhere can be read as one story rather than two halves lined up by timestamp.
+      // Nothing about the message itself is recorded: not its text, not its length.
+      await invokeDebugged("send_message", { server, channel, text, replyTo: reply_to });
       sending = false;
       // The channel-updated event normally refreshes this too, but the command acknowledgement is
       // the deterministic local completion point. Do not leave the just-sent message dependent on
@@ -12679,6 +12691,56 @@
   // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
   // held purely so the teardown has something to call.
   let uiLogging: UiLogging | null = null;
+
+  // ---- correlation across the IPC boundary --------------------------------------------------
+  //
+  // A user-visible operation here crosses ten stages between the click and the render, and until
+  // now nothing carried one identifier through them. "My message did not arrive" could not be
+  // narrowed to a stage, and two concurrent sends were indistinguishable in the record.
+  //
+  // Everything below is bounded and batched; see diagnostics.ts. The cost on the hot path is a
+  // counter increment and an array push.
+  const traceSource = makeTraceSource(Math.floor(Math.random() * 0xffffffff));
+  const diagRecorder = makeRecorder(
+    (events) => {
+      void invoke("record_ui_events", { events }).catch(() => {
+        /* diagnostics must never be able to break what they observe */
+      });
+    },
+    { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
+  );
+  /** Record one structured observation from the webview. */
+  function diagRecord(event: DiagEvent) {
+    diagRecorder.record(event);
+  }
+  const invokeDebugged = makeInvokeDebugged(invoke, diagRecord, traceSource);
+  const seqTracker = makeSeqTracker();
+  /**
+   * Notice a missing or repeated event.
+   *
+   * A gap means the backend changed something the webview was never told about, which is a stale
+   * UI with no other evidence. A repeat usually means a listener got installed twice, which is the
+   * failure the logging lifecycle fix was about and is worth catching if it ever returns.
+   */
+  function noteEventSeq(name: string, seq: unknown) {
+    const anomaly = seqTracker.observe(name, seq);
+    if (!anomaly) return;
+    diagRecord(
+      anomaly.kind === "gap"
+        ? {
+            section: "ipc",
+            code: "IPC.EVENT.SEQUENCE_GAP",
+            level: "warn",
+            fields: { event: anomaly.event, expected: anomaly.expected, received: anomaly.received, missed: anomaly.missed },
+          }
+        : {
+            section: "ipc",
+            code: "IPC.EVENT.REPEATED",
+            level: "warn",
+            fields: { event: anomaly.event, previous: anomaly.previous, received: anomaly.received },
+          },
+    );
+  }
   const syncMaximized = () => void appWindow.isMaximized().then((m) => (winMaximized = m));
 
   onMount(() => {
@@ -12748,8 +12810,13 @@
         messages_changed: boolean;
         topic: boolean;
         jukebox: boolean;
+        __seq?: number;
       }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // A coalesced update and a lost one look identical from here, and only one of them leaves
+        // the unread badge wrong. The native side numbers every emit so the difference is
+        // observable at all; this is where it gets noticed.
+        noteEventSeq("channel-updated", e.payload.__seq);
         // One channel document holds the message log, the topic and the jukebox queue, so the
         // event says which of them moved. Only an arrival may raise an unread badge or ring:
         // reacting to an old message, renaming the topic and queueing a track all used to look
