@@ -54,8 +54,10 @@ pub mod redact;
 pub mod render;
 pub mod ring;
 
-pub use config::{CaptureConfig, CaptureMode, ConsoleView, Level, Section, SECTIONS};
-pub use event::{DiagnosticEvent, Phase, Refs, SpanId, TraceId, MAX_FIELDS, SCHEMA_VERSION};
+pub use config::{CaptureConfig, CaptureGate, CaptureMode, ConsoleView, Level, Section, SECTIONS};
+pub use event::{
+    DiagnosticEvent, FieldName, Phase, Refs, SpanId, TraceId, MAX_FIELDS, SCHEMA_VERSION,
+};
 pub use hub::{DiagnosticHub, DEFAULT_CAPACITY};
 pub use redact::{
     AddressFamily, AddressValue, BridgedMessage, RefDomain, SafeText, SafeValue, SessionRef,

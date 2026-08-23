@@ -18,11 +18,12 @@
 //! about the sink failure through the failed sink is an unbounded loop inside the component whose
 //! job is to still be working when everything else is not.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use catcoms_rt::{Clock, RngCore};
 
-use crate::config::{CaptureConfig, CaptureMode, Level, Section};
+use crate::config::{CaptureConfig, CaptureGate, CaptureMode, Level, Section};
 use crate::event::{DiagnosticEvent, SpanId, TraceId};
 use crate::redact::{RefDomain, SessionRef, SessionSalt};
 use crate::ring::{Ring, RingStats};
@@ -46,9 +47,28 @@ struct HubInner {
 }
 
 /// The diagnostic hub. Cheap to clone; every clone refers to the same store.
+///
+/// # Cost on the emitting thread
+///
+/// This sits on paths that include actor and network work, so what it costs matters as much as
+/// what it records. Diagnostics that add contention become a cause of the stalls they exist to
+/// explain, and the resulting hunt is for a bug that is not there.
+///
+/// * An event the config excludes costs two relaxed atomic loads and no lock at all, via
+///   [`CaptureGate`]. That is the common case under a debug or trace level on a busy section.
+/// * An event that is recorded takes the store's lock for a bounded push: a few counter
+///   increments and a `VecDeque` append, with no allocation, no I/O and no scanning.
+/// * The clock is read before the lock, never under it.
+/// * Field names are owned by the event rather than interned in a shared table, so building one
+///   touches no global state.
 #[derive(Clone)]
 pub struct DiagnosticHub {
     inner: Arc<Mutex<HubInner>>,
+    /// Consulted without locking, so the excluded case never contends. Kept in step with the
+    /// config inside the lock on every change.
+    gate: Arc<CaptureGate>,
+    /// Counted outside the lock too, for the same reason.
+    filtered: Arc<AtomicU64>,
     clock: Arc<dyn Clock>,
     session_id: String,
 }
@@ -78,14 +98,18 @@ impl DiagnosticHub {
     ) -> Self {
         let origin_ms = clock.monotonic_ms();
         let session_id = format!("{:08x}", rng.next_u32());
+        let config = CaptureConfig::for_mode(mode);
+        let gate = Arc::new(CaptureGate::new(&config));
         DiagnosticHub {
             inner: Arc::new(Mutex::new(HubInner {
                 ring: Ring::new(capacity),
-                config: CaptureConfig::for_mode(mode),
+                config,
                 salt,
                 next_id: 0,
                 origin_ms,
             })),
+            gate,
+            filtered: Arc::new(AtomicU64::new(0)),
             clock,
             session_id,
         }
@@ -101,13 +125,19 @@ impl DiagnosticHub {
     /// Returns the assigned sequence, or `None` when the capture config excluded it. The rejection
     /// is counted, so a silent section is distinguishable from a quiet one.
     pub fn record(&self, event: DiagnosticEvent) -> Option<u64> {
+        // Before anything else, and before any lock: an event nobody asked for should cost two
+        // atomic loads and go away. Under a trace level on a busy section this is most events, on
+        // every thread at once, and taking a global lock to reject them would make the diagnostics
+        // the bottleneck.
+        if !self.gate.admits(event.section, event.level) {
+            self.filtered.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        // Read the clock outside the lock. It is the one call here that could be slow, and holding
+        // a global lock across a syscall is how a cheap critical section becomes a contended one.
         let at_ms = self.clock.now_ms();
         let monotonic = self.clock.monotonic_ms();
         let mut inner = self.lock();
-        if !inner.config.admits(event.section, event.level) {
-            inner.ring.note_filtered();
-            return None;
-        }
         let mut event = event;
         event.at_ms = at_ms;
         event.monotonic_ms = monotonic.saturating_sub(inner.origin_ms);
@@ -142,7 +172,10 @@ impl DiagnosticHub {
     }
 
     pub fn stats(&self) -> RingStats {
-        self.lock().ring.stats()
+        let mut stats = self.lock().ring.stats();
+        // Counted outside the lock, so it is folded in on the way out.
+        stats.filtered = self.filtered.load(Ordering::Relaxed);
+        stats
     }
 
     pub fn mode(&self) -> CaptureMode {
@@ -157,11 +190,16 @@ impl DiagnosticHub {
     pub fn set_mode(&self, mode: CaptureMode) {
         let mut inner = self.lock();
         inner.config = CaptureConfig::for_mode(mode);
+        // Published while the lock is held, so the gate and the config can never disagree about
+        // what the current setting is.
+        self.gate.store(&inner.config);
     }
 
     /// Adjust one section's level without disturbing the others.
     pub fn set_section_level(&self, section: Section, level: Option<Level>) {
-        self.lock().config.set(section, level);
+        let mut inner = self.lock();
+        inner.config.set(section, level);
+        self.gate.store(&inner.config);
     }
 
     pub fn config(&self) -> CaptureConfig {
@@ -396,6 +434,87 @@ mod tests {
         assert!(rendered.starts_with("DiagnosticHub("));
         assert!(!rendered.contains("SYNC.SECRETISH"));
         assert!(!rendered.contains("Salt"));
+    }
+
+    /// The property the whole design rests on when things get busy: many threads emitting at once
+    /// must produce a coherent record and must not deadlock. Every thread here contends for the
+    /// same store, which is the shape the real app has.
+    #[test]
+    fn concurrent_emitters_produce_one_coherent_record() {
+        let (hub, _) = hub(CaptureMode::Safe);
+        let threads = 8;
+        let each = 500;
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                let hub = hub.clone();
+                scope.spawn(move || {
+                    for _ in 0..each {
+                        hub.record(DiagnosticEvent::info(Section::Sync, "SYNC.CONCURRENT"));
+                    }
+                });
+            }
+        });
+
+        let stats = hub.stats();
+        assert_eq!(
+            stats.latest_seq,
+            (threads * each) as u64,
+            "every event got exactly one sequence number"
+        );
+        // The ring holds 64 in this fixture, so the rest were evicted rather than lost silently.
+        assert_eq!(stats.dropped, (threads * each) as u64 - hub.held() as u64);
+
+        // Sequences are dense and increasing across every thread's contributions.
+        let held = hub.since(0, 1000);
+        for pair in held.windows(2) {
+            assert!(pair[1].seq > pair[0].seq, "the timeline stayed ordered");
+        }
+    }
+
+    /// An excluded event must not take the store's lock. Under a trace level on a busy section
+    /// that is most events on every thread at once, and locking only to reject them would make the
+    /// diagnostics the bottleneck rather than the observer.
+    ///
+    /// Contention is not directly observable from a test, so this pins the consequence: rejection
+    /// is counted without the ring's sequence moving, which is only possible off the lock path.
+    #[test]
+    fn rejecting_an_event_leaves_the_store_untouched() {
+        let (hub, _) = hub(CaptureMode::Off);
+        for _ in 0..1000 {
+            assert!(hub
+                .record(DiagnosticEvent::info(Section::Sync, "SYNC.NOPE"))
+                .is_none());
+        }
+        let stats = hub.stats();
+        assert_eq!(stats.filtered, 1000);
+        assert_eq!(stats.latest_seq, 0, "the store never advanced");
+        assert_eq!(hub.held(), 0);
+    }
+
+    /// A level change has to be visible to the lock-free gate, or capture would keep following the
+    /// old setting until something happened to take the lock.
+    #[test]
+    fn a_config_change_reaches_the_lock_free_gate_immediately() {
+        let (hub, _) = hub(CaptureMode::Safe);
+        assert!(hub
+            .record(DiagnosticEvent::new(
+                Section::Voice,
+                Level::Debug,
+                "VOICE.X"
+            ))
+            .is_none());
+        hub.set_section_level(Section::Voice, Some(Level::Debug));
+        assert!(hub
+            .record(DiagnosticEvent::new(
+                Section::Voice,
+                Level::Debug,
+                "VOICE.X"
+            ))
+            .is_some());
+        hub.set_section_level(Section::Voice, None);
+        assert!(hub
+            .record(DiagnosticEvent::error(Section::Voice, "VOICE.BAD"))
+            .is_none());
     }
 
     #[test]

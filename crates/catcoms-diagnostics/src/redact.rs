@@ -215,12 +215,29 @@ pub struct BridgedMessage(String);
 impl BridgedMessage {
     /// Carry an existing log message through, bounded and stripped of control characters.
     pub fn new(text: &str) -> Self {
-        let cleaned: String = text
-            .chars()
+        BridgedMessage(Self::clean(text))
+    }
+
+    /// The same, taking ownership.
+    ///
+    /// The `tracing` bridge has already allocated a `String` per field by the time it gets here,
+    /// and copying it again doubles the per-field allocation on the emitting thread. An ordinary
+    /// message is short and control-free, so the scan usually finds nothing and the original
+    /// buffer is kept as it is.
+    pub fn from_owned(text: String) -> Self {
+        let clean =
+            text.len() <= MAX_BRIDGED_MESSAGE && !text.chars().any(|c| c != '\n' && c.is_control());
+        if clean {
+            return BridgedMessage(text);
+        }
+        BridgedMessage(Self::clean(&text))
+    }
+
+    fn clean(text: &str) -> String {
+        text.chars()
             .filter(|c| *c == '\n' || !c.is_control())
             .take(MAX_BRIDGED_MESSAGE)
-            .collect();
-        BridgedMessage(cleaned)
+            .collect()
     }
 
     pub fn as_str(&self) -> &str {

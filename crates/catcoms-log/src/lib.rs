@@ -30,7 +30,7 @@
 //! Treat a debug log as "who I talked to and when", and share it accordingly.
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
@@ -128,7 +128,7 @@ fn project(event: &catcoms_diagnostics::DiagnosticEvent) -> LogEvent {
     let mut message = String::new();
     let mut fields = Vec::with_capacity(event.fields.len() + 2);
     for (name, value) in &event.fields {
-        if *name == MESSAGE_FIELD && message.is_empty() {
+        if name.as_str() == MESSAGE_FIELD && message.is_empty() {
             message = value.render(mode);
         } else {
             fields.push(((*name).to_string(), value.render(mode)));
@@ -278,39 +278,13 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
         )
         .target(target);
         for (name, value) in collected.0 {
-            // `field` takes a `&'static str` name, which a runtime field name is not. Leaking is
-            // the wrong tool for an unbounded set, so names are interned: `tracing` field names
-            // come from a fixed set of string literals in the source, and the set is therefore
-            // bounded by the size of the codebase rather than by anything a peer can influence.
-            recorded = recorded.field(intern(name), BridgedMessage::new(&value));
+            // Both halves are moved rather than copied. This runs on whichever thread emitted the
+            // event, which includes actor and network paths, so a per-field allocation that could
+            // have been a move is a cost the app pays for being observed.
+            recorded = recorded.field(name, BridgedMessage::from_owned(value));
         }
         catcoms_diagnostics::DiagnosticHub::record(&hub(), recorded);
     }
-}
-
-/// Turn a `tracing` field name into a `'static` one.
-///
-/// Bounded by construction: `tracing` field names are string literals in the source, so the set is
-/// the size of the codebase and cannot be grown by anything a peer sends. The cap is belt and
-/// braces against a macro that builds names dynamically, and past it a field keeps its value under
-/// a generic name rather than being dropped.
-fn intern(name: String) -> &'static str {
-    /// Far more than the distinct field names in this codebase, and small enough that the memory
-    /// is irrelevant even if something unexpected fills it.
-    const MAX_INTERNED: usize = 512;
-    static NAMES: OnceLock<Mutex<std::collections::HashMap<String, &'static str>>> =
-        OnceLock::new();
-    let table = NAMES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(held) = table.get(&name) {
-        return held;
-    }
-    if table.len() >= MAX_INTERNED {
-        return "field";
-    }
-    let leaked: &'static str = Box::leak(name.clone().into_boxed_str());
-    table.insert(name, leaked);
-    leaked
 }
 
 /// Default console filter when `RUST_LOG` is unset.
@@ -572,14 +546,19 @@ mod tests {
             .contains(&("trace".to_string(), "7f2c".to_string())));
     }
 
-    /// Field names arrive from `tracing` as runtime strings and the event wants `'static` ones.
-    /// Interning is bounded, and past the bound a field keeps its value rather than vanishing.
+    /// Field names arrive from `tracing` as runtime strings, and the event owns them.
+    ///
+    /// They used to be interned in a global table behind a mutex, which put a second lock
+    /// acquisition on the emitting thread for every field of every event and leaked a string per
+    /// distinct name. Diagnostics that add contention to a path shared with actor and network work
+    /// become a cause of the stalls they exist to explain.
     #[test]
-    fn field_names_intern_to_the_same_pointer_and_stop_growing_eventually() {
-        let first = intern("peer_id".to_string());
-        let again = intern("peer_id".to_string());
-        assert_eq!(first, "peer_id");
-        assert!(std::ptr::eq(first, again), "the same name is interned once");
+    fn a_bridged_field_name_is_owned_rather_than_interned_behind_a_lock() {
+        use catcoms_diagnostics::{BridgedMessage, DiagnosticEvent, FieldName, Level, Section};
+        let event = DiagnosticEvent::new(Section::Transport, Level::Warn, BRIDGED_CODE)
+            .field("peer_id".to_string(), BridgedMessage::new("2b5df389"));
+        assert!(matches!(event.fields[0].0, FieldName::Owned(_)));
+        assert_eq!(event.fields[0].0.as_str(), "peer_id");
     }
 
     #[test]

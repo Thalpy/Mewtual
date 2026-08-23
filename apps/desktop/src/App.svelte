@@ -19438,8 +19438,9 @@
               <section class="set-section">
                 <h3>Debug log</h3>
                 <p class="muted small">
-                  Off by default. When on, Mewtual writes a text log next to its data so you can
-                  reproduce a problem and send the file to someone who can read it.
+                  On by default during the alpha. Mewtual writes a text log next to its data so you
+                  can reproduce a problem and send the file to someone who can read it. Turning it
+                  off is permanent until you turn it back on.
                 </p>
                 {#if debugLog}
                   <label class="toggle">

@@ -150,6 +150,56 @@ pub enum Section {
     Privacy,
 }
 
+/// A snapshot of the capture config that can be consulted without taking a lock.
+///
+/// The reason this exists rather than the config being read under the hub's mutex: an event the
+/// config excludes should cost as close to nothing as possible, and taking a global lock only to
+/// discover an event is unwanted turns the *filtered* case into the contended one. Under a debug
+/// or trace level on a busy section that is most events, on every thread in the process at once.
+///
+/// Two relaxed atomic loads instead. Relaxed is right here: a capture-level change racing an
+/// in-flight event can land either side of it, and neither answer is wrong.
+#[derive(Debug)]
+pub struct CaptureGate {
+    mode: std::sync::atomic::AtomicU8,
+    /// `0` means the section is off; otherwise the [`Level`] as a discriminant plus one.
+    levels: [std::sync::atomic::AtomicU8; 22],
+}
+
+impl CaptureGate {
+    pub fn new(config: &CaptureConfig) -> Self {
+        let gate = CaptureGate {
+            mode: std::sync::atomic::AtomicU8::new(0),
+            levels: std::array::from_fn(|_| std::sync::atomic::AtomicU8::new(0)),
+        };
+        gate.store(config);
+        gate
+    }
+
+    /// Replace the snapshot after a config change.
+    pub fn store(&self, config: &CaptureConfig) {
+        use std::sync::atomic::Ordering;
+        self.mode.store(config.mode as u8, Ordering::Relaxed);
+        for (at, section) in SECTIONS.iter().enumerate() {
+            let encoded = config.level(*section).map_or(0, |l| l as u8 + 1);
+            self.levels[at].store(encoded, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether an event at this section and level is captured, without taking a lock.
+    pub fn admits(&self, section: Section, level: Level) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.mode.load(Ordering::Relaxed) == CaptureMode::Off as u8 {
+            return false;
+        }
+        let encoded = self.levels[section.index()].load(Ordering::Relaxed);
+        // `Level` is ordered loudest first, so "at least as loud as the threshold" is `<=`. The
+        // encoding is the level plus one, leaving zero to mean "section off", so the comparison is
+        // shifted rather than the stored value.
+        encoded != 0 && (level as u8) < encoded
+    }
+}
+
 /// Every section, in the order reports render them.
 pub const SECTIONS: [Section; 22] = [
     Section::Diag,
@@ -177,6 +227,38 @@ pub const SECTIONS: [Section; 22] = [
 ];
 
 impl Section {
+    /// This section's slot in the per-section arrays.
+    ///
+    /// A match rather than a scan of [`SECTIONS`]. It is called twice per recorded event while the
+    /// hub's lock is held, and a linear search over twenty-two entries inside a global critical
+    /// section is the kind of small cost that only shows up as unexplained jitter under load.
+    pub fn index(self) -> usize {
+        match self {
+            Section::Diag => 0,
+            Section::Startup => 1,
+            Section::Ui => 2,
+            Section::Ipc => 3,
+            Section::Runtime => 4,
+            Section::Vault => 5,
+            Section::Storage => 6,
+            Section::Identity => 7,
+            Section::Membership => 8,
+            Section::Transport => 9,
+            Section::Reachability => 10,
+            Section::Discovery => 11,
+            Section::Join => 12,
+            Section::Sync => 13,
+            Section::Channels => 14,
+            Section::Documents => 15,
+            Section::Files => 16,
+            Section::Voice => 17,
+            Section::Devices => 18,
+            Section::Updates => 19,
+            Section::Performance => 20,
+            Section::Privacy => 21,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Section::Diag => "diag",
@@ -309,12 +391,11 @@ impl CaptureConfig {
 
     /// The level a section is captured at, or `None` when it is off.
     pub fn level(&self, section: Section) -> Option<Level> {
-        self.levels[Self::index(section)]
+        self.levels[section.index()]
     }
 
     pub fn set(&mut self, section: Section, level: Option<Level>) {
-        let at = Self::index(section);
-        self.levels[at] = level;
+        self.levels[section.index()] = level;
     }
 
     /// Whether an event at this section and level is captured.
@@ -325,13 +406,6 @@ impl CaptureConfig {
         // `Level` is ordered loudest first, so "at least as loud as the threshold" is `<=`.
         self.level(section)
             .is_some_and(|threshold| level <= threshold)
-    }
-
-    fn index(section: Section) -> usize {
-        SECTIONS
-            .iter()
-            .position(|s| *s == section)
-            .expect("SECTIONS lists every Section")
     }
 }
 

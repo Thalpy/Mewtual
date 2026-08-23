@@ -110,6 +110,50 @@ impl Phase {
     }
 }
 
+/// The name of one field on an event.
+///
+/// An enum rather than a `&'static str` because field names arrive from two places with different
+/// lifetimes. New code writes literals, which are already `'static`. The `tracing` bridge gets
+/// them as runtime strings, and the first attempt at squaring that interned them in a global table
+/// behind a mutex, which put a second lock acquisition on the emitting thread for *every field of
+/// every event* and leaked a string per distinct name. Diagnostics that add lock contention to the
+/// hot path become a cause of the stalls they exist to explain, so the allocation moves into the
+/// event where it belongs and no shared state is touched at all.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FieldName {
+    /// A literal from the source. Every name new code uses.
+    Static(&'static str),
+    /// A name that arrived at runtime, from the `tracing` bridge.
+    Owned(Box<str>),
+}
+
+impl FieldName {
+    pub fn as_str(&self) -> &str {
+        match self {
+            FieldName::Static(name) => name,
+            FieldName::Owned(name) => name,
+        }
+    }
+}
+
+impl From<&'static str> for FieldName {
+    fn from(name: &'static str) -> Self {
+        FieldName::Static(name)
+    }
+}
+
+impl From<String> for FieldName {
+    fn from(name: String) -> Self {
+        FieldName::Owned(name.into_boxed_str())
+    }
+}
+
+impl std::fmt::Display for FieldName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The subjects an event can be about.
 ///
 /// Every one is a [`SessionRef`], so this struct cannot carry a raw identifier however it is
@@ -168,7 +212,7 @@ pub struct DiagnosticEvent {
     /// The emitting module, for locating the code that said this.
     pub target: String,
     /// Ordered so rendering is deterministic. See [`crate::render`].
-    pub fields: Vec<(&'static str, SafeValue)>,
+    pub fields: Vec<(FieldName, SafeValue)>,
 }
 
 impl DiagnosticEvent {
@@ -251,9 +295,9 @@ impl DiagnosticEvent {
     /// are worse: growing hands a hostile producer the memory, and panicking means recording an
     /// event can kill the thing recording it, which is the failure mode this whole subsystem was
     /// built to remove.
-    pub fn field(mut self, name: &'static str, value: impl Into<SafeValue>) -> Self {
+    pub fn field(mut self, name: impl Into<FieldName>, value: impl Into<SafeValue>) -> Self {
         if self.fields.len() < MAX_FIELDS {
-            self.fields.push((name, value.into()));
+            self.fields.push((name.into(), value.into()));
         }
         self
     }
@@ -354,7 +398,7 @@ mod tests {
             .field("first", 1u64)
             .field("second", 2u64)
             .field("third", 3u64);
-        let names: Vec<_> = event.fields.iter().map(|(n, _)| *n).collect();
+        let names: Vec<_> = event.fields.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["first", "second", "third"]);
     }
 }

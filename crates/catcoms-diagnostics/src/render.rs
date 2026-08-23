@@ -142,7 +142,7 @@ pub fn event_json(event: &DiagnosticEvent, mode: CaptureMode) -> String {
             if at > 0 {
                 out.push(',');
             }
-            json_string(name, &mut out);
+            json_string(name.as_str(), &mut out);
             out.push(':');
             json_value(value, mode, &mut out);
         }
