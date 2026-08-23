@@ -193,6 +193,29 @@ pub trait MeshTransport: Send + Sync {
         data: Bytes,
     ) -> Result<Bytes, TransportError>;
 
+    /// Send an addressed message to `peer` **without waiting for a reply**, returning as soon as
+    /// it is queued for sending.
+    ///
+    /// For traffic whose reply carries no information: call signalling, where the receiver queues
+    /// the payload and deliberately never answers with data. The distinction is not cosmetic.
+    /// [`MeshTransport::request`] parks its caller until the remote answers or the request/response
+    /// timeout fires, which is seconds against a peer that has gone away; a caller driving an actor
+    /// loop stalls every other thing that loop serves for that whole window, including the
+    /// disconnect handling and re-dial that would have repaired the route. Delivery problems
+    /// surface in the transport's own logs rather than in this return value, because there is no
+    /// useful answer to give a caller that is not allowed to wait.
+    ///
+    /// The default delegates to `request` and discards the reply, which is what a transport whose
+    /// requests complete immediately (the in-memory one used by tests) wants anyway.
+    async fn notify(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        self.request(peer, proto, data).await.map(|_| ())
+    }
+
     /// Await the next inbound event. Returns `None` once the transport is closed.
     /// Intended to be driven by a single consumer task.
     async fn next_event(&self) -> Option<TransportEvent>;

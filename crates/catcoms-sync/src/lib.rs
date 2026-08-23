@@ -1380,6 +1380,32 @@ pub enum SyncError {
 /// **device id**, not the self-asserted `peer_id`; two records could claim the same
 /// `peer_id`, so keying on `peer_id` would let one member pin another's freshness.
 /// `peer_id`/`addresses` are the dial target only.
+/// What this node knows about reaching one current member, for the debug console's network view.
+///
+/// Every field is local state, never a claim about the member's own view of things: `connected`
+/// means this node holds a live transport connection, and `addresses` are what the member's signed
+/// record advertises, not addresses proven to work.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberRoute {
+    /// The member's device fingerprint, as the roster shows it.
+    pub fingerprint: String,
+    /// Its self-asserted transport peer, or `None` when no record has been learned yet (no PEX).
+    /// Nothing can be dialled or signalled without this, so `None` is a complete explanation on
+    /// its own for a member that calls and DMs cannot reach.
+    pub peer_id: Option<[u8; 32]>,
+    /// The addresses its record advertises. Empty means the record carries no dialable route.
+    pub addresses: Vec<String>,
+    /// The record's signed sequence number; a stuck value means PEX is not refreshing it.
+    pub seq: u64,
+    /// Whether a transport connection to it is live right now.
+    pub connected: bool,
+    /// Consecutive dial attempts charged against it. Climbing while `connected` is false is what a
+    /// peer this node cannot reach looks like.
+    pub dial_attempts: u8,
+    /// Milliseconds until the backoff permits another dial; zero when eligible now.
+    pub next_dial_in_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerDescriptor {
     /// The member's device public key (roster lookup + self-signature verification).
@@ -4764,6 +4790,47 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.peer_records.values().cloned().collect()
     }
 
+    /// What this node knows about reaching each current member: the debug console's network view.
+    ///
+    /// Read-only and derived entirely from state the node already holds, so asking costs nothing on
+    /// the wire and cannot perturb what it reports. It exists because none of this was visible
+    /// anywhere: a node can sit unable to reach anybody while the roster still shows names, and the
+    /// difference between "no record for them yet", "a record whose only addresses are on a network
+    /// this host cannot route" and "backing off after repeated failures" is the whole diagnosis and
+    /// looked identical from outside.
+    ///
+    /// Sorted by fingerprint so a polling view does not reshuffle under the reader.
+    pub fn member_routes(&self) -> Vec<MemberRoute> {
+        let now = self.clock.monotonic_ms();
+        let own = self.device.device_id();
+        let mut routes: Vec<MemberRoute> = self
+            .group
+            .member_device_ids()
+            .into_iter()
+            .filter(|device| *device != own)
+            .map(|device| {
+                let record = self.peer_records.get(&device);
+                let retry = self.dial_retries.get(device.as_bytes().as_slice());
+                MemberRoute {
+                    fingerprint: roles::fingerprint(&device),
+                    peer_id: record.map(|r| r.peer_id),
+                    addresses: record.map(|r| r.addresses.clone()).unwrap_or_default(),
+                    seq: record.map_or(0, |r| r.seq),
+                    connected: record
+                        .is_some_and(|r| self.connected_peers.contains(&PeerId::new(r.peer_id))),
+                    dial_attempts: retry.map_or(0, |r| r.attempts),
+                    // Milliseconds until the backoff lets this member be dialled again; zero when
+                    // it is eligible now. A member stuck at the cap is the visible symptom of a
+                    // node burning every attempt on a route that cannot work.
+                    next_dial_in_ms: retry
+                        .map_or(0, |r| r.next_attempt_ms.saturating_sub(now)),
+                }
+            })
+            .collect();
+        routes.sort_by(|a, b| a.fingerprint.cmp(&b.fingerprint));
+        routes
+    }
+
     /// Whether ≥1 transport peer is connected right now; the accurate liveness signal (maintained
     /// on both connect and disconnect, unlike the catch-up source lists). Backs the file-browser
     /// "can a fetch be tried" availability hint.
@@ -4934,8 +5001,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// Push a call-signalling message (opaque payload) to current member `target_fp` over this group.
-    /// `Ok(true)` if delivered, `Ok(false)` if we hold no peer record for the target. Authenticated as
-    /// coming from a current member (the recipient learns the verified sender fingerprint).
+    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if we hold no peer record for the
+    /// target. Authenticated as coming from a current member (the recipient learns the verified
+    /// sender fingerprint).
+    ///
+    /// Sent through [`MeshTransport::notify`], never `request`: `serve_call_signal` deliberately
+    /// answers with no data, so there is nothing in the reply worth blocking for, and blocking is
+    /// exactly what went wrong. This call is made from the server actor's command loop, so the
+    /// several seconds a `request` spends discovering that an absent peer is absent were seconds
+    /// the same loop was not processing `PeerDisconnected`, was not answering inbound requests, and
+    /// was not running the discovery pass whose whole job is to redial that peer. Call signalling
+    /// re-sends on a timer, so the stall refilled itself faster than it drained and one dropped
+    /// connection took the server down for minutes at a stretch. `Ok(true)` therefore means
+    /// "addressed and handed to the transport", never "delivered"; the transport logs what became
+    /// of it.
     pub async fn send_call_signal(
         &mut self,
         target_fp: &str,
@@ -4946,7 +5025,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let (req, _auth) = self.build_authed_request(KIND_CALL_SIGNAL, payload)?;
         self.transport
-            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+            .notify(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
             .await?;
         Ok(true)
     }
@@ -5123,11 +5202,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // squatter leaves the roster (`queue_eviction` drops a removed device's record, so the
         // claim does not outlive the membership). That is a far smaller harm than the one it
         // prevents, and it is a fair trade only because the alternative is unbounded.
+        // Our own record, relayed back to us inside somebody else's PEX bundle. Every bundle we
+        // apply contains one, so this is the ordinary case and not evidence of anything. It was
+        // folded in with the squatter branch below and logged at WARN, which put a line reading
+        // like an attempted hijack in the log on every single PEX exchange.
+        if desc.peer_id == *self.transport.local_peer().as_bytes() {
+            tracing::trace!("ignoring our own peer record echoed back over PEX");
+            return false;
+        }
         let claimed_elsewhere = self
             .peer_records
             .iter()
             .any(|(d, e)| *d != device && e.peer_id == desc.peer_id);
-        if claimed_elsewhere || desc.peer_id == *self.transport.local_peer().as_bytes() {
+        if claimed_elsewhere {
             tracing::warn!("dropping peer record claiming a transport peer another device claims");
             return false;
         }
@@ -13128,6 +13215,94 @@ mod tests {
         assert!(
             alice.take_call_signals().is_empty(),
             "draining a call signal emits it only once"
+        );
+    }
+
+    /// A transport whose `request` never answers: the peer that has gone away, without the test
+    /// having to sit through a real request/response timeout. `notify` completes at once, which is
+    /// the whole point of having it.
+    #[derive(Debug, Default)]
+    struct StallingNet {
+        notified: std::sync::Mutex<Vec<(PeerId, Vec<u8>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MeshTransport for StallingNet {
+        fn local_peer(&self) -> PeerId {
+            PeerId::from_u64(1)
+        }
+        async fn subscribe(&self, _topic: Topic) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn unsubscribe(&self, _topic: Topic) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn publish(&self, _topic: Topic, _data: Bytes) -> Result<(), TransportError> {
+            Ok(())
+        }
+        async fn request(
+            &self,
+            _peer: PeerId,
+            _proto: ProtocolId,
+            _data: Bytes,
+        ) -> Result<Bytes, TransportError> {
+            std::future::pending().await
+        }
+        async fn notify(
+            &self,
+            peer: PeerId,
+            _proto: ProtocolId,
+            data: Bytes,
+        ) -> Result<(), TransportError> {
+            self.notified
+                .lock()
+                .expect("mutex")
+                .push((peer, data.to_vec()));
+            Ok(())
+        }
+        async fn next_event(&self) -> Option<TransportEvent> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_signal_does_not_wait_for_the_peer_to_answer() {
+        // The production freeze this pins down. `send_call_signal` runs inside the server actor's
+        // command loop, so waiting out a request/response timeout against an absent peer stalls
+        // that loop, and that loop is what handles the disconnect and runs the re-dial pass which
+        // would have repaired the route. Call signalling re-sends on a timer, so the stall refilled
+        // faster than it drained: one dropped connection froze a whole server for minutes, with
+        // every failure logged ten seconds after the last. `serve_call_signal` answers with no data
+        // anyway, so there was never anything in the reply worth waiting for.
+        let founder = MlsDevice::generate().unwrap();
+        let own = founder.device_id();
+        let group = ServerGroup::create(&founder).unwrap();
+        let mut node = ChannelSync::new(
+            StallingNet::default(),
+            group,
+            founder,
+            ChaCha20Rng::seed_from_u64(77),
+            Box::new(ManualClock::new(1_000)),
+        );
+        // Any current member with a record will do; the subject here is which transport verb the
+        // send reaches for, not who it is addressed to.
+        node.publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .unwrap();
+
+        let sent = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            node.send_call_signal(&roles::fingerprint(&own), b"sdp-offer"),
+        )
+        .await
+        .expect("a call signal must return without waiting for the peer to answer")
+        .unwrap();
+
+        assert!(sent, "the signal was addressed and handed to the transport");
+        let notified = node.transport.notified.lock().expect("mutex").clone();
+        assert_eq!(notified.len(), 1, "exactly one fire-and-forget send");
+        assert!(
+            notified[0].1.first() == Some(&KIND_CALL_SIGNAL),
+            "it went out as a call signal"
         );
     }
 

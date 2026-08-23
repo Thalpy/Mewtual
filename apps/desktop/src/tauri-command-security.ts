@@ -11,10 +11,14 @@ export const TAURI_COMMAND_GROUPS = {
     commands: [
       "vault_exists", "resume_session", "lock_session", "unlock", "get_ui_state", "save_ui_state",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
-      // Writes a frontend line to the local debug log and nothing else. Deliberately outside the
-      // unlocked-session gate: the errors most worth capturing are the ones from startup and from
-      // unlock itself failing, which happen before there is a session to check.
+      // Writes a frontend line into the diagnostics pipeline and nothing else. Deliberately
+      // outside the unlocked-session gate: the errors most worth capturing are the ones from
+      // startup and from unlock itself failing, which happen before there is a session to check.
       "log_ui",
+      // Reads this session's in-memory diagnostics ring for the debug console, and clears the
+      // view. Unlike log_ui these ARE gated on an unlocked session: the ring holds peer addresses
+      // and stable identifiers, which a locked app must not show to whoever picks the machine up.
+      "get_console_log", "clear_console_log",
     ],
   },
   server_lifecycle_and_membership: {
@@ -33,6 +37,11 @@ export const TAURI_COMMAND_GROUPS = {
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
       "get_join_attempts", "get_connectivity", "get_call_transport", "get_switchboard_status", "set_switchboard_offered", "get_channel_topic", "get_jukebox", "get_inbox",
+      // Local reachability state for the debug console: which members this node holds a record
+      // for, the addresses those records advertise, and where the dial backoff has got to.
+      // Addresses of *members*, which this node already holds and already dials; no new exposure
+      // beyond the debug log, and gated on an unlocked session like every read here.
+      "get_member_routes",
       // Route booleans + the mapping status line only; concrete addresses stay native-side.
       "check_invite_routes",
       "get_messages",

@@ -283,6 +283,10 @@ pub enum AppCommand {
     },
     /// Query the fingerprints of members reachable right now (presence).
     OnlineMembers { reply: oneshot::Sender<Vec<String>> },
+    /// Query what this node knows about reaching each member (the debug console's network view).
+    MemberRoutes {
+        reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
+    },
     /// Query the recent inbound join attempts this node served, newest first (operator
     /// diagnostics; see `Server::join_attempts`).
     JoinAttempts {
@@ -1597,6 +1601,20 @@ impl ServerActor {
         if self
             .cmd_tx
             .send(AppCommand::OnlineMembers { reply })
+            .await
+            .is_err()
+        {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
+    /// Fetch what this node knows about reaching each member (the debug console's network view).
+    pub async fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(AppCommand::MemberRoutes { reply })
             .await
             .is_err()
         {
@@ -2931,6 +2949,9 @@ where
                     }
                     Some(AppCommand::OnlineMembers { reply }) => {
                         let _ = reply.send(server.online_members());
+                    }
+                    Some(AppCommand::MemberRoutes { reply }) => {
+                        let _ = reply.send(server.member_routes());
                     }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());

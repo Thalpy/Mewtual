@@ -283,6 +283,116 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
         ],
         last_error: "",
       });
+    // The debug console's sources. The data deliberately re-enacts the two incidents the console
+    // was built for, so the fixture shows it doing its job rather than showing an empty shell:
+    // Moss advertises only IPv6 while this device has no IPv6 route, and the voice signalling run
+    // fails against a peer whose transport connection has gone.
+    case "get_console_log":
+      return clone({
+        events: [
+          {
+            seq: 1,
+            at_ms: VISUAL_FIXTURE_NOW - 182_000,
+            level: "INFO",
+            target: "catcoms_net",
+            message: "listening address",
+            fields: [["address", "/ip4/192.168.1.42/udp/22487/quic-v1"]],
+          },
+          {
+            seq: 2,
+            at_ms: VISUAL_FIXTURE_NOW - 121_000,
+            level: "WARN",
+            target: "catcoms_net",
+            message: "dial failed",
+            fields: [
+              ["addr", "/ip6/2601:441:4581:a5c0:b81d:9e0b:cab1:de04/udp/23123/quic-v1"],
+              ["error", "network unreachable"],
+            ],
+          },
+          {
+            seq: 3,
+            at_ms: VISUAL_FIXTURE_NOW - 96_000,
+            level: "WARN",
+            target: "catcoms_discovery::eclipse",
+            message: "eclipse detector raised CAUTION (sustained isolation signs)",
+            fields: [],
+          },
+          {
+            seq: 4,
+            at_ms: VISUAL_FIXTURE_NOW - 74_000,
+            level: "WARN",
+            target: "catcoms_ui",
+            message: "voice: router would not map the media port",
+            fields: [],
+          },
+          {
+            seq: 5,
+            at_ms: VISUAL_FIXTURE_NOW - 61_000,
+            level: "WARN",
+            target: "catcoms_ui",
+            message: 'voice signal failed {"targetFp":"9b31d5a2","type":"ice","error":"dial failure"}',
+            fields: [],
+          },
+          {
+            seq: 6,
+            at_ms: VISUAL_FIXTURE_NOW - 51_000,
+            level: "WARN",
+            target: "catcoms_net",
+            message: "outbound request failed",
+            fields: [["peer", "12D3KooWFixtureMoss"], ["error", "dial failure"]],
+          },
+          {
+            seq: 7,
+            at_ms: VISUAL_FIXTURE_NOW - 30_000,
+            level: "DEBUG",
+            target: "catcoms_sync",
+            message: "serving PEX",
+            fields: [["count", "2"]],
+          },
+        ],
+        errors: 0,
+        warnings: 4,
+        dropped: 0,
+        latest_seq: 7,
+        capacity: 4096,
+      });
+    case "get_member_routes":
+      return server === 1
+        ? clone([
+            {
+              fingerprint: JUNIPER,
+              peer: "7c41a9de",
+              addresses: ["/ip4/198.51.100.24/udp/31484/quic-v1"],
+              seq: 6,
+              connected: true,
+              dial_attempts: 0,
+              next_dial_in_ms: 0,
+            },
+            {
+              fingerprint: MOSS,
+              peer: "2b5df389",
+              addresses: ["/ip6/2601:441:4581:a5c0:b81d:9e0b:cab1:de04/udp/23123/quic-v1"],
+              seq: 4,
+              connected: false,
+              dial_attempts: 8,
+              next_dial_in_ms: 812_000,
+            },
+          ])
+        : [];
+    case "get_call_transport":
+      return clone({
+        public_direct: false,
+        autonat: "not tested: no public address candidate and AutoNAT server were available together",
+        public_ipv4: ["213.105.231.38"],
+        public_ipv6: [],
+        bridges: [],
+        relay_likely_required: true,
+        router_maps: true,
+        advice:
+          "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
+      });
+    case "get_debug_logging":
+      return clone({ enabled: false, active: true, dir: "C:\\fixture\\logs", file: "" });
     case "get_switchboard_status":
     case "set_switchboard_offered":
       return clone({

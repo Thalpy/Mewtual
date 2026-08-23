@@ -138,6 +138,29 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import { callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, type MappedPort } from "./callroutes";
+  import {
+    DEFAULT_LEVELS,
+    LEVELS,
+    PRIVACY_NOTE,
+    appendEvents,
+    copyBundle,
+    dropNote,
+    eventLine,
+    eventParts,
+    filterEvents,
+    formatDuration,
+    isFrontend,
+    latestSeq,
+    makeAliases,
+    maybeRedact,
+    routeChip,
+    routeExplanation,
+    routeState,
+    shownCount,
+    type LogEvent,
+    type LogStats,
+    type MemberRoute,
+  } from "./debug-console";
 
   type Reaction = { emoji: string; by: string[] };
   type Msg = { id: string; author: string; text: string; ts: number; edited: number; reactions: Reaction[]; reply_to: string; pinned: boolean };
@@ -5695,6 +5718,209 @@
       debugLogBusy = false;
     }
   }
+  // ---- debug console (docs/design-debug-console.md) ------------------------------------
+  //
+  // The app used to fail silently: a call died while the roster still showed the peer online, and
+  // a node sat isolated for an hour dialling addresses it could never reach with no dial failure
+  // surfaced anywhere. This is the in-app view of what the log file knows, segmented so the failing
+  // layer is findable in seconds. Capture is native and always on (`catcoms-log`'s ring); this
+  // polls it while open, so a console that is closed costs nothing and one that has just opened
+  // still shows the run-up to whatever the user came here about.
+  type DbgSection = "overview" | "network" | "voice" | "backend" | "frontend" | "storage";
+  const DBG_SECTIONS: { id: DbgSection; label: string }[] = [
+    { id: "overview", label: "Overview" },
+    { id: "network", label: "Network" },
+    { id: "voice", label: "Voice" },
+    { id: "backend", label: "Backend" },
+    { id: "frontend", label: "Frontend" },
+    { id: "storage", label: "Storage" },
+  ];
+  /** How many events the webview holds. The native ring is deeper; this is what is rendered. */
+  const DBG_VIEW_CAP = 2000;
+  let showDebugConsole = $state(false);
+  let dbgSection = $state<DbgSection>("overview");
+  let dbgEvents = $state<LogEvent[]>([]);
+  let dbgStats = $state<LogStats>({ errors: 0, warnings: 0, dropped: 0, latest_seq: 0, capacity: 0 });
+  let dbgRedact = $state(false);
+  let dbgPaused = $state(false);
+  let dbgFrozen = $state<LogEvent[]>([]);
+  let dbgBackFilter = $state("");
+  let dbgBackTarget = $state("");
+  let dbgBackLevels = $state<string[]>([...DEFAULT_LEVELS]);
+  let dbgFrontFilter = $state("");
+  let dbgFrontLevels = $state<string[]>([...DEFAULT_LEVELS]);
+  let dbgRoutes = $state<Record<number, MemberRoute[]>>({});
+  let dbgExpanded = $state<string>("");
+  let dbgCopied = $state("");
+  let dbgTimer: ReturnType<typeof setInterval> | null = null;
+  // Aliases live for the console's lifetime rather than per render, so the same address is the
+  // same `[ip 2]` every time it appears. Correlation is the evidence; see debug-console.ts.
+  let dbgAliases = makeAliases();
+
+  async function pollDebugConsole() {
+    try {
+      const page = await invoke<{ events: LogEvent[] } & LogStats>("get_console_log", {
+        afterSeq: latestSeq(dbgEvents),
+        limit: 500,
+      });
+      dbgEvents = appendEvents(dbgEvents, page.events, DBG_VIEW_CAP);
+      dbgStats = page;
+    } catch {
+      /* the console must never be able to break the app it is observing */
+    }
+    // Reachability per server, for the Network section. Cheap: local state, no wire traffic.
+    const routes: Record<number, MemberRoute[]> = {};
+    for (const s of servers) {
+      try {
+        routes[s.id] = await invoke<MemberRoute[]>("get_member_routes", { server: s.id });
+      } catch {
+        routes[s.id] = [];
+      }
+    }
+    dbgRoutes = routes;
+  }
+
+  function openDebugConsole(section: DbgSection = "overview") {
+    dbgSection = section;
+    showDebugConsole = true;
+    showSettings = false;
+    // This device's own reachability is the other half of Overview, and it is the answer to
+    // "can anyone reach me at all". Fetched on open rather than polled: it changes on the scale of
+    // a router lease, not a second.
+    void refreshCallTransport();
+    void pollDebugConsole();
+    dbgTimer ??= setInterval(() => {
+      // Paused freezes the view, not the capture: the ring keeps filling natively and a resume
+      // shows what arrived. Skipping the poll instead would lose it.
+      if (!dbgPaused) void pollDebugConsole();
+    }, 1000);
+  }
+  function closeDebugConsole() {
+    showDebugConsole = false;
+    if (dbgTimer) clearInterval(dbgTimer);
+    dbgTimer = null;
+  }
+
+  /** The backend half of the ring: everything Rust emitted. */
+  const dbgBackend = $derived((dbgPaused ? dbgFrozen : dbgEvents).filter((e) => !isFrontend(e)));
+  /** The frontend half: whatever the webview logged, which arrives under one tracing target. */
+  const dbgFrontend = $derived((dbgPaused ? dbgFrozen : dbgEvents).filter(isFrontend));
+  const dbgBackShown = $derived(
+    filterEvents(dbgBackend, { levels: dbgBackLevels, target: dbgBackTarget, text: dbgBackFilter }, dbgAliases, dbgRedact),
+  );
+  const dbgFrontShown = $derived(
+    filterEvents(dbgFrontend, { levels: dbgFrontLevels, text: dbgFrontFilter }, dbgAliases, dbgRedact),
+  );
+  /** Per-section error counts for the rail badges, from the same events the feeds render. */
+  const dbgBackErrors = $derived(dbgBackend.filter((e) => e.level === "ERROR").length);
+  const dbgBackWarns = $derived(dbgBackend.filter((e) => e.level === "WARN").length);
+  const dbgFrontErrors = $derived(dbgFrontend.filter((e) => e.level === "ERROR").length);
+  const dbgFrontWarns = $derived(dbgFrontend.filter((e) => e.level === "WARN").length);
+  /** Members this node cannot currently reach, across every server: the Network badge. */
+  const dbgUnreachable = $derived(
+    Object.values(dbgRoutes)
+      .flat()
+      .filter((r) => routeState(r) !== "connected").length,
+  );
+  /** The transport's own events: dial attempts, dial failures, connection churn. */
+  const dbgNetEvents = $derived(dbgBackend.filter((e) => e.target === "catcoms_net").slice(-300));
+  /**
+   * What the voice path logged this session.
+   *
+   * Matched on the message rather than a dedicated target because the voice stack lives in the
+   * webview and logs through the one `catcoms_ui` target; every line it writes is already prefixed
+   * "voice" (`voice signal failed`, `voice ICE server/candidate error`, and so on).
+   */
+  const dbgVoiceEvents = $derived(
+    dbgFrontend.filter((e) => e.message.toLowerCase().includes("voice")).slice(-300),
+  );
+  /** The newest few loud events, so "why is the badge red" is one glance rather than a hunt. */
+  const dbgAttention = $derived(
+    (dbgPaused ? dbgFrozen : dbgEvents)
+      .filter((e) => e.level === "ERROR" || e.level === "WARN")
+      .slice(-4)
+      .reverse(),
+  );
+
+  function dbgToggleLevel(which: "back" | "front", level: string) {
+    const held = which === "back" ? dbgBackLevels : dbgFrontLevels;
+    const next = held.includes(level) ? held.filter((l) => l !== level) : [...held, level];
+    if (which === "back") dbgBackLevels = next;
+    else dbgFrontLevels = next;
+  }
+  function dbgTogglePause() {
+    dbgPaused = !dbgPaused;
+    // Freeze a copy rather than stopping the poll, so resuming reveals the backlog instead of a
+    // hole where the paused interval was.
+    if (dbgPaused) dbgFrozen = [...dbgEvents];
+  }
+  function dbgLine(e: LogEvent): string {
+    return eventLine(e, dbgAliases, dbgRedact);
+  }
+  /** The spans a feed row renders. The joined line is built from these, so they cannot disagree. */
+  function dbgParts(e: LogEvent) {
+    return eventParts(e, dbgAliases, dbgRedact);
+  }
+  function dbgText(s: string): string {
+    return maybeRedact(s, dbgAliases, dbgRedact);
+  }
+  function dbgLevelClass(level: string): string {
+    return `lvl-${level === "ERROR" ? "err" : level.toLowerCase()}`;
+  }
+  async function dbgCopy(what: string, text: string) {
+    await copyText(text);
+    dbgCopied = what;
+    setTimeout(() => (dbgCopied = ""), 1500);
+  }
+  /** The routes table as plain text, the same strings the table renders. */
+  function dbgRouteLines(): string[] {
+    return servers.flatMap((s) => {
+      const rows = dbgRoutes[s.id] ?? [];
+      return rows.map((r) => {
+        const chip = routeChip(routeState(r));
+        const addrs = r.addresses.map((a) => dbgText(a)).join(" ") || "(no address)";
+        return `${s.name} ${dbgText(r.fingerprint)} ${chip.label} peer=${dbgText(r.peer) || "(none)"} seq=${r.seq} fails=${r.dial_attempts} next=${r.next_dial_in_ms ? formatDuration(r.next_dial_in_ms) : "-"} ${addrs}`;
+      });
+    });
+  }
+  async function dbgCopyReport() {
+    await dbgCopy(
+      "report",
+      copyBundle(
+        { version: APP_VERSION, at: Date.now(), redacted: dbgRedact },
+        [
+          { title: "this device", lines: dbgDeviceLines() },
+          { title: "network", lines: dbgRouteLines() },
+          { title: "voice", lines: dbgVoiceLines() },
+          { title: "backend", lines: dbgBackShown.map(dbgLine) },
+          { title: "frontend", lines: dbgFrontShown.map(dbgLine) },
+        ],
+      ),
+    );
+  }
+  /** This device's own reachability, from the connectivity report the settings page already uses. */
+  function dbgDeviceLines(): string[] {
+    const t = callTransport;
+    if (!t) return [];
+    return [
+      `public ipv4: ${t.public_ipv4.map((a) => dbgText(a)).join(" ") || "(none)"}`,
+      `public ipv6: ${t.public_ipv6.map((a) => dbgText(a)).join(" ") || "(none)"}`,
+      `directly reachable: ${t.public_direct ? "yes" : "no"}`,
+      `autonat: ${t.autonat || "(no verdict)"}`,
+      `router maps ports: ${t.router_maps ? "yes" : "no"}`,
+      `relay likely required: ${t.relay_likely_required ? "yes" : "no"}`,
+    ];
+  }
+  /** Whether this device has any usable IPv6 route, which decides how a v6-only peer is explained. */
+  const dbgHasIpv6 = $derived((callTransport?.public_ipv6.length ?? 0) > 0);
+  /** The live call's per-peer WebRTC state. Empty outside a call, which the section says plainly. */
+  function dbgVoiceLines(): string[] {
+    return Object.entries(callPeers).map(([fp, p]) => {
+      const path = peerTransport[fp] ?? "unknown";
+      return `${dbgText(fp)} connection=${p.pc.connectionState} ice=${p.pc.iceConnectionState} signaling=${p.pc.signalingState} path=${path}`;
+    });
+  }
+
   async function copyJoinLog() {
     await copyText(formatJoinLog(joinAttempts));
     joinLogCopied = true;
@@ -12939,6 +13165,7 @@
         else if (fileInfo) closeFileInfo();
         else if (showWikiHelp) showWikiHelp = false;
         else if (showFeedback) showFeedback = false;
+        else if (showDebugConsole) closeDebugConsole();
         else if (showServerSettings) showServerSettings = false;
         else if (showSettings) showSettings = false;
         else if (showSearch) closeSearch();
@@ -19253,6 +19480,18 @@
               <div class="stx-crumb">SETTINGS // CONNECTION // DIAGNOSTICS</div>
               <h1>Diagnostics</h1>
               <section class="set-section">
+                <h3>Debug console</h3>
+                <p class="muted small">
+                  A live view of what this app is doing: which members it can reach and why not,
+                  what the network layer is attempting, backend and frontend errors, and the voice
+                  stack during a call. It reads memory this session already holds, so it is always
+                  ready and does not need the log file below to be switched on first.
+                </p>
+                <div class="invite-actions">
+                  <button class="ghost" onclick={() => openDebugConsole("overview")}>Open debug console</button>
+                </div>
+              </section>
+              <section class="set-section">
                 <h3>Connection report</h3>
                 {#if connectivity && connectivity.action}
                   {@const reach = reachabilitySummary(connectivity)}
@@ -19401,6 +19640,394 @@
             <span class="stx-esc-ring">✕</span>
             <span>ESC</span>
           </button>
+        </div>
+      </div>
+    {/if}
+
+    {#if showDebugConsole}
+      <div class="dbg" role="dialog" aria-label="Debug console">
+        <div class="dbg-head">
+          <div class="dbg-title">
+            <div class="stx-crumb">DIAGNOSTICS // {DBG_SECTIONS.find((s) => s.id === dbgSection)?.label.toUpperCase()}</div>
+            <h1>Debug console</h1>
+          </div>
+          <!-- Session totals, counted natively before the ring evicts anything, so this stays
+               true after the offending line has aged out of the view below. -->
+          <div class="dbg-sev">
+            <span class="dbg-sev-chip" class:err={dbgStats.errors > 0} class:quiet={dbgStats.errors === 0}>
+              {dbgStats.errors} ERRORS
+            </span>
+            <span class="dbg-sev-chip" class:warn={dbgStats.warnings > 0} class:quiet={dbgStats.warnings === 0}>
+              {dbgStats.warnings} WARNINGS
+            </span>
+          </div>
+          <div class="dbg-head-actions">
+            <button class="ghost small" onclick={dbgCopyReport}>{dbgCopied === "report" ? "Copied" : "Copy report"}</button>
+          </div>
+          <button type="button" class="stx-esc" onclick={closeDebugConsole} title="Close (Esc)">
+            <span class="stx-esc-ring">✕</span>
+            <span>ESC</span>
+          </button>
+        </div>
+
+        <div class="dbg-body">
+          <nav class="dbg-rail">
+            {#each DBG_SECTIONS as s (s.id)}
+              <button type="button" class="dbg-rail-item" class:active={dbgSection === s.id} onclick={() => (dbgSection = s.id)}>
+                <span>{s.label}</span>
+                {#if s.id === "backend" && (dbgBackErrors || dbgBackWarns)}
+                  <span class="dbg-rail-count" class:err={dbgBackErrors > 0} class:warn={dbgBackErrors === 0}>{dbgBackErrors || dbgBackWarns}</span>
+                {:else if s.id === "frontend" && (dbgFrontErrors || dbgFrontWarns)}
+                  <span class="dbg-rail-count" class:err={dbgFrontErrors > 0} class:warn={dbgFrontErrors === 0}>{dbgFrontErrors || dbgFrontWarns}</span>
+                {:else if s.id === "network" && dbgUnreachable > 0}
+                  <span class="dbg-rail-count warn">{dbgUnreachable}</span>
+                {/if}
+              </button>
+            {/each}
+          </nav>
+
+          <div class="dbg-content">
+            {#if dbgSection === "overview"}
+              <div class="dbg-sec">
+                <div class="dbg-card">
+                  <div class="dbg-card-h"><span>Servers</span></div>
+                  {#if servers.length}
+                    <div class="dbg-table-wrap">
+                      <table class="dbg-table">
+                        <thead><tr><th>Server</th><th class="num">Reachable</th><th class="num">Roster</th><th>State</th></tr></thead>
+                        <tbody>
+                          {#each servers as s (s.id)}
+                            {@const rows = dbgRoutes[s.id] ?? []}
+                            {@const live = rows.filter((r) => r.connected).length}
+                            <tr>
+                              <td class="name-cell">{s.name}</td>
+                              <td class="num">{live} / {rows.length}</td>
+                              <td class="num">{rows.length + 1}</td>
+                              <td>
+                                {#if rows.length === 0}
+                                  <span class="chip faint">ALONE</span>
+                                {:else if live === rows.length}
+                                  <span class="chip ok">ALL REACHED</span>
+                                {:else if live === 0}
+                                  <span class="chip danger">NONE REACHED</span>
+                                {:else}
+                                  <span class="chip warn">PARTIAL</span>
+                                {/if}
+                              </td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                  {:else}
+                    <div class="dbg-empty">No servers joined yet. Reachability below still describes this device.</div>
+                  {/if}
+                </div>
+
+                <div class="dbg-card">
+                  <div class="dbg-card-h">
+                    <span>This device</span>
+                    <span class="dbg-card-actions">
+                      <button class="ghost small" onclick={() => dbgCopy("device", dbgDeviceLines().join("\n"))}>{dbgCopied === "device" ? "Copied" : "Copy"}</button>
+                    </span>
+                  </div>
+                  {#if callTransport}
+                    <div class="dbg-kv">
+                      <span class="k">Public IPv4</span>
+                      <span class="v"><span class="dbg-pii">{callTransport.public_ipv4.map(dbgText).join(", ") || "none observed"}</span></span>
+                      <span class="k">Public IPv6</span>
+                      <span class="v"><span class="dbg-pii">{callTransport.public_ipv6.map(dbgText).join(", ") || "none observed"}</span></span>
+                      <span class="k">Directly reachable</span>
+                      <span class="v">
+                        {#if callTransport.public_direct}<span class="chip ok">YES</span>{:else}<span class="chip warn">NO</span>{/if}
+                      </span>
+                      <span class="k">Router maps ports</span>
+                      <span class="v">
+                        {#if callTransport.router_maps}<span class="chip ok">YES</span>{:else}<span class="chip warn">NO</span>{/if}
+                      </span>
+                    </div>
+                    {#if !dbgHasIpv6}
+                      <!-- The failure that stranded a node for an hour: every dial went to an IPv6
+                           address this machine has no route to, and failed instantly. -->
+                      <p class="dbg-note">
+                        No usable IPv6 route on this device. A member whose record advertises only
+                        IPv6 addresses cannot be dialled from here at all, and each attempt fails
+                        immediately rather than timing out.
+                      </p>
+                    {/if}
+                    <p class="dbg-note">{callTransport.advice}</p>
+                  {:else}
+                    <div class="dbg-empty">No reachability report yet. Open a server, or use Settings, Connection, Diagnostics.</div>
+                  {/if}
+                </div>
+
+                <div class="dbg-card">
+                  <div class="dbg-card-h"><span>Needs attention</span></div>
+                  {#if dbgAttention.length}
+                    <div class="dbg-attn">
+                      {#each dbgAttention as e (e.seq)}
+                        <button type="button" class="dbg-attn-item {dbgLevelClass(e.level)}" onclick={() => (dbgSection = isFrontend(e) ? "frontend" : "backend")}>
+                          <span class="dbg-ts">{dbgParts(e).ts}</span>
+                          <span class="dbg-tag">{e.level}</span>
+                          {#if dbgParts(e).target}<span class="dbg-target">{dbgParts(e).target}</span>{/if}
+                          <span class="dbg-msg">{dbgParts(e).text}</span>
+                        </button>
+                      {/each}
+                    </div>
+                  {:else}
+                    <div class="dbg-empty">Nothing needs attention.</div>
+                  {/if}
+                </div>
+              </div>
+
+            {:else if dbgSection === "network"}
+              <div class="dbg-sec">
+                {#each servers as s (s.id)}
+                  {@const rows = dbgRoutes[s.id] ?? []}
+                  <div class="dbg-card">
+                    <div class="dbg-card-h">
+                      <span>{s.name}</span>
+                      <span class="dbg-card-actions">
+                        <button class="ghost small" onclick={() => dbgCopy("routes", dbgRouteLines().join("\n"))}>{dbgCopied === "routes" ? "Copied" : "Copy"}</button>
+                      </span>
+                    </div>
+                    {#if rows.length}
+                      <div class="dbg-table-wrap">
+                        <table class="dbg-table">
+                          <thead><tr><th></th><th>Member</th><th>Peer</th><th>State</th><th class="num">Routes</th><th class="num">Seq</th><th class="num">Fails</th><th>Next dial</th></tr></thead>
+                          <tbody>
+                            {#each rows as r (r.fingerprint)}
+                              {@const st = routeState(r)}
+                              {@const chip = routeChip(st)}
+                              {@const key = `${s.id}:${r.fingerprint}`}
+                              <tr class="dbg-row-toggle" onclick={() => (dbgExpanded = dbgExpanded === key ? "" : key)}>
+                                <td>{dbgExpanded === key ? "▾" : "▸"}</td>
+                                <td class="name-cell">{nameOf(r.fingerprint)}</td>
+                                <td><span class="dbg-pii fp">{dbgText(r.peer) || "none"}</span></td>
+                                <td><span class="chip {chip.tone}">{chip.label}</span></td>
+                                <td class="num">{r.addresses.length}</td>
+                                <td class="num">{r.seq}</td>
+                                <td class="num" class:bad={r.dial_attempts > 0}>{r.dial_attempts}</td>
+                                <td>{r.next_dial_in_ms > 0 ? formatDuration(r.next_dial_in_ms) : "-"}</td>
+                              </tr>
+                              {#if dbgExpanded === key}
+                                <tr class="dbg-row-detail">
+                                  <td colspan="8">
+                                    <div class="muted small">{routeExplanation(r, dbgHasIpv6)}</div>
+                                    {#if r.addresses.length}
+                                      <ul>
+                                        {#each r.addresses as a (a)}
+                                          <li><span class="dbg-pii">{dbgText(a)}</span></li>
+                                        {/each}
+                                      </ul>
+                                    {/if}
+                                  </td>
+                                </tr>
+                              {/if}
+                            {/each}
+                          </tbody>
+                        </table>
+                      </div>
+                    {:else}
+                      <div class="dbg-empty">No other members on this server yet.</div>
+                    {/if}
+                  </div>
+                {/each}
+                {#if servers.length === 0}
+                  <div class="dbg-empty">No servers joined yet, so there is nothing to reach.</div>
+                {/if}
+
+                <div class="dbg-card dbg-feed">
+                  <div class="dbg-card-h"><span>Transport events</span></div>
+                  <p class="muted small">
+                    Dial attempts, dial failures and connection churn, straight from the transport.
+                    Turn on DEBUG in Backend to see attempts as well as failures.
+                  </p>
+                  <div class="dbg-feed-scroll h-md" role="log">
+                    {#if dbgNetEvents.length}
+                      {#each dbgNetEvents as e (e.seq)}
+                        <div class="dbg-line {dbgLevelClass(e.level)}">
+                          <span class="dbg-ts">{dbgParts(e).ts}</span>
+                          <span class="dbg-tag">{e.level}</span>
+                          <span class="dbg-msg">{dbgParts(e).text}</span>
+                        </div>
+                      {/each}
+                    {:else}
+                      <div class="dbg-empty">No transport events captured yet.</div>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+
+            {:else if dbgSection === "voice"}
+              <div class="dbg-sec">
+                <div class="dbg-card">
+                  <div class="dbg-card-h">
+                    <span>Call peers</span>
+                    <span class="dbg-card-actions">
+                      <button class="ghost small" onclick={() => dbgCopy("voice", dbgVoiceLines().join("\n"))}>{dbgCopied === "voice" ? "Copied" : "Copy"}</button>
+                    </span>
+                  </div>
+                  {#if Object.keys(callPeers).length}
+                    <div class="dbg-grid">
+                      {#each Object.entries(callPeers) as [fp, p] (fp)}
+                        <div class="dbg-card">
+                          <div class="dbg-card-h"><span class="dbg-pii">{dbgText(fp)}</span></div>
+                          <div class="dbg-kv">
+                            <span class="k">Connection</span>
+                            <span class="v"><span class="chip {p.pc.connectionState === 'connected' ? 'ok' : p.pc.connectionState === 'failed' ? 'danger' : 'warn'}">{p.pc.connectionState.toUpperCase()}</span></span>
+                            <span class="k">ICE</span>
+                            <span class="v"><span class="chip {p.pc.iceConnectionState === 'connected' || p.pc.iceConnectionState === 'completed' ? 'ok' : p.pc.iceConnectionState === 'failed' ? 'danger' : 'warn'}">{p.pc.iceConnectionState.toUpperCase()}</span></span>
+                            <span class="k">Signalling</span>
+                            <span class="v">{p.pc.signalingState}</span>
+                            <span class="k">Media path</span>
+                            <span class="v">
+                              {#if peerTransport[fp] === "relayed"}<span class="chip warn">TURN RELAY</span>
+                              {:else if peerTransport[fp] === "direct"}<span class="chip ok">DIRECT</span>
+                              {:else}<span class="chip faint">UNKNOWN</span>{/if}
+                            </span>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {:else}
+                    <div class="dbg-empty">Not in a call. This section fills while a call is running.</div>
+                  {/if}
+                </div>
+
+                <div class="dbg-card dbg-feed">
+                  <div class="dbg-card-h"><span>Signalling and ICE</span></div>
+                  <p class="muted small">
+                    Everything the voice path logged this session: failed signals, rejected
+                    candidates, STUN and TURN errors, and router mapping refusals.
+                  </p>
+                  <div class="dbg-feed-scroll h-md" role="log">
+                    {#if dbgVoiceEvents.length}
+                      {#each dbgVoiceEvents as e (e.seq)}
+                        <div class="dbg-line {dbgLevelClass(e.level)}">
+                          <span class="dbg-ts">{dbgParts(e).ts}</span>
+                          <span class="dbg-tag">{e.level}</span>
+                          <span class="dbg-msg">{dbgParts(e).text}</span>
+                        </div>
+                      {/each}
+                    {:else}
+                      <div class="dbg-empty">No voice events this session.</div>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+
+            {:else if dbgSection === "backend"}
+              <div class="dbg-sec">
+                <div class="dbg-card dbg-feed">
+                  <div class="dbg-card-h"><span>Backend</span></div>
+                  <div class="dbg-feed-bar">
+                    <input class="dbg-feed-filter" bind:value={dbgBackFilter} placeholder="Filter lines" />
+                    <input class="dbg-feed-filter" bind:value={dbgBackTarget} placeholder="Target, e.g. catcoms_net" />
+                    <span class="dbg-lvl-chips">
+                      {#each LEVELS as l (l)}
+                        <button type="button" class="dbg-lvl {dbgLevelClass(l)} l-{l === 'ERROR' ? 'err' : l.toLowerCase()}" class:on={dbgBackLevels.includes(l)}
+                          aria-pressed={dbgBackLevels.includes(l)} onclick={() => dbgToggleLevel("back", l)}>{l}</button>
+                      {/each}
+                    </span>
+                    <span class="dbg-feed-count">{shownCount(dbgBackShown.length, dbgBackend.length)}</span>
+                    <button class="ghost small" aria-pressed={dbgPaused} onclick={dbgTogglePause}>{dbgPaused ? "Resume" : "Pause"}</button>
+                    <button class="ghost small" onclick={() => dbgCopy("backend", dbgBackShown.map(dbgLine).join("\n"))}>{dbgCopied === "backend" ? "Copied" : "Copy"}</button>
+                  </div>
+                  <div class="dbg-feed-scroll h-lg" role="log">
+                    {#if dbgStats.dropped > 0}
+                      <div class="dbg-drop-note">{dropNote(dbgStats.dropped, dbgEvents.length)}</div>
+                    {/if}
+                    {#if dbgBackShown.length}
+                      {#each dbgBackShown as e (e.seq)}
+                        <div class="dbg-line {dbgLevelClass(e.level)}">
+                          <span class="dbg-ts">{dbgParts(e).ts}</span>
+                          <span class="dbg-tag">{e.level}</span>
+                          <span class="dbg-target">{e.target}</span>
+                          <span class="dbg-msg">{dbgParts(e).text}</span>
+                        </div>
+                      {/each}
+                    {:else}
+                      <div class="dbg-empty">Nothing matches. {dbgBackend.length} event(s) captured.</div>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+
+            {:else if dbgSection === "frontend"}
+              <div class="dbg-sec">
+                <div class="dbg-card dbg-feed">
+                  <div class="dbg-card-h"><span>Frontend</span></div>
+                  <p class="muted small">
+                    Console errors and warnings from the webview, plus uncaught exceptions and
+                    unhandled promise rejections. Half this app runs in the webview.
+                  </p>
+                  <div class="dbg-feed-bar">
+                    <input class="dbg-feed-filter" bind:value={dbgFrontFilter} placeholder="Filter lines" />
+                    <span class="dbg-lvl-chips">
+                      {#each LEVELS as l (l)}
+                        <button type="button" class="dbg-lvl l-{l === 'ERROR' ? 'err' : l.toLowerCase()}" class:on={dbgFrontLevels.includes(l)}
+                          aria-pressed={dbgFrontLevels.includes(l)} onclick={() => dbgToggleLevel("front", l)}>{l}</button>
+                      {/each}
+                    </span>
+                    <span class="dbg-feed-count">{shownCount(dbgFrontShown.length, dbgFrontend.length)}</span>
+                    <button class="ghost small" aria-pressed={dbgPaused} onclick={dbgTogglePause}>{dbgPaused ? "Resume" : "Pause"}</button>
+                    <button class="ghost small" onclick={() => dbgCopy("frontend", dbgFrontShown.map(dbgLine).join("\n"))}>{dbgCopied === "frontend" ? "Copied" : "Copy"}</button>
+                  </div>
+                  <div class="dbg-feed-scroll h-lg" role="log">
+                    {#if dbgFrontShown.length}
+                      {#each dbgFrontShown as e (e.seq)}
+                        <div class="dbg-line {dbgLevelClass(e.level)}">
+                          <span class="dbg-ts">{dbgParts(e).ts}</span>
+                          <span class="dbg-tag">{e.level}</span>
+                          <span class="dbg-msg">{dbgParts(e).text}</span>
+                        </div>
+                      {/each}
+                    {:else}
+                      <div class="dbg-empty">Nothing captured. Frontend errors appear here as they happen.</div>
+                    {/if}
+                  </div>
+                </div>
+              </div>
+
+            {:else}
+              <div class="dbg-sec">
+                <div class="dbg-card">
+                  <div class="dbg-card-h"><span>Storage</span></div>
+                  {#if servers.length}
+                    <div class="dbg-table-wrap">
+                      <table class="dbg-table">
+                        <thead><tr><th>Server</th><th class="num">Channels</th><th class="num">Files</th></tr></thead>
+                        <tbody>
+                          {#each servers as s (s.id)}
+                            <tr>
+                              <td class="name-cell">{s.name}</td>
+                              <td class="num">{s.channels?.length ?? 0}</td>
+                              <td class="num">{s.id === activeServerId ? files.length : "-"}</td>
+                            </tr>
+                          {/each}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p class="dbg-note">
+                      File counts are read for the open server only. Settings, Storage has the full
+                      per-server figures and the repair tools.
+                    </p>
+                  {:else}
+                    <div class="dbg-empty">No servers, nothing stored yet.</div>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          </div>
+        </div>
+
+        <div class="dbg-foot">
+          <p class="muted small">{PRIVACY_NOTE}</p>
+          <label class="dbg-redact">
+            <input type="checkbox" bind:checked={dbgRedact} />
+            <span>REDACT FOR SCREENSHOTS</span>
+          </label>
         </div>
       </div>
     {/if}

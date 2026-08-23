@@ -4864,6 +4864,25 @@ button.you-panel:hover {
   color: var(--ok);
   border-color: color-mix(in oklab, var(--ok) 40%, transparent);
 }
+/* The rest of the semantic set, on the same recipe. Status is a job: warn is advisory (backing
+   off, CAUTION, a relayed call), danger is failure, transfer is something in motion, faint is a
+   value that is present but says nothing. */
+.chip.warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 40%, transparent);
+}
+.chip.danger {
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 40%, transparent);
+}
+.chip.transfer {
+  color: var(--transfer);
+  border-color: color-mix(in oklab, var(--transfer) 40%, transparent);
+}
+.chip.faint {
+  color: var(--faint);
+  border-color: var(--border-soft);
+}
 
 /* --- Member column: online / offline groups --- */
 /* The role badge sits on the row's right edge (abbreviated OWN / ADM in the markup). */
@@ -13385,4 +13404,465 @@ button.stage-mute.nomic:hover {
 .conn-facts li .stage-label {
   flex: none;
   min-width: 11ch;
+}
+
+/* ============================================================
+   Debug console (docs/design-debug-console.md)
+
+   A full-window operator terminal: severity roll-up in the head,
+   six sections on a left rail, one privacy line and the redact
+   toggle pinned to the foot. Same shell shape as the settings
+   takeover, so it reads as the same app; tokens only, so the
+   palette presets restyle it for free.
+   ============================================================ */
+.dbg {
+  position: fixed;
+  inset: var(--titlebar-h) 0 0 0;
+  z-index: 41; /* above settings, below the titlebar (1000) and toasts */
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  /* Console chrome is chrome. Machine text opts back in below, because the entire point of this
+     surface is that you can select and paste what it shows you. */
+  user-select: none;
+}
+.dbg .dbg-feed-scroll,
+.dbg .dbg-table,
+.dbg .dbg-kv .v,
+.dbg .fp,
+.dbg input {
+  user-select: text;
+}
+
+.dbg-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px 10px 18px;
+  border-bottom: 1px solid var(--border-soft);
+  flex: none;
+  position: relative;
+}
+.dbg-title h1 {
+  margin: 2px 0 0;
+  font-size: 1.05rem;
+}
+.dbg-sev {
+  display: flex;
+  gap: 6px;
+  margin-inline: auto;
+}
+.dbg-sev-chip {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  padding: 3px 9px;
+  border-radius: var(--r);
+  border: 1px solid var(--border-soft);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.dbg-sev-chip.err {
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 40%, transparent);
+  background: var(--danger-dim);
+}
+.dbg-sev-chip.warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 40%, transparent);
+  background: var(--warn-dim);
+}
+/* Zero is deliberately boring: "all clear" should not draw the eye. */
+.dbg-sev-chip.quiet {
+  color: var(--faint);
+  border-color: var(--border-soft);
+  background: transparent;
+}
+.dbg-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-right: 58px; /* clear of the ESC ring */
+}
+
+.dbg-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.dbg-rail {
+  width: 168px;
+  flex: none;
+  border-right: 1px solid var(--border-soft);
+  overflow-y: auto;
+  padding: 8px 0;
+}
+button.dbg-rail-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--text-2);
+  font-family: var(--ui);
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+}
+button.dbg-rail-item:hover {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+button.dbg-rail-item.active {
+  background: var(--accent-dim);
+  border-left-color: var(--accent);
+  color: var(--text);
+}
+.dbg-rail-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+}
+.dbg-rail-count.err {
+  color: var(--danger);
+}
+.dbg-rail-count.warn {
+  color: var(--warn);
+}
+
+.dbg-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  background: var(--bg-0);
+  padding: 14px 18px 20px;
+}
+.dbg-sec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dbg-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 18px;
+  border-top: 1px solid var(--border-soft);
+  flex: none;
+}
+.dbg-foot p {
+  margin: 0;
+}
+.dbg-redact {
+  margin-left: auto;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+/* --- content blocks --- */
+.dbg-card {
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  padding: var(--panel-pad);
+}
+.dbg-card-h {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin-bottom: 9px;
+}
+.dbg-card-h::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+  order: 2;
+}
+.dbg-card-actions {
+  display: flex;
+  gap: 6px;
+  flex: none;
+  order: 3;
+}
+.dbg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
+  gap: 12px;
+}
+.dbg-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 14px;
+  align-items: baseline;
+}
+.dbg-kv .k {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+.dbg-kv .v {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+.dbg-empty {
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--r);
+  padding: 18px 14px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+.dbg-note {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+}
+.dbg-attn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+button.dbg-attn-item {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: var(--r);
+  padding: 4px 6px;
+  text-align: left;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+button.dbg-attn-item:hover {
+  background: var(--bg-elev);
+}
+
+/* --- tables --- */
+.dbg-table-wrap {
+  overflow-x: auto;
+}
+.dbg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+.dbg-table th {
+  text-align: left;
+  font-weight: 400;
+  font-size: 0.6rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 0 10px 5px 0;
+  white-space: nowrap;
+}
+.dbg-table td {
+  padding: 5px 10px 5px 0;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-2);
+  vertical-align: top;
+  /* Machine columns are sized to their content, so a value with a space in it (a redaction alias
+     reads `[peer 1]`) would otherwise wrap onto two lines inside a column one word wide. The
+     expansion row opts back out below, since that is where the long addresses live. */
+  white-space: nowrap;
+}
+.dbg-row-detail td {
+  white-space: normal;
+}
+.dbg-table .name-cell {
+  font-family: var(--ui);
+  color: var(--text);
+}
+.dbg-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* A right-aligned column needs its heading over the digits, not off at the far left of a wide
+   cell, or the number appears to belong to the column after it. */
+.dbg-table th.num {
+  text-align: right;
+}
+/* Machine columns should be as narrow as their content; the name column takes the slack, so a
+   table does not stretch four values across the whole window. */
+.dbg-table .name-cell {
+  width: 99%;
+}
+.dbg-table .num.bad {
+  color: var(--danger);
+}
+tr.dbg-row-toggle {
+  cursor: pointer;
+}
+tr.dbg-row-toggle:hover td {
+  background: var(--bg-elev);
+}
+.dbg-row-detail td {
+  background: var(--bg-0);
+  padding: 8px 10px 10px;
+}
+.dbg-row-detail ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+}
+.dbg-row-detail li {
+  overflow-wrap: anywhere;
+}
+
+/* --- feeds --- */
+.dbg-feed {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.dbg-feed-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 7px;
+}
+input.dbg-feed-filter {
+  flex: 1;
+  min-width: 140px;
+  background: var(--bg-elev);
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+.dbg-lvl-chips {
+  display: flex;
+  gap: 4px;
+  flex: none;
+}
+button.dbg-lvl {
+  cursor: pointer;
+  background: transparent;
+  color: var(--faint);
+  border: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  padding: 2px 7px;
+  border-radius: var(--r);
+  width: auto;
+  flex: none;
+}
+button.dbg-lvl.on.l-err {
+  color: var(--danger);
+  border-color: color-mix(in oklab, var(--danger) 40%, transparent);
+}
+button.dbg-lvl.on.l-warn {
+  color: var(--warn);
+  border-color: color-mix(in oklab, var(--warn) 40%, transparent);
+}
+button.dbg-lvl.on.l-info {
+  color: var(--text-2);
+  border-color: var(--border);
+}
+button.dbg-lvl.on.l-debug,
+button.dbg-lvl.on.l-trace {
+  color: var(--muted);
+  border-color: var(--border);
+}
+.dbg-feed-count {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--faint);
+  flex: none;
+}
+.dbg-feed-scroll {
+  background: var(--bg-0);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+.dbg-feed-scroll.h-lg {
+  max-height: 58vh;
+}
+.dbg-feed-scroll.h-md {
+  max-height: 34vh;
+}
+.dbg-feed-scroll.h-sm {
+  max-height: 22vh;
+}
+.dbg-drop-note {
+  position: sticky;
+  top: -6px;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--border-soft);
+  padding: 4px 0 5px;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.dbg-line {
+  display: flex;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: var(--fs-msg);
+  line-height: 1.4;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 1px 0;
+}
+.dbg-line.lvl-debug,
+.dbg-line.lvl-trace {
+  color: var(--muted);
+}
+.dbg-ts {
+  flex: none;
+  color: var(--faint);
+}
+.dbg-tag {
+  flex: none;
+  min-width: 5ch;
+  color: var(--muted);
+}
+.lvl-err .dbg-tag {
+  color: var(--danger);
+}
+.lvl-warn .dbg-tag {
+  color: var(--warn);
+}
+.lvl-info .dbg-tag {
+  color: var(--text-2);
+}
+.lvl-trace .dbg-tag {
+  color: var(--faint);
+}
+.dbg-target {
+  flex: none;
+  color: var(--muted);
+}
+.dbg-msg {
+  min-width: 0;
+}
+.dbg-pii {
+  /* No visual change unredacted; the hook exists so the markup says what is maskable. */
+  font: inherit;
+  color: inherit;
 }

@@ -3837,6 +3837,12 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.connected_member_fingerprints()
     }
 
+    /// What this node knows about reaching each current member, for the debug console's network
+    /// view. Local state only; see [`ChannelSync::member_routes`].
+    pub fn member_routes(&self) -> Vec<catcoms_sync::MemberRoute> {
+        self.sync.member_routes()
+    }
+
     /// Every inbound join attempt this node served this session, newest first, with why each was
     /// refused (the **operator's** view; see [`JoinAttempt`]).
     ///

@@ -869,6 +869,9 @@ enum Command {
         data: Bytes,
         reply: oneshot::Sender<Result<Bytes, TransportError>>,
     },
+    /// Send a request whose reply nobody is waiting for (see [`catcoms_rt::MeshTransport::notify`]).
+    /// No `pending_req` entry is registered, so the outcome is logged here and goes nowhere else.
+    Notify { peer: PeerId, data: Bytes },
     /// Start listening on `addr` (e.g. a `…/p2p-circuit` relay reservation).
     Listen(Multiaddr),
     /// Dial `addr` (e.g. a relay, before reserving a circuit on it).
@@ -1192,6 +1195,69 @@ type PortMappingKey = (PortMappingMechanism, PortMappingTransport, Option<IpAddr
 /// public watch channel itself is coalesced.
 const MAX_AUTONAT_OBSERVATIONS: usize = 64;
 const MAX_MESH_OBSERVATIONS: usize = 32;
+
+/// How many disconnected peers keep a redial hint (see `Actor::recent_peers`). Comfortably above
+/// a friend circle's roster, and small enough that a churning public node cannot grow on it.
+const MAX_RECENT_PEERS: usize = 256;
+
+/// How many addresses one redial hint remembers. A peer is reachable over a handful of routes
+/// (direct v4/v6, a relay circuit); keeping every address a long-lived peer has ever connected
+/// from would let one peer crowd out the rest of the map.
+const MAX_RECENT_PEER_ADDRS: usize = 4;
+
+/// A peer's last known transport identity, kept so a request can redial it after its connection
+/// dropped. See `Actor::recent_peers` for why the transport remembers this at all.
+#[derive(Debug, Clone)]
+struct RecentPeer {
+    libp2p: libp2p::PeerId,
+    /// Addresses this node has actually established a connection over, freshest last. Offered to
+    /// the swarm's address book before a redial; never advertised as anything of ours.
+    addresses: VecDeque<Multiaddr>,
+}
+
+/// Remember a peer's transport identity and the address it connected over, so a later request can
+/// redial it once that connection has gone. See `Actor::recent_peers`.
+///
+/// Unlike [`record_mesh_observation`], a repeat visit does **not** make the peer newest: the map is
+/// a redial hint for peers this node keeps talking to, and refreshing on every reconnect would let
+/// a pair of chatty peers push out the quiet member whose route is the one worth remembering.
+fn record_recent_peer(
+    recent: &mut HashMap<PeerId, RecentPeer>,
+    order: &mut VecDeque<PeerId>,
+    peer: PeerId,
+    libp2p_peer: libp2p::PeerId,
+    addr: Multiaddr,
+) {
+    match recent.get_mut(&peer) {
+        Some(entry) => {
+            // A peer id is derived from its key, so this only ever re-confirms what is already
+            // there; assigning keeps the halves consistent if that ever stops being true.
+            entry.libp2p = libp2p_peer;
+            if !entry.addresses.contains(&addr) {
+                entry.addresses.push_back(addr);
+                while entry.addresses.len() > MAX_RECENT_PEER_ADDRS {
+                    entry.addresses.pop_front();
+                }
+            }
+        }
+        None => {
+            recent.insert(
+                peer,
+                RecentPeer {
+                    libp2p: libp2p_peer,
+                    addresses: VecDeque::from([addr]),
+                },
+            );
+            order.push_back(peer);
+            while recent.len() > MAX_RECENT_PEERS {
+                let Some(oldest) = order.pop_front() else {
+                    break;
+                };
+                recent.remove(&oldest);
+            }
+        }
+    }
+}
 
 fn record_mesh_observation(
     observations: &mut HashMap<libp2p::PeerId, Multiaddr>,
@@ -2722,6 +2788,17 @@ struct Actor {
     /// Registrations deferred until we have a confirmed external address to advertise.
     pending_registers: Vec<(rendezvous::Namespace, libp2p::PeerId)>,
     peers: HashMap<PeerId, libp2p::PeerId>,
+    /// Last known libp2p identity and dial addresses for every peer this node has been connected
+    /// to, deliberately kept **past** disconnect. `peers` is the live set and `to_peer` is a
+    /// one-way BLAKE3, so without this an outbound request to a peer whose connection had dropped
+    /// could not even name a dial target and failed instantly, with no attempt to reconnect. That
+    /// turned one dropped connection into a permanently dead route for call signalling, which
+    /// re-sends on a timer and therefore never recovered on its own.
+    ///
+    /// Bounded FIFO: this is a redial hint, not an address book, and the authoritative one
+    /// (signed peer records) lives above the transport.
+    recent_peers: HashMap<PeerId, RecentPeer>,
+    recent_peer_order: VecDeque<PeerId>,
     pending_req: HashMap<OutboundRequestId, oneshot::Sender<Result<Bytes, TransportError>>>,
     pending_publish: Vec<(Topic, Bytes)>,
     /// Peers this node uses as **infrastructure**: rendezvous nodes it registers or discovers at,
@@ -3208,20 +3285,32 @@ impl Actor {
                     tracing::trace!(bytes = len, "published");
                 }
             }
-            Command::Request { peer, data, reply } => match self.peers.get(&peer) {
+            Command::Request { peer, data, reply } => match self.request_target(&peer) {
                 Some(libp2p_peer) => {
                     tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send request");
                     let id = self
                         .swarm
                         .behaviour_mut()
                         .request_response
-                        .send_request(libp2p_peer, data.to_vec());
+                        .send_request(&libp2p_peer, data.to_vec());
                     self.pending_req.insert(id, reply);
                 }
                 None => {
                     tracing::warn!(?peer, "request to unknown peer");
                     let _ = reply.send(Err(TransportError::Unreachable(peer)));
                 }
+            },
+            Command::Notify { peer, data } => match self.request_target(&peer) {
+                Some(libp2p_peer) => {
+                    tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send notification");
+                    // No `pending_req` entry: nobody is waiting, and registering one would keep a
+                    // sender alive for the whole request timeout for a reply that is never read.
+                    self.swarm
+                        .behaviour_mut()
+                        .request_response
+                        .send_request(&libp2p_peer, data.to_vec());
+                }
+                None => tracing::warn!(?peer, "notification to unknown peer"),
             },
             Command::Listen(addr) => {
                 // Listening on a `…/p2p-circuit` address is how a reservation is requested, so the
@@ -3304,6 +3393,29 @@ impl Actor {
     /// point of the check is that it cannot be talked out of.
     fn is_protected(&self, peer: PeerId) -> bool {
         self.protected.iter().any(|p| to_peer(p) == peer)
+    }
+
+    /// The libp2p peer an outbound request should go to: a live connection when there is one, and
+    /// otherwise the last peer we held one with. On that fallback the remembered addresses are
+    /// handed to the swarm first, so `send_request` has somewhere to dial rather than failing for
+    /// want of an address.
+    ///
+    /// An evicted peer is still refused. The deny list is enforced when the connection is
+    /// established, so naming a dial target here cannot smuggle one past it.
+    fn request_target(&mut self, peer: &PeerId) -> Option<libp2p::PeerId> {
+        if let Some(live) = self.peers.get(peer).copied() {
+            return Some(live);
+        }
+        let recent = self.recent_peers.get(peer)?.clone();
+        tracing::debug!(
+            peer = %recent.libp2p,
+            addresses = recent.addresses.len(),
+            "request to a peer that is not connected; offering its last known addresses for a redial"
+        );
+        for addr in recent.addresses {
+            self.swarm.add_peer_address(recent.libp2p, addr);
+        }
+        Some(recent.libp2p)
     }
 
     /// Detach an evicted peer (P6) and keep it detached.
@@ -3473,12 +3585,23 @@ impl Actor {
     fn flush_dials(&mut self) {
         for (peer, addrs) in std::mem::take(&mut self.pending_dials) {
             let count = addrs.len();
+            // The addresses, not just how many. A node that spends every attempt on an address
+            // family it cannot route (an IPv6-only peer record on an IPv4-only host) looks
+            // identical to a node that is dialing nothing at all unless the log says where it
+            // went, and the answer is the whole diagnosis.
+            let attempted = addrs
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
                 .condition(PeerCondition::Always)
                 .build();
             match self.swarm.dial(opts) {
-                Ok(()) => tracing::debug!(peer = %peer, addresses = count, "dialing"),
+                Ok(()) => {
+                    tracing::debug!(peer = %peer, addresses = count, %attempted, "dialing")
+                }
                 Err(e) => {
                     tracing::warn!(peer = %peer, error = %e, "dial failed");
                     self.covered_addrs.remove(&peer);
@@ -3667,6 +3790,15 @@ impl Actor {
                 // Only surface `PeerConnected` on the *first* connection to a peer;
                 // a DCUtR upgrade opens a second (direct) connection to a peer we
                 // already know, and must not look like a new peer to layers above.
+                // Kept past the disconnect that follows, so a later request can redial rather than
+                // fail for want of a dial target.
+                record_recent_peer(
+                    &mut self.recent_peers,
+                    &mut self.recent_peer_order,
+                    peer,
+                    peer_id,
+                    endpoint.get_remote_address().clone(),
+                );
                 if self.peers.insert(peer, peer_id).is_none() {
                     let _ = self
                         .event_tx
@@ -3675,6 +3807,19 @@ impl Actor {
                 }
             }
             SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                // Say so. Every failed dial used to be silent: the only trace an unreachable peer
+                // left in a log was quinn's raw `sendmsg` warning for the UDP case, and nothing at
+                // all for TCP, so "this node is dialing and failing" and "this node is not dialing"
+                // read identically. A `Transport` error names each address it tried, which is the
+                // part worth having; the rest carry their reason in the error itself.
+                match &error {
+                    libp2p::swarm::DialError::Transport(failed) => {
+                        for (addr, cause) in failed {
+                            tracing::warn!(peer = ?peer_id, %addr, error = %cause, "dial failed");
+                        }
+                    }
+                    other => tracing::warn!(peer = ?peer_id, error = %other, "dial failed"),
+                }
                 // The attempt is over, so a later tick may retry rather than being suppressed by a
                 // ledger entry that nothing would ever clear.
                 self.release_failed_dial(peer_id, &error);
@@ -3759,10 +3904,32 @@ impl Actor {
                 }
             },
             SwarmEvent::Behaviour(MeshBehaviourEvent::RequestResponse(
-                request_response::Event::OutboundFailure { request_id, .. },
+                request_response::Event::OutboundFailure {
+                    request_id,
+                    peer,
+                    error,
+                    ..
+                },
             )) => {
+                // Log the reason. Every outbound failure used to be reported as "transport closed",
+                // which reads as a local shutdown; a dial that never landed, a peer that went away
+                // mid-request and a request that simply timed out are three different problems and
+                // a log that spells them all the same way sends you looking in the wrong place.
+                tracing::warn!(peer = %peer, error = %error, "outbound request failed");
                 if let Some(reply) = self.pending_req.remove(&request_id) {
-                    let _ = reply.send(Err(TransportError::Closed));
+                    let _ = reply.send(Err(match error {
+                        request_response::OutboundFailure::Timeout => {
+                            TransportError::Timeout(to_peer(&peer))
+                        }
+                        request_response::OutboundFailure::DialFailure
+                        | request_response::OutboundFailure::UnsupportedProtocols => {
+                            TransportError::Unreachable(to_peer(&peer))
+                        }
+                        // The remote had the request and the connection died before its answer:
+                        // "no response" is the honest description, and unlike `Closed` it does not
+                        // claim this node's own transport went down.
+                        _ => TransportError::NoResponse,
+                    }));
                 }
             }
             // DCUtR hole-punch result. On success the relayed link has been upgraded
@@ -4050,6 +4217,8 @@ impl MeshService {
             registered_tx,
             pending_registers: Vec::new(),
             peers: HashMap::new(),
+            recent_peers: HashMap::new(),
+            recent_peer_order: VecDeque::new(),
             pending_req: HashMap::new(),
             pending_publish: Vec::new(),
             infra_peers: HashSet::new(),
@@ -4493,6 +4662,19 @@ impl MeshTransport for MeshService {
         rx.await.map_err(|_| TransportError::Closed)?
     }
 
+    /// Queue the send and return; the only wait is for room in the actor's command channel.
+    async fn notify(
+        &self,
+        peer: PeerId,
+        _proto: ProtocolId,
+        data: Bytes,
+    ) -> Result<(), TransportError> {
+        self.cmd_tx
+            .send(Command::Notify { peer, data })
+            .await
+            .map_err(|_| TransportError::Closed)
+    }
+
     async fn next_event(&self) -> Option<TransportEvent> {
         self.event_rx.lock().await.recv().await
     }
@@ -4868,6 +5050,58 @@ mod tests {
         assert!(
             !observations.contains_key(&first),
             "the oldest peer is evicted"
+        );
+    }
+
+    #[test]
+    fn a_peer_is_remembered_with_its_routes_and_the_map_stays_bounded() {
+        // The redial hint that makes a request to a disconnected peer survivable. `to_peer` is a
+        // one-way hash and `peers` holds only live connections, so without this map an outbound
+        // request to a peer whose connection had dropped could not even name a dial target.
+        let mut recent = HashMap::new();
+        let mut order = VecDeque::new();
+        let first = to_peer(&test_peer(1));
+        for n in 1..=(MAX_RECENT_PEER_ADDRS + 2) {
+            record_recent_peer(
+                &mut recent,
+                &mut order,
+                first,
+                test_peer(1),
+                format!("/ip4/198.51.100.1/tcp/{}", 40000 + n).parse().unwrap(),
+            );
+        }
+        assert_eq!(
+            recent[&first].addresses.len(),
+            MAX_RECENT_PEER_ADDRS,
+            "one peer's route list is capped"
+        );
+        assert_eq!(
+            recent[&first].addresses.back().unwrap().to_string(),
+            format!("/ip4/198.51.100.1/tcp/{}", 40000 + MAX_RECENT_PEER_ADDRS + 2),
+            "the freshest route is kept"
+        );
+
+        // A repeat visit must not renew the peer's place in the queue, or two chatty peers would
+        // evict the quiet member whose route is the one actually worth remembering.
+        // `test_peer` only spans a byte, and the bound needs more distinct peers than that.
+        let wide_peer = |n: u16| {
+            let mut seed = [5u8; 32];
+            seed[..2].copy_from_slice(&n.to_be_bytes());
+            keypair_from_seed(seed).unwrap().public().to_peer_id()
+        };
+        for n in 2..=(MAX_RECENT_PEERS as u16 + 2) {
+            record_recent_peer(
+                &mut recent,
+                &mut order,
+                to_peer(&wide_peer(n)),
+                wide_peer(n),
+                format!("/ip4/198.51.100.2/tcp/{n}").parse().unwrap(),
+            );
+        }
+        assert_eq!(recent.len(), MAX_RECENT_PEERS);
+        assert!(
+            !recent.contains_key(&first),
+            "the least recently learned peer is evicted"
         );
     }
 

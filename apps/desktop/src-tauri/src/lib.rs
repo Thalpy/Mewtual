@@ -5586,6 +5586,48 @@ async fn get_online_members(
     Ok(actor.online_members().await)
 }
 
+/// One member's reachability as this node sees it, for the debug console's network view.
+#[derive(Serialize)]
+struct MemberRouteEvt {
+    fingerprint: String,
+    /// Short hex of the member's self-asserted transport peer, or empty when no record has been
+    /// learned. Empty is a complete explanation on its own for a member calls cannot reach.
+    peer: String,
+    addresses: Vec<String>,
+    seq: u64,
+    connected: bool,
+    dial_attempts: u8,
+    next_dial_in_ms: u64,
+}
+
+/// What this node knows about reaching each member of a server.
+///
+/// The question none of the existing views could answer: the roster shows names whether or not
+/// anything can be reached, and presence collapses "no record for them yet", "a record whose only
+/// route is on a network this host cannot use" and "backing off after repeated failures" into one
+/// grey dot. Local state only, so asking costs nothing on the wire.
+#[tauri::command]
+async fn get_member_routes(
+    state: State<'_, AppState>,
+    server: u64,
+) -> Result<Vec<MemberRouteEvt>, String> {
+    let actor = actor_of(&state, server).await?;
+    Ok(actor
+        .member_routes()
+        .await
+        .into_iter()
+        .map(|r| MemberRouteEvt {
+            fingerprint: r.fingerprint,
+            peer: r.peer_id.map(|p| hex::encode(&p[..4])).unwrap_or_default(),
+            addresses: r.addresses,
+            seq: r.seq,
+            connected: r.connected,
+            dial_attempts: r.dial_attempts,
+            next_dial_in_ms: r.next_dial_in_ms,
+        })
+        .collect())
+}
+
 /// Delivery state for this device's recent messages in a channel; the seed a UI paints on open,
 /// before the throttled `delivery-changed` event next fires. Empty until this session sends a
 /// message (the message-id → change mapping is not persisted across a restart).
@@ -9240,6 +9282,87 @@ async fn set_debug_logging(
 /// short enough that a runaway loop cannot fill the disk one line at a time.
 const MAX_UI_LOG_BYTES: usize = 2000;
 
+/// One diagnostic event, as the debug console renders it.
+#[derive(Serialize)]
+struct ConsoleLogEvent {
+    seq: u64,
+    at_ms: i64,
+    level: String,
+    /// The emitting module: `catcoms_net`, `catcoms_sync`, and `catcoms_ui` for the webview's own.
+    /// This is what splits the console's Backend tab from its Frontend tab.
+    target: String,
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+/// A page of diagnostics plus the counters the console's severity roll-up needs.
+#[derive(Serialize)]
+struct ConsoleLog {
+    events: Vec<ConsoleLogEvent>,
+    /// Session totals, counted before the ring evicts anything, so the roll-up stays true after
+    /// the offending line has aged out.
+    errors: u64,
+    warnings: u64,
+    /// Events the ring dropped to stay bounded. The console says so rather than presenting the
+    /// gap as a quiet period.
+    dropped: u64,
+    latest_seq: u64,
+    capacity: usize,
+}
+
+/// The most events one poll will return, so a console that has been closed for an hour cannot ask
+/// for the whole ring in a single IPC payload.
+const MAX_CONSOLE_LOG_PAGE: usize = 500;
+
+/// Serve the debug console the diagnostics it has not seen yet.
+///
+/// Polled with the last sequence number the console holds, so an open console costs one small
+/// message per tick and a freshly opened one gets the backlog the ring still has. The ring is
+/// in-memory only: this reads it, and nothing here writes it anywhere.
+///
+/// Gated on an unlocked session, unlike `log_ui` below. The ring holds peer addresses and stable
+/// identifiers, and a locked app must not show those to whoever picks the machine up. Someone
+/// diagnosing a failure that happens before unlock still has the debug log file.
+#[tauri::command]
+async fn get_console_log(
+    state: State<'_, AppState>,
+    after_seq: u64,
+    limit: usize,
+) -> Result<ConsoleLog, String> {
+    require_unlocked_session(&state).await?;
+    let ring = catcoms_log::ring();
+    let stats = ring.stats();
+    let events = ring
+        .since(after_seq, limit.clamp(1, MAX_CONSOLE_LOG_PAGE))
+        .into_iter()
+        .map(|e| ConsoleLogEvent {
+            seq: e.seq,
+            at_ms: e.at_ms,
+            level: e.level.to_string(),
+            target: e.target,
+            message: e.message,
+            fields: e.fields,
+        })
+        .collect();
+    Ok(ConsoleLog {
+        events,
+        errors: stats.errors,
+        warnings: stats.warnings,
+        dropped: stats.dropped,
+        latest_seq: stats.latest_seq,
+        capacity: catcoms_log::LOG_RING_CAPACITY,
+    })
+}
+
+/// Drop the events the console is holding. The session counters and sequence are kept: this is a
+/// "clear my view" button, not a rewrite of what happened.
+#[tauri::command]
+async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
+    require_unlocked_session(&state).await?;
+    catcoms_log::ring().clear();
+    Ok(())
+}
+
 /// Record something the webview saw.
 ///
 /// Until this existed the log was Rust-only, so every `console.warn` in the voice path (failed
@@ -9249,12 +9372,15 @@ const MAX_UI_LOG_BYTES: usize = 2000;
 ///
 /// Deliberately not gated on an unlocked session, unlike almost every other command: the errors
 /// most worth having are the ones from unlock failing and from startup, which happen before there
-/// is a session to check. It writes only to the local log file, and only when logging is on.
+/// is a session to check.
+///
+/// It also does not check whether the debug **file** is on any more. It emits a `tracing` event and
+/// lets the installed layers decide: the file layer exists only when the user enabled it, and the
+/// in-memory console ring is always there. Returning early when the file was off is what used to
+/// make the frontend's own errors invisible to the in-app console unless the user had turned on a
+/// log file and restarted first, which is the opposite of what someone hitting a problem needs.
 #[tauri::command]
-async fn log_ui(app: AppHandle, level: String, message: String) {
-    if !app.state::<LogState>().active {
-        return;
-    }
+async fn log_ui(level: String, message: String) {
     let mut text = message;
     if text.len() > MAX_UI_LOG_BYTES {
         text.truncate(MAX_UI_LOG_BYTES);
@@ -9346,6 +9472,7 @@ pub fn run() {
             get_storage_health,
             repair_storage,
             get_online_members,
+            get_member_routes,
             get_delivery,
             dm_stats,
             send_dm_invite,
@@ -9398,6 +9525,8 @@ pub fn run() {
             change_vault_secret,
             get_debug_logging,
             set_debug_logging,
+            get_console_log,
+            clear_console_log,
             log_ui,
             set_admin,
             remove_member,
