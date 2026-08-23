@@ -72,7 +72,8 @@
     deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
     type DeliveryEvidence,
   } from "./delivery";
-  import { installUiLogging } from "./uilog";
+  import { installUiLogging, type UiLogging } from "./uilog";
+  import { drainStartupLog, endStartupCapture } from "./startup-log";
   import {
     TRANSFER_CHUNK_BYTES,
     formatBytes, formatRate, sampleRate, transferPieces, uploadContract,
@@ -5617,8 +5618,32 @@
   const switchboardRefreshGeneration = new Map<number, number>();
   let connectivityRefreshGeneration = 0;
   let connCopied = $state(false);
-  let debugLog = $state<{ enabled: boolean; active: boolean; dir: string; file: string } | null>(null);
+  /**
+   * The debug log's preference and its actual sink health, which are separate on purpose.
+   *
+   * `enabled` is what the user asked for; `state` is what the writer is doing. They used to be one
+   * boolean assigned from the preference, so a process that never managed to open a file still
+   * reported itself active. Someone could then reproduce a hard bug on the strength of that word
+   * and find nothing to send, which spends the reproduction and returns nothing.
+   */
+  type DebugLogState = {
+    enabled: boolean;
+    active: boolean;
+    state: "stopped" | "active" | "degraded" | "failed";
+    error: string;
+    session: string;
+    dir: string;
+    file: string;
+    events_written: number;
+    bytes_written: number;
+    events_dropped: number;
+    queue_depth: number;
+    queue_high_water: number;
+    session_quota_bytes: number;
+  };
+  let debugLog = $state<DebugLogState | null>(null);
   let debugLogBusy = $state(false);
+  let debugLogTested = $state(false);
 
   async function refreshJoinAttempts() {
     const gen = viewGeneration;
@@ -5717,6 +5742,51 @@
     } finally {
       debugLogBusy = false;
     }
+  }
+  /**
+   * Put a marked record through the whole pipeline and re-read the sink's health.
+   *
+   * The only control here that proves anything. Every other signal on this page is inferred from a
+   * preference or from state captured at startup, so a sink that has since filled its quota or lost
+   * its file still looks fine. This emits now, waits for the writer, and reports what came back.
+   */
+  async function testDebugLog() {
+    debugLogBusy = true;
+    try {
+      debugLog = await invoke("test_debug_logging");
+      debugLogTested = true;
+      setTimeout(() => (debugLogTested = false), 4000);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      debugLogBusy = false;
+    }
+  }
+  /** How the sink's state reads to someone who did not write it. */
+  function debugLogSummary(d: DebugLogState): { tone: "ok" | "warn" | "danger" | "faint"; text: string } {
+    if (d.state === "failed") {
+      return { tone: "danger", text: d.error || "Not writing, and the reason was not recorded." };
+    }
+    if (d.state === "degraded") {
+      return {
+        tone: "warn",
+        text: d.events_dropped
+          ? `Writing, but ${d.events_dropped.toLocaleString()} record(s) never reached the file.`
+          : "Writing, but close enough to this session's limit to matter.",
+      };
+    }
+    if (d.state === "active") {
+      return {
+        tone: "ok",
+        text: `Writing. ${d.events_written.toLocaleString()} entries, ${formatBytes(d.bytes_written)} so far.`,
+      };
+    }
+    return {
+      tone: "faint",
+      text: d.enabled
+        ? "Not writing yet. A log can only be opened when the app starts, so restart Mewtual."
+        : "Not writing, because you have logging switched off.",
+    };
   }
   // ---- debug console (docs/design-debug-console.md) ------------------------------------
   //
@@ -12776,20 +12846,41 @@
   // to follow the real window state, which also changes by snap, double-click and the OS.
   const appWindow = getCurrentWindow();
   let winMaximized = $state(false);
+  // The live frontend-logging installation, kept so unmount can stop it. Not reactive state: it is
+  // held purely so the teardown has something to call.
+  let uiLogging: UiLogging | null = null;
   const syncMaximized = () => void appWindow.isMaximized().then((m) => (winMaximized = m));
 
   onMount(() => {
-    // First thing, before anything can fail: from here on, what the webview sees reaches the
-    // debug log rather than a devtools console nobody has open. The native side drops these when
-    // logging is off, so this costs nothing when the user has opted out.
-    installUiLogging(
-      (level, message) => {
-        void invoke("log_ui", { level, message }).catch(() => {
+    // From here on, what the webview sees reaches the native diagnostics rather than a devtools
+    // console nobody has open. Records arrive batched: one IPC call per console.warn is most
+    // expensive exactly when the webview is emitting fastest, which is the moment worth capturing.
+    //
+    // The handle is kept and stopped on unmount. F5 and HMR remount this component while the
+    // native process stays alive, and the previous version threw the cleanup away, so every
+    // remount layered another console wrapper and left another pair of window listeners attached.
+    // One exception then arrived several times over and a retry loop looked like it was
+    // accelerating when it was the logger multiplying.
+    uiLogging = installUiLogging(
+      (records) => {
+        void invoke("log_ui_batch", { records }).catch(() => {
           /* the log is not worth an error of its own */
         });
       },
-      { console: globalThis.console, addEventListener: window.addEventListener.bind(window) },
+      {
+        console: globalThis.console,
+        addEventListener: window.addEventListener.bind(window),
+        removeEventListener: window.removeEventListener.bind(window),
+      },
     );
+    // Anything that failed before this component existed: a module that threw while evaluating, a
+    // dynamic import that never resolved. main.ts buffered them because there was nowhere else to
+    // put them, and this is the first moment the bridge can take them.
+    const startup = drainStartupLog();
+    if (startup.length) {
+      void invoke("log_ui_batch", { records: startup }).catch(() => {});
+    }
+    endStartupCapture();
     syncMaximized();
     // Reconnect a controller that was already granted and already plugged in, silently. Waiting
     // for the instrument drawer to be opened once was half of why MIDI felt like a coin toss.
@@ -13332,6 +13423,11 @@
       clearTimeout(updateTimer);
       clearInterval(pingTimer);
       subs.forEach((p) => p.then((un) => un()));
+      // Last, so anything the teardown above logs still has somewhere to go. Stopping restores the
+      // console, removes both window listeners and sends whatever is still queued; without it a
+      // remount leaves the old hooks live and every event gets recorded twice.
+      uiLogging?.stop();
+      uiLogging = null;
     };
   });
 </script>
@@ -19521,9 +19617,17 @@
                       onchange={(e) => toggleDebugLog(e.currentTarget.checked)} />
                     <span>Keep a debug log</span>
                   </label>
-                  {#if debugLog.enabled && !debugLog.active}
-                    <p class="muted small">Restart Mewtual to start writing: a log can only be opened when the app starts.</p>
-                  {:else if !debugLog.enabled && debugLog.active}
+                  <!-- Preference and reality, always both. The gap between them is the whole
+                       reason this reads the sink instead of echoing the checkbox above. -->
+                  {@const health = debugLogSummary(debugLog)}
+                  <div class="dbg-kv">
+                    <span class="k">You asked for</span>
+                    <span class="v">{debugLog.enabled ? "A debug log" : "No debug log"}</span>
+                    <span class="k">Actually</span>
+                    <span class="v"><span class="chip {health.tone}">{debugLog.state.toUpperCase()}</span></span>
+                  </div>
+                  <p class="muted small">{health.text}</p>
+                  {#if !debugLog.enabled && debugLog.active}
                     <p class="muted small">Still writing this session's log. It stops at the next restart.</p>
                   {/if}
                   <div class="field">
@@ -19531,12 +19635,27 @@
                     <input readonly value={debugLog.dir} />
                   </div>
                   {#if debugLog.file}
-                    <p class="muted small">This session's file: <span class="fp">{debugLog.file}</span></p>
+                    <p class="muted small">
+                      This session's file: <span class="fp">{debugLog.file}</span>
+                      {#if debugLog.session}<span class="muted"> (session {debugLog.session})</span>{/if}
+                    </p>
                   {:else}
                     <p class="muted small">Files are named <code>debug_log_&lt;date&gt;_&lt;time&gt;.txt</code>.</p>
                   {/if}
+                  {#if debugLog.events_dropped > 0}
+                    <!-- Never a silent gap: a period with no lines has to be distinguishable from
+                         a period whose lines were lost. -->
+                    <p class="dbg-note">
+                      {debugLog.events_dropped.toLocaleString()} entries did not reach the file, so
+                      this log has holes in it. That happens when the app emits faster than the disk
+                      accepts, or after the session's size limit stopped the writer.
+                    </p>
+                  {/if}
                   <div class="invite-actions">
                     <button class="ghost small" onclick={() => copyText(debugLog?.dir ?? "")}>Copy folder path</button>
+                    <button class="ghost small" disabled={debugLogBusy} onclick={testDebugLog}>
+                      {debugLogTested ? "Checked" : "Write a test entry"}
+                    </button>
                   </div>
                 {:else}
                   <p class="muted small">This build cannot report the log setting.</p>

@@ -294,7 +294,17 @@ impl WsArgs {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    let _log_guard = catcoms_log::init_debug(cli.debug, &cli.log_dir);
+    // A failed debug log is worth saying out loud but not worth refusing to run over: the command
+    // the user typed is the point, and losing its output because a log directory was unwritable
+    // would be a worse trade than losing the log. Console logging still comes up either way.
+    let _log_guard = match catcoms_log::init_debug(cli.debug, &cli.log_dir) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("catcomsctl: no debug log this run: {e}");
+            catcoms_log::init();
+            None
+        }
+    };
 
     match cli.command {
         Command::Version => println!("catcomsctl {}", env!("CARGO_PKG_VERSION")),

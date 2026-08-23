@@ -1,5 +1,17 @@
 import { mount } from "svelte";
 import "./app.css";
+import {
+  beginStartupCapture,
+  diagnosticId,
+  drainStartupLog,
+  renderStartupFailure,
+  startupFailureReport,
+} from "./startup-log";
+
+// First statement to execute, ahead of every application module. An error thrown while evaluating
+// or importing one of them now lands somewhere instead of vanishing into a devtools console nobody
+// has open: the blank-window reports that arrived with nothing attached were all from this window.
+beginStartupCapture();
 
 async function start() {
   const fixture = new URLSearchParams(window.location.search).get("fixture");
@@ -20,4 +32,16 @@ async function start() {
   });
 }
 
-export default start();
+/**
+ * Nothing beyond this point can report through the application, because the application is what
+ * failed. The screen is drawn directly and the error is kept where a person can read and copy it.
+ */
+export default start().catch((error: unknown) => {
+  const id = diagnosticId();
+  const report = startupFailureReport(id, error, drainStartupLog(), navigator.userAgent);
+  // Still worth printing: a developer with devtools open should see this the ordinary way too.
+  console.error(report);
+  const target = document.getElementById("app");
+  if (target) renderStartupFailure(target, id, report);
+  return null;
+});

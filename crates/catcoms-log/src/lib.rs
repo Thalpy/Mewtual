@@ -36,6 +36,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
+mod writer;
+
+pub use writer::{
+    DiagnosticInitError, SinkHealth, SinkState, MAX_DIR_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
+    MAX_SESSION_BYTES,
+};
+use writer::{FileWriter, SYNC_TIMEOUT};
+
 // --- in-memory ring, for the in-app debug console ----------------------------------------
 
 /// How many events the console's ring holds. Enough to cover the run-up to a failure that a user
@@ -270,16 +278,60 @@ pub fn init_test() {
         .try_init();
 }
 
-/// Keeps the debug-log file writer alive. Hold it until the program exits; on
-/// drop the buffered file output is flushed.
+/// Keeps the debug-log file writer alive, and answers for it.
+///
+/// Hold it until the program exits: dropping it waits for everything queued to reach the disk. The
+/// [`health`](LogGuard::health) method is the reason this is a value with an API rather than an
+/// opaque token. A caller that wants to tell a user whether logging is working must ask the sink,
+/// because the alternative is repeating back the setting that asked for it, and a setting has never
+/// once failed to open a file.
 pub struct LogGuard {
-    _file: Option<tracing_appender::non_blocking::WorkerGuard>,
+    file: Option<FileWriter>,
+}
+
+impl LogGuard {
+    /// What the debug-log file is actually doing right now. Never cached: a sink that was healthy
+    /// at startup and has since filled its quota must not still be described by the startup answer.
+    pub fn health(&self) -> SinkHealth {
+        match &self.file {
+            Some(file) => file.health(),
+            None => SinkHealth::stopped(),
+        }
+    }
+
+    /// Block until everything emitted so far has reached the file, up to a two second wait.
+    /// Returns whether it got there. Used by the settings page's "write a test record" button, so
+    /// the answer it shows describes the disk rather than the queue.
+    pub fn sync(&self) -> bool {
+        match &self.file {
+            Some(file) => file.sync(SYNC_TIMEOUT),
+            None => true,
+        }
+    }
 }
 
 impl std::fmt::Debug for LogGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("LogGuard")
     }
+}
+
+/// A short id for this run.
+///
+/// Two logs written the same afternoon need to be distinguishable, and an excerpt someone pastes
+/// needs to be matchable to the file it came from. Not a secret and not globally unique: it only
+/// has to separate this run from the last one on this machine.
+fn new_session_id() -> String {
+    // FNV-1a over the two values that differ between consecutive runs. Keeping this local avoids
+    // a random-number dependency in a crate whose whole job is installing subscribers.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let nanos = chrono::Local::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let pid = u64::from(std::process::id());
+    for byte in nanos.to_le_bytes().iter().chain(pid.to_le_bytes().iter()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{:08x}", hash as u32)
 }
 
 /// The debug-file filter for a long-running **GUI** session.
@@ -299,53 +351,88 @@ pub const APP_FILE_FILTER: &str = "info,catcoms_app=debug,catcoms_sync=debug,cat
 
 /// Install console logging and, when `debug` is true, also a verbose debug log at
 /// `<dir>/debug_log_<timestamp>.txt`. Returns a guard that must be kept alive
-/// (dropping it flushes the file).
+/// (dropping it waits for the queued output to reach the disk).
 ///
 /// The file captures everything at `debug` and above, for every crate; see
 /// [`init_debug_with`] for a caller that wants a narrower one.
-pub fn init_debug(debug: bool, dir: impl AsRef<Path>) -> LogGuard {
+pub fn init_debug(
+    debug: bool,
+    dir: impl AsRef<Path>,
+) -> Result<LogGuard, DiagnosticInitError> {
     init_debug_with(debug, dir, "debug")
 }
 
 /// [`init_debug`] with an explicit filter for the **file** layer (the console layer keeps
 /// obeying `RUST_LOG`). See [`APP_FILE_FILTER`] for the GUI's choice and why it is narrower
 /// than the CLI's.
-pub fn init_debug_with(debug: bool, dir: impl AsRef<Path>, file_filter: &str) -> LogGuard {
+///
+/// # Why this returns a `Result`
+///
+/// It used to return an apparently healthy guard whatever happened: the directory creation, the
+/// file open and the subscriber installation were each assigned to `_`. A user could then be told
+/// "logging: active" by a process that had never opened a file, reproduce a hard bug on the
+/// strength of that, and find nothing to send. Every step that can fail now says so, and the
+/// caller decides what to show.
+pub fn init_debug_with(
+    debug: bool,
+    dir: impl AsRef<Path>,
+    file_filter: &str,
+) -> Result<LogGuard, DiagnosticInitError> {
     let console = fmt::layer().with_filter(console_filter());
-    // Always on, and independent of the debug-log setting. The in-app console is the thing a user
-    // can actually look at while a problem is happening, so making it depend on having enabled a
-    // file beforehand and restarted would put it out of reach in exactly the situation it exists
-    // for. It costs a bounded amount of memory and writes nothing anywhere.
-    //
+    // The ring is always on, and independent of the debug-log setting. The in-app console is the
+    // thing a user can actually look at while a problem is happening, so making it depend on having
+    // enabled a file beforehand and restarted would put it out of reach in exactly the situation it
+    // exists for. It costs a bounded amount of memory and writes nothing anywhere.
     if !debug {
-        let _ = tracing_subscriber::registry()
+        return tracing_subscriber::registry()
             .with(console)
             .with(ring_layer())
-            .try_init();
-        return LogGuard { _file: None };
+            .try_init()
+            .map(|()| LogGuard { file: None })
+            .map_err(|_| DiagnosticInitError::SubscriberInstalled);
     }
 
     let dir = dir.as_ref();
-    let _ = std::fs::create_dir_all(dir);
-    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let name = format!("debug_log_{stamp}.txt");
-    let appender = tracing_appender::rolling::never(dir, &name);
-    let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+    let session_id = new_session_id();
+    let base = format!("debug_log_{}", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let (file_writer, sink) = FileWriter::start(dir, &base, session_id.clone())?;
+    let path = file_writer
+        .path()
+        .expect("a started writer knows the segment it opened");
 
     // The file captures verbose detail regardless of the console filter.
     let file = fmt::layer()
         .with_ansi(false)
-        .with_writer(non_blocking)
+        .with_writer(sink)
         .with_filter(EnvFilter::new(file_filter));
 
-    let _ = tracing_subscriber::registry()
+    tracing_subscriber::registry()
         .with(console)
         .with(file)
         .with(ring_layer())
-        .try_init();
+        .try_init()
+        .map_err(|_| DiagnosticInitError::SubscriberInstalled)?;
 
-    eprintln!("[catcoms] debug log -> {}", dir.join(&name).display());
-    LogGuard { _file: Some(guard) }
+    // The last check, and the one that makes "active" mean something. A directory that resolved, a
+    // file that opened and a layer that attached are all necessary and none of them is sufficient:
+    // the layer's filter could exclude everything, or the write could go somewhere that discards.
+    // So emit a record, wait for the worker, and read the size back off the disk. Only a file with
+    // bytes in it counts as a working sink.
+    tracing::info!(
+        target: "catcoms_log",
+        session = %session_id,
+        file = %path.display(),
+        "DIAG.SESSION.STARTED"
+    );
+    file_writer.sync(SYNC_TIMEOUT);
+    let recorded = std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false);
+    if !recorded {
+        return Err(DiagnosticInitError::NoSessionRecord { path });
+    }
+
+    Ok(LogGuard {
+        file: Some(file_writer),
+    })
 }
 
 #[cfg(test)]
@@ -435,19 +522,62 @@ mod tests {
     }
 
     #[test]
-    fn debug_mode_writes_a_timestamped_file() {
+    fn debug_mode_writes_a_timestamped_file_and_reports_it_healthy() {
         let dir = tempfile::tempdir().unwrap();
+        let path;
         {
-            let _guard = init_debug(true, dir.path());
+            let guard = init_debug(true, dir.path()).expect("the sink started");
+
+            // The health is the point: it names the file this process opened, and it says active
+            // only because a session-start record was read back off the disk during init.
+            let health = guard.health();
+            assert!(health.desired);
+            assert_eq!(health.state, SinkState::Active);
+            assert!(!health.session_id.is_empty());
+            assert!(health.last_error.is_none());
+            path = health.path.clone().expect("an open segment");
+
             tracing::info!(test_marker = 1, "hello from the debug log test");
-            // guard drops here -> flush
+            assert!(guard.sync(), "the queued event reached the disk");
+
+            let after = guard.health();
+            assert!(after.events_written >= 2, "the session marker and the test event");
+            assert!(after.bytes_written > 0);
+            assert_eq!(after.events_dropped, 0);
+            assert!(after.last_write_at_ms.is_some());
         }
-        let entry = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .find(|e| e.file_name().to_string_lossy().starts_with("debug_log_"))
-            .expect("a debug_log_*.txt file was created");
-        let contents = std::fs::read_to_string(entry.path()).unwrap();
-        assert!(contents.contains("hello from the debug log test"));
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("DIAG.SESSION.STARTED"), "{contents}");
+        assert!(contents.contains("hello from the debug log test"), "{contents}");
+    }
+
+    /// A file that could not be opened must reach the caller as an error. The previous version
+    /// discarded it and returned a guard, which is how the app came to tell users that logging was
+    /// active while no file existed anywhere.
+    #[test]
+    fn a_sink_that_cannot_be_opened_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocked = dir.path().join("occupied");
+        std::fs::write(&blocked, b"not a directory").unwrap();
+        let result = init_debug(true, blocked.join("logs"));
+        assert!(matches!(result, Err(DiagnosticInitError::Directory { .. })));
+    }
+
+    /// Off is off. No file, no directory, and health that says so without inventing a state.
+    #[test]
+    fn logging_off_leaves_no_file_and_reports_stopped() {
+        let health = LogGuard { file: None }.health();
+        assert!(!health.desired);
+        assert_eq!(health.state, SinkState::Stopped);
+        assert_eq!(health.events_written, 0);
+        assert!(health.path.is_none());
+    }
+
+    /// Two runs on one machine must be tellable apart in the file itself.
+    #[test]
+    fn a_session_id_is_stable_within_a_run_and_short_enough_to_quote() {
+        let id = new_session_id();
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

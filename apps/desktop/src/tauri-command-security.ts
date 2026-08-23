@@ -11,10 +11,15 @@ export const TAURI_COMMAND_GROUPS = {
     commands: [
       "vault_exists", "resume_session", "lock_session", "unlock", "get_ui_state", "save_ui_state",
       "create_backup", "change_vault_secret", "get_debug_logging", "set_debug_logging",
-      // Writes a frontend line into the diagnostics pipeline and nothing else. Deliberately
+      // Emits a marked record and re-reads the sink's health, so Settings can report what the
+      // writer is doing rather than what the preference asked for. Gated like the pair above.
+      "test_debug_logging",
+      // Writes frontend lines into the diagnostics pipeline and nothing else. Deliberately
       // outside the unlocked-session gate: the errors most worth capturing are the ones from
       // startup and from unlock itself failing, which happen before there is a session to check.
-      "log_ui",
+      // Both are rate-limited natively, because the webview is the least trustworthy producer
+      // this process has and a render loop must cost a counter rather than a disk.
+      "log_ui", "log_ui_batch",
       // Reads this session's in-memory diagnostics ring for the debug console, and clears the
       // view. Unlike log_ui these ARE gated on an unlocked session: the ring holds peer addresses
       // and stable identifiers, which a locked app must not show to whoever picks the machine up.

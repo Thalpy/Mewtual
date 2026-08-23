@@ -96,11 +96,19 @@ test("the frontend invokes only registered, security-classified literal commands
 
 test("every non-bootstrap native command visibly crosses the unlocked-session gate", () => {
   const segments = commandSegments(readFileSync(bridgePath, "utf8"));
-  // Commands that must work before, or without, an unlocked session. log_ui is here for the same
-  // reason the vault ones are: a log that only works once you are unlocked cannot record unlock
-  // failing, which is exactly when a user most needs to send one. It writes to the local log file
-  // and nothing else.
-  const bootstrap = new Set(["vault_exists", "unlock", "resume_session", "lock_session", "log_ui"]);
+  // Commands that must work before, or without, an unlocked session. The log_ui pair is here for
+  // the same reason the vault ones are: a log that only works once you are unlocked cannot record
+  // unlock failing, and cannot record the startup errors that leave a user with a blank window,
+  // which is exactly when they most need something to send. Both write into the local diagnostics
+  // pipeline and nothing else, both are bounded, and both are rate-limited natively.
+  const bootstrap = new Set([
+    "vault_exists",
+    "unlock",
+    "resume_session",
+    "lock_session",
+    "log_ui",
+    "log_ui_batch",
+  ]);
   for (const [command, segment] of segments) {
     if (bootstrap.has(command)) continue;
     assert.match(

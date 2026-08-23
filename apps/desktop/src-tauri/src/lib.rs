@@ -37,7 +37,7 @@ use catcoms_rt::{Clock, MeshTransport, OsCryptoRng, PeerId, RngCore, SystemClock
 use catcoms_sync::{join_namespace, JOIN_REPLY_PROOF_KIND};
 use libp2p::multiaddr::Protocol;
 use libp2p::Multiaddr;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{http, AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
@@ -9154,6 +9154,11 @@ fn debug_flag_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 /// The state of the debug log, as shown in Settings.
+///
+/// `enabled` and `state` are separate because the whole value of this struct is that they can
+/// disagree. The old version had one boolean assigned from the preference, so a process that had
+/// never managed to open a file still reported "active" and a user could burn their only
+/// reproduction on the strength of it.
 #[derive(Serialize, Clone)]
 struct DebugLogging {
     /// Whether the preference is on right now.
@@ -9162,10 +9167,58 @@ struct DebugLogging {
     /// installed once per process, so a toggle applies at the next launch, and saying so is the
     /// difference between a working setting and a user who thinks they captured a log.
     active: bool,
+    /// What the sink is doing: `stopped`, `active`, `degraded` or `failed`. Derived from bytes
+    /// that reached a file, never from `enabled`.
+    state: String,
+    /// Why it is degraded or failed, when it is. Shown verbatim, because "permission denied
+    /// opening the diagnostics directory" is something a person can act on and "logging failed"
+    /// is not.
+    error: String,
+    /// Identifies this run inside the file itself, so an excerpt can be matched to its source.
+    session: String,
     /// The folder the log is written to, always shown so the user can go and get it.
     dir: String,
-    /// The current session's file, when there is one.
+    /// The file **this process opened**. Not the newest file in the directory: that used to be
+    /// how this was answered, and it names a previous run's log whenever the current one failed
+    /// to open, which is exactly when a wrong answer does the most damage.
     file: String,
+    /// Events this session put in the file, and bytes they took.
+    events_written: u64,
+    bytes_written: u64,
+    /// Events that never made it: queue overflow, or emitted after the quota stopped the writer.
+    events_dropped: u64,
+    /// How full the write queue is, and how full it has ever been.
+    queue_depth: u64,
+    queue_high_water: u64,
+    /// The session byte quota, so the UI can show how close to it this run has come.
+    session_quota_bytes: u64,
+}
+
+impl DebugLogging {
+    /// Build the reply from the sink's own health plus the stored preference.
+    fn from_health(enabled: bool, dir: &std::path::Path, health: &catcoms_log::SinkHealth) -> Self {
+        DebugLogging {
+            enabled,
+            active: health.state == catcoms_log::SinkState::Active
+                || health.state == catcoms_log::SinkState::Degraded,
+            state: health.state.as_str().to_string(),
+            error: health.last_error.clone().unwrap_or_default(),
+            session: health.session_id.clone(),
+            dir: dir.display().to_string(),
+            file: health
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            events_written: health.events_written,
+            bytes_written: health.bytes_written,
+            events_dropped: health.events_dropped,
+            queue_depth: health.queue_depth as u64,
+            queue_high_water: health.queue_high_water as u64,
+            session_quota_bytes: catcoms_log::MAX_SESSION_BYTES,
+        }
+    }
 }
 
 /// Read the debug-logging preference.
@@ -9194,36 +9247,38 @@ fn debug_enabled_from_flag(opt_out_exists: bool) -> bool {
     !opt_out_exists
 }
 
-/// Whether this process installed a debug-log file layer, and which file it is writing. Set once
-/// in `setup`; read by `get_debug_logging` so the UI can distinguish "on" from "on since the
-/// last restart".
+/// What this process did about diagnostics at startup, and what came of it.
+///
+/// Set once in `setup`; read by `get_debug_logging` so the UI can distinguish "on" from "on since
+/// the last restart", and both of those from "asked for, and it did not work".
 struct LogState {
-    /// Dropping this flushes the file, so it is held for the life of the process.
-    _guard: catcoms_log::LogGuard,
-    active: bool,
+    /// Dropping this waits for queued output to reach the disk, so it is held for the life of the
+    /// process. It also answers for the sink's health, which is why it is no longer a `_` binding.
+    guard: Option<catcoms_log::LogGuard>,
+    /// Why there is no guard, when there is none. Preserved verbatim from startup, because by the
+    /// time a user opens Settings the failing call is long gone.
+    init_error: Option<String>,
     dir: std::path::PathBuf,
 }
 
-/// The newest `debug_log_*.txt` in `dir`, so Settings can name the file this session is writing
-/// rather than making the user guess which timestamp is theirs.
-fn newest_log_file(dir: &std::path::Path) -> String {
-    let mut best: Option<(std::time::SystemTime, String)> = None;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return String::new();
-    };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if !name.starts_with("debug_log_") {
-            continue;
-        }
-        let Ok(modified) = e.metadata().and_then(|m| m.modified()) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(t, _)| modified > *t) {
-            best = Some((modified, name));
+impl LogState {
+    /// The sink's health, or a synthetic failed state carrying the startup error.
+    ///
+    /// A process whose logger would not start has no sink to ask, and answering "stopped" there
+    /// would be indistinguishable from the user having turned logging off. The distinction is the
+    /// entire point of the struct, so the startup error is carried forward instead.
+    fn health(&self) -> catcoms_log::SinkHealth {
+        match (&self.guard, &self.init_error) {
+            (Some(guard), _) => guard.health(),
+            (None, Some(error)) => catcoms_log::SinkHealth {
+                desired: true,
+                state: catcoms_log::SinkState::Failed,
+                last_error: Some(error.clone()),
+                ..catcoms_log::SinkHealth::stopped()
+            },
+            (None, None) => catcoms_log::SinkHealth::stopped(),
         }
     }
-    best.map(|(_, n)| n).unwrap_or_default()
 }
 
 /// The debug log's current state, for Settings.
@@ -9234,23 +9289,42 @@ async fn get_debug_logging(
 ) -> Result<DebugLogging, String> {
     require_unlocked_session(&state).await?;
     let log = app.try_state::<LogState>();
-    let active = log.as_ref().is_some_and(|l| l.active);
     // Prefer the directory this process actually opened, so the path shown is the path being
     // written to even if the app data directory moved under us.
     let dir = match log.as_ref() {
         Some(l) => l.dir.clone(),
         None => log_dir(&app)?,
     };
-    Ok(DebugLogging {
-        enabled: debug_logging_enabled(&app),
-        active,
-        dir: dir.display().to_string(),
-        file: if active {
-            newest_log_file(&dir)
-        } else {
-            String::new()
-        },
-    })
+    let health = match log.as_ref() {
+        Some(l) => l.health(),
+        None => catcoms_log::SinkHealth::stopped(),
+    };
+    Ok(DebugLogging::from_health(
+        debug_logging_enabled(&app),
+        &dir,
+        &health,
+    ))
+}
+
+/// Put a marked record through the whole pipeline and report whether it reached the disk.
+///
+/// The one question the settings page could never answer for itself. Every other signal it shows
+/// is inferred from a preference or from state captured at startup; this emits an event now, waits
+/// for the writer, and reads the file size back, so a sink that has quietly stopped since launch is
+/// caught by the button rather than by a missing bug report a week later.
+#[tauri::command]
+async fn test_debug_logging(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DebugLogging, String> {
+    require_unlocked_session(&state).await?;
+    tracing::info!(target: "catcoms_app", at = wall_ms(), "DIAG.SELFTEST.RECORD");
+    if let Some(log) = app.try_state::<LogState>() {
+        if let Some(guard) = log.guard.as_ref() {
+            guard.sync();
+        }
+    }
+    get_debug_logging(app, state).await
 }
 
 /// Turn the debug log on or off for the **next** launch (a tracing subscriber is install-once
@@ -9381,14 +9455,157 @@ async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
 /// log file and restarted first, which is the opposite of what someone hitting a problem needs.
 #[tauri::command]
 async fn log_ui(level: String, message: String) {
+    record_ui_log(&level, message, 1);
+}
+
+/// One line the webview wants recorded.
+#[derive(Deserialize)]
+struct UiLogRecord {
+    level: String,
+    message: String,
+    /// How many identical lines this one stands for.
+    ///
+    /// The frontend collapses consecutive repeats so a render or reconnect loop does not cost an
+    /// IPC round trip per line, but the count travels with the survivor. "One ICE candidate
+    /// rejected" and "four thousand in two seconds" are different bugs, and the old deduper
+    /// rendered them as the same evidence.
+    #[serde(default)]
+    repeats: u32,
+}
+
+/// The most records one call may carry. A batch is a convenience, not a way around the rate limit.
+const MAX_UI_LOG_BATCH: usize = 256;
+
+/// Record a batch of webview lines.
+///
+/// Batching exists because the alternative is one IPC round trip per `console.warn`, and the
+/// moments worth capturing are exactly the ones where the webview is emitting fastest. See
+/// [`log_ui`] for why this is not gated on an unlocked session.
+#[tauri::command]
+async fn log_ui_batch(records: Vec<UiLogRecord>) {
+    for record in records.into_iter().take(MAX_UI_LOG_BATCH) {
+        record_ui_log(&record.level, record.message, record.repeats.max(1));
+    }
+}
+
+/// Shorten `text` to at most `max` **bytes** without splitting a character.
+///
+/// `String::truncate` panics unless the index is a character boundary, and this input is arbitrary
+/// text from the webview: one emoji, one combining mark or any CJK line long enough puts a
+/// multi-byte character across the cap. The frontend's own limit is counted in UTF-16 units, so it
+/// cannot prevent this. Panicking here would mean the act of recording an error destroys the
+/// evidence of that error, which is the worst available failure for a logging path.
+fn truncate_utf8_bytes(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let mut end = max;
+    // Byte 0 is always a boundary, so this terminates even when the first character alone is
+    // longer than the cap.
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
+/// Wall-clock milliseconds. Only ever used for rate-limiter arithmetic and for stamping a
+/// self-test record, so a clock that steps is a cosmetic problem rather than a correctness one;
+/// the elapsed-time calculation clamps negatives.
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// How many webview records may arrive in a burst before the limiter starts suppressing.
+const UI_LOG_BURST: f64 = 200.0;
+
+/// How many it may sustain per second once the burst is spent.
+const UI_LOG_PER_SECOND: f64 = 50.0;
+
+/// How often the limiter is allowed to say how much it suppressed.
+const UI_LOG_REPORT_INTERVAL_MS: i64 = 5_000;
+
+/// A token bucket over the webview's log traffic.
+///
+/// The webview is the least trustworthy input this process has: a render loop, a reconnect storm
+/// or a compromised page can all emit without bound, and each record costs formatting, a queue
+/// slot and disk. Suppression is counted and reported rather than silent, because a limiter that
+/// hides its own effect turns a retry storm into a quiet period.
+#[derive(Debug)]
+struct UiLogBudget {
+    tokens: f64,
+    last_ms: i64,
+    suppressed: u64,
+    last_report_ms: i64,
+}
+
+static UI_LOG_BUDGET: std::sync::OnceLock<std::sync::Mutex<UiLogBudget>> =
+    std::sync::OnceLock::new();
+
+/// Whether one more record fits, plus the suppression summary owed to the log if it does.
+fn ui_log_allowance(now_ms: i64) -> (bool, Option<u64>) {
+    let cell = UI_LOG_BUDGET.get_or_init(|| {
+        std::sync::Mutex::new(UiLogBudget {
+            tokens: UI_LOG_BURST,
+            last_ms: now_ms,
+            suppressed: 0,
+            last_report_ms: now_ms,
+        })
+    });
+    let mut budget = match cell.lock() {
+        Ok(b) => b,
+        // A poisoned limiter must not take logging down with it: the numbers behind it are still
+        // perfectly usable.
+        Err(e) => e.into_inner(),
+    };
+
+    let elapsed = (now_ms - budget.last_ms).max(0) as f64 / 1000.0;
+    budget.tokens = (budget.tokens + elapsed * UI_LOG_PER_SECOND).min(UI_LOG_BURST);
+    budget.last_ms = now_ms;
+
+    if budget.tokens >= 1.0 {
+        budget.tokens -= 1.0;
+        // Report on the first record after a quiet spell rather than on a timer, so the summary
+        // lands next to the traffic it describes.
+        if budget.suppressed > 0 && now_ms - budget.last_report_ms >= UI_LOG_REPORT_INTERVAL_MS {
+            let count = std::mem::take(&mut budget.suppressed);
+            budget.last_report_ms = now_ms;
+            return (true, Some(count));
+        }
+        return (true, None);
+    }
+
+    budget.suppressed += 1;
+    (false, None)
+}
+
+/// Bound, rate-limit and emit one webview line.
+fn record_ui_log(level: &str, message: String, repeats: u32) {
+    let (allowed, suppressed) = ui_log_allowance(wall_ms());
+    if let Some(count) = suppressed {
+        tracing::warn!(
+            target: "catcoms_ui",
+            suppressed = count,
+            "UI.LOG.RATE_LIMITED: records dropped to keep the log usable"
+        );
+    }
+    if !allowed {
+        return;
+    }
+
     let mut text = message;
     if text.len() > MAX_UI_LOG_BYTES {
-        text.truncate(MAX_UI_LOG_BYTES);
+        truncate_utf8_bytes(&mut text, MAX_UI_LOG_BYTES);
         text.push_str(" [truncated]");
+    }
+    if repeats > 1 {
+        text.push_str(&format!(" [x{repeats}]"));
     }
     // The webview chooses the level, so it is matched against a known set rather than parsed:
     // an unrecognised one becomes info instead of being dropped.
-    match level.as_str() {
+    match level {
         "error" => tracing::error!(target: "catcoms_ui", "{text}"),
         "warn" => tracing::warn!(target: "catcoms_ui", "{text}"),
         "debug" => tracing::debug!(target: "catcoms_ui", "{text}"),
@@ -9429,10 +9646,18 @@ pub fn run() {
             let handle = app.handle().clone();
             let enabled = debug_logging_enabled(&handle);
             let dir = log_dir(&handle).unwrap_or_else(|_| std::path::PathBuf::from("logs"));
-            let guard = catcoms_log::init_debug_with(enabled, &dir, catcoms_log::APP_FILE_FILTER);
+            // A failure here is kept rather than discarded. Diagnostics that cannot start are a
+            // thing the user needs told, and the only moment the reason exists is right now: by
+            // the time somebody opens Settings and wonders why their log is missing, the io::Error
+            // that explains it was dropped several thousand events ago.
+            let (guard, init_error) =
+                match catcoms_log::init_debug_with(enabled, &dir, catcoms_log::APP_FILE_FILTER) {
+                    Ok(guard) => (Some(guard), None),
+                    Err(e) => (None, Some(e.to_string())),
+                };
             app.manage(LogState {
-                _guard: guard,
-                active: enabled,
+                guard,
+                init_error,
                 dir,
             });
             spawn_network_monitor(&handle);
@@ -9525,9 +9750,11 @@ pub fn run() {
             change_vault_secret,
             get_debug_logging,
             set_debug_logging,
+            test_debug_logging,
             get_console_log,
             clear_console_log,
             log_ui,
+            log_ui_batch,
             set_admin,
             remove_member,
             revoke_device,
@@ -11370,31 +11597,125 @@ mod tests {
         );
     }
 
-    /// Settings promises the user "this session's file is X". If that name is wrong they open
-    /// somebody else's capture (or yesterday's) and send the wrong thing, so the newest-wins rule
-    /// and the "only debug_log_* counts" rule are both pinned.
+    /// Settings promises the user "this session's file is X". The name now comes from the sink
+    /// that opened it, not from whichever `debug_log_*` in the folder was touched most recently.
+    ///
+    /// The old rule looked reasonable and was wrong in the one case that matters: when this
+    /// process failed to open a file, the newest one in the directory belongs to a *previous* run,
+    /// so the UI named a stale capture and called it active. A user then sends yesterday's log for
+    /// today's bug, which costs a round trip and usually a second reproduction.
     #[test]
-    fn the_named_log_file_is_the_newest_debug_log_in_the_folder() {
-        let dir = std::env::temp_dir().join(format!("mewtual-logtest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn settings_names_the_file_this_process_opened_and_never_a_stale_one() {
+        let dir = std::path::Path::new("/data/logs");
+        let health = catcoms_log::SinkHealth {
+            desired: true,
+            state: catcoms_log::SinkState::Active,
+            session_id: "eb887278".into(),
+            path: Some(dir.join("debug_log_20260823_120000.txt")),
+            events_written: 12,
+            bytes_written: 900,
+            ..catcoms_log::SinkHealth::stopped()
+        };
+        let reply = DebugLogging::from_health(true, dir, &health);
+        assert!(reply.active);
+        assert_eq!(reply.state, "active");
+        assert_eq!(reply.file, "debug_log_20260823_120000.txt");
+        assert_eq!(reply.session, "eb887278");
+        assert!(reply.error.is_empty());
+    }
 
-        // Nothing yet: an empty answer, never a guessed filename.
-        assert_eq!(newest_log_file(&dir), "");
-        // A missing folder is the same "nothing to name", not a panic.
-        assert_eq!(newest_log_file(&dir.join("absent")), "");
+    /// The case the previous design could not express: the preference says yes and the sink says
+    /// no. Both halves have to reach the UI, or "enabled" is read as "captured".
+    #[test]
+    fn a_failed_sink_is_reported_as_failed_with_its_reason_and_names_no_file() {
+        let dir = std::path::Path::new("/data/logs");
+        let health = catcoms_log::SinkHealth {
+            desired: true,
+            state: catcoms_log::SinkState::Failed,
+            last_error: Some("permission denied opening the diagnostics directory".into()),
+            ..catcoms_log::SinkHealth::stopped()
+        };
+        let reply = DebugLogging::from_health(true, dir, &health);
+        assert!(reply.enabled, "the user did ask for a log");
+        assert!(!reply.active, "and did not get one");
+        assert_eq!(reply.state, "failed");
+        assert_eq!(reply.error, "permission denied opening the diagnostics directory");
+        assert!(reply.file.is_empty(), "no file is named when none was opened");
+    }
 
-        std::fs::write(dir.join("debug_log_20260819_100000.txt"), b"old").unwrap();
-        std::fs::write(dir.join("notes.txt"), b"not a log").unwrap();
-        assert_eq!(newest_log_file(&dir), "debug_log_20260819_100000.txt");
+    /// Loss must not read as health. A sink that is still writing but has dropped records is
+    /// degraded, and the UI keeps treating it as capturing so the user does not stop mid-report.
+    #[test]
+    fn a_degraded_sink_is_still_capturing_but_says_it_lost_events() {
+        let dir = std::path::Path::new("/data/logs");
+        let health = catcoms_log::SinkHealth {
+            desired: true,
+            state: catcoms_log::SinkState::Degraded,
+            path: Some(dir.join("debug_log_20260823_120000.txt")),
+            events_written: 40_000,
+            events_dropped: 17,
+            queue_high_water: 8192,
+            ..catcoms_log::SinkHealth::stopped()
+        };
+        let reply = DebugLogging::from_health(true, dir, &health);
+        assert!(reply.active);
+        assert_eq!(reply.state, "degraded");
+        assert_eq!(reply.events_dropped, 17);
+        assert_eq!(reply.queue_high_water, 8192);
+    }
 
-        // Written second, so it is the newer file whatever the timestamps in the names say; the
-        // rule is modification time, because that is what "this session's" actually means.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        std::fs::write(dir.join("debug_log_20260101_000000.txt"), b"new").unwrap();
-        assert_eq!(newest_log_file(&dir), "debug_log_20260101_000000.txt");
+    /// Recording an error must never be able to destroy the evidence of that error.
+    ///
+    /// `String::truncate` panics on a non-boundary index, the frontend's own cap counts UTF-16
+    /// units rather than bytes, and this input is arbitrary text from the webview. Every byte
+    /// offset into a multibyte line is tried, because the bug is not "emoji break it", it is
+    /// "one specific offset breaks it" and which offset depends entirely on the message.
+    #[test]
+    fn truncating_a_ui_log_line_never_splits_a_character() {
+        let samples = [
+            "🐈‍⬛🐈‍⬛🐈‍⬛ the cat is on the roof",
+            "こんにちは、世界。これはテストです。",
+            "e\u{0301}e\u{0301}e\u{0301} combining marks",
+            "plain ascii is the easy case",
+            "🎹",
+        ];
+        for sample in samples {
+            for max in 0..=sample.len() + 2 {
+                let mut text = sample.to_string();
+                truncate_utf8_bytes(&mut text, max);
+                assert!(text.len() <= max.max(0), "{sample:?} at {max} grew");
+                assert!(sample.starts_with(&text), "{sample:?} at {max} is not a prefix");
+            }
+        }
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    /// A single character longer than the whole cap is the edge that the obvious implementations
+    /// get wrong: there is no boundary at or below the limit except zero.
+    #[test]
+    fn a_first_character_larger_than_the_cap_truncates_to_nothing() {
+        let mut text = "🎹abc".to_string();
+        truncate_utf8_bytes(&mut text, 2);
+        assert_eq!(text, "");
+    }
+
+    /// A render loop must not be able to fill the log, and the limiter must not be able to hide
+    /// that it happened: a suppressed storm presented as a quiet period is worse than the storm.
+    #[test]
+    fn the_ui_log_limiter_caps_a_burst_and_counts_what_it_dropped() {
+        let start = 1_700_000_000_000;
+        let mut allowed = 0;
+        for _ in 0..1000 {
+            if ui_log_allowance(start).0 {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, UI_LOG_BURST as i32, "the burst is the burst, not a suggestion");
+
+        // Time passing refills it, and the first record afterwards carries the summary of what was
+        // lost, so the count reaches the log rather than a counter nobody reads.
+        let (ok, suppressed) = ui_log_allowance(start + UI_LOG_REPORT_INTERVAL_MS + 1000);
+        assert!(ok);
+        assert_eq!(suppressed, Some(800), "every suppressed record is accounted for");
     }
 
     #[test]

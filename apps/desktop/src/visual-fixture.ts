@@ -392,7 +392,24 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
           "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
       });
     case "get_debug_logging":
-      return clone({ enabled: false, active: true, dir: "C:\\fixture\\logs", file: "" });
+    case "test_debug_logging":
+      // Deliberately the interesting case: the preference is off while the sink from before the
+      // toggle is still writing, which is the disagreement the settings page exists to show.
+      return clone({
+        enabled: false,
+        active: true,
+        state: "active",
+        error: "",
+        session: "eb887278",
+        dir: "C:\\fixture\\logs",
+        file: "debug_log_20260823_120000.txt",
+        events_written: 1284,
+        bytes_written: 190_432,
+        events_dropped: 0,
+        queue_depth: 0,
+        queue_high_water: 12,
+        session_quota_bytes: 52_428_800,
+      });
     case "get_switchboard_status":
     case "set_switchboard_offered":
       return clone({
