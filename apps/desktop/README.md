@@ -68,6 +68,12 @@ The unsigned alpha installer may trigger a Windows SmartScreen warning. It still
 **WebView2 runtime** on the target PC (default on Windows 11; a free installer for older
 Windows). For a local portable build, use `npm run tauri build -- --no-bundle`.
 
+For Linux, swap the bundle target: `npm run tauri build -- --bundles deb,appimage`, producing
+`.deb`/`.AppImage` under `src-tauri/target/release/bundle/{deb,appimage}/`. This has to run on an
+actual Linux environment (native, VM, or WSL2), not cross-compiled from Windows, because Tauri
+links WebKitGTK/GTK3 natively — see the repository README's [Build a Linux
+release](../../README.md#build-a-linux-release) for prerequisites and caveats.
+
 ## Networking
 
 The app founds on all interfaces (`0.0.0.0`) and the founder can advertise a **reachable

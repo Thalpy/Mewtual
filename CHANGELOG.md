@@ -4,6 +4,16 @@ All notable changes to Mewtual are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Linux build crashed while packaging the AppImage**, even though a full icon set already
+  sat in `src-tauri/icons/`. Tauri's Windows installer gets its icon from `build.rs` embedding
+  `icon.ico` directly into the exe, independent of `tauri.conf.json`; the Linux and Debian
+  bundlers instead build their icon set purely from `bundle.icon` in that config, which this repo
+  never set. With nothing to choose from, picking the largest square icon panicked outright
+  instead of bundling with none. `tauri.conf.json` now lists the standard icon set (the same
+  files already generated for Windows/macOS), so `--bundles deb,appimage` has an icon to use.
+
 ## [0.3.0-alpha.7] - 2026-08-22
 
 ### Fixed
