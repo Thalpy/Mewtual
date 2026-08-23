@@ -9720,6 +9720,73 @@ async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// The largest diagnostics report that will be written.
+///
+/// Comfortably above a full ring rendered as text, and far below anything that could fill a disk.
+/// A cap that is never reached in normal use is still the difference between a bug and an outage.
+const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Where a saved report went, for the UI to show.
+#[derive(Serialize)]
+struct SavedReport {
+    /// The full path, so the user can go and get it.
+    path: String,
+    /// Just the file name, for saying "saved as X" without a wall of directory.
+    file: String,
+    bytes: usize,
+}
+
+/// Write a diagnostics report next to the debug log.
+///
+/// The console can already copy a report to the clipboard, which is the fast path for pasting into
+/// a chat. This is the one for keeping: a clipboard survives until the next thing you copy, and a
+/// bug report written a day later needs the evidence to still exist. It also gives someone a file
+/// to attach rather than a wall of text to paste.
+///
+/// The text is composed by the console, through the same serialiser that renders the screen, so
+/// the file matches what the user was looking at including whether redaction was on. Composing it
+/// natively instead would give two renderings that could disagree, and a report that contradicts
+/// the screenshot it arrived with costs the reader more time than it saves.
+///
+/// The file name is built here and never taken from the webview: a caller-supplied name is a path
+/// traversal waiting to happen, and there is nothing the webview needs to say about it.
+#[tauri::command]
+async fn save_diagnostics_report(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<SavedReport, String> {
+    require_unlocked_session(&state).await?;
+    if text.len() > MAX_REPORT_BYTES {
+        return Err(format!(
+            "the report is larger than the {} MiB limit",
+            MAX_REPORT_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let dir = match app.try_state::<LogState>() {
+        Some(log) => log.dir.clone(),
+        None => log_dir(&app)?,
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let session = catcoms_log::hub().session_id().to_string();
+    let file = format!("mewtual-diagnostics-{session}-{}.txt", wall_ms());
+    let path = dir.join(&file);
+    std::fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        target: "catcoms_app",
+        bytes = text.len(),
+        "PRIVACY.EXPORT.WRITTEN"
+    );
+    Ok(SavedReport {
+        path: path.display().to_string(),
+        file,
+        bytes: text.len(),
+    })
+}
+
 /// Record something the webview saw.
 ///
 /// Until this existed the log was Rust-only, so every `console.warn` in the voice path (failed
@@ -10157,6 +10224,7 @@ pub fn run() {
             test_debug_logging,
             get_console_log,
             clear_console_log,
+            save_diagnostics_report,
             log_ui,
             log_ui_batch,
             record_ui_events,

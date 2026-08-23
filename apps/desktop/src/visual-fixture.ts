@@ -287,6 +287,12 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     // was built for, so the fixture shows it doing its job rather than showing an empty shell:
     // Moss advertises only IPv6 while this device has no IPv6 route, and the voice signalling run
     // fails against a peer whose transport connection has gone.
+    case "save_diagnostics_report":
+      return clone({
+        path: "C:\\fixture\\logs\\mewtual-diagnostics-eb887278-1787000000000.txt",
+        file: "mewtual-diagnostics-eb887278-1787000000000.txt",
+        bytes: 4096,
+      });
     case "get_console_log":
       return clone({
         events: [

@@ -29,6 +29,10 @@ export const TAURI_COMMAND_GROUPS = {
       // view. Unlike log_ui these ARE gated on an unlocked session: the ring holds peer addresses
       // and stable identifiers, which a locked app must not show to whoever picks the machine up.
       "get_console_log", "clear_console_log",
+      // Writes a diagnostics report next to the debug log. The text is composed by the console so
+      // the file matches what was on screen, redaction included; the file NAME is built natively
+      // and never taken from the webview, because a caller-supplied name is a path traversal.
+      "save_diagnostics_report",
     ],
   },
   server_lifecycle_and_membership: {

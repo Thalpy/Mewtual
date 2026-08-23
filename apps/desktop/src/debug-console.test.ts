@@ -20,6 +20,7 @@ import {
   routeExplanation,
   routeState,
   shownCount,
+  collectAllEvents,
   deviceLines,
   levelClass,
   mediaPathChip,
@@ -362,4 +363,63 @@ test("level classes match the css, including the one that is not just lowercase"
   assert.equal(levelClass("ERROR"), "lvl-err");
   assert.equal(levelClass("WARN"), "lvl-warn");
   assert.equal(levelClass("TRACE"), "lvl-trace");
+});
+
+// --- saving a report ---------------------------------------------------------------------------
+//
+// A saved report is evidence. The view holds the newest events; the native ring is deeper, and a
+// report that silently stops at the window boundary is how a bug report arrives missing the run-up
+// to the failure it describes.
+
+/** A native ring of `total` events, served in pages the way `get_console_log` does. */
+function pager(total: number, pageSize = 500) {
+  let calls = 0;
+  const page = async (afterSeq: number, limit: number) => {
+    calls += 1;
+    const out: LogEvent[] = [];
+    for (let seq = afterSeq + 1; seq <= total && out.length < Math.min(limit, pageSize); seq += 1) {
+      out.push({ seq, at_ms: 0, level: "INFO", target: "catcoms_sync", message: `e${seq}`, fields: [] });
+    }
+    return out;
+  };
+  return { page, get calls() { return calls; } };
+}
+
+test("saving pages the whole ring rather than stopping at what is on screen", async () => {
+  const source = pager(1300);
+  const all = await collectAllEvents(source.page);
+  assert.equal(all.length, 1300);
+  assert.equal(all[0].seq, 1);
+  assert.equal(all[all.length - 1].seq, 1300);
+  assert.equal(source.calls, 3, "500 + 500 + 300, then it stops on the short page");
+});
+
+test("an empty ring produces an empty report rather than a hang", async () => {
+  assert.deepEqual(await collectAllEvents(pager(0).page), []);
+});
+
+test("a ring that exactly fills its last page still terminates", async () => {
+  // The off-by-one that would loop: a full final page looks like there may be more.
+  const source = pager(1000);
+  assert.equal((await collectAllEvents(source.page)).length, 1000);
+  assert.equal(source.calls, 3, "the third page comes back empty and ends it");
+});
+
+test("a native side that stops advancing cannot spin the export forever", async () => {
+  // Defensive: a page that repeats the same sequences would otherwise never terminate.
+  let calls = 0;
+  const stuck = async () => {
+    calls += 1;
+    return [{ seq: 1, at_ms: 0, level: "INFO", target: "t", message: "same", fields: [] }];
+  };
+  const all = await collectAllEvents(stuck, { pageSize: 10 });
+  assert.equal(calls, 1, "the sequence did not advance, so it stopped");
+  assert.equal(all.length, 1);
+});
+
+test("the page budget bounds the export even if pages keep advancing", async () => {
+  const source = pager(1_000_000);
+  const all = await collectAllEvents(source.page, { pageSize: 500, maxPages: 4 });
+  assert.equal(all.length, 2000);
+  assert.equal(source.calls, 4);
 });

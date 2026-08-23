@@ -497,6 +497,36 @@ export function copySection(title: string, lines: readonly string[]): string {
 }
 
 /**
+ * Page the whole ring, rather than only what the console is currently rendering.
+ *
+ * The view holds the newest `DBG_VIEW_CAP` events; the native ring is deeper. For a copy that is
+ * about to be read on screen the view is the right thing, but a saved report is evidence, and
+ * evidence that silently stops at the window boundary is how a bug report arrives missing the
+ * run-up to the failure it is describing.
+ *
+ * Bounded twice over: the loop stops when a page comes back short, and again at `maxPages`, so a
+ * native side that kept answering could not spin this forever.
+ */
+export async function collectAllEvents(
+  page: (afterSeq: number, limit: number) => Promise<LogEvent[]>,
+  { pageSize = 500, maxPages = 40 }: { pageSize?: number; maxPages?: number } = {},
+): Promise<LogEvent[]> {
+  const all: LogEvent[] = [];
+  let after = 0;
+  for (let n = 0; n < maxPages; n += 1) {
+    const batch = await page(after, pageSize);
+    if (!batch.length) break;
+    all.push(...batch);
+    const newest = batch[batch.length - 1].seq;
+    // A page that did not advance the sequence would loop forever. Treat it as the end.
+    if (newest <= after) break;
+    after = newest;
+    if (batch.length < pageSize) break;
+  }
+  return all;
+}
+
+/**
  * Assemble the whole report.
  *
  * States its own redaction mode, because a reader who cannot tell masked output from real output

@@ -26,6 +26,7 @@
     LEVELS,
     PRIVACY_NOTE,
     appendEvents,
+    collectAllEvents,
     copyBundle,
     deviceLines,
     dropNote,
@@ -111,6 +112,9 @@
   let voicePeers = $state<DebugVoicePeer[]>([]);
   let expanded = $state("");
   let copied = $state("");
+  let saving = $state(false);
+  /** The file the last save produced, or why it did not. Shown in the footer, not as a toast. */
+  let saved = $state("");
   // Aliases live for the console's lifetime rather than per render, so the same address is the same
   // `[ip 2]` every time it appears. Correlation is the evidence: "it keeps dialling the same two
   // addresses" is the whole diagnosis of the hour-long isolation, and a screenshot where both read
@@ -221,17 +225,59 @@
     copied = what;
     setTimeout(() => (copied = ""), 1500);
   }
+  /**
+   * Build the report.
+   *
+   * `full` decides where the log sections come from. Copy uses what is on screen, because that is
+   * what the person is looking at and about to paste. Save pages the whole native ring, because a
+   * saved report is evidence and evidence that stops at the view boundary arrives missing the
+   * run-up to the failure it describes.
+   */
+  async function buildReport(full: boolean): Promise<string> {
+    let backend = backShown;
+    let frontend = frontShown;
+    if (full) {
+      const every = await collectAllEvents((afterSeq, limit) =>
+        invoke<{ events: LogEvent[] }>("get_console_log", { afterSeq, limit }).then((p) => p.events),
+      );
+      backend = every.filter((e) => !isFrontend(e));
+      frontend = every.filter(isFrontend);
+    }
+    return copyBundle({ version, at: Date.now(), redacted: redact }, [
+      { title: "this device", lines: deviceLines(device, aliases, redact) },
+      { title: "network", lines: routeLines(servers, routes, aliases, redact) },
+      { title: "voice", lines: voiceLines(voicePeers, aliases, redact) },
+      { title: "backend", lines: backend.map(line) },
+      { title: "frontend", lines: frontend.map(line) },
+    ]);
+  }
+
   async function copyReport() {
-    await copy(
-      "report",
-      copyBundle({ version, at: Date.now(), redacted: redact }, [
-        { title: "this device", lines: deviceLines(device, aliases, redact) },
-        { title: "network", lines: routeLines(servers, routes, aliases, redact) },
-        { title: "voice", lines: voiceLines(voicePeers, aliases, redact) },
-        { title: "backend", lines: backShown.map(line) },
-        { title: "frontend", lines: frontShown.map(line) },
-      ]),
-    );
+    await copy("report", await buildReport(false));
+  }
+
+  /**
+   * Write the report to a file next to the debug log.
+   *
+   * The clipboard is the fast path for pasting into a chat, and it survives exactly until the next
+   * thing you copy. A bug report written the following morning needs the evidence to still exist,
+   * and someone reading it would rather have a file to open than a wall of text in a message.
+   */
+  async function saveReport() {
+    if (saving) return;
+    saving = true;
+    saved = "";
+    try {
+      const report = await buildReport(true);
+      const written = await invoke<{ file: string; bytes: number }>("save_diagnostics_report", {
+        text: report,
+      });
+      saved = written.file;
+    } catch (e) {
+      saved = `could not save: ${String(e)}`;
+    } finally {
+      saving = false;
+    }
   }
 </script>
 
@@ -253,6 +299,9 @@
     </div>
     <div class="dbg-head-actions">
       <button class="ghost small" onclick={copyReport}>{copied === "report" ? "Copied" : "Copy report"}</button>
+      <button class="ghost small" disabled={saving} onclick={saveReport}>
+        {saving ? "Saving" : "Save report"}
+      </button>
     </div>
     <button type="button" class="stx-esc" onclick={onclose} title="Close (Esc)">
       <span class="stx-esc-ring">✕</span>
@@ -615,7 +664,14 @@
   </div>
 
   <div class="dbg-foot">
-    <p class="muted small">{PRIVACY_NOTE}</p>
+    <p class="muted small">
+      {PRIVACY_NOTE}
+      {#if saved}
+        <!-- Named rather than announced and gone: the point of saving is that the file is still
+             there tomorrow, so the name has to survive long enough to be written down. -->
+        <span class="dbg-saved">Saved as <span class="fp">{saved}</span>, in the log folder.</span>
+      {/if}
+    </p>
     <label class="dbg-redact">
       <input type="checkbox" bind:checked={redact} />
       <span>REDACT FOR SCREENSHOTS</span>

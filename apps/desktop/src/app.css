@@ -13558,6 +13558,12 @@ button.dbg-rail-item.active {
 .dbg-foot p {
   margin: 0;
 }
+/* Follows the privacy sentence rather than replacing it: both matter, and the saved file's name
+   has to stay readable long enough to be written down. */
+.dbg-saved {
+  color: var(--ok);
+  margin-left: 6px;
+}
 .dbg-redact {
   margin-left: auto;
   flex: none;
