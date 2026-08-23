@@ -611,6 +611,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "catcoms-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "catcoms-rt",
+ "tracing",
+]
+
+[[package]]
 name = "catcoms-discovery"
 version = "0.0.0"
 dependencies = [
@@ -625,6 +634,8 @@ dependencies = [
 name = "catcoms-log"
 version = "0.0.0"
 dependencies = [
+ "catcoms-diagnostics",
+ "catcoms-rt",
  "chrono",
  "tracing",
  "tracing-subscriber",

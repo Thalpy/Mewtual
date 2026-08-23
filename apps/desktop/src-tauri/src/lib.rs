@@ -1442,12 +1442,12 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
     // protects it inside the net actor when the raw-interface owner is removed.
     for address in external_addrs(&removed) {
         if let Err(error) = mesh.remove_external_address(address.clone()).await {
-            eprintln!("interface refresh: could not withdraw {address}: {error}");
+            tracing::warn!(target: "catcoms_app", %address, %error, "REACH.INTERFACE.WITHDRAW_FAILED");
         }
     }
     for address in external_addrs(&added) {
         if let Err(error) = mesh.add_external_address(address.clone()).await {
-            eprintln!("interface refresh: could not advertise {address}: {error}");
+            tracing::warn!(target: "catcoms_app", %address, %error, "REACH.INTERFACE.ADVERTISE_FAILED");
         }
     }
 
@@ -1970,7 +1970,7 @@ async fn persist_server(state: &AppState, server: u64) {
     let bytes = match actor.snapshot().await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("persist: snapshot of server {server} failed: {e}");
+            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SNAPSHOT.FAILED");
             return;
         }
     };
@@ -1978,7 +1978,7 @@ async fn persist_server(state: &AppState, server: u64) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_server(server, &bytes, &mut rng) {
-            eprintln!("persist: sealing server {server} failed: {e}");
+            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.SEAL_SERVER.FAILED");
         }
     }
 }
@@ -2005,7 +2005,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
             Some(store) => match store.address_cache_key() {
                 Ok(k) => k,
                 Err(e) => {
-                    eprintln!("persist: no address-cache key for server {server}: {e}");
+                    tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.NO_KEY");
                     return;
                 }
             },
@@ -2019,7 +2019,7 @@ async fn persist_address_cache(app: &AppHandle, server: u64) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_address_cache(server, &bytes, &mut rng) {
-            eprintln!("persist: sealing the address cache of server {server} failed: {e}");
+            tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.ADDRESS_CACHE.SEAL_FAILED");
         }
     }
 }
@@ -2042,7 +2042,7 @@ async fn persist_registry(state: &AppState) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_registry(&records, &mut rng) {
-            eprintln!("persist: sealing registry failed: {e}");
+            tracing::error!(target: "catcoms_app", error = %e, "VAULT.REGISTRY.SEAL_FAILED");
         }
     }
 }
@@ -2063,13 +2063,15 @@ async fn attach_blob_store(state: &AppState, server: &mut Server<MeshService, Os
         let key = hex::encode(server.group_id());
         match store.blob_store(&key) {
             Ok(blobs) => server.set_blob_store(blobs),
-            Err(e) => eprintln!("attach blob store failed: {e}"),
+            Err(e) => {
+                tracing::error!(target: "catcoms_app", error = %e, "STORAGE.BLOB_STORE.ATTACH_FAILED")
+            }
         }
     }
     drop(guard);
     let swept = server.clear_staged_uploads();
     if swept > 0 {
-        eprintln!("startup: dropped {swept} chunk(s) from uploads that never finished");
+        tracing::info!(target: "catcoms_app", chunks = swept, "STORAGE.UPLOAD.STAGED_SWEPT");
     }
 }
 
@@ -2372,7 +2374,7 @@ async fn establish_reachability(
     // itself because "reachable through a relay" is a separate property from direct reachability.
     for addr in external_addrs(&bootstrap) {
         if let Err(e) = mesh.add_external_address(addr.clone()).await {
-            eprintln!("reachability: could not offer {addr} to AutoNAT: {e}");
+            tracing::warn!(target: "catcoms_app", %addr, error = %e, "REACH.AUTONAT.OFFER_FAILED");
         }
     }
 
@@ -2561,7 +2563,7 @@ async fn persist_server_net(state: &AppState, server: u64, net: &ServerNet) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_server_net(server, net, &mut rng) {
-            eprintln!("persist: sealing the network identity of server {server} failed: {e}");
+            tracing::error!(target: "catcoms_app", server, error = %e, "VAULT.NET_IDENTITY.SEAL_FAILED");
         }
     }
 }
@@ -2590,7 +2592,7 @@ async fn load_or_init_server_net(
             Some(store) => match store.load_server_net(server) {
                 Ok(net) => net,
                 Err(e) => {
-                    eprintln!("reload: the network identity of server {server} did not load: {e}");
+                    tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.NET_IDENTITY.LOAD_FAILED");
                     None
                 }
             },
@@ -3635,7 +3637,7 @@ async fn found_server_inner(
     // `bootstrap` (loopback, the LAN address) are stripped inside `publish_self_record`, so what
     // members learn is only what they could actually dial.
     if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
-        eprintln!("found: publishing the peer record failed: {e}");
+        tracing::warn!(target: "catcoms_app", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
     }
 
     // Mint a single-use invite (1h) carrying the bootstrap address (+ rendezvous addr if set, so
@@ -4259,7 +4261,7 @@ async fn join_server_inner(
     // `publish_self_record`.
     diag.advertised.clone_from(&joiner_addrs);
     if let Err(e) = server.publish_self_record(joiner_addrs.clone(), net.record_seq) {
-        eprintln!("join: publishing the peer record failed: {e}");
+        tracing::warn!(target: "catcoms_app", phase = "join", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
     }
 
     let general = channel_id("general");
@@ -4613,7 +4615,7 @@ async fn leave_server(state: State<'_, AppState>, server: u64) -> Result<(), Str
         let guard = state.store.lock().await;
         if let Some(store) = guard.as_ref() {
             if let Err(e) = store.remove_server(server) {
-                eprintln!("leave: removing sealed server {server} failed: {e}");
+                tracing::warn!(target: "catcoms_app", server, error = %e, "VAULT.SERVER.REMOVE_FAILED");
             }
         }
     }
@@ -4688,7 +4690,7 @@ async fn get_invite(state: State<'_, AppState>, server: u64) -> Result<Option<St
     match refresh_or_mint_invite(&state, server, false).await {
         Ok(fresh) => Ok(Some(fresh)),
         Err(e) => {
-            eprintln!("get_invite: re-mint after a reachability change failed: {e}");
+            tracing::warn!(target: "catcoms_app", error = %e, "JOIN.INVITE.REMINT_FAILED");
             Err(format!("the live invite could not be refreshed: {e}"))
         }
     }
@@ -4716,10 +4718,12 @@ async fn mint_invite_fresh(state: State<'_, AppState>, server: u64) -> Result<St
     match actor_of(&state, server).await {
         Ok(actor) => {
             if let Err(e) = actor.readmit_evicted_peers().await {
-                eprintln!("mint_invite_fresh: lifting outstanding evictions failed: {e}");
+                tracing::warn!(target: "catcoms_app", error = %e, "JOIN.EVICTIONS.LIFT_FAILED");
             }
         }
-        Err(e) => eprintln!("mint_invite_fresh: no actor to lift evictions on: {e}"),
+        Err(e) => {
+            tracing::warn!(target: "catcoms_app", error = %e, "JOIN.EVICTIONS.NO_ACTOR")
+        }
     }
     Ok(invite)
 }
@@ -7525,7 +7529,7 @@ async fn reload_one(
     for p in &problems {
         // Unlike founding, a reload never fails over this: the user is not standing at a form, and
         // a server that loads with reduced reach still reads its history and re-dials its peers.
-        eprintln!("reload: server {} reachability: {p}", record.id);
+        tracing::warn!(target: "catcoms_app", server = record.id, problem = %p, "REACH.RELOAD.DEGRADED");
     }
     let Reachability {
         bootstrap,
@@ -7572,7 +7576,7 @@ async fn reload_one(
     // reachable address may not be (a new relay circuit, a different UPnP mapping), and a record
     // published from a number the peers have already seen is discarded by every one of them.
     if let Err(e) = server.publish_self_record(bootstrap.clone(), net.record_seq) {
-        eprintln!("reload: publishing the peer record failed: {e}");
+        tracing::warn!(target: "catcoms_app", phase = "reload", error = %e, "DISCOVERY.PEER_RECORD.PUBLISH_FAILED");
     }
     server.set_switchboard_offered(net.switchboard);
     // Restore the cross-session address cache: the previously-proven members this node can offer
@@ -7587,16 +7591,19 @@ async fn reload_one(
             ) {
                 (Ok(key), Ok(bytes)) if !bytes.is_empty() => {
                     if !server.load_address_cache(&bytes, &key) {
-                        eprintln!(
-                            "reload: the address cache of server {} was rejected",
-                            record.id
+                        tracing::warn!(
+                            target: "catcoms_app",
+                            server = record.id,
+                            "VAULT.ADDRESS_CACHE.REJECTED"
                         );
                     }
                 }
                 (Err(e), _) | (_, Err(e)) => {
-                    eprintln!(
-                        "reload: the address cache of server {} did not load: {e}",
-                        record.id
+                    tracing::warn!(
+                        target: "catcoms_app",
+                        server = record.id,
+                        error = %e,
+                        "VAULT.ADDRESS_CACHE.LOAD_FAILED"
                     )
                 }
                 _ => {}
@@ -7611,9 +7618,11 @@ async fn reload_one(
     server.cache_known_records();
     let redialled = server.dial_cached_peers().await;
     if redialled > 0 {
-        eprintln!(
-            "reload: server {} re-dialled {redialled} known member(s)",
-            record.id
+        tracing::info!(
+            target: "catcoms_app",
+            server = record.id,
+            peers = redialled,
+            "DISCOVERY.REDIAL.STARTED"
         );
     }
 
@@ -8461,10 +8470,14 @@ async fn unlock(
     match store.load_pairing_ledger() {
         Ok(bytes) if !bytes.is_empty() => match PairingLedger::restore(&bytes) {
             Ok(led) => *state.pairing_ledger.lock().await = led,
-            Err(e) => eprintln!("unlock: the pairing ledger did not restore: {e}"),
+            Err(e) => {
+                tracing::warn!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.RESTORE_FAILED")
+            }
         },
         Ok(_) => {}
-        Err(e) => eprintln!("unlock: reading the pairing ledger failed: {e}"),
+        Err(e) => {
+            tracing::warn!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.READ_FAILED")
+        }
     }
 
     // Load every server's sealed snapshot up front, while we still own `store` locally.
@@ -8473,7 +8486,7 @@ async fn unlock(
         .map(|r| match store.load_server(r.id) {
             Ok(b) => Some(b),
             Err(e) => {
-                eprintln!("unlock: loading server {} failed: {e}", r.id);
+                tracing::error!(target: "catcoms_app", server = r.id, error = %e, "VAULT.SERVER.LOAD_FAILED");
                 None
             }
         })
@@ -8496,7 +8509,7 @@ async fn unlock(
     for (record, snap) in records.iter().zip(snapshots.iter()) {
         let Some(bytes) = snap else { continue };
         if let Err(e) = reload_one(&app, &state, bytes, record).await {
-            eprintln!("unlock: restoring server {} failed: {e}", record.id);
+            tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
             continue;
         }
         reloaded.push(ReloadedServer {
@@ -8750,7 +8763,7 @@ async fn persist_pairing_ledger(state: &AppState) {
     if let Some(store) = guard.as_ref() {
         let mut rng = OsCryptoRng;
         if let Err(e) = store.save_pairing_ledger(&snapshot, &mut rng) {
-            eprintln!("persist: sealing the pairing ledger failed: {e}");
+            tracing::error!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING_LEDGER.SEAL_FAILED");
         }
     }
 }
@@ -9074,7 +9087,7 @@ async fn join_one_grant(
             .map(|t| (t.addr.to_string(), t.peer.to_bytes()))
             .collect(),
         Err(e) => {
-            eprintln!("pair: the grant's rendezvous addresses were rejected ({e}); pairing without steady-state discovery");
+            tracing::warn!(target: "catcoms_app", error = %e, "IDENTITY.PAIRING.RENDEZVOUS_REJECTED");
             Vec::new()
         }
     };

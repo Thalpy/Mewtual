@@ -9,6 +9,7 @@ members = [
     "crates/catcoms-storage",
     "crates/catcoms-net",
     "crates/catcoms-log",
+    "crates/catcoms-diagnostics",
     "crates/catcoms-discovery",
     "crates/catcoms-sync",
     "crates/catcoms-app",

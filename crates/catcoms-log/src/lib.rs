@@ -29,9 +29,8 @@
 //!
 //! Treat a debug log as "who I talked to and when", and share it accordingly.
 
-use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
@@ -49,10 +48,6 @@ use writer::{FileWriter, SYNC_TIMEOUT};
 /// How many events the console's ring holds. Enough to cover the run-up to a failure that a user
 /// notices and then goes looking for, small enough to be irrelevant against the app's footprint.
 pub const LOG_RING_CAPACITY: usize = 4096;
-
-/// How much of one rendered event survives. A single event should not be able to push the rest of
-/// the ring out on its own.
-const MAX_EVENT_CHARS: usize = 4000;
 
 /// The filter the **ring** captures at.
 ///
@@ -103,20 +98,57 @@ pub struct LogRingStats {
     pub latest_seq: u64,
 }
 
-#[derive(Default)]
-struct RingInner {
-    events: VecDeque<LogEvent>,
-    next_seq: u64,
-    stats: LogRingStats,
-}
+/// The name `tracing` gives an event's primary message. It is just another field to `tracing`;
+/// the console wants it as the headline, so it is lifted out on the way in and back out again on
+/// the way to the console.
+const MESSAGE_FIELD: &str = "message";
 
 /// A bounded, in-memory view of this session's diagnostics, shared with the debug console.
+///
+/// A projection over [`catcoms_diagnostics::DiagnosticHub`] rather than a store of its own. There
+/// is one canonical record now, and this is the shape the console already reads it in: keeping the
+/// old type and its methods means the hub could take over the storage without the console, the
+/// desktop bridge or their tests changing at all.
 #[derive(Clone, Default)]
-pub struct LogRing(Arc<Mutex<RingInner>>);
+pub struct LogRing;
 
 impl std::fmt::Debug for LogRing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("LogRing")
+    }
+}
+
+/// Flatten a canonical event into the console's line-oriented shape.
+///
+/// Lossy in one direction only: the trace, phase and section survive as ordinary fields rather
+/// than as structure, because that is all the current console can render. The canonical event is
+/// still intact in the hub for anything that wants the rest.
+fn project(event: &catcoms_diagnostics::DiagnosticEvent) -> LogEvent {
+    let mode = catcoms_diagnostics::CaptureMode::Enhanced;
+    let mut message = String::new();
+    let mut fields = Vec::with_capacity(event.fields.len() + 2);
+    for (name, value) in &event.fields {
+        if *name == MESSAGE_FIELD && message.is_empty() {
+            message = value.render(mode);
+        } else {
+            fields.push(((*name).to_string(), value.render(mode)));
+        }
+    }
+    // A structured event has a code rather than prose. Showing the code as the headline is what
+    // makes a converted call site read better in the console than the sentence it replaced.
+    if message.is_empty() && !event.code.is_empty() {
+        message = event.code.to_string();
+    }
+    if event.trace.is_set() {
+        fields.push(("trace".to_string(), event.trace.short()));
+    }
+    LogEvent {
+        seq: event.seq,
+        at_ms: event.at_ms as i64,
+        level: event.level.as_str(),
+        target: event.target.clone(),
+        message,
+        fields,
     }
 }
 
@@ -126,84 +158,59 @@ impl LogRing {
     /// A caller that has fallen further behind than the ring is deep gets the oldest events the
     /// ring still holds, and learns from [`LogRingStats::dropped`] that it missed some.
     pub fn since(&self, after_seq: u64, limit: usize) -> Vec<LogEvent> {
-        let inner = self.lock();
-        inner
-            .events
-            .iter()
-            .filter(|e| e.seq > after_seq)
-            .take(limit)
-            .cloned()
-            .collect()
+        hub().since(after_seq, limit).iter().map(project).collect()
     }
 
     /// The session counters. See [`LogRingStats`].
     pub fn stats(&self) -> LogRingStats {
-        self.lock().stats
+        let stats = hub().stats();
+        LogRingStats {
+            errors: stats.errors,
+            warnings: stats.warnings,
+            dropped: stats.dropped,
+            latest_seq: stats.latest_seq,
+        }
     }
 
     /// Forget every held event, keeping the session counters and the sequence. Used by the
     /// console's clear button, which is about the view, not about rewriting what happened.
     pub fn clear(&self) {
-        self.lock().events.clear();
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, RingInner> {
-        // A panic in some other thread's short critical section must not take diagnostics down
-        // with it: the data behind a poisoned lock here is still perfectly readable.
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn push(&self, level: &'static str, target: String, mut fields: Vec<(String, String)>) {
-        let mut inner = self.lock();
-        inner.next_seq += 1;
-        let seq = inner.next_seq;
-        inner.stats.latest_seq = seq;
-        match level {
-            "ERROR" => inner.stats.errors += 1,
-            "WARN" => inner.stats.warnings += 1,
-            _ => {}
-        }
-        // `message` is just another field to `tracing`; the console wants it as the headline.
-        let message = fields
-            .iter()
-            .position(|(k, _)| k == "message")
-            .map(|i| fields.remove(i).1)
-            .unwrap_or_default();
-        inner.events.push_back(LogEvent {
-            seq,
-            at_ms: chrono::Local::now().timestamp_millis(),
-            level,
-            target,
-            message: truncate(message),
-            fields,
-        });
-        while inner.events.len() > LOG_RING_CAPACITY {
-            inner.events.pop_front();
-            inner.stats.dropped += 1;
-        }
+        hub().clear();
     }
 }
 
-fn truncate(mut s: String) -> String {
-    if s.chars().count() > MAX_EVENT_CHARS {
-        s = s.chars().take(MAX_EVENT_CHARS).collect::<String>() + " [truncated]";
-    }
-    s
-}
+/// The process-wide diagnostic hub.
+static HUB: OnceLock<catcoms_diagnostics::DiagnosticHub> = OnceLock::new();
 
-/// The process-wide ring, so the desktop bridge can reach the one the subscriber writes into.
-static RING: OnceLock<LogRing> = OnceLock::new();
+/// The hub this process records into.
+///
+/// Created on first use rather than at subscriber installation, so a binary or test that never
+/// asked for diagnostics still gets a working handle instead of a panic. Capture starts in
+/// [`CaptureMode::Enhanced`](catcoms_diagnostics::CaptureMode::Enhanced) because this ring never
+/// touches the disk: it lives in memory, is shown only in this app's own debug console, and leaves
+/// only if the user presses copy. The file, which is the thing a user pastes to a stranger, is a
+/// separate sink with its own narrower filter.
+pub fn hub() -> catcoms_diagnostics::DiagnosticHub {
+    HUB.get_or_init(|| {
+        catcoms_diagnostics::DiagnosticHub::with_capacity(
+            std::sync::Arc::new(catcoms_rt::SystemClock),
+            catcoms_diagnostics::SessionSalt::random(&mut catcoms_rt::OsCryptoRng),
+            catcoms_diagnostics::CaptureMode::Enhanced,
+            LOG_RING_CAPACITY,
+            &mut catcoms_rt::OsCryptoRng,
+        )
+    })
+    .clone()
+}
 
 /// The ring this process is capturing into. Empty and inert until a subscriber installs one, so a
 /// binary or test that never asked for a console still gets a working (if silent) handle.
 pub fn ring() -> LogRing {
-    RING.get_or_init(LogRing::default).clone()
+    LogRing
 }
 
-/// The `tracing` layer that fills [`ring`].
-struct RingLayer {
-    ring: LogRing,
-}
+/// The `tracing` layer that feeds [`hub`].
+struct RingLayer;
 
 /// The filtered ring layer, ready to stack onto a subscriber.
 ///
@@ -214,8 +221,15 @@ fn ring_layer<S>() -> impl Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    RingLayer { ring: ring() }.with_filter(EnvFilter::new(CONSOLE_RING_FILTER))
+    RingLayer.with_filter(EnvFilter::new(CONSOLE_RING_FILTER))
 }
+
+/// The code a `tracing` event that has not been converted to a structured one carries.
+///
+/// A single constant rather than a per-event guess, so counting them measures exactly how much of
+/// the app is still emitting prose instead of stable codes. See
+/// [`BridgedMessage`](catcoms_diagnostics::redact::BridgedMessage).
+const BRIDGED_CODE: &str = "LOG.TRACING.EVENT";
 
 /// Renders every field to a string. `tracing` gives typed values; the console shows text, and a
 /// debug rendering is the one representation every value type has.
@@ -246,18 +260,57 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut fields = FieldCollector(Vec::new());
-        event.record(&mut fields);
-        self.ring.push(
-            event.metadata().level().as_str(),
-            event.metadata().target().to_string(),
-            fields
-                .0
-                .into_iter()
-                .map(|(k, v)| (k, truncate(v)))
-                .collect(),
-        );
+        use catcoms_diagnostics::{BridgedMessage, DiagnosticEvent, Level, Section};
+
+        let metadata = event.metadata();
+        let target = metadata.target();
+        let mut collected = FieldCollector(Vec::new());
+        event.record(&mut collected);
+
+        // Every `tracing` event in the app arrives here, and none of them has been converted to a
+        // structured code yet. The section is inferred from the emitting crate, which is coarse
+        // but places each one somewhere a person would look for it; a converted call site states
+        // its own section and overrides this entirely.
+        let mut recorded = DiagnosticEvent::new(
+            Section::from_target(target),
+            Level::from_tracing(metadata.level().as_str()),
+            BRIDGED_CODE,
+        )
+        .target(target);
+        for (name, value) in collected.0 {
+            // `field` takes a `&'static str` name, which a runtime field name is not. Leaking is
+            // the wrong tool for an unbounded set, so names are interned: `tracing` field names
+            // come from a fixed set of string literals in the source, and the set is therefore
+            // bounded by the size of the codebase rather than by anything a peer can influence.
+            recorded = recorded.field(intern(name), BridgedMessage::new(&value));
+        }
+        catcoms_diagnostics::DiagnosticHub::record(&hub(), recorded);
     }
+}
+
+/// Turn a `tracing` field name into a `'static` one.
+///
+/// Bounded by construction: `tracing` field names are string literals in the source, so the set is
+/// the size of the codebase and cannot be grown by anything a peer sends. The cap is belt and
+/// braces against a macro that builds names dynamically, and past it a field keeps its value under
+/// a generic name rather than being dropped.
+fn intern(name: String) -> &'static str {
+    /// Far more than the distinct field names in this codebase, and small enough that the memory
+    /// is irrelevant even if something unexpected fills it.
+    const MAX_INTERNED: usize = 512;
+    static NAMES: OnceLock<Mutex<std::collections::HashMap<String, &'static str>>> =
+        OnceLock::new();
+    let table = NAMES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut table = table.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(held) = table.get(&name) {
+        return held;
+    }
+    if table.len() >= MAX_INTERNED {
+        return "field";
+    }
+    let leaked: &'static str = Box::leak(name.clone().into_boxed_str());
+    table.insert(name, leaked);
+    leaked
 }
 
 /// Default console filter when `RUST_LOG` is unset.
@@ -470,61 +523,63 @@ mod tests {
         assert!(!file.contains("catcoms_net=debug"), "{file}");
     }
 
+    // The ring's own behaviour (bounds, counters that outlive their events, per-section counts)
+    // is tested where it lives now, in `catcoms-diagnostics`. What is left here is the join
+    // between the two: whether a canonical event still reads the way the console expects.
+
+    /// A `tracing` message has to arrive as the headline, not buried among the structured fields.
+    /// It is the first thing on every rendered line, and the thing a person scans for.
     #[test]
-    fn the_ring_keeps_its_counters_when_events_age_out() {
-        // A roll-up that reported "no errors" because the error had been evicted would be worse
-        // than having no roll-up at all, so the counters are taken before the bound is applied.
-        let ring = LogRing::default();
-        ring.push(
-            "ERROR",
-            "catcoms_net".into(),
-            vec![("message".into(), "the first failure".into())],
-        );
-        for n in 0..LOG_RING_CAPACITY {
-            ring.push(
-                "INFO",
-                "catcoms_sync".into(),
-                vec![("message".into(), format!("filler {n}"))],
-            );
-        }
-        let stats = ring.stats();
-        assert_eq!(stats.errors, 1, "the error is still counted");
-        assert!(stats.dropped >= 1, "and the ring admits it dropped events");
-        assert!(
-            !ring
-                .since(0, LOG_RING_CAPACITY)
-                .iter()
-                .any(|e| e.message == "the first failure"),
-            "even though the event itself has aged out"
+    fn a_bridged_message_projects_to_the_headline_the_console_renders() {
+        use catcoms_diagnostics::{BridgedMessage, DiagnosticEvent, Level, Section};
+        let mut event = DiagnosticEvent::new(Section::Transport, Level::Warn, BRIDGED_CODE)
+            .target("catcoms_net")
+            .field("message", BridgedMessage::new("dial failed"))
+            .field("peer", BridgedMessage::new("2b5df389"));
+        event.seq = 12;
+        event.at_ms = 1_787_000_000_000;
+
+        let projected = project(&event);
+        assert_eq!(projected.seq, 12);
+        assert_eq!(projected.level, "WARN");
+        assert_eq!(projected.target, "catcoms_net");
+        assert_eq!(projected.message, "dial failed");
+        assert_eq!(
+            projected.fields,
+            vec![("peer".to_string(), "2b5df389".to_string())]
         );
     }
 
+    /// A converted call site has a stable code instead of prose. Showing the code as the headline
+    /// is what makes the migration an improvement in the console rather than a blank line.
     #[test]
-    fn the_ring_serves_only_what_a_caller_has_not_seen() {
-        let ring = LogRing::default();
-        for n in 0..5 {
-            ring.push(
-                "INFO",
-                "catcoms_app".into(),
-                vec![("message".into(), format!("event {n}"))],
-            );
-        }
-        let first = ring.since(0, 10);
-        assert_eq!(first.len(), 5);
-        assert_eq!(first[0].message, "event 0");
-        let newest = first.last().unwrap().seq;
-        assert!(
-            ring.since(newest, 10).is_empty(),
-            "a caller that is up to date is told nothing twice"
-        );
-        ring.push(
-            "WARN",
-            "catcoms_ui".into(),
-            vec![("message".into(), "later".into())],
-        );
-        let next = ring.since(newest, 10);
-        assert_eq!(next.len(), 1);
-        assert_eq!(next[0].message, "later");
+    fn a_structured_event_shows_its_code_where_a_message_would_be() {
+        use catcoms_diagnostics::{DiagnosticEvent, Level, Section, TraceId};
+        let event = DiagnosticEvent::new(Section::Join, Level::Warn, "JOIN.ROUTES.EXHAUSTED")
+            .target("catcoms_sync")
+            .trace(TraceId(0x7f2c_0000_0000_0001))
+            .field("direct_candidates", 4u64);
+
+        let projected = project(&event);
+        assert_eq!(projected.message, "JOIN.ROUTES.EXHAUSTED");
+        assert!(projected
+            .fields
+            .contains(&("direct_candidates".to_string(), "4".to_string())));
+        // The trace is what ties this line to the rest of its operation, so it travels even in the
+        // flattened shape the current console renders.
+        assert!(projected
+            .fields
+            .contains(&("trace".to_string(), "7f2c".to_string())));
+    }
+
+    /// Field names arrive from `tracing` as runtime strings and the event wants `'static` ones.
+    /// Interning is bounded, and past the bound a field keeps its value rather than vanishing.
+    #[test]
+    fn field_names_intern_to_the_same_pointer_and_stop_growing_eventually() {
+        let first = intern("peer_id".to_string());
+        let again = intern("peer_id".to_string());
+        assert_eq!(first, "peer_id");
+        assert!(std::ptr::eq(first, again), "the same name is interned once");
     }
 
     #[test]
@@ -545,6 +600,25 @@ mod tests {
 
             tracing::info!(test_marker = 1, "hello from the debug log test");
             assert!(guard.sync(), "the queued event reached the disk");
+
+            // The other half of the same emission: one `tracing` call has to reach both sinks,
+            // the file that gets pasted to somebody and the in-memory record the console reads.
+            // They are separate on purpose (different filters, different privacy exposure), and
+            // an event landing in one but not the other is the bug this asserts against.
+            let captured = ring().since(0, 100);
+            let mine = captured
+                .iter()
+                .find(|e| e.message == "hello from the debug log test")
+                .expect("the event reached the console record too");
+            assert_eq!(mine.level, "INFO");
+            assert_eq!(mine.target, "catcoms_log::tests");
+            assert!(
+                mine.fields
+                    .iter()
+                    .any(|(k, v)| k == "test_marker" && v == "1"),
+                "structured fields survive the bridge: {:?}",
+                mine.fields
+            );
 
             let after = guard.health();
             assert!(

@@ -288,22 +288,34 @@ impl Drop for LineWriter {
             return;
         }
         let line = std::mem::take(&mut self.buf);
+        // Claim the queue slot *before* handing the line over, and refund it if the send fails.
+        //
+        // Counting it afterwards is a race with a sharp edge: the worker can dequeue the line and
+        // decrement the depth before this thread resumes, so an unsigned counter goes below zero,
+        // wraps to `usize::MAX`, and the next increment overflows. In a debug build that panics,
+        // and it panics on the logging path, which is the one place a panic destroys the evidence
+        // of whatever was being logged.
+        let depth = self
+            .stats
+            .queue_depth
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        self.stats
+            .queue_high_water
+            .fetch_max(depth, Ordering::Relaxed);
         // `try_send`, never `send`. Blocking here would push disk latency onto whichever thread
         // emitted the event, which for this app includes actor and network paths: diagnostics
         // would become a source of the stalls it is supposed to explain. A full queue is recorded
         // as a drop instead, and the console shows the count.
         match self.tx.try_send(Op::Line(line)) {
-            Ok(()) => {
-                let depth = self.stats.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
-                self.stats
-                    .queue_high_water
-                    .fetch_max(depth, Ordering::Relaxed);
-            }
+            Ok(()) => {}
             Err(TrySendError::Full(_)) => {
+                self.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                 self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
                 self.stats.degraded.store(true, Ordering::Relaxed);
             }
             Err(TrySendError::Disconnected(_)) => {
+                self.stats.queue_depth.fetch_sub(1, Ordering::Relaxed);
                 self.stats.events_dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -749,6 +761,33 @@ mod tests {
             segment_name("debug_log_20260823_120000", 2),
             "debug_log_20260823_120000_002.txt"
         );
+    }
+
+    /// The depth gauge has to come back to zero once the worker has caught up.
+    ///
+    /// It used to be incremented after the send, which races the worker: the line could be
+    /// dequeued and decremented before the sending thread resumed, taking an unsigned counter
+    /// below zero and wrapping it. The next increment then overflowed and panicked, on the logging
+    /// path, which is the one place a panic destroys the evidence it was called to record. A
+    /// settled queue reading zero is the observable form of that being fixed.
+    #[test]
+    fn the_queue_depth_settles_back_to_zero_rather_than_wrapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, sink) = writer(dir.path());
+        for n in 0..500 {
+            write_line(&sink, &format!("event {n}\n"));
+        }
+        assert!(writer.sync(SYNC_TIMEOUT));
+        let health = writer.health();
+        assert_eq!(
+            health.queue_depth, 0,
+            "everything queued has been accounted for"
+        );
+        assert!(
+            health.queue_high_water > 0,
+            "and the peak was still observed"
+        );
+        assert!(health.queue_high_water <= QUEUE_CAPACITY);
     }
 
     /// The barrier has to survive the busiest moment, because that is when it is used: the last
