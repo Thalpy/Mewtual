@@ -20,6 +20,14 @@ import {
   routeExplanation,
   routeState,
   shownCount,
+  deviceLines,
+  levelClass,
+  mediaPathChip,
+  routeLines,
+  voiceLines,
+  webrtcChip,
+  type DebugDevice,
+  type DebugVoicePeer,
   type LogEvent,
   type MemberRoute,
 } from "./debug-console.ts";
@@ -255,4 +263,103 @@ test("a copied bundle states its redaction mode and carries the privacy contract
 test("an empty section is labelled rather than silently missing from a report", () => {
   const text = copyBundle({ version: "0.3.0", at: 0, redacted: false }, [{ title: "voice", lines: [] }]);
   assert.match(text, /\(nothing captured\)/);
+});
+
+// --- section serialisers ---------------------------------------------------------------------
+//
+// These carry the same values the console renders, and they are tested separately because that
+// equality is the point: a pasted report that disagrees with the screenshot it arrived with makes
+// the reader work out which one is lying before they can start on the bug.
+
+const device: DebugDevice = {
+  public_ipv4: ["203.0.113.9"],
+  public_ipv6: [],
+  public_direct: false,
+  autonat: "private",
+  router_maps: true,
+  relay_likely_required: true,
+  advice: "Calls to peers behind NAT need a relay.",
+};
+
+test("this device's lines say what was observed and what was not", () => {
+  const lines = deviceLines(device, makeAliases(), false);
+  assert.match(lines.join("\n"), /public ipv4: 203\.0\.113\.9/);
+  // Absence has to read as absence. An empty value would look like a value that failed to render.
+  assert.match(lines.join("\n"), /public ipv6: \(none\)/);
+  assert.match(lines.join("\n"), /directly reachable: no/);
+});
+
+test("a device with no report at all yields no lines rather than a row of blanks", () => {
+  assert.deepEqual(deviceLines(null, makeAliases(), false), []);
+});
+
+test("device lines are redacted by the same rules the screen uses", () => {
+  const aliases = makeAliases();
+  const shown = maybeRedact("203.0.113.9", aliases, true);
+  const lines = deviceLines(device, aliases, true);
+  assert.ok(lines[0].includes(shown), `${lines[0]} should carry ${shown}`);
+  assert.ok(!lines[0].includes("203.0.113.9"), "the real address must not survive redaction");
+});
+
+test("route lines carry the state, the counters and every candidate address", () => {
+  const servers = [{ id: 1, name: "Studio" }];
+  const routes = { 1: [{ ...route, dial_attempts: 3, next_dial_in_ms: 42_000 }] };
+  const [line] = routeLines(servers, routes, makeAliases(), false);
+  assert.match(line, /^Studio /);
+  assert.match(line, /BACKING OFF/);
+  assert.match(line, /fails=3/);
+  assert.match(line, /next=42s/);
+  assert.match(line, /\/ip4\/203\.0\.113\.9\/udp\/31484\/quic-v1/);
+});
+
+test("a member with no address says so rather than trailing off", () => {
+  const [line] = routeLines([{ id: 1, name: "Studio" }], { 1: [{ ...route, addresses: [] }] }, makeAliases(), false);
+  assert.match(line, /\(no address\)/);
+});
+
+test("a server with no members contributes nothing rather than an empty row", () => {
+  assert.deepEqual(routeLines([{ id: 1, name: "Studio" }], {}, makeAliases(), false), []);
+});
+
+test("voice lines carry every state that decides whether a call is working", () => {
+  const peers: DebugVoicePeer[] = [
+    { fingerprint: "741af9ff", connection: "connected", ice: "completed", signaling: "stable", path: "relayed" },
+  ];
+  const [line] = voiceLines(peers, makeAliases(), false);
+  assert.match(line, /connection=connected/);
+  assert.match(line, /ice=completed/);
+  assert.match(line, /signaling=stable/);
+  assert.match(line, /path=relayed/);
+});
+
+test("outside a call the voice section has nothing to say, and says nothing", () => {
+  assert.deepEqual(voiceLines([], makeAliases(), false), []);
+});
+
+/**
+ * ICE reports `completed` once it stops checking, so treating only `connected` as success would
+ * paint a working call as a problem. `closed` is the other trap: a call that ended normally is not
+ * a failure, and colouring it like one sends people hunting for a bug that is not there.
+ */
+test("webrtc chips separate success, in-progress, failure and a call that simply ended", () => {
+  assert.equal(webrtcChip("connected").tone, "ok");
+  assert.equal(webrtcChip("completed").tone, "ok");
+  assert.equal(webrtcChip("stable").tone, "ok");
+  assert.equal(webrtcChip("checking").tone, "warn");
+  assert.equal(webrtcChip("disconnected").tone, "warn");
+  assert.equal(webrtcChip("failed").tone, "danger");
+  assert.equal(webrtcChip("closed").tone, "faint");
+  assert.equal(webrtcChip("connected").label, "CONNECTED");
+});
+
+test("a relayed call is worth noticing but is not a fault", () => {
+  assert.deepEqual(mediaPathChip("relayed"), { label: "TURN RELAY", tone: "warn" });
+  assert.deepEqual(mediaPathChip("direct"), { label: "DIRECT", tone: "ok" });
+  assert.deepEqual(mediaPathChip("unknown"), { label: "UNKNOWN", tone: "faint" });
+});
+
+test("level classes match the css, including the one that is not just lowercase", () => {
+  assert.equal(levelClass("ERROR"), "lvl-err");
+  assert.equal(levelClass("WARN"), "lvl-warn");
+  assert.equal(levelClass("TRACE"), "lvl-trace");
 });

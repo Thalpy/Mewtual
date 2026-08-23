@@ -350,6 +350,135 @@ export function isIpv6Addr(addr: string): boolean {
   return addr.startsWith("/ip6/");
 }
 
+// --- what the console is given ------------------------------------------------------------
+//
+// The console takes plain data and nothing else. It is a viewer over the diagnostics, not a second
+// place where application state lives, and handing it live objects (an `RTCPeerConnection`, a
+// server record with its methods) would make it a second owner of things it has no business
+// owning. Everything below is a snapshot the host assembles.
+
+/** The part of a server the console reads. */
+export type DebugServer = { id: number; name: string; channels?: unknown[] };
+
+/** This device's own reachability, as the connectivity report already describes it. */
+export type DebugDevice = {
+  public_ipv4: string[];
+  public_ipv6: string[];
+  public_direct: boolean;
+  autonat: string;
+  router_maps: boolean;
+  relay_likely_required: boolean;
+  advice: string;
+};
+
+/**
+ * One call participant's WebRTC state, flattened out of the live peer connection.
+ *
+ * Flattened deliberately: `RTCPeerConnection` fields change without telling anything, so a
+ * component holding the object would render whatever was true at its last unrelated redraw. A
+ * snapshot taken on the console's own poll is both simpler and more honest about how fresh it is.
+ */
+export type DebugVoicePeer = {
+  fingerprint: string;
+  connection: string;
+  ice: string;
+  signaling: string;
+  path: "direct" | "relayed" | "unknown";
+};
+
+/** The console's sections, in rail order. */
+export type DbgSection = "overview" | "network" | "voice" | "backend" | "frontend" | "storage";
+
+export const DBG_SECTIONS: { id: DbgSection; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "network", label: "Network" },
+  { id: "voice", label: "Voice" },
+  { id: "backend", label: "Backend" },
+  { id: "frontend", label: "Frontend" },
+  { id: "storage", label: "Storage" },
+];
+
+/** How many events the webview holds. The native ring is deeper; this is what is rendered. */
+export const DBG_VIEW_CAP = 2000;
+
+/** The CSS class that colours a feed line's level tag. */
+export function levelClass(level: string): string {
+  return `lvl-${level === "ERROR" ? "err" : level.toLowerCase()}`;
+}
+
+/**
+ * The chip for one WebRTC state value.
+ *
+ * `connected` and `completed` are both success (ICE reports the latter once it stops checking);
+ * `failed` and `closed` are the two that end a call, and only one of them is a fault. Everything
+ * in between is in progress, which is advisory rather than wrong.
+ */
+export function webrtcChip(state: string): { label: string; tone: "ok" | "warn" | "danger" | "faint" } {
+  const label = state.toUpperCase();
+  if (state === "connected" || state === "completed" || state === "stable") return { label, tone: "ok" };
+  if (state === "failed") return { label, tone: "danger" };
+  if (state === "closed") return { label, tone: "faint" };
+  return { label, tone: "warn" };
+}
+
+/** The chip for how a call's media is actually travelling. */
+export function mediaPathChip(path: DebugVoicePeer["path"]): {
+  label: string;
+  tone: "ok" | "warn" | "faint";
+} {
+  if (path === "relayed") return { label: "TURN RELAY", tone: "warn" };
+  if (path === "direct") return { label: "DIRECT", tone: "ok" };
+  return { label: "UNKNOWN", tone: "faint" };
+}
+
+// --- section serialisers -------------------------------------------------------------------
+
+/**
+ * This device's own reachability as copyable lines.
+ *
+ * These serialisers live beside the renderer on purpose. If copy had its own formatting the two
+ * could disagree, and a pasted bug report that does not match the screenshot it arrived with is
+ * worse than no bug report: the reader has to work out which one is lying before they can start.
+ */
+export function deviceLines(device: DebugDevice | null, aliases: Aliases, redact: boolean): string[] {
+  if (!device) return [];
+  const mask = (s: string) => maybeRedact(s, aliases, redact);
+  return [
+    `public ipv4: ${device.public_ipv4.map(mask).join(" ") || "(none)"}`,
+    `public ipv6: ${device.public_ipv6.map(mask).join(" ") || "(none)"}`,
+    `directly reachable: ${device.public_direct ? "yes" : "no"}`,
+    `autonat: ${device.autonat || "(no verdict)"}`,
+    `router maps ports: ${device.router_maps ? "yes" : "no"}`,
+    `relay likely required: ${device.relay_likely_required ? "yes" : "no"}`,
+  ];
+}
+
+/** Every member's reachability as copyable lines, the same values the table renders. */
+export function routeLines(
+  servers: readonly DebugServer[],
+  routes: Readonly<Record<number, MemberRoute[]>>,
+  aliases: Aliases,
+  redact: boolean,
+): string[] {
+  const mask = (s: string) => maybeRedact(s, aliases, redact);
+  return servers.flatMap((s) =>
+    (routes[s.id] ?? []).map((r) => {
+      const chip = routeChip(routeState(r));
+      const addresses = r.addresses.map(mask).join(" ") || "(no address)";
+      const next = r.next_dial_in_ms ? formatDuration(r.next_dial_in_ms) : "-";
+      return `${s.name} ${mask(r.fingerprint)} ${chip.label} peer=${mask(r.peer) || "(none)"} seq=${r.seq} fails=${r.dial_attempts} next=${next} ${addresses}`;
+    }),
+  );
+}
+
+/** The live call's per-peer state as copyable lines. Empty outside a call. */
+export function voiceLines(peers: readonly DebugVoicePeer[], aliases: Aliases, redact: boolean): string[] {
+  return peers.map(
+    (p) =>
+      `${maybeRedact(p.fingerprint, aliases, redact)} connection=${p.connection} ice=${p.ice} signaling=${p.signaling} path=${p.path}`,
+  );
+}
+
 // --- copy --------------------------------------------------------------------------------
 
 /**

@@ -528,16 +528,36 @@ impl FileWriter {
         ))
     }
 
-    /// Block until everything queued so far has been written, or the timeout expires.
+    /// Block until everything queued so far has been written, or the deadline passes.
     ///
-    /// Returns whether the acknowledgement arrived. A `false` here means the worker is wedged or
-    /// gone, which is worth knowing rather than assuming.
+    /// Returns whether the acknowledgement arrived. A `false` means the worker is wedged or gone,
+    /// which is worth knowing rather than assuming.
+    ///
+    /// The barrier waits for a queue slot rather than giving up when the queue is momentarily
+    /// full. Unlike the logging path, blocking here is the whole point: every caller of this is
+    /// explicitly asking for the disk to be current, and the busiest moment (a full queue) is
+    /// exactly when a shutdown flush most needs to land. Failing instead would drop the last
+    /// events written, which are the ones a crash report is made of.
     pub(crate) fn sync(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
         let (ack_tx, ack_rx) = sync_channel(1);
-        if self.tx.try_send(Op::Sync(ack_tx)).is_err() {
-            return false;
+        let mut pending = Op::Sync(ack_tx);
+        loop {
+            match self.tx.try_send(pending) {
+                Ok(()) => break,
+                // Nobody is draining and nobody ever will be.
+                Err(TrySendError::Disconnected(_)) => return false,
+                Err(TrySendError::Full(returned)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    pending = returned;
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
         }
-        match ack_rx.recv_timeout(timeout) {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match ack_rx.recv_timeout(left) {
             Ok(()) => true,
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => false,
         }
@@ -678,6 +698,22 @@ mod tests {
     fn segment_names_keep_the_first_file_where_people_expect_it() {
         assert_eq!(segment_name("debug_log_20260823_120000", 1), "debug_log_20260823_120000.txt");
         assert_eq!(segment_name("debug_log_20260823_120000", 2), "debug_log_20260823_120000_002.txt");
+    }
+
+    /// The barrier has to survive the busiest moment, because that is when it is used: the last
+    /// thing a crashing process does is flush, and it flushes a full queue.
+    #[test]
+    fn the_flush_barrier_waits_for_a_slot_instead_of_giving_up_on_a_full_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, sink) = writer(dir.path());
+        for n in 0..(QUEUE_CAPACITY + 200) {
+            write_line(&sink, &format!("event {n}\n"));
+        }
+        assert!(
+            writer.sync(SYNC_TIMEOUT),
+            "a barrier queued behind a backlog still has to land"
+        );
+        assert!(writer.health().events_written > 0);
     }
 
     #[test]
