@@ -10831,6 +10831,12 @@ struct ConsoleLogEvent {
     /// no longer what decides which console section the event appears in.
     target: String,
     fields: Vec<ConsoleField>,
+    /// Fields this event had to drop at the cap.
+    ///
+    /// Carried so a shortened field list reads as shortened. The JSON and the text row already say
+    /// so, and a console that quietly showed the surviving thirty-two would be the one rendering
+    /// where a reader could take the list for the whole of it.
+    fields_dropped: u32,
     /// The mode this line was rendered at. On every event rather than only in the page header,
     /// because an excerpt someone pastes gets separated from its header immediately.
     capture: &'static str,
@@ -10864,6 +10870,7 @@ impl From<catcoms_diagnostics::EventView> for ConsoleLogEvent {
                     sensitive: f.sensitive,
                 })
                 .collect(),
+            fields_dropped: view.fields_dropped,
             capture: view.capture,
         }
     }

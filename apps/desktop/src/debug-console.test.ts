@@ -70,6 +70,7 @@ function ev(over: Partial<LogEvent> = {}): LogEvent {
     attempt: null,
     target: "catcoms_net",
     fields: [],
+    fields_dropped: 0,
     capture: "safe",
     ...over,
   };
@@ -173,6 +174,18 @@ test("an un-migrated line still reads as its prose, and is tellable apart from a
 
 test("a phase of observation is not printed, because every bare event would carry it", () => {
   assert.equal(eventText(ev({ code: "NET.LISTEN" })), "NET.LISTEN");
+});
+
+/**
+ * An event that hit the field cap shows a shortened list, and the shortening has to be the one
+ * thing the line does mention: otherwise a reader takes what is there for the whole of it. The
+ * native renderings say the same, and this is the third.
+ */
+test("a line whose event lost fields to the cap says so", () => {
+  const kept = ev({ code: "NET.X", fields: [f("a", "1")] });
+  assert.equal(eventText(kept), "NET.X a=1", "and says nothing when nothing was lost");
+  const trimmed = ev({ code: "NET.X", fields: [f("a", "1")], fields_dropped: 9 });
+  assert.equal(eventText(trimmed), "NET.X a=1 fields_dropped=9");
 });
 
 test("a frontend line drops the target, which would read catcoms_ui on every row", () => {

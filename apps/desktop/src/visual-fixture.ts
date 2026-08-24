@@ -138,6 +138,7 @@ const dbgEvent = (e: {
   attempt: null,
   target: e.target,
   fields: (e.fields ?? []).map((f) => ({ name: f.name, value: f.value, sensitive: f.sensitive ?? false })),
+  fields_dropped: 0,
   capture: "enhanced",
 });
 

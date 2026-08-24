@@ -57,6 +57,8 @@ export type LogEvent = {
   /** The emitting module. Kept for locating the code that said this, no longer used to group. */
   target: string;
   fields: LogField[];
+  /** Fields this event had to drop at the cap, so a shortened list reads as shortened. */
+  fields_dropped: number;
   /** The capture mode this event was rendered at. */
   capture: string;
 };
@@ -245,6 +247,10 @@ export function eventText(e: LogEvent): string {
     if (f === lead) continue;
     bits.push(`${f.name}=${f.value}`);
   }
+  // Last, and only when it happened. An event that hit the field cap shows a shortened list, and
+  // without this the shortening is the one thing the line does not mention: a reader would take
+  // what is there for the whole of it. The native renderings say the same.
+  if (e.fields_dropped > 0) bits.push(`fields_dropped=${e.fields_dropped}`);
   return bits.join(" ");
 }
 
