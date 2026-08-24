@@ -376,17 +376,37 @@ Neither was in a review, and both are the kind of thing a passing suite says not
   An enum listing outcomes no code produces invites a UI branch for a case that never happens.
 - **Structured detail on `AppError`.** Removed rather than carried unused.
 
-## 4a. Open findings from the Part 3 review
+## 4a. Every finding from the Part 3 review
+<!-- Twelve of twenty resolved: P3-001 to P3-011 and P3-014. Eight open, all Medium or Low. -->
 
-`docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`, pinned to `f6c1be6`. Three are fixed
-(see "Corrections made after review"); the rest are open. Read the review for the detail, and treat
-this as the triage rather than the record.
 
-**Do these before instrumenting anything further.** The argument for the order is the review's own,
-and it is sound: more instrumentation widens the gap between what is recorded and what can be read.
+`docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`, pinned to `f6c1be6`. Read the review for
+the detail; this is the scoreboard.
 
-| ID | Sev | Open finding | Note |
+**All twenty are listed, fixed ones included.** They used to be two lists, open here and fixed under
+"Corrections made after review", and P3-003 fell between them: the work was done and committed and
+the record simply lost it. A diagnostics project whose own tracking silently drops a row is not in a
+position to lecture anyone, and two lists that have to agree are one list too many. The count is the
+check: if this table does not have twenty rows, something has gone missing.
+
+**Do the open ones before instrumenting anything further.** The argument for the order is the
+review's own, and it is sound: more instrumentation widens the gap between what is recorded and what
+can be read.
+
+| ID | Sev | Finding | Status |
 |---|---|---|---|
+| P3-001 | Critical | Safe multiaddr rendering can expose a raw peer id | Fixed, `dbf965f` |
+| P3-002 | Critical | The exported-report privacy promise is false and unvalidated | Wording fixed, `dbf965f`. The validator that would make a stronger claim true is M6. |
+| P3-003 | High | Saved reports bypass retention and can fill the log directory | Fixed, `cfbead6` |
+| P3-004 | High | Trace correlation stops before the actor and event pipeline | Fixed, `74166bf` |
+| P3-005 | High | The console consumes a lossy, hard-coded Enhanced projection | Fixed, `dde528d` |
+| P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | Fixed, `93053a5` |
+| P3-007 | High | Console polling can overlap and scales with server count | Fixed, `dde528d` |
+| P3-008 | High | A formatted event has no size bound before allocation | Fixed, `8a403fb` |
+| P3-009 | High | Task supervision misses the paths that make the UI stale | Fixed, `cd52a2c` |
+| P3-010 | High | Event sequencing detects gaps but does not repair them | Fixed, `3770efa` |
+| P3-011 | Med | Frontend structured events flatten into `UI.EVENT` | Fixed, `dde528d` |
+| P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Fixed, `3bcb6c7` |
 | P3-012 | Med | Console/export reads clone events under the global hub mutex | **Start here.** Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
