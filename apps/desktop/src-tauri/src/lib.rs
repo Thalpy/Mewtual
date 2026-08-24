@@ -11537,6 +11537,41 @@ fn ui_log_allowance(channel: UiLogChannel, now_ms: i64) -> (bool, Option<u64>) {
     (false, None)
 }
 
+/// Read a JSON object into ordered pairs.
+///
+/// `serde` will not map an object onto a `Vec` of pairs on its own: it wants a sequence, and says
+/// so. A visitor gets the entries in the order the parser met them, which is the order the webview
+/// wrote them.
+fn ordered_fields<'de, D>(deserializer: D) -> Result<Vec<(String, serde_json::Value)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct InDocumentOrder;
+
+    impl<'de> serde::de::Visitor<'de> for InDocumentOrder {
+        type Value = Vec<(String, serde_json::Value)>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("an object of diagnostic fields")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            // Bounded by the caller: `record_ui_events` drops everything past the event's field
+            // cap, and the batch itself is capped before that.
+            let mut fields = Vec::with_capacity(map.size_hint().unwrap_or(0).min(64));
+            while let Some(pair) = map.next_entry()? {
+                fields.push(pair);
+            }
+            Ok(fields)
+        }
+    }
+
+    deserializer.deserialize_map(InDocumentOrder)
+}
+
 /// One structured observation from the webview.
 #[derive(Deserialize)]
 struct UiDiagnosticEvent {
@@ -11549,8 +11584,18 @@ struct UiDiagnosticEvent {
     phase: String,
     #[serde(default)]
     duration_ms: Option<u64>,
-    #[serde(default)]
-    fields: HashMap<String, serde_json::Value>,
+    /// The webview's fields, in the order it wrote them.
+    ///
+    /// A `Vec` of pairs rather than a `HashMap`, because a map has no order and Rust's is
+    /// deliberately seeded per process: the same events exported from two runs came out with their
+    /// fields shuffled differently, which is the byte-identical-output property gone for exactly
+    /// the events the console shows most. Found by adversarial review (P3-015).
+    ///
+    /// Insertion order rather than sorted, because that is what the canonical event does with its
+    /// own fields and what `render.rs` promises. Sorting would also be deterministic, and would
+    /// throw away the order the producer meant.
+    #[serde(default, deserialize_with = "ordered_fields")]
+    fields: Vec<(String, serde_json::Value)>,
 }
 
 /// Record structured observations from the webview.
@@ -11996,6 +12041,34 @@ mod tests {
             "/ip6/2001:db8::1/udp/31484/quic-v1"
         );
         assert_eq!(json["capture"], "enhanced");
+    }
+
+    /// The webview's fields keep the order it wrote them in.
+    ///
+    /// They arrived in a `HashMap`, whose iteration order Rust seeds per process, so the same
+    /// events exported from two runs came out with their fields shuffled differently. That is the
+    /// byte-identical-output property gone, for exactly the events the console shows most: a report
+    /// that cannot be diffed against another cannot be compared between two peers, which is how
+    /// some sync bugs are localised at all. Found by adversarial review (P3-015).
+    #[test]
+    fn a_webview_events_fields_keep_the_order_it_wrote_them() {
+        // Deliberately not alphabetical, so a container that sorted would be caught too.
+        let json = r#"{
+            "section": "channels",
+            "code": "UI.TEST",
+            "level": "info",
+            "fields": { "zulu": 1, "alpha": 2, "mike": 3 }
+        }"#;
+        let event: UiDiagnosticEvent = serde_json::from_str(json).expect("the webview's shape");
+        let names: Vec<&str> = event.fields.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["zulu", "alpha", "mike"]);
+
+        // And it is the same on every parse, which a hashed container is not.
+        for _ in 0..8 {
+            let again: UiDiagnosticEvent = serde_json::from_str(json).unwrap();
+            let order: Vec<&str> = again.fields.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(order, names);
+        }
     }
 
     /// A locked vault must not be reported as a broken server.

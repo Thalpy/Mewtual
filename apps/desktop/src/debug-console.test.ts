@@ -39,6 +39,7 @@ import {
   webrtcChip,
   type DebugDevice,
   type DebugVoicePeer,
+  type Aliases,
   type LogEvent,
   type MemberRoute,
   type TaskHealth,
@@ -217,7 +218,7 @@ test("parts redact their text and drop the target for a frontend event", () => {
   const a = makeAliases();
   const p = eventParts(bridged("dial 203.0.113.9", { section: "ui", view: "frontend", target: "catcoms_ui" }), a, true);
   assert.equal(p.target, "");
-  assert.equal(p.text, "dial [ip 1]");
+  assert.match(p.text, /^dial \[ip [0-9a-f]{6}\]$/);
 });
 
 test("fields alone still render when an event has nothing but its code", () => {
@@ -231,9 +232,10 @@ test("redaction gives each distinct value a stable alias, so correlation survive
   const first = redactText("dial /ip4/203.0.113.9/udp/1 failed", a);
   const second = redactText("dial /ip4/203.0.113.9/udp/1 failed again", a);
   const other = redactText("dial /ip4/198.51.100.7/udp/1 failed", a);
-  assert.match(first, /\[ip 1\]/);
-  assert.ok(second.includes("[ip 1]"), "the same address keeps its alias");
-  assert.ok(other.includes("[ip 2]"), "a different address gets a different one");
+  const mask = first.match(/\[ip [0-9a-f]{6}\]/)?.[0];
+  assert.ok(mask, first);
+  assert.ok(second.includes(mask), "the same address keeps its alias");
+  assert.ok(!other.includes(mask), "a different address gets a different one");
   assert.ok(!first.includes("203.0.113.9"));
 });
 
@@ -241,16 +243,17 @@ test("an IPv6 literal is masked whole, not chewed into hex pieces", () => {
   const a = makeAliases();
   const out = redactText("[2601:441:4581:a5c0:b81d:9e0b:cab1:de04]:23123 unreachable", a);
   assert.ok(!out.includes("2601:441"), out);
-  assert.match(out, /\[ip 1\]/);
+  assert.match(out, /\[ip [0-9a-f]{6}\]/);
 });
 
 test("peer ids are masked in both the shapes the app prints them in", () => {
   const a = makeAliases();
   const b58 = redactText("local_peer_id=12D3KooWSaXFXMFgkGxgBF6UPEojspeSj2KaDiP4ks5poLzieKKN", a);
-  assert.match(b58, /\[peer 1\]/);
+  assert.match(b58, /\[peer [0-9a-f]{6}\]/);
   assert.ok(!b58.includes("12D3Koo"), b58);
   const hex = redactText("peer=2b5df389", a);
-  assert.match(hex, /\[peer 2\]/);
+  assert.match(hex, /\[peer [0-9a-f]{6}\]/);
+  assert.notEqual(b58, hex, "two different ids are two different aliases");
 });
 
 test("a short or truncated peer id is masked too, rather than slipping past a length rule", () => {
@@ -260,21 +263,67 @@ test("a short or truncated peer id is masked too, rather than slipping past a le
   const a = makeAliases();
   const out = redactText("peer=12D3KooWFixtureMoss failed", a);
   assert.ok(!out.includes("12D3Koo"), out);
-  assert.match(out, /\[peer 1\]/);
+  assert.match(out, /\[peer [0-9a-f]{6}\]/);
 });
 
-test("ip and peer aliases are numbered per kind and do not collide", () => {
-  const a = makeAliases();
-  assert.equal(alias(a, "ip", "1.2.3.4"), "[ip 1]");
-  assert.equal(alias(a, "peer", "abcdef12"), "[peer 1]");
-  assert.equal(alias(a, "ip", "5.6.7.8"), "[ip 2]");
-  assert.equal(alias(a, "ip", "1.2.3.4"), "[ip 1]", "and are stable");
+test("aliases are per kind and per value, and do not collide across kinds", () => {
+  const a = makeAliases("fixed-salt");
+  const first = alias(a, "ip", "1.2.3.4");
+  assert.match(first, /^\[ip [0-9a-f]{6}\]$/);
+  assert.equal(alias(a, "ip", "1.2.3.4"), first, "and are stable");
+  assert.notEqual(alias(a, "ip", "5.6.7.8"), first, "a different value is a different alias");
+  // `[ip …]` and `[peer …]` must not read as the same thing even for the same underlying string.
+  assert.notEqual(alias(a, "peer", "1.2.3.4"), first);
+});
+
+/**
+ * The property the review asks for by name, and the reason the counter had to go.
+ *
+ * Aliases were minted in the order values were first seen, so merely visiting a section, typing a
+ * filter or rendering a route before pressing Save decided which address got `[ip 1]`. The same
+ * events then exported differently depending on where the user had clicked first, and a report that
+ * cannot be diffed against another cannot be compared between two peers.
+ */
+test("what gets exported does not depend on where the user clicked first", () => {
+  const events = [
+    bridged("dial failed 198.51.100.7", { seq: 1, level: "WARN" }),
+    bridged("dial failed 203.0.113.9", { seq: 2, level: "WARN" }),
+    bridged("peer 12D3KooWFixtureMoss unreachable", { seq: 3, level: "WARN" }),
+  ];
+  const routes = { 1: [{ ...route, addresses: ["/ip4/203.0.113.9/udp/1/quic-v1"] }] };
+  const servers = [{ id: 1, name: "Studio" }];
+
+  // One salt, because two consoles are two sessions and are *meant* to differ; what must not differ
+  // is two exports from the same session that were navigated differently.
+  const report = (visit: (a: Aliases) => void) => {
+    const a = makeAliases("one-session");
+    visit(a);
+    return copyBundle({ version: "0.3.0", at: 0, redacted: true, capture: "safe" }, [
+      { title: "network", lines: routeLines(servers, routes, a, true) },
+      { title: "backend", lines: events.map((e) => eventLine(e, a, true)) },
+    ]);
+  };
+
+  const straightToSave = report(() => {});
+  const readTheFeedFirst = report((a) => {
+    for (const e of [...events].reverse()) eventLine(e, a, true);
+  });
+  const openedTheNetworkTab = report((a) => {
+    routeLines(servers, routes, a, true);
+    eventLine(events[2], a, true);
+  });
+
+  assert.equal(readTheFeedFirst, straightToSave);
+  assert.equal(openedTheNetworkTab, straightToSave);
+  // And the masking actually happened, so this is not three identical unredacted reports.
+  assert.ok(!straightToSave.includes("203.0.113.9"), straightToSave);
+  assert.match(straightToSave, /\[ip [0-9a-f]{6}\]/);
 });
 
 test("redaction is off unless asked for", () => {
   const a = makeAliases();
   assert.equal(maybeRedact("1.2.3.4", a, false), "1.2.3.4");
-  assert.equal(maybeRedact("1.2.3.4", a, true), "[ip 1]");
+  assert.match(maybeRedact("1.2.3.4", a, true), /^\[ip [0-9a-f]{6}\]$/);
 });
 
 test("a filter matches the rendered line, so typing what you see works", () => {
@@ -317,7 +366,10 @@ test("a trace filter narrows a feed to one operation, from either form of the id
 test("a filter can search the masked text while redaction is on", () => {
   const a = makeAliases();
   const events = [bridged("dial 203.0.113.9", { seq: 1 })];
-  assert.equal(filterEvents(events, { levels: ["INFO"], text: "[ip 1]" }, a, true).length, 1);
+  // Typing the alias off the screen is a legitimate thing to do, so the filter has to match what
+  // is rendered rather than what is underneath.
+  const shown = maybeRedact("203.0.113.9", a, true);
+  assert.equal(filterEvents(events, { levels: ["INFO"], text: shown }, a, true).length, 1);
 });
 
 // --- capture control --------------------------------------------------------------------------

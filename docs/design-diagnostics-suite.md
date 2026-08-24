@@ -224,6 +224,26 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-015 (medium), fixed.** Two independent causes of the same broken promise.
+  Redaction aliases were minted in encounter order (`[ip 1]`, `[ip 2]`) into a map kept for the
+  console's lifetime, so merely visiting a section, typing a filter or rendering a route before
+  pressing Save decided which address got which number. The same events exported differently
+  depending on where the user had clicked first. An alias is now a function of the value under a
+  per-console random salt, so encounter order cannot reach it.
+  **The salt is random and never exported, deliberately.** Deriving it from something printed in
+  the report, the session id say, would make the alias reversible: IPv4 is a four-billion-value
+  space and a reader holding the salt could try all of it. A value nobody outside the window has is
+  the difference between masking an address and encoding it.
+  And the webview's fields crossed the bridge in a `HashMap`, whose iteration order Rust seeds per
+  process, so field order varied between runs for exactly the events the console shows most. They
+  arrive as ordered pairs now, in the order the producer wrote them, which is what the canonical
+  event does with its own fields.
+  The golden test is the one the review asks for by name: three navigation orders, byte-identical
+  reports. It was verified by restoring the counter, and only that test failed, so it is isolating
+  the ordering property rather than the alias format.
+  **Still open, and belongs to M6:** source-typed references instead of output regexes. The native
+  side already produces `SessionRef` values; the regex is the console's screenshot backstop and
+  over-masks on purpose, which is the safe direction and is documented where it lives.
 * **P3-012 (medium), fixed.** The hot-path guarantee in the hub's docs described writes and said
   nothing about readers, and the readers were the expensive half: `since`, `section_since` and
   `trace` deep-cloned every event they returned *while holding the one lock every producer needs*.
@@ -427,7 +447,7 @@ can be read.
 | P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Fixed, `3bcb6c7` |
 | P3-012 | Med | Console/export reads clone events under the global hub mutex | Fixed, see below |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | Fixed, `6433907` + `013fc7a` |
-| P3-015 | Med | Redaction and frontend field ordering break deterministic export | **Start here.** Directly undercuts the determinism claim in `render.rs`. |
+| P3-015 | Med | Redaction and frontend field ordering break deterministic export | Fixed, see below. Source-typed references instead of output regexes is M6. |
 | P3-016 | Med | Startup capture begins too late for static-import failures | Fixed, `3480681`. One part open: a failure to fetch `main.ts` itself needs `index.html`, which the CSP makes awkward. |
 | P3-017 | Med | The typed-error registry is conventional, not enforced | Fixed, `d061574`. The `SERVER.ACTOR.UNAVAILABLE` split is not done; see below. |
 | P3-018 | Med | Unread reconciliation uses an unsafe sender-clock cursor | Pre-existing, not introduced by this work. |

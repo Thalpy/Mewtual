@@ -153,22 +153,76 @@ export function formatDuration(ms: number): string {
  * addresses read `[redacted]` no longer says it. So each distinct value gets its own alias, kept
  * for the life of the console, and the same address is the same `[ip 2]` every time it appears.
  */
-export type Aliases = Map<string, string>;
+export type Aliases = {
+  /**
+   * Random per console session, and never exported.
+   *
+   * The alias has to be unguessable, not just stable. Deriving it from something printed in the
+   * report, the session id say, would make it reversible: IPv4 is a four-billion-value space and a
+   * reader holding the salt could simply try them all. A value nobody outside this window has is
+   * the difference between masking an address and encoding it.
+   */
+  salt: string;
+  /** Pure cache. The alias is a function of its inputs, so this only saves the arithmetic. */
+  cache: Map<string, string>;
+};
 
-export function makeAliases(): Aliases {
-  return new Map();
+/**
+ * A fresh aliasing scheme.
+ *
+ * `salt` is injectable for tests, which need reproducible aliases; nothing in the app passes one.
+ */
+export function makeAliases(salt = randomSalt()): Aliases {
+  return { salt, cache: new Map() };
 }
 
-/** The alias for one value, minting a new one on first sight. */
+function randomSalt(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * A short stable tag for one value.
+ *
+ * FNV-1a, truncated. Not a security boundary: what protects the underlying value is the salt above,
+ * which never leaves this window. This only has to be stable and collide rarely, and at six hex
+ * characters a report holding a hundred distinct addresses has about a three-in-ten-thousand chance
+ * of any pair sharing a tag.
+ */
+function tag(salt: string, kind: string, value: string): string {
+  let hash = 0x811c9dc5;
+  for (const ch of `${salt} ${kind} ${value}`) {
+    hash ^= ch.codePointAt(0) ?? 0;
+    // The FNV prime, by shift-add because JavaScript's `*` would lose the low bits to a double.
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) >>> 0;
+  }
+  return (hash & 0xffffff).toString(16).padStart(6, "0");
+}
+
+/**
+ * The alias for one value.
+ *
+ * # Why this is not a counter any more
+ *
+ * It used to mint `[ip 1]`, `[ip 2]` in the order values were first seen, in a map kept for the
+ * console's lifetime. So merely visiting a section, typing a filter or rendering a route before
+ * pressing Save decided which address got which number, and the same events exported differently
+ * depending on where the user had clicked first. A report that cannot be diffed against another
+ * cannot be compared between two peers, which is how some sync bugs are localised at all. Found by
+ * adversarial review (P3-015).
+ *
+ * A function of the value instead, so encounter order cannot reach it. The property that matters is
+ * unchanged and is the reason redaction is aliased rather than blanked: the same address is the
+ * same alias every time it appears, so "it keeps dialling the same two addresses" survives masking,
+ * and that sentence is the whole diagnosis of the hour-long isolation.
+ */
 export function alias(aliases: Aliases, kind: string, value: string): string {
   const key = `${kind}:${value}`;
-  const existing = aliases.get(key);
+  const existing = aliases.cache.get(key);
   if (existing) return existing;
-  // Numbered per kind, so `[ip 1]` and `[peer 1]` can coexist without reading as the same thing.
-  let n = 1;
-  for (const k of aliases.keys()) if (k.startsWith(`${kind}:`)) n += 1;
-  const minted = `[${kind} ${n}]`;
-  aliases.set(key, minted);
+  const minted = `[${kind} ${tag(aliases.salt, kind, value)}]`;
+  aliases.cache.set(key, minted);
   return minted;
 }
 
