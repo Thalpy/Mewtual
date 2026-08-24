@@ -26,7 +26,7 @@ use catcoms_rt::{Clock, RngCore};
 use crate::config::{CaptureConfig, CaptureGate, CaptureMode, Level, Section};
 use crate::event::{DiagnosticEvent, SpanId, TraceId};
 use crate::redact::{RefDomain, SessionRef, SessionSalt};
-use crate::ring::{Ring, RingStats};
+use crate::ring::{Ring, RingStats, StoredEvent};
 
 /// How many events the hub holds by default.
 ///
@@ -54,6 +54,10 @@ struct HubInner {
 ///   [`CaptureGate`]. That is the common case under a debug or trace level on a busy section.
 /// * An event that is recorded takes the store's lock for a bounded push: a few counter
 ///   increments and a `VecDeque` append, with no allocation, no I/O and no scanning.
+/// * A *reader* takes it for a bounded range and some reference counts. This guarantee used to
+///   describe writes only, which left the expensive half unstated: the console polls every second
+///   and an export pages the whole ring, and both deep-cloned every event they returned while
+///   holding the one lock every producer needs.
 /// * The clock is read before the lock, never under it.
 /// * Field names are owned by the event rather than interned in a shared table, so building one
 ///   touches no global state.
@@ -265,13 +269,14 @@ impl DiagnosticHub {
     }
 
     /// Events after `after_seq`, oldest first, at most `limit`.
-    pub fn since(&self, after_seq: u64, limit: usize) -> Vec<DiagnosticEvent> {
-        self.lock()
-            .ring
-            .since(after_seq, limit)
-            .into_iter()
-            .cloned()
-            .collect()
+    ///
+    /// Returns handles, not copies, and the difference is what a reader costs a writer. An event
+    /// can carry thirty-two fields of owned strings; deep-cloning a page of them *under this lock*
+    /// blocked every producer for the length of the copy, and the console polls every second while
+    /// a full export pages the whole ring. The lock is held long enough to locate a range and bump
+    /// some reference counts. Rendering happens afterwards, outside it.
+    pub fn since(&self, after_seq: u64, limit: usize) -> Vec<StoredEvent> {
+        self.lock().ring.since(after_seq, limit)
     }
 
     /// Events after `after_seq` within one section.
@@ -280,18 +285,13 @@ impl DiagnosticHub {
         section: Section,
         after_seq: u64,
         limit: usize,
-    ) -> Vec<DiagnosticEvent> {
-        self.lock()
-            .ring
-            .section_since(section, after_seq, limit)
-            .into_iter()
-            .cloned()
-            .collect()
+    ) -> Vec<StoredEvent> {
+        self.lock().ring.section_since(section, after_seq, limit)
     }
 
     /// Every stage of one operation, in order.
-    pub fn trace(&self, trace: TraceId) -> Vec<DiagnosticEvent> {
-        self.lock().ring.trace(trace).into_iter().cloned().collect()
+    pub fn trace(&self, trace: TraceId) -> Vec<StoredEvent> {
+        self.lock().ring.trace(trace)
     }
 
     /// How many events, and how many errors, one section has seen this session.
@@ -621,6 +621,52 @@ mod tests {
 
         // Sequences are dense and increasing across every thread's contributions.
         let held = hub.since(0, 1000);
+        for pair in held.windows(2) {
+            assert!(pair[1].seq > pair[0].seq, "the timeline stayed ordered");
+        }
+    }
+
+    /// Readers and writers at once, which is the shape the console actually creates.
+    ///
+    /// An open console polls every second and an export pages the whole ring, all while actor and
+    /// network threads keep recording. This does not measure how long anybody waited: a wall-clock
+    /// benchmark would need a monotonic instant read directly, which `scripts/check-no-ambient.sh`
+    /// forbids outside `catcoms-rt`, and a timing assertion in a test suite is a flake waiting for
+    /// a busy machine.
+    /// What it does prove is that the two sides compose: no deadlock, no torn read, and every
+    /// handed-out handle still readable after the store has moved on from it.
+    #[test]
+    fn readers_and_writers_do_not_get_in_each_others_way() {
+        let (hub, _) = hub(CaptureMode::Safe);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let hub = hub.clone();
+                scope.spawn(move || {
+                    for _ in 0..500 {
+                        hub.record(DiagnosticEvent::info(Section::Sync, "SYNC.WRITE"));
+                    }
+                });
+            }
+            for _ in 0..4 {
+                let hub = hub.clone();
+                scope.spawn(move || {
+                    for _ in 0..500 {
+                        // Held past the read, the way rendering does, so eviction happens under a
+                        // live handle rather than politely after it.
+                        let page = hub.since(0, 64);
+                        for event in &page {
+                            assert!(!event.code.is_empty());
+                        }
+                    }
+                });
+            }
+        });
+        let stats = hub.stats();
+        assert_eq!(
+            stats.latest_seq, 2000,
+            "every write got exactly one sequence"
+        );
+        let held = hub.since(0, 10_000);
         for pair in held.windows(2) {
             assert!(pair[1].seq > pair[0].seq, "the timeline stayed ordered");
         }

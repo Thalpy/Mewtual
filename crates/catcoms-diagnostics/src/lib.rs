@@ -65,4 +65,4 @@ pub use redact::{
     SessionSalt, MAX_ADDRESS_CHARS, MAX_BRIDGED_MESSAGE, MAX_SAFE_TEXT,
 };
 pub use render::{event_json, event_line, event_view, EventView, ViewField};
-pub use ring::{Ring, RingStats};
+pub use ring::{Ring, RingStats, StoredEvent};

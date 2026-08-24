@@ -224,6 +224,23 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-012 (medium), fixed.** The hot-path guarantee in the hub's docs described writes and said
+  nothing about readers, and the readers were the expensive half: `since`, `section_since` and
+  `trace` deep-cloned every event they returned *while holding the one lock every producer needs*.
+  An event can carry thirty-two fields of owned strings, the console polls every second, and an
+  export pages the whole ring. The store holds `Arc<DiagnosticEvent>` now: a read locates its range,
+  clones handles and lets go, and rendering happens outside the lock. Pointer identity is what the
+  test asserts, because that is the property.
+  Two smaller things in the same file. `Ring::index` was a linear scan over the twenty-two sections,
+  twice per push under the lock, which is exactly what `Section::index()` exists to avoid and what
+  its own doc comment warns about. And polling started from the oldest retained event every time, so
+  a quiet second walked the entire ring to return nothing; sequences are dense across the deque, so
+  the starting point is arithmetic.
+  **No timing benchmark.** The review asks for a p95/p99 budget. A wall-clock measurement needs a
+  monotonic instant read that `scripts/check-no-ambient.sh` forbids outside `catcoms-rt`, and a
+  timing assertion in this suite would be a flake waiting for a busy machine. What is tested instead
+  is the structural property the budget was a proxy for, plus readers and writers composing under
+  contention without deadlock or a torn read.
 * **P3-009 (high), fixed.** Only the server actor was supervised. Six other long-lived tasks had
   their `JoinHandle` dropped on the floor, so their deaths were unobserved: the network monitor, the
   discovery timer, the four reachability folds, and the event forwarder. The forwarder is the one
@@ -407,7 +424,7 @@ can be read.
 | P3-010 | High | Event sequencing detects gaps but does not repair them | Fixed, `3770efa` |
 | P3-011 | Med | Frontend structured events flatten into `UI.EVENT` | Fixed, `dde528d` |
 | P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Fixed, `3bcb6c7` |
-| P3-012 | Med | Console/export reads clone events under the global hub mutex | **Start here.** Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
+| P3-012 | Med | Console/export reads clone events under the global hub mutex | Fixed, see below |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
 | P3-016 | Med | Startup capture begins too late for static-import failures | `main.ts` imports run before its first statement. |

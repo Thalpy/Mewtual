@@ -9,9 +9,24 @@
 //! a quiet period, which is the single most misleading thing a diagnostic store can do.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
-use crate::config::{Level, Section, SECTIONS};
+use crate::config::{Level, Section};
 use crate::event::DiagnosticEvent;
+
+/// A handle to a stored event.
+///
+/// The store hands these out rather than copies. An event can carry thirty-two fields of owned
+/// strings, and the reads that matter are not small: the console polls every second and a full
+/// export pages the whole ring. Cloning that depth *under the hub's lock* meant every reader
+/// blocked every producer for as long as the copy took, on paths that include actor and network
+/// work.
+///
+/// So a read locates its range, clones handles, and lets go. The deep work, rendering an event at a
+/// capture mode, happens afterwards with no lock held. Found by adversarial review (P3-012), which
+/// noted that the hot-path guarantee in the hub's docs described writes and said nothing about what
+/// concurrent readers cost.
+pub type StoredEvent = Arc<DiagnosticEvent>;
 
 /// What the store knows about itself.
 ///
@@ -33,7 +48,7 @@ pub struct RingStats {
 /// A bounded, chronological store of diagnostic events.
 #[derive(Debug)]
 pub struct Ring {
-    events: VecDeque<DiagnosticEvent>,
+    events: VecDeque<StoredEvent>,
     capacity: usize,
     next_seq: u64,
     stats: RingStats,
@@ -64,19 +79,41 @@ impl Ring {
             Level::Warn => self.stats.warnings += 1,
             _ => {}
         }
-        let at = Self::index(event.section);
+        let at = event.section.index();
         self.per_section[at] += 1;
         if event.level == Level::Error {
             self.per_section_errors[at] += 1;
         }
 
         let seq = event.seq;
-        self.events.push_back(event);
+        self.events.push_back(Arc::new(event));
         while self.events.len() > self.capacity {
             self.events.pop_front();
             self.stats.dropped += 1;
         }
         seq
+    }
+
+    /// The index of the first held event numbered above `after_seq`.
+    ///
+    /// Arithmetic rather than a scan. Sequences are dense across the deque: `push` assigns
+    /// consecutive numbers and eviction only ever removes from the front, so the event at index `i`
+    /// is always numbered `front + i`. The console polls with the highest sequence it holds, which
+    /// on a quiet second is the newest event in the ring, and a scan from the oldest meant walking
+    /// the entire store every tick to discover there was nothing new.
+    fn offset_after(&self, after_seq: u64) -> usize {
+        let Some(front) = self.events.front() else {
+            return 0;
+        };
+        // Everything held is newer than the caller: start at the beginning.
+        if front.seq > after_seq {
+            return 0;
+        }
+        // `front.seq + i > after_seq` for the first time at `i = after_seq - front.seq + 1`, and
+        // that can be past the end, which the callers treat as "nothing new".
+        ((after_seq - front.seq) as usize)
+            .saturating_add(1)
+            .min(self.events.len())
     }
 
     /// Note an event that the capture config excluded, so the difference between "nothing
@@ -89,31 +126,42 @@ impl Ring {
     ///
     /// A caller further behind than the ring is deep gets the oldest events still held, and learns
     /// from [`RingStats::dropped`] that it missed some.
-    pub fn since(&self, after_seq: u64, limit: usize) -> Vec<&DiagnosticEvent> {
+    pub fn since(&self, after_seq: u64, limit: usize) -> Vec<StoredEvent> {
         self.events
             .iter()
-            .filter(|e| e.seq > after_seq)
+            .skip(self.offset_after(after_seq))
             .take(limit)
+            .cloned()
             .collect()
     }
 
     /// Events after `after_seq` in one section.
+    ///
+    /// Still a scan, but only of the range the caller has not seen: a section filter has no index
+    /// of its own, and building one would be a second structure to keep in step with the timeline
+    /// for a read that is bounded by the ring anyway.
     pub fn section_since(
         &self,
         section: Section,
         after_seq: u64,
         limit: usize,
-    ) -> Vec<&DiagnosticEvent> {
+    ) -> Vec<StoredEvent> {
         self.events
             .iter()
-            .filter(|e| e.seq > after_seq && e.section == section)
+            .skip(self.offset_after(after_seq))
+            .filter(|e| e.section == section)
             .take(limit)
+            .cloned()
             .collect()
     }
 
     /// Every event belonging to one trace, which is how an operation is read end to end.
-    pub fn trace(&self, trace: crate::event::TraceId) -> Vec<&DiagnosticEvent> {
-        self.events.iter().filter(|e| e.trace == trace).collect()
+    pub fn trace(&self, trace: crate::event::TraceId) -> Vec<StoredEvent> {
+        self.events
+            .iter()
+            .filter(|e| e.trace == trace)
+            .cloned()
+            .collect()
     }
 
     pub fn stats(&self) -> RingStats {
@@ -122,7 +170,7 @@ impl Ring {
 
     /// How many events, and how many errors, one section has seen this session.
     pub fn section_counts(&self, section: Section) -> (u64, u64) {
-        let at = Self::index(section);
+        let at = section.index();
         (self.per_section[at], self.per_section_errors[at])
     }
 
@@ -142,13 +190,6 @@ impl Ring {
     /// cleared store for a fresh session.
     pub fn clear(&mut self) {
         self.events.clear();
-    }
-
-    fn index(section: Section) -> usize {
-        SECTIONS
-            .iter()
-            .position(|s| *s == section)
-            .expect("SECTIONS lists every Section")
     }
 }
 
@@ -285,6 +326,85 @@ mod tests {
         assert_eq!(ring.held(), 0);
         assert_eq!(ring.stats().errors, 1);
         assert_eq!(ring.push(event(Section::Sync, Level::Info, "B")), 2);
+    }
+
+    /// A reader takes a handle, not a copy.
+    ///
+    /// The whole of P3-012. An event can carry thirty-two fields of owned strings, and deep-cloning
+    /// a page of them happened under the hub's one mutex, so every reader blocked every producer
+    /// for the length of the copy. Pointer identity is the proof: the caller and the store are
+    /// looking at the same allocation, so nothing was copied to hand it over.
+    #[test]
+    fn a_read_hands_out_a_handle_rather_than_a_copy() {
+        let mut ring = Ring::new(10);
+        ring.push(
+            event(Section::Sync, Level::Info, "SYNC.BIG")
+                .field("payload", crate::redact::SafeText::describe("a long value")),
+        );
+
+        let first = ring.since(0, 10);
+        let second = ring.since(0, 10);
+        assert!(
+            Arc::ptr_eq(&first[0], &second[0]),
+            "two reads of one event must not produce two copies of it"
+        );
+        // Three live handles: the store's own, and one from each read.
+        assert_eq!(Arc::strong_count(&first[0]), 3);
+
+        // And a handle outlives eviction, so a reader that is still rendering cannot be pulled out
+        // from under by a producer filling the ring.
+        for _ in 0..20 {
+            ring.push(event(Section::Sync, Level::Info, "SYNC.FILLER"));
+        }
+        assert_eq!(first[0].code, "SYNC.BIG");
+        assert_eq!(
+            Arc::strong_count(&first[0]),
+            2,
+            "the store has let go, the readers have not"
+        );
+    }
+
+    /// Polling must not walk the whole store to discover there is nothing new.
+    ///
+    /// The console polls every second with the highest sequence it holds, which on a quiet second
+    /// is the newest event in the ring. Scanning from the oldest meant traversing the entire store
+    /// every tick to return nothing. Sequences are dense across the deque, so the starting point is
+    /// arithmetic.
+    #[test]
+    fn a_poll_starts_where_the_caller_left_off() {
+        let mut ring = Ring::new(100);
+        for _ in 0..50 {
+            ring.push(event(Section::Sync, Level::Info, "A"));
+        }
+        // Every boundary: before the front, at the front, mid-ring, at the newest, and past it.
+        assert_eq!(ring.offset_after(0), 0, "nothing seen yet");
+        assert_eq!(ring.offset_after(1), 1, "seen the first");
+        assert_eq!(ring.offset_after(25), 25);
+        assert_eq!(ring.offset_after(50), 50, "seen everything");
+        assert_eq!(
+            ring.offset_after(999),
+            50,
+            "and a caller ahead of the ring is clamped"
+        );
+
+        // After eviction the front is no longer sequence 1, which is where an off-by-one would
+        // start returning somebody else's events.
+        for _ in 0..80 {
+            ring.push(event(Section::Sync, Level::Info, "B"));
+        }
+        let front = ring.since(0, 1)[0].seq;
+        assert!(front > 1, "the ring has rolled");
+        assert_eq!(
+            ring.offset_after(0),
+            0,
+            "a caller behind the ring gets what is left"
+        );
+        assert_eq!(ring.offset_after(front), 1);
+        let newest = ring.since(0, 1000).last().unwrap().seq;
+        assert!(
+            ring.since(newest, 10).is_empty(),
+            "and nothing new is nothing"
+        );
     }
 
     #[test]
