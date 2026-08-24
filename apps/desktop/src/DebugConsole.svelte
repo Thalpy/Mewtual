@@ -32,6 +32,7 @@
     dropNote,
     eventLine,
     eventParts,
+    eventText,
     filterEvents,
     formatDuration,
     isFrontend,
@@ -184,11 +185,18 @@
   /**
    * What the voice path logged this session.
    *
-   * Matched on the message rather than a dedicated target because the voice stack lives in the
-   * webview and logs through the one `catcoms_ui` target; every line it writes is already prefixed
-   * "voice" (`voice signal failed`, `voice ICE server/candidate error`, and so on).
+   * Matched on text rather than a dedicated target because the voice stack lives in the webview and
+   * logs through the one `catcoms_ui` target. The whole rendered line is searched, not just the
+   * message: a structured event carries its code in a field (`code=VOICE.SIGNAL.NO_MEMBER_ROUTE`)
+   * while an old-style console line carries it in the message, and matching only the message would
+   * have quietly dropped every migrated event out of this section.
+   *
+   * A stopgap either way. Events already state their section natively, and the console reads that
+   * directly once it is rebuilt on the hub.
    */
-  const voiceEvents = $derived(frontend.filter((e) => e.message.toLowerCase().includes("voice")).slice(-300));
+  const voiceEvents = $derived(
+    frontend.filter((e) => eventText(e).toLowerCase().includes("voice")).slice(-300),
+  );
   /** The newest few loud events, so "why is the badge red" is one glance rather than a hunt. */
   const attention = $derived(
     (paused ? frozen : events)

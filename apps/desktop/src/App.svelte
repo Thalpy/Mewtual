@@ -9073,16 +9073,35 @@
     return new TextDecoder().decode(Uint8Array.from(atob(b), (c) => c.charCodeAt(0)));
   }
   async function sendSignal(server: number, targetFp: string, msg: Record<string, unknown>): Promise<boolean> {
+    // The message kind is a protocol enum (offer, answer, ice, bye), never anything a person
+    // wrote, so it is safe to record and it is what turns a wall of identical warnings into
+    // "every ice candidate failed while the offer got through".
+    const kind = typeof msg.type === "string" ? msg.type : "unknown";
     try {
-      const delivered = await invoke<boolean>("send_call_signal", {
+      const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
         server,
         targetFp,
         payload: b64enc(JSON.stringify(msg)),
       });
-      if (!delivered) console.warn("voice signal had no member route", { server, targetFp, type: msg.type });
+      // The incident this whole section exists for: the roster shows the peer online and the
+      // transport has nowhere to send to. A run of these is a call that is about to die, and it
+      // used to be a console.warn nobody had open.
+      if (!delivered) {
+        diagRecord({
+          section: "voice",
+          code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
+          level: "warn",
+          fields: { kind },
+        });
+      }
       return delivered;
     } catch (e) {
-      console.warn("voice signal failed", { server, targetFp, type: msg.type, error: String(e) });
+      diagRecord({
+        section: "voice",
+        code: "VOICE.SIGNAL.FAILED",
+        level: "warn",
+        fields: { kind, failure: classifyInvokeFailure(e) },
+      });
       return false;
     }
   }

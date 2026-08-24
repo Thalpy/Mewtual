@@ -6164,18 +6164,47 @@ async fn send_dm_invite(
 }
 
 /// Push a call-signalling message (base64 payload) to member `target_fp`. `true` if reached.
+///
+/// The path behind one of the two incidents that started all of this: a call died while the roster
+/// still showed the peer online. That is exactly a run of these returning `false`, which the caller
+/// turned into a `console.warn` and nothing else. The `false` is not an error and must not be
+/// recorded as one, but it is the whole diagnosis, so it is recorded as its own outcome.
+///
+/// The payload is opaque here and stays that way: what is recorded is whether it went, never what
+/// it said.
 #[tauri::command]
 async fn send_call_signal(
     state: State<'_, AppState>,
     server: u64,
     target_fp: String,
     payload: String,
-) -> Result<bool, String> {
+    trace: Option<String>,
+) -> Result<bool, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Voice,
+        "send_call_signal",
+        server,
+        None,
+    );
     let bytes = B64
         .decode(payload.as_bytes())
-        .map_err(|e| format!("bad payload: {e}"))?;
-    let actor = actor_of(&state, server).await?;
-    actor.send_call_signal(target_fp, bytes).await
+        .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
+    let actor = actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let delivered = actor
+        .send_call_signal(target_fp, bytes)
+        .await
+        .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, e))?;
+    if delivered {
+        op.succeeded("VOICE.SIGNAL.DELIVERED");
+    } else {
+        // The roster says this member is here and the transport has nowhere to send to. Not a
+        // failure of this command, and precisely the thing that was invisible.
+        op.failed("VOICE.SIGNAL.NO_MEMBER_ROUTE");
+    }
+    Ok(delivered)
 }
 
 /// This call's E2E media base key (base64) + the MLS epoch it's keyed to. Derived locally from the

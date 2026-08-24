@@ -165,6 +165,14 @@ pub mod codes {
         remediation: Some(Remediation::Retry),
     };
 
+    /// A call-signalling message that could not be handed to the transport at all. Distinct from
+    /// one that was sent to a member with no route: that is an outcome, not an error.
+    pub const VOICE_SIGNAL_FAILED: ErrorCode = ErrorCode {
+        code: "VOICE.SIGNAL.FAILED",
+        retryable: true,
+        remediation: Some(Remediation::Retry),
+    };
+
     /// Every registered code, for the tests that keep this honest. The manifest is the registry:
     /// a code missing from here is a code no test checks the shape of.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -182,6 +190,7 @@ pub mod codes {
         FILE_UPLOAD_REFUSED,
         FILE_UPLOAD_FAILED,
         FILE_DOWNLOAD_FAILED,
+        VOICE_SIGNAL_FAILED,
     ];
 }
 
