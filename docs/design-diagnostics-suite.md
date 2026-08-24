@@ -224,6 +224,26 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-010 (high), fixed.** Detection existed and repair did not, so the record could say the UI had
+  gone stale while the UI stayed stale. All seven parts:
+  * Every event goes through one listener wrapper, not just `channel-updated`. It is a shim with
+    `listen`'s own shape, so no listener had to remember to opt in: the one that forgets is exactly
+    the one whose gaps go unnoticed.
+  * `reachability-changed` and `switchboard-changed` were bare server ids with nowhere to put the
+    bookkeeping, which made them the two families whose gaps could never be detected. Both are
+    objects now, and an unstamped event is reported rather than passed over in silence.
+  * The tracker is seeded from `get_event_cursor` before the listeners go live, so what a remount
+    slept through is a detected gap instead of the new baseline.
+  * A gap requests exactly one authoritative resynchronisation, coalesced: channels re-read,
+    unread rebuilt from durable heads, the open conversation refreshed.
+  * `__ord` gives the stream a total order alongside the per-name `__seq`. The per-name sequence
+    says *what* to re-fetch; the stream's says whether anything was missed at all, including the
+    last event of a family, which leaves no successor to be numbered against.
+  * A successful `emit` still does not prove a listener handled it, but `UI.EVENT.RECEIVED` is now
+    recorded under the same trace, so the two ends are comparable.
+  * A payload that shadows an envelope key is recorded as `IPC.EVENT.ENVELOPE_COLLISION`. The
+    envelope still wins, because the alternative is the frontend reading application data as a
+    sequence number, but it no longer wins in silence.
 * **P3-014 (medium), fixed.** Capture settings stopped events at the *store*, and the `tracing`
   bridge formats every field of every event into a `String` before the store sees it. So turning
   capture off meant the app kept paying to be watched and stopped keeping the results, which is the
@@ -297,7 +317,7 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 
 | ID | Sev | Open finding | Note |
 |---|---|---|---|
-| P3-010 | High | Event sequencing detects gaps but does not repair them | **Start here.** A gap is now noticed, named and correlated, and still nothing refetches. |
+| P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | **Start here.** The batcher counts sync throws, not rejected promises. |
 | P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | The batcher counts sync throws, not rejected promises. |
 | P3-008 | High | A formatted event has no size bound before allocation or queuing | I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
 | P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |

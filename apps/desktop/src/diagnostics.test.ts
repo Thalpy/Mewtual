@@ -7,8 +7,10 @@ import {
   errorText,
   makeInvokeDebugged,
   makeRecorder,
+  makeResync,
   makeSeqTracker,
   makeTraceSource,
+  needsResync,
   shortTrace,
   type UiEvent,
 } from "./diagnostics.ts";
@@ -33,11 +35,14 @@ test("two sessions do not mint traces that look like each other's", () => {
  * The distinction the whole mechanism exists for. A coalesced update and a lost one look identical
  * from the webview, and only one of them leaves the unread badge wrong.
  */
+/** An event as the native side stamps it: this family's sequence, the stream's, and the run. */
+const stamped = (seq: number, ord: number, gen = 7) => ({ __seq: seq, __ord: ord, __gen: gen });
+
 test("a missing event is reported with how many went missing", () => {
   const seq = makeSeqTracker();
-  assert.equal(seq.observe("channel-updated", 1198), null, "the first sighting cannot be a gap");
-  assert.equal(seq.observe("channel-updated", 1199), null);
-  assert.deepEqual(seq.observe("channel-updated", 1202), {
+  assert.equal(seq.observe("channel-updated", stamped(1198, 1)), null, "the first sighting cannot be a gap");
+  assert.equal(seq.observe("channel-updated", stamped(1199, 2)), null);
+  assert.deepEqual(seq.observe("channel-updated", stamped(1202, 5)), {
     kind: "gap",
     event: "channel-updated",
     expected: 1200,
@@ -49,8 +54,73 @@ test("a missing event is reported with how many went missing", () => {
 test("an unbroken run reports nothing", () => {
   const seq = makeSeqTracker();
   for (let n = 1; n <= 50; n += 1) {
-    assert.equal(seq.observe("channel-updated", n), null, `at ${n}`);
+    assert.equal(seq.observe("channel-updated", stamped(n, n)), null, `at ${n}`);
   }
+});
+
+/**
+ * The loss a per-family sequence can never show.
+ *
+ * If the event that went missing was the last of its family, no later event of that family is ever
+ * numbered against it, so its own counter stays unbroken forever. The stream's order is what
+ * notices, on the next event of any family at all.
+ */
+test("an event lost from a family that then goes quiet is still noticed", () => {
+  const seq = makeSeqTracker();
+  seq.observe("channel-updated", stamped(1, 100));
+  // A `files-updated` was emitted at ord 101 and never arrived. Its family says nothing, because
+  // this is the first one this webview has seen of it.
+  assert.deepEqual(seq.observe("members-changed", stamped(1, 102)), {
+    kind: "stream-gap",
+    event: "members-changed",
+    expected: 101,
+    received: 102,
+    missed: 1,
+  });
+});
+
+/**
+ * The window an F5 or a hot reload opens: the native process keeps running and keeps emitting while
+ * the webview comes back with no memory of what it had seen.
+ *
+ * Unseeded, the tracker takes whatever it sees first as its baseline, so everything missed during
+ * that window is invisible. That is the difference between a diagnostic that reports gaps and one
+ * that reports the gaps it happened to be present for.
+ */
+test("a remounted webview notices what it missed while it was not listening", () => {
+  const seq = makeSeqTracker();
+  seq.seed({ generation: 7, ord: 400 });
+  // Four events were emitted between reading the cursor and the listener being live.
+  assert.deepEqual(seq.observe("channel-updated", stamped(9, 405)), {
+    kind: "stream-gap",
+    event: "channel-updated",
+    expected: 401,
+    received: 405,
+    missed: 4,
+  });
+
+  // Seeded and unbroken is silent, so the seeding cannot make every start look like a gap.
+  const clean = makeSeqTracker();
+  clean.seed({ generation: 7, ord: 400 });
+  assert.equal(clean.observe("channel-updated", stamped(9, 401)), null);
+});
+
+/**
+ * A different run of the native process means everything held is about a stream that has ended, so
+ * comparing against it would produce nonsense: enormous gaps, or none at all.
+ */
+test("a stream from a different run of the process is not compared against the old one", () => {
+  const seq = makeSeqTracker();
+  seq.seed({ generation: 7, ord: 400 });
+  seq.observe("channel-updated", stamped(9, 401));
+  assert.deepEqual(seq.observe("channel-updated", stamped(1, 1, 99)), {
+    kind: "generation",
+    event: "channel-updated",
+    previous: 7,
+    received: 99,
+  });
+  // And it carries on from the new stream rather than reporting every event as a gap.
+  assert.equal(seq.observe("channel-updated", stamped(2, 2, 99)), null);
 });
 
 /**
@@ -59,14 +129,14 @@ test("an unbroken run reports nothing", () => {
  */
 test("a repeated or out-of-order delivery is reported as itself, not as a gap", () => {
   const seq = makeSeqTracker();
-  seq.observe("channel-updated", 10);
-  assert.deepEqual(seq.observe("channel-updated", 10), {
+  seq.observe("channel-updated", stamped(10, 10));
+  assert.deepEqual(seq.observe("channel-updated", stamped(10, 11)), {
     kind: "repeat",
     event: "channel-updated",
     previous: 10,
     received: 10,
   });
-  assert.deepEqual(seq.observe("channel-updated", 4), {
+  assert.deepEqual(seq.observe("channel-updated", stamped(4, 12)), {
     kind: "repeat",
     event: "channel-updated",
     previous: 10,
@@ -76,18 +146,117 @@ test("a repeated or out-of-order delivery is reported as itself, not as a gap", 
 
 test("sequences are tracked per event name, so a quiet feed cannot fake a gap in a busy one", () => {
   const seq = makeSeqTracker();
-  seq.observe("channel-updated", 100);
-  seq.observe("members-changed", 3);
-  assert.equal(seq.observe("channel-updated", 101), null);
-  assert.equal(seq.observe("members-changed", 4), null);
+  seq.observe("channel-updated", stamped(100, 1));
+  seq.observe("members-changed", stamped(3, 2));
+  assert.equal(seq.observe("channel-updated", stamped(101, 3)), null);
+  assert.equal(seq.observe("members-changed", stamped(4, 4)), null);
 });
 
-test("an event whose payload cannot carry a sequence is not guessed about", () => {
+/**
+ * Every event payload is an object now, so every one can carry the envelope. An unstamped event is
+ * therefore a fault rather than a shrug: it used to be silence, which made "this family cannot be
+ * checked" indistinguishable from "this family is fine".
+ */
+test("an event that carried no bookkeeping is named rather than passed over", () => {
   const seq = makeSeqTracker();
-  // Bare-number payloads (a server id) have nowhere to put __seq. Silence is the honest answer.
-  assert.equal(seq.observe("reachability-changed", undefined), null);
-  assert.equal(seq.observe("reachability-changed", "12"), null);
-  assert.equal(seq.observe("reachability-changed", NaN), null);
+  assert.deepEqual(seq.observe("reachability-changed", undefined), {
+    kind: "unstamped",
+    event: "reachability-changed",
+  });
+  assert.deepEqual(seq.observe("reachability-changed", { __seq: NaN }), {
+    kind: "unstamped",
+    event: "reachability-changed",
+  });
+});
+
+// --- repairing what the detector finds ----------------------------------------------------------
+
+/**
+ * The half P3-010 says was missing. A gap was recorded and nothing was re-fetched, so the record
+ * could say the UI had gone stale while the UI stayed stale.
+ */
+test("a repeat needs no repair, and everything else does", () => {
+  assert.equal(needsResync({ kind: "repeat", event: "e", previous: 1, received: 1 }), false);
+  assert.equal(needsResync({ kind: "gap", event: "e", expected: 2, received: 4, missed: 2 }), true);
+  assert.equal(
+    needsResync({ kind: "stream-gap", event: "e", expected: 2, received: 4, missed: 2 }),
+    true,
+  );
+  assert.equal(needsResync({ kind: "generation", event: "e", previous: 1, received: 2 }), true);
+  assert.equal(needsResync({ kind: "unstamped", event: "e" }), true);
+});
+
+test("a burst of anomalies produces exactly one resynchronisation", async () => {
+  // One dropped event usually means several, so several listeners notice within milliseconds of
+  // each other. Re-fetching once per anomaly turns one lost event into a burst of refreshes, which
+  // is worse than the staleness it repairs.
+  const t = timers();
+  let ran = 0;
+  const resync = makeResync(async () => { ran += 1; }, t.scope);
+  for (const reason of ["channel-updated", "members-changed", "files-updated"]) {
+    resync.request(reason);
+  }
+  assert.equal(ran, 0, "nothing happens until the window closes");
+  assert.deepEqual(resync.pendingReasons, ["channel-updated", "files-updated", "members-changed"]);
+  t.run();
+  await Promise.resolve();
+  assert.equal(ran, 1);
+
+  // And no follow-up. Each request scheduling its own timer would be absorbed by the guard against
+  // concurrent runs and then reappear as a second, pointless refresh once the first finished, so
+  // draining again is what tells one run from one-run-and-a-straggler.
+  t.run();
+  await Promise.resolve();
+  assert.equal(ran, 1, "a burst is one refresh, not one and then another");
+  assert.equal(resync.runs, 1);
+});
+
+test("an anomaly during a resynchronisation schedules exactly one more", async () => {
+  // Whatever prompted it may have happened after the snapshot was taken, so it cannot be folded
+  // into the run already in flight. It also must not start a second one alongside.
+  const t = timers();
+  let ran = 0;
+  let release: (() => void) | null = null;
+  const resync = makeResync(
+    () =>
+      new Promise<void>((resolve) => {
+        ran += 1;
+        release = resolve;
+      }),
+    t.scope,
+  );
+  resync.request("first");
+  t.run();
+  await Promise.resolve();
+  assert.equal(ran, 1);
+
+  resync.request("during");
+  resync.request("during-too");
+  t.run();
+  await Promise.resolve();
+  assert.equal(ran, 1, "the run in flight is not interrupted or duplicated");
+
+  release?.();
+  await Promise.resolve();
+  await Promise.resolve();
+  t.run();
+  await Promise.resolve();
+  assert.equal(ran, 2, "and exactly one more follows");
+});
+
+test("a repair that fails does not take the app with it", async () => {
+  const t = timers();
+  const resync = makeResync(async () => {
+    throw new Error("the snapshot could not be read");
+  }, t.scope);
+  resync.request("channel-updated");
+  t.run();
+  await Promise.resolve();
+  // The next anomaly asks again rather than the mechanism having wedged itself.
+  resync.request("channel-updated");
+  t.run();
+  await Promise.resolve();
+  assert.equal(resync.runs, 2);
 });
 
 // --- recording --------------------------------------------------------------------------------

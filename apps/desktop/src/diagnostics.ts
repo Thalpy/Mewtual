@@ -55,49 +55,199 @@ export function shortTrace(trace: TraceId): string {
 
 // --- event sequence gaps ---------------------------------------------------------------------
 
+/**
+ * The bookkeeping the native side stamps onto every event payload.
+ *
+ * Three numbers, because they answer three different questions. `__seq` is this event name's own
+ * sequence and says *what* to re-fetch; `__ord` is the whole stream's and says whether anything at
+ * all was missed, including the last event of a family that leaves no successor to show a gap;
+ * `__gen` says which run of the native process the stream belongs to.
+ */
+export type EventEnvelope = {
+  __seq?: number;
+  __ord?: number;
+  __gen?: number;
+  __trace?: string;
+};
+
 /** What a missing event looks like once it has been noticed. */
 export type SeqAnomaly =
+  /** This event family lost one. We know which authoritative snapshot would repair it. */
   | { kind: "gap"; event: string; expected: number; received: number; missed: number }
-  | { kind: "repeat"; event: string; previous: number; received: number };
+  /** The stream lost one, and it is not this family's. Only a broad resynchronisation repairs it. */
+  | { kind: "stream-gap"; event: string; expected: number; received: number; missed: number }
+  /** Delivered twice, or out of order. */
+  | { kind: "repeat"; event: string; previous: number; received: number }
+  /** A different run of the native process. Everything held is about a stream that has ended. */
+  | { kind: "generation"; event: string; previous: number; received: number }
+  /** An event that carried no bookkeeping at all, so nothing about it can be checked. */
+  | { kind: "unstamped"; event: string };
+
+/** Where the native event stream had got to when the webview last asked. */
+export type EventCursor = { generation: number; ord: number };
 
 /**
- * Watch the `__seq` the native side stamps on every emitted event.
+ * Watch the envelope the native side stamps on every emitted event.
  *
  * The distinction this exists to make: an update that was coalesced and an update that was lost
  * look identical from the webview, and only one of them leaves the UI stale. A backend that
  * changed a channel while the frontend never heard about it is a wrong unread badge with no
  * evidence, and that is precisely the class of bug that has been hardest to pin down here.
  *
- * Per event name, because sequences are allocated per name. A frontend remount resets the tracker,
- * which is correct: it has not missed anything, it has simply not seen anything yet.
+ * # Why it has to be seeded
+ *
+ * Left to itself this takes the first sequence it happens to see as its baseline, which makes
+ * everything missed before that moment invisible. That window is not hypothetical: the webview can
+ * be remounted on its own by an F5 or a hot reload while the native process keeps running and keeps
+ * emitting, and it comes back with no memory. [`seed`] closes it by starting from where the stream
+ * actually was, so an event that arrives numbered past that is a gap rather than a beginning.
  */
 export function makeSeqTracker() {
   const last = new Map<string, number>();
+  let ord = 0;
+  let generation = 0;
+
   return {
-    observe(event: string, seq: unknown): SeqAnomaly | null {
-      // A payload that is not a JSON object cannot carry a sequence. Those events are numbered
-      // natively but not checkable here, and silence is the honest answer rather than a guess.
-      if (typeof seq !== "number" || !Number.isFinite(seq)) return null;
-      const previous = last.get(event);
-      if (previous === undefined) {
-        last.set(event, seq);
-        return null;
+    /** Start from where the native stream actually is, rather than from the first event seen. */
+    seed(cursor: EventCursor) {
+      generation = cursor.generation;
+      ord = cursor.ord;
+    },
+    observe(event: string, envelope: EventEnvelope | undefined): SeqAnomaly | null {
+      const seq = envelope?.__seq;
+      const at = envelope?.__ord;
+      const gen = envelope?.__gen;
+      // A payload that could not carry the envelope cannot be checked. That used to be silence,
+      // which made "this event family is unverifiable" indistinguishable from "this family is
+      // fine"; every payload is an object now, so an unstamped one is a fault worth naming.
+      if (typeof seq !== "number" || !Number.isFinite(seq)) return { kind: "unstamped", event };
+
+      if (typeof gen === "number" && generation !== 0 && gen !== generation) {
+        const previous = generation;
+        generation = gen;
+        last.clear();
+        ord = typeof at === "number" ? at : 0;
+        return { kind: "generation", event, previous, received: gen };
       }
-      if (seq <= previous) {
+      if (typeof gen === "number") generation = gen;
+
+      // The stream's own order first: it catches a loss this family would never show, because the
+      // last event of a family leaves no successor to be numbered against.
+      let streamAnomaly: SeqAnomaly | null = null;
+      if (typeof at === "number" && Number.isFinite(at)) {
+        if (ord !== 0 && at > ord + 1) {
+          streamAnomaly = {
+            kind: "stream-gap",
+            event,
+            expected: ord + 1,
+            received: at,
+            missed: at - ord - 1,
+          };
+        }
+        if (at > ord) ord = at;
+      }
+
+      const previous = last.get(event);
+      if (previous !== undefined && seq <= previous) {
         // Delivered twice, or out of order. Not a gap, but not nothing either: a listener that
         // was installed twice looks exactly like this, and so does a retry that should not have
         // happened.
         return { kind: "repeat", event, previous, received: seq };
       }
       last.set(event, seq);
-      if (seq === previous + 1) return null;
-      return { kind: "gap", event, expected: previous + 1, received: seq, missed: seq - previous - 1 };
+      if (previous !== undefined && seq > previous + 1) {
+        // This family's own gap wins over the stream's: it names which snapshot repairs it, and
+        // the stream-level one would only say that something somewhere went missing.
+        return { kind: "gap", event, expected: previous + 1, received: seq, missed: seq - previous - 1 };
+      }
+      return streamAnomaly;
     },
     /** Forget everything, for a session change rather than a remount. */
     reset() {
       last.clear();
+      ord = 0;
+      generation = 0;
     },
   };
+}
+
+// --- repairing what the gap detector finds ------------------------------------------------------
+
+/**
+ * Coalesce resynchronisation requests into one run.
+ *
+ * A lost event usually means several were lost, so several listeners notice within a few
+ * milliseconds of each other. Re-fetching once per anomaly would turn one dropped event into a
+ * burst of refreshes, which is worse than the staleness it is repairing, and the review asks for
+ * exactly one resynchronisation.
+ *
+ * A run already in flight is not interrupted, and a request that arrives during one schedules
+ * exactly one more: whatever prompted it may have happened after the snapshot was taken.
+ */
+export function makeResync(
+  run: () => Promise<void>,
+  scope: {
+    setTimeout: (fn: () => void, ms: number) => unknown;
+    clearTimeout: (handle: unknown) => void;
+    /** How long to gather anomalies before acting. */
+    settleMs?: number;
+  },
+) {
+  const settleMs = scope.settleMs ?? 250;
+  let timer: unknown = null;
+  let running = false;
+  let again = false;
+  let runs = 0;
+  const reasons = new Set<string>();
+
+  async function fire() {
+    timer = null;
+    if (running) {
+      again = true;
+      return;
+    }
+    running = true;
+    reasons.clear();
+    runs += 1;
+    try {
+      await run();
+    } catch {
+      // A repair that fails must not take the app with it. The next anomaly will ask again.
+    } finally {
+      running = false;
+      if (again) {
+        again = false;
+        timer = scope.setTimeout(() => void fire(), settleMs);
+      }
+    }
+  }
+
+  return {
+    /** Ask for one resynchronisation, soon. Repeated asks inside the window are one run. */
+    request(reason: string) {
+      reasons.add(reason);
+      if (timer !== null) return;
+      timer = scope.setTimeout(() => void fire(), settleMs);
+    },
+    /** What prompted the pending run, for the record. */
+    get pendingReasons(): string[] {
+      return [...reasons].sort();
+    },
+    get runs() {
+      return runs;
+    },
+  };
+}
+
+/**
+ * Whether an anomaly means the UI is now showing something that may be wrong.
+ *
+ * A repeat does not: the same event twice leaves the projection correct, and the fault is in the
+ * delivery rather than the state. Everything else means the backend changed something this webview
+ * was never told about, and the only honest repair is to go and ask.
+ */
+export function needsResync(anomaly: SeqAnomaly): boolean {
+  return anomaly.kind !== "repeat";
 }
 
 // --- recording -------------------------------------------------------------------------------

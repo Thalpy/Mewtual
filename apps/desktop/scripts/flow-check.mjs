@@ -166,7 +166,15 @@ class Cdp {
   async waitReady(timeoutMs = 90000) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      if (await this.eval("document.documentElement.dataset.visualReady ?? ''")) return;
+      // Polled inside a try, because a poll that lands mid-navigation finds no document at all and
+      // throws on `documentElement`. That is the normal state of a page that has not arrived yet,
+      // not a failure, and letting it escape turned an ordinary race into an intermittent red run
+      // whose message pointed nowhere near the cause.
+      try {
+        if (await this.eval("document.documentElement?.dataset.visualReady ?? ''")) return;
+      } catch {
+        /* not navigated yet */
+      }
       await sleep(250);
     }
     throw new Error("visual fixture never became ready");

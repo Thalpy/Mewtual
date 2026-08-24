@@ -1472,7 +1472,7 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
     emit_tracked(
         app,
         "reachability-changed",
-        server,
+        ServerEvt { server },
         catcoms_diagnostics::TraceId::default(),
     );
     true
@@ -1618,7 +1618,7 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<catcom
                     );
                 }
                 AppEvent::SwitchboardsChanged => {
-                    emit_tracked(&app, "switchboard-changed", server, trace);
+                    emit_tracked(&app, "switchboard-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::DeliveryChanged { channel, states } => {
                     emit_tracked(
@@ -2207,18 +2207,44 @@ fn next_event_seq(name: &'static str) -> u64 {
     *slot
 }
 
-/// Attach the sequence and the trace to an event payload, if it can carry them.
+/// The whole event stream's order, across every event name.
+///
+/// Per-name sequences answer "did I miss a `channel-updated`", which is what tells the frontend
+/// *what* to re-fetch. They cannot answer "did I miss anything", because the last event of a
+/// family leaves no successor to show the gap, and they say nothing about the order two different
+/// events happened in. This is one counter for the stream, so both questions have answers.
+static EVENT_ORD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Which run of the native process this event stream belongs to.
+///
+/// The webview can be remounted on its own (F5, or a hot reload during development) while the
+/// process it is talking to keeps running, and it comes back with no memory of what it had seen.
+/// Stamping the run lets it tell "I have been restarted beside the same stream" from "this is a
+/// different stream entirely", which are different amounts of catching up.
+static EVENT_GENERATION: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+fn event_generation() -> u64 {
+    *EVENT_GENERATION.get_or_init(|| catcoms_rt::RngCore::next_u64(&mut catcoms_rt::OsCryptoRng))
+}
+
+/// The envelope keys, which a payload may not define for itself.
+const ENVELOPE_KEYS: [&str; 4] = ["__seq", "__ord", "__gen", "__trace"];
+
+/// Attach the stream envelope to an event payload, if it can carry one.
 ///
 /// A pure function so the contract the webview relies on can be tested without a running window.
-/// `None` means the payload is not a JSON object (a bare server id, say) and neither could be
-/// attached; the caller records that fact rather than letting the absence look like a gap.
+/// `None` means the payload is not a JSON object and could carry nothing; the caller records that
+/// fact rather than letting the absence look like a gap.
 fn stamp_payload(
     mut value: serde_json::Value,
     seq: u64,
+    ord: u64,
     trace: catcoms_diagnostics::TraceId,
 ) -> Option<serde_json::Value> {
     let object = value.as_object_mut()?;
     object.insert("__seq".to_string(), serde_json::json!(seq));
+    object.insert("__ord".to_string(), serde_json::json!(ord));
+    object.insert("__gen".to_string(), serde_json::json!(event_generation()));
     // Only when there is one. An absent trace is left off entirely rather than sent as sixteen
     // zeroes, so a listener testing for it gets an answer rather than a value that looks like an
     // operation and belongs to none.
@@ -2226,6 +2252,18 @@ fn stamp_payload(
         object.insert("__trace".to_string(), serde_json::json!(trace.as_hex()));
     }
     Some(value)
+}
+
+/// Whether a payload already defines a key the envelope owns.
+///
+/// A collision means a payload type has grown a field that shadows the stream's own bookkeeping.
+/// The envelope has to win, or the frontend's gap detection starts reading application data as
+/// sequence numbers; but overwriting in silence is how the collision would survive. This is what
+/// makes it noticed instead.
+fn collides_with_envelope(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|object| ENVELOPE_KEYS.iter().any(|key| object.contains_key(*key)))
 }
 
 /// Emit a Tauri event, numbered, traced and recorded.
@@ -2253,11 +2291,29 @@ fn emit_tracked<S: Serialize + Clone>(
     trace: catcoms_diagnostics::TraceId,
 ) {
     let seq = next_event_seq(name);
-    let numbered = serde_json::to_value(&payload)
-        .ok()
-        .and_then(|value| stamp_payload(value, seq, trace));
+    let ord = EVENT_ORD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let raw = serde_json::to_value(&payload).ok();
+    let collision = raw.as_ref().is_some_and(collides_with_envelope);
+    let numbered = raw.and_then(|value| stamp_payload(value, seq, ord, trace));
 
     let carried = numbered.is_some();
+    if collision {
+        // Loud, because the consequence is silent: the frontend would read a payload field as the
+        // stream's sequence and either invent a gap or miss a real one.
+        catcoms_log::hub().record_with(
+            catcoms_diagnostics::Section::Ipc,
+            catcoms_diagnostics::Level::Error,
+            || {
+                catcoms_diagnostics::DiagnosticEvent::error(
+                    catcoms_diagnostics::Section::Ipc,
+                    "IPC.EVENT.ENVELOPE_COLLISION",
+                )
+                .target("catcoms_app")
+                .trace(trace)
+                .field("event", catcoms_diagnostics::SafeText::describe(name))
+            },
+        );
+    }
     let sent = match numbered {
         Some(value) => app.emit(name, value),
         None => app.emit(name, payload),
@@ -3293,7 +3349,7 @@ async fn store_port_mapping_status(
         emit_tracked(
         app,
         "reachability-changed",
-        server,
+        ServerEvt { server },
         catcoms_diagnostics::TraceId::default(),
     );
     }
@@ -3453,7 +3509,7 @@ fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAd
             emit_tracked(
         &app,
         "reachability-changed",
-        server,
+        ServerEvt { server },
         catcoms_diagnostics::TraceId::default(),
     );
         }
@@ -3493,7 +3549,7 @@ fn spawn_mesh_observation_fold(
                 emit_tracked(
         &app,
         "reachability-changed",
-        server,
+        ServerEvt { server },
         catcoms_diagnostics::TraceId::default(),
     );
             }
@@ -3602,7 +3658,7 @@ async fn store_autonat_snapshot(
         emit_tracked(
         app,
         "reachability-changed",
-        server,
+        ServerEvt { server },
         catcoms_diagnostics::TraceId::default(),
     );
     }
@@ -6945,7 +7001,7 @@ async fn set_switchboard_offered(
     emit_tracked(
         &app,
         "switchboard-changed",
-        server,
+        ServerEvt { server },
         catcoms_diagnostics::TraceId::default(),
     );
     get_switchboard_status(state, server).await
@@ -10516,6 +10572,33 @@ fn capture_config_view() -> CaptureConfigView {
     }
 }
 
+/// Where the event stream has got to.
+#[derive(Serialize)]
+struct EventCursor {
+    /// Which run of the native process this stream belongs to.
+    generation: u64,
+    /// The last position issued across the whole stream.
+    ord: u64,
+}
+
+/// Where the event stream has got to right now.
+///
+/// Read by the webview before it installs its listeners, so it knows what the next event should be
+/// numbered. Without it a remounted webview takes whatever sequence it happens to see first as its
+/// baseline, which makes everything missed before that moment invisible: precisely the window a
+/// hot reload or an F5 opens while the native process keeps running and keeps emitting.
+///
+/// Two counters and nothing else. Gated with the other reads for consistency rather than because
+/// they are sensitive.
+#[tauri::command]
+async fn get_event_cursor(state: State<'_, AppState>) -> Result<EventCursor, String> {
+    require_unlocked_session(&state).await?;
+    Ok(EventCursor {
+        generation: event_generation(),
+        ord: EVENT_ORD.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
 /// What the diagnostics are currently capturing.
 #[tauri::command]
 async fn get_capture_config(state: State<'_, AppState>) -> Result<CaptureConfigView, String> {
@@ -11189,6 +11272,7 @@ pub fn run() {
             get_capture_config,
             set_capture_mode,
             set_section_capture,
+            get_event_cursor,
             save_diagnostics_report,
             log_ui,
             log_ui_batch,
@@ -11327,9 +11411,14 @@ mod tests {
     #[test]
     fn an_emitted_payload_carries_the_operation_that_caused_it() {
         let trace = catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001);
-        let stamped = stamp_payload(serde_json::json!({ "server": 1 }), 1198, trace)
-            .expect("an object payload can carry both");
-        assert_eq!(stamped["__seq"], 1198);
+        let stamped = stamp_payload(serde_json::json!({ "server": 1 }), 1198, 44_012, trace)
+            .expect("an object payload can carry the envelope");
+        assert_eq!(stamped["__seq"], 1198, "this event name's own sequence");
+        assert_eq!(
+            stamped["__ord"], 44_012,
+            "and the whole stream's, which is what says whether anything at all was missed"
+        );
+        assert_eq!(stamped["__gen"], event_generation());
         assert_eq!(stamped["__trace"], "7f2c000000000001");
         assert_eq!(stamped["server"], 1, "and the payload itself is untouched");
 
@@ -11339,15 +11428,52 @@ mod tests {
         let spontaneous = stamp_payload(
             serde_json::json!({ "server": 1 }),
             1199,
+            44_013,
             catcoms_diagnostics::TraceId::default(),
         )
         .expect("still numbered");
         assert_eq!(spontaneous["__seq"], 1199);
         assert!(spontaneous.get("__trace").is_none());
 
-        // A payload that is not an object can carry neither, and says so by refusing rather than
-        // by silently dropping the sequence the frontend checks for gaps with.
-        assert!(stamp_payload(serde_json::json!(7), 1200, trace).is_none());
+        // A payload that is not an object can carry none of it, and says so by refusing rather
+        // than by silently dropping the sequence the frontend checks for gaps with.
+        assert!(stamp_payload(serde_json::json!(7), 1200, 44_014, trace).is_none());
+    }
+
+    /// A payload field that shadows the envelope must be noticed, not silently overwritten.
+    ///
+    /// The envelope has to win, or the frontend reads application data as a sequence number and
+    /// either invents a gap or misses a real one. But winning quietly is how such a collision would
+    /// survive: the symptom is a gap detector that has become fiction.
+    #[test]
+    fn a_payload_that_shadows_the_envelope_is_noticed() {
+        assert!(collides_with_envelope(
+            &serde_json::json!({ "server": 1, "__seq": 5 })
+        ));
+        assert!(collides_with_envelope(&serde_json::json!({ "__ord": 5 })));
+        assert!(collides_with_envelope(&serde_json::json!({ "__gen": 5 })));
+        assert!(collides_with_envelope(&serde_json::json!({ "__trace": "x" })));
+        assert!(!collides_with_envelope(
+            &serde_json::json!({ "server": 1, "seq": 5 })
+        ));
+        // A payload that cannot carry an envelope cannot collide with one either.
+        assert!(!collides_with_envelope(&serde_json::json!(7)));
+
+        // Every envelope key is checked. One added to `stamp_payload` and forgotten here would be
+        // one the collision test does not cover.
+        let stamped = stamp_payload(
+            serde_json::json!({}),
+            1,
+            2,
+            catcoms_diagnostics::TraceId(9),
+        )
+        .unwrap();
+        for key in stamped.as_object().unwrap().keys() {
+            assert!(
+                ENVELOPE_KEYS.contains(&key.as_str()),
+                "{key} is stamped onto every payload but is not guarded against collision"
+            );
+        }
     }
 
     /// A trace minted in the webview has to be the *same* trace natively, or the two halves of an

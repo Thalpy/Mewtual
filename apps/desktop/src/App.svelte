@@ -1,6 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
@@ -79,8 +79,12 @@
     errorText,
     makeInvokeDebugged,
     makeRecorder,
+    makeResync,
     makeSeqTracker,
     makeTraceSource,
+    needsResync,
+    type EventCursor,
+    type EventEnvelope,
     // Aliased: this file already has a `UiEvent`, which is a calendar entry.
     type UiEvent as DiagEvent,
   } from "./diagnostics";
@@ -12869,7 +12873,44 @@
   // removal, which leaves the `?` of `trace?: string` behind as a syntax error the browser only
   // reports at load, as "Mewtual failed to start" with a stack of no frames. A default reads the
   // same at every call site and survives the transform.
-  function noteEventSeq(name: string, seq: unknown, trace: string = "") {
+  /**
+   * Re-read the projections a lost event leaves wrong.
+   *
+   * Not a guess about which one went missing: a gap says something was lost, and only sometimes
+   * which family it belonged to. These are the projections built *from* the event stream, so they
+   * are the ones that can silently disagree with the backend, and each of them has an authoritative
+   * source to be rebuilt from. `rebuildUnread` in particular already exists for the same reason in
+   * a different situation: after a lock or a restart the badges have no event left to raise them.
+   */
+  const resync = makeResync(
+    async () => {
+      diagRecord({ section: "ipc", code: "UI.RESYNC.STARTED", level: "warn" });
+      for (const s of servers) await refreshChannels(s.id);
+      rebuildAllUnread();
+      if (activeServerId !== null && cur?.active) await channelEventRefresh.request(true);
+      diagRecord({
+        section: "ipc",
+        code: "UI.RESYNC.APPLIED",
+        level: "info",
+        fields: { servers: servers.length },
+      });
+    },
+    {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+    },
+  );
+
+  /**
+   * Every native event passes through here, on its way to the handler that wanted it.
+   *
+   * One wrapper rather than a call in each listener, because the one that gets forgotten is the one
+   * whose gaps go unnoticed: this used to check `channel-updated` alone, so a lost `files-updated`
+   * or `members-changed` left the UI wrong with nothing recorded and nothing repaired.
+   */
+  function noteEvent(name: string, payload: unknown) {
+    const envelope = (payload ?? undefined) as EventEnvelope | undefined;
+    const trace = envelope?.__trace ?? "";
     // The stage that proves the webview received what the backend sent. A backend that emitted and
     // a webview that never heard used to look identical from either side, and that is precisely
     // the shape of a stale unread badge.
@@ -12882,25 +12923,44 @@
         fields: { event: name },
       });
     }
-    const anomaly = seqTracker.observe(name, seq);
+    const anomaly = seqTracker.observe(name, envelope);
     if (!anomaly) return;
-    diagRecord(
-      anomaly.kind === "gap"
-        ? {
-            section: "ipc",
-            code: "IPC.EVENT.SEQUENCE_GAP",
-            level: "warn",
-            trace: trace || undefined,
-            fields: { event: anomaly.event, expected: anomaly.expected, received: anomaly.received, missed: anomaly.missed },
-          }
-        : {
-            section: "ipc",
-            code: "IPC.EVENT.REPEATED",
-            level: "warn",
-            trace: trace || undefined,
-            fields: { event: anomaly.event, previous: anomaly.previous, received: anomaly.received },
-          },
-    );
+    diagRecord({
+      section: "ipc",
+      code:
+        anomaly.kind === "repeat"
+          ? "IPC.EVENT.REPEATED"
+          : anomaly.kind === "generation"
+            ? "IPC.EVENT.STREAM_CHANGED"
+            : anomaly.kind === "unstamped"
+              ? "IPC.EVENT.UNSTAMPED"
+              : "IPC.EVENT.SEQUENCE_GAP",
+      level: "warn",
+      trace: trace || undefined,
+      fields: {
+        event: anomaly.event,
+        anomaly: anomaly.kind,
+        ...("missed" in anomaly ? { expected: anomaly.expected, received: anomaly.received, missed: anomaly.missed } : {}),
+        ...("previous" in anomaly ? { previous: anomaly.previous, received: anomaly.received } : {}),
+      },
+    });
+    // Detecting without repairing meant the record could say the UI had gone stale while the UI
+    // stayed stale. A repeat is the one anomaly that needs no repair: the same event twice leaves
+    // the projection correct and the fault is in the delivery.
+    if (needsResync(anomaly)) resync.request(anomaly.kind + ":" + anomaly.event);
+  }
+
+  /**
+   * `listen`, with the stream's bookkeeping checked on the way past.
+   *
+   * A shim with the same shape as the real one, so every existing listener is covered without any
+   * of them having to remember to opt in.
+   */
+  function listen<T>(name: string, handler: (event: { payload: T }) => void): Promise<UnlistenFn> {
+    return tauriListen<T>(name, (event) => {
+      noteEvent(name, event.payload);
+      handler(event);
+    });
   }
   const syncMaximized = () => void appWindow.isMaximized().then((m) => (winMaximized = m));
 
@@ -12962,6 +13022,15 @@
         } else chooseGate();
       })
       .catch(chooseGate);
+    // Where the stream is, before listening to it. Read first on purpose: anything emitted between
+    // this answer and the listeners going live is genuinely missed, and seeding is what makes that
+    // a detected gap rather than an invisible one. Unseeded, the tracker takes whatever it sees
+    // first as its baseline, so a remount hides everything it slept through.
+    void invoke<EventCursor>("get_event_cursor")
+      .then((cursor) => seqTracker.seed(cursor))
+      .catch(() => {
+        /* locked, or an older backend: the tracker falls back to its first sighting */
+      });
     const subs: Promise<UnlistenFn>[] = [
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
@@ -12987,10 +13056,6 @@
         // Which operation this update belongs to, when a local one caused it. An arrival from
         // somebody else carries none, which is itself the answer to "was this mine".
         const trace = eventTrace(e.payload);
-        // A coalesced update and a lost one look identical from here, and only one of them leaves
-        // the unread badge wrong. The native side numbers every emit so the difference is
-        // observable at all; this is where it gets noticed.
-        noteEventSeq("channel-updated", e.payload.__seq, trace);
         // One channel document holds the message log, the topic and the jukebox queue, so the
         // event says which of them moved. Only an arrival may raise an unread badge or ring:
         // reacting to an old message, renaming the topic and queueing a track all used to look
@@ -13226,20 +13291,23 @@
         joinReplyReady = e.payload;
         notice = "Send the connection reply back to the inviter now; keep this app open.";
       }),
-      listen<number>("reachability-changed", (e) => {
+      // These two used to arrive as a bare server id, which is a payload with nowhere to put the
+      // stream's bookkeeping: they were the two event families whose gaps could never be detected.
+      listen<{ server: number }>("reachability-changed", (e) => {
         // Router mapping and AutoNAT settle after founding/joining returns. Both onboarding and
         // Settings use this same report. Refresh that server's cached invite too: the event can
         // arrive while another server is active, and copied codes must never retain an expired
         // mapping or relay route.
         if (locked) return;
-        if (reachabilityEventAffectsReport(connectivity, e.payload)) refreshConnectivity();
-        if (e.payload === activeServerId && view === "connectivity") refreshSwitchboards();
-        void refreshInviteFor(e.payload);
+        const server = e.payload.server;
+        if (reachabilityEventAffectsReport(connectivity, server)) refreshConnectivity();
+        if (server === activeServerId && view === "connectivity") refreshSwitchboards();
+        void refreshInviteFor(server);
       }),
-      listen<number>("switchboard-changed", (e) => {
-        const decision = switchboardEventRefreshDecision(locked, activeServerId, e.payload);
+      listen<{ server: number }>("switchboard-changed", (e) => {
+        const decision = switchboardEventRefreshDecision(locked, activeServerId, e.payload.server);
         if (decision.refreshStatus) refreshSwitchboards();
-        if (decision.refreshInvite) void refreshInviteFor(e.payload);
+        if (decision.refreshInvite) void refreshInviteFor(e.payload.server);
       }),
       listen<{ server: number; caution: boolean }>("eclipse-changed", (e) => {
         if (e.payload.server === activeServerId) eclipseCaution = e.payload.caution;
