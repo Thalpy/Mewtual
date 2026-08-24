@@ -65,8 +65,9 @@
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import {
-    CLOCK_SKEW_GRACE_MS, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
-    unreadDecision, unreadFromHeads, type ChannelChange, type ChannelHead,
+    CLOCK_SKEW_GRACE_MS, NO_READ_MARK, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
+    transitionApplied, transitionMismatch, unreadChannels, unreadDecision, unreadFromHeads,
+    type ChannelChange, type ChannelHead, type ReadMark, type UnreadDecision, type UnreadState,
   } from "./unread";
   import {
     deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
@@ -2450,10 +2451,15 @@
     }
   }
 
-  // Jump-to-unread: per `server:channel`, the timestamp of the newest message you've seen. It and
-  // composer drafts are sealed into the unlocked vault: neither sensitive text nor reading habits
-  // fall back to plaintext browser storage.
-  let readMarks = $state<Record<string, number>>({});
+  // Jump-to-unread: per `server:channel`, how far this device has read. The id is the cursor and
+  // the timestamp only positions the divider, because a timestamp is the sender's clock and every
+  // sender in a channel is running a different one. Marks and composer drafts are sealed into the
+  // unlocked vault: neither sensitive text nor reading habits fall back to plaintext storage.
+  let readMarks = $state<Record<string, ReadMark>>({});
+  /** This device's read position in a channel, or a fresh mark when it has never been read. */
+  function readMarkOf(key: string): ReadMark {
+    return readMarks[key] ?? NO_READ_MARK;
+  }
   let dividerTs = $state(Number.POSITIVE_INFINITY);
   let uiStateSaveTimer: ReturnType<typeof setTimeout> | undefined;
   let uiStateReady = false;
@@ -2513,7 +2519,7 @@
   }
   function captureDivider() {
     const k = chanKey();
-    dividerTs = k ? (readMarks[k] ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
+    dividerTs = k && readMarks[k] ? readMarks[k].ts : Number.POSITIVE_INFINITY;
   }
   // The newest timestamp in the loaded conversation this machine is willing to believe. A message
   // timestamp is the SENDER's clock, so used raw as a cursor one broken clock (or one member
@@ -2528,10 +2534,28 @@
     const k = chanKey();
     if (!k || !messages.length) return;
     const latest = messages.reduce((a, m) => Math.max(a, readTs(m)), 0);
-    if ((readMarks[k] ?? 0) < latest) {
-      readMarks[k] = latest;
-      scheduleUiStateSave();
+    // The cursor is the newest message somebody ELSE wrote, because that is what the durable scan
+    // compares against: own messages never make a channel unread. Where several share the newest
+    // millisecond this takes the last of them, which is the order the log itself renders.
+    let id = "";
+    let newest = -1;
+    for (const m of messages) {
+      if (m.author === myFp) continue;
+      const ts = readTs(m);
+      if (ts >= newest) {
+        newest = ts;
+        id = m.id;
+      }
     }
+    const mark = readMarkOf(k);
+    // The id can move while the timestamp does not: two messages in the same millisecond are a
+    // real arrival that a timestamp comparison cannot see. Checking both is what makes the second
+    // one count.
+    if (mark.ts >= latest && mark.id === id) return;
+    // An id is only ever replaced by another id. A window holding none of somebody else's
+    // messages is not evidence that the cursor should go back to being a bare timestamp.
+    readMarks[k] = { ts: Math.max(mark.ts, latest), id: id || mark.id };
+    scheduleUiStateSave();
   }
   // Is there a message here from somebody else that this device has not read past yet? Measured
   // against the saved mark rather than `dividerTs`, which is deliberately frozen at the value the
@@ -2539,8 +2563,12 @@
   function activeChannelHasUnseen(): boolean {
     const k = chanKey();
     if (!k) return false;
-    const mark = readMarks[k] ?? 0;
-    return messages.some((m) => m.author !== myFp && readTs(m) > mark);
+    const mark = readMarkOf(k);
+    // Position by id where the mark has one and the row is loaded: the log is already in order,
+    // so "after the one I read" needs no clock and survives a batch sharing one millisecond.
+    const at = mark.id ? messages.findIndex((m) => m.id === mark.id) : -1;
+    if (at >= 0) return messages.slice(at + 1).some((m) => m.author !== myFp);
+    return messages.some((m) => m.author !== myFp && readTs(m) > mark.ts);
   }
   // Index of the first message newer than the read boundary (-1 if all read).
   // Own messages never count as unread: sending shouldn't raise a "New messages" divider.
@@ -5268,36 +5296,78 @@
   function chatOnScreenNow(): boolean {
     return chatIsObserved(chatSurfaceState(true));
   }
+  /** One channel's badge state right now, as a transition record needs to describe it. */
+  function unreadStateOf(server: number, channel: string): UnreadState {
+    const s = servers.find((x) => x.id === server);
+    return {
+      // A badge for a channel the catalog does not list goes nowhere: `markChannelUnread`
+      // returns early. That silent drop is the one this record exists to stop hiding.
+      listed: !!s && s.channels.some((c) => c.id === channel),
+      unread: s?.unread.includes(channel) ?? false,
+    };
+  }
+  /** A decision taken when the event arrived, waiting for the badge to actually move. */
+  type PendingUnread = { decision: UnreadDecision; before: UnreadState; isActive: boolean };
   /**
-   * Record what a channel update meant for unread state, and why.
+   * Read what a channel update means for unread state, at the moment the event arrives.
    *
    * Deliberately does not decide anything: the branches below still own the behaviour. This
-   * observes the same inputs they use and writes down the conclusion, so a badge that failed to
-   * appear leaves evidence of which condition accounted for it rather than none at all.
+   * observes the same inputs they use so a badge that failed to appear leaves evidence of which
+   * condition accounted for it rather than none at all.
+   *
+   * Split from the recording because the two happen at different times. The surface state that
+   * decides "seen" is only true of the moment the event landed, while whether a badge moved is
+   * only knowable after the refresh that moves it. Reading both at once is what let the log say
+   * `mark_unread` about a transition that never happened.
    *
    * Only arrivals are recorded loudly. A reaction or a topic rename firing this on every keystroke
-   * would drown the section it is meant to explain.
+   * would drown the section it is meant to explain, so those return `null`.
    */
-  function noteUnreadDecision(server: number, channel: string, change: ChannelChange, trace: string = "") {
+  function beginUnreadDecision(server: number, channel: string, change: ChannelChange): PendingUnread | null {
     const isActive = server === activeServerId && channel === cur?.active;
-    const outcome = unreadDecision(change, chatSurfaceState(chatStickToBottom), isActive);
-    if (outcome.decision === "not_an_arrival") return;
+    const decision = unreadDecision(change, chatSurfaceState(chatStickToBottom), isActive);
+    if (decision.decision === "not_an_arrival") return null;
+    return { decision, before: unreadStateOf(server, channel), isActive };
+  }
+  /**
+   * Write down what the decision actually did, once the badge has had its chance to move.
+   *
+   * The invariant worth being able to check afterwards is that an arrival either produces an
+   * unread transition or a valid explanation of why it was already seen. A record that cannot
+   * tell those apart from a transition that was attempted and silently dropped is not evidence of
+   * anything, so a disagreement between the two is reported at `warn` under its own name.
+   */
+  function finishUnreadDecision(
+    pending: PendingUnread | null,
+    server: number,
+    channel: string,
+    trace: string = "",
+  ) {
+    if (!pending) return;
+    const after = unreadStateOf(server, channel);
+    const t = { decision: pending.decision, before: pending.before, after };
+    const mismatch = transitionMismatch(t);
     diagRecord({
       section: "channels",
       code: "UNREAD.DECISION",
-      level: "debug",
+      level: mismatch ? "warn" : "debug",
       // The decision joins the operation that caused it. "I sent a message and no badge appeared"
       // and "someone sent me one and no badge appeared" are different bugs, and the trace is what
       // separates them without guessing from timestamps.
       trace: trace || undefined,
       fields: {
-        decision: outcome.decision,
-        reason: outcome.reason,
-        active_channel: isActive,
+        decision: pending.decision.decision,
+        reason: pending.decision.reason,
+        active_channel: pending.isActive,
         // The transition, not just the conclusion: "marked unread" on a channel that was already
         // unread is a different event from one that changed the badge, and the review's invariant
         // is about transitions.
-        already_unread: servers.find((x) => x.id === server)?.unread.includes(channel) ?? false,
+        was_unread: pending.before.unread,
+        now_unread: after.unread,
+        listed: after.listed,
+        applied: transitionApplied(t),
+        // Present only when there is one, so its absence is not a field to read past.
+        ...(mismatch ? { mismatch } : {}),
       },
     });
   }
@@ -5353,13 +5423,30 @@
       const s = servers.find((x) => x.id === server);
       if (!s) return;
       const known = new Set(s.channels.map((c) => c.id));
-      const rebuilt = unreadFromHeads(
+      const verdicts = unreadFromHeads(
         heads,
-        (channel) => readMarks[chatScopeKey(server, channel)] ?? 0,
+        (channel) => readMarkOf(chatScopeKey(server, channel)),
         Date.now(),
         (channel) => known.has(channel),
       );
+      const rebuilt = unreadChannels(verdicts);
       if (rebuilt.length) s.unread = [...new Set([...s.unread, ...rebuilt])];
+      // Which cursor the scan actually got to decide by. A rebuild that fell back to timestamps
+      // for most of a server is the signal that read marks predate stable ids, and it is the
+      // difference between "no badges because nothing arrived" and "no badges because the
+      // comparison could not be made honestly".
+      diagRecord({
+        section: "channels",
+        code: "UNREAD.REBUILD",
+        level: "debug",
+        fields: {
+          heads: heads.length,
+          badged: rebuilt.length,
+          by_message_id: verdicts.filter((v) => v.cursor === "message_id").length,
+          by_timestamp: verdicts.filter((v) => v.cursor === "timestamp").length,
+          skewed: verdicts.filter((v) => v.reason === "implausible_timestamp").length,
+        },
+      });
       // The conversation on screen is the one exception: it is being looked at right now.
       if (server === activeServerId && cur?.active) settleReadState();
     } catch {
@@ -8762,7 +8849,7 @@
     // which is what false gives it. The old key built `null:channel`, which said the same thing
     // by accident rather than on purpose.
     if (!myFp || activeServerId === null) return false;
-    const seen = readMarks[chatScopeKey(activeServerId, channel)] ?? 0;
+    const seen = readMarkOf(chatScopeKey(activeServerId, channel)).ts;
     // Same clock ceiling the read marks use: a sender-chosen timestamp far in the future must not
     // decide, either way, whether something addressed to me still counts as unseen.
     const ceiling = readCeiling(msgs.map((m) => m.ts), Date.now());
@@ -8836,7 +8923,7 @@
     // An entry timestamped beyond any believable clock skew cannot be measured against a read mark
     // honestly, and calling it unseen would hand it a badge that reading can never clear.
     if (!Number.isFinite(it.ts) || it.ts > Date.now() + CLOCK_SKEW_GRACE_MS) return false;
-    return it.ts > (readMarks[chatScopeKey(it.server, it.channel)] ?? 0);
+    return it.ts > readMarkOf(chatScopeKey(it.server, it.channel)).ts;
   }
   let inboxUnseenCount = $derived(inboxItems.filter(inboxUnseen).length);
   // The entry's channel name, resolved from the server's known channel list (names are a UI concern).
@@ -13059,12 +13146,13 @@
         // reacting to an old message, renaming the topic and queueing a track all used to look
         // exactly like somebody talking.
         const change = readChannelChange(e.payload);
-        // Why this update did or did not raise a badge, recorded at the moment it is decided.
-        // The invariant worth being able to check afterwards is that an arrival either produces an
-        // unread transition or a valid explanation of why it was already seen. "Reacted to an old
-        // message", "the window was behind something" and "they were looking straight at it" are
-        // three very different answers, and all three used to produce silence.
-        noteUnreadDecision(server, channel, change, trace);
+        // Why this update did or did not raise a badge. Read here, against the surface state that
+        // actually decided it, and written down further below once the badge has had its chance to
+        // move: "reacted to an old message", "the window was behind something" and "they were
+        // looking straight at it" are three very different answers, all three of which used to
+        // produce silence, and "we tried and nothing happened" is a fourth that used to be
+        // indistinguishable from success.
+        const pendingUnread = beginUnreadDecision(server, channel, change);
         spaceActivityAt[server] = Date.now();
         if (server === activeServerId && view === "moderation") void refreshModeration();
         // A new or edited message may be addressed to me → the cross-server inbox may have a new
@@ -13097,7 +13185,9 @@
               });
             }
             // The refresh settles read state for us: seen if the log is genuinely on screen,
-            // unread if this channel is merely selected behind something else.
+            // unread if this channel is merely selected behind something else. Which of those it
+            // did is only knowable now, which is why the record waits until here.
+            finishUnreadDecision(pendingUnread, server, channel, trace);
             if (!change.messagesAppended) return; // an edit or a reaction never announces itself
             // Announce unless the log is on screen. Focus alone was not enough: the window can be
             // focused with Files, the wiki or a call surface over the channel. Scrolled-up counts
@@ -13139,6 +13229,10 @@
             void notifyLatestChannelMessage(server, channel, "detect");
           }
         }
+        // Outside the guard on purpose. An arrival for a channel the catalog does not list falls
+        // straight through it and raises nothing, and a record written before that point would
+        // have claimed the badge went up.
+        finishUnreadDecision(pendingUnread, server, channel, trace);
       }),
       listen<{ server: number; count: number }>("members-changed", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();

@@ -1,12 +1,16 @@
+import type { ReadMark } from "./unread";
+
 export type UiContinuity = {
   version: 1;
   drafts: Record<string, string>;
-  readMarks: Record<string, number>;
+  readMarks: Record<string, ReadMark>;
 };
 
 const MAX_ENTRIES = 2_000;
 const MAX_KEY_CHARS = 256;
 const MAX_DRAFT_CHARS = 32_768;
+/** Message ids are fixed-width hex in practice; this only has to stop an unbounded record. */
+const MAX_ID_CHARS = 128;
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -18,18 +22,38 @@ function record(value: unknown): Record<string, unknown> {
 export function sanitizeUiContinuity(value: unknown): UiContinuity {
   const root = record(value);
   const drafts: Record<string, string> = {};
-  const readMarks: Record<string, number> = {};
+  const readMarks: Record<string, ReadMark> = {};
   for (const [key, item] of Object.entries(record(root.drafts)).slice(0, MAX_ENTRIES)) {
     if (key.length <= MAX_KEY_CHARS && typeof item === "string" && item.length <= MAX_DRAFT_CHARS) {
       drafts[key] = item;
     }
   }
   for (const [key, item] of Object.entries(record(root.readMarks)).slice(0, MAX_ENTRIES)) {
-    if (key.length <= MAX_KEY_CHARS && typeof item === "number" && Number.isSafeInteger(item) && item >= 0) {
-      readMarks[key] = item;
-    }
+    if (key.length > MAX_KEY_CHARS) continue;
+    const mark = readMark(item);
+    if (mark) readMarks[key] = mark;
   }
   return { version: 1, drafts, readMarks };
+}
+
+/**
+ * Read one persisted mark, accepting the bare timestamp older builds wrote.
+ *
+ * A mark used to be just a number. Upgrading in place rather than discarding those keeps every
+ * badge people had already cleared cleared: the id is empty until the channel is next read, which
+ * is exactly the state the unread scan treats as "fall back to the timestamp".
+ */
+function readMark(item: unknown): ReadMark | null {
+  if (typeof item === "number") {
+    return Number.isSafeInteger(item) && item >= 0 ? { ts: item, id: "" } : null;
+  }
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+  const m = item as Record<string, unknown>;
+  const ts = m.ts;
+  const id = m.id;
+  if (typeof ts !== "number" || !Number.isSafeInteger(ts) || ts < 0) return null;
+  if (id !== undefined && (typeof id !== "string" || id.length > MAX_ID_CHARS)) return null;
+  return { ts, id: typeof id === "string" ? id : "" };
 }
 
 export type LegacyMigration = {

@@ -179,6 +179,39 @@ export type ChannelHead = {
 };
 
 /**
+ * How far this device has read in one channel.
+ *
+ * `id` is the cursor and `ts` is for display. That split is the whole point: a message id is
+ * minted with the message and means the same thing on every device, while `ts` is the SENDER's
+ * clock and means only what that machine believed at the time. Deciding "is there something new
+ * here" from a clock is what produced the reports: two messages in the same millisecond collapse,
+ * a sender whose clock runs backwards writes a newer message with an older stamp, and every sender
+ * in a channel is running an unrelated clock anyway.
+ *
+ * `ts` survives because the "new messages" divider needs somewhere to sit in a list ordered by
+ * time, and being a few rows out there is a cosmetic problem rather than a lost message.
+ */
+export type ReadMark = {
+  /** Effective timestamp of the newest row seen. Positions the divider; never decides unread. */
+  ts: number;
+  /** Stable id of the newest message from somebody else that this device has seen. The cursor. */
+  id: string;
+};
+
+/** A read mark for a channel that has never been read. */
+export const NO_READ_MARK: ReadMark = { ts: 0, id: "" };
+
+/** What the durable scan concluded about one channel, and which cursor it got there by. */
+export type UnreadVerdict = {
+  channel: string;
+  unread: boolean;
+  /** Stable identifier for the reason, for counting and comparing across reports. */
+  reason: string;
+  /** Which cursor actually decided this. `message_id` is the trustworthy one. */
+  cursor: "message_id" | "timestamp" | "none";
+};
+
+/**
  * Rebuild a server's unread channel list by comparing activity heads with durable read marks.
  *
  * This is the path that survives an explicit lock, a restart and an offline catch-up, none of
@@ -186,26 +219,112 @@ export type ChannelHead = {
  * notifications, and a restart begins with no event history at all. Without this the badges for
  * everything that arrived in the meantime are simply gone.
  *
+ * The comparison is by message id wherever both sides have one, which needs no clock and so has
+ * no skew to handle: either the newest message somebody else wrote is the one this device last
+ * read, or it is not. Timestamps are the fallback for marks written by older builds and for
+ * messages that predate stable ids, and that path reports itself as the weaker cursor it is.
+ *
  * `known` filters to channels the UI actually lists, so a head for a channel that was removed
  * from the directory cannot raise a badge nothing can open.
  */
 export function unreadFromHeads(
   heads: ChannelHead[],
-  readMarkOf: (channel: string) => number,
+  readMarkOf: (channel: string) => ReadMark,
   now: number,
   known?: (channel: string) => boolean,
   grace = CLOCK_SKEW_GRACE_MS,
-): string[] {
+): UnreadVerdict[] {
   const limit = now + grace;
-  const out: string[] = [];
+  const out: UnreadVerdict[] = [];
   for (const head of heads) {
     if (known && !known(head.channel)) continue;
+    const mark = readMarkOf(head.channel);
+    const id = typeof head.latest_incoming_id === "string" ? head.latest_incoming_id : "";
     const ts = head.latest_incoming_ts;
-    if (!Number.isFinite(ts) || ts <= 0) continue;
-    // A head above the plausible limit cannot be measured against a read mark honestly, and
-    // treating it as unread would hand anyone with a wrong clock a badge that never clears.
-    if (ts > limit) continue;
-    if (ts > readMarkOf(head.channel)) out.push(head.channel);
+    const has = Number.isFinite(ts) && ts > 0;
+    if (!id && !has) {
+      out.push({ channel: head.channel, unread: false, reason: "nothing_incoming", cursor: "none" });
+      continue;
+    }
+    if (id && mark.id) {
+      // The one comparison with no clock in it. Note that this reads "different", not "newer":
+      // two ids cannot be ordered, and they do not need to be. If the newest message somebody
+      // else wrote is not the one this device read, something has happened here since.
+      const unread = id !== mark.id;
+      out.push({
+        channel: head.channel,
+        unread,
+        reason: unread ? "head_is_not_the_read_message" : "head_is_the_read_message",
+        cursor: "message_id",
+      });
+      continue;
+    }
+    // No usable id on one side or the other, so this falls back to the sender's clock with all
+    // the caveats above. It resolves itself: the next read of this channel writes an id, and
+    // every later scan takes the branch above.
+    if (!has) {
+      out.push({ channel: head.channel, unread: false, reason: "no_incoming_timestamp", cursor: "none" });
+      continue;
+    }
+    if (ts > limit) {
+      // A stamp this far ahead cannot be measured against a read mark honestly. It used to be
+      // dropped, which silently lost a real message from anyone whose clock was off by more than
+      // the grace. Raising the badge instead is safe now in a way it was not before: reading the
+      // channel writes an id, so the badge clears on the id branch rather than waiting for a
+      // clock nobody controls to come back down.
+      out.push({ channel: head.channel, unread: true, reason: "implausible_timestamp", cursor: "timestamp" });
+      continue;
+    }
+    const unread = ts > mark.ts;
+    out.push({
+      channel: head.channel,
+      unread,
+      reason: unread ? "newer_than_read_mark" : "not_newer_than_read_mark",
+      cursor: "timestamp",
+    });
   }
   return out;
+}
+
+/** The channels a scan says to badge. */
+export function unreadChannels(verdicts: UnreadVerdict[]): string[] {
+  return verdicts.filter((v) => v.unread).map((v) => v.channel);
+}
+
+/** One channel's badge state, as the record needs to describe it before and after a transition. */
+export type UnreadState = {
+  /** Is this channel in the catalog at all? A badge for one that is not goes nowhere. */
+  listed: boolean;
+  unread: boolean;
+};
+
+/** A decision, the states either side of it, and whether the badge actually moved. */
+export type UnreadTransition = {
+  decision: UnreadDecision;
+  before: UnreadState;
+  after: UnreadState;
+};
+
+/** Did the badge state actually change? */
+export function transitionApplied(t: UnreadTransition): boolean {
+  return t.before.unread !== t.after.unread;
+}
+
+/**
+ * The reason a decision did not produce the state it asked for, or `""` when the record is honest.
+ *
+ * This exists because the diagnostic used to be written before the transition it described was
+ * attempted, so a record saying `mark_unread` proved only that something intended to raise a
+ * badge. If the channel was missing from the catalog, or a refresh replaced the server entry
+ * underneath, nothing happened and the record said otherwise. Anything this returns is a case
+ * where the log and the screen disagree, which is the one thing a diagnostic must never hide.
+ */
+export function transitionMismatch(t: UnreadTransition): string {
+  if (t.decision.decision === "mark_unread") {
+    if (!t.after.listed) return "channel_not_listed";
+    if (!t.after.unread) return "badge_not_raised";
+    return "";
+  }
+  if (t.decision.decision === "seen" && t.after.unread) return "badge_not_cleared";
+  return "";
 }
