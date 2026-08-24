@@ -3834,7 +3834,7 @@
     const endTs = evEnd ? new Date(evEnd).getTime() : 0;
     if (!evTitle.trim() || !startTs) return;
     try {
-      await invoke("create_event", { server: activeServerId, title: evTitle, body: evBody, startTs, endTs, image: evImage });
+      await invokeDebugged("create_event", { server: activeServerId, title: evTitle, body: evBody, startTs, endTs, image: evImage });
       evTitle = ""; evBody = ""; evStart = ""; evEnd = ""; evImage = "";
       await refreshEvents();
     } catch (e) {
@@ -5178,10 +5178,10 @@
     editingTopic = false;
     if (t === channelTopic) return;
     try {
-      await invoke("set_channel_topic", { server: activeServerId, channel: cur.active, topic: t });
+      await invokeDebugged("set_channel_topic", { server: activeServerId, channel: cur.active, topic: t });
       channelTopic = t;
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
@@ -5950,9 +5950,9 @@
     if (!text || activeServerId === null) return;
     statusDraft = "";
     try {
-      await invoke("post_status", { server: activeServerId, text });
+      await invokeDebugged("post_status", { server: activeServerId, text });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
@@ -7170,7 +7170,7 @@
       // would queue an EMPTY proposal that eventually auto-creates a blank page. So members
       // under review just open the editor; their first real save becomes the proposal.
       if (!wikiPages.includes(name) && mayEditWikiStructure(wikiReviewDays, canModerate)) {
-        await invoke("save_wiki_page", { server: activeServerId, name, body: "" });
+        await invokeDebugged("save_wiki_page", { server: activeServerId, name, body: "" });
         await refreshWiki();
       }
       await openWikiPage(name);
@@ -7230,7 +7230,7 @@
   async function saveWikiPage() {
     if (!activeWikiPage || activeServerId === null) return;
     try {
-      const queued = await invoke<boolean>("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
+      const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server: activeServerId, name: activeWikiPage, body: wikiBody });
       wikiDirty = false;
       wikiDrafts.delete(activeWikiPage);
       if (queued) {

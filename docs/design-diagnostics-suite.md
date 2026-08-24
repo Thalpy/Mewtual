@@ -81,26 +81,39 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M0 | Stop the logger lying and crashing | done |
 | M1 | Console out of `App.svelte` | done |
 | M2 | `catcoms-diagnostics`: canonical event, privacy model, store, renderers | done |
-| M3 | Correlation, typed errors, task supervision, invoke migration | in progress |
+| M3 | Correlation, typed errors, task supervision, invoke migration | done |
 | M4 | Rebuild the console on the hub | not started |
 | M5 | Findings and checks | not started |
 | M6 | Export bundle and GitHub issue flow | partly: text export done |
 | M7 | Hardening, privacy property tests, performance budgets, CI gates | not started |
 
-### M3 progress
+### M3, as delivered
 
-Wrappers, emit sequence numbers, task supervision and `AppError` are in. The invoke migration runs
-subsystem by subsystem:
+Wrappers, emit sequence numbers, task supervision and `AppError` are in, and all eight subsystem
+groups have been through:
 
-1. messages: send, edit, delete, react, pin — **done**
-2. channels, unread, inbox — **instrumentation done**; the read commands keep string errors, because
-   their failures are almost entirely "locked" or "unknown server" and a code adds little there
-3. jukebox
-4. join, connectivity, reachability
-5. files and transfers
-6. voice signalling
-7. vault and persistence
-8. remaining settings and document operations
+1. messages: send, edit, delete, react, pin
+2. channels, unread, inbox: the unread **decision** is recorded with its reason
+3. jukebox: queue digests, so an event that changed nothing is visible
+4. join, connectivity, reachability: aggregate route findings, and the connectivity panel joined to
+   the record by trace
+5. files and transfers: begin/finish bracketing, so an abandoned upload is visible
+6. voice signalling: a delivery with no member route recorded as its own outcome
+7. vault and persistence: partial unlock made visible
+8. documents and settings: wiki, status, calendar, channel topic
+
+**Read commands were deliberately left on string errors.** Their failures are almost entirely
+"locked" or "unknown server", so a code adds nothing a caller can act on, and migrating them would
+be churn with no reader. The same judgment applies throughout: instrument where the diagnosis was
+missing, type the errors a user must act on, and leave the rest.
+
+### What M3 did not do
+
+* The trace does not yet cross the actor mailbox. A command's stages are correlated; work the actor
+  does *later* in response is not, so a `channel-updated` that arrives two seconds after a send
+  carries the emit's sequence number but not the send's trace. That is the next real step in
+  correlation and it belongs with M4, where the console can render a trace end to end.
+* `push_file_chunk` accepts a trace and ignores it, on purpose. See its signature.
 
 ## 4. Deferred, with reasons
 

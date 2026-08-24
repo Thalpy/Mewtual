@@ -197,6 +197,21 @@ pub mod codes {
         remediation: Some(Remediation::Retry),
     };
 
+    /// A write to a server document (wiki, status, calendar) that was refused. Almost always the
+    /// content: too long, malformed, or a name that is not allowed.
+    pub const DOCUMENT_WRITE_REJECTED: ErrorCode = ErrorCode {
+        code: "DOCUMENT.WRITE.REJECTED",
+        retryable: false,
+        remediation: Some(Remediation::AmendInput),
+    };
+
+    /// A channel topic refused; over the byte limit, in practice.
+    pub const CHANNEL_TOPIC_REJECTED: ErrorCode = ErrorCode {
+        code: "CHANNEL.TOPIC.REJECTED",
+        retryable: false,
+        remediation: Some(Remediation::AmendInput),
+    };
+
     /// Every registered code, for the tests that keep this honest. The manifest is the registry:
     /// a code missing from here is a code no test checks the shape of.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -218,6 +233,8 @@ pub mod codes {
         VAULT_LOCKED_OUT,
         VAULT_READ_FAILED,
         VAULT_BACKUP_FAILED,
+        DOCUMENT_WRITE_REJECTED,
+        CHANNEL_TOPIC_REJECTED,
     ];
 }
 

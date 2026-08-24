@@ -6450,10 +6450,25 @@ async fn download_file(
 
 /// Post to the server status feed.
 #[tauri::command]
-async fn post_status(state: State<'_, AppState>, server: u64, text: String) -> Result<(), String> {
-    let actor = actor_of(&state, server).await?;
+async fn post_status(
+    state: State<'_, AppState>,
+    server: u64,
+    text: String,
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "post_status",
+        server,
+        None,
+    );
+    let actor = actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
     actor.post_status(text).await;
     persist_server(&state, server).await;
+    op.succeeded("STATUS.POST.PERSISTED");
     Ok(())
 }
 
@@ -6477,6 +6492,7 @@ async fn get_statuses(state: State<'_, AppState>, server: u64) -> Result<Vec<UiM
 /// shape only: the blob is fetched over the file path like any other embed.
 /// An `events-changed` event follows, so the UI re-reads the calendar.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn create_event(
     state: State<'_, AppState>,
     server: u64,
@@ -6485,12 +6501,25 @@ async fn create_event(
     start_ts: u64,
     end_ts: u64,
     image: String,
-) -> Result<(), String> {
-    let actor = actor_of(&state, server).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "create_event",
+        server,
+        None,
+    );
+    let actor = actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    // The title and body are content; that an event was created is the record.
     actor
         .create_event(title, body, start_ts, end_ts, image)
-        .await?;
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("EVENT.CREATE.PERSISTED");
     Ok(())
 }
 
@@ -7502,10 +7531,35 @@ async fn save_wiki_page(
     server: u64,
     name: String,
     body: String,
-) -> Result<bool, String> {
-    let actor = actor_of(&state, server).await?;
-    let queued = actor.write_wiki_page(name, body).await?;
+    trace: Option<String>,
+) -> Result<bool, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Documents,
+        "save_wiki_page",
+        server,
+        None,
+    );
+    let actor = actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    // The page body never reaches the record, and neither does its name: a wiki page is content,
+    // and the whole point of the privacy model is that content has no representation here.
+    let queued = actor
+        .write_wiki_page(name, body)
+        .await
+        .map_err(|e| op.fail(codes::DOCUMENT_WRITE_REJECTED, e))?;
     persist_server(&state, server).await;
+    // Two different things happened, and only one of them put the edit on the page. "Saved" and
+    // "queued for someone to approve" look identical from a success return, and an author who
+    // thinks the first happened when it was the second goes looking for their edit and cannot find
+    // it. Same shape as a call signal that was sent to a member with no route: an outcome, not an
+    // error, and the outcome is the diagnosis.
+    if queued {
+        op.succeeded("WIKI.EDIT.QUEUED_FOR_REVIEW");
+    } else {
+        op.succeeded("WIKI.EDIT.APPLIED");
+    }
     Ok(queued)
 }
 
@@ -7882,11 +7936,23 @@ async fn set_channel_topic(
     server: u64,
     channel: String,
     topic: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.set_channel_topic(id, topic).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "set_channel_topic",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    // The topic text is content and stays out of the record; that it changed is the event.
+    actor
+        .set_channel_topic(id, topic)
+        .await
+        .map_err(|e| op.fail(codes::CHANNEL_TOPIC_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.TOPIC.PERSISTED");
     Ok(())
 }
 
