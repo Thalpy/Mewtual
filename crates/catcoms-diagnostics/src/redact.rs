@@ -288,6 +288,13 @@ pub struct AddressValue {
     raw: String,
 }
 
+/// The most of a literal address that is kept.
+///
+/// Generous beside any real multiaddr, including a relay circuit with two peer ids in it. The bound
+/// is not about the addresses this app produces; it is that `AddressValue::new` takes a `&str` and
+/// nothing about that says "short".
+pub const MAX_ADDRESS_CHARS: usize = 300;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AddressFamily {
     V4,
@@ -337,7 +344,11 @@ impl AddressValue {
         AddressValue {
             family,
             transport: SafeText::describe(transport),
-            raw: addr.to_string(),
+            // Bounded like every other value that arrives from outside. A multiaddr is short, but
+            // this is a `&str` from a caller and nothing about the type says so: an address-shaped
+            // field carrying a megabyte would sit in the ring at full size and reach the file at
+            // full size. Found by adversarial review (P3-008).
+            raw: addr.chars().take(MAX_ADDRESS_CHARS).collect(),
         }
     }
 

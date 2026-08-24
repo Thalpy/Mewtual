@@ -5672,6 +5672,7 @@
     events_written: number;
     bytes_written: number;
     events_dropped: number;
+    events_truncated: number;
     queue_depth: number;
     queue_high_water: number;
     session_quota_bytes: number;
@@ -19823,6 +19824,15 @@
                       {debugLog.events_dropped.toLocaleString()} entries did not reach the file, so
                       this log has holes in it. That happens when the app emits faster than the disk
                       accepts, or after the session's size limit stopped the writer.
+                    </p>
+                  {/if}
+                  {#if debugLog.events_truncated > 0}
+                    <!-- A different thing from a hole, and worth saying separately: these lines are
+                         present, and somebody reading one needs to know its tail is missing before
+                         they draw a conclusion from half of an error message. -->
+                    <p class="dbg-note">
+                      {debugLog.events_truncated.toLocaleString()} entries were too long and were
+                      cut short. They are in the file, each marked, with the beginning intact.
                     </p>
                   {/if}
                   <div class="invite-actions">

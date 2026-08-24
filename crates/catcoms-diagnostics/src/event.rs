@@ -42,6 +42,20 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// case (a compromised webview, a malformed remote payload) is a producer with no such restraint.
 pub const MAX_FIELDS: usize = 32;
 
+/// The most of a runtime field name that is kept.
+///
+/// Only the `tracing` bridge produces these; a literal from our own source is already `'static` and
+/// needs no bound. A field name is a short identifier in every sane case, which is exactly why it
+/// should not be the thing a memory bound depends on.
+pub const MAX_FIELD_NAME: usize = 64;
+
+/// The most of an emitting module path that is kept.
+///
+/// A target is a module path, so a long one is a deeply nested module rather than an attack. It is
+/// bounded for the same reason as everything else here: the type is a `String` from a caller, and
+/// an event that can hold an unbounded one holds it in the ring and writes it to the file.
+pub const MAX_TARGET: usize = 200;
+
 /// Ties every stage of one user-visible operation together.
 ///
 /// The thing whose absence made concurrent sends, reconnects, server switches and retries
@@ -143,8 +157,22 @@ impl From<&'static str> for FieldName {
 }
 
 impl From<String> for FieldName {
+    /// Bounded, because this is the runtime path.
+    ///
+    /// The `Static` arm is a literal from our own source and needs no bound; this one arrives from
+    /// the `tracing` bridge, where the name is whatever a call site anywhere in the dependency tree
+    /// chose. A field *name* is a short identifier in every sane case, and the bound is here so
+    /// that "every sane case" is not the thing holding the memory bound up.
     fn from(name: String) -> Self {
-        FieldName::Owned(name.into_boxed_str())
+        if name.len() <= MAX_FIELD_NAME {
+            return FieldName::Owned(name.into_boxed_str());
+        }
+        FieldName::Owned(
+            name.chars()
+                .take(MAX_FIELD_NAME)
+                .collect::<String>()
+                .into_boxed_str(),
+        )
     }
 }
 
@@ -270,7 +298,12 @@ impl DiagnosticEvent {
     }
 
     pub fn target(mut self, target: impl Into<String>) -> Self {
-        self.target = target.into();
+        let target = target.into();
+        self.target = if target.len() <= MAX_TARGET {
+            target
+        } else {
+            target.chars().take(MAX_TARGET).collect()
+        };
         self
     }
 
@@ -312,7 +345,10 @@ impl DiagnosticEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redact::{AddressValue, RefDomain, SafeText, SessionSalt};
+    use crate::config::CaptureMode;
+    use crate::redact::{
+        AddressValue, RefDomain, SafeText, SessionSalt, MAX_ADDRESS_CHARS, MAX_SAFE_TEXT,
+    };
 
     #[test]
     fn a_trace_reads_the_same_way_everywhere_it_is_quoted() {
@@ -388,6 +424,58 @@ mod tests {
             AddressValue::new("/ip6/2001:db8::1/udp/1/quic-v1"),
         );
         assert!(addressed.is_mode_sensitive());
+    }
+
+    /// Every part of an event that arrives as an owned string has a bound.
+    ///
+    /// The field cap above bounds how *many* there are and says nothing about how large each one
+    /// is, so an event could hold a hundred megabytes in thirty-two fields and satisfy it. These
+    /// are the parts a caller supplies as a `String` or a `&str`, where nothing about the type
+    /// says "short". Found by adversarial review (P3-008).
+    #[test]
+    fn every_owned_part_of_an_event_is_bounded() {
+        let huge = "x".repeat(1_000_000);
+
+        let event = DiagnosticEvent::info(Section::Sync, "SYNC.TEST")
+            .target(huge.clone())
+            .field(huge.clone(), SafeText::describe(&huge))
+            .field("address", AddressValue::new(&huge));
+
+        assert!(event.target.len() <= MAX_TARGET, "the emitting module path");
+        assert!(
+            event.fields[0].0.as_str().len() <= MAX_FIELD_NAME,
+            "a runtime field name"
+        );
+        assert!(
+            event.fields[0].1.render(CaptureMode::Full).len() <= MAX_SAFE_TEXT * 4,
+            "the value, which SafeText already bounded"
+        );
+        // The literal address, which only a deliberately chosen mode renders at all.
+        let rendered = event.fields[1].1.render(CaptureMode::Full);
+        assert!(
+            rendered.len() <= MAX_ADDRESS_CHARS * 4,
+            "{}",
+            rendered.len()
+        );
+
+        // The whole event, in the only terms that matter: what it costs to hold.
+        let total: usize = event.target.len()
+            + event
+                .fields
+                .iter()
+                .map(|(name, value)| name.as_str().len() + value.render(CaptureMode::Full).len())
+                .sum::<usize>();
+        assert!(total < 64 * 1024, "one event held {total} bytes");
+    }
+
+    /// A short name must not be trimmed, or every ordinary field pays for the hostile case.
+    #[test]
+    fn an_ordinary_field_name_is_untouched() {
+        let event = DiagnosticEvent::info(Section::Sync, "SYNC.TEST")
+            .target("catcoms_app::actor")
+            .field("direct_candidates".to_string(), 4u64);
+        assert_eq!(event.target, "catcoms_app::actor");
+        assert_eq!(event.fields[0].0.as_str(), "direct_candidates");
     }
 
     #[test]

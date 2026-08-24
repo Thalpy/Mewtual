@@ -39,8 +39,8 @@ use tracing_subscriber::{fmt, EnvFilter, Layer};
 mod writer;
 
 pub use writer::{
-    DiagnosticInitError, SinkHealth, SinkState, MAX_DIR_BYTES, MAX_SEGMENTS, MAX_SEGMENT_BYTES,
-    MAX_SESSION_BYTES,
+    DiagnosticInitError, SinkHealth, SinkState, MAX_DIR_BYTES, MAX_EVENT_BYTES, MAX_SEGMENTS,
+    MAX_SEGMENT_BYTES, MAX_SESSION_BYTES, TRUNCATION_MARKER,
 };
 use writer::{FileWriter, SYNC_TIMEOUT};
 

@@ -10522,6 +10522,10 @@ struct DebugLogging {
     bytes_written: u64,
     /// Events that never made it: queue overflow, or emitted after the quota stopped the writer.
     events_dropped: u64,
+    /// Events that reached the file with their tail cut off. A different thing from dropped, and
+    /// worth showing separately: a truncated line is there and says so, so a reader who meets one
+    /// knows not to draw a conclusion from half an error message.
+    events_truncated: u64,
     /// How full the write queue is, and how full it has ever been.
     queue_depth: u64,
     queue_high_water: u64,
@@ -10549,6 +10553,7 @@ impl DebugLogging {
             events_written: health.events_written,
             bytes_written: health.bytes_written,
             events_dropped: health.events_dropped,
+            events_truncated: health.events_truncated,
             queue_depth: health.queue_depth as u64,
             queue_high_water: health.queue_high_water as u64,
             session_quota_bytes: catcoms_log::MAX_SESSION_BYTES,
@@ -13880,6 +13885,7 @@ mod tests {
             path: Some(dir.join("debug_log_20260823_120000.txt")),
             events_written: 40_000,
             events_dropped: 17,
+            events_truncated: 3,
             queue_high_water: 8192,
             ..catcoms_log::SinkHealth::stopped()
         };
@@ -13887,6 +13893,10 @@ mod tests {
         assert!(reply.active);
         assert_eq!(reply.state, "degraded");
         assert_eq!(reply.events_dropped, 17);
+        assert_eq!(
+            reply.events_truncated, 3,
+            "a line that is there with its tail cut off is not a line that is missing"
+        );
         assert_eq!(reply.queue_high_water, 8192);
     }
 

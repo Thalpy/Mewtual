@@ -544,6 +544,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
         events_written: 1284,
         bytes_written: 190_432,
         events_dropped: 0,
+        events_truncated: 0,
         queue_depth: 0,
         queue_high_water: 12,
         session_quota_bytes: 52_428_800,

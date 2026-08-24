@@ -31,6 +31,24 @@ use std::time::Duration;
 // disk has become the outage. The exact numbers are a starting point and can be tuned; having
 // them at all is not optional.
 
+/// The most one formatted event may occupy.
+///
+/// A bound on the *emitting* thread, which is where it has to be. The segment and session quotas
+/// below are enforced by the worker, and the worker only sees a line once it has already been
+/// built: without this, one event could allocate an arbitrarily large `Vec` on an actor or network
+/// thread, arrive as a single queue item, and carry the file past a quota in one write instead of
+/// being stopped at it.
+///
+/// 64 KiB because it is far above any event this app composes on purpose and far below anything
+/// that matters to a machine. Most values reaching the log are bounded at their source, but the
+/// `tracing` ecosystem is wide and a `Debug` rendering can carry remote or file-derived material:
+/// a writer that depends on every producer staying careful forever is one bad `Debug` impl from an
+/// outage. Found by adversarial review (P3-008).
+pub const MAX_EVENT_BYTES: usize = 64 * 1024;
+
+/// Marks a line the cap cut short, so a reader knows the tail is missing rather than absent.
+pub const TRUNCATION_MARKER: &str = " [truncated]";
+
 /// How large one segment grows before the writer starts another.
 pub const MAX_SEGMENT_BYTES: u64 = 10 * 1024 * 1024;
 
@@ -116,6 +134,9 @@ pub struct SinkHealth {
     pub bytes_written: u64,
     /// Events that never reached the file: queue overflow, or emitted after the quota stopped it.
     pub events_dropped: u64,
+    /// Events that reached the file with their tail cut off. Distinct from dropped: a truncated
+    /// event is present and says so, and usually still holds the part that mattered.
+    pub events_truncated: u64,
     pub queue_depth: usize,
     pub queue_high_water: usize,
     pub last_error: Option<String>,
@@ -134,6 +155,7 @@ impl SinkHealth {
             events_written: 0,
             bytes_written: 0,
             events_dropped: 0,
+            events_truncated: 0,
             queue_depth: 0,
             queue_high_water: 0,
             last_error: None,
@@ -210,6 +232,12 @@ struct WriterStats {
     events_written: AtomicU64,
     bytes_written: AtomicU64,
     events_dropped: AtomicU64,
+    /// Events that reached the file with their tail cut off.
+    ///
+    /// Kept apart from `events_dropped` because they mean different things to whoever is reading
+    /// the log: a dropped event is absent and its absence is invisible, while a truncated one is
+    /// present, says so on the line, and may still contain the part that matters.
+    events_truncated: AtomicU64,
     queue_depth: AtomicUsize,
     queue_high_water: AtomicUsize,
     last_write_at_ms: AtomicI64,
@@ -267,13 +295,38 @@ pub(crate) struct FileSink {
 /// otherwise mean counting `write` calls, which is a number about the formatter, not about the log.
 pub(crate) struct LineWriter {
     buf: Vec<u8>,
+    /// Whether this line has already hit the cap, so it is counted once rather than per write.
+    truncated: bool,
     tx: SyncSender<Op>,
     stats: Arc<WriterStats>,
 }
 
 impl Write for LineWriter {
+    /// Take at most [`MAX_EVENT_BYTES`] of a line, and report the rest as written.
+    ///
+    /// The cap is applied *here*, on the emitting thread, before the bytes are held. The segment
+    /// and session quotas are enforced by the worker, which is too late for three of the four
+    /// problems: a single formatted event could allocate an arbitrarily large `Vec` on whichever
+    /// thread emitted it, enqueue that allocation as one item, and carry the file past a quota in
+    /// one write rather than being stopped at it.
+    ///
+    /// Reporting `bytes.len()` for bytes that were discarded is deliberate. `io::Write` treats a
+    /// short count as backpressure and the formatter will simply offer the remainder again, so a
+    /// truthful count here turns one oversized event into a loop that never converges. The honest
+    /// signal is the truncation marker on the line and the counter beside it, not a return value
+    /// the caller will interpret as "try again". Found by adversarial review (P3-008).
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.buf.extend_from_slice(bytes);
+        let room = MAX_EVENT_BYTES.saturating_sub(self.buf.len());
+        // Never past a character boundary: the buffer is UTF-8 that a reader will decode, and a cap
+        // landing mid-character makes the line unreadable from that point rather than merely short.
+        let take = floor_char_boundary(&bytes[..room.min(bytes.len())]);
+        if take < bytes.len() && !self.truncated {
+            // Counted once per line, not once per rejected write, or a 100 MiB field would report
+            // itself as thousands of truncations.
+            self.truncated = true;
+            self.stats.events_truncated.fetch_add(1, Ordering::Relaxed);
+        }
+        self.buf.extend_from_slice(&bytes[..take]);
         Ok(bytes.len())
     }
 
@@ -282,12 +335,61 @@ impl Write for LineWriter {
     }
 }
 
+/// The largest index at or below `bytes.len()` that does not split a UTF-8 character.
+///
+/// `str::floor_char_boundary` is still unstable, and this runs on a slice that may not be valid
+/// UTF-8 at all (a `Debug` rendering of arbitrary bytes), so it walks back over continuation bytes
+/// and gives up rather than assuming.
+fn floor_char_boundary(bytes: &[u8]) -> usize {
+    let len = bytes.len();
+    if len == 0 {
+        return 0;
+    }
+    // Back up to the lead byte of the last character. A continuation byte is `10xxxxxx`, and at
+    // most three of them follow a lead, so this terminates.
+    let mut start = len - 1;
+    let mut walked = 0;
+    while start > 0 && walked < 3 && (bytes[start] & 0b1100_0000) == 0b1000_0000 {
+        start -= 1;
+        walked += 1;
+    }
+    let lead = bytes[start];
+    let width = match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        // A stray continuation or an invalid lead: this is not UTF-8, so there is no boundary to
+        // respect. Keeping it is better than trimming bytes on a guess.
+        _ => 1,
+    };
+    // Whole character present: the cut is already on a boundary. Otherwise cut before it starts,
+    // rather than leaving a lead byte whose continuations never arrive.
+    if start + width <= len {
+        len
+    } else {
+        start
+    }
+}
+
 impl Drop for LineWriter {
     fn drop(&mut self) {
         if self.buf.is_empty() {
             return;
         }
-        let line = std::mem::take(&mut self.buf);
+        let mut line = std::mem::take(&mut self.buf);
+        if self.truncated {
+            // Said on the line itself. A counter tells someone reading the health panel that
+            // something was cut; the marker tells whoever is reading *this line* that its tail is
+            // missing, which is the person who would otherwise draw a conclusion from half an
+            // error message. Inserted before the newline so the line stays one line.
+            let end = if line.last() == Some(&b'\n') {
+                line.len() - 1
+            } else {
+                line.len()
+            };
+            line.splice(end..end, TRUNCATION_MARKER.bytes());
+        }
         // Claim the queue slot *before* handing the line over, and refund it if the send fails.
         //
         // Counting it afterwards is a race with a sharp edge: the worker can dequeue the line and
@@ -328,6 +430,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for FileSink {
     fn make_writer(&'a self) -> Self::Writer {
         LineWriter {
             buf: Vec::with_capacity(256),
+            truncated: false,
             tx: self.tx.clone(),
             stats: Arc::clone(&self.stats),
         }
@@ -628,6 +731,7 @@ impl FileWriter {
             events_written: self.stats.events_written.load(Ordering::Relaxed),
             bytes_written: self.stats.bytes_written.load(Ordering::Relaxed),
             events_dropped: dropped,
+            events_truncated: self.stats.events_truncated.load(Ordering::Relaxed),
             queue_depth: self.stats.queue_depth.load(Ordering::Relaxed),
             queue_high_water: self.stats.queue_high_water.load(Ordering::Relaxed),
             last_error: self.stats.last_error.lock().ok().and_then(|e| e.clone()),
@@ -658,6 +762,115 @@ mod tests {
         let mut w = sink.make_writer();
         w.write_all(text.as_bytes()).unwrap();
         drop(w);
+    }
+
+    /// One event must not be able to allocate without bound on the thread that emitted it.
+    ///
+    /// The quotas below this are enforced by the worker, which only sees a line once it has been
+    /// built. So a single formatted event could allocate an arbitrarily large `Vec` on an actor or
+    /// network thread, arrive as one queue item, and carry the file past a quota in one write
+    /// instead of being stopped at it. Found by adversarial review (P3-008).
+    ///
+    /// A hundred mebibytes, because the point is that the size of the input does not decide the
+    /// size of the allocation.
+    #[test]
+    fn one_enormous_event_is_truncated_rather_than_allowed_to_allocate() {
+        use tracing_subscriber::fmt::MakeWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, sink) = writer(dir.path());
+
+        let mut w = sink.make_writer();
+        // Offered in slices, the way a formatter renders one field at a time.
+        let slice = "x".repeat(1024 * 1024);
+        for _ in 0..100 {
+            let written = w.write(slice.as_bytes()).unwrap();
+            assert_eq!(
+                written,
+                slice.len(),
+                "a short count reads as backpressure and the formatter would offer it again \
+                 forever"
+            );
+        }
+        w.write_all(b"\n").unwrap();
+        // The bound that matters, checked before the line is ever handed over.
+        assert!(
+            w.buf.len() <= MAX_EVENT_BYTES,
+            "held {} bytes of a 100 MiB event",
+            w.buf.len()
+        );
+        drop(w);
+        assert!(writer.sync(SYNC_TIMEOUT));
+
+        let health = writer.health();
+        assert_eq!(health.events_truncated, 1, "one event, counted once");
+        assert_eq!(
+            health.events_dropped, 0,
+            "truncated is not dropped: the event is there, and says what happened to it"
+        );
+
+        // And the file agrees: the line is present, bounded, and marked.
+        let path = health.path.expect("an open segment");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains(TRUNCATION_MARKER),
+            "the line says so itself"
+        );
+        assert!(
+            (contents.len() as u64) < MAX_SEGMENT_BYTES,
+            "the segment quota stayed true: {} bytes",
+            contents.len()
+        );
+        assert!(health.bytes_written <= MAX_EVENT_BYTES as u64 + 64);
+    }
+
+    /// The cap must not land in the middle of a character.
+    ///
+    /// The buffer is UTF-8 that somebody will decode. A cut mid-character makes the line unreadable
+    /// from that point rather than merely short, which is worse than losing one more character.
+    #[test]
+    fn truncation_never_splits_a_character() {
+        use tracing_subscriber::fmt::MakeWriter;
+        let dir = tempfile::tempdir().unwrap();
+        let (_writer, sink) = writer(dir.path());
+
+        // Every offset into a four-byte character, so the aligned case cannot be the only one
+        // tested. The first version of this passed while the code was wrong, because 64 KiB
+        // happens to be a whole number of cats.
+        for skew in 0..4 {
+            let mut w = sink.make_writer();
+            w.write_all(&b"x".repeat(skew)).unwrap();
+            w.write_all("🐈".repeat(MAX_EVENT_BYTES).as_bytes())
+                .unwrap();
+            assert!(w.buf.len() <= MAX_EVENT_BYTES);
+            assert!(
+                std::str::from_utf8(&w.buf).is_ok(),
+                "the kept prefix is still decodable at skew {skew}"
+            );
+            w.buf.clear(); // do not ship 64 KiB of cats to the worker four times over
+        }
+    }
+
+    /// The boundary walk itself, which the writer test can only exercise at whatever offsets the
+    /// cap happens to produce.
+    #[test]
+    fn the_boundary_walk_keeps_whole_characters_and_no_more() {
+        assert_eq!(floor_char_boundary(b""), 0);
+        assert_eq!(floor_char_boundary(b"abc"), 3, "ascii is all boundaries");
+        // A complete multi-byte character at the end is kept whole.
+        assert_eq!(floor_char_boundary("a🐈".as_bytes()), 5);
+        // An incomplete one is cut before it starts, rather than leaving a lead byte whose
+        // continuations never arrive.
+        for partial in 1..4 {
+            let full = "a🐈".as_bytes();
+            let cut = &full[..1 + partial];
+            assert_eq!(
+                floor_char_boundary(cut),
+                1,
+                "{partial} bytes of a four-byte character is not a character"
+            );
+        }
+        // Not UTF-8 at all: keep it rather than trimming bytes on a guess.
+        assert_eq!(floor_char_boundary(&[0xff, 0xfe]), 2);
     }
 
     #[test]

@@ -56,12 +56,13 @@ pub mod ring;
 
 pub use config::{CaptureConfig, CaptureGate, CaptureMode, ConsoleView, Level, Section, SECTIONS};
 pub use event::{
-    DiagnosticEvent, FieldName, Phase, Refs, SpanId, TraceId, MAX_FIELDS, SCHEMA_VERSION,
+    DiagnosticEvent, FieldName, Phase, Refs, SpanId, TraceId, MAX_FIELDS, MAX_FIELD_NAME,
+    MAX_TARGET, SCHEMA_VERSION,
 };
 pub use hub::{DiagnosticHub, DEFAULT_CAPACITY};
 pub use redact::{
     AddressFamily, AddressValue, BridgedMessage, RefDomain, SafeText, SafeValue, SessionRef,
-    SessionSalt, MAX_BRIDGED_MESSAGE, MAX_SAFE_TEXT,
+    SessionSalt, MAX_ADDRESS_CHARS, MAX_BRIDGED_MESSAGE, MAX_SAFE_TEXT,
 };
 pub use render::{event_json, event_line, event_view, EventView, ViewField};
 pub use ring::{Ring, RingStats};

@@ -224,6 +224,21 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-008 (high), fixed.** `LineWriter::write` did `extend_from_slice` with no per-event bound, so
+  one formatted event could allocate an arbitrarily large `Vec` on whichever thread emitted it,
+  arrive as a single queue item, and carry the file past a quota in one write rather than being
+  stopped at it. The segment and session quotas are enforced by the worker, which only sees a line
+  once it has been built, so a bound there is three problems too late. `MAX_EVENT_BYTES` caps it at
+  the point of writing, the line says `[truncated]` for whoever reads it, and `events_truncated` is
+  counted separately from `events_dropped`: a dropped event is absent and its absence is invisible,
+  while a truncated one is present and usually still holds the part that mattered.
+  Also bounded, for the same reason (the type is a `String` from a caller and nothing about that
+  says "short"): the event's `target`, runtime field names from the bridge, and the literal address
+  in `AddressValue`. `SafeText` and `BridgedMessage` were already bounded.
+  Two notes on the tests. The write must report the full length even for bytes it discarded, or
+  `io::Write` reads the short count as backpressure and the formatter offers the remainder forever.
+  And the boundary walk needed a second attempt: the first passed only because 64 KiB happens to be
+  a whole number of four-byte characters, so the test now covers every offset into one.
 * **P3-006 (high), fixed.** Both frontend batchers counted a loss only when `send` threw
   *immediately*, and the real send returns a promise: it was fired and forgotten, the rejection
   arrived outside the batcher, and the counter still read zero. The pipeline reported perfect health
@@ -330,8 +345,7 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 
 | ID | Sev | Open finding | Note |
 |---|---|---|---|
-| P3-008 | High | A formatted event has no size bound before allocation or queuing | **Start here.** I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
-| P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |
+| P3-009 | High | Task supervision misses the paths that make the UI silently stale | **Start here.** Only actor tasks are supervised. |
 | P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
