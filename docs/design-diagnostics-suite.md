@@ -394,7 +394,8 @@ Neither was in a review, and both are the kind of thing a passing suite says not
 - **Structured detail on `AppError`.** Removed rather than carried unused.
 
 ## 4a. Every finding from the Part 3 review
-<!-- Twelve of twenty resolved: P3-001 to P3-011 and P3-014. Eight open, all Medium or Low. -->
+<!-- Seventeen of twenty resolved. Open: P3-015, P3-018, P3-020, plus the named remainders of
+     P3-002, P3-016, P3-017 and P3-019. -->
 
 
 `docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`, pinned to `f6c1be6`. Read the review for
@@ -425,13 +426,33 @@ can be read.
 | P3-011 | Med | Frontend structured events flatten into `UI.EVENT` | Fixed, `dde528d` |
 | P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Fixed, `3bcb6c7` |
 | P3-012 | Med | Console/export reads clone events under the global hub mutex | Fixed, see below |
-| P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
-| P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
-| P3-016 | Med | Startup capture begins too late for static-import failures | `main.ts` imports run before its first statement. |
-| P3-017 | Med | The typed-error registry is conventional, not enforced | Nothing stops a code being used without registering it. |
+| P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | Fixed, `6433907` + `013fc7a` |
+| P3-015 | Med | Redaction and frontend field ordering break deterministic export | **Start here.** Directly undercuts the determinism claim in `render.rs`. |
+| P3-016 | Med | Startup capture begins too late for static-import failures | Fixed, `3480681`. One part open: a failure to fetch `main.ts` itself needs `index.html`, which the CSP makes awkward. |
+| P3-017 | Med | The typed-error registry is conventional, not enforced | Fixed, `d061574`. The `SERVER.ACTOR.UNAVAILABLE` split is not done; see below. |
 | P3-018 | Med | Unread reconciliation uses an unsafe sender-clock cursor | Pre-existing, not introduced by this work. |
-| P3-019 | Med | The jukebox digest is weak and the revision can saturate | 32-bit FNV was chosen for brevity, not collision resistance. |
+| P3-019 | Med | The jukebox digest is weak and the revision can saturate | Digest fixed, `f58d7f2`. The saturating revision is in `apps/desktop/src/jukebox.ts` and is still open. |
 | P3-020 | Low | Some status messages overstate what was retained | |
+
+## 4b. Found while fixing, not yet fixed
+
+Three things that turned up as neighbours of the findings above and are worth writing down rather
+than losing:
+
+* **A locked session is reported as a broken server.** `actor_of` calls `require_unlocked_session`
+  first, so a locked vault surfaces as `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation
+  rather than `SESSION.LOCKED` with `Unlock`. The user is told to restart the app when they need to
+  type a passphrase. It is the natural companion to P3-017's unfinished half, splitting that code
+  into the three states it currently conflates.
+* **Webview field order is nondeterministic.** `record_ui_events` deserialises the webview's fields
+  into a `HashMap` and iterates it, so events from that producer have no stable field order. That
+  undercuts the byte-identical-output property for exactly the events the console shows most. It
+  belongs with P3-015.
+* **A fetch failure of `main.ts` itself still reports nothing.** P3-016 moved capture ahead of every
+  static import, which covers a module that throws while evaluating. A module that never arrives is
+  a different case and needs a first script in `index.html`; the app ships `script-src 'self'` with
+  no `'unsafe-inline'`, so the review's first-choice inline bootstrap needs a separate file and a
+  CSP decision.
 
 ## 5. Cooperative link test
 
