@@ -22,6 +22,20 @@
 //! dependency to do it, but mostly because determinism here means controlling field order exactly,
 //! and the value type is a small closed enum that takes about forty lines to write out.
 //!
+//! # One event, one row, one reading
+//!
+//! Both export renderings are grammars, and a value that carries the grammar's own punctuation can
+//! forge a record in one. A `tracing` message keeps its newlines on purpose (a stack trace is why
+//! bridged messages exist at all), so an unescaped one puts a line into `report.txt` that neither a
+//! reader nor a screenshot can tell from a real event. Field names are whatever the bridge or the
+//! webview chose and are not unique, so rendering them as a JSON object emitted the same key twice,
+//! which readers resolve differently: first wins, last wins, or refuse.
+//!
+//! Neither is a formatting nit. A report that its reader and its author read differently is worse
+//! than no report, because it is believed. So: every rendered value is escaped where it could break
+//! the grammar around it, fields render as an ordered array rather than as a map, and one event
+//! produces exactly one row. Found by adversarial review (P3-013).
+//!
 //! # Three renderings, one event
 //!
 //! [`event_line`] is text for a human, [`event_json`] is a line of an export bundle, and
@@ -139,17 +153,34 @@ pub fn event_json(event: &DiagnosticEvent, mode: CaptureMode) -> String {
         out.push('}');
     }
 
+    // An array of `{name,value}` rather than an object, because field names are not unique.
+    //
+    // Nothing rejects a repeated name: the `tracing` bridge takes whatever a call site declared and
+    // the webview sends what it likes, so `fields` as an object could emit the same key twice. JSON
+    // says nothing about what a reader should then do, and readers duly disagree; two people on one
+    // report would read two different values and neither would find out. An array carries exactly
+    // what was recorded, in the order it was recorded, and asks the reader to resolve nothing. The
+    // `refs` object above stays an object: its five keys are literals from one array in this file
+    // and cannot repeat.
     if !event.fields.is_empty() {
-        out.push_str(",\"fields\":{");
+        out.push_str(",\"fields\":[");
         for (at, (name, value)) in event.fields.iter().enumerate() {
             if at > 0 {
                 out.push(',');
             }
+            out.push_str("{\"name\":");
             json_string(name.as_str(), &mut out);
-            out.push(':');
+            out.push_str(",\"value\":");
             json_value(value, mode, &mut out);
+            out.push('}');
         }
-        out.push('}');
+        out.push(']');
+    }
+    // Omitted when nothing was lost, like every other optional key, but never inferable from the
+    // count: a reader who sees thirty-two fields has no way to know a thirty-third was refused, and
+    // the event that reaches the cap is exactly the one whose extra field someone is looking for.
+    if event.fields_dropped > 0 {
+        out.push_str(&format!(",\"fields_dropped\":{}", event.fields_dropped));
     }
 
     // Says what the reader is holding. A Safe report and a Full one look similar and mean very
@@ -159,6 +190,39 @@ pub fn event_json(event: &DiagnosticEvent, mode: CaptureMode) -> String {
     json_string(mode.as_str(), &mut out);
     out.push('}');
     out
+}
+
+/// Escape a rendered name or value for a report row.
+///
+/// The row is the unit a reader works in: they split a report on line breaks and expect each piece
+/// to be one event. A bridged `tracing` message keeps its newlines deliberately, so without this a
+/// message reading `dial failed\n0001234  ERROR  security      MLS.KEY.LEAKED` puts a line into
+/// `report.txt` that is indistinguishable from an event the app never recorded. A literal address
+/// under a mode that renders them is the same hole by a different route.
+///
+/// Carriage returns and the rest of the control characters go with the newlines: a line that can
+/// move the terminal cursor can overwrite the line above it, which is the same forgery against a
+/// reader who is watching rather than parsing. `U+2028` is neither a newline nor a control
+/// character and is treated as one, because a reader in a webview or an editor breaks a line on it.
+///
+/// Names are escaped as well as values even though [`crate::event::FieldName`] already cleans the
+/// runtime ones: a guarantee this file makes about its own output should not depend on a bound
+/// enforced in another module, which is how it would be lost the day a third source of names
+/// appears.
+fn push_row_escaped(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || c == '\u{2028}' || c == '\u{2029}' => {
+                // The same `\u00XX` spelling the JSON escaping uses, so a reader who meets one in
+                // either rendering reads it the same way.
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
 }
 
 /// One event as a line of text, in the shape the console and `report.txt` both use.
@@ -190,7 +254,13 @@ pub fn event_line(event: &DiagnosticEvent, mode: CaptureMode) -> String {
         }
     }
     for (name, value) in &event.fields {
-        out.push_str(&format!(" {name}={}", value.render(mode)));
+        out.push(' ');
+        push_row_escaped(name.as_str(), &mut out);
+        out.push('=');
+        push_row_escaped(&value.render(mode), &mut out);
+    }
+    if event.fields_dropped > 0 {
+        out.push_str(&format!(" fields_dropped={}", event.fields_dropped));
     }
     out
 }
@@ -252,6 +322,11 @@ pub struct EventView {
     pub attempt: Option<u32>,
     pub target: String,
     pub fields: Vec<ViewField>,
+    /// Fields the event's cap refused, so the console can say the event is short rather than
+    /// showing a truncated one as if it were whole. Carried here as well as in the export because
+    /// the three renderings are in one file precisely so they cannot disagree about what an event
+    /// contains, and "it contained more than this" is part of what it contains.
+    pub fields_dropped: u32,
     /// The mode this was rendered at.
     ///
     /// Travels with every event rather than only in the payload's header, for the same reason
@@ -308,6 +383,7 @@ pub fn event_view(event: &DiagnosticEvent, mode: CaptureMode) -> EventView {
                 sensitive: value.is_mode_sensitive(),
             })
             .collect(),
+        fields_dropped: event.fields_dropped,
         capture: mode.as_str(),
     }
 }
@@ -316,8 +392,8 @@ pub fn event_view(event: &DiagnosticEvent, mode: CaptureMode) -> EventView {
 mod tests {
     use super::*;
     use crate::config::Section;
-    use crate::event::{Phase, Refs, SpanId, TraceId};
-    use crate::redact::{AddressValue, RefDomain, SafeText, SessionSalt};
+    use crate::event::{Phase, Refs, SpanId, TraceId, MAX_FIELDS};
+    use crate::redact::{AddressValue, BridgedMessage, RefDomain, SafeText, SessionSalt};
 
     fn sample() -> DiagnosticEvent {
         let salt = SessionSalt::for_tests(3);
@@ -405,9 +481,12 @@ mod tests {
     #[test]
     fn numbers_stay_numbers_so_a_reader_can_sort_on_them() {
         let json = event_json(&sample(), CaptureMode::Safe);
-        assert!(json.contains("\"direct_candidates\":4"), "{json}");
+        assert!(
+            json.contains("{\"name\":\"direct_candidates\",\"value\":4}"),
+            "{json}"
+        );
         assert!(json.contains("\"duration_ms\":60123"), "{json}");
-        assert!(!json.contains("\"direct_candidates\":\"4\""));
+        assert!(!json.contains("\"value\":\"4\""));
     }
 
     #[test]
@@ -568,5 +647,444 @@ mod tests {
         let json = event_json(&event, CaptureMode::Safe);
         assert!(json.contains(r#"\"quoted\""#), "{json}");
         assert!(json.contains(r"\\ backslash"), "{json}");
+    }
+
+    // --- P3-013: the canonical format cannot be made to say two things ----------------------
+
+    /// A repeated field name is not hypothetical. The `tracing` bridge carries whatever names a
+    /// call site declared and the webview sends what it likes, and nothing between there and here
+    /// rejects a repeat. Rendered as a JSON object that was two identical keys, which the format
+    /// does not define: readers variously keep the first, keep the last, or refuse, so two people
+    /// reading one report would disagree about what it said and neither would be told.
+    #[test]
+    fn a_repeated_field_name_stays_two_fields_rather_than_one_ambiguous_key() {
+        let event = DiagnosticEvent::info(Section::Sync, "SYNC.TEST")
+            .field("reason", SafeText::describe("first"))
+            .field("reason".to_string(), SafeText::describe("second"));
+
+        let json = read_json(&event_json(&event, CaptureMode::Safe))
+            .expect("a report a reader can read only one way");
+        let fields = json.get("fields").expect("the fields").items();
+
+        assert_eq!(fields.len(), 2, "{fields:?}");
+        assert_eq!(fields[0].get("name").unwrap().text(), "reason");
+        assert_eq!(fields[0].get("value").unwrap().text(), "first");
+        assert_eq!(
+            fields[1].get("value").unwrap().text(),
+            "second",
+            "in the order recorded, which is the only thing telling the two apart"
+        );
+    }
+
+    /// The event that reaches the field cap is the one whose extra fields somebody wanted. Losing
+    /// them is defensible; losing them invisibly is not, because the report then reads as a
+    /// complete account of an event that was not completely recorded.
+    #[test]
+    fn an_event_that_lost_fields_to_the_cap_says_so_in_every_rendering() {
+        let mut event = DiagnosticEvent::info(Section::Sync, "SYNC.TEST");
+        for n in 0..(MAX_FIELDS + 5) {
+            event = event.field("filler", n as u64);
+        }
+
+        let json = read_json(&event_json(&event, CaptureMode::Safe)).expect("parses");
+        assert_eq!(json.get("fields").unwrap().items().len(), MAX_FIELDS);
+        assert_eq!(
+            json.get("fields_dropped")
+                .expect("the export admits the loss")
+                .number(),
+            5
+        );
+        assert!(
+            event_line(&event, CaptureMode::Safe).contains(" fields_dropped=5"),
+            "the row admits it too, since that is what a screenshot shows"
+        );
+        assert_eq!(event_view(&event, CaptureMode::Safe).fields_dropped, 5);
+
+        // And an event that lost nothing carries no marker, or the marker stops meaning anything.
+        let whole = DiagnosticEvent::info(Section::Sync, "SYNC.OK").field("ops", 1u64);
+        assert!(!event_json(&whole, CaptureMode::Safe).contains("fields_dropped"));
+        assert!(!event_line(&whole, CaptureMode::Safe).contains("fields_dropped"));
+    }
+
+    /// The forgery in the shape the review demonstrated. A bridged message keeps its newlines on
+    /// purpose, so a message whose second line is shaped like an event header puts an event into
+    /// `report.txt` that the app never recorded, and a screenshot of it cannot be argued with.
+    #[test]
+    fn a_value_cannot_add_a_row_to_the_report() {
+        let forged = "real error\n0001234  ERROR  security      MLS.KEY.LEAKED";
+        let event = DiagnosticEvent::error(Section::Sync, "SYNC.FAILED")
+            .field("message", BridgedMessage::new(forged));
+        let line = event_line(&event, CaptureMode::Safe);
+        assert_eq!(line.lines().count(), 1, "one event, one row: {line}");
+        assert!(line.contains(r"real error\n0001234"), "{line}");
+
+        // The same hole by the other route: a literal address is rendered verbatim under a mode
+        // that allows it, and nothing on the way in strips its control characters.
+        let addressed = DiagnosticEvent::info(Section::Transport, "NET.DIAL.FAILED").field(
+            "address",
+            AddressValue::new(
+                "/ip4/203.0.113.9/tcp/1\n0001235  ERROR  security      MLS.KEY.LEAKED",
+            ),
+        );
+        let line = event_line(&addressed, CaptureMode::Full);
+        assert_eq!(line.lines().count(), 1, "{line}");
+
+        // A carriage return is the same forgery against a reader watching a terminal rather than
+        // parsing a file: it returns the cursor and the rest of the value overwrites the row.
+        // A bridged message loses one on the way in, but an address keeps everything it was given.
+        let returned = DiagnosticEvent::info(Section::Transport, "NET.DIAL.FAILED")
+            .field("address", AddressValue::new("/ip4/203.0.113.9\rtcp"));
+        assert!(
+            event_line(&returned, CaptureMode::Full).contains(r"203.0.113.9\rtcp"),
+            "a control character reads as itself rather than acting"
+        );
+    }
+
+    /// Events chosen for what they can do to a rendering rather than for what they report.
+    ///
+    /// Each is paired with the number of fields it was offered, so the accounting below can be
+    /// checked against what the call site asked for rather than against what the event kept.
+    fn hostile_events() -> Vec<(DiagnosticEvent, usize)> {
+        let salt = SessionSalt::for_tests(5);
+        let mut events = Vec::new();
+
+        let mut plain = sample();
+        plain.seq = 1;
+        events.push((plain, 4));
+
+        let mut forged = DiagnosticEvent::error(Section::Files, "FILES.SEND.FAILED")
+            .field(
+                "message",
+                BridgedMessage::new("upload failed\n0000009  ERROR  security      MLS.KEY.LEAKED"),
+            )
+            .field(
+                "address",
+                AddressValue::new("/ip4/203.0.113.9/tcp/1\r0000010  WARN   join         JOIN.OK"),
+            )
+            .field(
+                "transfer".to_string(),
+                salt.reference(RefDomain::Transfer, b"t-1"),
+            );
+        forged.seq = 2;
+        events.push((forged, 3));
+
+        let mut repeated = DiagnosticEvent::warn(Section::Sync, "SYNC.CATCHUP.STALLED")
+            .field("reason", SafeText::describe("first"))
+            .field("reason".to_string(), SafeText::describe("second"))
+            .field("reason".to_string(), SafeText::describe("third"))
+            .field("stalled", true);
+        repeated.seq = 3;
+        events.push((repeated, 4));
+
+        let mut named = DiagnosticEvent::info(Section::Ui, "UI.EVENT")
+            .field("peer=peer-000000000000 x".to_string(), 1u64)
+            .field("brace\u{7}d".to_string(), -2i64);
+        named.seq = 4;
+        events.push((named, 2));
+
+        let offered = MAX_FIELDS + 9;
+        let mut overflowed = DiagnosticEvent::info(Section::Startup, "STARTUP.READY");
+        for n in 0..offered {
+            overflowed = overflowed.field("filler", n as u64);
+        }
+        overflowed.seq = 5;
+        events.push((overflowed, offered));
+
+        events
+    }
+
+    /// The test the review asked for: read a rendered report back, and prove every row of it is
+    /// exactly one event.
+    ///
+    /// Written as a parser rather than as `contains` assertions because that is what the finding is
+    /// about. A rendering can satisfy any number of substring checks and still be a document that
+    /// two readers resolve differently, and the only way to show it is not is to be a reader.
+    #[test]
+    fn every_row_of_a_report_maps_to_exactly_one_event() {
+        // Both modes, because the literal address only exists in one of them and it is one of the
+        // two ways a value reaches a row unfiltered.
+        for mode in [CaptureMode::Safe, CaptureMode::Full] {
+            let events = hostile_events();
+
+            let text: String = events
+                .iter()
+                .map(|(event, _)| event_line(event, mode))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let rows: Vec<&str> = text.lines().collect();
+            assert_eq!(
+                rows.len(),
+                events.len(),
+                "{} events produced {} rows in {mode:?} mode:\n{text}",
+                events.len(),
+                rows.len()
+            );
+            for (row, (event, _)) in rows.iter().zip(&events) {
+                let seq = row_seq(row).unwrap_or_else(|why| panic!("{why}"));
+                assert_eq!(seq, event.seq, "row does not belong to its event: {row}");
+            }
+
+            let jsonl: String = events
+                .iter()
+                .map(|(event, _)| event_json(event, mode))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let lines: Vec<&str> = jsonl.lines().collect();
+            assert_eq!(lines.len(), events.len(), "{jsonl}");
+            for (line, (event, offered)) in lines.iter().zip(&events) {
+                let parsed = read_json(line)
+                    .unwrap_or_else(|why| panic!("a reader cannot read this: {why}\n{line}"));
+                assert_eq!(
+                    parsed.get("seq").expect("a sequence number").number(),
+                    event.seq
+                );
+
+                // Everything the call site offered is either in the report or counted as missing
+                // from it. Nothing goes without a trace.
+                let kept = parsed
+                    .get("fields")
+                    .map_or(0, |fields| fields.items().len());
+                let dropped = parsed.get("fields_dropped").map_or(0, |lost| lost.number());
+                assert_eq!(
+                    kept as u64 + dropped,
+                    *offered as u64,
+                    "event {} accounted for {kept} kept and {dropped} dropped of {offered}",
+                    event.seq
+                );
+            }
+        }
+    }
+
+    /// The only thing a reader must be able to do to a row: say which event it is.
+    fn row_seq(row: &str) -> Result<u64, String> {
+        let (seq, rest) = row
+            .split_once("  ")
+            .ok_or_else(|| format!("a row no event could have produced: {row:?}"))?;
+        if seq.is_empty() || !seq.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!("a row that does not open with a sequence: {row:?}"));
+        }
+        if rest.is_empty() {
+            return Err(format!("a row with nothing after its sequence: {row:?}"));
+        }
+        seq.parse()
+            .map_err(|_| format!("unreadable sequence {seq:?}"))
+    }
+
+    /// What a consumer of `events.jsonl` can get back out of it.
+    ///
+    /// Deliberately stricter than a real reader would be, on exactly the two counts this finding is
+    /// about: a duplicate key and a raw control character inside a string are errors here rather
+    /// than something to resolve, because both are places where two readers would part company
+    /// about what the report said and neither of them would find out.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Json {
+        Str(String),
+        Num(String),
+        Bool(bool),
+        Arr(Vec<Json>),
+        Obj(Vec<(String, Json)>),
+    }
+
+    impl Json {
+        fn get(&self, key: &str) -> Option<&Json> {
+            match self {
+                Json::Obj(pairs) => pairs.iter().find(|(name, _)| name == key).map(|(_, v)| v),
+                _ => None,
+            }
+        }
+
+        fn text(&self) -> &str {
+            match self {
+                Json::Str(value) => value,
+                other => panic!("not a string: {other:?}"),
+            }
+        }
+
+        fn number(&self) -> u64 {
+            match self {
+                Json::Num(value) => value.parse().expect("a whole number"),
+                other => panic!("not a number: {other:?}"),
+            }
+        }
+
+        fn items(&self) -> &[Json] {
+            match self {
+                Json::Arr(values) => values,
+                other => panic!("not an array: {other:?}"),
+            }
+        }
+    }
+
+    fn read_json(text: &str) -> Result<Json, String> {
+        let mut reader = Reader {
+            chars: text.chars().collect(),
+            at: 0,
+        };
+        let value = reader.value()?;
+        reader.space();
+        if reader.at != reader.chars.len() {
+            return Err(format!(
+                "text after the end of the document at {}",
+                reader.at
+            ));
+        }
+        Ok(value)
+    }
+
+    struct Reader {
+        chars: Vec<char>,
+        at: usize,
+    }
+
+    impl Reader {
+        fn peek(&self) -> Option<char> {
+            self.chars.get(self.at).copied()
+        }
+
+        fn space(&mut self) {
+            while self.peek().is_some_and(char::is_whitespace) {
+                self.at += 1;
+            }
+        }
+
+        fn expect(&mut self, wanted: char) -> Result<(), String> {
+            if self.peek() == Some(wanted) {
+                self.at += 1;
+                return Ok(());
+            }
+            Err(format!("expected {wanted:?} at {}", self.at))
+        }
+
+        fn value(&mut self) -> Result<Json, String> {
+            self.space();
+            match self.peek() {
+                Some('{') => self.object(),
+                Some('[') => self.array(),
+                Some('"') => Ok(Json::Str(self.string()?)),
+                Some('t') => self.word("true").map(|()| Json::Bool(true)),
+                Some('f') => self.word("false").map(|()| Json::Bool(false)),
+                Some(c) if c == '-' || c.is_ascii_digit() => Ok(Json::Num(self.number())),
+                other => Err(format!("unexpected {other:?} at {}", self.at)),
+            }
+        }
+
+        fn object(&mut self) -> Result<Json, String> {
+            self.expect('{')?;
+            let mut pairs: Vec<(String, Json)> = Vec::new();
+            self.space();
+            if self.peek() == Some('}') {
+                self.at += 1;
+                return Ok(Json::Obj(pairs));
+            }
+            loop {
+                self.space();
+                let key = self.string()?;
+                if pairs.iter().any(|(seen, _)| *seen == key) {
+                    return Err(format!(
+                        "the key {key:?} appears twice, so no reader can say which value the \
+                         event carried"
+                    ));
+                }
+                self.space();
+                self.expect(':')?;
+                let value = self.value()?;
+                pairs.push((key, value));
+                self.space();
+                match self.peek() {
+                    Some(',') => self.at += 1,
+                    Some('}') => {
+                        self.at += 1;
+                        return Ok(Json::Obj(pairs));
+                    }
+                    other => return Err(format!("expected ',' or '}}', found {other:?}")),
+                }
+            }
+        }
+
+        fn array(&mut self) -> Result<Json, String> {
+            self.expect('[')?;
+            let mut values = Vec::new();
+            self.space();
+            if self.peek() == Some(']') {
+                self.at += 1;
+                return Ok(Json::Arr(values));
+            }
+            loop {
+                values.push(self.value()?);
+                self.space();
+                match self.peek() {
+                    Some(',') => self.at += 1,
+                    Some(']') => {
+                        self.at += 1;
+                        return Ok(Json::Arr(values));
+                    }
+                    other => return Err(format!("expected ',' or ']', found {other:?}")),
+                }
+            }
+        }
+
+        fn string(&mut self) -> Result<String, String> {
+            self.expect('"')?;
+            let mut out = String::new();
+            loop {
+                let c = self.peek().ok_or("a string that never ends")?;
+                self.at += 1;
+                match c {
+                    '"' => return Ok(out),
+                    '\\' => {
+                        let escape = self.peek().ok_or("an escape that never ends")?;
+                        self.at += 1;
+                        out.push(match escape {
+                            'n' => '\n',
+                            'r' => '\r',
+                            't' => '\t',
+                            'b' => '\u{8}',
+                            'f' => '\u{c}',
+                            '"' => '"',
+                            '\\' => '\\',
+                            '/' => '/',
+                            'u' => {
+                                let digits: String = self
+                                    .chars
+                                    .get(self.at..self.at + 4)
+                                    .ok_or("a \\u escape that runs off the end")?
+                                    .iter()
+                                    .collect();
+                                self.at += 4;
+                                let point = u32::from_str_radix(&digits, 16)
+                                    .map_err(|_| format!("{digits:?} is not hexadecimal"))?;
+                                char::from_u32(point)
+                                    .ok_or_else(|| format!("U+{point:04X} is not a character"))?
+                            }
+                            other => return Err(format!("an escape nobody defines: {other:?}")),
+                        });
+                    }
+                    // A raw newline here would end the JSON line the reader is on, which is the
+                    // same forgery the text rendering is guarded against.
+                    c if (c as u32) < 0x20 => {
+                        return Err(format!("a raw U+{:04X} inside a string", c as u32))
+                    }
+                    c => out.push(c),
+                }
+            }
+        }
+
+        fn number(&mut self) -> String {
+            let start = self.at;
+            while self
+                .peek()
+                .is_some_and(|c| c.is_ascii_digit() || "-+.eE".contains(c))
+            {
+                self.at += 1;
+            }
+            self.chars[start..self.at].iter().collect()
+        }
+
+        fn word(&mut self, wanted: &str) -> Result<(), String> {
+            for c in wanted.chars() {
+                self.expect(c)?;
+            }
+            Ok(())
+        }
     }
 }

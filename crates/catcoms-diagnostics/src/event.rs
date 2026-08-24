@@ -156,19 +156,38 @@ impl From<&'static str> for FieldName {
     }
 }
 
+/// Whether a character in a field name would fabricate structure in a rendering.
+///
+/// Every rendering of a field is some form of `name=value` separated by spaces, so a name that
+/// contains a space or an equals sign is a name that can invent a second field. `x=1 peer` reads
+/// as a peer reference the event never carried, and the debug console composes the same shape from
+/// the structured view, so the two would agree with each other about a field nothing recorded.
+/// Whitespace in general rather than the space character in particular, because `U+2028` is a line
+/// separator that is not a control character, and a reader that breaks a line on it sees one row
+/// where the event produced none.
+fn forges_structure(c: char) -> bool {
+    c == '=' || c.is_whitespace() || c.is_control()
+}
+
 impl From<String> for FieldName {
-    /// Bounded, because this is the runtime path.
+    /// Bounded and stripped of separators, because this is the runtime path.
     ///
     /// The `Static` arm is a literal from our own source and needs no bound; this one arrives from
-    /// the `tracing` bridge, where the name is whatever a call site anywhere in the dependency tree
-    /// chose. A field *name* is a short identifier in every sane case, and the bound is here so
-    /// that "every sane case" is not the thing holding the memory bound up.
+    /// the `tracing` bridge and from the webview, where the name is whatever a call site anywhere
+    /// in the dependency tree chose. A field *name* is a short identifier in every sane case, and
+    /// both the bound and the substitution are here so that "every sane case" is not the thing
+    /// holding up the memory bound and the report's grammar. See [`forges_structure`] for what a
+    /// name with a separator in it can make a reader believe.
+    ///
+    /// An ordinary name is neither long nor odd, so the usual path checks and keeps the buffer the
+    /// bridge already allocated rather than building a second one per field on the emitting thread.
     fn from(name: String) -> Self {
-        if name.len() <= MAX_FIELD_NAME {
+        if name.len() <= MAX_FIELD_NAME && !name.chars().any(forges_structure) {
             return FieldName::Owned(name.into_boxed_str());
         }
         FieldName::Owned(
             name.chars()
+                .map(|c| if forges_structure(c) { '_' } else { c })
                 .take(MAX_FIELD_NAME)
                 .collect::<String>()
                 .into_boxed_str(),
@@ -241,6 +260,14 @@ pub struct DiagnosticEvent {
     pub target: String,
     /// Ordered so rendering is deterministic. See [`crate::render`].
     pub fields: Vec<(FieldName, SafeValue)>,
+    /// How many fields [`MAX_FIELDS`] refused.
+    ///
+    /// Carried on the event because a truncated event otherwise reads as a complete one: the reader
+    /// sees thirty-two fields and no reason to suspect a thirty-third, which in the case that
+    /// actually reaches the cap is the field they were looking for. Rule 4 of this crate is that
+    /// every bound is explicit and everything lost to one is counted; this is that rule applied to
+    /// the one bound whose loss used to be silent.
+    pub fields_dropped: u32,
 }
 
 impl DiagnosticEvent {
@@ -263,6 +290,7 @@ impl DiagnosticEvent {
             attempt: None,
             target: String::new(),
             fields: Vec::new(),
+            fields_dropped: 0,
         }
     }
 
@@ -322,15 +350,20 @@ impl DiagnosticEvent {
         self
     }
 
-    /// Add one field, up to [`MAX_FIELDS`].
+    /// Add one field, up to [`MAX_FIELDS`], counting anything past it.
     ///
-    /// Silently ignores anything past the cap rather than growing or panicking. Both alternatives
-    /// are worse: growing hands a hostile producer the memory, and panicking means recording an
-    /// event can kill the thing recording it, which is the failure mode this whole subsystem was
-    /// built to remove.
+    /// Refuses rather than growing or panicking. Both alternatives are worse: growing hands a
+    /// hostile producer the memory, and panicking means recording an event can kill the thing
+    /// recording it, which is the failure mode this whole subsystem was built to remove.
+    ///
+    /// It used to refuse in silence, which made an event that lost a field indistinguishable from
+    /// one that never had it. See [`DiagnosticEvent::fields_dropped`] for why that is worse than
+    /// the loss itself.
     pub fn field(mut self, name: impl Into<FieldName>, value: impl Into<SafeValue>) -> Self {
         if self.fields.len() < MAX_FIELDS {
             self.fields.push((name.into(), value.into()));
+        } else {
+            self.fields_dropped = self.fields_dropped.saturating_add(1);
         }
         self
     }
@@ -371,6 +404,29 @@ mod tests {
             event = event.field("filler", n as u64);
         }
         assert_eq!(event.fields.len(), MAX_FIELDS);
+        // And the loss is admitted, or the reader of the resulting report has thirty-two fields
+        // and no reason to suspect there were ninety-six. Found by adversarial review (P3-013).
+        assert_eq!(event.fields_dropped, (MAX_FIELDS * 3) as u32);
+    }
+
+    /// A field name arrives from the `tracing` bridge and from the webview as a runtime string, and
+    /// every rendering of a field is `name=value` separated by spaces. A name that carries those
+    /// separators invents a field: `peer=peer-000000000000 x` reads as a reference to a peer this
+    /// event was never about, in a report someone is using to decide what went wrong.
+    #[test]
+    fn a_runtime_field_name_cannot_fabricate_a_second_field() {
+        let event = DiagnosticEvent::info(Section::Sync, "SYNC.TEST")
+            .field("peer=peer-000000000000 x".to_string(), 1u64)
+            .field("first\nsecond".to_string(), 2u64)
+            .field("split\u{2028}here".to_string(), 3u64);
+        for (name, _) in &event.fields {
+            let name = name.as_str();
+            assert!(
+                !name.contains('=') && !name.chars().any(|c| c.is_whitespace() || c.is_control()),
+                "a name that can invent a field: {name:?}"
+            );
+        }
+        assert_eq!(event.fields[0].0.as_str(), "peer_peer-000000000000_x");
     }
 
     /// Overflowing the cap must not panic. Recording an event killing the thing that recorded it
