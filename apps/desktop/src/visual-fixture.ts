@@ -254,6 +254,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
       return clone({
         action: "found",
         subject: "Lantern Room",
+        // The join key between this panel and the debug console's record of the same attempt.
+        trace: "7f2c",
         at: VISUAL_FIXTURE_NOW - 3 * 60_000,
         server: 1,
         advertised: [

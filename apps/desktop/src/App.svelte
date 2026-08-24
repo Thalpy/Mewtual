@@ -4629,10 +4629,10 @@
     busy = true;
     error = "";
     try {
-      const r = await invoke<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName, advertise, relay, rendezvous, isDm: false });
       addServer(r, displayName);
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       busy = false;
     }
@@ -4657,7 +4657,7 @@
       );
       // Do not let the click that first reveals the extra-member privacy boundary also cross it.
       if (assistedAction === "preview") return;
-      const r = await invoke<Found>("join_server", {
+      const { value: r } = await invokeDebugged<Found>("join_server", {
         inviteHex: hex,
         displayName,
         isDm: false,
@@ -4709,7 +4709,7 @@
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
-      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
       addServer(r, name);
       dmName = "";
       showNewDm = false;
@@ -4729,7 +4729,7 @@
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
-      const r = await invoke<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
+      const { value: r } = await invokeDebugged<Found>("join_server", { inviteHex: dmInvite.trim(), displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: name });
       addServer(r, name);
       dmName = "";
       dmInvite = "";
@@ -4767,7 +4767,7 @@
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || name).trim() || "me";
-      const r = await invoke<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
+      const { value: r } = await invokeDebugged<Found>("found_server", { displayName: myProfileName, advertise, relay, rendezvous, isDm: true, serverName: name });
       // Add the DM to the list without switching away from the current server.
       servers = [
         ...servers,
@@ -4823,7 +4823,7 @@
     try {
       // Derive my profile name from the current profile or fall back to "me"
       const myProfileName = (pName.trim() || req.from_name).trim() || "me";
-      const r = await invoke<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
+      const { value: r } = await invokeDebugged<Found>("join_server", { inviteHex: req.invite, displayName: myProfileName, isDm: true, allowSwitchboards: false, serverName: req.from_name });
       addServer(r, req.from_name);
       await invoke("dismiss_dm_request", { server: req.server, fromFp: req.from_fp });
       dmRequests = dmRequests.filter((x) => !(x.server === req.server && x.from_fp === req.from_fp));
@@ -19567,6 +19567,11 @@
                   <p class="muted small">
                     The last thing this app tried: <b>{connectivity.action === "found" ? "founding" : "joining"}</b>
                     {connectivity.subject ? ` (${connectivity.subject})` : ""}, {fmtLocal(connectivity.at)}.
+                    {#if connectivity.trace}
+                      <!-- The join key between this panel and the debug console. Relating the two
+                           used to mean matching wall-clock times by eye. -->
+                      Trace <span class="fp">{connectivity.trace}</span>.
+                    {/if}
                   </p>
                   <p class="muted small">Observed reachability: <b>{reach.verdict}</b>. {reach.detail}</p>
                   <div class="invite-actions">

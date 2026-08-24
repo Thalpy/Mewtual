@@ -667,6 +667,12 @@ struct Connectivity {
     steps: Vec<DiagStep>,
     /// The last error, verbatim, so the user can copy exactly what the code said.
     last_error: String,
+    /// The trace this attempt belongs to, in the short form a person quotes.
+    ///
+    /// The panel and the diagnostic record used to be two accounts of the same minute with nothing
+    /// joining them, so relating one to the other meant matching wall-clock times by eye. This is
+    /// the join key, shown in the panel and stamped on every event the attempt produced.
+    trace: String,
 }
 
 #[derive(Serialize)]
@@ -1935,6 +1941,21 @@ impl Operation {
         server: u64,
         channel: Option<&str>,
     ) -> Self {
+        Self::start_maybe(trace, section, operation, Some(server), channel)
+    }
+
+    /// [`start`](Operation::start) for an operation that has no server yet.
+    ///
+    /// Founding and joining do not have a server id until they succeed, and inventing one to fit
+    /// the signature would put a reference in the record standing for nothing. An operation with no
+    /// subject is honest; one with a made-up subject correlates with the wrong events.
+    fn start_maybe(
+        trace: Option<String>,
+        section: catcoms_diagnostics::Section,
+        operation: &'static str,
+        server: Option<u64>,
+        channel: Option<&str>,
+    ) -> Self {
         let hub = catcoms_log::hub();
         let trace = trace
             .and_then(|t| u64::from_str_radix(&t, 16).ok())
@@ -1944,9 +1965,9 @@ impl Operation {
             trace,
             section,
             operation,
-            server: Some(
-                hub.reference_str(catcoms_diagnostics::RefDomain::Server, &server.to_string()),
-            ),
+            server: server.map(|id| {
+                hub.reference_str(catcoms_diagnostics::RefDomain::Server, &id.to_string())
+            }),
             channel: channel.map(|c| hub.reference_str(catcoms_diagnostics::RefDomain::Channel, c)),
             started_ms: SystemClock.now_ms(),
         };
@@ -1997,6 +2018,63 @@ impl Operation {
     /// The trace, in the short form a person quotes.
     fn short_trace(&self) -> String {
         self.trace.short()
+    }
+
+    /// Replay a connectivity attempt's steps into the diagnostic record, under this trace.
+    ///
+    /// Founding and joining already keep an excellent step-by-step account for the connectivity
+    /// panel: the review calls it the strongest diagnostic pattern in the codebase and says to
+    /// generalise it. What it could not do was correlate. The panel showed one attempt, the log
+    /// showed everything else, and tying the two together meant matching wall-clock times by eye,
+    /// which is exactly the correlation-by-timestamp the trace exists to replace.
+    ///
+    /// Replayed at the end rather than recorded as each step happens, because the steps are pushed
+    /// from a dozen places across `establish_reachability` and threading an operation through all
+    /// of them would be a large change for the same result. The trade is that the record's own
+    /// timestamps are the replay's, so each step carries the moment it actually happened as a
+    /// field, and the ordering is the attempt's own.
+    fn replay(&self, steps: &[DiagStep]) {
+        for step in steps {
+            // A failed step is the thing somebody came looking for, so it is the one that is loud
+            // enough to survive a Safe-mode filter. `unknown` is genuinely not a failure: several
+            // of these start work libp2p finishes later.
+            let level = match step.status.as_str() {
+                "failed" => catcoms_diagnostics::Level::Warn,
+                _ => catcoms_diagnostics::Level::Debug,
+            };
+            let mut event =
+                catcoms_diagnostics::DiagnosticEvent::new(self.section, level, "REACH.STEP")
+                    .target("catcoms_app")
+                    .phase(catcoms_diagnostics::Phase::Progress)
+                    .operation(self.operation)
+                    .trace(self.trace)
+                    .refs(catcoms_diagnostics::Refs {
+                        server: self.server.clone(),
+                        ..catcoms_diagnostics::Refs::default()
+                    })
+                    .field("kind", catcoms_diagnostics::SafeText::describe(&step.kind))
+                    .field(
+                        "status",
+                        catcoms_diagnostics::SafeText::describe(&step.status),
+                    )
+                    .field("at_ms", step.at);
+            if !step.target.is_empty() {
+                // The step's subject is usually an address, so it goes in as one: Safe mode keeps
+                // its family and transport, which is what diagnoses a route problem, and drops the
+                // literal that would stop the report being publishable.
+                event = event.field(
+                    "target",
+                    catcoms_diagnostics::AddressValue::new(&step.target),
+                );
+            }
+            if !step.detail.is_empty() {
+                event = event.field(
+                    "detail",
+                    catcoms_diagnostics::SafeText::describe(&step.detail),
+                );
+            }
+            catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
+        }
     }
 
     /// End the operation in failure and build the error the frontend receives.
@@ -3776,12 +3854,23 @@ async fn found_server(
     rendezvous: String,
     is_dm: bool,
     server_name: Option<String>,
+    trace: Option<String>,
 ) -> Result<FoundResult, String> {
-    require_unlocked_session(&state).await?;
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Reachability,
+        "found_server",
+        None,
+        None,
+    );
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).message)?;
     let mut diag = Connectivity {
         action: "found".into(),
         subject: display_name.clone(),
         at: SystemClock.now_ms(),
+        trace: op.short_trace(),
         ..Default::default()
     };
     let out = found_server_inner(
@@ -3796,10 +3885,16 @@ async fn found_server(
         &mut diag,
     )
     .await;
+    // The panel's own account, now also in the record and under this attempt's trace. Both, rather
+    // than one: the panel is what the user reads and the record is what survives to be exported.
+    op.replay(&diag.steps);
     // The verbatim error is the point: the connectivity panel shows exactly what the code said,
     // so a user can paste it rather than paraphrase it.
     if let Err(e) = &out {
         diag.last_error.clone_from(e);
+        op.failed("REACH.FOUND.FAILED");
+    } else {
+        op.succeeded("REACH.FOUND.COMPLETED");
     }
     *state.diag.lock().await = diag;
     out
@@ -4076,6 +4171,7 @@ async fn wait_for_switchboard_peer(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn join_server(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -4084,11 +4180,22 @@ async fn join_server(
     is_dm: bool,
     allow_switchboards: bool,
     server_name: Option<String>,
+    trace: Option<String>,
 ) -> Result<FoundResult, String> {
-    require_unlocked_session(&state).await?;
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Join,
+        "join_server",
+        None,
+        None,
+    );
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).message)?;
     let mut diag = Connectivity {
         action: "join".into(),
         at: SystemClock.now_ms(),
+        trace: op.short_trace(),
         ..Default::default()
     };
     let out = join_server_inner(
@@ -4102,8 +4209,14 @@ async fn join_server(
         &mut diag,
     )
     .await;
+    op.replay(&diag.steps);
     if let Err(e) = &out {
         diag.last_error.clone_from(e);
+        // A join that fails is the single most reported problem in this app, and until now the
+        // record of one was a panel the user had to be looking at to see.
+        op.failed("JOIN.ATTEMPT.FAILED");
+    } else {
+        op.succeeded("JOIN.ATTEMPT.COMPLETED");
     }
     *state.diag.lock().await = diag;
     out
