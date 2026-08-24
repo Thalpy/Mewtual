@@ -2174,7 +2174,7 @@ impl Operation {
     /// deeper layer that may have interpolated something into it. The user sees it, the log does
     /// not, and that split is deliberate.
     fn fail(&self, code: ErrorCode, message: impl Into<String>) -> AppError {
-        self.failed(code.code);
+        self.failed(code.code());
         AppError::new(code, message, &self.short_trace())
     }
 
@@ -4407,7 +4407,7 @@ async fn found_server(
     );
     require_unlocked_session(&state)
         .await
-        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).message)?;
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).into_message())?;
     let mut diag = Connectivity {
         action: "found".into(),
         subject: display_name.clone(),
@@ -4734,7 +4734,7 @@ async fn join_server(
     );
     require_unlocked_session(&state)
         .await
-        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).message)?;
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e).into_message())?;
     let mut diag = Connectivity {
         action: "join".into(),
         at: SystemClock.now_ms(),

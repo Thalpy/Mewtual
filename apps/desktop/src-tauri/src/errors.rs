@@ -58,184 +58,131 @@ pub enum Remediation {
 /// Registered rather than invented at the call site: a code that exists in one branch of one
 /// function cannot be searched for, documented, or counted, and the whole value of a stable code is
 /// that it outlives the wording around it.
+///
+/// The fields are private, and that is the enforcement rather than a style preference. While they
+/// were public any module could write `ErrorCode { code: "WHATEVER", .. }` at a call site, ship a
+/// code the registry had never heard of, and break nothing: the registry tests only ever looked at
+/// what was already in `ALL`, so the one thing they could not see was an omission.
 #[derive(Clone, Copy, Debug)]
 pub struct ErrorCode {
     /// `AREA.COMPONENT.OUTCOME`, stable across rewording.
-    pub code: &'static str,
+    code: &'static str,
     /// Whether trying the same thing again could plausibly work.
-    pub retryable: bool,
-    pub remediation: Option<Remediation>,
+    retryable: bool,
+    remediation: Option<Remediation>,
+}
+
+impl ErrorCode {
+    /// The stable code, for a caller that records a failure as well as returning it.
+    pub const fn code(&self) -> &'static str {
+        self.code
+    }
 }
 
 /// The codes this bridge can return.
 ///
-/// Every one is listed here, and a test pins that they are unique and correctly shaped. The review
-/// asks for CI to enforce "every ErrorCode exists in the registry"; this is that registry, and the
-/// enforcement is the test at the bottom of this file.
+/// Every one is declared through `error_codes!`, which builds the constant and the manifest from
+/// the same line, so "registered" is not a second step anybody can forget. Together with the
+/// private fields above that closes the gap the registry used to have: outside this module a code
+/// cannot be assembled at all, and inside it a code cannot exist without appearing in `ALL`.
 pub mod codes {
-    use super::{ErrorCode, Remediation};
+    use super::ErrorCode;
+    use super::Remediation::{AmendInput, Restart, Retry, Unlock};
 
-    /// The session is locked, so nothing that touches a server can proceed.
-    pub const SESSION_LOCKED: ErrorCode = ErrorCode {
-        code: "SESSION.LOCKED",
-        retryable: true,
-        remediation: Some(Remediation::Unlock),
-    };
+    /// Declare a code and register it in one act.
+    ///
+    /// The registry used to be two lists that had to agree by hand: a constant, and a line in
+    /// `ALL`. A constant that never reached `ALL` compiled, worked, and was invisible to every
+    /// test here, so the manifest could sit quietly behind what the bridge actually emits. One
+    /// list removes the disagreement rather than testing for it.
+    macro_rules! error_codes {
+        ($(
+            $(#[$note:meta])*
+            $name:ident = $code:literal, retryable: $retryable:literal, $remediation:expr;
+        )+) => {
+            $(
+                $(#[$note])*
+                pub const $name: ErrorCode = ErrorCode {
+                    code: $code,
+                    retryable: $retryable,
+                    remediation: $remediation,
+                };
+            )+
 
-    /// No actor for that server. Either it was never opened, or its task has stopped, and those
-    /// are very different problems that used to produce the same sentence.
-    pub const SERVER_UNAVAILABLE: ErrorCode = ErrorCode {
-        code: "SERVER.ACTOR.UNAVAILABLE",
-        retryable: false,
-        remediation: Some(Remediation::Restart),
-    };
+            /// Every registered code, for the tests that keep this honest.
+            #[cfg_attr(not(test), allow(dead_code))]
+            pub const ALL: &[ErrorCode] = &[$($name),+];
 
-    /// A channel id that is not a channel id. Always a caller bug rather than a user one.
-    pub const CHANNEL_BAD_ID: ErrorCode = ErrorCode {
-        code: "CHANNEL.ID.INVALID",
-        retryable: false,
-        remediation: None,
-    };
+            /// The same codes under the names call sites use, which is what the guard against a
+            /// hand-written constant needs: a call site says `codes::SESSION_LOCKED` rather than
+            /// `"SESSION.LOCKED"`, so identifiers are the only thing the two can be compared by.
+            #[cfg_attr(not(test), allow(dead_code))]
+            pub const NAMES: &[&str] = &[$(stringify!($name)),+];
+        };
+    }
 
-    pub const CHAT_SEND_REJECTED: ErrorCode = ErrorCode {
-        code: "CHAT.SEND.REJECTED",
-        retryable: false,
-        remediation: Some(Remediation::AmendInput),
-    };
+    error_codes! {
+        /// The session is locked, so nothing that touches a server can proceed.
+        SESSION_LOCKED = "SESSION.LOCKED", retryable: true, Some(Unlock);
 
-    pub const CHAT_EDIT_REJECTED: ErrorCode = ErrorCode {
-        code: "CHAT.EDIT.REJECTED",
-        retryable: false,
-        remediation: Some(Remediation::AmendInput),
-    };
+        /// No actor for that server. Either it was never opened, or its task has stopped, and
+        /// those are very different problems that used to produce the same sentence.
+        SERVER_UNAVAILABLE = "SERVER.ACTOR.UNAVAILABLE", retryable: false, Some(Restart);
 
-    pub const CHAT_DELETE_REJECTED: ErrorCode = ErrorCode {
-        code: "CHAT.DELETE.REJECTED",
-        retryable: false,
-        remediation: None,
-    };
+        /// A channel id that is not a channel id. Always a caller bug rather than a user one.
+        CHANNEL_BAD_ID = "CHANNEL.ID.INVALID", retryable: false, None;
 
-    pub const CHAT_REACTION_REJECTED: ErrorCode = ErrorCode {
-        code: "CHAT.REACTION.REJECTED",
-        retryable: false,
-        remediation: None,
-    };
+        CHAT_SEND_REJECTED = "CHAT.SEND.REJECTED", retryable: false, Some(AmendInput);
 
-    pub const CHAT_PIN_REJECTED: ErrorCode = ErrorCode {
-        code: "CHAT.PIN.REJECTED",
-        retryable: false,
-        remediation: None,
-    };
+        CHAT_EDIT_REJECTED = "CHAT.EDIT.REJECTED", retryable: false, Some(AmendInput);
 
-    /// A queue add refused: not a content address, a blank or over-long name, or the 64-entry cap.
-    /// All four are the input, which is why the user can fix it.
-    pub const JUKEBOX_ADD_REJECTED: ErrorCode = ErrorCode {
-        code: "JUKEBOX.ADD.REJECTED",
-        retryable: false,
-        remediation: Some(Remediation::AmendInput),
-    };
+        CHAT_DELETE_REJECTED = "CHAT.DELETE.REJECTED", retryable: false, None;
 
-    /// Removal is idempotent, so a refusal is never about the entry being absent.
-    pub const JUKEBOX_REMOVE_REJECTED: ErrorCode = ErrorCode {
-        code: "JUKEBOX.REMOVE.REJECTED",
-        retryable: false,
-        remediation: None,
-    };
+        CHAT_REACTION_REJECTED = "CHAT.REACTION.REJECTED", retryable: false, None;
 
-    /// An upload refused before a byte moved: a malformed id, or a file over the size limit.
-    pub const FILE_UPLOAD_REFUSED: ErrorCode = ErrorCode {
-        code: "FILE.UPLOAD.REFUSED",
-        retryable: false,
-        remediation: Some(Remediation::AmendInput),
-    };
+        CHAT_PIN_REJECTED = "CHAT.PIN.REJECTED", retryable: false, None;
 
-    /// An upload that began and could not be completed. Distinct from a refusal because bytes
-    /// have already moved and a reservation is being held.
-    pub const FILE_UPLOAD_FAILED: ErrorCode = ErrorCode {
-        code: "FILE.UPLOAD.FAILED",
-        retryable: true,
-        remediation: Some(Remediation::Retry),
-    };
+        /// A queue add refused: not a content address, a blank or over-long name, or the 64-entry
+        /// cap. All four are the input, which is why the user can fix it.
+        JUKEBOX_ADD_REJECTED = "JUKEBOX.ADD.REJECTED", retryable: false, Some(AmendInput);
 
-    /// A download that could not be completed. Retryable because the usual cause is that nobody
-    /// holding the bytes is reachable right now, which changes.
-    pub const FILE_DOWNLOAD_FAILED: ErrorCode = ErrorCode {
-        code: "FILE.DOWNLOAD.FAILED",
-        retryable: true,
-        remediation: Some(Remediation::Retry),
-    };
+        /// Removal is idempotent, so a refusal is never about the entry being absent.
+        JUKEBOX_REMOVE_REJECTED = "JUKEBOX.REMOVE.REJECTED", retryable: false, None;
 
-    /// A call-signalling message that could not be handed to the transport at all. Distinct from
-    /// one that was sent to a member with no route: that is an outcome, not an error.
-    pub const VOICE_SIGNAL_FAILED: ErrorCode = ErrorCode {
-        code: "VOICE.SIGNAL.FAILED",
-        retryable: true,
-        remediation: Some(Remediation::Retry),
-    };
+        /// An upload refused before a byte moved: a malformed id, or a file over the size limit.
+        FILE_UPLOAD_REFUSED = "FILE.UPLOAD.REFUSED", retryable: false, Some(AmendInput);
 
-    /// The vault would not open. Overwhelmingly a wrong passphrase, which is why it is retryable
-    /// and why the message is left exactly as it was: telling somebody their passphrase is wrong
-    /// is the entire useful content of this failure.
-    pub const VAULT_LOCKED_OUT: ErrorCode = ErrorCode {
-        code: "VAULT.OPEN.REFUSED",
-        retryable: true,
-        remediation: Some(Remediation::AmendInput),
-    };
+        /// An upload that began and could not be completed. Distinct from a refusal because bytes
+        /// have already moved and a reservation is being held.
+        FILE_UPLOAD_FAILED = "FILE.UPLOAD.FAILED", retryable: true, Some(Retry);
 
-    /// The vault opened and something inside it could not be read. A different problem from a
-    /// wrong passphrase, and one the user cannot fix by typing more carefully.
-    pub const VAULT_READ_FAILED: ErrorCode = ErrorCode {
-        code: "VAULT.READ.FAILED",
-        retryable: false,
-        remediation: Some(Remediation::Restart),
-    };
+        /// A download that could not be completed. Retryable because the usual cause is that
+        /// nobody holding the bytes is reachable right now, which changes.
+        FILE_DOWNLOAD_FAILED = "FILE.DOWNLOAD.FAILED", retryable: true, Some(Retry);
 
-    /// A backup that could not be written.
-    pub const VAULT_BACKUP_FAILED: ErrorCode = ErrorCode {
-        code: "VAULT.BACKUP.FAILED",
-        retryable: true,
-        remediation: Some(Remediation::Retry),
-    };
+        /// A call-signalling message that could not be handed to the transport at all. Distinct
+        /// from one that was sent to a member with no route: that is an outcome, not an error.
+        VOICE_SIGNAL_FAILED = "VOICE.SIGNAL.FAILED", retryable: true, Some(Retry);
 
-    /// A write to a server document (wiki, status, calendar) that was refused. Almost always the
-    /// content: too long, malformed, or a name that is not allowed.
-    pub const DOCUMENT_WRITE_REJECTED: ErrorCode = ErrorCode {
-        code: "DOCUMENT.WRITE.REJECTED",
-        retryable: false,
-        remediation: Some(Remediation::AmendInput),
-    };
+        /// The vault would not open. Overwhelmingly a wrong passphrase, which is why it is
+        /// retryable and why the message is left exactly as it was: telling somebody their
+        /// passphrase is wrong is the entire useful content of this failure.
+        VAULT_LOCKED_OUT = "VAULT.OPEN.REFUSED", retryable: true, Some(AmendInput);
 
-    /// A channel topic refused; over the byte limit, in practice.
-    pub const CHANNEL_TOPIC_REJECTED: ErrorCode = ErrorCode {
-        code: "CHANNEL.TOPIC.REJECTED",
-        retryable: false,
-        remediation: Some(Remediation::AmendInput),
-    };
+        /// The vault opened and something inside it could not be read. A different problem from a
+        /// wrong passphrase, and one the user cannot fix by typing more carefully.
+        VAULT_READ_FAILED = "VAULT.READ.FAILED", retryable: false, Some(Restart);
 
-    /// Every registered code, for the tests that keep this honest. The manifest is the registry:
-    /// a code missing from here is a code no test checks the shape of.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: &[ErrorCode] = &[
-        SESSION_LOCKED,
-        SERVER_UNAVAILABLE,
-        CHANNEL_BAD_ID,
-        CHAT_SEND_REJECTED,
-        CHAT_EDIT_REJECTED,
-        CHAT_DELETE_REJECTED,
-        CHAT_REACTION_REJECTED,
-        CHAT_PIN_REJECTED,
-        JUKEBOX_ADD_REJECTED,
-        JUKEBOX_REMOVE_REJECTED,
-        FILE_UPLOAD_REFUSED,
-        FILE_UPLOAD_FAILED,
-        FILE_DOWNLOAD_FAILED,
-        VOICE_SIGNAL_FAILED,
-        VAULT_LOCKED_OUT,
-        VAULT_READ_FAILED,
-        VAULT_BACKUP_FAILED,
-        DOCUMENT_WRITE_REJECTED,
-        CHANNEL_TOPIC_REJECTED,
-    ];
+        /// A backup that could not be written.
+        VAULT_BACKUP_FAILED = "VAULT.BACKUP.FAILED", retryable: true, Some(Retry);
+
+        /// A write to a server document (wiki, status, calendar) that was refused. Almost always
+        /// the content: too long, malformed, or a name that is not allowed.
+        DOCUMENT_WRITE_REJECTED = "DOCUMENT.WRITE.REJECTED", retryable: false, Some(AmendInput);
+
+        /// A channel topic refused; over the byte limit, in practice.
+        CHANNEL_TOPIC_REJECTED = "CHANNEL.TOPIC.REJECTED", retryable: false, Some(AmendInput);
+    }
 }
 
 /// A failure, as the frontend receives it.
@@ -243,20 +190,24 @@ pub mod codes {
 /// Serialised as an object, so a migrated call site reads fields rather than parsing prose. The
 /// frontend's `describeError` handles both this and a bare string, which is what lets commands
 /// migrate one at a time.
+///
+/// The fields are private so that `new` is the only way to make one. A hand-assembled `AppError`
+/// would put whatever `&'static str` somebody typed on the wire without ever passing a registered
+/// code, which is the same escape from the registry that `ErrorCode`'s public fields used to be.
 #[derive(Clone, Debug, Serialize)]
 pub struct AppError {
     /// The stable code. Searchable, groupable, and unchanged when the wording improves.
-    pub code: &'static str,
+    code: &'static str,
     /// What the user sees. Deliberately the same text they see today: the specific message is the
     /// part that tells somebody what to do differently, and replacing it with a generic sentence
     /// would be a regression wearing an improvement's clothes.
-    pub message: String,
+    message: String,
     /// The operation this belonged to, short enough to quote in a bug report.
     ///
     /// The link between a user saying "it failed" and the twelve events that describe why.
-    pub trace: String,
-    pub retryable: bool,
-    pub remediation: Option<Remediation>,
+    trace: String,
+    retryable: bool,
+    remediation: Option<Remediation>,
 }
 
 impl AppError {
@@ -273,6 +224,11 @@ impl AppError {
             retryable: code.retryable,
             remediation: code.remediation,
         }
+    }
+
+    /// The user-facing text, for a command that has not been migrated and still returns a `String`.
+    pub fn into_message(self) -> String {
+        self.message
     }
 }
 
@@ -291,6 +247,115 @@ impl std::error::Error for AppError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    /// Every bridge source except this one, which is where codes are declared rather than used.
+    ///
+    /// Read from disk rather than `include_str!` of a fixed list, because a module added later
+    /// would otherwise be invisible to the guards below and they would quietly narrow to whatever
+    /// the file list said years ago.
+    fn call_site_sources() -> String {
+        let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut joined = String::new();
+        while let Some(dir) = pending.pop() {
+            let entries = std::fs::read_dir(&dir).expect("the bridge sources must be readable");
+            for entry in entries {
+                let path = entry.expect("the bridge sources must be readable").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && path.file_name().is_some_and(|n| n != "errors.rs")
+                {
+                    joined.push_str(&std::fs::read_to_string(&path).expect("unreadable source"));
+                }
+            }
+        }
+        joined
+    }
+
+    /// Every `codes::NAME` a source names, whichever constant that turns out to be.
+    ///
+    /// Finding none is a failure rather than a quiet pass. Both guards below are satisfied by an
+    /// empty set, so a scan that stopped matching, because the sources moved or the call shape
+    /// changed, would leave two tests reporting success while checking nothing at all.
+    fn names_used_by_call_sites(source: &str) -> BTreeSet<&str> {
+        let names: BTreeSet<&str> = source
+            .match_indices("codes::")
+            .map(|(at, marker)| {
+                let rest = &source[at + marker.len()..];
+                let end = rest
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+        assert!(
+            !names.is_empty(),
+            "the scan found no call sites, so it is checking nothing"
+        );
+        names
+    }
+
+    /// A constant written out by hand beside the macro would compile, be usable from a command,
+    /// and never reach `ALL`, which is the exact drift the macro exists to remove. The compiler
+    /// cannot see the difference, so this reads the file.
+    #[test]
+    fn the_macro_is_the_only_thing_that_mints_a_code() {
+        let source = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/errors.rs"),
+        )
+        .expect("this file must be readable");
+        // Only what the app compiles. Below this marker sits the test that spells out the pattern
+        // it is looking for, and a scan of the whole file counts itself as a second definition.
+        let shipped = &source[..source
+            .find("#[cfg(test)]")
+            .expect("this guard cannot find where the shipped half of the file ends")];
+        let macro_at = shipped
+            .find("macro_rules! error_codes")
+            .expect("this guard cannot find the macro it is guarding");
+        let mints: Vec<usize> = shipped
+            .match_indices(": ErrorCode =")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            mints.len(),
+            1,
+            "a code is defined outside error_codes!, so it will not appear in ALL"
+        );
+        assert!(
+            mints[0] > macro_at,
+            "a code is defined before the macro, so it will not appear in ALL"
+        );
+    }
+
+    /// A registry that runs ahead of the bridge is the same lie as one that lags behind it: a code
+    /// nothing can emit still gets documented, searched for, and looked up by somebody holding a
+    /// bug report that will never contain it.
+    #[test]
+    fn every_registered_code_is_reachable_from_a_call_site() {
+        let sources = call_site_sources();
+        let used = names_used_by_call_sites(&sources);
+        for name in codes::NAMES {
+            assert!(
+                used.contains(name),
+                "{name} is registered but nothing emits it"
+            );
+        }
+    }
+
+    /// The other direction, which catches the hand-written constant the guard above misses if it
+    /// is ever written in a shape the file scan does not match: a call site can only name a
+    /// constant, so a name the manifest does not know is a code outside the registry.
+    #[test]
+    fn every_code_a_call_site_names_is_registered() {
+        let registered: BTreeSet<&str> = codes::NAMES.iter().copied().collect();
+        for name in names_used_by_call_sites(&call_site_sources()) {
+            assert!(
+                registered.contains(name),
+                "codes::{name} is used but is not declared in error_codes!"
+            );
+        }
+    }
 
     /// A code that appears twice means two different failures group together in an issue tracker
     /// and in every count derived from them.
