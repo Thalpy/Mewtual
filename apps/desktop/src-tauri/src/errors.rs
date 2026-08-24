@@ -77,6 +77,18 @@ impl ErrorCode {
     pub const fn code(&self) -> &'static str {
         self.code
     }
+
+    /// What the user is being asked to do about it.
+    ///
+    /// Test-only: the app delivers this by serialising the whole error, and nothing needs to read
+    /// it back. It exists so a test can assert on the *advice* rather than only on the label,
+    /// because those come apart. A locked vault reported with a `Restart` remediation carries a
+    /// perfectly correct sentence above a suggestion that cannot help, and the label alone would
+    /// not have caught it.
+    #[cfg(test)]
+    pub const fn remediation(&self) -> Option<Remediation> {
+        self.remediation
+    }
 }
 
 /// The codes this bridge can return.
@@ -307,8 +319,14 @@ mod tests {
         .expect("this file must be readable");
         // Only what the app compiles. Below this marker sits the test that spells out the pattern
         // it is looking for, and a scan of the whole file counts itself as a second definition.
+        //
+        // The boundary is the test module's own declaration, not the first `#[cfg(test)]` in the
+        // file: that attribute is ordinary on a test-only accessor, and using it here meant adding
+        // one anywhere above truncated the scan to nothing. It failed loudly rather than passing
+        // vacuously, which is the design working, but a guard that breaks when unrelated code is
+        // added is a guard somebody eventually deletes.
         let shipped = &source[..source
-            .find("#[cfg(test)]")
+            .find("mod tests {")
             .expect("this guard cannot find where the shipped half of the file ends")];
         let macro_at = shipped
             .find("macro_rules! error_codes")

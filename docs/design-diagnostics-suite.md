@@ -439,11 +439,17 @@ can be read.
 Three things that turned up as neighbours of the findings above and are worth writing down rather
 than losing:
 
-* **A locked session is reported as a broken server.** `actor_of` calls `require_unlocked_session`
-  first, so a locked vault surfaces as `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation
-  rather than `SESSION.LOCKED` with `Unlock`. The user is told to restart the app when they need to
-  type a passphrase. It is the natural companion to P3-017's unfinished half, splitting that code
-  into the three states it currently conflates.
+* ~~**A locked session is reported as a broken server.**~~ Fixed. `actor_of` checked the lock and
+  then reported every failure alike, so a locked vault reached the user as
+  `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation: they were told to restart the application
+  when what they needed was to type a passphrase. The lookup returns a typed answer now, so the
+  distinction travels rather than being re-derived. `channel_target` had always got this right,
+  which is the tell: the distinction was known and lost passing through one helper.
+  Only two states, not the three P3-017 suggests. "Never opened" and "closed since" are one state
+  to the registry, and a code claiming to tell them apart would be guessing.
+  The test asserts on the *remediation*, not only the code. That is where it went wrong: the
+  sentence shown to the user was correct and only the advice was useless, so a test comparing
+  labels would have passed.
 * **Webview field order is nondeterministic.** `record_ui_events` deserialises the webview's fields
   into a `HashMap` and iterates it, so events from that producer have no stable field order. That
   undercuts the byte-identical-output property for exactly the events the console shows most. It

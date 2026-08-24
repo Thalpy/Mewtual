@@ -715,21 +715,74 @@ async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
     }
 }
 
+/// Why a server's actor could not be handed over.
+///
+/// A typed answer rather than a sentence, because the two states ask opposite things of the user
+/// and a caller cannot tell them apart from a string without sniffing prose.
+///
+/// The bug this fixes: [`actor_of`] checks the lock and then reports every failure the same way, so
+/// a locked vault reached the user as `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation. They
+/// were told to restart the application when what they needed to do was type their passphrase.
+/// `channel_target` a few hundred lines down had always got this right, which is the tell: the
+/// distinction was known and lost on the way through one helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActorLookup {
+    /// The vault is locked.
+    Locked,
+    /// No server with that id is open in this process.
+    ///
+    /// "Never opened" and "closed since" are one state here, deliberately: the registry cannot tell
+    /// them apart, and a code that claimed to would be guessing.
+    NotOpen,
+}
+
+impl ActorLookup {
+    fn code(self) -> ErrorCode {
+        match self {
+            ActorLookup::Locked => codes::SESSION_LOCKED,
+            ActorLookup::NotOpen => codes::SERVER_UNAVAILABLE,
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            ActorLookup::Locked => "the vault is locked",
+            ActorLookup::NotOpen => "unknown server",
+        }
+    }
+}
+
+impl std::fmt::Display for ActorLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// So the sixty-odd commands that return a bare string keep compiling, and keep saying what they
+/// said. `?` applies this conversion for them; the typed callers match on the value instead.
+impl From<ActorLookup> for String {
+    fn from(failure: ActorLookup) -> String {
+        failure.message().to_string()
+    }
+}
+
 /// Internal actor lookup used by persistence/reload paths which must keep operating while the UI
 /// is locked. Native command handlers use [`actor_of`] so the webview cannot cross that boundary.
-async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor, String> {
+async fn actor_of_unchecked(state: &AppState, server: u64) -> Result<ServerActor, ActorLookup> {
     state
         .servers
         .lock()
         .await
         .get(&server)
         .map(|e| e.actor.clone())
-        .ok_or_else(|| "unknown server".to_string())
+        .ok_or(ActorLookup::NotOpen)
 }
 
 /// Clone out the actor for an unlocked webview command (never holding either lock across actor I/O).
-async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, String> {
-    require_unlocked_session(state).await?;
+async fn actor_of(state: &AppState, server: u64) -> Result<ServerActor, ActorLookup> {
+    require_unlocked_session(state)
+        .await
+        .map_err(|_| ActorLookup::Locked)?;
     actor_of_unchecked(state, server).await
 }
 
@@ -2060,7 +2113,9 @@ impl Operation {
         actor_of(state, server)
             .await
             .map(|actor| actor.with_trace(self.trace.0))
-            .map_err(|e| self.fail(codes::SERVER_UNAVAILABLE, e))
+            // The lookup's own answer, not a blanket one. A locked vault used to arrive here as
+            // "the server is unavailable, restart the app".
+            .map_err(|failure| self.fail(failure.code(), failure.message()))
     }
 
     /// Note that the operation reached a stage, without ending it.
@@ -8397,7 +8452,7 @@ async fn channel_target(
         .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     let actor = actor_of_unchecked(state, server)
         .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+        .map_err(|failure| op.fail(failure.code(), failure.message()))?;
     // Bound to this operation here rather than at each caller, which is what makes it impossible
     // for a new channel command to forget. Everything the actor does in response, and every event
     // that work produces, then lands under the same trace as the command that asked for it.
@@ -11941,6 +11996,54 @@ mod tests {
             "/ip6/2001:db8::1/udp/31484/quic-v1"
         );
         assert_eq!(json["capture"], "enhanced");
+    }
+
+    /// A locked vault must not be reported as a broken server.
+    ///
+    /// These two failures want opposite things from the user, and for a long time they arrived
+    /// identically: `actor_of` checked the lock and then reported everything as
+    /// `SERVER.ACTOR.UNAVAILABLE` with a `Restart` remediation, so somebody who needed to type a
+    /// passphrase was told to restart the application. The sentence above it was even correct,
+    /// which is what made it survive: only the remediation was wrong, and nothing asserted on that.
+    #[test]
+    fn a_locked_vault_and_a_missing_server_ask_for_different_things() {
+        assert_eq!(ActorLookup::Locked.code().code(), "SESSION.LOCKED");
+        assert_eq!(
+            ActorLookup::Locked.code().remediation(),
+            Some(errors::Remediation::Unlock),
+            "the fix is a passphrase, and the advice has to say so"
+        );
+
+        assert_eq!(ActorLookup::NotOpen.code().code(), "SERVER.ACTOR.UNAVAILABLE");
+        assert_eq!(
+            ActorLookup::NotOpen.code().remediation(),
+            Some(errors::Remediation::Restart)
+        );
+
+        // The distinction is the point, so assert it rather than the two halves separately.
+        assert_ne!(
+            ActorLookup::Locked.code().remediation(),
+            ActorLookup::NotOpen.code().remediation()
+        );
+    }
+
+    /// The lookup itself, not just the mapping. A default state has no unlocked session, which is
+    /// exactly the case that used to come back as a broken server.
+    #[tokio::test]
+    async fn looking_up_an_actor_while_locked_says_locked() {
+        let state = AppState::default();
+        assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::Locked);
+        // And with the lock out of the way it is an honest "no such server", rather than the lock
+        // answer leaking into every later failure. A real vault, because that is what unlocked
+        // means here: the check is `resumable && store.is_some()`, and faking half of it would test
+        // the test rather than the code.
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            catcoms_app::ServerStore::open(dir.path(), b"passphrase", &mut catcoms_rt::OsCryptoRng)
+                .expect("a fresh vault opens");
+        *state.session_resumable.lock().await = true;
+        *state.store.lock().await = Some(store);
+        assert_eq!(actor_of(&state, 1).await.unwrap_err(), ActorLookup::NotOpen);
     }
 
     /// A task started from `setup` must not need a runtime that does not exist yet.
