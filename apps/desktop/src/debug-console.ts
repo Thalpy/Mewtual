@@ -13,6 +13,11 @@
  * than no bug report.
  */
 
+// Borrowed rather than restated: a second byte formatter would eventually round differently from
+// the transfer readouts, and two sizes for one number is the sort of thing a reader stops to
+// reconcile in the middle of diagnosing something else.
+import { formatBytes } from "./transfer-visual.ts";
+
 /** One field of an event, rendered at the session's capture mode. */
 export type LogField = {
   name: string;
@@ -429,16 +434,309 @@ export function latestSeq(held: readonly LogEvent[]): number {
  *
  * Never a silent truncation: a gap presented as a quiet period is a lie a diagnostic tool cannot
  * afford. Returns an empty string when nothing was dropped.
+ *
+ * The one line of `retentionStatus`, for a caller that wants prose rather than parts. Pass the sink
+ * snapshot: without one this can only say that the file's state is unknown, which is honest but is
+ * the weakest thing it could say.
  */
-export function dropNote(dropped: number, kept: number): string {
-  if (dropped <= 0) return "";
-  const total = dropped + kept;
-  return `Ring full: oldest entries dropped. Showing the last ${kept.toLocaleString()} of ${total.toLocaleString()} this session. The debug log file keeps everything.`;
+export function dropNote(dropped: number, kept: number, sink: DebugLogSink | null = null): string {
+  return retentionStatus({ dropped, kept, sink }).text;
 }
 
 /** The `n of m shown` readout, so an over-eager filter can never look like an empty feed. */
 export function shownCount(shown: number, total: number): string {
   return shown === total ? `${total.toLocaleString()}` : `${shown.toLocaleString()} of ${total.toLocaleString()} shown`;
+}
+
+// --- what the log file actually holds ------------------------------------------------------
+//
+// The drop notice used to end "The debug log file keeps everything", which was false in six
+// separate ways at once: file logging may be switched off, its initialisation may have failed, its
+// filter is deliberately narrower than the ring's, its queue drops under pressure, it rotates under
+// a session quota, and an event the capture settings excluded never reached either store. That is
+// the exact shape of reassurance the logger-health work exists to remove, and it was worse than
+// saying nothing: somebody reads it, stops screenshotting, and goes looking for a file that either
+// does not exist or does not contain the part they needed. Found by adversarial review (P3-020).
+//
+// Everything below is decided by a value the console can actually read, and where it cannot read
+// one it says so rather than guessing kindly.
+
+/**
+ * The file sink's own account of itself, as `get_debug_logging` returns it.
+ *
+ * A structural subset of that reply, so the shell can hand its existing snapshot straight in
+ * without a conversion that could quietly disagree with it.
+ *
+ * `enabled` is what the user asked for; `state` is what the writer is doing. They are separate
+ * fields because the entire value of this record is that they can disagree, and every sentence
+ * derived from it below is decided by `state`. A preference is a request, not evidence.
+ */
+export type DebugLogSink = {
+  /** Whether a file was asked for. */
+  enabled: boolean;
+  /** Whether this process is writing one. Derived from bytes that reached a file. */
+  active: boolean;
+  /** `stopped` | `active` | `degraded` | `failed`. */
+  state: string;
+  /** Why it is degraded or failed. Shown verbatim: "permission denied" is actionable. */
+  error: string;
+  /** The file this process opened, or empty when it opened none. */
+  file: string;
+  events_written: number;
+  bytes_written: number;
+  /** Events that never reached the file: queue overflow, or emitted after the quota stopped it. */
+  events_dropped: number;
+  /** Events that reached the file with their tail cut off. Present, and they say so. */
+  events_truncated: number;
+  queue_high_water: number;
+  /** The session byte quota, so how close this run has come to it can be stated rather than felt. */
+  session_quota_bytes: number;
+};
+
+/** A colour job, shared by the sink summary and the retention notice. */
+export type SinkTone = "ok" | "warn" | "danger" | "faint";
+
+/**
+ * The targets the shared log file records at `debug`. Everything else it holds at `info`.
+ *
+ * Mirrors `APP_FILE_FILTER` in `crates/catcoms-log/src/lib.rs`, which is deliberately narrower than
+ * the ring's `CONSOLE_RING_FILTER`: the file is the thing a user pastes to somebody else, and the
+ * transport, storage and replication layers at `debug` are both the bulk of the volume and the most
+ * identifying part of it. The narrowing is a privacy decision and a good one; what it is not is a
+ * detail the console may leave out while telling somebody the file has their missing entries.
+ */
+export const FILE_DEBUG_TARGETS = [
+  "catcoms_app",
+  "catcoms_sync",
+  "catcoms_mls",
+  "catcoms_discovery",
+  UI_TARGET,
+] as const;
+
+/**
+ * Whether the file layer's filter refused this event outright.
+ *
+ * True for anything at TRACE, and for DEBUG outside the five targets above. Such an event is in the
+ * ring and was never eligible for the file, so no amount of sink health makes the file a fallback
+ * for it.
+ */
+export function belowFileFilter(e: LogEvent): boolean {
+  if (e.level === "TRACE") return true;
+  if (e.level !== "DEBUG") return false;
+  return !FILE_DEBUG_TARGETS.some((t) => e.target === t || e.target.startsWith(`${t}::`));
+}
+
+/** How full a session's quota has to get before it is worth mentioning unprompted. */
+const QUOTA_NOTICE = 0.9;
+
+/**
+ * How the sink's state reads to someone who did not write it.
+ *
+ * The single place the console phrases file-log health, so the drop notice, the sink panel and a
+ * copied report cannot end up disagreeing about whether a log exists. Every branch is chosen by
+ * `state`, which the writer sets from bytes that reached a file, and never by `enabled`.
+ */
+export function sinkSummary(sink: DebugLogSink | null): { tone: SinkTone; text: string } {
+  // No snapshot is its own answer, and a rare one: the command needs an unlocked session, so a
+  // console opened over a locked vault genuinely does not know. Saying so beats assuming either way.
+  if (!sink) {
+    return { tone: "warn", text: "The debug log file's state has not been read, so what it holds is unknown." };
+  }
+  if (sink.state === "failed") {
+    return {
+      tone: "danger",
+      text: sink.error
+        ? `The debug log file is not being written: ${sink.error}`
+        : "The debug log file is not being written, and the reason was not recorded.",
+    };
+  }
+  if (sink.state === "degraded") {
+    return {
+      tone: "warn",
+      text: sink.events_dropped
+        ? `Writing, but ${sink.events_dropped.toLocaleString()} record(s) never reached the file.`
+        : "Writing, but close enough to this session's limit to matter.",
+    };
+  }
+  if (sink.state === "active") {
+    return {
+      tone: "ok",
+      text: `Writing. ${sink.events_written.toLocaleString()} entries, ${formatBytes(sink.bytes_written)} so far.`,
+    };
+  }
+  return {
+    tone: "faint",
+    text: sink.enabled
+      ? "Not writing yet. A log can only be opened when the app starts, so restart Mewtual."
+      : "Not writing, because you have logging switched off.",
+  };
+}
+
+/**
+ * The sink's health as copyable lines.
+ *
+ * Beside the summary for the reason every serialiser here is: a pasted report that does not match
+ * the screenshot it arrived with makes the reader work out which one is lying first.
+ */
+export function sinkLines(sink: DebugLogSink | null): string[] {
+  if (!sink) return ["debug log: not read"];
+  const quota = sink.session_quota_bytes > 0 ? ` of ${formatBytes(sink.session_quota_bytes)}` : "";
+  return [
+    `preference: ${sink.enabled ? "on" : "off"}`,
+    `sink state: ${sink.state}`,
+    `file: ${sink.file || "(none opened)"}`,
+    `written: ${sink.events_written.toLocaleString()} entries, ${formatBytes(sink.bytes_written)}${quota}`,
+    `dropped: ${sink.events_dropped.toLocaleString()}`,
+    `truncated: ${sink.events_truncated.toLocaleString()}`,
+    `queue high water: ${sink.queue_high_water.toLocaleString()}`,
+    ...(sink.error ? [`last error: ${sink.error}`] : []),
+  ];
+}
+
+/** One measured reason the file cannot be taken for a complete record. */
+export type RetentionCaveat = {
+  /** A stable code, so this can be counted and searched rather than read. */
+  code: string;
+  text: string;
+};
+
+/** What the console can honestly claim about history the ring no longer holds. */
+export type RetentionStatus = {
+  dropped: number;
+  kept: number;
+  total: number;
+  /**
+   * `none` when the file demonstrably has nothing more, `partial` when it has been written this
+   * session and may have some of it, `unknown` when the sink was never read. Never `all`: no state
+   * of this system supports that word.
+   */
+  file: "none" | "partial" | "unknown";
+  tone: SinkTone;
+  /** What the ring itself lost. Empty when nothing was dropped. */
+  ring: string;
+  /** What the file's own reported state says about the gap. */
+  sink: string;
+  caveats: RetentionCaveat[];
+  /** Every sentence above, joined, which is what the pinned notice and a copied report use. */
+  text: string;
+};
+
+/**
+ * What happened to the entries the ring dropped, in terms the console can back up.
+ *
+ * Structured rather than a formatted blob because the console renders the parts differently: the
+ * ring sentence is the headline, the sink sentence carries the tone, and the caveats are a list. A
+ * caller that only wants prose has `dropNote`.
+ *
+ * `filtered` and `events` are what turn two of these sentences from configuration trivia into
+ * measurements: `LogStats.filtered` counts what the capture settings excluded from both stores, and
+ * the held events are where the file's narrower filter can be counted rather than merely asserted.
+ *
+ * Nothing was dropped means there is nothing to say, and every field comes back empty.
+ */
+export function retentionStatus(input: {
+  dropped: number;
+  kept: number;
+  sink: DebugLogSink | null;
+  /** Events the capture config excluded outright, from `LogStats`. */
+  filtered?: number;
+  /** The events the console still holds, so the file's filter can be counted against them. */
+  events?: readonly LogEvent[];
+}): RetentionStatus {
+  const dropped = Math.max(0, input.dropped);
+  const kept = Math.max(0, input.kept);
+  const total = dropped + kept;
+  if (dropped <= 0) {
+    return { dropped: 0, kept, total, file: "unknown", tone: "faint", ring: "", sink: "", caveats: [], text: "" };
+  }
+
+  const ring = `Ring full: oldest entries dropped. Showing the last ${kept.toLocaleString()} of ${total.toLocaleString()} this session.`;
+  const s = input.sink;
+  const caveats: RetentionCaveat[] = [];
+
+  // Applies whatever the file is doing, and it is the one loss neither store can make good: an
+  // event the capture settings refused was never built, so raising the mode now brings back nothing.
+  const filtered = input.filtered ?? 0;
+  if (filtered > 0) {
+    caveats.push({
+      code: "LOG.CAPTURE.EXCLUDED",
+      text: `${filtered.toLocaleString()} event(s) were never captured at all under the current capture settings, so neither this console nor the file has them.`,
+    });
+  }
+
+  let file: RetentionStatus["file"];
+  let sink: string;
+  let tone: SinkTone;
+  if (!s) {
+    file = "unknown";
+    tone = "warn";
+    sink = "The debug log file's state has not been read here, so whether it kept any of them is unknown. Settings, Diagnostics reports what the file is actually doing.";
+  } else if (s.state === "failed") {
+    file = "none";
+    tone = "danger";
+    sink = s.error
+      ? `No file is being written (${s.error}), so the dropped entries are gone.`
+      : "No file is being written, and the reason was not recorded, so the dropped entries are gone.";
+  } else if (s.state === "stopped") {
+    file = "none";
+    tone = "warn";
+    // The preference matters here and only here. Off is a choice the user made and the sentence
+    // should name it; on-but-stopped is the app failing to honour one, and the two want different
+    // next steps from the person reading.
+    sink = s.enabled
+      ? "Logging is switched on but this session opened no file, so the dropped entries are gone. A log can only be opened when the app starts."
+      : "File logging is switched off, so nothing was written to disk and the dropped entries are gone.";
+  } else {
+    file = "partial";
+    tone = s.state === "degraded" || s.events_dropped > 0 ? "warn" : "faint";
+    const named = s.file ? ` (${s.file})` : "";
+    sink = `The debug log file${named} has taken ${s.events_written.toLocaleString()} entries this session and may hold some of these, but it is not a complete record of them.`;
+
+    if (s.events_dropped > 0) {
+      caveats.push({
+        code: "LOG.FILE.DROPPED",
+        text: `${s.events_dropped.toLocaleString()} record(s) never reached the file: its queue overflowed, or the session quota had already stopped it.`,
+      });
+    }
+    if (s.events_truncated > 0) {
+      caveats.push({
+        code: "LOG.FILE.TRUNCATED",
+        text: `${s.events_truncated.toLocaleString()} record(s) reached the file with their tail cut off.`,
+      });
+    }
+    if (s.session_quota_bytes > 0 && s.bytes_written >= s.session_quota_bytes * QUOTA_NOTICE) {
+      caveats.push({
+        code: "LOG.FILE.QUOTA",
+        text:
+          s.bytes_written >= s.session_quota_bytes
+            ? `This session has reached its ${formatBytes(s.session_quota_bytes)} file limit, so nothing further is being written.`
+            : `This session has written ${formatBytes(s.bytes_written)} of a ${formatBytes(s.session_quota_bytes)} limit, and writing stops at the limit.`,
+      });
+    }
+
+    // Always, because it is true of every healthy file too, and it is the caveat somebody reading
+    // "the file has more" would never think to check. Counted against what is on screen when there
+    // is something to count, because a number is harder to wave away than a configuration note.
+    const excluded = (input.events ?? []).filter(belowFileFilter).length;
+    caveats.push({
+      code: "LOG.FILE.NARROWER_FILTER",
+      text: excluded
+        ? `The file's capture filter is narrower than this console's: ${excluded.toLocaleString()} of the entries still shown here were never eligible for it.`
+        : "The file's capture filter is narrower than this console's, so some kinds of entry never reach it whatever its state.",
+    });
+  }
+
+  return {
+    dropped,
+    kept,
+    total,
+    file,
+    tone,
+    ring,
+    sink,
+    caveats,
+    text: [ring, sink, ...caveats.map((c) => c.text)].join(" "),
+  };
 }
 
 // --- network view ------------------------------------------------------------------------

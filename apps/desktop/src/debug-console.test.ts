@@ -6,10 +6,14 @@ import {
   DEFAULT_LEVELS,
   appendEvents,
   alias,
+  belowFileFilter,
   captureModeIsRevealing,
   captureModeNote,
   copyBundle,
   dropNote,
+  retentionStatus,
+  sinkLines,
+  sinkSummary,
   eventLine,
   eventParts,
   eventText,
@@ -38,6 +42,7 @@ import {
   voiceLines,
   webrtcChip,
   type DebugDevice,
+  type DebugLogSink,
   type DebugVoicePeer,
   type Aliases,
   type LogEvent,
@@ -404,11 +409,181 @@ test("appending a page never repeats what is already held and stays bounded", ()
   assert.equal(latestSeq([]), 0, "an empty view asks from the beginning");
 });
 
+// --- retention and sink health (P3-020) -----------------------------------------------------
+
+/** A file sink's own account of itself, healthy unless a test says otherwise. */
+function sink(over: Partial<DebugLogSink> = {}): DebugLogSink {
+  return {
+    enabled: true,
+    active: true,
+    state: "active",
+    error: "",
+    file: "debug_log_20260823_120000.txt",
+    events_written: 1284,
+    bytes_written: 190_432,
+    events_dropped: 0,
+    events_truncated: 0,
+    queue_high_water: 12,
+    session_quota_bytes: 52_428_800,
+    ...over,
+  };
+}
+
+/**
+ * The claim P3-020 removed, in the forms a well-meaning edit would put it back.
+ *
+ * The notice used to end "The debug log file keeps everything", which was false whenever logging
+ * was off, the sink had failed, its queue had dropped, its quota had stopped it, or the event was
+ * below its filter. Every state below asserts against this, so restoring the promise anywhere in
+ * the notice fails the whole group rather than one forgotten case.
+ */
+function promisesCompleteness(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    t.includes("keeps everything") ||
+    t.includes("has everything") ||
+    t.includes("holds everything") ||
+    t.includes("kept everything") ||
+    /file (?:keeps|has|holds|contains) (?:everything|it all|them all|the rest)/.test(t)
+  );
+}
+
 test("a ring that dropped events says so rather than presenting a gap as quiet", () => {
-  assert.equal(dropNote(0, 100), "");
-  const note = dropNote(1417, 2000);
+  assert.equal(dropNote(0, 100), "", "nothing dropped is nothing to announce");
+  const note = dropNote(1417, 2000, sink());
   assert.match(note, /last 2,000 of 3,417/);
-  assert.match(note, /debug log file keeps everything/);
+  assert.ok(!promisesCompleteness(note), "and never promises the file made the gap good");
+});
+
+test("a console that has not read the sink says the file is unknown rather than reassuring", () => {
+  const s = retentionStatus({ dropped: 10, kept: 2000, sink: null });
+  assert.equal(s.file, "unknown");
+  assert.match(s.sink, /has not been read/);
+  assert.ok(!promisesCompleteness(s.text));
+});
+
+test("file logging switched off is named as that, not hedged into a maybe", () => {
+  const s = retentionStatus({ dropped: 10, kept: 2000, sink: sink({ enabled: false, active: false, state: "stopped" }) });
+  assert.equal(s.file, "none", "nothing was written, so nothing may be claimed for it");
+  assert.match(s.sink, /switched off/, "the user's own choice is named rather than described as a failure");
+  assert.match(s.sink, /gone/);
+  assert.ok(!promisesCompleteness(s.text));
+});
+
+test("a sink that failed to open is not offered as a fallback, and says why", () => {
+  const s = retentionStatus({
+    dropped: 10,
+    kept: 2000,
+    sink: sink({ active: false, state: "failed", file: "", error: "permission denied opening the diagnostics directory" }),
+  });
+  assert.equal(s.file, "none");
+  assert.equal(s.tone, "danger");
+  assert.match(s.sink, /permission denied/, "the actionable reason survives, rather than becoming 'logging failed'");
+  assert.ok(!promisesCompleteness(s.text));
+});
+
+test("logging asked for but never started is a different sentence from logging turned off", () => {
+  const s = retentionStatus({ dropped: 10, kept: 2000, sink: sink({ enabled: true, active: false, state: "stopped", file: "" }) });
+  assert.equal(s.file, "none");
+  assert.match(s.sink, /switched on but this session opened no file/);
+  assert.match(s.sink, /when the app starts/, "and says the thing that would fix it");
+  assert.ok(!promisesCompleteness(s.text));
+});
+
+test("a sink with a non-zero dropped count cannot imply it kept what the ring lost", () => {
+  const s = retentionStatus({ dropped: 10, kept: 2000, sink: sink({ state: "degraded", events_dropped: 37 }) });
+  assert.equal(s.file, "partial", "it is writing, so 'may hold some' is the strongest honest claim");
+  assert.equal(s.tone, "warn");
+  assert.ok(s.caveats.some((c) => c.code === "LOG.FILE.DROPPED" && c.text.includes("37")));
+  assert.ok(!promisesCompleteness(s.text));
+});
+
+test("a truncated record is reported apart from a dropped one, because they differ to a reader", () => {
+  const s = retentionStatus({ dropped: 10, kept: 2000, sink: sink({ events_truncated: 4 }) });
+  const cut = s.caveats.find((c) => c.code === "LOG.FILE.TRUNCATED");
+  assert.ok(cut && cut.text.includes("4"), "present, and says so, unlike a dropped one");
+  assert.ok(!s.caveats.some((c) => c.code === "LOG.FILE.DROPPED"), "and is not counted as a drop");
+});
+
+test("a session near its file quota says so, because that is where the history stops", () => {
+  const quiet = retentionStatus({ dropped: 10, kept: 2000, sink: sink({ bytes_written: 1_000 }) });
+  assert.ok(!quiet.caveats.some((c) => c.code === "LOG.FILE.QUOTA"), "an empty file is not a warning");
+  const full = retentionStatus({
+    dropped: 10,
+    kept: 2000,
+    sink: sink({ bytes_written: 52_428_800, session_quota_bytes: 52_428_800 }),
+  });
+  const quota = full.caveats.find((c) => c.code === "LOG.FILE.QUOTA");
+  assert.ok(quota && /nothing further is being written/.test(quota.text));
+  assert.ok(!promisesCompleteness(full.text));
+});
+
+/**
+ * The narrowing that makes "the file has the rest" wrong even for a perfectly healthy sink. The
+ * ring takes `catcoms_net` at debug so dial failures are visible in the app; the file holds it at
+ * info so a log a user pastes to somebody else is not a list of every address they have ever seen.
+ */
+test("the file's narrower filter is stated, and counted against what is on screen", () => {
+  const held = [
+    ev({ level: "DEBUG", target: "catcoms_net" }),
+    ev({ level: "DEBUG", target: "catcoms_storage" }),
+    ev({ level: "DEBUG", target: "catcoms_sync" }),
+    ev({ level: "INFO", target: "catcoms_net" }),
+  ];
+  const s = retentionStatus({ dropped: 10, kept: held.length, sink: sink(), events: held });
+  const narrow = s.caveats.find((c) => c.code === "LOG.FILE.NARROWER_FILTER");
+  assert.ok(narrow, "a healthy sink still has a filter, and it is narrower than this console's");
+  assert.match(narrow!.text, /\b2\b/, "the two debug lines the file never saw are counted, not asserted");
+  assert.ok(!promisesCompleteness(s.text));
+
+  // Still said when there is nothing on screen to count: the configuration is the fact, and a
+  // caller that cannot pass its events should not be told the file's filter matches the ring's.
+  const unmeasured = retentionStatus({ dropped: 10, kept: 2000, sink: sink() });
+  assert.match(
+    unmeasured.caveats.find((c) => c.code === "LOG.FILE.NARROWER_FILTER")!.text,
+    /narrower than this console's/,
+  );
+});
+
+test("the file's filter is mirrored per target, not guessed from the level alone", () => {
+  assert.ok(belowFileFilter(ev({ level: "DEBUG", target: "catcoms_net" })), "transport debug is ring only");
+  assert.ok(belowFileFilter(ev({ level: "DEBUG", target: "catcoms_replication" })));
+  assert.ok(!belowFileFilter(ev({ level: "DEBUG", target: "catcoms_sync" })), "product layers reach the file");
+  assert.ok(!belowFileFilter(ev({ level: "DEBUG", target: "catcoms_ui::voice" })), "and so do their submodules");
+  assert.ok(!belowFileFilter(ev({ level: "INFO", target: "catcoms_net" })), "info reaches it from anywhere");
+  assert.ok(belowFileFilter(ev({ level: "TRACE", target: "catcoms_app" })), "trace reaches it from nowhere");
+});
+
+test("events the capture settings excluded are named, because neither store has them", () => {
+  const s = retentionStatus({ dropped: 10, kept: 2000, sink: sink(), filtered: 812 });
+  const excluded = s.caveats.find((c) => c.code === "LOG.CAPTURE.EXCLUDED");
+  assert.ok(excluded && excluded.text.includes("812"));
+  assert.match(excluded!.text, /neither this console nor the file/);
+
+  // And still said when the file is not writing at all: raising the capture mode now cannot bring
+  // back an event that was never built, whatever the sink is doing.
+  const off = retentionStatus({ dropped: 10, kept: 2000, sink: sink({ enabled: false, state: "stopped" }), filtered: 5 });
+  assert.ok(off.caveats.some((c) => c.code === "LOG.CAPTURE.EXCLUDED"));
+});
+
+test("the sink summary is decided by what the writer did, never by the preference", () => {
+  // The disagreement the whole record exists to show: the preference is off while the sink opened
+  // before the toggle is still writing. A summary taken from `enabled` would call this stopped.
+  assert.equal(sinkSummary(sink({ enabled: false, state: "active" })).tone, "ok");
+  assert.equal(sinkSummary(sink({ enabled: true, active: false, state: "failed", error: "disk full" })).tone, "danger");
+  assert.match(sinkSummary(sink({ state: "failed", error: "disk full" })).text, /disk full/);
+  assert.match(sinkSummary(sink({ state: "failed", error: "" })).text, /reason was not recorded/);
+  assert.equal(sinkSummary(sink({ state: "degraded", events_dropped: 3 })).tone, "warn");
+  assert.equal(sinkSummary(sink({ enabled: false, active: false, state: "stopped" })).tone, "faint");
+  assert.match(sinkSummary(null).text, /has not been read/);
+});
+
+test("sink health copies the same numbers it shows, including the ones that are zero", () => {
+  const lines = sinkLines(sink({ events_dropped: 0, error: "" })).join("\n");
+  assert.match(lines, /dropped: 0/, "a zero drop count is evidence, so it is stated rather than omitted");
+  assert.match(lines, /sink state: active/);
+  assert.ok(!/last error/.test(lines), "and an error line is absent when there is no error");
+  assert.match(sinkLines(null)[0], /not read/);
 });
 
 test("a filtered feed shows its own arithmetic, so it cannot look empty by accident", () => {
