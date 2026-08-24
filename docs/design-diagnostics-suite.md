@@ -146,6 +146,35 @@ group tally stand in for it.
   An enum listing outcomes no code produces invites a UI branch for a case that never happens.
 - **Structured detail on `AppError`.** Removed rather than carried unused.
 
+## 4a. Open findings from the Part 3 review
+
+`docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`, pinned to `f6c1be6`. Three are fixed
+(see "Corrections made after review"); the rest are open. Read the review for the detail, and treat
+this as the triage rather than the record.
+
+**Do these before instrumenting anything further.** The argument for the order is the review's own,
+and it is sound: more instrumentation widens the gap between what is recorded and what can be read.
+
+| ID | Sev | Open finding | Note |
+|---|---|---|---|
+| P3-005 | High | The console consumes a lossy, hard-coded Enhanced projection | **Start here.** This is M4, pulled forward. |
+| P3-004 | High | Trace correlation stops before the actor and event pipeline | M3's actual headline requirement. |
+| P3-010 | High | Event sequencing detects gaps but does not repair them | Pairs with P3-004. |
+| P3-011 | Med | Frontend structured events flatten into `UI.EVENT` | Falls out of P3-005. |
+| P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | The batcher counts sync throws, not rejected promises. |
+| P3-007 | High | Console polling can overlap and scales linearly with server count | One `get_member_routes` per server per second, unguarded. |
+| P3-008 | High | A formatted event has no size bound before allocation or queuing | I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
+| P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |
+| P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. |
+| P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
+| P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Already known and deferred; see section 4. |
+| P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
+| P3-016 | Med | Startup capture begins too late for static-import failures | `main.ts` imports run before its first statement. |
+| P3-017 | Med | The typed-error registry is conventional, not enforced | Nothing stops a code being used without registering it. |
+| P3-018 | Med | Unread reconciliation uses an unsafe sender-clock cursor | Pre-existing, not introduced by this work. |
+| P3-019 | Med | The jukebox digest is weak and the revision can saturate | 32-bit FNV was chosen for brevity, not collision resistance. |
+| P3-020 | Low | Some status messages overstate what was retained | |
+
 ## 5. Cooperative link test
 
 A two-person test, run from the debug console, that exercises the paths between two peers and
