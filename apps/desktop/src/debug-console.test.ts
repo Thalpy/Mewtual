@@ -258,7 +258,12 @@ test("a copied bundle states its redaction mode and carries the privacy contract
   );
   assert.match(text, /redaction: on/);
   assert.match(text, /== NETWORK ==/);
-  assert.match(text, /never includes message text/);
+  // Describes what a report may contain rather than promising what it does not. The old sentence
+  // ended "never includes ... names", and the report writes every server's name into itself: a
+  // false safety label is the difference between someone reviewing a report before pasting it
+  // into a public issue and someone not bothering.
+  assert.match(text, /Read it before you share it/);
+  assert.ok(!/never includes/.test(text), "a report must not promise what it cannot enforce");
   assert.match(copyBundle({ version: "0.3.0", at: 0, redacted: false }, []), /redaction: off/);
 });
 

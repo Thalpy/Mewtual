@@ -591,11 +591,26 @@ export function voiceLines(peers: readonly DebugVoicePeer[], aliases: Aliases, r
 /**
  * The privacy sentence, appended to every copied bundle.
  *
- * The same contract the Diagnostics settings page states. It travels with the text because the
- * person who receives a pasted report is not the person who read the footer.
+ * It travels with the text because the person who receives a pasted report is not the person who
+ * read the footer.
+ *
+ * # Why this no longer promises anything
+ *
+ * It used to end "It never includes message text, file contents, names or key material", and that
+ * was false. An adversarial review listed the counterexamples: the report writes every server's
+ * name, the `tracing` compatibility bridge carries arbitrary message prose, forwarded console
+ * warnings and stacks carry whatever they were given, and the regex redactor only knows about
+ * addresses and peer ids. A legacy warning like `failed to render "Private Support": C:\Users\...`
+ * lands in a report whose footer told the recipient it contained no names.
+ *
+ * A false safety label is worse than none: it is the difference between someone reviewing a report
+ * before pasting it into a public issue and someone not bothering. So this describes what a report
+ * may contain and asks the reader to look, and it will keep saying so until the export validator
+ * exists to make a stronger claim true. See `docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`
+ * finding P3-002.
  */
 export const PRIVACY_NOTE =
-  "This report can include your IP addresses, peer and device identifiers, and timing. It never includes message text, file contents, names or key material.";
+  "This report may contain IP addresses, peer and device identifiers, server names, local file paths, URLs, error text and activity metadata. Read it before you share it.";
 
 /** One section of a copy bundle, under a heading copy can be scanned by. */
 export function copySection(title: string, lines: readonly string[]): string {

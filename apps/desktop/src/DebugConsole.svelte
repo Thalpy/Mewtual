@@ -697,7 +697,10 @@
     </p>
     <label class="dbg-redact">
       <input type="checkbox" bind:checked={redact} />
-      <span>REDACT FOR SCREENSHOTS</span>
+      <!-- Named for everything it affects. It was "REDACT FOR SCREENSHOTS", which is where it
+           started, but it also changes what Copy and Save produce, and a label that undersells
+           its own scope invites someone to copy a report believing the toggle did not apply. -->
+      <span>REDACT ADDRESSES AND IDS</span>
     </label>
   </div>
 </div>

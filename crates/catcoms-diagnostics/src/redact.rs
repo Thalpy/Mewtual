@@ -251,6 +251,30 @@ impl std::fmt::Display for BridgedMessage {
     }
 }
 
+/// The transport protocol names an address may be described by in Safe mode.
+///
+/// A closed set on purpose. These are protocol identifiers, fixed by libp2p and shared by everyone
+/// using it, so naming which was tried says nothing about who was talking. Anything outside the set
+/// is not rendered, which is what makes an unrecognised address shape fail closed instead of
+/// leaking whatever happened to sit in the last segment.
+///
+/// Deliberately excludes `ip4`, `ip6`, `dns*` (the family, reported separately) and `p2p` (whose
+/// value is a peer id).
+const TRANSPORTS: [&str; 12] = [
+    "tcp",
+    "udp",
+    "quic",
+    "quic-v1",
+    "ws",
+    "wss",
+    "webtransport",
+    "webrtc",
+    "webrtc-direct",
+    "p2p-circuit",
+    "tls",
+    "noise",
+];
+
 /// A network address, which is the one genuinely useful thing that is also genuinely identifying.
 ///
 /// In Safe mode an event carries only what the address *is*: its family and transport, which is
@@ -295,11 +319,20 @@ impl AddressValue {
         } else {
             AddressFamily::Other
         };
-        // The last protocol segment is the transport: quic-v1, tcp, ws, and so on. Which one was
-        // tried matters and is not identifying on its own.
+        // An allowlist, not a heuristic, and the difference is a real leak.
+        //
+        // This used to take "the last segment that is not a number" as the transport. A real
+        // multiaddr ends `/p2p/<peer id>`, and a peer id is not a number, so Safe mode rendered
+        // `ip4/12D3KooW…`: a raw stable identifier in the one mode whose entire promise is that it
+        // contains none, produced by the most ordinary input in the system. Found by adversarial
+        // review, not by any of the tests written alongside it.
+        //
+        // Matching a closed set instead fails closed: a segment nobody anticipated is not rendered
+        // at all rather than being rendered because it did not look like a number.
         let transport = addr
-            .rsplit('/')
-            .find(|part| !part.is_empty() && part.parse::<u16>().is_err())
+            .split('/')
+            .filter(|part| TRANSPORTS.contains(part))
+            .next_back()
             .unwrap_or("unknown");
         AddressValue {
             family,
@@ -501,6 +534,39 @@ mod tests {
             "/ip6/2001:db8::1/udp/31484/quic-v1",
             "and must survive a mode the user deliberately turned on"
         );
+    }
+
+    /// The leak an adversarial review found in this exact function.
+    ///
+    /// A real multiaddr usually ends `/p2p/<peer id>`, and "take the last non-numeric segment as
+    /// the transport" takes the peer id. Safe mode then rendered `ip4/12D3KooW...`: a raw stable
+    /// identifier, in the one mode whose entire promise is that it contains none, reached by the
+    /// most ordinary input in the system.
+    #[test]
+    fn safe_mode_never_renders_a_peer_id_from_a_p2p_suffixed_address() {
+        for raw in [
+            "/ip4/203.0.113.9/udp/22487/quic-v1/p2p/12D3KooWSaXFXMFgkGxgBF6UPEojspeSj2KaDiP4ks5p",
+            "/ip6/2001:db8::1/tcp/443/p2p/12D3KooWFixtureMoss",
+            "/ip4/203.0.113.9/tcp/443/p2p/12D3KooWFixtureMoss/p2p-circuit/p2p/12D3KooWOther",
+        ] {
+            let safe = AddressValue::new(raw).render(CaptureMode::Safe);
+            assert!(
+                !safe.contains("12D3Koo"),
+                "leaked a peer id: {raw} -> {safe}"
+            );
+            assert!(!safe.contains("203.0.113.9"), "leaked an address: {safe}");
+            assert!(!safe.contains("2001:db8"), "leaked an address: {safe}");
+        }
+    }
+
+    /// The transport still has to survive, or the finding that diagnosed the isolation incident
+    /// ("every candidate is IPv6 over QUIC") loses the half that says what was tried.
+    #[test]
+    fn the_transport_survives_a_p2p_suffix() {
+        let addr = AddressValue::new("/ip4/203.0.113.9/udp/22487/quic-v1/p2p/12D3KooWFixture");
+        assert_eq!(addr.render(CaptureMode::Safe), "ip4/quic-v1");
+        let relayed = AddressValue::new("/ip4/203.0.113.9/tcp/443/p2p/12D3KooWA/p2p-circuit");
+        assert_eq!(relayed.render(CaptureMode::Safe), "ip4/p2p-circuit");
     }
 
     #[test]

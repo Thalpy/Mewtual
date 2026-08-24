@@ -88,6 +88,10 @@ Four bands, top to bottom:
 - One privacy sentence, always visible, `muted small`:
   "Everything here can include your IP addresses, peer and device identifiers, and
   timing. It never includes message text, file contents, names or key material."
+  **Superseded.** That sentence was not true of the implementation: the report writes server
+  names, and the `tracing` compatibility bridge carries arbitrary prose. It now describes what a
+  report may contain and asks the reader to check. See `docs/design-diagnostics-suite.md` and
+  finding P3-002 in `docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md`.
   This is the same contract as the Diagnostics settings page wording; every copy action
   in the console is covered by this strip, so individual buttons do not repeat it. The
   "Copy report" flow additionally appends the sentence to the copied bundle itself.

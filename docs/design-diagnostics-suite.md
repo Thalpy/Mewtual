@@ -81,7 +81,7 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M0 | Stop the logger lying and crashing | done |
 | M1 | Console out of `App.svelte` | done |
 | M2 | `catcoms-diagnostics`: canonical event, privacy model, store, renderers | done |
-| M3 | Correlation, typed errors, task supervision, invoke migration | done |
+| M3 | Correlation, typed errors, task supervision, invoke migration | subsystems done, correlation incomplete |
 | M4 | Rebuild the console on the hub | not started |
 | M5 | Findings and checks | not started |
 | M6 | Export bundle and GitHub issue flow | partly: text export done |
@@ -109,11 +109,33 @@ missing, type the errors a user must act on, and leave the rest.
 
 ### What M3 did not do
 
-* The trace does not yet cross the actor mailbox. A command's stages are correlated; work the actor
-  does *later* in response is not, so a `channel-updated` that arrives two seconds after a send
-  carries the emit's sequence number but not the send's trace. That is the next real step in
-  correlation and it belongs with M4, where the console can render a trace end to end.
+All eight subsystem groups have been through, but **M3's headline requirement is not met**, and
+`docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md` is right to say so rather than let the
+group tally stand in for it.
+
+* **The trace does not cross the actor mailbox** (P3-004). A command's own stages are correlated;
+  the work the actor does *later* in response is not. So a `channel-updated` arriving two seconds
+  after a send carries the emit's sequence number but not the send's trace, which is precisely the
+  ten-stage question the milestone existed to answer. This is the next real step.
+* **The console consumes a lossy projection** (P3-005). `catcoms-log`'s `project()` flattens
+  section, phase, span and refs away and hard-codes Enhanced rendering, so the console cannot
+  faithfully show what the canonical model now records. The review argues M4 should be pulled
+  forward before more subsystems are instrumented, and that argument is sound: instrumenting
+  further widens the gap between what is recorded and what can be read.
 * `push_file_chunk` accepts a trace and ignores it, on purpose. See its signature.
+
+### Corrections made after review
+
+* **P3-001 (critical), fixed.** `AddressValue::new` took "the last non-numeric segment" as the
+  transport. A real multiaddr ends `/p2p/<peer id>`, so Safe mode rendered raw peer ids: the exact
+  leak the typed model was built to prevent, produced by the most ordinary input in the system, and
+  missed by every test written alongside it. It matches a closed set of transport names now, so an
+  unrecognised address shape renders nothing rather than whatever sat in the last segment.
+* **P3-002 (critical), partly fixed.** The report footer promised it "never includes message text,
+  file contents, names or key material" while the report writes every server name and the `tracing`
+  bridge carries arbitrary prose. The wording now describes what a report may contain and asks the
+  reader to check. The real fix is the export validator, which is M6's work; until it exists the
+  honest sentence is the fix, because a false safety label is worse than none.
 
 ## 4. Deferred, with reasons
 
