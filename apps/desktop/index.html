@@ -4,9 +4,176 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mewtual</title>
+    <!--
+      Everything below styles the boot-failure panel, and it is written here rather than in app.css
+      because app.css is one of the things that may not have arrived. This document is the only
+      thing guaranteed to have parsed when the module bundle fails to load, so it is the only place
+      a message about that failure can live.
+
+      No change to the Content-Security-Policy was needed for any of it: the policy already allows
+      inline styles (style-src 'unsafe-inline'), and the bootstrap script is a separate same-origin
+      file, which script-src 'self' already allows. Nothing here is inline script.
+    -->
+    <style>
+      /*
+        Visible by default is the whole trick. Nothing has to detect the failure, because failure is
+        the absence of success: the panel reveals itself after a wait, and an application that
+        arrives takes it away again. That needs no script at all, which matters because every
+        diagnostic this project has built lives inside the bundle that just failed to load.
+
+        The wait is long enough that an ordinary start never shows this, including a cold dev server
+        paying to transform App.svelte, and short enough that a person staring at a blank window is
+        not still guessing.
+
+        Being an animation, this reveal is suppressible by a global animation reset, and the
+        development visual fixture does exactly that so its screenshots are deterministic. That
+        costs nothing where it counts: a window with no application in it has no application
+        stylesheet either, so there is nothing there to suppress it.
+      */
+      #boot-failure {
+        position: fixed;
+        inset: 0;
+        overflow: auto;
+        padding: 32px;
+        visibility: hidden;
+        opacity: 0;
+        animation: boot-failure-reveal 240ms ease-out 8s forwards;
+        background: #12101a;
+        color: #d8d4e4;
+        font: 13px/1.5 ui-sans-serif, system-ui, sans-serif;
+      }
+
+      @keyframes boot-failure-reveal {
+        to {
+          visibility: visible;
+          opacity: 1;
+        }
+      }
+
+      /*
+        Success, expressed without script: Svelte's first element lands in #app, and so does the
+        in-app startup failure screen, which knows far more than this panel does and should win
+        whenever the bundle got far enough to draw it. A slow start that eventually arrives puts the
+        panel away again by the same rule, so a false alarm corrects itself.
+      */
+      #app:not(:empty) ~ #boot-failure {
+        display: none;
+      }
+
+      /* A failure the bootstrap script actually watched happen does not wait out the timer. */
+      #boot-failure[data-boot-failed] {
+        visibility: visible;
+        opacity: 1;
+        animation: none;
+      }
+
+      /* The raw section is only offered once there is something raw to put in it. */
+      #boot-failure:not([data-boot-detail]) .boot-raw {
+        display: none;
+      }
+
+      #boot-failure .boot-inner {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+        max-width: 100%;
+      }
+
+      #boot-failure h1 {
+        margin: 0;
+        font-size: 1.1rem;
+        font-weight: 600;
+      }
+
+      #boot-failure p {
+        margin: 0;
+        max-width: 60ch;
+        color: #9c96b0;
+      }
+
+      #boot-failure .boot-warning {
+        margin: 0 0 8px;
+        color: #e0b0b0;
+      }
+
+      #boot-failure .boot-report {
+        width: 100%;
+        box-sizing: border-box;
+        margin: 0;
+        padding: 12px;
+        overflow: auto;
+        background: #0b0a11;
+        border: 1px solid #2a2635;
+        border-radius: 8px;
+        font-family: ui-monospace, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        user-select: text;
+      }
+
+      #boot-failure .boot-raw {
+        width: 100%;
+      }
+
+      #boot-failure summary {
+        cursor: pointer;
+        margin-bottom: 8px;
+        color: #c9a2ff;
+      }
+
+      #boot-failure button {
+        padding: 6px 12px;
+        background: transparent;
+        border: 1px solid #2a2635;
+        border-radius: 6px;
+        color: #d8d4e4;
+        font: inherit;
+        cursor: pointer;
+      }
+    </style>
   </head>
   <body>
+    <!-- Kept free of whitespace: the rule above reads an empty #app as "the app has not arrived". -->
     <div id="app"></div>
+    <div id="boot-failure" role="alert">
+      <div class="boot-inner">
+        <h1>Mewtual could not start</h1>
+        <p>
+          The interface did not load, so none of the application is running. Nothing inside it can
+          report this, which is why this message is part of the window rather than part of the app.
+        </p>
+        <p>
+          Close the window and open Mewtual again. If it happens every time, the summary below is
+          the part to send.
+        </p>
+        <pre id="boot-failure-summary" class="boot-report">No error text was captured. The interface stopped before anything could say why.</pre>
+        <div id="boot-failure-actions"></div>
+        <details class="boot-raw">
+          <summary>Show raw technical detail</summary>
+          <!--
+            The same warning the in-app failure screen prints, repeated here rather than shared,
+            because the module holding it is exactly the module that did not load. A raw stack is
+            never content-free and this must not imply otherwise.
+          -->
+          <p class="boot-warning">
+            Not redacted. This can contain the folder the app was installed into, which usually
+            includes your account name, along with URLs and identifiers from this device. Read it
+            before sending it.
+          </p>
+          <pre id="boot-failure-detail" class="boot-report"></pre>
+          <div id="boot-failure-raw-actions"></div>
+        </details>
+      </div>
+    </div>
+    <!--
+      A classic script, not a module, and deliberately ahead of the module below. Classic scripts in
+      the body run as the parser reaches them, while module scripts are deferred to the end of
+      parsing, so this one has its handlers installed before the bundle gets its chance to fail. It
+      is served from public/ and imports nothing, so it shares no fate with what it is watching.
+    -->
+    <script src="/boot-failure.js"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
