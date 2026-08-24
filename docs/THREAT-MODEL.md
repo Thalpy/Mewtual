@@ -45,14 +45,17 @@ table with the commit that closed it.
   joiner's IP/timing and spends bandwidth, while invite recipients learn the host's stable device
   and transport identities plus candidate addresses. Opt-out refuses new forwards immediately,
   but cached/already-copied signed offers remain dial-visible until their short expiry. A malicious
-  member may sign an arbitrary *public* candidate: shape/total-dial caps bound the resulting scan
-  surface, but the signature does not prove address ownership or live reachability.
+  member may sign an arbitrary *public* candidate: canonical terminal-peer binding plus endpoint,
+  prefix, server and process caps bound the resulting scan surface, but the signature does not
+  prove address ownership or live reachability.
 - **Two-way replies authenticate possession of the bearer invite, not a person.** Candidates are
   public direct literals, capped at four and live for at most 60 seconds from receipt. Every callback
   contact proves the invite-derived reply channel before seeing the invite/KeyPackage; replacing a
   different joiner needs confirmation. Anyone who obtained the original invite can still form a
   valid reply or redeem it. Both apps must remain open during an overlapping window, and symmetric
-  NAT/CGNAT can still make punching impossible.
+  NAT/CGNAT can still make punching impossible. Each callback socket pass spends the shared
+  endpoint budget; proof retries continue without opening a socket so a proof queued before the
+  first connection completes cannot strand an otherwise connected reply.
 - **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP and PCPv6 firewall
   pinholes can expose this app's stable TCP and UDP/QUIC listeners and can return a wrong or stale
   public socket. PCPv6 accepts only a request-matched Global Unicast result from the exact scoped
@@ -64,7 +67,22 @@ table with the commit that closed it.
   until that grant expires. Publishing a global IPv6 privacy address also makes that
   device/address visible to invite recipients, peers and the configured AutoNAT observer.
 - **Discovery retries are availability aids, not proof of presence.** The current member roster and
-  self-signature gate every cached record, while the common discovery policy caps outbound dials.
+  self-signature gate every cached record. Every route accepted from PEX/cache/rendezvous is parsed
+  by one canonical grammar, must terminate in the exact signed/discovered transport peer, and is
+  revalidated immediately before submission; the network actor refuses a peer-less dial instead
+  of falling back to `Swarm::dial(address)`. A signature authenticates who chose a public socket,
+  not ownership of that socket, so the local policy charges every address and one desktop-owned
+  scheduler caps process, server, peer, normalized endpoint and IPv4 `/24`/IPv6 `/48` starts.
+  Exact endpoint/prefix/process keys do not include descriptor sequence or PeerId, preventing those
+  rotations from resetting the main scanner bounds. Scheduler state is bounded and transient;
+  restart resets it, and a process-wide in-flight/concurrency lease remains future hardening.
+  Direct routes carried by companion grants use the same canonical invite policy, must name one
+  unambiguous contact, and spend this process budget across every grant in a bundle. Pre-join
+  rendezvous uses at most two validated seeds so infrastructure routes cannot consume the entire
+  per-server window before the actual inviter route.
+  The sync classifier refuses DNS and dangerous local/private/transitional ranges but deliberately
+  retains non-routed documentation/benchmark literals for deterministic tests; such a record can
+  waste only bounded retry tokens and is not proof of a live public route.
   Failed current epochs retry with monotonic exponential backoff and jitter; a newly signed epoch
   is tried immediately. Each discovery pass also asks the local kernel which IPv4/IPv6 source it
   would route toward documentation-only destinations (UDP `connect` sends no packet), then

@@ -582,6 +582,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "catcoms-crypto",
+ "catcoms-discovery",
  "catcoms-mls",
  "catcoms-rt",
  "catcoms-storage",
@@ -626,6 +627,7 @@ dependencies = [
  "blake3",
  "catcoms-rt",
  "catcoms-wire",
+ "multiaddr",
  "thiserror 2.0.18",
  "tracing",
 ]

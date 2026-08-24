@@ -3509,8 +3509,10 @@ impl Actor {
     ///   address for an already-connected peer is not, which is what lets a direct address
     ///   preempt a relayed connection.
     ///
-    /// An address with no `/p2p/<id>` names no peer, so it cannot be gated; it is dialed as
-    /// before. (The jitter half of P11 lives in the caller that drives the timer.)
+    /// An address with no `/p2p/<id>` names no authenticated target and is refused. Discovery and
+    /// PEX validate the terminal id against the signed record before this point; retaining a bare
+    /// fallback here would silently turn a malformed record back into an arbitrary socket dial.
+    /// (The jitter half of P11 lives in the caller that drives the timer.)
     fn dial_gated(&mut self, addr: Multiaddr) {
         // Routing *through* a relay makes it this node's infrastructure just as surely as
         // reserving on it does, and only the reservation path was noting it. The gate below
@@ -3523,9 +3525,7 @@ impl Actor {
             self.note_infra(relay);
         }
         let Some(target) = target_peer_in_multiaddr(&addr) else {
-            if let Err(e) = self.swarm.dial(addr.clone()) {
-                tracing::warn!(%addr, error = %e, "dial failed");
-            }
+            tracing::warn!(%addr, "dial refused: address has no terminal peer id");
             return;
         };
         if self.infra_peers.contains(&target) {
@@ -5753,6 +5753,35 @@ mod tests {
             .unwrap();
         assert_eq!(target_peer_in_multiaddr(&direct), Some(target));
         assert_eq!(relay_peer_in_circuit_addr(&direct), None);
+    }
+
+    /// Pin the actor boundary, not merely the route parser: an untrusted caller can enqueue a
+    /// syntactically valid bare socket through the public runtime handle, but it must never reach
+    /// libp2p. A peer-bound form of that same address must still connect normally.
+    #[tokio::test]
+    async fn the_runtime_dial_actor_refuses_a_bare_socket() {
+        let listen: Multiaddr = "/memory/918274".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let server_id = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let client = MeshService::new_memory(None, &[]).unwrap();
+
+        client.dial(listen.clone()).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), server.next_event())
+                .await
+                .is_err(),
+            "a bare runtime address must be discarded before the swarm dials it"
+        );
+
+        let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
+        client.dial(bound).await.unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), server.next_event())
+            .await
+            .expect("the peer-bound control route should connect")
+            .expect("the server actor should remain alive");
+        assert!(matches!(event, TransportEvent::PeerConnected(_)));
     }
 
     #[test]

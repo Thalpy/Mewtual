@@ -100,7 +100,11 @@ async fn reserve_circuit(
     relay_addr: &Multiaddr,
     relay_id: libp2p::PeerId,
 ) -> Multiaddr {
-    node.dial(relay_addr.clone()).await.unwrap();
+    // Runtime dialing deliberately refuses a bare socket: without the terminal identity there is
+    // no authenticated target for the actor to bind the connection to. The relay reservation
+    // fixture must exercise the same canonical route production uses.
+    let relay_route: Multiaddr = format!("{relay_addr}/p2p/{relay_id}").parse().unwrap();
+    node.dial(relay_route).await.unwrap();
     await_connected(node).await;
     let circuit: Multiaddr = format!("{relay_addr}/p2p/{relay_id}/p2p-circuit")
         .parse()

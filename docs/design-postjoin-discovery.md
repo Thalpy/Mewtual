@@ -22,6 +22,12 @@ Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
   ownership.
 - [x] Subscribe to native OS network-change events for lower latency; retain polling as the
   portable repair path and debounce event bursts into one signed epoch.
+- [x] Require one canonical, terminal peer-bound multiaddr grammar for invite, rendezvous, PEX,
+  switchboard, companion-grant, two-way reply, and cached member routes; remove the transport's
+  bare discovery dial fallback.
+- [x] Charge endpoint attempts (not peers) through one transient scheduler shared by every desktop
+  server and pre-join path, with per-process, per-server, per-peer, exact-socket, IPv4 `/24`, and
+  IPv6 `/48` limits on the injected monotonic clock.
 - [ ] Add an optional, tightly bounded previous-address-epoch grace window (one record, minutes,
   current routes first); never build an indefinite address history.
 - [ ] Add authenticated reciprocal-dial signalling through an already connected member.
@@ -72,7 +78,7 @@ tag. So `Candidate.tag_verified` is **`false`** here. That is **safe**:
   non-member can't compute them, so registering/discovering under them already restricts to members.
 - The **real gates are post-dial**: MLS group membership (a dialed non-member can't decrypt the
   channel), and `ingest_peer_record`/`request_pex` (membership-verified). A wrongly-dialed peer just
-  wastes one dial (bounded by the policy budget).
+  wastes canonical, endpoint-metered attempts (bounded both locally and across the process).
 **Update (2026-08-19): the synthetic-address wiring is now closed as a decision, not a follow-up.**
 The libp2p `PeerRecord` cannot carry it (`register` takes addresses from the swarm-global external
 set and mints `seq` itself), forcing it through `add_external_address` would broadcast a
@@ -92,6 +98,10 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
   connection/disconnection lifecycle, and are bypassed immediately by a newer signed peer-record
   sequence. This replaces the old process-lifetime `dialed_peers` set, under which one failed dial
   permanently suppressed that member until this app restarted.
+- `endpoint_dials: EndpointDialScheduler`; an explicitly injected clone of the desktop's one
+  process handle. The local policy ranks and reserves by endpoint; the shared scheduler is the
+  final gate before socket submission. A shared denial is refunded to the local window because no
+  attempt happened, while the process counters are charged only for routes actually granted.
 
 **Driver methods on `ChannelSync`** (called by `Server`, driven by the actor):
 - `drive_discovery()` (async): for each rz node, for each `ns` in `rendezvous_namespaces(rz_node)`;
@@ -101,8 +111,9 @@ detector needed from it is served by roster-backed confirmation instead (the P8 
 - `ingest_discovered(d)` (async): build a `Candidate { source: Rendezvous(rz_node), seq,
   tag_verified: false }`, apply the retry deadline, then call
   `DiscoveryPolicy::plan(roster = member_count)`. Only policy-granted dials receive retry state;
-  budget-deferred candidates remain eligible. After connecting, the existing PEX + membership
-  verification take over.
+  budget-deferred candidates remain eligible. Every surviving address must be canonical and end
+  in the discovered record's exact `/p2p/<PeerId>`; public IP classification is applied
+  separately. After connecting, the existing PEX + membership verification take over.
 
 **Driving it (timer in the bridge, off the deterministic-time seam).** The periodic timer can't
 live in `crates/`; the ambient-dependency gate forbids `tokio::time::interval`/`sleep` there (all
@@ -121,7 +132,10 @@ rz it registered at; joiner: the invite's rz). For the joiner to be *discoverabl
 **listen + advertise** (today the joiner binds no port); so the join path binds a port,
 `add_external_address`es it, and the actor's first tick registers it under the member-only
 namespaces. The bridge's existing one-shot found/join `join_ns` registration is unchanged (it serves
-the invite); steady-state adds the rotation-aware namespaces on top.
+the invite); steady-state adds the rotation-aware namespaces on top. The bridge also owns one
+`EndpointDialScheduler` and installs clones before eager cached redial. Invite bootstraps,
+invite-supplied rendezvous seeds, rendezvous results, and consented switchboard candidates cross
+the same final process boundary.
 
 ## Scope / deferred
 - **Record seq; DONE (follow-up):** the discovered record's signed `seq` is now surfaced
@@ -209,16 +223,16 @@ budgets. Opting out of those roles therefore does not turn a member into a passi
 prevents silent promotion into a public listener or general relay. A user can always cease all
 participation by disconnecting or leaving the group.
 
-Before reciprocal dialing is enabled, implementation must:
+Before reciprocal dialing is enabled, implementation status is:
 
-- enforce one canonical direct-route grammar with a mandatory terminal `/p2p/<PeerId>` matching the
-  signed descriptor and remove every discovery bare-address dial path;
-- meter endpoints rather than peers through a process-wide scheduler shared by existing discovery
-  and reciprocal dialing;
-- add a typed peer-bound batch transport API;
-- implement bounded session/replay state, addressed helper forwarding, actor cancellation, and
+- [x] enforce one canonical direct-route grammar with a mandatory terminal `/p2p/<PeerId>` matching
+  the signed descriptor and remove every discovery bare-address dial path;
+- [x] meter endpoints rather than peers through a process-wide scheduler shared by existing
+  discovery paths; reciprocal work must reuse it when implemented;
+- [ ] add a typed peer-bound batch transport API;
+- [ ] implement bounded session/replay state, addressed helper forwarding, actor cancellation, and
   deterministic topology-aware A-to-C-to-B tests; and
-- complete another adversarial review of each implementation slice before handoff.
+- [ ] complete another adversarial review of each later implementation slice before handoff.
 
 ## Address-history policy
 
@@ -256,9 +270,12 @@ a fresh reply code; group actions include enabling a reachable switchboard or co
 relay/rendezvous node. No single peer's failed probe is a global health verdict.
 
 ## Security
-Discovery only *surfaces* candidates; the `DiscoveryPolicy` alone decides dials (budget-bounded,
-≤1 trust-root per rendezvous). A dialed non-member cannot read the channel (MLS) or pass
+Discovery only *surfaces* candidates; the `DiscoveryPolicy` ranks dials (budget-bounded,
+≤1 trust-root per rendezvous), then the process scheduler applies the final endpoint limits. A
+signed route must use the supported canonical TCP/QUIC or circuit grammar, name an allowed IP
+literal, and terminate in the exact advertised peer id; signatures still do not prove ownership
+of that public socket. A dialed non-member cannot read the channel (MLS) or pass
 `ingest_peer_record` (membership-signed). The member-only namespace secrecy + the post-dial
 membership gate are the load-bearing checks; the review focuses on the trait extension (no busy-loop
-/ no event-stealing), the actor arms (cancellation-safety), the dedup set (unbounded growth), and
-that a hostile rendezvous can't make a member dial unboundedly (policy budget).
+/ no event-stealing), the actor arms (cancellation-safety), bounded scheduler state, and that a
+hostile rendezvous/member cannot turn peer or sequence rotation into unbounded endpoint traffic.

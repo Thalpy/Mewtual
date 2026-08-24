@@ -1522,7 +1522,11 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
     });
 }
 
-fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<catcoms_app::TracedEvent>) {
+fn forward_events(
+    app: AppHandle,
+    server: u64,
+    mut events: mpsc::Receiver<catcoms_app::TracedEvent>,
+) {
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
             // The operation the actor was handling when it produced this, or none for work that
@@ -2630,6 +2634,9 @@ fn external_addr(s: &str) -> Option<Multiaddr> {
 /// to spare, and turns "one pasted string, 64 outbound connections to hosts of the author's
 /// choosing" into something with a much smaller blast radius.
 const MAX_BOOTSTRAP_DIALS: usize = 12;
+/// Pre-join rendezvous is a route to the inviter, not the destination. Two distinct validated
+/// seeds retain redundancy while leaving the per-group scheduler budget for the inviter itself.
+const MAX_INVITE_RENDEZVOUS_DIALS: usize = 2;
 
 /// Validate and rank an invite's `bootstrap` list into the addresses this client will dial.
 ///
@@ -2641,14 +2648,15 @@ const MAX_BOOTSTRAP_DIALS: usize = 12;
 /// is exactly the party we are guarding against here.
 ///
 /// Rules:
-/// * anything unparseable, or naming something that cannot be a peer ([`addr_is_undialable`]),
-///   is dropped;
+/// * anything unparseable, naming something that cannot be a peer ([`addr_is_undialable`]), or
+///   missing the canonical non-zero TCP/QUIC stack and terminal peer id is dropped;
 /// * loopback is kept only when **nothing else survived**. A loopback entry is by construction
 ///   the same-machine case (two instances on one dev box, the DM/self-pairing flows), and that
 ///   case is real and must keep working. But when the invite also carries routable addresses,
 ///   a loopback entry is not a fallback for anything: it can only ever probe ports on the
 ///   reader's own machine, so it is dropped rather than dialled;
-/// * the survivors are capped at [`MAX_BOOTSTRAP_DIALS`], routable first.
+/// * the survivors are capped at [`MAX_BOOTSTRAP_DIALS`], routable first; the process scheduler
+///   applies its tighter present-window allowance before the transport is constructed.
 ///
 /// Private (LAN) addresses are deliberately **kept**: a group on one home network is the single
 /// most common first invite, and dropping them would break it. The exposure is bounded by the
@@ -2658,7 +2666,7 @@ fn dialable_bootstrap(bootstrap: &[String]) -> Vec<Multiaddr> {
     let parsed: Vec<Multiaddr> = bootstrap
         .iter()
         .filter_map(|s| s.parse::<Multiaddr>().ok())
-        .filter(|a| !addr_is_undialable(a))
+        .filter(|a| canonical_invite_peer_endpoint(a).is_some())
         .collect();
     let (loopback, routable): (Vec<Multiaddr>, Vec<Multiaddr>) =
         parsed.into_iter().partition(addr_is_loopback);
@@ -3354,11 +3362,11 @@ async fn store_port_mapping_status(
         != Some(&outcome);
     if changed {
         emit_tracked(
-        app,
-        "reachability-changed",
-        ServerEvt { server },
-        catcoms_diagnostics::TraceId::default(),
-    );
+            app,
+            "reachability-changed",
+            ServerEvt { server },
+            catcoms_diagnostics::TraceId::default(),
+        );
     }
 }
 
@@ -3514,11 +3522,11 @@ fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAd
             let snapshot = rx.borrow_and_update().clone();
             apply_relay_snapshot(&app, server, snapshot, &mut previous).await;
             emit_tracked(
-        &app,
-        "reachability-changed",
-        ServerEvt { server },
-        catcoms_diagnostics::TraceId::default(),
-    );
+                &app,
+                "reachability-changed",
+                ServerEvt { server },
+                catcoms_diagnostics::TraceId::default(),
+            );
         }
     });
 }
@@ -3554,11 +3562,11 @@ fn spawn_mesh_observation_fold(
                 != Some(&observations);
             if changed {
                 emit_tracked(
-        &app,
-        "reachability-changed",
-        ServerEvt { server },
-        catcoms_diagnostics::TraceId::default(),
-    );
+                    &app,
+                    "reachability-changed",
+                    ServerEvt { server },
+                    catcoms_diagnostics::TraceId::default(),
+                );
             }
             if rx.changed().await.is_err() {
                 break;
@@ -3663,11 +3671,11 @@ async fn store_autonat_snapshot(
         != Some(&next);
     if changed {
         emit_tracked(
-        app,
-        "reachability-changed",
-        ServerEvt { server },
-        catcoms_diagnostics::TraceId::default(),
-    );
+            app,
+            "reachability-changed",
+            ServerEvt { server },
+            catcoms_diagnostics::TraceId::default(),
+        );
     }
 }
 
@@ -3852,6 +3860,72 @@ fn switchboard_dial_plan(
     (allowed, selected)
 }
 
+/// Apply the same process-wide endpoint accounting to opt-in standing-member fallbacks. The
+/// switchboard signatures authorize *which helper may be contacted*; they do not exempt its
+/// public sockets from the scanner/resource boundary.
+fn schedule_switchboard_candidates(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    mut allowed: HashMap<PeerId, u64>,
+    candidates: Vec<Multiaddr>,
+    clock: &dyn Clock,
+) -> (HashMap<PeerId, u64>, Vec<Multiaddr>) {
+    let mut granted = Vec::new();
+    let mut granted_peers = HashSet::new();
+    for candidate in candidates {
+        let Some(target) = target_peer_in_multiaddr(&candidate) else {
+            continue;
+        };
+        let peer = phase0_peer_id(&target);
+        if !allowed.contains_key(&peer) {
+            continue;
+        }
+        let address = candidate.to_string();
+        let Some(endpoint) = untrusted_peer_endpoint(&address, &peer) else {
+            continue;
+        };
+        if !scheduler
+            .reserve(
+                group_id,
+                peer.as_bytes(),
+                std::slice::from_ref(&endpoint),
+                clock,
+            )
+            .is_empty()
+        {
+            granted_peers.insert(peer);
+            granted.push(candidate);
+        }
+    }
+    allowed.retain(|peer, _| granted_peers.contains(peer));
+    (allowed, granted)
+}
+
+/// Charge one two-way reply dial pass against the same process-wide boundary as rendezvous,
+/// signed peer-record, and switchboard dials. A valid reply authenticates the joiner PeerId and
+/// its short-lived address set, but it does not make those Internet sockets free to probe.
+///
+/// Returning an empty set is deliberately temporary: the caller keeps the bounded reply session
+/// alive and may retry after the scheduler's monotonic window rolls over.
+fn schedule_join_reply_candidates(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    joiner: &libp2p::PeerId,
+    candidates: &[Multiaddr],
+    clock: &dyn Clock,
+) -> Vec<Multiaddr> {
+    let phase_peer = phase0_peer_id(joiner);
+    let endpoints: Vec<_> = candidates
+        .iter()
+        .filter_map(|candidate| untrusted_peer_endpoint(&candidate.to_string(), &phase_peer))
+        .collect();
+    scheduler
+        .reserve(group_id, phase_peer.as_bytes(), &endpoints, clock)
+        .into_iter()
+        .filter_map(|address| address.parse().ok())
+        .collect()
+}
+
 #[tauri::command]
 async fn preview_invite(
     state: State<'_, AppState>,
@@ -3888,6 +3962,132 @@ fn untrusted_peer_endpoint(address: &str, expected_peer: &PeerId) -> Option<Dial
     addr_is_globally_routable(&parsed).then_some(route.endpoint)
 }
 
+/// Validate an invite route while preserving the deliberate same-LAN and same-machine cases.
+/// The canonical grammar and terminal peer binding are identical to internet discovery; only the
+/// host policy differs. DNS, link-local, multicast, unspecified, and unsupported route shapes
+/// still fail closed.
+fn invite_peer_endpoint(address: &str, expected_peer: &PeerId) -> Option<DialEndpoint> {
+    let route = parse_peer_dial_route(address, expected_peer.as_bytes())?;
+    if !matches!(route.host, RouteHost::Ip(_)) {
+        return None;
+    }
+    let parsed: Multiaddr = address.parse().ok()?;
+    (!addr_is_undialable(&parsed)).then_some(route.endpoint)
+}
+
+fn canonical_invite_peer_endpoint(address: &Multiaddr) -> Option<DialEndpoint> {
+    let target = target_peer_in_multiaddr(address)?;
+    invite_peer_endpoint(&address.to_string(), &phase0_peer_id(&target))
+}
+
+/// Schedule already set-validated rendezvous routes. The invite validator permits loopback only
+/// when the entire set is loopback, so this must use the invite host policy rather than silently
+/// tightening it to the public-only policy used for network-discovered records.
+fn schedule_invite_rendezvous_targets(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    targets: Vec<RendezvousTarget>,
+    clock: &dyn Clock,
+) -> Vec<RendezvousTarget> {
+    targets
+        .into_iter()
+        .filter(|target| {
+            let phase_peer = phase0_peer_id(&target.peer);
+            let Some(endpoint) = invite_peer_endpoint(&target.addr.to_string(), &phase_peer) else {
+                return false;
+            };
+            !scheduler
+                .reserve(
+                    group_id,
+                    phase_peer.as_bytes(),
+                    std::slice::from_ref(&endpoint),
+                    clock,
+                )
+                .is_empty()
+        })
+        // Cap actual grants, not merely entries considered: a structurally valid but unsupported
+        // address before a usable one must not consume rendezvous redundancy.
+        .take(MAX_INVITE_RENDEZVOUS_DIALS)
+        .collect()
+}
+
+/// Keep the same bounded, canonical seed set for steady-state recovery after a switchboard join.
+/// This path does not reserve again: the live server actor will spend the shared scheduler when it
+/// actually reconnects to these configured nodes.
+fn retained_invite_rendezvous_config(targets: &[RendezvousTarget]) -> Vec<(String, Vec<u8>)> {
+    targets
+        .iter()
+        .filter(|target| canonical_invite_peer_endpoint(&target.addr).is_some())
+        .take(MAX_INVITE_RENDEZVOUS_DIALS)
+        .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
+        .collect()
+}
+
+/// Merge candidate sources without erasing their different host-trust rules. Rendezvous/PEX
+/// discovery is public-IP-only; the issuer-signed direct bootstrap deliberately retains bounded
+/// LAN and same-machine routes.
+fn join_candidate_endpoints(
+    discovered: &[String],
+    invite_fallbacks: &[String],
+    inviter: &PeerId,
+) -> Vec<DialEndpoint> {
+    let mut endpoints = Vec::new();
+    for address in discovered {
+        if let Some(endpoint) = untrusted_peer_endpoint(address, inviter) {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+    }
+    for address in invite_fallbacks {
+        if let Some(endpoint) = invite_peer_endpoint(address, inviter) {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+    }
+    endpoints
+}
+
+/// Validate and schedule the direct reach fields copied into one companion grant. Grants are
+/// authenticated pairing material, but a compromised/buggy origin must not turn a multi-server
+/// bundle into an unbounded or peer-confused dial list on the new device.
+fn schedule_grant_bootstrap(
+    scheduler: &EndpointDialScheduler,
+    group_id: &[u8],
+    bootstrap: &[String],
+    clock: &dyn Clock,
+) -> Result<(PeerId, Vec<Multiaddr>), String> {
+    let candidates = dialable_bootstrap(bootstrap);
+    if candidates.is_empty() {
+        return Err("this grant carries no usable address for that server".to_string());
+    }
+    let contacts: HashSet<_> = candidates
+        .iter()
+        .filter_map(target_peer_in_multiaddr)
+        .collect();
+    if contacts.len() != 1 {
+        return Err("grant addresses do not name one unambiguous server peer".to_string());
+    }
+    let contact_lp = *contacts.iter().next().expect("one contact checked above");
+    let contact = phase0_peer_id(&contact_lp);
+    let endpoints: Vec<_> = candidates
+        .iter()
+        .filter_map(|address| invite_peer_endpoint(&address.to_string(), &contact))
+        .collect();
+    let granted: Vec<_> = scheduler
+        .reserve(group_id, contact.as_bytes(), &endpoints, clock)
+        .into_iter()
+        .filter_map(|address| address.parse().ok())
+        .collect();
+    if granted.is_empty() {
+        return Err(
+            "the process-wide discovery dial budget deferred every grant endpoint".to_string(),
+        );
+    }
+    Ok((contact, granted))
+}
+
 async fn discover_and_connect(
     invite: &InviteToken,
     net: &ServerNet,
@@ -3902,6 +4102,17 @@ async fn discover_and_connect(
         validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
     if targets.is_empty() {
         return Err("invite carries no rendezvous address".into());
+    }
+    // The transport constructor dials its seed list immediately, so the shared scheduler must
+    // trim invite-selected rendezvous endpoints before construction. Charging only the member
+    // records discovered afterwards would leave the first (and easiest) scanner seam outside the
+    // process cap.
+    let targets =
+        schedule_invite_rendezvous_targets(endpoint_dials, &invite.group_id, targets, &SystemClock);
+    if targets.is_empty() {
+        return Err(
+            "the process-wide discovery dial budget deferred every rendezvous endpoint".into(),
+        );
     }
     let rz_addrs: Vec<Multiaddr> = targets.iter().map(|t| t.addr.clone()).collect();
     // Bind the joiner's own (stable, persisted-identity) listen addresses so it is itself dialable;
@@ -4026,14 +4237,7 @@ async fn discover_and_connect(
         .iter()
         .map(|m| m.to_string())
         .collect();
-    let mut endpoints = Vec::new();
-    for address in dialed.addresses.iter().chain(fallbacks.iter()) {
-        if let Some(endpoint) = untrusted_peer_endpoint(address, &inviter) {
-            if !endpoints.contains(&endpoint) {
-                endpoints.push(endpoint);
-            }
-        }
-    }
+    let endpoints = join_candidate_endpoints(&dialed.addresses, &fallbacks, &inviter);
     let granted = endpoint_dials.reserve(
         &invite.group_id,
         inviter.as_bytes(),
@@ -4041,7 +4245,9 @@ async fn discover_and_connect(
         &SystemClock,
     );
     if granted.is_empty() {
-        return Err("the process-wide discovery dial budget deferred every inviter endpoint".into());
+        return Err(
+            "the process-wide discovery dial budget deferred every inviter endpoint".into(),
+        );
     }
     for a in &granted {
         match a.parse::<Multiaddr>() {
@@ -4544,10 +4750,7 @@ async fn join_server_inner(
     {
         let targets =
             validate_invite_rendezvous_addrs(&invite.rendezvous).map_err(|e| e.to_string())?;
-        let fallback_rz_config: Vec<_> = targets
-            .iter()
-            .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
-            .collect();
+        let fallback_rz_config = retained_invite_rendezvous_config(&targets);
         match discover_and_connect(
             &invite,
             &net,
@@ -4583,10 +4786,10 @@ async fn join_server_inner(
     } else {
         // Validated + capped before a single socket is opened (defect P7): an unvalidated list of
         // up to 64 author-chosen addresses is a connect flood with a paste for a trigger.
-        let addrs = dialable_bootstrap(&invite.bootstrap);
+        let candidate_addrs = dialable_bootstrap(&invite.bootstrap);
         // The dropped entries are worth naming: "the invite listed three addresses and every one
         // was loopback or otherwise undialable" is a diagnosis; a bare empty list is not.
-        let dropped = invite.bootstrap.len().saturating_sub(addrs.len());
+        let dropped = invite.bootstrap.len().saturating_sub(candidate_addrs.len());
         if dropped > 0 {
             diag.steps.push(DiagStep::failed(
                 "dial",
@@ -4594,16 +4797,66 @@ async fn join_server_inner(
                 format!("{dropped} address(es) in the invite were unusable and were not dialled"),
             ));
         }
-        if addrs.is_empty() && !use_switchboards {
+        if candidate_addrs.is_empty() && !use_switchboards {
             return Err("invite carries no usable bootstrap address".to_string());
         }
-        let inviter = match addrs.iter().find_map(target_peer_in_multiaddr) {
+        let inviter = match candidate_addrs.iter().find_map(target_peer_in_multiaddr) {
             Some(peer) => phase0_peer_id(&peer),
             None => plan_inviter.ok_or_else(|| {
                 "invite has neither a direct inviter route nor a pinned assisted inviter"
                     .to_string()
             })?,
         };
+        let peer_bound: Vec<(Multiaddr, DialEndpoint)> = candidate_addrs
+            .iter()
+            .filter_map(|address| {
+                invite_peer_endpoint(&address.to_string(), &inviter)
+                    .map(|endpoint| (address.clone(), endpoint))
+            })
+            .collect();
+        let wrong_peer = candidate_addrs.len().saturating_sub(peer_bound.len());
+        if wrong_peer > 0 {
+            diag.steps.push(DiagStep::failed(
+                "dial",
+                "",
+                format!(
+                    "{wrong_peer} otherwise usable address(es) named a different inviter and were not dialled"
+                ),
+            ));
+        }
+        if peer_bound.is_empty() && !use_switchboards {
+            return Err("invite carries no usable route bound to its inviter".to_string());
+        }
+        let endpoints: Vec<DialEndpoint> = peer_bound
+            .iter()
+            .map(|(_, endpoint)| endpoint.clone())
+            .collect();
+        let granted = state.endpoint_dials.reserve(
+            &invite.group_id,
+            inviter.as_bytes(),
+            &endpoints,
+            &SystemClock,
+        );
+        let addrs: Vec<Multiaddr> = granted
+            .iter()
+            .filter_map(|address| address.parse().ok())
+            .collect();
+        let deferred = peer_bound.len().saturating_sub(addrs.len());
+        if deferred > 0 {
+            diag.steps.push(DiagStep::unknown(
+                "dial",
+                "",
+                format!(
+                    "the shared process budget deferred {deferred} otherwise usable address(es)"
+                ),
+            ));
+        }
+        if addrs.is_empty() && !use_switchboards {
+            return Err(
+                "the process-wide discovery dial budget deferred every inviter endpoint"
+                    .to_string(),
+            );
+        }
         let (mesh, _id, port, bound) = build_transport(&net, &addrs)?;
         record_listener_evidence(&mesh, &bound, &mut diag.steps).await;
         net.port = port;
@@ -4663,6 +4916,13 @@ async fn join_server_inner(
                     &invite.group_id,
                     now,
                     invite.expires_at_ms,
+                );
+                let (allowed, candidates) = schedule_switchboard_candidates(
+                    &state.endpoint_dials,
+                    &invite.group_id,
+                    allowed,
+                    candidates,
+                    &SystemClock,
                 );
                 let latest_deadline = allowed.values().copied().max().unwrap_or(now);
                 if !candidates.is_empty() {
@@ -5162,6 +5422,7 @@ async fn apply_join_reply(
     if start_dial {
         let task_app = app.clone();
         let invite_nonce = permit.invite_nonce;
+        let endpoint_dials = state.endpoint_dials.clone();
         tauri::async_runtime::spawn(async move {
             let clock = SystemClock;
             let mut delay_ms = 200 + jitter;
@@ -5176,11 +5437,25 @@ async fn apply_join_reply(
                     .is_some_and(|active| {
                         active.generation == generation && active.joiner == joiner
                     });
-                if !current || mesh.dial_join_candidates(&targets).await.is_err() {
+                if !current {
+                    return;
+                }
+                let scheduled = schedule_join_reply_candidates(
+                    &endpoint_dials,
+                    &group_id,
+                    &joiner,
+                    &targets,
+                    &clock,
+                );
+                if !scheduled.is_empty() && mesh.dial_join_candidates(&scheduled).await.is_err() {
                     return;
                 }
                 // A socket alone proves nothing: send the code-holder proof over the Noise
                 // connection before the retained joiner reveals its bearer invite/KeyPackage.
+                // Keep retrying this even when the endpoint scheduler denies another *new* dial:
+                // the actor drains the initial Dial and Request commands before polling the
+                // swarm, so that first request can legitimately precede connection establishment.
+                // A request cannot create a socket without an existing/recent peer mapping.
                 let mut proof_request = Vec::with_capacity(33);
                 proof_request.push(JOIN_REPLY_PROOF_KIND);
                 proof_request.extend_from_slice(&proof);
@@ -10069,23 +10344,19 @@ async fn join_one_grant(
     // nonce* (`join_namespace(group_id, invite_nonce, …)`), and a grant carries a certificate
     // instead. A companion whose grant has only rendezvous hints therefore cannot discover the
     // group yet; that needs a certificate-keyed pre-join namespace (M4 backlog).
-    let addrs: Vec<Multiaddr> = grant
-        .bootstrap
-        .iter()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    if addrs.is_empty() {
-        return Err(if grant.rendezvous.is_empty() {
-            "this grant carries no usable address for that server".to_string()
-        } else {
+    let (contact, addrs) = schedule_grant_bootstrap(
+        &state.endpoint_dials,
+        &grant.group_id,
+        &grant.bootstrap,
+        &SystemClock,
+    )
+    .map_err(|error| {
+        if grant.bootstrap.is_empty() && !grant.rendezvous.is_empty() {
             "this grant is rendezvous-only; pairing needs a directly-dialable server".to_string()
-        });
-    }
-    let contact_lp = addrs
-        .iter()
-        .find_map(target_peer_in_multiaddr)
-        .ok_or_else(|| "grant address has no peer id".to_string())?;
-    let contact = phase0_peer_id(&contact_lp);
+        } else {
+            error
+        }
+    })?;
     let (mesh, _id) = MeshService::new_tcp(None, &addrs).map_err(|e| e.to_string())?;
     let mesh_handle = mesh.handle();
     timeout(Duration::from_secs(20), async {
@@ -10703,7 +10974,10 @@ async fn set_capture_mode(
             "DIAG.CAPTURE.MODE_CHANGED",
         )
         .target("catcoms_app")
-        .field("mode", catcoms_diagnostics::SafeText::describe(mode.as_str())),
+        .field(
+            "mode",
+            catcoms_diagnostics::SafeText::describe(mode.as_str()),
+        ),
     );
     Ok(capture_config_view())
 }
@@ -10772,7 +11046,8 @@ fn retain_reports(dir: &std::path::Path, keeping: usize) {
 
     let mut total: u64 = held.iter().map(|(_, size)| size).sum();
     let mut index = 0;
-    while index < held.len() && (held.len() + keeping > MAX_SAVED_REPORTS || total > MAX_REPORT_DIR_BYTES)
+    while index < held.len()
+        && (held.len() + keeping > MAX_SAVED_REPORTS || total > MAX_REPORT_DIR_BYTES)
     {
         let (path, size) = &held[index];
         if std::fs::remove_file(path).is_ok() {
@@ -11424,6 +11699,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use catcoms_rt::ManualClock;
 
     /// A canonical event as it reaches the webview.
     ///
@@ -11434,8 +11710,8 @@ mod tests {
     #[test]
     fn every_canonical_field_reaches_the_webview() {
         use catcoms_diagnostics::{
-            AddressValue, CaptureMode, DiagnosticEvent, Phase, RefDomain, Refs, Section, SessionSalt,
-            SpanId, TraceId,
+            AddressValue, CaptureMode, DiagnosticEvent, Phase, RefDomain, Refs, Section,
+            SessionSalt, SpanId, TraceId,
         };
 
         let salt = SessionSalt::for_tests(3);
@@ -11511,7 +11787,10 @@ mod tests {
         let enhanced: ConsoleLogEvent =
             catcoms_diagnostics::event_view(&event, CaptureMode::Enhanced).into();
         let json = serde_json::to_value(&enhanced).expect("the console event serialises");
-        assert_eq!(json["fields"][1]["value"], "/ip6/2001:db8::1/udp/31484/quic-v1");
+        assert_eq!(
+            json["fields"][1]["value"],
+            "/ip6/2001:db8::1/udp/31484/quic-v1"
+        );
         assert_eq!(json["capture"], "enhanced");
     }
 
@@ -11564,7 +11843,9 @@ mod tests {
         ));
         assert!(collides_with_envelope(&serde_json::json!({ "__ord": 5 })));
         assert!(collides_with_envelope(&serde_json::json!({ "__gen": 5 })));
-        assert!(collides_with_envelope(&serde_json::json!({ "__trace": "x" })));
+        assert!(collides_with_envelope(
+            &serde_json::json!({ "__trace": "x" })
+        ));
         assert!(!collides_with_envelope(
             &serde_json::json!({ "server": 1, "seq": 5 })
         ));
@@ -11573,13 +11854,8 @@ mod tests {
 
         // Every envelope key is checked. One added to `stamp_payload` and forgotten here would be
         // one the collision test does not cover.
-        let stamped = stamp_payload(
-            serde_json::json!({}),
-            1,
-            2,
-            catcoms_diagnostics::TraceId(9),
-        )
-        .unwrap();
+        let stamped =
+            stamp_payload(serde_json::json!({}), 1, 2, catcoms_diagnostics::TraceId(9)).unwrap();
         for key in stamped.as_object().unwrap().keys() {
             assert!(
                 ENVELOPE_KEYS.contains(&key.as_str()),
@@ -12896,6 +13172,111 @@ mod tests {
     }
 
     #[test]
+    fn join_reply_retries_share_exact_socket_budget_across_groups() {
+        let joiner = test_libp2p_peer(49);
+        let other = test_libp2p_peer(50);
+        let route: Multiaddr = format!("/ip4/45.79.12.34/tcp/22487/p2p/{joiner}")
+            .parse()
+            .unwrap();
+        let wrong_peer: Multiaddr = format!("/ip4/8.8.8.8/tcp/22487/p2p/{other}")
+            .parse()
+            .unwrap();
+        let scheduler = EndpointDialScheduler::new(catcoms_discovery::EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 4,
+            server_limit: 4,
+            peer_limit: 4,
+            endpoint_limit: 2,
+            prefix_limit: 4,
+        });
+        let clock = ManualClock::new(0);
+
+        assert_eq!(
+            schedule_join_reply_candidates(
+                &scheduler,
+                b"group-a",
+                &joiner,
+                &[route.clone(), wrong_peer],
+                &clock,
+            ),
+            vec![route.clone()],
+            "a candidate bound to another peer must never consume a grant or reach the dialer"
+        );
+        assert_eq!(
+            schedule_join_reply_candidates(
+                &scheduler,
+                b"group-a",
+                &joiner,
+                std::slice::from_ref(&route),
+                &clock,
+            ),
+            vec![route.clone()]
+        );
+        assert!(schedule_join_reply_candidates(
+            &scheduler,
+            b"group-b",
+            &joiner,
+            std::slice::from_ref(&route),
+            &clock,
+        )
+        .is_empty());
+
+        clock.advance_ms(1_000);
+        assert_eq!(
+            schedule_join_reply_candidates(
+                &scheduler,
+                b"group-b",
+                &joiner,
+                std::slice::from_ref(&route),
+                &clock,
+            ),
+            vec![route]
+        );
+    }
+
+    #[test]
+    fn companion_grants_reject_peer_confusion_and_share_the_process_cap() {
+        let first = test_libp2p_peer(47);
+        let other = test_libp2p_peer(48);
+        let first_route = format!("/ip4/45.79.12.34/tcp/22487/p2p/{first}");
+        let second_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{other}");
+        let bare = "/ip4/1.1.1.1/tcp/53".to_string();
+        let scheduler = EndpointDialScheduler::new(catcoms_discovery::EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 1,
+            server_limit: 2,
+            peer_limit: 2,
+            endpoint_limit: 1,
+            prefix_limit: 2,
+        });
+        let clock = ManualClock::new(0);
+
+        let (contact, granted) =
+            schedule_grant_bootstrap(&scheduler, b"group-a", &[first_route.clone(), bare], &clock)
+                .unwrap();
+        assert_eq!(contact, phase0_peer_id(&first));
+        assert_eq!(granted, vec![first_route.parse::<Multiaddr>().unwrap()]);
+
+        let confused = schedule_grant_bootstrap(
+            &EndpointDialScheduler::default(),
+            b"group-confused",
+            &[first_route, second_route.clone()],
+            &clock,
+        )
+        .unwrap_err();
+        assert!(confused.contains("one unambiguous server peer"));
+
+        let capped = schedule_grant_bootstrap(
+            &scheduler,
+            b"group-b",
+            std::slice::from_ref(&second_route),
+            &clock,
+        )
+        .unwrap_err();
+        assert!(capped.contains("process-wide"));
+    }
+
+    #[test]
     fn switchboard_dial_plan_skips_expired_or_mismatched_routes_and_caps_total_dials() {
         let now = 1_000;
         let group_id = vec![9; 16];
@@ -12957,6 +13338,30 @@ mod tests {
         assert!(addresses.iter().all(|address| {
             target_peer_in_multiaddr(address).is_some_and(|peer| peer == first || peer == second)
         }));
+
+        let scheduler = EndpointDialScheduler::new(catcoms_discovery::EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 2,
+            server_limit: 2,
+            peer_limit: 2,
+            endpoint_limit: 1,
+            prefix_limit: 2,
+        });
+        let clock = ManualClock::new(1_000);
+        let (scheduled_allowed, scheduled) =
+            schedule_switchboard_candidates(&scheduler, &group_id, allowed, addresses, &clock);
+        assert_eq!(scheduled.len(), 2, "helper routes spend endpoint tokens");
+        assert_eq!(scheduled_allowed.len(), 2);
+
+        let (denied_allowed, denied) = schedule_switchboard_candidates(
+            &scheduler,
+            b"another-group",
+            HashMap::from([(first_phase, 3_000), (second_phase, 4_000)]),
+            scheduled,
+            &clock,
+        );
+        assert!(denied.is_empty(), "the process cap is shared across groups");
+        assert!(denied_allowed.is_empty());
     }
 
     #[test]
@@ -13535,7 +13940,10 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), b"not ours").unwrap();
 
         for n in 0..(MAX_SAVED_REPORTS * 3) {
-            let name = format!("{REPORT_PREFIX}{:013}-abcd1234.txt", 1_700_000_000_000u64 + n as u64);
+            let name = format!(
+                "{REPORT_PREFIX}{:013}-abcd1234.txt",
+                1_700_000_000_000u64 + n as u64
+            );
             std::fs::write(dir.path().join(name), b"report").unwrap();
             retain_reports(dir.path(), 1);
         }
@@ -13553,11 +13961,19 @@ mod tests {
         );
         // Oldest first out: a report written a moment ago is the one somebody is about to send.
         assert!(
-            reports.iter().all(|n| n > &format!("{REPORT_PREFIX}1700000000010")),
+            reports
+                .iter()
+                .all(|n| n > &format!("{REPORT_PREFIX}1700000000010")),
             "the newest reports should be the survivors: {reports:?}"
         );
-        assert!(dir.path().join("debug_log_20260823_120000.txt").exists(), "logs are untouched");
-        assert!(dir.path().join("notes.txt").exists(), "so is everything else");
+        assert!(
+            dir.path().join("debug_log_20260823_120000.txt").exists(),
+            "logs are untouched"
+        );
+        assert!(
+            dir.path().join("notes.txt").exists(),
+            "so is everything else"
+        );
     }
 
     /// A render loop must not be able to fill the log, and the limiter must not be able to hide
@@ -13586,8 +14002,10 @@ mod tests {
 
         // Time passing refills it, and the first record afterwards carries the summary of what was
         // lost, so the count reaches the log rather than a counter nobody reads.
-        let (ok, suppressed) =
-            ui_log_allowance(UiLogChannel::Prose, start + UI_LOG_REPORT_INTERVAL_MS + 1000);
+        let (ok, suppressed) = ui_log_allowance(
+            UiLogChannel::Prose,
+            start + UI_LOG_REPORT_INTERVAL_MS + 1000,
+        );
         assert!(ok);
         assert_eq!(
             suppressed,
@@ -13741,11 +14159,120 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].to_string(), a("/ip4/203.0.113.7"));
 
+        // A socket alone is not a peer route. Missing, duplicated, zero-port and unsupported
+        // stacks are rejected before the transport constructor can dial them.
+        let other = test_libp2p_peer(91);
+        for invalid in [
+            "/ip4/203.0.113.7/tcp/9".to_string(),
+            format!("/ip4/203.0.113.7/tcp/9/p2p/{ID}/p2p/{other}"),
+            format!("/ip4/203.0.113.7/tcp/0/p2p/{ID}"),
+            format!("/ip4/203.0.113.7/udp/9/p2p/{ID}"),
+        ] {
+            assert!(
+                dialable_bootstrap(&[invalid]).is_empty(),
+                "non-canonical invite route must not be dialled"
+            );
+        }
+
         // And the number actually dialled is capped well below the token's 64.
         let flood: Vec<String> = (1..=60)
             .map(|n| a(&format!("/ip4/203.0.113.{n}")))
             .collect();
         assert_eq!(dialable_bootstrap(&flood).len(), MAX_BOOTSTRAP_DIALS);
+    }
+
+    #[test]
+    fn same_machine_invite_rendezvous_survives_endpoint_scheduling() {
+        let peer = test_libp2p_peer(92);
+        let address = format!("/ip4/127.0.0.1/tcp/22487/p2p/{peer}");
+        let targets = validate_invite_rendezvous_addrs(std::slice::from_ref(&address)).unwrap();
+        let scheduler = EndpointDialScheduler::default();
+        let scheduled = schedule_invite_rendezvous_targets(
+            &scheduler,
+            b"same-machine-group",
+            targets,
+            &ManualClock::new(0),
+        );
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].addr.to_string(), address);
+    }
+
+    #[test]
+    fn invite_rendezvous_seeds_leave_group_budget_for_the_inviter() {
+        let routes: Vec<_> = (0..8u8)
+            .map(|index| {
+                format!(
+                    "/ip4/45.79.{}.34/tcp/22487/p2p/{}",
+                    index + 1,
+                    test_libp2p_peer(index + 100)
+                )
+            })
+            .collect();
+        let targets = validate_invite_rendezvous_addrs(&routes).unwrap();
+        let scheduler = EndpointDialScheduler::default();
+        let clock = ManualClock::new(0);
+        let scheduled =
+            schedule_invite_rendezvous_targets(&scheduler, b"rendezvous-headroom", targets, &clock);
+        assert_eq!(scheduled.len(), MAX_INVITE_RENDEZVOUS_DIALS);
+
+        let inviter = test_libp2p_peer(120);
+        let inviter_phase = phase0_peer_id(&inviter);
+        let inviter_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{inviter}");
+        let endpoint = untrusted_peer_endpoint(&inviter_route, &inviter_phase).unwrap();
+        assert_eq!(
+            scheduler.reserve(
+                b"rendezvous-headroom",
+                inviter_phase.as_bytes(),
+                &[endpoint],
+                &clock,
+            ),
+            vec![inviter_route]
+        );
+    }
+
+    #[test]
+    fn rendezvous_seed_cap_counts_supported_routes_not_unusable_prefix_entries() {
+        let tls_only = format!("/ip4/45.79.1.34/tcp/443/tls/p2p/{}", test_libp2p_peer(121));
+        let unsupported = format!("/ip4/45.79.2.34/tcp/443/http/p2p/{}", test_libp2p_peer(122));
+        let usable = format!(
+            "/ip4/45.79.3.34/udp/22487/quic-v1/p2p/{}",
+            test_libp2p_peer(123)
+        );
+        let targets =
+            validate_invite_rendezvous_addrs(&[tls_only, unsupported, usable.clone()]).unwrap();
+
+        let retained = retained_invite_rendezvous_config(&targets);
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].0, usable);
+        let scheduled = schedule_invite_rendezvous_targets(
+            &EndpointDialScheduler::default(),
+            b"supported-seeds",
+            targets,
+            &ManualClock::new(0),
+        );
+        assert_eq!(scheduled.len(), 1);
+        assert_eq!(scheduled[0].addr.to_string(), usable);
+    }
+
+    #[test]
+    fn signed_lan_fallback_keeps_invite_policy_but_discovery_does_not() {
+        let inviter_lp = test_libp2p_peer(93);
+        let other = test_libp2p_peer(94);
+        let inviter = phase0_peer_id(&inviter_lp);
+        let public = format!("/ip4/45.79.12.34/tcp/22487/p2p/{inviter_lp}");
+        let lan = format!("/ip4/192.168.1.5/tcp/22487/p2p/{inviter_lp}");
+        let wrong_peer = format!("/ip4/192.168.1.6/tcp/22487/p2p/{other}");
+
+        let endpoints = join_candidate_endpoints(
+            &[public.clone(), lan.clone()],
+            &[lan.clone(), wrong_peer],
+            &inviter,
+        );
+        let addresses: Vec<_> = endpoints
+            .iter()
+            .map(|endpoint| endpoint.address())
+            .collect();
+        assert_eq!(addresses, vec![public.as_str(), lan.as_str()]);
     }
 
     #[test]

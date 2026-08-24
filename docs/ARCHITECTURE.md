@@ -57,6 +57,21 @@ is broken. The load-bearing fixes:
    sibling device removes another) and `mint_invite` gated behind the auth-bound key;
    per-server "relay-only / hide my IP" mode; pure-Rust crypto on the hot path;
    metadata-index aging/re-keying.
+9. **Discovery egress is peer-bound and process-bounded.** Every peer/invite/switchboard/companion
+   grant route
+   accepted for dialing uses one canonical supported multiaddr grammar with a non-zero TCP or
+   UDP/QUIC socket and a terminal `/p2p/<PeerId>` matching the signed/discovered transport
+   identity. Untrusted records use IP literals; DNS and dangerous local/private/link-local,
+   multicast and transitional ranges fail closed outside the explicitly local invite case. The
+   sync classifier deliberately retains non-routed documentation/benchmark literals as
+   deterministic test stand-ins; those can only consume bounded retry tokens. `DiscoveryPolicy`
+   charges addresses rather than peers, then
+   one desktop-owned `EndpointDialScheduler` applies monotonic per-process, per-server, per-peer,
+   exact-socket and IPv4 `/24`/IPv6 `/48` caps before submission. PeerId/sequence rotation cannot
+   reset the socket, prefix, server, or process buckets. The transport refuses a dial command with
+   no terminal peer rather than falling back to an address-only socket dial. Two-way reply retries
+   use the same scheduler for each new socket pass; their proof request may continue over an
+   established/recent connection without opening another socket.
 
 ## 3. Honest residual risks
 
@@ -85,7 +100,11 @@ is broken. The load-bearing fixes:
   route-selected IPv4/IPv6 sources, while the roughly-minute pass remains a fallback. A changed
   sample republishes one address epoch; exact route ownership prevents raw-interface removal from
   withdrawing an identical mapping/manual/relay route. It intentionally does not merge
-  withdrawn public IPs forever because an ISP can reassign them. A fully isolated device whose current address is unknown to every peer still needs
+  withdrawn public IPs forever because an ISP can reassign them. Route signatures and matching
+  peer ids still do not prove ownership of an IP/port before the bounded first packet is sent.
+  Scheduler counters are transient and reset with the process; libp2p's pending-outgoing cap is
+  still per swarm, so this slice bounds starts but does not yet provide a process-wide in-flight
+  lease. A fully isolated device whose current address is unknown to every peer still needs
   out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
   cannot manufacture a route from no contact.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals

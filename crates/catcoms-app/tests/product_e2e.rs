@@ -63,8 +63,23 @@ const WAIT: Duration = Duration::from_secs(60);
 /// are stripped inside `publish_self_record`, so a record built from them would carry none and
 /// the cross-session cache would have nothing to hold; TEST-NET-3 is routable-looking and
 /// unroutable in reality.
+fn test_libp2p_peer(n: u64) -> libp2p::PeerId {
+    let octet = u8::try_from(n).expect("test peer id fits one byte");
+    libp2p::identity::Keypair::ed25519_from_bytes([octet; 32])
+        .unwrap()
+        .public()
+        .to_peer_id()
+}
+
+fn test_transport_peer(n: u64) -> PeerId {
+    catcoms_net::phase0_peer_id(&test_libp2p_peer(n))
+}
+
 fn advertised(n: u64) -> Vec<String> {
-    vec![format!("/ip4/203.0.113.{n}/tcp/9000")]
+    vec![format!(
+        "/ip4/203.0.113.{n}/tcp/9000/p2p/{}",
+        test_libp2p_peer(n)
+    )]
 }
 
 /// One running node: the actor handle the UI holds, its event stream, and the identity facts a
@@ -331,12 +346,12 @@ async fn drain(events: &mut Receiver<TracedEvent>) -> Vec<AppEvent> {
 async fn two_members_found_invite_join_and_talk_both_ways() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -430,13 +445,13 @@ async fn two_members_found_invite_join_and_talk_both_ways() {
 async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let mut alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let mut alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
 
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -482,7 +497,7 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
     let mut carol = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(3),
+        test_transport_peer(3),
         "carol",
         3,
         alice.peer,
@@ -559,7 +574,7 @@ async fn presence_lights_up_across_the_roster_and_goes_dark_when_a_member_leaves
 async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let mut alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let mut alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     alice.publish_record(advertised(1)).await;
 
     // Four members: one above the detector's roster floor, so suspicion is even possible.
@@ -569,7 +584,7 @@ async fn the_eclipse_advisory_stays_quiet_for_a_healthy_group() {
         let mut m = join_node(
             &hub,
             &clock,
-            PeerId::from_u64(n),
+            test_transport_peer(n),
             "member",
             n,
             alice.peer,
@@ -640,12 +655,12 @@ async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late(
     let plans = channel_id("plans");
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let mut alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let mut alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -729,12 +744,12 @@ async fn a_channel_one_member_created_is_readable_by_a_member_who_opens_it_late(
 async fn a_file_shared_by_one_member_downloads_byte_for_byte_on_another() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -857,14 +872,14 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
     let mut rng = ChaCha20Rng::seed_from_u64(99);
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice_peer = PeerId::from_u64(1);
+    let alice_peer = test_transport_peer(1);
 
     let mut alice = found_node(&hub, &clock, alice_peer, "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -930,8 +945,9 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
     // The 9g claim, checked directly on the bytes that reached the disk: the snapshot carries
     // somewhere to dial. This returned an empty list for the entire life of the feature.
     let addrs = peer_addrs_from_snapshot(&snapshot).expect("the snapshot decodes");
+    let bob_route = advertised(2).pop().expect("one Bob route");
     assert!(
-        addrs.contains(&"/ip4/203.0.113.2/tcp/9000".to_string()),
+        addrs.contains(&bob_route),
         "the reload has Bob's address to dial, got {addrs:?}"
     );
 
@@ -1058,12 +1074,12 @@ async fn a_restarted_server_recovers_its_state_and_re_finds_its_peers_without_a_
 async fn a_profile_change_on_one_node_reaches_the_other_members_roster() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -1137,12 +1153,12 @@ async fn a_profile_change_on_one_node_reaches_the_other_members_roster() {
 async fn wiki_status_and_events_written_on_one_node_reach_the_other() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -1263,12 +1279,12 @@ async fn wiki_status_and_events_written_on_one_node_reach_the_other() {
 async fn owner_only_actions_are_refused_for_a_non_owner() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -1369,13 +1385,13 @@ async fn owner_only_actions_are_refused_for_a_non_owner() {
 async fn a_third_member_is_visible_to_the_member_who_joined_before_them() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
 
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -1387,7 +1403,7 @@ async fn a_third_member_is_visible_to_the_member_who_joined_before_them() {
     let carol = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(3),
+        test_transport_peer(3),
         "carol",
         3,
         alice.peer,
@@ -1447,14 +1463,14 @@ async fn a_third_member_is_visible_to_the_member_who_joined_before_them() {
 async fn a_genuinely_missed_membership_commit_heals_without_an_older_member_speaking() {
     let hub = Hub::new();
     let clock = ManualClock::new(1_700_000_000_000);
-    let alice = found_node(&hub, &clock, PeerId::from_u64(1), "alice", 1).await;
+    let alice = found_node(&hub, &clock, test_transport_peer(1), "alice", 1).await;
 
     // Bob joins, but off the control topic: the commit admitting anyone after him is lost.
     let invite = mint(&alice.actor, 7).await;
     let mut bob = join_node_off_the_control_topic(
         &hub,
         &clock,
-        PeerId::from_u64(2),
+        test_transport_peer(2),
         "bob",
         2,
         alice.peer,
@@ -1467,7 +1483,7 @@ async fn a_genuinely_missed_membership_commit_heals_without_an_older_member_spea
     let carol = join_node(
         &hub,
         &clock,
-        PeerId::from_u64(3),
+        test_transport_peer(3),
         "carol",
         3,
         alice.peer,

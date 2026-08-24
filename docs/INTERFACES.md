@@ -39,7 +39,13 @@ pub trait MeshTransport: Send + Sync {
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError>;
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError>;
     async fn request(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<Bytes, TransportError>;
+    async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
+    async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
+    async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
+    async fn dial_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn add_external_addr(&self, addr:&str) -> Result<(),TransportError>;
+    async fn next_discovered(&self) -> Option<DiscoveredPeer>; // default never resolves
 }
 pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
@@ -113,9 +119,48 @@ Implementations:
     surface results. Discovered records (`Discovered { peer, addresses, namespace }`) are
     **never auto-dialed**; a higher layer (`catcoms-discovery`) decides whether to dial;
     the surfaced-record queue is per-Discover-response capped. `add_external_address(addr)`
-    lets a directly-reachable node register without a relay. `dial(addr)` dials at runtime.
+    lets a directly-reachable node register without a relay. `dial(addr)` queues a runtime dial;
+    the actor refuses it unless the address has a terminal peer id (there is no bare fallback).
     Free fn `validate_rendezvous_addrs(&[String]) -> Vec<RendezvousTarget>` (reject
     `/p2p-circuit`, require exactly one `/p2p/`, distinct PeerIds).
+
+### Peer-bound route parsing and endpoint scheduling  *(catcoms-discovery)*
+
+```rust
+pub fn parse_peer_dial_route(addr:&str, expected_peer:&[u8;32]) -> Option<ParsedPeerRoute>;
+pub struct ParsedPeerRoute { pub host:RouteHost, pub relayed:bool, pub endpoint:DialEndpoint }
+pub enum RouteHost { Ip(IpAddr), Dns(String) }
+pub struct EndpointDialConfig {
+    pub window_ms:u64, pub process_limit:u32, pub server_limit:u32,
+    pub peer_limit:u32, pub endpoint_limit:u32, pub prefix_limit:u32,
+}
+pub struct EndpointDialScheduler; // cloneable; clones share one bounded transient counter set
+  new(EndpointDialConfig) -> Self;
+  reserve(&self, server:&[u8], peer:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
+    -> Vec<String>;
+```
+
+The parser accepts only canonical, non-zero raw TCP or WebSocket TCP (exactly `/ws`, `/wss`, or
+`/tls/ws`; SNI and standalone/mixed TLS shapes are not product transports)
+or UDP/QUIC-v1 routes, plus the explicit single-relay circuit form. A direct route has exactly one
+terminal `/p2p/<PeerId>`; a circuit has one relay id and one terminal target. The terminal id's
+Phase-0 hash must equal `expected_peer`, with nothing trailing. Syntax and identity binding are
+separate from host trust: PEX/cache/member inputs additionally refuse DNS and dangerous local,
+private, link-local, multicast and transitional ranges (the sync test vocabulary deliberately
+retains non-routed documentation/benchmark literals); invite rendezvous and switchboards use the
+stricter global-literal classifier. Direct invite bootstraps deliberately retain bounded
+LAN/loopback support.
+
+`DiscoveryPolicy::dial_budget` counts returned addresses, not peers. The desktop creates one
+`EndpointDialScheduler`, installs a clone into every server before cached redial, and also applies
+it to pre-join invite/rendezvous/switchboard routes, repeated two-way reply callbacks, and direct
+companion-grant redemption. Defaults grant at most 32 endpoints per
+60-second process window, 8 per server, 4 per `(server, peer)`, 2 per normalized socket, and 8 per
+IPv4 `/24`, IPv6 `/48`, or DNS host. Normalized socket/prefix keys exclude the claimed PeerId and
+descriptor sequence. A shared denial is refunded to the local policy because no socket started;
+scheduler state is session-only and uses `Clock::monotonic_ms`. Pre-join invite rendezvous seeds
+are capped at two distinct validated nodes so infrastructure cannot exhaust the per-server window
+before the discovered inviter is dialed.
 
 ### `SecureKeyStore`; at-rest DEK protection, tiered  *(catcoms-crypto)*
 ```rust
@@ -303,6 +348,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
+  set_endpoint_dial_scheduler(EndpointDialScheduler); // inject one process-shared final dial gate
   cache_known_records() -> usize;  async dial_cached_peers() -> usize;
   authorize_join_helper(joiner:PeerId, invite_nonce:[u8;16], inviter_device:DeviceId,
                         target:PeerId, expires_at_ms:u64) -> bool;
@@ -312,7 +358,8 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
 // (BLAKE3-keyed off derive_key(invite_nonce), bound to group + rz_peer); so a joiner
 // discovers the inviter with no group secret and no hard-coded address.
 pub fn join_namespace(group_id:&[u8], invite_nonce:&[u8;16], rz_peer:&[u8]) -> String;
-// A member's self-signed, dialable peer record (PEX entry / discovery candidate).
+// A member's self-signed, dialable peer record (PEX entry / discovery candidate). Every address
+// must be canonical, public-IP based, and terminate in the libp2p id whose Phase-0 hash is peer_id.
 pub struct PeerDescriptor { pub device_pubkey:Vec<u8>, pub peer_id:[u8;32], pub addresses:Vec<String>, pub seq:u64, pub signature:[u8;64] }
   verify_self() -> bool;
 

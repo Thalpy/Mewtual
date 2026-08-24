@@ -5826,6 +5826,15 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         self.sync.set_rendezvous_nodes(nodes);
     }
 
+    /// Share one process-level endpoint budget across this server and every sibling group actor.
+    /// This must be installed before eager cached redial on restore.
+    pub fn set_endpoint_dial_scheduler(
+        &mut self,
+        scheduler: catcoms_discovery::EndpointDialScheduler,
+    ) {
+        self.sync.set_endpoint_dial_scheduler(scheduler);
+    }
+
     /// Whether steady-state rendezvous discovery is configured (so the actor drives its tick).
     pub fn has_rendezvous(&self) -> bool {
         self.sync.has_rendezvous()
@@ -5991,6 +6000,23 @@ mod tests {
     use rand_core::SeedableRng;
 
     const GENERAL: u128 = 1;
+
+    /// Deterministic transport identities keep product-layer fixtures honest about the
+    /// canonical `/p2p/<PeerId>` route binding enforced by steady-state discovery.
+    fn test_libp2p_peer(n: u8) -> libp2p::PeerId {
+        libp2p::identity::Keypair::ed25519_from_bytes([n; 32])
+            .unwrap()
+            .public()
+            .to_peer_id()
+    }
+
+    fn test_transport_peer(n: u8) -> PeerId {
+        catcoms_net::phase0_peer_id(&test_libp2p_peer(n))
+    }
+
+    fn test_peer_route(n: u8, base: &str) -> String {
+        format!("{base}/p2p/{}", test_libp2p_peer(n))
+    }
 
     /// Let `s` apply everything currently queued for it, then stop.
     ///
@@ -6868,8 +6894,8 @@ mod tests {
     #[tokio::test]
     async fn two_members_exchange_records_and_report_each_other_online() {
         let hub = Hub::new();
-        let alice_peer = PeerId::from_u64(1);
-        let bob_peer = PeerId::from_u64(2);
+        let alice_peer = test_transport_peer(1);
+        let bob_peer = test_transport_peer(2);
         let mut alice = Server::found(
             hub.join(alice_peer),
             MlsDevice::generate().unwrap(),
@@ -6907,10 +6933,16 @@ mod tests {
         // sequence block. (Addresses are the reachable ones; loopback and LAN entries are
         // stripped at publish, so a stand-in public address is what a real node would carry.)
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/9000".into()], 65_536)
+            .publish_self_record(
+                vec![test_peer_route(1, "/ip4/203.0.113.1/tcp/9000")],
+                65_536,
+            )
             .unwrap();
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/9000".into()], 65_536)
-            .unwrap();
+        bob.publish_self_record(
+            vec![test_peer_route(2, "/ip4/203.0.113.2/tcp/9000")],
+            65_536,
+        )
+        .unwrap();
 
         // What the actor's discovery tick now does: one PEX pass each, nobody naming a peer.
         let (_, _) = tokio::join!(bob.drive_pex(), alice.sync_once());
@@ -6934,8 +6966,9 @@ mod tests {
         // This returned an empty list for the entire life of the feature.
         let snap = alice.snapshot().unwrap();
         let addrs = peer_addrs_from_snapshot(&snap).unwrap();
+        let bob_route = test_peer_route(2, "/ip4/203.0.113.2/tcp/9000");
         assert!(
-            addrs.contains(&"/ip4/203.0.113.2/tcp/9000".to_string()),
+            addrs.contains(&bob_route),
             "the cross-session re-dial has Bob's address to dial, got {addrs:?}"
         );
 
@@ -6953,7 +6986,7 @@ mod tests {
         // was unconditionally true for any roster above the floor, so CAUTION fired about 30s
         // after startup, forever, in every real group. Four members, all reachable, must be quiet.
         let hub = Hub::new();
-        let alice_peer = PeerId::from_u64(1);
+        let alice_peer = test_transport_peer(1);
         let clock = ManualClock::new(1_000);
         let mut alice = Server::found(
             hub.join(alice_peer),
@@ -6965,17 +6998,20 @@ mod tests {
         .unwrap();
         alice.subscribe_control().await.unwrap();
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/9000".into()], 65_536)
+            .publish_self_record(
+                vec![test_peer_route(1, "/ip4/203.0.113.1/tcp/9000")],
+                65_536,
+            )
             .unwrap();
 
         let mut members = Vec::new();
-        for (n, nonce) in [(2u64, 11u8), (3, 12), (4, 13)] {
+        for (n, nonce) in [(2u8, 11u8), (3, 12), (4, 13)] {
             let invite = alice.mint_invite([nonce; 16], u64::MAX, vec![]).unwrap();
             let (joined, _) = tokio::join!(
                 Server::join(
-                    hub.join(PeerId::from_u64(n)),
+                    hub.join(test_transport_peer(n)),
                     MlsDevice::generate().unwrap(),
-                    ChaCha20Rng::seed_from_u64(n),
+                    ChaCha20Rng::seed_from_u64(u64::from(n)),
                     Box::new(clock.clone()),
                     "member",
                     alice_peer,
@@ -6984,8 +7020,11 @@ mod tests {
                 alice.sync_once(),
             );
             let mut m = joined.unwrap();
-            m.publish_self_record(vec![format!("/ip4/203.0.113.{n}/tcp/9000")], 65_536)
-                .unwrap();
+            m.publish_self_record(
+                vec![test_peer_route(n, &format!("/ip4/203.0.113.{n}/tcp/9000"))],
+                65_536,
+            )
+            .unwrap();
             members.push(m);
         }
         assert_eq!(alice.member_count(), 4);

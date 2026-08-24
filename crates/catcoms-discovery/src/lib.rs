@@ -22,8 +22,8 @@
 //!   records cannot dominate the dial order,
 //! - **clamps** the plan to roughly the roster size (you never need to dial more
 //!   distinct peers than could plausibly be members), and
-//! - meters dials against a **Clock-paced, RNG-jittered budget** shared across all
-//!   discovery sources, so junk costs at most `B` dials per window.
+//! - meters endpoint attempts against a **Clock-paced, RNG-jittered budget** shared across all
+//!   discovery sources, so junk costs at most `B` socket targets per window.
 //!
 //! It **ranks only; it never gates messaging** and never makes a network call. No
 //! ambient time/RNG: a `Clock` and an RNG are injected on every `plan` call, exactly
@@ -37,9 +37,14 @@
 //! by cache + PEX + the membership tag). The caller bounds it further by admitting only
 //! records from the invite's fixed rendezvous set.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::{Arc, Mutex},
+};
 
 use catcoms_rt::{Clock, CryptoRngCore};
+use multiaddr::{Multiaddr, Protocol};
 
 mod cache;
 mod eclipse;
@@ -111,10 +116,335 @@ pub struct PlannedDial {
     pub addresses: Vec<String>,
 }
 
+/// The host a canonical peer route contacts before Noise authenticates its terminal peer.
+///
+/// Discovery callers apply their own trust policy to this value: member records accept public IP
+/// literals only, while an operator-configured rendezvous may intentionally use a DNS name or LAN
+/// address. Keeping syntax parsing here avoids the more dangerous outcome where those callers
+/// implement subtly different `/p2p/` and relay-route grammars.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteHost {
+    /// A literal IPv4 or IPv6 destination.
+    Ip(IpAddr),
+    /// A DNS destination. Untrusted member/invite routes should reject this variant.
+    Dns(String),
+}
+
+/// One canonical socket endpoint ready to be charged by [`EndpointDialScheduler`].
+///
+/// `endpoint_key` intentionally excludes the terminal peer id. Otherwise a hostile source could
+/// name the same victim socket under many fresh peer ids and evade per-endpoint accounting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DialEndpoint {
+    address: String,
+    endpoint_key: [u8; 32],
+    prefix_key: [u8; 32],
+}
+
+impl DialEndpoint {
+    /// The canonical multiaddr string to pass to the transport after the scheduler grants it.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// Build an opaque endpoint for trusted configuration whose route grammar is validated by its
+    /// owner. The material must identify the actual socket independently of a claimed target peer;
+    /// `prefix_material` groups endpoints that share a network/provider boundary.
+    pub fn from_key_material(
+        address: impl Into<String>,
+        endpoint_material: &[u8],
+        prefix_material: &[u8],
+    ) -> Self {
+        Self {
+            address: address.into(),
+            endpoint_key: *blake3::hash(endpoint_material).as_bytes(),
+            prefix_key: *blake3::hash(prefix_material).as_bytes(),
+        }
+    }
+}
+
+/// A syntactically canonical peer-bound route and its scheduler identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedPeerRoute {
+    /// The network host contacted by the route (a relay host for a circuit address).
+    pub host: RouteHost,
+    /// Whether the route traverses a circuit relay before reaching the terminal peer.
+    pub relayed: bool,
+    /// The endpoint accounting key and canonical address.
+    pub endpoint: DialEndpoint,
+}
+
+/// Parse the one route grammar accepted from signed peer records and rendezvous results.
+///
+/// Accepted routes have exactly one host, one non-zero TCP or UDP/QUIC-v1 socket, and a terminal
+/// `/p2p/<PeerId>` whose Phase-0 BLAKE3 id equals `expected_peer`. A relay route may contain one
+/// additional relay peer followed by exactly `/p2p-circuit/p2p/<expected>`. TCP is raw or uses
+/// exactly `/ws`, `/wss`, or `/tls/ws`, matching the product's libp2p WebSocket parser; arbitrary
+/// protocols, SNI, repeated/mixed wrappers, trailing components, zero ports, non-canonical
+/// spellings, and bare socket addresses fail closed.
+///
+/// This function validates syntax and peer binding, not whether the host is safe to contact. A
+/// caller handling untrusted records must additionally reject [`RouteHost::Dns`] and apply its
+/// canonical global-address classifier to [`RouteHost::Ip`].
+pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<ParsedPeerRoute> {
+    let parsed: Multiaddr = addr.parse().ok()?;
+    if parsed.to_string() != addr {
+        return None;
+    }
+    let parts: Vec<_> = parsed.iter().collect();
+    let (host, host_key, prefix_key) = match parts.first()? {
+        Protocol::Ip4(ip) => (
+            RouteHost::Ip(IpAddr::V4(*ip)),
+            ip.octets().to_vec(),
+            ipv4_prefix(*ip),
+        ),
+        Protocol::Ip6(ip) => {
+            // IPv4-mapped/compatible IPv6 reaches the same physical IPv4 host. Keep the original
+            // family for the caller's classifier, but normalize scheduler keys so rewriting an
+            // address as `::ffff:a.b.c.d` cannot refill endpoint or prefix limits.
+            let (host_key, prefix_key) = ip.to_ipv4().map_or_else(
+                || (ip.octets().to_vec(), ipv6_prefix(*ip)),
+                |v4| (v4.octets().to_vec(), ipv4_prefix(v4)),
+            );
+            (RouteHost::Ip(IpAddr::V6(*ip)), host_key, prefix_key)
+        }
+        Protocol::Dns(name)
+        | Protocol::Dns4(name)
+        | Protocol::Dns6(name)
+        | Protocol::Dnsaddr(name) => {
+            let normalized = name.to_ascii_lowercase();
+            (
+                RouteHost::Dns(normalized.clone()),
+                normalized.as_bytes().to_vec(),
+                normalized.into_bytes(),
+            )
+        }
+        _ => return None,
+    };
+
+    let mut index = 1;
+    let (transport_tag, port) = match parts.get(index)? {
+        Protocol::Tcp(port) if *port != 0 => {
+            index += 1;
+            match parts.get(index) {
+                Some(Protocol::Ws(_)) | Some(Protocol::Wss(_)) => index += 1,
+                Some(Protocol::Tls) => {
+                    index += 1;
+                    if !matches!(parts.get(index), Some(Protocol::Ws(_))) {
+                        return None;
+                    }
+                    index += 1;
+                }
+                _ => {}
+            }
+            (6u8, *port)
+        }
+        Protocol::Udp(port) if *port != 0 => {
+            index += 1;
+            if !matches!(parts.get(index), Some(Protocol::QuicV1)) {
+                return None;
+            }
+            index += 1;
+            (17u8, *port)
+        }
+        _ => return None,
+    };
+
+    let Protocol::P2p(first_peer) = parts.get(index)? else {
+        return None;
+    };
+    index += 1;
+    let (target, relayed) = if index == parts.len() {
+        (first_peer, false)
+    } else {
+        if !matches!(parts.get(index), Some(Protocol::P2pCircuit)) {
+            return None;
+        }
+        index += 1;
+        let Protocol::P2p(target) = parts.get(index)? else {
+            return None;
+        };
+        index += 1;
+        if index != parts.len() {
+            return None;
+        }
+        (target, true)
+    };
+    if blake3::hash(&target.to_bytes()).as_bytes() != expected_peer {
+        return None;
+    }
+
+    let mut endpoint_material = Vec::with_capacity(host_key.len() + 3);
+    endpoint_material.push(transport_tag);
+    endpoint_material.extend_from_slice(&port.to_be_bytes());
+    endpoint_material.extend_from_slice(&host_key);
+    Some(ParsedPeerRoute {
+        host,
+        relayed,
+        endpoint: DialEndpoint::from_key_material(addr, &endpoint_material, &prefix_key),
+    })
+}
+
+fn ipv4_prefix(ip: Ipv4Addr) -> Vec<u8> {
+    let octets = ip.octets();
+    vec![4, octets[0], octets[1], octets[2]]
+}
+
+fn ipv6_prefix(ip: Ipv6Addr) -> Vec<u8> {
+    let octets = ip.octets();
+    let mut prefix = vec![6];
+    prefix.extend_from_slice(&octets[..6]); // /48, matching the abuse-accounting boundary.
+    prefix
+}
+
+/// Process-shared endpoint limits. Defaults bound ordinary desktop discovery while leaving enough
+/// room to try TCP+QUIC over both address families for several peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointDialConfig {
+    /// Length of one monotonic accounting window.
+    pub window_ms: u64,
+    /// Endpoints granted across the whole process per window.
+    pub process_limit: u32,
+    /// Endpoints granted to one server/group per window.
+    pub server_limit: u32,
+    /// Endpoints granted to one `(server, peer)` pair per window.
+    pub peer_limit: u32,
+    /// Attempts to one physical socket per window, regardless of claimed target PeerId.
+    pub endpoint_limit: u32,
+    /// Attempts to one IPv4 /24, IPv6 /48, or DNS host per window.
+    pub prefix_limit: u32,
+}
+
+impl Default for EndpointDialConfig {
+    fn default() -> Self {
+        Self {
+            window_ms: 60_000,
+            process_limit: 32,
+            server_limit: 8,
+            peer_limit: 4,
+            endpoint_limit: 2,
+            prefix_limit: 8,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct EndpointDialState {
+    window_start_ms: Option<u64>,
+    process_spent: u32,
+    server_spent: HashMap<[u8; 32], u32>,
+    peer_spent: HashMap<[u8; 32], u32>,
+    endpoint_spent: HashMap<[u8; 32], u32>,
+    prefix_spent: HashMap<[u8; 32], u32>,
+}
+
+/// A cloneable, deterministic endpoint scheduler shared by every server in one application.
+///
+/// Ranking remains per group, but every actual member-discovery endpoint passes through this
+/// handle. The short lock covers counters only; no network call or await occurs while held. State
+/// is transient and resets on process restart, while a monotonic `Clock` makes wall-clock changes
+/// irrelevant. Unique-key maps cannot exceed `process_limit` entries in one window because keys
+/// are inserted only for granted attempts.
+#[derive(Debug, Clone)]
+pub struct EndpointDialScheduler {
+    config: EndpointDialConfig,
+    state: Arc<Mutex<EndpointDialState>>,
+}
+
+impl EndpointDialScheduler {
+    /// Construct an isolated scheduler. Production creates one and clones it into every server;
+    /// tests can construct isolated handles without process-global cross-test interference.
+    pub fn new(config: EndpointDialConfig) -> Self {
+        Self {
+            config,
+            state: Arc::new(Mutex::new(EndpointDialState::default())),
+        }
+    }
+
+    /// Reserve a bounded subset of endpoints in caller order.
+    pub fn reserve(
+        &self,
+        server: &[u8],
+        peer: &[u8],
+        endpoints: &[DialEndpoint],
+        clock: &dyn Clock,
+    ) -> Vec<String> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let now = clock.monotonic_ms();
+        let expired = state
+            .window_start_ms
+            // A zero duration is a configuration mistake, not permission to refill on every
+            // reservation in the same actor drain. Clamp it to the smallest monotonic window.
+            .is_none_or(|start| now.saturating_sub(start) >= self.config.window_ms.max(1));
+        if expired {
+            *state = EndpointDialState {
+                window_start_ms: Some(now),
+                ..EndpointDialState::default()
+            };
+        }
+
+        let server_key = scoped_key(b"catcoms/dial/server/v1", &[server]);
+        let peer_key = scoped_key(b"catcoms/dial/peer/v1", &[server, peer]);
+        let mut granted = Vec::new();
+        for endpoint in endpoints {
+            if state.process_spent >= self.config.process_limit
+                || state.server_spent.get(&server_key).copied().unwrap_or(0)
+                    >= self.config.server_limit
+                || state.peer_spent.get(&peer_key).copied().unwrap_or(0) >= self.config.peer_limit
+                || state
+                    .endpoint_spent
+                    .get(&endpoint.endpoint_key)
+                    .copied()
+                    .unwrap_or(0)
+                    >= self.config.endpoint_limit
+                || state
+                    .prefix_spent
+                    .get(&endpoint.prefix_key)
+                    .copied()
+                    .unwrap_or(0)
+                    >= self.config.prefix_limit
+            {
+                continue;
+            }
+            state.process_spent = state.process_spent.saturating_add(1);
+            increment(&mut state.server_spent, server_key);
+            increment(&mut state.peer_spent, peer_key);
+            increment(&mut state.endpoint_spent, endpoint.endpoint_key);
+            increment(&mut state.prefix_spent, endpoint.prefix_key);
+            granted.push(endpoint.address.clone());
+        }
+        granted
+    }
+}
+
+impl Default for EndpointDialScheduler {
+    fn default() -> Self {
+        Self::new(EndpointDialConfig::default())
+    }
+}
+
+fn scoped_key(domain: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    for part in parts {
+        hasher.update(&(part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn increment(map: &mut HashMap<[u8; 32], u32>, key: [u8; 32]) {
+    let value = map.entry(key).or_default();
+    *value = value.saturating_add(1);
+}
+
 /// Tunable bounds. Defaults suit a desktop node; tests shrink them.
 #[derive(Debug, Clone, Copy)]
 pub struct PolicyConfig {
-    /// `B`: dials granted per budget window (shared across all sources).
+    /// `B`: endpoint attempts granted per budget window (shared across all sources).
     pub dial_budget: u32,
     /// Budget-window length on the injected clock (ms).
     pub window_ms: u64,
@@ -258,7 +588,7 @@ pub struct DiscoveryPolicy {
     window_start_ms: Option<u64>,
     /// This window's length (base + RNG jitter), fixed when the window opens.
     window_len_ms: u64,
-    /// Dials granted so far in the current window.
+    /// Endpoint attempts granted so far in the current window.
     spent: u32,
 }
 
@@ -279,15 +609,32 @@ impl DiscoveryPolicy {
         }
     }
 
-    /// Dials still available in the current budget window (diagnostics / tests). Does
+    /// Endpoint attempts still available in the current budget window (diagnostics / tests). Does
     /// not advance the window.
     pub fn remaining_budget(&self) -> u32 {
         self.config.dial_budget.saturating_sub(self.spent)
     }
 
+    /// Return locally planned endpoint tokens that a final shared scheduler did not grant.
+    ///
+    /// [`Self::plan`] must reserve before returning so independent callers cannot forget to
+    /// account for an address fan-out. A process-wide scheduler can then apply stricter limits;
+    /// denied endpoints never touched a socket and must not strand this server behind two
+    /// separate budget windows. An oversized refund is ignored (fails closed); the planned typed
+    /// batch API should eventually replace this count with an opaque reservation receipt.
+    pub fn refund_endpoint_budget(&mut self, endpoints: usize) {
+        let Ok(endpoints) = u32::try_from(endpoints) else {
+            return;
+        };
+        if endpoints <= self.spent {
+            self.spent -= endpoints;
+        }
+    }
+
     /// Rank `candidates` into a bounded dial plan for a group whose roster has
     /// `roster_size` members (including this node). Consumes dial budget for the
-    /// peers it returns. Returns peers in dial order (best first).
+    /// addresses it returns. Returns peers in dial order (best first), with each peer's address
+    /// list trimmed to the remaining endpoint budget.
     pub fn plan(
         &mut self,
         candidates: Vec<Candidate>,
@@ -366,25 +713,34 @@ impl DiscoveryPolicy {
         let clamp = (roster_size.saturating_sub(1) + self.config.roster_headroom)
             .max(self.config.min_dial_slots);
 
-        // 5. Dial budget: meter against the Clock-paced, RNG-jittered window.
-        let granted = self.grant_budget(clock, rng);
-        let take = order.len().min(clamp).min(granted);
-        self.spent = self.spent.saturating_add(take as u32);
-
-        order
-            .into_iter()
-            .take(take)
-            .map(|i| PlannedDial {
+        // 5. Endpoint budget: a peer with eight addresses costs eight attempts, not one. The
+        // process-shared scheduler above this policy applies the wider cross-server caps; this
+        // local window prevents one server/source from consuming an arbitrary address fan-out.
+        let mut remaining = self.grant_budget(clock, rng);
+        let mut out = Vec::new();
+        for i in order {
+            if out.len() >= clamp || remaining == 0 {
+                break;
+            }
+            let addresses: Vec<String> =
+                items[i].addresses.iter().take(remaining).cloned().collect();
+            if addresses.is_empty() {
+                continue;
+            }
+            remaining -= addresses.len();
+            self.spent = self.spent.saturating_add(addresses.len() as u32);
+            out.push(PlannedDial {
                 peer: items[i].peer.clone(),
-                addresses: items[i].addresses.clone(),
-            })
-            .collect()
+                addresses,
+            });
+        }
+        out
     }
 
     /// Compute the dials available now, rolling the budget window over (with fresh RNG
     /// jitter) if the previous one has elapsed.
     fn grant_budget(&mut self, clock: &dyn Clock, rng: &mut impl CryptoRngCore) -> usize {
-        let now = clock.now_ms();
+        let now = clock.monotonic_ms();
         let expired = match self.window_start_ms {
             None => true,
             Some(start) => now.saturating_sub(start) >= self.window_len_ms,
@@ -438,6 +794,23 @@ mod tests {
     fn rdv(n: u8) -> PeerKey {
         // A distinct rendezvous-id per `n` (16 bytes, well clear of the peer keys).
         vec![0xA0u8.wrapping_add(n); 16]
+    }
+
+    const PEER_A: &str = "12D3KooWHp1hLNjWf4ZM4eLaiUdMGTbGnXDDDkhnE56P9CRbHx8E";
+    const PEER_B: &str = "12D3KooWBGfsSWvGFAJeTz3oBPeRFbSadCwedBJvJ6AFAJtfkSD2";
+
+    fn phase0(peer: &str) -> [u8; 32] {
+        let address: Multiaddr = format!("/ip4/203.0.113.1/tcp/9/p2p/{peer}")
+            .parse()
+            .unwrap();
+        let raw = address
+            .iter()
+            .find_map(|part| match part {
+                Protocol::P2p(peer) => Some(peer.to_bytes()),
+                _ => None,
+            })
+            .unwrap();
+        *blake3::hash(&raw).as_bytes()
     }
 
     fn cand(p: u8, source: Source, seq: u64, tag_verified: bool) -> Candidate {
@@ -618,6 +991,258 @@ mod tests {
         clock.advance_ms(1_001);
         let plan3 = pol.plan(candidates, 64, &clock, &mut r);
         assert_eq!(plan3.len(), 3, "budget refills after the window");
+    }
+
+    #[test]
+    fn one_peer_with_many_addresses_spends_one_budget_unit_per_endpoint() {
+        let mut pol = DiscoveryPolicy::with_config(PolicyConfig {
+            dial_budget: 3,
+            window_ms: 1_000,
+            jitter_ms: 0,
+            roster_headroom: 8,
+            min_dial_slots: 8,
+            max_addresses: 8,
+            max_tracked_peers: 32,
+        });
+        let clock = ManualClock::new(0);
+        let mut r = rng();
+        let candidate = Candidate {
+            peer: peer(1),
+            addresses: (1..=8)
+                .map(|port| format!("/ip4/203.0.113.1/tcp/{port}"))
+                .collect(),
+            source: Source::Cache,
+            seq: 1,
+            tag_verified: false,
+        };
+        let plan = pol.plan(vec![candidate.clone()], 2, &clock, &mut r);
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].addresses.len(), 3);
+        assert_eq!(pol.remaining_budget(), 0);
+        assert!(pol.plan(vec![candidate], 2, &clock, &mut r).is_empty());
+    }
+
+    #[test]
+    fn a_shared_scheduler_deferral_does_not_consume_the_servers_local_window() {
+        let mut pol = DiscoveryPolicy::with_config(PolicyConfig {
+            dial_budget: 3,
+            window_ms: 1_000,
+            jitter_ms: 0,
+            roster_headroom: 8,
+            min_dial_slots: 8,
+            max_addresses: 8,
+            max_tracked_peers: 32,
+        });
+        let clock = ManualClock::new(0);
+        let mut r = rng();
+        let candidate = Candidate {
+            peer: peer(1),
+            addresses: (1..=3)
+                .map(|port| format!("/ip4/203.0.113.1/tcp/{port}"))
+                .collect(),
+            source: Source::Cache,
+            seq: 1,
+            tag_verified: false,
+        };
+
+        let planned = pol.plan(vec![candidate.clone()], 2, &clock, &mut r);
+        assert_eq!(planned[0].addresses.len(), 3);
+        pol.refund_endpoint_budget(3);
+        assert_eq!(pol.remaining_budget(), 3);
+        assert_eq!(pol.plan(vec![candidate], 2, &clock, &mut r).len(), 1);
+    }
+
+    #[test]
+    fn an_oversized_local_budget_refund_is_ignored() {
+        let mut pol = DiscoveryPolicy::with_config(PolicyConfig {
+            dial_budget: 3,
+            window_ms: 1_000,
+            jitter_ms: 0,
+            roster_headroom: 0,
+            min_dial_slots: 1,
+            max_addresses: 8,
+            max_tracked_peers: 32,
+        });
+        let clock = ManualClock::new(0);
+        let mut r = rng();
+        let candidate = Candidate {
+            peer: peer(1),
+            addresses: vec!["a".into(), "b".into()],
+            source: Source::Cache,
+            seq: 1,
+            tag_verified: false,
+        };
+        assert_eq!(
+            pol.plan(vec![candidate], 2, &clock, &mut r)[0]
+                .addresses
+                .len(),
+            2
+        );
+        pol.refund_endpoint_budget(3);
+        assert_eq!(pol.remaining_budget(), 1);
+    }
+
+    #[test]
+    fn canonical_peer_routes_bind_the_terminal_peer_and_transport_shape() {
+        let expected = phase0(PEER_A);
+        for good in [
+            format!("/ip4/203.0.113.1/tcp/4001/p2p/{PEER_A}"),
+            format!("/ip6/2001:db8::1/udp/4001/quic-v1/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/80/ws/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/443/wss/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/443/tls/ws/p2p/{PEER_A}"),
+            format!("/ip4/198.51.100.1/tcp/4001/p2p/{PEER_B}/p2p-circuit/p2p/{PEER_A}"),
+        ] {
+            assert!(
+                parse_peer_dial_route(&good, &expected).is_some(),
+                "{good} should pass"
+            );
+        }
+        for bad in [
+            "/ip4/203.0.113.1/tcp/4001".to_string(),
+            format!("/ip4/203.0.113.1/tcp/4001/p2p/{PEER_B}"),
+            format!("/ip4/203.0.113.1/tcp/0/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/udp/4001/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/4001/http/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/4001/tls/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/4001/tls/sni/example.com/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/4001/tls/sni/example.com/ws/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/4001/tls/wss/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/4001/p2p/{PEER_A}/p2p-circuit"),
+        ] {
+            assert!(
+                parse_peer_dial_route(&bad, &expected).is_none(),
+                "{bad} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn cloned_schedulers_share_process_and_socket_budgets() {
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 3,
+            server_limit: 3,
+            peer_limit: 3,
+            endpoint_limit: 1,
+            prefix_limit: 3,
+        });
+        let other_server = scheduler.clone();
+        let clock = ManualClock::new(0);
+        let route_a = format!("/ip4/203.0.113.9/tcp/4001/p2p/{PEER_A}");
+        let route_b = format!("/ip6/::ffff:203.0.113.9/tcp/4001/p2p/{PEER_B}");
+        let same_socket_a = parse_peer_dial_route(&route_a, &phase0(PEER_A))
+            .unwrap()
+            .endpoint;
+        let same_socket_b = parse_peer_dial_route(&route_b, &phase0(PEER_B))
+            .unwrap()
+            .endpoint;
+        let socket_c = DialEndpoint::from_key_material("c", b"socket-c", b"prefix-c");
+        let socket_d = DialEndpoint::from_key_material("d", b"socket-d", b"prefix-d");
+
+        assert_eq!(
+            scheduler.reserve(b"server-a", b"peer-a", &[same_socket_a], &clock),
+            vec![route_a]
+        );
+        assert!(
+            other_server
+                .reserve(b"server-b", b"peer-b", &[same_socket_b], &clock)
+                .is_empty(),
+            "peer/server rotation and IPv4-mapped spelling must not bypass the socket cap"
+        );
+        assert_eq!(
+            other_server.reserve(b"server-b", b"peer-b", &[socket_c, socket_d], &clock),
+            vec!["c", "d"]
+        );
+        assert_eq!(scheduler.state.lock().unwrap().process_spent, 3);
+    }
+
+    #[test]
+    fn scheduler_windows_use_monotonic_time_and_reset_all_scopes() {
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 100,
+            process_limit: 1,
+            server_limit: 1,
+            peer_limit: 1,
+            endpoint_limit: 1,
+            prefix_limit: 1,
+        });
+        let clock = ManualClock::new(10_000);
+        let endpoint = DialEndpoint::from_key_material("route", b"socket", b"prefix");
+        assert_eq!(
+            scheduler.reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock),
+            vec!["route"]
+        );
+        clock.set_wall_ms(1);
+        assert!(
+            scheduler
+                .reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock)
+                .is_empty(),
+            "wall-clock correction must not refill the window"
+        );
+        clock.advance_ms(100);
+        assert_eq!(
+            scheduler.reserve(b"server", b"peer", &[endpoint], &clock),
+            vec!["route"]
+        );
+    }
+
+    #[test]
+    fn zero_length_scheduler_window_cannot_refill_at_one_instant() {
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 0,
+            process_limit: 1,
+            server_limit: 1,
+            peer_limit: 1,
+            endpoint_limit: 1,
+            prefix_limit: 1,
+        });
+        let clock = ManualClock::new(50);
+        let endpoint = DialEndpoint::from_key_material("route", b"socket", b"prefix");
+        assert_eq!(
+            scheduler.reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock,),
+            vec!["route"]
+        );
+        assert!(scheduler
+            .reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock)
+            .is_empty());
+        clock.advance_ms(1);
+        assert_eq!(
+            scheduler.reserve(b"server", b"peer", &[endpoint], &clock),
+            vec!["route"]
+        );
+    }
+
+    #[test]
+    fn prefix_accounting_is_independent_of_transport_and_peer_identity() {
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 4,
+            server_limit: 4,
+            peer_limit: 4,
+            endpoint_limit: 4,
+            prefix_limit: 1,
+        });
+        let clock = ManualClock::new(0);
+        let tcp_route = format!("/ip4/203.0.113.9/tcp/4001/p2p/{PEER_A}");
+        let quic_route = format!("/ip4/203.0.113.10/udp/4002/quic-v1/p2p/{PEER_B}");
+        let tcp = parse_peer_dial_route(&tcp_route, &phase0(PEER_A))
+            .unwrap()
+            .endpoint;
+        let quic = parse_peer_dial_route(&quic_route, &phase0(PEER_B))
+            .unwrap()
+            .endpoint;
+
+        assert_eq!(
+            scheduler.reserve(b"server-a", b"peer-a", &[tcp], &clock),
+            vec![tcp_route]
+        );
+        assert!(
+            scheduler
+                .reserve(b"server-b", b"peer-b", &[quic], &clock)
+                .is_empty(),
+            "TCP/QUIC and peer/server rotation must still share one IPv4 /24 bucket"
+        );
     }
 
     #[test]

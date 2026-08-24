@@ -34,8 +34,9 @@ use catcoms_crypto::{
     seal, unseal, verify_with_public_bytes, DeviceCertificate, DeviceId, SealedBlob,
 };
 use catcoms_discovery::{
-    AddressCache, CacheConfig, CacheError, CachedPeer, Candidate, DiscoveryPolicy, EclipseConfig,
-    EclipseDetector, EclipseLevel, EclipseObservation, PolicyConfig, Source,
+    parse_peer_dial_route, AddressCache, CacheConfig, CacheError, CachedPeer, Candidate,
+    DialEndpoint, DiscoveryPolicy, EclipseConfig, EclipseDetector, EclipseLevel,
+    EclipseObservation, EndpointDialScheduler, PolicyConfig, RouteHost, Source,
 };
 use catcoms_mls::{
     key_package_signature_key, restore_server, serialize_key_package, snapshot_server, Incoming,
@@ -1599,7 +1600,7 @@ impl SwitchboardOffer {
         let mut addresses = Vec::with_capacity(count);
         for _ in 0..count {
             let address = d.get_str().map_err(|_| SyncError::Malformed)?;
-            if address.len() > MAX_PEX_ADDR_LEN || !peer_addr_is_routable(address) {
+            if address.len() > MAX_PEX_ADDR_LEN || !peer_addr_is_routable_for(address, &peer_id) {
                 return Err(SyncError::Malformed);
             }
             addresses.push(address.to_string());
@@ -1868,28 +1869,23 @@ fn ipv6_is_routable(ip: &std::net::Ipv6Addr) -> bool {
 /// would buy nothing but a worse test vocabulary.
 ///
 /// Pure: string plus `std::net` parsing, no DNS, no I/O, no ambient anything.
-fn peer_addr_is_routable(addr: &str) -> bool {
-    let mut parts = addr.split('/');
-    while let Some(proto) = parts.next() {
-        // Each IP component is `ip4`/`ip6` followed by its literal, so taking the next
-        // element here consumes exactly that literal and leaves the walk aligned.
-        match proto {
-            "ip4" => match parts.next().map(str::parse::<std::net::Ipv4Addr>) {
-                Some(Ok(ip)) if ipv4_is_routable(&ip) => {}
-                // A missing or unparseable literal is malformed; fail closed rather than
-                // hand an address we could not read to the dialer.
-                _ => return false,
-            },
-            "ip6" => match parts.next().map(str::parse::<std::net::Ipv6Addr>) {
-                Some(Ok(ip)) if ipv6_is_routable(&ip) => {}
-                _ => return false,
-            },
-            // A name resolved at dial time is a target we never get to inspect.
-            "dns" | "dns4" | "dns6" | "dnsaddr" => return false,
-            _ => {}
-        }
-    }
-    true
+fn validated_peer_endpoint(addr: &str, expected_peer: &[u8; 32]) -> Option<DialEndpoint> {
+    let parsed = parse_peer_dial_route(addr, expected_peer)?;
+    let routable = match parsed.host {
+        RouteHost::Ip(std::net::IpAddr::V4(ip)) => ipv4_is_routable(&ip),
+        RouteHost::Ip(std::net::IpAddr::V6(ip)) => ipv6_is_routable(&ip),
+        // A name resolved at dial time is a target we never get to inspect.
+        RouteHost::Dns(_) => false,
+    };
+    routable.then_some(parsed.endpoint)
+}
+
+/// Validate both halves of a signed member route: its public socket shape and the terminal
+/// transport identity bound by the descriptor. The old range-only predicate accepted bare
+/// `/ip4/victim/tcp/port` strings, so the net layer fell back to an unbound `Swarm::dial` and a
+/// hostile current member could aim every peer at an arbitrary public service.
+fn peer_addr_is_routable_for(addr: &str, expected_peer: &[u8; 32]) -> bool {
+    validated_peer_endpoint(addr, expected_peer).is_some()
 }
 
 /// Fisher-Yates over the injected RNG. `rand`'s `SliceRandom` is not a dependency of this
@@ -2669,6 +2665,11 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// The eclipse-resistant dial policy (one long-lived per group; transient; rebuilt on restore)
     /// that ranks discovered candidates into a bounded dial plan. The transport NEVER auto-dials.
     discovery: DiscoveryPolicy,
+    /// Endpoint-level enforcement shared by every server in the desktop process. Ranking and
+    /// retry state remain per group; this handle is the final cross-group bound that prevents one
+    /// record with many addresses—or many simultaneous group swarms—from multiplying socket work.
+    /// Transient and deliberately injected after restore so deterministic tests remain isolated.
+    endpoint_dials: EndpointDialScheduler,
     /// Bounded, expiring retry state for discovery candidates. This replaced the old
     /// process-lifetime `dialed_peers` set: that set made a failed first attempt permanent, so a
     /// member whose network or public IP recovered could not be contacted until this app
@@ -2841,6 +2842,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             roster_gen: 0,
             rendezvous_nodes: Vec::new(),
             discovery: DiscoveryPolicy::with_config(PolicyConfig::default()),
+            endpoint_dials: EndpointDialScheduler::default(),
             dial_retries: HashMap::new(),
             eclipse: EclipseDetector::new(EclipseConfig::default()),
             pending_dm_invites: Vec::new(),
@@ -4443,6 +4445,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.rendezvous_nodes = nodes;
     }
 
+    /// Replace this server's isolated endpoint scheduler with the application-wide handle.
+    ///
+    /// Callers that host more than one group in a process must clone one scheduler into every
+    /// server before any discovery/redial pass. Keeping injection explicit avoids a mutable global
+    /// whose counters would leak across deterministic tests and independent library applications.
+    pub fn set_endpoint_dial_scheduler(&mut self, scheduler: EndpointDialScheduler) {
+        self.endpoint_dials = scheduler;
+    }
+
     /// Whether any rendezvous is configured (so the actor knows whether to drive discovery).
     pub fn has_rendezvous(&self) -> bool {
         !self.rendezvous_nodes.is_empty()
@@ -4456,7 +4467,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for (addr, rz_node) in self.rendezvous_nodes.clone() {
             // Ensure we're connected to the rendezvous (idempotent if already connected); so a
             // reloaded member re-establishes the link without the bridge re-dialing it.
-            let _ = self.transport.dial_addr(&addr).await;
+            let expected = *transport_peer_from_raw(&rz_node).as_bytes();
+            if let Some(route) = parse_peer_dial_route(&addr, &expected) {
+                let granted = self.endpoint_dials.reserve(
+                    &self.group.group_id(),
+                    &rz_node,
+                    std::slice::from_ref(&route.endpoint),
+                    &*self.clock,
+                );
+                for address in granted {
+                    let _ = self.transport.dial_addr(&address).await;
+                }
+            } else {
+                tracing::warn!("configured rendezvous route lost its peer binding; dial refused");
+            }
             for ns in self.rendezvous_namespaces(&rz_node) {
                 let _ = self.transport.rendezvous_register(&ns, &rz_node).await;
                 let _ = self.transport.rendezvous_discover(&ns, &rz_node).await;
@@ -4548,15 +4572,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.transport.next_discovered().await
     }
 
-    /// Rank a discovered peer through the [`DiscoveryPolicy`] (which alone decides dials; the
-    /// transport never auto-dials) and dial the chosen addresses when their retry deadline permits.
+    /// Rank a discovered peer through the [`DiscoveryPolicy`], apply the shared endpoint gate
+    /// (the transport never auto-dials), and dial granted addresses when retry permits.
     /// The
     /// namespace must be one of ours (member-only); membership is re-proven post-dial by the
     /// existing PEX/`ingest_peer_record` path. `tag_verified` is `false`, permanently: see
     /// [`routing_membership_tag`] for why the tag is not carried and why nothing above could use
     /// it if it were.
     ///
-    /// Addresses are validated by [`peer_addr_is_routable`] exactly as a PEX record's are, and
+    /// Addresses are validated by [`peer_addr_is_routable_for`] exactly as a PEX record's are,
     /// **this** is the path that dials in the shipping app. Without it, anyone who can register
     /// under the group's namespace (the rendezvous operator, or any member) could serve records
     /// naming `/ip4/192.168.1.1/tcp/22`, with a fresh peer id per record to defeat the
@@ -4581,10 +4605,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         else {
             return;
         };
+        let expected_peer = *transport_peer_from_raw(&d.peer).as_bytes();
         let addresses: Vec<String> = d
             .addresses
             .into_iter()
-            .filter(|a| peer_addr_is_routable(a))
+            .filter(|a| peer_addr_is_routable_for(a, &expected_peer))
             .collect();
         if addresses.is_empty() {
             // Nothing dialable survived. Deliberately before the root is noted: a rendezvous that
@@ -4638,9 +4663,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .discovery
             .plan(vec![candidate], roster, &*self.clock, &mut self.rng);
         for pd in plan {
+            let expected = *transport_peer_from_raw(&pd.peer).as_bytes();
+            let endpoints: Vec<DialEndpoint> = pd
+                .addresses
+                .iter()
+                .filter_map(|addr| validated_peer_endpoint(addr, &expected))
+                .collect();
+            let granted = self.endpoint_dials.reserve(
+                &self.group.group_id(),
+                &pd.peer,
+                &endpoints,
+                &*self.clock,
+            );
+            self.discovery
+                .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
+            if granted.is_empty() {
+                continue;
+            }
             self.note_dial_attempt(pd.peer.clone(), seq);
-            for addr in &pd.addresses {
-                let _ = self.transport.dial_addr(addr).await;
+            for addr in granted {
+                let _ = self.transport.dial_addr(&addr).await;
             }
         }
     }
@@ -4736,7 +4778,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// publish a fresher record later).
     ///
     /// Non-routable addresses (loopback, this LAN, CGNAT, link-local, multicast, reserved;
-    /// see [`peer_addr_is_routable`]) are dropped **before signing**, for two reasons. They
+    /// see [`peer_addr_is_routable_for`]) are dropped **before signing**, for two reasons. They
     /// publish this machine's internal topology to every member and buy nothing, since no
     /// remote peer can route to them; and filtering here is what lets the receive side reject
     /// such an address outright without ever tripping over an honest node, because a signature
@@ -4756,10 +4798,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if seq == u64::MAX {
             return Err(SyncError::Malformed);
         }
-        addresses.retain(|a| a.len() <= MAX_PEX_ADDR_LEN && peer_addr_is_routable(a));
-        addresses.truncate(MAX_PEX_ADDRESSES);
         let device_pubkey = self.device.public_key_bytes();
         let peer_id = *self.transport.local_peer().as_bytes();
+        addresses.retain(|a| a.len() <= MAX_PEX_ADDR_LEN && peer_addr_is_routable_for(a, &peer_id));
+        addresses.truncate(MAX_PEX_ADDRESSES);
         let payload = peer_record_signing_payload(&device_pubkey, &peer_id, &addresses, seq);
         let signature = self.device.sign(&payload)?;
         let desc = PeerDescriptor {
@@ -5169,12 +5211,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return false;
         }
-        // Address validation (see `peer_addr_is_routable`). The whole record goes, rather than
+        // Address validation (see `peer_addr_is_routable_for`). The whole record goes, rather than
         // the offending address: the record is stored to be **relayed on** to other members
         // under its author's own signature, and a record with an edited address list no longer
         // verifies. `publish_self_record` strips these before signing, so an honest member's
         // record never reaches this branch.
-        if desc.addresses.iter().any(|a| !peer_addr_is_routable(a)) {
+        if desc
+            .addresses
+            .iter()
+            .any(|a| !peer_addr_is_routable_for(a, &desc.peer_id))
+        {
             tracing::trace!("dropping peer record naming a non-routable address");
             return false;
         }
@@ -5851,7 +5897,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let addresses: Vec<String> = record
                     .addresses
                     .iter()
-                    .filter(|address| peer_addr_is_routable(address))
+                    .filter(|address| peer_addr_is_routable_for(address, &record.peer_id))
                     .cloned()
                     .collect();
                 if addresses.is_empty() {
@@ -5875,19 +5921,49 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .map(|candidate| (candidate.peer.clone(), candidate.seq))
             .collect();
+        let candidate_peers: HashMap<Vec<u8>, [u8; 32]> = candidates
+            .iter()
+            .filter_map(|candidate| {
+                let device = Self::cached_peer_device(&candidate.peer)?;
+                Some((
+                    candidate.peer.clone(),
+                    self.peer_records.get(&device)?.peer_id,
+                ))
+            })
+            .collect();
         let roster = self.member_count();
         let plan = self
             .discovery
             .plan(candidates, roster, &*self.clock, &mut self.rng);
-        let dialed = plan.len();
+        let mut dialed = 0;
         for pd in plan {
             // Record an attempt only once the policy actually plans it. Recording every
             // *candidate* would back off peers the dial budget deferred without touching a
             // socket, recreating the old sticky-dedup failure in a subtler form.
             let seq = candidate_seqs.get(&pd.peer).copied().unwrap_or(0);
+            let Some(expected) = candidate_peers.get(&pd.peer) else {
+                continue;
+            };
+            let endpoints: Vec<DialEndpoint> = pd
+                .addresses
+                .iter()
+                .filter_map(|addr| validated_peer_endpoint(addr, expected))
+                .collect();
+            let granted = self.endpoint_dials.reserve(
+                &self.group.group_id(),
+                &pd.peer,
+                &endpoints,
+                &*self.clock,
+            );
+            self.discovery
+                .refund_endpoint_budget(pd.addresses.len().saturating_sub(granted.len()));
+            if granted.is_empty() {
+                continue;
+            }
             self.note_dial_attempt(pd.peer.clone(), seq);
-            for addr in &pd.addresses {
-                let _ = self.transport.dial_addr(addr).await;
+            dialed += 1;
+            for addr in granted {
+                let _ = self.transport.dial_addr(&addr).await;
             }
         }
         dialed
@@ -9838,7 +9914,7 @@ mod tests {
         let hub = Hub::new();
         let alice = MlsDevice::generate().unwrap();
         let alice_group = ServerGroup::create(&alice).unwrap();
-        let alice_peer = PeerId::from_u64(1);
+        let alice_peer = test_transport_peer(1);
         let mut asy = ChannelSync::new(
             hub.join(alice_peer),
             alice_group,
@@ -9849,10 +9925,10 @@ mod tests {
 
         // Bob and Carol join, so both are roster members with valid signing keys.
         let mut joined = Vec::new();
-        for (n, nonce) in [(2u64, [1u8; 16]), (3u64, [2u8; 16])] {
+        for (n, nonce) in [(2u8, [1u8; 16]), (3u8, [2u8; 16])] {
             let dev = MlsDevice::generate().unwrap();
             let invite = asy.mint_invite(nonce, 10_000, vec![]).unwrap();
-            let net = hub.join(PeerId::from_u64(n));
+            let net = hub.join(test_transport_peer(n));
             let (res, _) = tokio::join!(
                 request_join(&net, alice_peer, &dev, &invite),
                 asy.run_once(),
@@ -9862,7 +9938,7 @@ mod tests {
                 net,
                 group,
                 dev,
-                ChaCha20Rng::seed_from_u64(n),
+                ChaCha20Rng::seed_from_u64(u64::from(n)),
                 Box::new(ManualClock::new(1_000)),
                 routing,
             ));
@@ -9872,7 +9948,7 @@ mod tests {
         let mut carol = it.next().unwrap();
 
         // Bob publishes an honest record; Alice takes it.
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
             .unwrap();
         let bob_record = bob.self_record().unwrap().clone();
         assert!(asy.ingest_peer_record(bob_record.clone()));
@@ -9880,10 +9956,11 @@ mod tests {
         // Carol signs a record claiming BOB's transport peer. It is validly signed by a current
         // member, so every check that existed before this one passes.
         carol
-            .publish_self_record(vec!["/ip4/203.0.113.3/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&carol, "/ip4/203.0.113.3/tcp/1")], 1)
             .unwrap();
         let mut squat = carol.self_record().unwrap().clone();
         squat.peer_id = bob_record.peer_id;
+        squat.addresses = vec![member_route(&bob, "/ip4/203.0.113.3/tcp/1")];
         let payload = peer_record_signing_payload(
             &squat.device_pubkey,
             &squat.peer_id,
@@ -9906,6 +9983,7 @@ mod tests {
         // A record claiming ALICE's own transport peer is refused for the same reason.
         let mut self_squat = squat;
         self_squat.peer_id = *asy.transport.local_peer().as_bytes();
+        self_squat.addresses = vec![member_route(&asy, "/ip4/203.0.113.3/tcp/1")];
         let payload = peer_record_signing_payload(
             &self_squat.device_pubkey,
             &self_squat.peer_id,
@@ -10265,7 +10343,7 @@ mod tests {
         let group = ServerGroup::create(&alice).unwrap();
         let hub = Hub::new();
         ChannelSync::new(
-            hub.join(PeerId::from_u64(1)),
+            hub.join(test_transport_peer(1)),
             group,
             alice,
             ChaCha20Rng::seed_from_u64(0),
@@ -10895,6 +10973,43 @@ mod tests {
 
     type Member = ChannelSync<MemNetwork, ChaCha20Rng>;
 
+    /// Deterministic libp2p identity used only to make test multiaddrs obey the production
+    /// `/p2p/<id>` → Phase-0 binding. The in-memory transport still sees only the hashed PeerId.
+    fn test_libp2p_peer(n: u8) -> libp2p::PeerId {
+        libp2p::identity::Keypair::ed25519_from_bytes([n; 32])
+            .unwrap()
+            .public()
+            .to_peer_id()
+    }
+
+    fn test_transport_peer(n: u8) -> PeerId {
+        catcoms_net::phase0_peer_id(&test_libp2p_peer(n))
+    }
+
+    fn test_peer_route(n: u8, base: &str) -> String {
+        format!("{base}/p2p/{}", test_libp2p_peer(n))
+    }
+
+    fn member_route<T: MeshTransport, R: CryptoRngCore>(
+        member: &ChannelSync<T, R>,
+        base: &str,
+    ) -> String {
+        let n = (1..=u8::MAX)
+            .find(|n| test_transport_peer(*n) == member.local_peer())
+            .expect("test member uses a deterministic libp2p-derived transport id");
+        test_peer_route(n, base)
+    }
+
+    fn member_routes<T: MeshTransport, R: CryptoRngCore>(
+        member: &ChannelSync<T, R>,
+        bases: &[&str],
+    ) -> Vec<String> {
+        bases
+            .iter()
+            .map(|base| member_route(member, base))
+            .collect()
+    }
+
     /// The in-memory broker intentionally models request delivery rather than connection
     /// lifecycle. Reply-code joining needs both, so this narrow wrapper injects deterministic
     /// `PeerConnected` events while delegating every wire operation to the real test transport.
@@ -11090,7 +11205,7 @@ mod tests {
         let founder = MlsDevice::generate().unwrap();
         let founder_id = founder.device_id();
         let fgroup = ServerGroup::create(&founder).unwrap();
-        let fpeer = PeerId::from_u64(1);
+        let fpeer = test_transport_peer(1);
         let mut founder_sync = ChannelSync::new(
             hub.join(fpeer),
             fgroup,
@@ -11106,7 +11221,7 @@ mod tests {
             let invite = founder_sync
                 .mint_invite([i as u8; 16], 10_000, vec![])
                 .unwrap();
-            let net = hub.join(PeerId::from_u64(i));
+            let net = hub.join(test_transport_peer(i as u8));
             let (joined, _) = tokio::join!(
                 request_join(&net, fpeer, &dev, &invite),
                 founder_sync.run_once(),
@@ -11162,10 +11277,10 @@ mod tests {
             .mint_invite(&device, [0x31; 16], 10_000, Vec::new())
             .unwrap();
         let inviter_peer = *PeerId::from_u64(41).as_bytes();
-        let helper_peer = *PeerId::from_u64(42).as_bytes();
+        let helper_peer = *test_transport_peer(42).as_bytes();
         let helper = MlsDevice::generate().unwrap();
         let helper_public_key = helper.public_key_bytes();
-        let helper_addresses = vec!["/ip4/203.0.113.42/tcp/22487".into()];
+        let helper_addresses = vec![test_peer_route(42, "/ip4/203.0.113.42/tcp/22487")];
         let helper_offer_payload = switchboard_offer_payload(
             &invite.group_id,
             &helper_public_key,
@@ -11238,8 +11353,8 @@ mod tests {
     #[tokio::test]
     async fn existing_member_forwards_only_the_inviter_signed_join_handshake() {
         let (hub, mut members, ids) = build_members(2).await;
-        let founder_peer = PeerId::from_u64(1);
-        let helper_peer = PeerId::from_u64(2);
+        let founder_peer = test_transport_peer(1);
+        let helper_peer = test_transport_peer(2);
         let joiner_peer = PeerId::from_u64(3);
 
         // The helper policy requires a live, proven member target. Production earns this through
@@ -11319,8 +11434,8 @@ mod tests {
     #[tokio::test]
     async fn standing_switchboard_requires_its_live_inviter_signed_route() {
         let (hub, mut members, ids) = build_members(2).await;
-        let founder_peer = PeerId::from_u64(1);
-        let helper_peer = PeerId::from_u64(2);
+        let founder_peer = test_transport_peer(1);
+        let helper_peer = test_transport_peer(2);
         let joiner_peer = PeerId::from_u64(30);
 
         let founder_public_key = members[0].device.public_key_bytes();
@@ -11345,7 +11460,7 @@ mod tests {
         let join_body = encode_join_req(&invite, &serialize_key_package(&key_package).unwrap());
 
         let helper_public_key = members[1].device.public_key_bytes();
-        let helper_addresses = vec!["/ip4/203.0.113.8/tcp/22487".into()];
+        let helper_addresses = vec![test_peer_route(2, "/ip4/203.0.113.8/tcp/22487")];
         let (valid_plan, expired, wrong_helper, too_far_future) = {
             let plan = |peer_id: [u8; 32], expires_at_ms: u64| {
                 let offer_payload = switchboard_offer_payload(
@@ -12109,7 +12224,7 @@ mod tests {
     #[test]
     fn peer_descriptor_roundtrips_and_self_verifies() {
         let mut node = solo_node();
-        node.publish_self_record(vec!["/ip4/1.2.3.4/tcp/9".into()], 5)
+        node.publish_self_record(vec![member_route(&node, "/ip4/1.2.3.4/tcp/9")], 5)
             .unwrap();
         let rec = node.self_record().unwrap().clone();
         assert!(rec.verify_self(), "a freshly-signed record self-verifies");
@@ -12164,7 +12279,7 @@ mod tests {
         let mut bob = it.next().unwrap();
         drop(it);
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
             .unwrap();
         // Bob is a member of Alice's roster and his record self-verifies → accepted.
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
@@ -12212,10 +12327,10 @@ mod tests {
         assert!(alice.connected_member_fingerprints().is_empty());
 
         // Alice learns Bob's + Carol's signed records (PEX).
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
             .unwrap();
         carol
-            .publish_self_record(vec!["/ip4/203.0.113.3/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&carol, "/ip4/203.0.113.3/tcp/1")], 1)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         assert!(alice.ingest_peer_record(carol.self_record().unwrap().clone()));
@@ -12309,7 +12424,7 @@ mod tests {
         let bob_fp = roles::fingerprint(&ids[1]);
 
         // Alice must hold Bob's signed peer record to address him (the UI gates this on Bob online).
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         assert!(bob.pending_dm_invites().is_empty());
@@ -12355,10 +12470,10 @@ mod tests {
         let bob_id = ids[1];
         let carol_id = ids[2];
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
             .unwrap();
         carol
-            .publish_self_record(vec!["/ip4/203.0.113.3/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&carol, "/ip4/203.0.113.3/tcp/1")], 1)
             .unwrap();
         // Carol already knows Bob's record (she joined after him, so Bob is in her
         // roster); seed it so she can relay it.
@@ -12439,7 +12554,9 @@ mod tests {
     /// the record passes `ingest_peer_record` exactly as a genuine one does.
     fn signed_record_claiming(member: &Member, peer_id: [u8; 32], seq: u64) -> PeerDescriptor {
         let device_pubkey = member.device.public_key_bytes();
-        let addresses = vec!["/ip4/203.0.113.77/tcp/9".to_string()];
+        // This helper tests transport-identity claim ownership, not route parsing. An empty route
+        // set is valid and avoids pretending an arbitrary Phase-0 id has an invertible libp2p id.
+        let addresses = Vec::new();
         let payload = peer_record_signing_payload(&device_pubkey, &peer_id, &addresses, seq);
         let signature = member.device.sign(&payload).unwrap();
         PeerDescriptor {
@@ -12572,47 +12689,68 @@ mod tests {
         // What a member may point every other member's dialer at. The private/loopback/CGNAT
         // rejects are the ones that matter: they turn PEX into an internal-network scanner run
         // from inside each victim's own LAN.
+        const TARGET: &str = "12D3KooWHp1hLNjWf4ZM4eLaiUdMGTbGnXDDDkhnE56P9CRbHx8E";
+        const OTHER: &str = "12D3KooWBGfsSWvGFAJeTz3oBPeRFbSadCwedBJvJ6AFAJtfkSD2";
+        let target_addr: libp2p::Multiaddr = format!("/ip4/203.0.113.4/tcp/9/p2p/{TARGET}")
+            .parse()
+            .unwrap();
+        let target_raw = target_addr
+            .iter()
+            .find_map(|part| match part {
+                libp2p::multiaddr::Protocol::P2p(peer) => Some(peer.to_bytes()),
+                _ => None,
+            })
+            .unwrap();
+        let expected = *blake3::hash(&target_raw).as_bytes();
         for good in [
-            "/ip4/203.0.113.4/tcp/9",
-            "/ip4/8.8.8.8/udp/443/quic-v1",
-            "/ip6/2001:db8::1/tcp/9",
-            "/ip4/198.51.100.1/tcp/4000/p2p/RELAY/p2p-circuit/p2p/SELF",
+            format!("/ip4/203.0.113.4/tcp/9/p2p/{TARGET}"),
+            format!("/ip4/8.8.8.8/udp/443/quic-v1/p2p/{TARGET}"),
+            format!("/ip6/2001:db8::1/tcp/9/p2p/{TARGET}"),
+            format!("/ip4/198.51.100.1/tcp/4000/p2p/{OTHER}/p2p-circuit/p2p/{TARGET}"),
             // 2001:db8::/32 is documentation, not Teredo (2001:0::/32); it stays allowed.
-            "/ip6/2001:db8::5/tcp/9",
+            format!("/ip6/2001:db8::5/tcp/9/p2p/{TARGET}"),
         ] {
-            assert!(peer_addr_is_routable(good), "{good} should be accepted");
+            assert!(
+                peer_addr_is_routable_for(&good, &expected),
+                "{good} should be accepted"
+            );
         }
         for bad in [
-            "/ip4/127.0.0.1/tcp/9",          // loopback
-            "/ip4/192.168.1.1/tcp/9",        // RFC1918
-            "/ip4/10.0.0.5/tcp/9",           // RFC1918
-            "/ip4/172.20.0.5/tcp/9",         // RFC1918 (the easy one to get wrong)
-            "/ip4/100.64.0.1/tcp/9",         // RFC6598 CGNAT
-            "/ip4/169.254.1.1/tcp/9",        // link-local
-            "/ip4/0.0.0.0/tcp/9",            // unspecified / "this network"
-            "/ip4/224.0.0.1/tcp/9",          // multicast
-            "/ip4/240.0.0.1/tcp/9",          // reserved
-            "/ip6/::1/tcp/9",                // loopback
-            "/ip6/fd00::1/tcp/9",            // unique-local
-            "/ip6/fe80::1/tcp/9",            // link-local
-            "/ip6/ff02::1/tcp/9",            // multicast
-            "/ip6/::ffff:192.168.1.1/tcp/9", // a private v4 smuggled through v6
-            "/ip4/not-an-address/tcp/9",     // malformed: fail closed
-            "/ip4",                          // truncated: fail closed
+            format!("/ip4/127.0.0.1/tcp/9/p2p/{TARGET}"), // loopback
+            format!("/ip4/192.168.1.1/tcp/9/p2p/{TARGET}"), // RFC1918
+            format!("/ip4/10.0.0.5/tcp/9/p2p/{TARGET}"),  // RFC1918
+            format!("/ip4/172.20.0.5/tcp/9/p2p/{TARGET}"), // RFC1918
+            format!("/ip4/100.64.0.1/tcp/9/p2p/{TARGET}"), // RFC6598 CGNAT
+            format!("/ip4/169.254.1.1/tcp/9/p2p/{TARGET}"), // link-local
+            format!("/ip4/0.0.0.0/tcp/9/p2p/{TARGET}"),   // unspecified
+            format!("/ip4/224.0.0.1/tcp/9/p2p/{TARGET}"), // multicast
+            format!("/ip4/240.0.0.1/tcp/9/p2p/{TARGET}"), // reserved
+            format!("/ip6/::1/tcp/9/p2p/{TARGET}"),       // loopback
+            format!("/ip6/fd00::1/tcp/9/p2p/{TARGET}"),   // unique-local
+            format!("/ip6/fe80::1/tcp/9/p2p/{TARGET}"),   // link-local
+            format!("/ip6/ff02::1/tcp/9/p2p/{TARGET}"),   // multicast
+            format!("/ip6/::ffff:192.168.1.1/tcp/9/p2p/{TARGET}"),
+            "/ip4/not-an-address/tcp/9".to_string(), // malformed: fail closed
+            "/ip4".to_string(),                      // truncated: fail closed
+            "/ip4/203.0.113.4/tcp/9".to_string(),    // no peer binding
+            format!("/ip4/203.0.113.4/tcp/9/p2p/{OTHER}"), // wrong peer binding
             // A relayed address whose *relay* is on the LAN is still a LAN dial.
-            "/ip4/192.168.1.9/tcp/4000/p2p/RELAY/p2p-circuit/p2p/SELF",
+            format!("/ip4/192.168.1.9/tcp/4000/p2p/{OTHER}/p2p-circuit/p2p/{TARGET}"),
             // A name resolved at dial time is a target we never get to inspect, and its A
             // record can point anywhere the publisher likes, whenever they like.
-            "/dns4/scan.attacker.invalid/tcp/22",
-            "/dns6/scan.attacker.invalid/tcp/22",
-            "/dns/scan.attacker.invalid/tcp/22",
-            "/dnsaddr/scan.attacker.invalid",
+            format!("/dns4/scan.attacker.invalid/tcp/22/p2p/{TARGET}"),
+            format!("/dns6/scan.attacker.invalid/tcp/22/p2p/{TARGET}"),
+            format!("/dns/scan.attacker.invalid/tcp/22/p2p/{TARGET}"),
+            format!("/dnsaddr/scan.attacker.invalid/tcp/22/p2p/{TARGET}"),
             // The transitional ranges each embed an IPv4 the kernel unwraps.
-            "/ip6/2002:c0a8:0101::1/tcp/9", // 6to4 wrapping 192.168.1.1
-            "/ip6/2001:0:1234::1/tcp/9",    // Teredo
-            "/ip6/64:ff9b::c0a8:101/tcp/9", // NAT64 wrapping 192.168.1.1
+            format!("/ip6/2002:c0a8:0101::1/tcp/9/p2p/{TARGET}"),
+            format!("/ip6/2001:0:1234::1/tcp/9/p2p/{TARGET}"),
+            format!("/ip6/64:ff9b::c0a8:101/tcp/9/p2p/{TARGET}"),
         ] {
-            assert!(!peer_addr_is_routable(bad), "{bad} should be rejected");
+            assert!(
+                !peer_addr_is_routable_for(&bad, &expected),
+                "{bad} should be rejected"
+            );
         }
     }
 
@@ -12625,33 +12763,37 @@ mod tests {
 
         // Publishing strips the addresses that must not leave the box, before signing.
         bob.publish_self_record(
-            vec![
-                "/ip4/192.168.1.50/tcp/9".into(),
-                "/ip4/203.0.113.9/tcp/9".into(),
-                "/ip4/127.0.0.1/tcp/9".into(),
-            ],
+            member_routes(
+                &bob,
+                &[
+                    "/ip4/192.168.1.50/tcp/9",
+                    "/ip4/203.0.113.9/tcp/9",
+                    "/ip4/127.0.0.1/tcp/9",
+                ],
+            ),
             1,
         )
         .unwrap();
         assert_eq!(
             bob.self_record().unwrap().addresses,
-            vec!["/ip4/203.0.113.9/tcp/9".to_string()],
+            vec![member_route(&bob, "/ip4/203.0.113.9/tcp/9")],
             "only the routable address survives, so the signature covers a clean list"
         );
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
 
         // A hand-rolled record (a modified client) naming a LAN host is refused outright, even
         // though its self-signature is perfectly valid and its signer is a real member.
+        let hostile_address = member_route(&bob, "/ip4/192.168.1.1/tcp/80");
         let payload = peer_record_signing_payload(
             &bob.device.public_key_bytes(),
             bob.local_peer().as_bytes(),
-            &["/ip4/192.168.1.1/tcp/80".to_string()],
+            std::slice::from_ref(&hostile_address),
             9,
         );
         let hostile = PeerDescriptor {
             device_pubkey: bob.device.public_key_bytes(),
             peer_id: *bob.local_peer().as_bytes(),
-            addresses: vec!["/ip4/192.168.1.1/tcp/80".into()],
+            addresses: vec![hostile_address],
             seq: 9,
             signature: bob.device.sign(&payload).unwrap(),
         };
@@ -12659,7 +12801,7 @@ mod tests {
         assert!(!alice.ingest_peer_record(hostile), "…and still refused");
         assert_eq!(
             alice.peer_record(&ids[1]).unwrap().addresses,
-            vec!["/ip4/203.0.113.9/tcp/9".to_string()],
+            vec![member_route(&bob, "/ip4/203.0.113.9/tcp/9")],
             "the refused record did not overwrite the good one despite its higher seq"
         );
     }
@@ -12673,7 +12815,7 @@ mod tests {
         let mut bob = it.next().unwrap();
         let bob_peer = bob.local_peer();
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 7)
             .unwrap();
         // Alice knows of Bob only as a transport peer (as she would after serving his join).
         alice.remember_peer(bob_peer);
@@ -12757,19 +12899,21 @@ mod tests {
             .next()
             .expect("a member-only namespace");
 
+        let attacker_peer = test_libp2p_peer(70);
+        let attacker_raw = attacker_peer.to_bytes();
         let scan = DiscoveredPeer {
-            peer: b"attacker-peer".to_vec(),
+            peer: attacker_raw.clone(),
             addresses: vec![
-                "/ip4/192.168.1.1/tcp/22".into(),
-                "/ip4/127.0.0.1/tcp/22".into(),
-                "/dns4/scan.attacker.invalid/tcp/22".into(),
+                format!("/ip4/192.168.1.1/tcp/22/p2p/{attacker_peer}"),
+                format!("/ip4/127.0.0.1/tcp/22/p2p/{attacker_peer}"),
+                format!("/dns4/scan.attacker.invalid/tcp/22/p2p/{attacker_peer}"),
             ],
             namespace: ns.clone(),
             seq: 1,
         };
         alice.ingest_discovered(scan).await;
         assert!(
-            !alice.dial_retries.contains_key(b"attacker-peer".as_slice()),
+            !alice.dial_retries.contains_key(attacker_raw.as_slice()),
             "nothing dialable survived, so the record was dropped whole"
         );
         assert_eq!(
@@ -12779,17 +12923,19 @@ mod tests {
         );
 
         // A record with a mix keeps only the routable half, and still counts as a real answer.
+        let honest_peer = test_libp2p_peer(71);
+        let honest_raw = honest_peer.to_bytes();
         let mixed = DiscoveredPeer {
-            peer: b"honest-peer".to_vec(),
+            peer: honest_raw.clone(),
             addresses: vec![
-                "/ip4/10.0.0.7/tcp/9".into(),
-                "/ip4/203.0.113.7/tcp/9".into(),
+                format!("/ip4/10.0.0.7/tcp/9/p2p/{honest_peer}"),
+                format!("/ip4/203.0.113.7/tcp/9/p2p/{honest_peer}"),
             ],
             namespace: ns,
             seq: 1,
         };
         alice.ingest_discovered(mixed).await;
-        assert!(alice.dial_retries.contains_key(b"honest-peer".as_slice()));
+        assert!(alice.dial_retries.contains_key(honest_raw.as_slice()));
         // Still not corroboration: a routable address is a dialable answer, not evidence that the
         // peer named is real. The root counts only once a roster member's signed record claims
         // that transport peer (see
@@ -12814,7 +12960,7 @@ mod tests {
         let stranger = DeviceId::from_bytes([0xEE; 32]);
         assert!(!alice.group.contains_device(&stranger));
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 1)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 1)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         assert_eq!(alice.cache_known_records(), 1);
@@ -12844,37 +12990,6 @@ mod tests {
             "only the member is dialled; the ex-member never is"
         );
 
-        // A group larger than one dial-budget window still gets everybody attempted eventually:
-        // only the peers the policy actually planned receive retry state.
-        for n in 0..24u8 {
-            let mut b = [0u8; 32];
-            b[0] = 0xA0 | (n & 0x0F);
-            b[1] = n;
-            alice.address_cache.insert(
-                CachedPeer {
-                    peer: b.to_vec(),
-                    addresses: vec![format!("/ip4/203.0.113.{}/tcp/1", 10 + n)],
-                    seq: 1,
-                    record: Vec::new(),
-                },
-                &mut alice.rng,
-            );
-        }
-        alice.dial_retries.clear();
-        let first = alice.dial_cached_peers().await;
-        assert!(
-            first > 0 && alice.dial_retries.len() == first,
-            "only the peers the policy planned are backed off, got {first} planned and {} tracked",
-            alice.dial_retries.len()
-        );
-        // Tidy up before the cache assertions below. Retain Bob by his *exact* device id, not by
-        // the filler rows' byte pattern: a real device id is a BLAKE3 hash, so it matches the
-        // `0xA0` nibble one time in sixteen, and this cleanup then deleted the genuine member too
-        // and left the count assertion below reading 0. That made the test flaky, not the code.
-        let bob_peer = bob.device.device_id().as_bytes().to_vec();
-        alice.address_cache.retain(|c| c.peer == bob_peer);
-        alice.dial_retries.clear();
-
         // ...and a sealed cache carrying the row does not resurrect them either: the load-time
         // re-proof drops any row whose record does not verify against the current roster.
         let key = [3u8; 32];
@@ -12899,7 +13014,7 @@ mod tests {
         let clock = ManualClock::new(1_000);
         alice.clock = Arc::new(clock.clone());
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 7)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         assert_eq!(alice.cache_known_records(), 1);
@@ -12936,14 +13051,17 @@ mod tests {
         let clock = ManualClock::new(1_000);
         alice.clock = Arc::new(clock);
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 7)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         alice.cache_known_records();
         assert_eq!(alice.dial_cached_peers().await, 1);
 
-        bob.publish_self_record(vec!["/ip6/2001:db8::22/udp/1/quic-v1".into()], 8)
-            .unwrap();
+        bob.publish_self_record(
+            vec![member_route(&bob, "/ip6/2001:db8::22/udp/1/quic-v1")],
+            8,
+        )
+        .unwrap();
         assert!(
             !alice.ingest_peer_record(bob.self_record().unwrap().clone()),
             "a refresh is accepted but is not counted as a newly-known member"
@@ -12972,7 +13090,7 @@ mod tests {
         let mut bob = it.next().unwrap();
         let bob_transport = bob.local_peer();
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 7)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 7)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         alice.cache_known_records();
@@ -13005,7 +13123,7 @@ mod tests {
         let mut bob = it.next().unwrap();
         let bob_id = ids[1];
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 4)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 4)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         alice.cache_known_records();
@@ -13047,7 +13165,7 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 2)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 2)
             .unwrap();
         let record = bob.self_record().unwrap().encode();
         // Bob's record, filed under Alice's device id.
@@ -13082,7 +13200,7 @@ mod tests {
         let group = ServerGroup::create(&founder).unwrap();
         let clock = ManualClock::new(1_000);
         let mut node = ChannelSync::new(
-            hub.join(PeerId::from_u64(1)),
+            hub.join(test_transport_peer(1)),
             group,
             founder,
             ChaCha20Rng::seed_from_u64(1),
@@ -13132,7 +13250,7 @@ mod tests {
 
         // Our own record is never the victim, however stale it looks: it is stamped once at
         // publish and then never refreshed, so it is exactly the entry a pure LRU would take.
-        node.publish_self_record(vec!["/ip4/203.0.113.5/tcp/9".into()], 1)
+        node.publish_self_record(vec![member_route(&node, "/ip4/203.0.113.5/tcp/9")], 1)
             .unwrap();
         let own = node.device.device_id();
         for i in 0..8 {
@@ -13153,12 +13271,12 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
 
-        bob.publish_self_record(vec!["/ip4/203.0.113.2/tcp/1".into()], 3)
+        bob.publish_self_record(vec![member_route(&bob, "/ip4/203.0.113.2/tcp/1")], 3)
             .unwrap();
         assert!(alice.ingest_peer_record(bob.self_record().unwrap().clone()));
         // Our own record is not a route past anything, so it is not cached.
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
             .unwrap();
         assert_eq!(alice.cache_known_records(), 1);
         assert_eq!(alice.cached_peer_count(), 1);
@@ -13196,7 +13314,7 @@ mod tests {
         let mut bob = it.next().unwrap();
 
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
             .unwrap();
         assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
 
@@ -13228,7 +13346,7 @@ mod tests {
     #[async_trait::async_trait]
     impl MeshTransport for StallingNet {
         fn local_peer(&self) -> PeerId {
-            PeerId::from_u64(1)
+            test_transport_peer(1)
         }
         async fn subscribe(&self, _topic: Topic) -> Result<(), TransportError> {
             Ok(())
@@ -13285,7 +13403,7 @@ mod tests {
         );
         // Any current member with a record will do; the subject here is which transport verb the
         // send reaches for, not who it is addressed to.
-        node.publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+        node.publish_self_record(vec![member_route(&node, "/ip4/203.0.113.1/tcp/1")], 1)
             .unwrap();
 
         let sent = tokio::time::timeout(
@@ -13334,7 +13452,7 @@ mod tests {
 
         // Everyone can address Alice.
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
             .unwrap();
         for n in [&mut bob, &mut carol] {
             assert!(n.ingest_peer_record(alice.self_record().unwrap().clone()));
@@ -13534,15 +13652,17 @@ mod tests {
             .next()
             .expect("a founder derives at least the current namespace");
 
+        let good_peer = test_libp2p_peer(72);
+        let good_raw = good_peer.to_bytes();
         let good = DiscoveredPeer {
-            peer: vec![1, 2, 3],
-            addresses: vec!["/ip4/5.6.7.8/tcp/1".into()],
+            peer: good_raw.clone(),
+            addresses: vec![format!("/ip4/5.6.7.8/tcp/1/p2p/{good_peer}")],
             namespace: ns,
             seq: 7,
         };
         alice.ingest_discovered(good).await;
         assert!(
-            alice.dial_retries.contains_key(&vec![1, 2, 3]),
+            alice.dial_retries.contains_key(&good_raw),
             "a record under our namespace is processed"
         );
 
@@ -13563,7 +13683,7 @@ mod tests {
     async fn pex_to_a_non_member_is_rejected() {
         let mut alice = solo_node();
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
             .unwrap();
         let gid = alice.group.group_id();
         // A non-member crafts a syntactically-valid authed PEX request; Alice's
@@ -13595,7 +13715,7 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         alice
-            .publish_self_record(vec!["/ip4/203.0.113.1/tcp/1".into()], 1)
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
             .unwrap();
         let bob_peer = bob.local_peer();
         // Bob (a member) signs a PEX request; strip the leading kind byte for serve_pex.

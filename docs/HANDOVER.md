@@ -307,9 +307,20 @@ and re-verifies it on load. Ordinary interface refresh is also live: one process
 route/interface monitor debounces platform events and wakes every server to poll route-selected
 IPv4/IPv6 sources, reconcile per-source address ownership, update libp2p external addresses, and
 publish one newer signed record before PEX. The roughly-minute discovery poll remains the repair
-path when native monitoring is unavailable or misses an event. Current discovery follow-ups are pairwise reachability
-evidence, reciprocal-dial signalling, swarm-style indirect probes/views, typed member health, and
-TTL-aware rendezvous scheduling; see the checked backlog in `design-postjoin-discovery.md`.
+path when native monitoring is unavailable or misses an event. The first two reciprocal-dial review
+prerequisites are now complete: peer/invite/switchboard discovery routes use one canonical grammar
+with a mandatory terminal id matching the signed/discovered Phase-0 peer, and the network actor has
+no bare-address fallback; `DiscoveryPolicy` meters every address and a single desktop-owned
+`EndpointDialScheduler` bounds normalized socket/prefix, peer, server and process starts across all
+server actors and pre-join rendezvous/direct/switchboard, two-way reply, and companion-grant paths.
+Its default process window is 32
+endpoints per minute; counters are bounded, monotonic and session-only. The scheduler does not yet
+own process-wide in-flight leases, and endpoint signatures still do not prove IP/port ownership.
+
+Current discovery follow-ups are the typed peer-bound batch API, the capability-gated addressed
+reciprocal/helper protocol and actor cancellation/replay state, pairwise reachability evidence,
+swarm-style indirect probes/views, typed member health, and TTL-aware rendezvous scheduling; see the
+checked backlog in `design-postjoin-discovery.md`.
 
 ### Earlier blocks (history)
 6d-1b (missed-commit recovery + past-epoch key window) and 6d-2 (fork resolution +
