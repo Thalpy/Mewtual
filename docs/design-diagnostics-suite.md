@@ -231,6 +231,28 @@ shared implementation, and M6 should collapse them rather than add a third.
   rendered. The test counts renders through the field's own `Debug` impl rather than asserting on a
   proxy: with capture off, across a hundred events, the count does not move.
 
+### Off means off, audited
+
+"Off" was true of the store and not of anything in front of it. Four places kept working:
+
+| Path | What it cost while off | Now |
+|---|---|---|
+| The `tracing` bridge | Every field of every event rendered to a `String` | Gated in the layer's filter |
+| `new_trace`, `new_span`, `reference` | The store's mutex, two or three times per traced command | Lock-free: an atomic counter and an `Arc` salt |
+| Native event building | References cloned and text bounded for events the gate rejects | `record_with` builds only if it will be kept |
+| The webview's recorder | Objects built and an IPC call every 250ms, discarded natively | Told by `capture-changed`; produces nothing |
+
+The last one is the one that could not be found by reading the native side: the webview cannot see
+the gate, so it had to be told. It is told rather than polled, because the mode only moves when
+somebody moves it.
+
+`record_with` takes a closure and still counts the rejection. An `admits` check at each call site
+would have been simpler and would have quietly lost `filtered`, which is the number that separates
+a section silent by policy from one silent because nothing happened.
+
+Each is pinned by a test that counts the work rather than asserting on a proxy for it: a `Debug`
+impl that counts renders, a closure that counts builds, a fake bridge that counts batches.
+
 ### What "turn off the debug log" actually turns off
 
 Worth stating because it is easy to assume otherwise, and a wrong assumption here is a privacy one.

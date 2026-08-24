@@ -12822,6 +12822,24 @@
     },
     { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
   );
+  /**
+   * Whether the diagnostics are capturing anything at all.
+   *
+   * Starts true because capture starts on and is never persisted, so a fresh webview always begins
+   * beside a fresh process that is recording. The native side says otherwise by emitting
+   * `capture-changed`, which only happens when somebody moves the control.
+   *
+   * The point of knowing here rather than only natively: off has to mean the app stops paying, not
+   * that it keeps building records and has them thrown away on the other side of an IPC call.
+   */
+  let captureOn = true;
+
+  /** Follow the native capture setting, in both of the webview's producers. */
+  function setCapture(on: boolean) {
+    captureOn = on;
+    diagRecorder.setCapturing(on);
+  }
+
   /** Record one structured observation from the webview. */
   function diagRecord(event: DiagEvent) {
     diagRecorder.record(event);
@@ -12898,6 +12916,10 @@
     // accelerating when it was the logger multiplying.
     uiLogging = installUiLogging(
       (records) => {
+        // Off means off here too. The hooks stay installed, because reinstalling them on every
+        // capture change is how the duplicate-listener bug this cleanup exists for came back; what
+        // stops is the sending.
+        if (!captureOn) return;
         void invoke("log_ui_batch", { records }).catch(() => {
           /* the log is not worth an error of its own */
         });
@@ -12943,6 +12965,11 @@
     const subs: Promise<UnlistenFn>[] = [
       appWindow.onResized(() => syncMaximized()),
       appWindow.onFocusChanged(({ payload }) => (windowFocused = payload)),
+      // Capture is a native setting, and the webview is one of the things that feeds it. Told
+      // rather than polled: the mode only moves when somebody moves it.
+      listen<{ mode: string }>("capture-changed", (e) => {
+        setCapture(e.payload.mode !== "off");
+      }),
       listen<{ server: number }>("channels-changed", (e) => {
         void refreshChannels(e.payload.server);
       }),

@@ -126,6 +126,50 @@ test("observations go in one batch rather than one call each", () => {
   assert.deepEqual(sent[0].map((e) => e.code), ["A", "B"]);
 });
 
+/**
+ * Off has to mean the webview stops paying, not that it keeps building observations and sending
+ * them across the bridge for the native side to discard.
+ *
+ * The webview cannot see the native capture gate, so it is told. Recording starts on because
+ * capture starts on and is never persisted: a fresh webview always begins beside a process that is
+ * recording, and the only thing that changes that is somebody moving the control.
+ */
+test("a recorder that has been switched off queues nothing and sends nothing", () => {
+  const t = timers();
+  const sent: UiEvent[][] = [];
+  const recorder = makeRecorder((events) => sent.push(events), t.scope);
+  assert.equal(recorder.capturing, true, "capture starts on, so recording does");
+
+  recorder.setCapturing(false);
+  for (let n = 0; n < 500; n += 1) recorder.record(observation(`E${n}`));
+  t.run();
+  assert.deepEqual(sent, [], "not one batch crossed the bridge");
+  assert.equal(recorder.pending, 0, "and nothing accumulated waiting for one");
+  assert.equal(recorder.dropped, 0, "discarded by request is not the same as lost");
+
+  // And it comes straight back, with no restart and no reinstalling anything.
+  recorder.setCapturing(true);
+  recorder.record(observation("AFTER"));
+  t.run();
+  assert.deepEqual(sent.map((batch) => batch.map((e) => e.code)), [["AFTER"]]);
+});
+
+test("turning capture off discards what was queued rather than delivering it late", () => {
+  // Those are observations the user has just said they do not want kept. Flushing them anyway
+  // would make the control mean "stop soon", which is the sort of nearly-off that makes a privacy
+  // setting untrustworthy.
+  const t = timers();
+  const sent: UiEvent[][] = [];
+  const recorder = makeRecorder((events) => sent.push(events), t.scope);
+  recorder.record(observation("QUEUED"));
+  assert.equal(recorder.pending, 1);
+
+  recorder.setCapturing(false);
+  assert.equal(recorder.pending, 0);
+  t.run();
+  assert.deepEqual(sent, [], "the pending batch never went");
+});
+
 test("a full queue drops the oldest and counts it", () => {
   const t = timers();
   const recorder = makeRecorder(() => {}, t.scope);

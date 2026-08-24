@@ -2091,38 +2091,42 @@ impl Operation {
                 "failed" => catcoms_diagnostics::Level::Warn,
                 _ => catcoms_diagnostics::Level::Debug,
             };
-            let mut event =
-                catcoms_diagnostics::DiagnosticEvent::new(self.section, level, "REACH.STEP")
-                    .target("catcoms_app")
-                    .phase(catcoms_diagnostics::Phase::Progress)
-                    .operation(self.operation)
-                    .trace(self.trace)
-                    .refs(catcoms_diagnostics::Refs {
-                        server: self.server.clone(),
-                        ..catcoms_diagnostics::Refs::default()
-                    })
-                    .field("kind", catcoms_diagnostics::SafeText::describe(&step.kind))
-                    .field(
-                        "status",
-                        catcoms_diagnostics::SafeText::describe(&step.status),
-                    )
-                    .field("at_ms", step.at);
-            if !step.target.is_empty() {
-                // The step's subject is usually an address, so it goes in as one: Safe mode keeps
-                // its family and transport, which is what diagnoses a route problem, and drops the
-                // literal that would stop the report being publishable.
-                event = event.field(
-                    "target",
-                    catcoms_diagnostics::AddressValue::new(&step.target),
-                );
-            }
-            if !step.detail.is_empty() {
-                event = event.field(
-                    "detail",
-                    catcoms_diagnostics::SafeText::describe(&step.detail),
-                );
-            }
-            catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
+            // A replay walks every step of an attempt and each one bounds two or three strings, so
+            // this is the loop where building an excluded event is most obviously wasted.
+            catcoms_log::hub().record_with(self.section, level, || {
+                let mut event =
+                    catcoms_diagnostics::DiagnosticEvent::new(self.section, level, "REACH.STEP")
+                        .target("catcoms_app")
+                        .phase(catcoms_diagnostics::Phase::Progress)
+                        .operation(self.operation)
+                        .trace(self.trace)
+                        .refs(catcoms_diagnostics::Refs {
+                            server: self.server.clone(),
+                            ..catcoms_diagnostics::Refs::default()
+                        })
+                        .field("kind", catcoms_diagnostics::SafeText::describe(&step.kind))
+                        .field(
+                            "status",
+                            catcoms_diagnostics::SafeText::describe(&step.status),
+                        )
+                        .field("at_ms", step.at);
+                if !step.target.is_empty() {
+                    // The step's subject is usually an address, so it goes in as one: Safe mode
+                    // keeps its family and transport, which is what diagnoses a route problem, and
+                    // drops the literal that would stop the report being publishable.
+                    event = event.field(
+                        "target",
+                        catcoms_diagnostics::AddressValue::new(&step.target),
+                    );
+                }
+                if !step.detail.is_empty() {
+                    event = event.field(
+                        "detail",
+                        catcoms_diagnostics::SafeText::describe(&step.detail),
+                    );
+                }
+                event
+            });
         }
     }
 
@@ -2147,20 +2151,25 @@ impl Operation {
         code: &'static str,
         duration_ms: Option<u64>,
     ) {
-        let mut event = catcoms_diagnostics::DiagnosticEvent::new(self.section, level, code)
-            .target("catcoms_app")
-            .phase(phase)
-            .operation(self.operation)
-            .trace(self.trace)
-            .refs(catcoms_diagnostics::Refs {
-                server: self.server.clone(),
-                channel: self.channel.clone(),
-                ..catcoms_diagnostics::Refs::default()
-            });
-        if let Some(duration) = duration_ms {
-            event = event.took(duration);
-        }
-        catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
+        // Built only if it will be kept. Every stage of every command comes through here, and the
+        // reference clones below are not free, so a stage the config excludes should cost the two
+        // atomic loads of the gate and nothing else.
+        catcoms_log::hub().record_with(self.section, level, || {
+            let mut event = catcoms_diagnostics::DiagnosticEvent::new(self.section, level, code)
+                .target("catcoms_app")
+                .phase(phase)
+                .operation(self.operation)
+                .trace(self.trace)
+                .refs(catcoms_diagnostics::Refs {
+                    server: self.server.clone(),
+                    channel: self.channel.clone(),
+                    ..catcoms_diagnostics::Refs::default()
+                });
+            if let Some(duration) = duration_ms {
+                event = event.took(duration);
+            }
+            event
+        });
     }
 }
 
@@ -2253,37 +2262,40 @@ fn emit_tracked<S: Serialize + Clone>(
         Some(value) => app.emit(name, value),
         None => app.emit(name, payload),
     };
-    let event = match &sent {
-        Ok(()) => catcoms_diagnostics::DiagnosticEvent::new(
-            catcoms_diagnostics::Section::Ipc,
-            catcoms_diagnostics::Level::Debug,
-            "IPC.EVENT.EMITTED",
-        ),
-        // The failure this replaces. A backend that changed state while the webview never heard
-        // about it is a stale-UI bug with no evidence, and it used to leave none.
-        Err(_) => catcoms_diagnostics::DiagnosticEvent::warn(
-            catcoms_diagnostics::Section::Ipc,
-            "IPC.EVENT.EMIT_FAILED",
-        ),
+    // A successful emit is ordinary and frequent; a failed one is the thing somebody came looking
+    // for, so it is loud enough to survive a Safe-mode filter. The level is decided before the
+    // event is built, so an excluded one costs the gate's two atomic loads and nothing else.
+    let level = match &sent {
+        Ok(()) => catcoms_diagnostics::Level::Debug,
+        Err(_) => catcoms_diagnostics::Level::Warn,
     };
-    let mut event = event
+    catcoms_log::hub().record_with(catcoms_diagnostics::Section::Ipc, level, || {
+        let code = match &sent {
+            Ok(()) => "IPC.EVENT.EMITTED",
+            // The failure this replaces. A backend that changed state while the webview never
+            // heard about it is a stale-UI bug with no evidence, and it used to leave none.
+            Err(_) => "IPC.EVENT.EMIT_FAILED",
+        };
+        let mut event = catcoms_diagnostics::DiagnosticEvent::new(
+            catcoms_diagnostics::Section::Ipc,
+            level,
+            code,
+        )
         .target("catcoms_app")
         .trace(trace)
-        .field(
-            "event",
-            catcoms_diagnostics::SafeText::describe(name),
-        )
+        .field("event", catcoms_diagnostics::SafeText::describe(name))
         .field("seq", seq)
         // A payload the sequence could not be attached to is one the frontend cannot check for
         // gaps, so the record says which kind it was rather than leaving the absence unexplained.
         .field("numbered", carried);
-    if let Err(e) = &sent {
-        event = event.field(
-            "error",
-            catcoms_diagnostics::SafeText::describe(&e.to_string()),
-        );
-    }
-    catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
+        if let Err(e) = &sent {
+            event = event.field(
+                "error",
+                catcoms_diagnostics::SafeText::describe(&e.to_string()),
+            );
+        }
+        event
+    });
 }
 
 /// The most of a panic payload that is recorded.
@@ -10456,6 +10468,12 @@ async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Told to the webview when the capture mode moves, so it can stop producing records nobody wants.
+#[derive(Serialize, Clone)]
+struct CaptureModeEvt {
+    mode: &'static str,
+}
+
 /// One section's capture level, for the console's capture panel.
 #[derive(Serialize)]
 struct SectionCapture {
@@ -10515,6 +10533,7 @@ async fn get_capture_config(state: State<'_, AppState>) -> Result<CaptureConfigV
 /// nobody remembers making, and `Full` in particular is meant to expire on its own.
 #[tauri::command]
 async fn set_capture_mode(
+    app: AppHandle,
     state: State<'_, AppState>,
     mode: String,
 ) -> Result<CaptureConfigView, String> {
@@ -10522,6 +10541,17 @@ async fn set_capture_mode(
     let mode = catcoms_diagnostics::CaptureMode::parse(&mode)
         .ok_or_else(|| format!("unknown capture mode: {mode}"))?;
     catcoms_log::hub().set_mode(mode);
+    // The webview produces diagnostics too, and it cannot see the gate. Without being told, it
+    // would keep building records and sending them across the bridge for the native side to throw
+    // away, which is the same "kept paying, stopped keeping" shape the tracing layer had.
+    emit_tracked(
+        &app,
+        "capture-changed",
+        CaptureModeEvt {
+            mode: mode.as_str(),
+        },
+        catcoms_diagnostics::TraceId::default(),
+    );
     // Recorded through the pipeline's own section, which is never turned down: a report that
     // changed what it was capturing halfway through, silently, is a report that misleads about a
     // gap. `Off` records nothing at all, including this, which is what off means.
@@ -10900,33 +10930,37 @@ async fn record_ui_events(events: Vec<UiDiagnosticEvent>) {
             continue;
         }
 
-        // The code is data from the webview, so it cannot be the `&'static str` a structured event
-        // wants. It is bounded and carried as a field instead, and the event's own code says where
-        // it came from. A webview cannot mint an arbitrary code that later shows up in an issue
-        // title, which is the property that matters.
-        let mut recorded = DiagnosticEvent::new(
-            ui_section(&event.section),
-            ui_level(&event.level),
-            "UI.EVENT",
-        )
-        .target("catcoms_ui")
-        .phase(ui_phase(&event.phase))
-        .field("code", SafeText::describe(&event.code));
+        // Built only if it will be kept. Each of these bounds the webview's code, its trace and
+        // every one of its fields, and the webview is the producer with the least restraint in the
+        // process, so an excluded batch should cost the gate and nothing else.
+        let section = ui_section(&event.section);
+        let level = ui_level(&event.level);
+        catcoms_log::hub().record_with(section, level, || {
+            // The code is data from the webview, so it cannot be the `&'static str` a structured
+            // event wants. It is bounded and carried as a field instead, and the event's own code
+            // says where it came from. A webview cannot mint an arbitrary code that later shows up
+            // in an issue title, which is the property that matters.
+            let mut recorded = DiagnosticEvent::new(section, level, "UI.EVENT")
+                .target("catcoms_ui")
+                .phase(ui_phase(&event.phase))
+                .field("code", SafeText::describe(&event.code));
 
-        if let Some(duration) = event.duration_ms {
-            recorded = recorded.took(duration);
-        }
-        // The trace becomes the event's own trace, not a field that happens to be called "trace".
-        // As a field it rendered as text, did not reach `DiagnosticHub::trace`, and so could not
-        // gather the webview's half of an operation with the native half: the correlation the whole
-        // mechanism exists for stopped exactly at the bridge. Found by adversarial review (P3-011).
-        if let Some(trace) = parse_trace(&event.trace) {
-            recorded = recorded.trace(trace);
-        }
-        for (name, value) in event.fields {
-            recorded = recorded.field(name, ui_field(&value));
-        }
-        catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), recorded);
+            if let Some(duration) = event.duration_ms {
+                recorded = recorded.took(duration);
+            }
+            // The trace becomes the event's own trace, not a field that happens to be called
+            // "trace". As a field it rendered as text, did not reach `DiagnosticHub::trace`, and so
+            // could not gather the webview's half of an operation with the native half: the
+            // correlation the whole mechanism exists for stopped exactly at the bridge. Found by
+            // adversarial review (P3-011).
+            if let Some(trace) = parse_trace(&event.trace) {
+                recorded = recorded.trace(trace);
+            }
+            for (name, value) in event.fields {
+                recorded = recorded.field(name, ui_field(&value));
+            }
+            recorded
+        });
     }
 
     fn ui_section(name: &str) -> Section {

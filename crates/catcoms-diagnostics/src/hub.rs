@@ -37,10 +37,6 @@ pub const DEFAULT_CAPACITY: usize = 8192;
 struct HubInner {
     ring: Ring,
     config: CaptureConfig,
-    salt: SessionSalt,
-    /// Source of trace and span identifiers. A counter rather than randomness: these need to be
-    /// unique within one session and nothing more, and a counter is reproducible under test.
-    next_id: u64,
     /// Where this session's monotonic clock started, so elapsed time is measured from process
     /// start rather than from an arbitrary origin.
     origin_ms: u64,
@@ -61,6 +57,10 @@ struct HubInner {
 /// * The clock is read before the lock, never under it.
 /// * Field names are owned by the event rather than interned in a shared table, so building one
 ///   touches no global state.
+/// * Minting a trace or a span, and reducing an identifier to a reference, take no lock either.
+///   Those are the calls an *instrumented command* makes before it knows whether anything will be
+///   recorded, so putting the store's mutex behind them meant every traced operation contended for
+///   the diagnostics lock two or three times even with capture switched off.
 #[derive(Clone)]
 pub struct DiagnosticHub {
     inner: Arc<Mutex<HubInner>>,
@@ -69,6 +69,17 @@ pub struct DiagnosticHub {
     gate: Arc<CaptureGate>,
     /// Counted outside the lock too, for the same reason.
     filtered: Arc<AtomicU64>,
+    /// Source of trace and span identifiers. A counter rather than randomness: these need to be
+    /// unique within one session and nothing more, and a counter is reproducible under test.
+    ///
+    /// Atomic and outside the store, because a trace is minted at the *start* of an operation,
+    /// before anything is known about whether it will be recorded. Behind the store's mutex it put
+    /// the diagnostics lock on the front of every instrumented command.
+    next_id: Arc<AtomicU64>,
+    /// Fixed for the life of the session, so it needs no lock to read and no synchronisation to
+    /// stay coherent. Kept behind an `Arc` rather than cloned into each handle so that a salt still
+    /// exists in exactly one place.
+    salt: Arc<SessionSalt>,
     clock: Arc<dyn Clock>,
     session_id: String,
 }
@@ -104,12 +115,12 @@ impl DiagnosticHub {
             inner: Arc::new(Mutex::new(HubInner {
                 ring: Ring::new(capacity),
                 config,
-                salt,
-                next_id: 0,
                 origin_ms,
             })),
             gate,
             filtered: Arc::new(AtomicU64::new(0)),
+            next_id: Arc::new(AtomicU64::new(0)),
+            salt: Arc::new(salt),
             clock,
             session_id,
         }
@@ -154,26 +165,63 @@ impl DiagnosticHub {
         self.gate.admits(section, level)
     }
 
+    /// Record an event that is only built if it is going to be kept.
+    ///
+    /// [`record`](Self::record) takes an event that has already been constructed, which means every
+    /// caller pays for the references, the owned strings and the `SafeText` bounds of an event the
+    /// config was always going to reject. That is the same mistake the `tracing` bridge made, one
+    /// layer up: capture switched off stopped the app *keeping* the results and not *paying* for
+    /// them.
+    ///
+    /// Prefer this wherever building an event allocates. Use `record` for one already in hand.
+    ///
+    /// The rejection is still counted, which is the part an `admits` check at the call site would
+    /// quietly lose: `filtered` is what distinguishes a section that is silent by policy from one
+    /// that is silent because nothing happened.
+    pub fn record_with(
+        &self,
+        section: Section,
+        level: Level,
+        build: impl FnOnce() -> DiagnosticEvent,
+    ) -> Option<u64> {
+        if !self.gate.admits(section, level) {
+            self.filtered.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        let event = build();
+        debug_assert_eq!(
+            (event.section, event.level),
+            (section, level),
+            "record_with was told one section and level and built another, so the gate it consulted \
+             was not the one that applies to the event"
+        );
+        self.record(event)
+    }
+
     /// A fresh trace, for one user-visible operation.
+    ///
+    /// Takes no lock. A trace is minted at the *start* of an operation, before anything is known
+    /// about whether it will be recorded, so this ran on the front of every instrumented command
+    /// including under capture that was switched off.
     pub fn new_trace(&self) -> TraceId {
-        let mut inner = self.lock();
-        inner.next_id += 1;
-        TraceId(inner.next_id)
+        TraceId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     /// A fresh span, for one stage inside a trace.
     pub fn new_span(&self) -> SpanId {
-        let mut inner = self.lock();
-        inner.next_id += 1;
-        SpanId(inner.next_id)
+        SpanId(self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
     /// Reduce an identifier to a reference under this session's salt.
     ///
     /// The only route by which an identifier reaches an event, which is what makes "a peer id
     /// cannot leak" a property of the code rather than a habit of its authors.
+    ///
+    /// Lock-free, for the same reason as [`new_trace`](Self::new_trace): a command reduces its
+    /// subjects before it knows whether the event will be kept, and the salt has not changed since
+    /// the session began.
     pub fn reference(&self, domain: RefDomain, id: &[u8]) -> SessionRef {
-        self.lock().salt.reference(domain, id)
+        self.salt.reference(domain, id)
     }
 
     /// Convenience for the common case of referencing something named by a string.
@@ -335,6 +383,102 @@ mod tests {
         );
         assert_eq!(hub.held(), 0);
         assert_eq!(hub.stats().errors, 0);
+    }
+
+    /// Off has to mean the app stops *paying*, not just stops keeping the results.
+    ///
+    /// [`DiagnosticHub::record`] takes an event that is already built, so every caller pays for the
+    /// references, owned strings and bounded text of an event the config was always going to
+    /// reject. `record_with` is the form that does not, and this counts the builds rather than
+    /// asserting on a proxy for them.
+    #[test]
+    fn an_excluded_event_is_never_even_built() {
+        let (hub, _) = hub(CaptureMode::Off);
+        let mut built = 0;
+        for _ in 0..100 {
+            hub.record_with(Section::Sync, Level::Error, || {
+                built += 1;
+                DiagnosticEvent::error(Section::Sync, "SYNC.BAD")
+            });
+        }
+        assert_eq!(built, 0, "not one event was constructed");
+        // Still accounted for. An `admits` check at the call site would have skipped this, and
+        // `filtered` is what separates a section silent by policy from one silent because nothing
+        // happened.
+        assert_eq!(hub.stats().filtered, 100);
+        assert_eq!(hub.stats().latest_seq, 0, "and the store never advanced");
+
+        // And it does build once capture wants it.
+        hub.set_mode(CaptureMode::Safe);
+        hub.record_with(Section::Sync, Level::Error, || {
+            built += 1;
+            DiagnosticEvent::error(Section::Sync, "SYNC.BAD")
+        });
+        assert_eq!(built, 1);
+        assert_eq!(hub.held(), 1);
+    }
+
+    /// The calls an instrumented command makes *before* it knows whether anything will be recorded.
+    ///
+    /// A trace is minted at the start of an operation and its subjects are reduced immediately
+    /// after, both unconditionally. While those went through the store's mutex, every traced
+    /// command contended for the diagnostics lock two or three times with capture switched off,
+    /// which is the shape of decision 2.5's warning: diagnostics becoming the latency they exist
+    /// to explain.
+    #[test]
+    fn an_operation_can_be_traced_without_the_store_being_touched() {
+        let (hub, _) = hub(CaptureMode::Off);
+
+        let first = hub.new_trace();
+        let second = hub.new_trace();
+        let span = hub.new_span();
+        assert!(first.is_set() && second.is_set() && span.is_set());
+        assert_ne!(first, second);
+        assert_ne!(first.0, span.0);
+
+        let reference = hub.reference(RefDomain::Peer, b"12D3KooWabc");
+        assert!(reference.as_str().starts_with("peer-"));
+        assert!(!reference.as_str().contains("12D3KooWabc"));
+
+        // None of it went near the store: nothing held, no sequence issued, nothing counted as
+        // filtered because nothing was offered.
+        assert_eq!(hub.held(), 0);
+        let stats = hub.stats();
+        assert_eq!(stats.latest_seq, 0);
+        assert_eq!(stats.filtered, 0);
+    }
+
+    /// Identifiers are minted off the lock now, so uniqueness is an atomic's property rather than
+    /// the mutex's. Many threads at once is the case that would expose a lost update.
+    #[test]
+    fn concurrently_minted_identifiers_are_still_unique() {
+        let (hub, _) = hub(CaptureMode::Off);
+        let threads = 8;
+        let each = 500;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                let hub = hub.clone();
+                let seen = seen.clone();
+                scope.spawn(move || {
+                    let mut mine = Vec::with_capacity(each);
+                    for _ in 0..each {
+                        mine.push(hub.new_trace().0);
+                    }
+                    seen.lock().unwrap().extend(mine);
+                });
+            }
+        });
+        let mut all = seen.lock().unwrap().clone();
+        let count = all.len();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            count,
+            "two operations were given the same identity"
+        );
+        assert_eq!(count, threads * each);
     }
 
     /// The change the previous design could not make without a relaunch. A user who wants to stop

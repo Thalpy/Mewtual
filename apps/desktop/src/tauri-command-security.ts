@@ -35,6 +35,8 @@ export const TAURI_COMMAND_GROUPS = {
       // what every later export contains; that is not a decision a locked machine may make. The
       // setting is never persisted, so nothing here survives a restart.
       "get_capture_config", "set_capture_mode", "set_section_capture",
+      // set_capture_mode also emits `capture-changed`, so the webview stops producing records when
+      // capture is off rather than sending them over for the native side to discard.
       // Writes a diagnostics report next to the debug log. The text is composed by the console so
       // the file matches what was on screen, redaction included; the file NAME is built natively
       // and never taken from the webview, because a caller-supplied name is a path traversal.

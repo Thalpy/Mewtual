@@ -139,6 +139,9 @@ export function makeRecorder(
   let queue: UiEvent[] = [];
   let dropped = 0;
   let timer: unknown = null;
+  // Capture starts on, and is never persisted, so a fresh webview always begins beside a process
+  // that is recording. The native side says otherwise only when somebody moves the control.
+  let capturing = true;
 
   function flush() {
     if (timer !== null) {
@@ -159,6 +162,10 @@ export function makeRecorder(
 
   return {
     record(event: UiEvent) {
+      // Off has to mean the webview stops paying, not that it keeps building observations and
+      // sending them across the bridge for the native side to discard. The check is here rather
+      // than at the call site so it is one decision in one place, and so it can be tested.
+      if (!capturing) return;
       queue.push(event);
       if (queue.length > MAX_PENDING) {
         dropped += queue.length - MAX_PENDING;
@@ -166,7 +173,27 @@ export function makeRecorder(
       }
       if (timer === null) timer = scope.setTimeout(flush, intervalMs);
     },
+    /**
+     * Follow the native capture setting.
+     *
+     * Turning it off discards whatever is queued rather than sending it: those are observations the
+     * user has just said they do not want kept, and delivering them anyway would make the control
+     * mean "stop soon". They are not counted as dropped either, because dropped means lost against
+     * the user's wishes and this is the opposite.
+     */
+    setCapturing(on: boolean) {
+      capturing = on;
+      if (on) return;
+      queue = [];
+      if (timer !== null) {
+        scope.clearTimeout(timer);
+        timer = null;
+      }
+    },
     flush,
+    get capturing() {
+      return capturing;
+    },
     get dropped() {
       return dropped;
     },
