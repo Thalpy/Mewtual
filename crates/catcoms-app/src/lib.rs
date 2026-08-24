@@ -49,7 +49,7 @@ mod actor;
 mod moderation;
 pub mod pairing;
 pub mod store;
-pub use actor::{spawn, AppCommand, AppEvent, ServerActor};
+pub use actor::{spawn, AppCommand, AppEvent, Envelope, ServerActor, Trace, TracedEvent};
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,
     MAX_MOD_REASON_BYTES,

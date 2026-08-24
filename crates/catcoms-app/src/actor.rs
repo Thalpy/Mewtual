@@ -47,6 +47,151 @@ const PEX_REQUEST_MS: u64 = 3_000;
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
 
+/// The user-visible operation a command belongs to, carried across the actor boundary.
+///
+/// # Why this exists
+///
+/// Diagnostics could follow an operation from the webview to native persistence and no further.
+/// Everything the actor did *in response* was a separate, uncorrelated record, so a
+/// `ChannelUpdated` arriving two seconds after a send carried no evidence of being that send's
+/// consequence. That is precisely the question the whole correlation architecture exists to
+/// answer: given "my message did not arrive", which of the ten stages failed. Six of them were
+/// past this line.
+///
+/// # Why it is an opaque integer
+///
+/// This crate emits diagnostics through the `tracing` facade and owns no diagnostic state, which
+/// is what keeps it independent of whichever binary is observing it. A trace is therefore a number
+/// it carries and never interprets; the binary that minted it knows what it means.
+///
+/// **Local only.** A trace identifies one device's own work. It is never put on the peer-to-peer
+/// wire: doing so would let a remote peer correlate this device's operations, which is the exact
+/// linkage the session-scoped reference model exists to prevent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Trace(pub u64);
+
+impl Trace {
+    /// No operation: internal work, or a command from a caller that did not mint one.
+    pub const NONE: Trace = Trace(0);
+
+    /// Whether this stands for an operation at all.
+    ///
+    /// Zero means absent rather than "operation zero". Correlating on it would gather every
+    /// unrelated piece of internal work that also had none.
+    pub fn is_set(self) -> bool {
+        self.0 != 0
+    }
+
+    /// The sixteen hex characters a trace is quoted by, matching the diagnostics rendering.
+    pub fn as_hex(self) -> String {
+        format!("{:016x}", self.0)
+    }
+}
+
+/// A command plus the operation that issued it.
+///
+/// An envelope rather than a field on each of the fifty [`AppCommand`] variants. The variants
+/// describe *what to do*; which operation asked is a property of the delivery, and threading it
+/// through every variant would have meant fifty edits for one fact and fifty chances to forget it
+/// on the next command somebody adds.
+#[derive(Debug)]
+pub struct Envelope {
+    pub trace: Trace,
+    pub command: AppCommand,
+}
+
+/// An event plus the operation that caused it, or [`Trace::NONE`] for spontaneous work.
+///
+/// An inbound message from a peer genuinely has no local operation behind it, and says so, which
+/// is the distinction that separates "this appeared because I sent it" from "this appeared because
+/// somebody else did".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TracedEvent {
+    pub trace: Trace,
+    pub event: AppEvent,
+}
+
+/// The command channel, with the caller's operation attached to whatever goes down it.
+///
+/// A wrapper with the same `send` shape as the `mpsc::Sender` it replaces, so the fifty existing
+/// call sites read exactly as they did. The alternative was fifty near-identical edits whose only
+/// effect was to construct an envelope.
+#[derive(Debug, Clone)]
+struct CommandSender {
+    tx: mpsc::Sender<Envelope>,
+    trace: Trace,
+}
+
+impl CommandSender {
+    async fn send(&self, command: AppCommand) -> Result<(), mpsc::error::SendError<Envelope>> {
+        self.tx
+            .send(Envelope {
+                trace: self.trace,
+                command,
+            })
+            .await
+    }
+}
+
+/// The event channel, which stamps each event with the command being handled when it was sent.
+///
+/// The actor handles one command at a time, so "what is in progress" is a single value rather than
+/// something that has to be threaded through every helper. It is atomic only because a `&EventSink`
+/// crosses `.await` points inside a `Send` task; nothing contends for it.
+#[derive(Debug)]
+struct EventSink {
+    tx: mpsc::Sender<TracedEvent>,
+    current: std::sync::atomic::AtomicU64,
+}
+
+impl EventSink {
+    fn new(tx: mpsc::Sender<TracedEvent>) -> Self {
+        EventSink {
+            tx,
+            current: std::sync::atomic::AtomicU64::new(Trace::NONE.0),
+        }
+    }
+
+    /// Take a command out of its envelope and adopt its operation for the duration of handling it.
+    ///
+    /// Called at the head of the command arm of the actor's `select!`, so every event the arm goes
+    /// on to emit is attributed to the command that caused it without any arm having to say so.
+    fn begin(&self, envelope: Option<Envelope>) -> Option<AppCommand> {
+        let (trace, command) = match envelope {
+            Some(envelope) => (envelope.trace, Some(envelope.command)),
+            None => (Trace::NONE, None),
+        };
+        self.current
+            .store(trace.0, std::sync::atomic::Ordering::Relaxed);
+        if trace.is_set() {
+            // The stage that separates a slow actor from a deep mailbox. Without it, a command that
+            // took two seconds is indistinguishable from one that waited behind another for two
+            // seconds, and those have completely different fixes.
+            tracing::debug!(
+                target: "catcoms_app",
+                trace = %trace.as_hex(),
+                "ACTOR.COMMAND.RECEIVED"
+            );
+        }
+        command
+    }
+
+    /// Leave whatever operation was in progress.
+    ///
+    /// Called when the actor turns to work nobody asked for: an inbound op from a peer is not the
+    /// consequence of the last local command, and attributing it to one would invent a causal link
+    /// that a reader would then trust.
+    fn idle(&self) {
+        self.current
+            .store(Trace::NONE.0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn send(&self, event: AppEvent) -> Result<(), mpsc::error::SendError<TracedEvent>> {
+        let trace = Trace(self.current.load(std::sync::atomic::Ordering::Relaxed));
+        self.tx.send(TracedEvent { trace, event }).await
+    }
+}
+
 /// A command from the UI to a running server actor.
 #[derive(Debug)]
 pub enum AppCommand {
@@ -698,10 +843,28 @@ pub enum AppEvent {
 /// A handle to a running server actor: send commands, run queries.
 #[derive(Debug, Clone)]
 pub struct ServerActor {
-    cmd_tx: mpsc::Sender<AppCommand>,
+    cmd_tx: CommandSender,
 }
 
 impl ServerActor {
+    /// A handle whose commands belong to one operation.
+    ///
+    /// The join between the caller's diagnostics and the actor's. A caller that has minted a trace
+    /// for "the user pressed send" uses this so the actor's work, and every event that work
+    /// produces, lands under that same trace rather than in a separate record that has to be lined
+    /// up by timestamp afterwards.
+    ///
+    /// A cheap clone, not a mutation: the untraced handle keeps working, and two operations can be
+    /// in flight without either adopting the other's trace.
+    pub fn with_trace(&self, trace: u64) -> ServerActor {
+        ServerActor {
+            cmd_tx: CommandSender {
+                tx: self.cmd_tx.tx.clone(),
+                trace: Trace(trace),
+            },
+        }
+    }
+
     /// Create a channel in the shared directory.
     pub async fn create_channel(&self, name: impl Into<String>) -> Result<ChannelInfo, String> {
         let (reply, rx) = oneshot::channel();
@@ -2436,13 +2599,14 @@ impl ServerActor {
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
 pub fn spawn<T, R>(
     mut server: Server<T, R>,
-) -> (ServerActor, mpsc::Receiver<AppEvent>, JoinHandle<()>)
+) -> (ServerActor, mpsc::Receiver<TracedEvent>, JoinHandle<()>)
 where
     T: MeshTransport + Send + 'static,
     R: CryptoRngCore + Send + 'static,
 {
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<AppCommand>(64);
-    let (event_tx, event_rx) = mpsc::channel::<AppEvent>(256);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
+    let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
+    let event_tx = EventSink::new(raw_events);
     let handle = tokio::spawn(async move {
         // Per open channel: a content signature of its messages, topic and jukebox (see
         // `channel_delta`), so an edit/delete/add all surface a `ChannelUpdated` that says which
@@ -2541,7 +2705,10 @@ where
         loop {
             tokio::select! {
                 biased;
-                cmd = cmd_rx.recv() => match cmd {
+                // `begin` unwraps the envelope and adopts the caller's operation for as long as
+                // this arm runs, so every event the arm emits is attributed to the command that
+                // caused it without any of the fifty arms below having to mention it.
+                cmd = cmd_rx.recv() => match event_tx.begin(cmd) {
                     Some(AppCommand::CreateChannel { name, reply }) => {
                         let res = server.create_channel(&name).await.map_err(|e| e.to_string());
                         // The creator already opened this document as part of create_channel.
@@ -3492,7 +3659,10 @@ where
                         break;
                     }
                 },
-                cont = server.sync_once() => match cont {
+                // Work nobody asked for. An op arriving from a peer is not the consequence of the
+                // last local command, and attributing it to one would invent a causal link that a
+                // reader would go on to trust.
+                cont = server.sync_once() => { event_tx.idle(); match cont {
                     Ok(true) => {
                         sync_channels(
                             &mut server,
@@ -3595,11 +3765,20 @@ where
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
-                },
+                } },
             }
         }
     });
-    (ServerActor { cmd_tx }, event_rx, handle)
+    (
+        ServerActor {
+            cmd_tx: CommandSender {
+                tx: cmd_tx,
+                trace: Trace::NONE,
+            },
+        },
+        event_rx,
+        handle,
+    )
 }
 
 /// Notice channel-directory changes, subscribe newly-discovered channel documents, and recover
@@ -3609,7 +3788,7 @@ async fn sync_channels<T, R>(
     server: &mut Server<T, R>,
     last: &mut Vec<ChannelInfo>,
     sigs: &mut HashMap<u128, ChannelSignature>,
-    event_tx: &mpsc::Sender<AppEvent>,
+    event_tx: &EventSink,
     catchup_peer: Option<PeerId>,
     locally_created: Option<u128>,
 ) where
@@ -3951,7 +4130,7 @@ where
 async fn sync_profiles<T, R>(
     server: &mut Server<T, R>,
     last_profiles: &mut HashMap<String, Profile>,
-    event_tx: &mpsc::Sender<AppEvent>,
+    event_tx: &EventSink,
 ) where
     T: MeshTransport,
     R: CryptoRngCore,
@@ -4004,13 +4183,22 @@ mod tests {
     }
 
     /// Drain events until the next `ChannelUpdated` for `channel`, returning what it says moved.
-    async fn next_change(events: &mut mpsc::Receiver<AppEvent>, channel: u128) -> ChannelChange {
+    async fn next_change(events: &mut mpsc::Receiver<TracedEvent>, channel: u128) -> ChannelChange {
+        next_traced_change(events, channel).await.1
+    }
+
+    /// As [`next_change`], but keeping the operation the event was attributed to.
+    async fn next_traced_change(
+        events: &mut mpsc::Receiver<TracedEvent>,
+        channel: u128,
+    ) -> (Trace, ChannelChange) {
         timeout(Duration::from_secs(5), async {
             loop {
                 match events.recv().await {
-                    Some(AppEvent::ChannelUpdated { channel: c, change }) if c == channel => {
-                        return change
-                    }
+                    Some(TracedEvent {
+                        trace,
+                        event: AppEvent::ChannelUpdated { channel: c, change },
+                    }) if c == channel => return (trace, change),
                     Some(_) => continue,
                     None => panic!("actor closed"),
                 }
@@ -4018,6 +4206,148 @@ mod tests {
         })
         .await
         .expect("no channel update arrived")
+    }
+
+    /// The link P3-004 says is missing: an event has to name the operation that caused it.
+    ///
+    /// Without it a `ChannelUpdated` arriving two seconds after a send is indistinguishable from
+    /// one caused by somebody else's message, so "did my send reach the UI" cannot be answered from
+    /// the record at all. Every stage before this one was already correlated and none of them could
+    /// establish the thing anybody actually wanted to know.
+    #[tokio::test]
+    async fn an_event_names_the_operation_that_caused_it() {
+        let hub = Hub::new();
+        let (actor, mut events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+        actor.open_channel(GENERAL).await;
+
+        let mine = 0x7f2c_0000_0000_0001;
+        actor.with_trace(mine).send_message(GENERAL, "hi").await;
+        let (trace, change) = next_traced_change(&mut events, GENERAL).await;
+        assert!(change.messages_appended);
+        assert_eq!(
+            trace,
+            Trace(mine),
+            "the update carries the send that caused it"
+        );
+
+        // A handle with no trace is not a handle carrying somebody else's.
+        actor.send_message(GENERAL, "and again").await;
+        let (trace, _) = next_traced_change(&mut events, GENERAL).await;
+        assert_eq!(trace, Trace::NONE, "an untraced command adopts nothing");
+        assert!(!trace.is_set());
+
+        actor.shutdown().await;
+        let _ = handle.await;
+    }
+
+    /// Two operations in flight at once must not borrow each other's identity.
+    ///
+    /// The failure this rules out is the one that would make the whole mechanism worse than
+    /// nothing: a trace that gathers another operation's stages does not merely fail to explain a
+    /// bug, it explains it wrongly, and the reader has no way to tell.
+    #[tokio::test]
+    async fn concurrent_operations_keep_their_own_stages() {
+        let hub = Hub::new();
+        let (actor, mut events, handle) = spawn(founder(&hub, PeerId::from_u64(1), "alice", 1));
+        actor.open_channel(GENERAL).await;
+
+        let first = actor.with_trace(0xaaaa);
+        let second = actor.with_trace(0xbbbb);
+        // Issued together, so the actor interleaves them however it likes.
+        let (a, b) = tokio::join!(
+            first.send_reply(GENERAL, "from a", String::new()),
+            second.send_reply(GENERAL, "from b", String::new()),
+        );
+        a.unwrap();
+        b.unwrap();
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let (trace, _) = next_traced_change(&mut events, GENERAL).await;
+            seen.push(trace);
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec![Trace(0xaaaa), Trace(0xbbbb)],
+            "each send produced exactly one update, under its own trace"
+        );
+
+        actor.shutdown().await;
+        let _ = handle.await;
+    }
+
+    /// Somebody else's message must not be attributed to my last command.
+    ///
+    /// The dangerous direction. A trace that merely *misses* a stage leaves a gap a reader can see;
+    /// a trace that gathers an unrelated one asserts a causal link that never existed, and the
+    /// reader has no way to tell. Here Bob's arrival lands on Alice while her own traced send is
+    /// the most recent thing she handled, which is exactly when a sticky trace would claim it.
+    #[tokio::test]
+    async fn a_peers_message_is_not_attributed_to_my_last_command() {
+        let hub = Hub::new();
+        let alice_peer = PeerId::from_u64(1);
+        let mut alice_srv = founder(&hub, alice_peer, "alice", 1);
+        alice_srv.subscribe_control().await.unwrap();
+        alice_srv.open_channel(GENERAL).await.unwrap();
+        let invite = alice_srv.mint_invite([7u8; 16], u64::MAX, vec![]).unwrap();
+        let (alice, mut alice_events, alice_handle) = spawn(alice_srv);
+
+        let bob_srv = Server::join(
+            hub.join(PeerId::from_u64(2)),
+            MlsDevice::generate().unwrap(),
+            ChaCha20Rng::seed_from_u64(2),
+            Box::new(ManualClock::new(1_000)),
+            "bob",
+            alice_peer,
+            &invite,
+        )
+        .await
+        .unwrap();
+        let (bob, bob_events, bob_handle) = spawn(bob_srv);
+        bob.open_channel(GENERAL).await;
+
+        // Alice's own send, under a trace she will recognise.
+        let mine = 0x7f2c_0000_0000_0002;
+        // The actor tracks a channel's content signature from the moment it is opened *through the
+        // actor*, which is what decides whether a change is reported at all.
+        alice.open_channel(GENERAL).await;
+        alice
+            .with_trace(mine)
+            .send_reply(GENERAL, "hi bob", String::new())
+            .await
+            .expect("alice's own send");
+        let (trace, _) = next_traced_change(&mut alice_events, GENERAL).await;
+        assert_eq!(trace, Trace(mine), "her own send is hers");
+
+        // Bob answers. Alice learns about it through her sync loop, not through a command, and she
+        // sends nothing further, so the next arrival she reports can only be his.
+        bob.send_message(GENERAL, "hi alice").await;
+        let seen = timeout(Duration::from_secs(60), async {
+            loop {
+                match alice_events.recv().await {
+                    Some(TracedEvent {
+                        trace,
+                        event: AppEvent::ChannelUpdated { channel, change },
+                    }) if channel == GENERAL && change.messages_appended => return trace,
+                    Some(_) => continue,
+                    None => panic!("alice's actor closed"),
+                }
+            }
+        })
+        .await
+        .expect("alice never saw bob's message");
+        assert_eq!(
+            seen,
+            Trace::NONE,
+            "an arrival from a peer belongs to no local operation, and must not borrow one"
+        );
+
+        alice.shutdown().await;
+        bob.shutdown().await;
+        let _ = alice_handle.await;
+        let _ = bob_handle.await;
+        drop(bob_events);
     }
 
     /// One channel document holds messages, the topic and the jukebox queue. The UI raises unread
@@ -4117,7 +4447,7 @@ mod tests {
             .expect("event timeout")
             .expect("actor closed");
         assert_eq!(
-            ev,
+            ev.event,
             AppEvent::ChannelUpdated {
                 channel: GENERAL,
                 change: ChannelChange {
@@ -4195,11 +4525,10 @@ mod tests {
         timeout(Duration::from_secs(60), async {
             loop {
                 match bob_events.recv().await {
-                    Some(AppEvent::ChannelUpdated { channel, change })
-                        if channel == GENERAL && change.messages_appended =>
-                    {
-                        break
-                    }
+                    Some(TracedEvent {
+                        event: AppEvent::ChannelUpdated { channel, change },
+                        ..
+                    }) if channel == GENERAL && change.messages_appended => break,
                     Some(_) => continue,
                     None => panic!("bob actor closed"),
                 }
@@ -4258,7 +4587,10 @@ mod tests {
         let received = timeout(Duration::from_secs(5), async {
             loop {
                 match alice_events.recv().await {
-                    Some(AppEvent::CallSignal { from_fp, payload }) => break (from_fp, payload),
+                    Some(TracedEvent {
+                        event: AppEvent::CallSignal { from_fp, payload },
+                        ..
+                    }) => break (from_fp, payload),
                     Some(_) => continue,
                     None => panic!("alice actor closed"),
                 }

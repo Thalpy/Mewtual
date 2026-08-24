@@ -411,11 +411,23 @@ impl CaptureConfig {
     /// volume, the most identifying part of a report, and the only thing that explains why a node
     /// cannot connect. So Safe keeps it at warn and Enhanced opens it up, which is the trade a
     /// user is actually making when they turn Enhanced on.
+    ///
+    /// # Safe is a content decision, not a verbosity one
+    ///
+    /// Safe used to hold every section at `Info`, which quietly made the mode do two unrelated
+    /// jobs. The correlation stages that answer "which of the ten stages failed" are recorded at
+    /// `Debug`, because there is one per stage of every command and they are of no interest until
+    /// something goes wrong. Holding the default mode at `Info` therefore threw all of them away
+    /// before anything could ask, so the default record could say that a send failed and never
+    /// which stage.
+    ///
+    /// The two axes are meant to be independent, so they are: what a mode changes is which values
+    /// may be rendered literally, and whether the transport firehose is on. How much of the app
+    /// speaks is the per-section levels, which the user can move separately.
     pub fn for_mode(mode: CaptureMode) -> Self {
         let base = match mode {
             CaptureMode::Off => None,
-            CaptureMode::Safe => Some(Level::Info),
-            CaptureMode::Enhanced => Some(Level::Debug),
+            CaptureMode::Safe | CaptureMode::Enhanced => Some(Level::Debug),
             CaptureMode::Full => Some(Level::Trace),
         };
         let mut config = CaptureConfig {
@@ -423,11 +435,11 @@ impl CaptureConfig {
             levels: [base; 22],
         };
         if mode == CaptureMode::Safe {
+            // The one section a Safe report holds back, and the whole of what Safe costs in
+            // coverage. Its warnings still speak, so a dial failure is recorded; what is dropped is
+            // the per-connection churn, which is both the bulk of the volume and the most
+            // identifying part of a report a user is about to share.
             config.set(Section::Transport, Some(Level::Warn));
-            // The pipeline's own health is never turned down. A diagnostics system that stops
-            // reporting its own failures at low verbosity has removed the one thing that explains
-            // an empty log.
-            config.set(Section::Diag, Some(Level::Info));
         }
         config
     }
@@ -493,6 +505,39 @@ mod tests {
 
         let enhanced = CaptureConfig::for_mode(CaptureMode::Enhanced);
         assert!(enhanced.admits(Section::Transport, Level::Debug));
+        // Transport is the *only* section the two modes disagree about. What else separates them is
+        // how a value renders, not how much of the app speaks.
+        for section in SECTIONS {
+            if section == Section::Transport {
+                continue;
+            }
+            assert_eq!(
+                safe.level(section),
+                enhanced.level(section),
+                "{section:?} should not vary with the mode"
+            );
+        }
+    }
+
+    /// The correlation stages have to survive the default mode.
+    ///
+    /// They are recorded at `Debug`, because there is one per stage of every command and none of
+    /// them is interesting until something goes wrong. Safe used to hold every section at `Info`,
+    /// which threw all of them away before anything could ask: the default record could say a send
+    /// failed and never which of its stages did. That is the exact question the trace exists for.
+    #[test]
+    fn the_default_mode_still_records_which_stage_of_an_operation_failed() {
+        let safe = CaptureConfig::for_mode(CaptureMode::Safe);
+        assert!(safe.admits(Section::Ipc, Level::Debug), "command stages");
+        assert!(safe.admits(Section::Runtime, Level::Debug), "actor stages");
+        assert!(
+            safe.admits(Section::Channels, Level::Debug),
+            "the send itself"
+        );
+        assert!(
+            safe.admits(Section::Ui, Level::Debug),
+            "and the webview's half"
+        );
     }
 
     /// A diagnostics pipeline that goes quiet about itself has removed the only thing that could

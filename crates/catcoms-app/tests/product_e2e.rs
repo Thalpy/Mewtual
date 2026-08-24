@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Profile, Server, ServerActor, ServerNet,
-    ServerStore,
+    ServerStore, TracedEvent,
 };
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_rt::{Hub, ManualClock, PeerId};
@@ -72,7 +72,10 @@ fn advertised(n: u64) -> Vec<String> {
 #[derive(Debug)]
 struct Node {
     actor: ServerActor,
-    events: Receiver<AppEvent>,
+    /// The actor's events, each carrying the local operation that caused it (or none, for work
+    /// that arrived from a peer). The helpers below unwrap that, so the assertions in these tests
+    /// stay about what happened rather than about the envelope it travelled in.
+    events: Receiver<TracedEvent>,
     task: JoinHandle<()>,
     peer: PeerId,
     fp: String,
@@ -270,7 +273,7 @@ async fn join_node_off_the_control_topic(
 /// waits on a query while never reading events can fill it and stall the very actor it is
 /// waiting for. The short inner bound also paces the loop without a sleep, which the
 /// ambient-dependency gate forbids.
-async fn until<F, Fut, T>(label: &str, events: &mut Receiver<AppEvent>, mut probe: F) -> T
+async fn until<F, Fut, T>(label: &str, events: &mut Receiver<TracedEvent>, mut probe: F) -> T
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Option<T>>,
@@ -288,11 +291,14 @@ where
 }
 
 /// Wait for the first event matching `pred`. Fails (rather than hangs) if it never arrives.
-async fn wait_event(events: &mut Receiver<AppEvent>, pred: impl Fn(&AppEvent) -> bool) -> AppEvent {
+async fn wait_event(
+    events: &mut Receiver<TracedEvent>,
+    pred: impl Fn(&AppEvent) -> bool,
+) -> AppEvent {
     timeout(WAIT, async {
         loop {
             match events.recv().await {
-                Some(ev) if pred(&ev) => return ev,
+                Some(ev) if pred(&ev.event) => return ev.event,
                 Some(_) => continue,
                 None => panic!("the actor closed before emitting the event under test"),
             }
@@ -303,10 +309,10 @@ async fn wait_event(events: &mut Receiver<AppEvent>, pred: impl Fn(&AppEvent) ->
 }
 
 /// Every event currently queued, without waiting for more.
-async fn drain(events: &mut Receiver<AppEvent>) -> Vec<AppEvent> {
+async fn drain(events: &mut Receiver<TracedEvent>) -> Vec<AppEvent> {
     let mut out = Vec::new();
     while let Ok(Some(ev)) = timeout(Duration::from_millis(20), events.recv()).await {
-        out.push(ev);
+        out.push(ev.event);
     }
     out
 }

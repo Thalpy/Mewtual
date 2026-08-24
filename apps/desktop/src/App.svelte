@@ -5274,7 +5274,7 @@
    * Only arrivals are recorded loudly. A reaction or a topic rename firing this on every keystroke
    * would drown the section it is meant to explain.
    */
-  function noteUnreadDecision(server: number, channel: string, change: ChannelChange) {
+  function noteUnreadDecision(server: number, channel: string, change: ChannelChange, trace: string = "") {
     const isActive = server === activeServerId && channel === cur?.active;
     const outcome = unreadDecision(change, chatSurfaceState(chatStickToBottom), isActive);
     if (outcome.decision === "not_an_arrival") return;
@@ -5282,6 +5282,10 @@
       section: "channels",
       code: "UNREAD.DECISION",
       level: "debug",
+      // The decision joins the operation that caused it. "I sent a message and no badge appeared"
+      // and "someone sent me one and no badge appeared" are different bugs, and the trace is what
+      // separates them without guessing from timestamps.
+      trace: trace || undefined,
       fields: {
         decision: outcome.decision,
         reason: outcome.reason,
@@ -12831,7 +12835,35 @@
    * UI with no other evidence. A repeat usually means a listener got installed twice, which is the
    * failure the logging lifecycle fix was about and is worth catching if it ever returns.
    */
-  function noteEventSeq(name: string, seq: unknown) {
+  /**
+   * The trace an emitted event carries, or undefined for one no local operation caused.
+   *
+   * The native side stamps it as `__trace` alongside `__seq`, so a listener can say "this arrived"
+   * under the same operation as the command that produced it. Without it the two halves were
+   * separate records that had to be lined up by wall clock, which is the correlation-by-timestamp
+   * the trace exists to replace.
+   */
+  function eventTrace(payload: { __trace?: string }): string {
+    return payload.__trace ?? "";
+  }
+
+  // A default rather than an optional parameter. This file's TypeScript is stripped by annotation
+  // removal, which leaves the `?` of `trace?: string` behind as a syntax error the browser only
+  // reports at load, as "Mewtual failed to start" with a stack of no frames. A default reads the
+  // same at every call site and survives the transform.
+  function noteEventSeq(name: string, seq: unknown, trace: string = "") {
+    // The stage that proves the webview received what the backend sent. A backend that emitted and
+    // a webview that never heard used to look identical from either side, and that is precisely
+    // the shape of a stale unread badge.
+    if (trace) {
+      diagRecord({
+        section: "ipc",
+        code: "UI.EVENT.RECEIVED",
+        level: "debug",
+        trace,
+        fields: { event: name },
+      });
+    }
     const anomaly = seqTracker.observe(name, seq);
     if (!anomaly) return;
     diagRecord(
@@ -12840,12 +12872,14 @@
             section: "ipc",
             code: "IPC.EVENT.SEQUENCE_GAP",
             level: "warn",
+            trace: trace || undefined,
             fields: { event: anomaly.event, expected: anomaly.expected, received: anomaly.received, missed: anomaly.missed },
           }
         : {
             section: "ipc",
             code: "IPC.EVENT.REPEATED",
             level: "warn",
+            trace: trace || undefined,
             fields: { event: anomaly.event, previous: anomaly.previous, received: anomaly.received },
           },
     );
@@ -12920,12 +12954,16 @@
         topic: boolean;
         jukebox: boolean;
         __seq?: number;
+        __trace?: string;
       }>("channel-updated", (e) => {
         const { server, channel } = e.payload;
+        // Which operation this update belongs to, when a local one caused it. An arrival from
+        // somebody else carries none, which is itself the answer to "was this mine".
+        const trace = eventTrace(e.payload);
         // A coalesced update and a lost one look identical from here, and only one of them leaves
         // the unread badge wrong. The native side numbers every emit so the difference is
         // observable at all; this is where it gets noticed.
-        noteEventSeq("channel-updated", e.payload.__seq);
+        noteEventSeq("channel-updated", e.payload.__seq, trace);
         // One channel document holds the message log, the topic and the jukebox queue, so the
         // event says which of them moved. Only an arrival may raise an unread badge or ring:
         // reacting to an old message, renaming the topic and queueing a track all used to look
@@ -12936,7 +12974,7 @@
         // unread transition or a valid explanation of why it was already seen. "Reacted to an old
         // message", "the window was behind something" and "they were looking straight at it" are
         // three very different answers, and all three used to produce silence.
-        noteUnreadDecision(server, channel, change);
+        noteUnreadDecision(server, channel, change, trace);
         spaceActivityAt[server] = Date.now();
         if (server === activeServerId && view === "moderation") void refreshModeration();
         // A new or edited message may be addressed to me → the cross-server inbox may have a new
@@ -12950,6 +12988,24 @@
           if (change.topic) refreshTopic();
           if (!change.messagesAppended && !change.messagesChanged) return; // nothing in the log moved
           channelEventRefresh.request(true).then(() => {
+            // The last stage of the operation, and the one that answers the original question. A
+            // send whose trace ends at TAURI.COMMAND.PERSISTED reached the disk; a send whose trace
+            // ends here reached the screen, and until this existed there was no way to tell those
+            // apart from the record.
+            if (trace) {
+              diagRecord({
+                section: "channels",
+                code: "UI.REFRESH.APPLIED",
+                level: "debug",
+                trace,
+                fields: {
+                  rows: messages.length,
+                  // Whether the rows on screen are this conversation's at all. A refresh that
+                  // settled onto a different channel is not this operation arriving.
+                  in_scope: scopeHoldsConversation(messageWindowScope, server, channel),
+                },
+              });
+            }
             // The refresh settles read state for us: seen if the log is genuinely on screen,
             // unread if this channel is merely selected behind something else.
             if (!change.messagesAppended) return; // an edit or a reaction never announces itself

@@ -1469,7 +1469,12 @@ async fn refresh_interface_routes(app: &AppHandle, server: u64) -> bool {
             diag.advertised = bootstrap;
         }
     }
-    emit_tracked(app, "reachability-changed", server);
+    emit_tracked(
+        app,
+        "reachability-changed",
+        server,
+        catcoms_diagnostics::TraceId::default(),
+    );
     true
 }
 
@@ -1510,9 +1515,14 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
     });
 }
 
-fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEvent>) {
+fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<catcoms_app::TracedEvent>) {
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
+            // The operation the actor was handling when it produced this, or none for work that
+            // arrived from a peer. Carried across as the canonical trace so a `channel-updated`
+            // reaching the webview is provably the send that caused it rather than something that
+            // happened to follow it.
+            let trace = catcoms_diagnostics::TraceId(ev.trace.0);
             // Actor networking stays live behind the explicit lock, but its event stream can
             // contain member fingerprints, channel ids, delivery state and call signalling.
             // Drop those notifications at the native boundary; unlock reloads fresh projections.
@@ -1520,14 +1530,27 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                 .await
                 .is_err()
             {
-                if matches!(&ev, AppEvent::Closed) {
+                // Recorded rather than dropped in silence. An operation whose event never reached
+                // the UI because the vault locked mid-flight looks exactly like one that was lost,
+                // and only one of those is a bug.
+                catcoms_diagnostics::DiagnosticHub::record(
+                    &catcoms_log::hub(),
+                    catcoms_diagnostics::DiagnosticEvent::new(
+                        catcoms_diagnostics::Section::Ipc,
+                        catcoms_diagnostics::Level::Debug,
+                        "IPC.EVENT.WITHHELD_LOCKED",
+                    )
+                    .target("catcoms_app")
+                    .trace(trace),
+                );
+                if matches!(&ev.event, AppEvent::Closed) {
                     break;
                 }
                 continue;
             }
-            match ev {
+            match ev.event {
                 AppEvent::ChannelsUpdated => {
-                    emit_tracked(&app, "channels-changed", ServerEvt { server });
+                    emit_tracked(&app, "channels-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::ChannelUpdated { channel, change } => {
                     // Channel ids are u128; send as a string (JS numbers lose precision).
@@ -1542,49 +1565,60 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                             topic: change.topic,
                             jukebox: change.jukebox,
                         },
+                        trace,
                     );
                 }
                 AppEvent::MembersChanged { count } => {
-                    emit_tracked(&app, "members-changed", CountEvt { server, count });
+                    emit_tracked(&app, "members-changed", CountEvt { server, count }, trace);
                 }
                 AppEvent::ProfilesUpdated => {
-                    emit_tracked(&app, "profiles-updated", ServerEvt { server });
+                    emit_tracked(&app, "profiles-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::LiveryUpdated => {
-                    emit_tracked(&app, "livery-changed", ServerEvt { server });
+                    emit_tracked(&app, "livery-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::BadgesUpdated => {
-                    emit_tracked(&app, "badges-changed", ServerEvt { server });
+                    emit_tracked(&app, "badges-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::DevicesUpdated => {
-                    emit_tracked(&app, "devices-changed", ServerEvt { server });
+                    emit_tracked(&app, "devices-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::FilesUpdated => {
-                    emit_tracked(&app, "files-updated", ServerEvt { server });
+                    emit_tracked(&app, "files-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::StatusUpdated => {
-                    emit_tracked(&app, "status-updated", ServerEvt { server });
+                    emit_tracked(&app, "status-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::EventsUpdated => {
-                    emit_tracked(&app, "events-changed", ServerEvt { server });
+                    emit_tracked(&app, "events-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::WikiUpdated => {
-                    emit_tracked(&app, "wiki-updated", ServerEvt { server });
+                    emit_tracked(&app, "wiki-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::RolesUpdated => {
-                    emit_tracked(&app, "roles-updated", ServerEvt { server });
+                    emit_tracked(&app, "roles-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::ModerationUpdated => {
-                    emit_tracked(&app, "moderation-updated", ServerEvt { server });
+                    emit_tracked(&app, "moderation-updated", ServerEvt { server }, trace);
                 }
                 AppEvent::EclipseChanged { caution } => {
-                    emit_tracked(&app, "eclipse-changed", EclipseEvt { server, caution });
+                    emit_tracked(
+                        &app,
+                        "eclipse-changed",
+                        EclipseEvt { server, caution },
+                        trace,
+                    );
                 }
                 AppEvent::ConnectivityChanged { online } => {
-                    emit_tracked(&app, "connectivity-changed", OnlineEvt { server, online });
+                    emit_tracked(
+                        &app,
+                        "connectivity-changed",
+                        OnlineEvt { server, online },
+                        trace,
+                    );
                 }
                 AppEvent::SwitchboardsChanged => {
-                    emit_tracked(&app, "switchboard-changed", server);
+                    emit_tracked(&app, "switchboard-changed", server, trace);
                 }
                 AppEvent::DeliveryChanged { channel, states } => {
                     emit_tracked(
@@ -1595,10 +1629,11 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                             channel: channel.to_string(),
                             states: delivery_payload(states),
                         },
+                        trace,
                     );
                 }
                 AppEvent::DmRequestsChanged => {
-                    emit_tracked(&app, "dm-requests-changed", ServerEvt { server });
+                    emit_tracked(&app, "dm-requests-changed", ServerEvt { server }, trace);
                 }
                 AppEvent::CallSignal { from_fp, payload } => {
                     emit_tracked(
@@ -1609,10 +1644,11 @@ fn forward_events(app: AppHandle, server: u64, mut events: mpsc::Receiver<AppEve
                             from_fp,
                             payload: B64.encode(payload),
                         },
+                        trace,
                     );
                 }
                 AppEvent::Closed => {
-                    emit_tracked(&app, "server-closed", ServerEvt { server });
+                    emit_tracked(&app, "server-closed", ServerEvt { server }, trace);
                     break;
                 }
             }
@@ -1980,6 +2016,19 @@ impl Operation {
         op
     }
 
+    /// The server's actor, bound to this operation.
+    ///
+    /// One function rather than the same three lines at each command, because binding is the part
+    /// that is easy to leave out: an actor fetched the plain way still works perfectly, and the
+    /// only symptom is a trace that stops at the bridge on that one command. Getting the actor and
+    /// adopting the operation are the same act here, so they cannot come apart.
+    async fn actor(&self, state: &AppState, server: u64) -> Result<ServerActor, AppError> {
+        actor_of(state, server)
+            .await
+            .map(|actor| actor.with_trace(self.trace.0))
+            .map_err(|e| self.fail(codes::SERVER_UNAVAILABLE, e))
+    }
+
     /// Note that the operation reached a stage, without ending it.
     fn stage(&self, code: &'static str) {
         self.emit(
@@ -2149,41 +2198,92 @@ fn next_event_seq(name: &'static str) -> u64 {
     *slot
 }
 
-/// Emit a Tauri event, numbered and recorded.
+/// Attach the sequence and the trace to an event payload, if it can carry them.
 ///
-/// Two problems in one. Every emit in this file used to be `emit_tracked(&app,...)`, so a delivery
-/// failure was discarded at the exact moment it mattered: the backend had changed state, the
-/// webview was never told, and nothing anywhere recorded the disagreement. And without a sequence
-/// number the frontend cannot tell an event that was coalesced from one that was lost, which is the
-/// difference between correct behaviour and a stale unread badge.
-///
-/// The number is injected into the payload as `__seq` rather than added to each payload type. That
-/// keeps every existing listener working unchanged while giving the frontend what it needs to spot
-/// a gap. A payload that is not a JSON object (a bare server id) cannot carry one, so it is emitted
-/// as-is and the sequence is recorded natively only.
-fn emit_tracked<S: Serialize + Clone>(app: &AppHandle, name: &'static str, payload: S) {
-    let seq = next_event_seq(name);
-    let numbered = serde_json::to_value(&payload).ok().and_then(|mut value| {
-        let object = value.as_object_mut()?;
-        object.insert("__seq".to_string(), serde_json::json!(seq));
-        Some(value)
-    });
+/// A pure function so the contract the webview relies on can be tested without a running window.
+/// `None` means the payload is not a JSON object (a bare server id, say) and neither could be
+/// attached; the caller records that fact rather than letting the absence look like a gap.
+fn stamp_payload(
+    mut value: serde_json::Value,
+    seq: u64,
+    trace: catcoms_diagnostics::TraceId,
+) -> Option<serde_json::Value> {
+    let object = value.as_object_mut()?;
+    object.insert("__seq".to_string(), serde_json::json!(seq));
+    // Only when there is one. An absent trace is left off entirely rather than sent as sixteen
+    // zeroes, so a listener testing for it gets an answer rather than a value that looks like an
+    // operation and belongs to none.
+    if trace.is_set() {
+        object.insert("__trace".to_string(), serde_json::json!(trace.as_hex()));
+    }
+    Some(value)
+}
 
+/// Emit a Tauri event, numbered, traced and recorded.
+///
+/// Three problems in one. Every emit in this file used to be `app.emit(...)`, so a delivery
+/// failure was discarded at the exact moment it mattered: the backend had changed state, the
+/// webview was never told, and nothing anywhere recorded the disagreement. Without a sequence
+/// number the frontend cannot tell an event that was coalesced from one that was lost, which is the
+/// difference between correct behaviour and a stale unread badge. And without a trace, an update
+/// arriving two seconds after a send carried no evidence of being that send's consequence, which is
+/// the question the whole correlation architecture exists to answer.
+///
+/// Both are injected into the payload, as `__seq` and `__trace`, rather than added to each payload
+/// type. That keeps every existing listener working unchanged while giving the frontend what it
+/// needs. A payload that is not a JSON object (a bare server id) cannot carry either, so it is
+/// emitted as-is and both are recorded natively only.
+///
+/// The trace is passed rather than inherited from ambient state. Which operation caused an emit is
+/// a fact the caller knows and nothing else can recover, and a wrong answer here asserts a causal
+/// link that never existed.
+fn emit_tracked<S: Serialize + Clone>(
+    app: &AppHandle,
+    name: &'static str,
+    payload: S,
+    trace: catcoms_diagnostics::TraceId,
+) {
+    let seq = next_event_seq(name);
+    let numbered = serde_json::to_value(&payload)
+        .ok()
+        .and_then(|value| stamp_payload(value, seq, trace));
+
+    let carried = numbered.is_some();
     let sent = match numbered {
         Some(value) => app.emit(name, value),
         None => app.emit(name, payload),
     };
-    if let Err(e) = sent {
+    let event = match &sent {
+        Ok(()) => catcoms_diagnostics::DiagnosticEvent::new(
+            catcoms_diagnostics::Section::Ipc,
+            catcoms_diagnostics::Level::Debug,
+            "IPC.EVENT.EMITTED",
+        ),
         // The failure this replaces. A backend that changed state while the webview never heard
         // about it is a stale-UI bug with no evidence, and it used to leave none.
-        tracing::error!(
-            target: "catcoms_app",
-            event = name,
-            seq,
-            error = %e,
-            "IPC.EVENT.EMIT_FAILED"
+        Err(_) => catcoms_diagnostics::DiagnosticEvent::warn(
+            catcoms_diagnostics::Section::Ipc,
+            "IPC.EVENT.EMIT_FAILED",
+        ),
+    };
+    let mut event = event
+        .target("catcoms_app")
+        .trace(trace)
+        .field(
+            "event",
+            catcoms_diagnostics::SafeText::describe(name),
+        )
+        .field("seq", seq)
+        // A payload the sequence could not be attached to is one the frontend cannot check for
+        // gaps, so the record says which kind it was rather than leaving the absence unexplained.
+        .field("numbered", carried);
+    if let Err(e) = &sent {
+        event = event.field(
+            "error",
+            catcoms_diagnostics::SafeText::describe(&e.to_string()),
         );
     }
+    catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
 }
 
 /// The most of a panic payload that is recorded.
@@ -2252,7 +2352,7 @@ async fn register_server(
     app: &AppHandle,
     state: &AppState,
     actor: ServerActor,
-    events: mpsc::Receiver<AppEvent>,
+    events: mpsc::Receiver<catcoms_app::TracedEvent>,
     task: tokio::task::JoinHandle<()>,
     group_id: Vec<u8>,
     device_id: DeviceId,
@@ -3178,7 +3278,12 @@ async fn store_port_mapping_status(
         .as_ref()
         != Some(&outcome);
     if changed {
-        emit_tracked(app, "reachability-changed", server);
+        emit_tracked(
+        app,
+        "reachability-changed",
+        server,
+        catcoms_diagnostics::TraceId::default(),
+    );
     }
 }
 
@@ -3333,7 +3438,12 @@ fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAd
         while rx.changed().await.is_ok() {
             let snapshot = rx.borrow_and_update().clone();
             apply_relay_snapshot(&app, server, snapshot, &mut previous).await;
-            emit_tracked(&app, "reachability-changed", server);
+            emit_tracked(
+        &app,
+        "reachability-changed",
+        server,
+        catcoms_diagnostics::TraceId::default(),
+    );
         }
     });
 }
@@ -3368,7 +3478,12 @@ fn spawn_mesh_observation_fold(
                 .as_ref()
                 != Some(&observations);
             if changed {
-                emit_tracked(&app, "reachability-changed", server);
+                emit_tracked(
+        &app,
+        "reachability-changed",
+        server,
+        catcoms_diagnostics::TraceId::default(),
+    );
             }
             if rx.changed().await.is_err() {
                 break;
@@ -3472,7 +3587,12 @@ async fn store_autonat_snapshot(
         .as_ref()
         != Some(&next);
     if changed {
-        emit_tracked(app, "reachability-changed", server);
+        emit_tracked(
+        app,
+        "reachability-changed",
+        server,
+        catcoms_diagnostics::TraceId::default(),
+    );
     }
 }
 
@@ -5737,11 +5857,13 @@ async fn push_file_chunk(
     token: String,
     offset: u64,
     data: String,
-    // Accepted and deliberately unused. The frontend threads the upload's trace through every
-    // slice so the whole transfer is one operation, but a slice is not worth an event of its own:
-    // a large file is thousands of them and recording each would bury the upload in its own
-    // progress. Begin and finish bracket the transfer; what happened between is the difference.
-    #[allow(unused_variables)] trace: Option<String>,
+    // The frontend threads the upload's trace through every slice so the whole transfer is one
+    // operation. A slice is deliberately not worth a diagnostic event of its own: a large file is
+    // thousands of them, and recording each would bury the upload in its own progress. It is used
+    // for the progress emit below, which is per *chunk* and is what a stalled transfer is
+    // diagnosed from. Begin and finish bracket the transfer; what happened between is the
+    // difference.
+    trace: Option<String>,
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
     // Bound the decode before doing it: base64 expands by 4/3, so this cannot be a legal slice
@@ -5785,6 +5907,7 @@ async fn push_file_chunk(
             // actually see the file rather than that this device has finished copying it.
             total: chunk_total + 1,
         },
+        trace.as_deref().and_then(parse_trace).unwrap_or_default(),
     );
     Ok(())
 }
@@ -5899,9 +6022,7 @@ async fn finish_file_upload(
         server,
         None,
     );
-    let actor = actor_of(&state, server)
-        .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let actor = op.actor(&state, server).await?;
     let key = (server, token);
     // Seal whatever the last slices left buffered: a file whose size is not a whole number of
     // chunks ends with a short one, and an empty file is still one (empty) chunk.
@@ -5956,6 +6077,7 @@ async fn finish_file_upload(
             done: chunk_total + 1,
             total: chunk_total + 1,
         },
+        op.trace,
     );
     persist_server(&state, server).await;
     // Deliberately after persistence, like every other operation here: an upload reported as
@@ -6207,9 +6329,7 @@ async fn send_call_signal(
     let bytes = B64
         .decode(payload.as_bytes())
         .map_err(|e| op.fail(codes::VOICE_SIGNAL_FAILED, format!("bad payload: {e}")))?;
-    let actor = actor_of(&state, server)
-        .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let actor = op.actor(&state, server).await?;
     let delivered = actor
         .send_call_signal(target_fp, bytes)
         .await
@@ -6374,9 +6494,7 @@ async fn download_file(
         .clone()
         .try_into()
         .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
-    let actor = actor_of(&state, server)
-        .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let actor = op.actor(&state, server).await?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
         op.fail(
             codes::FILE_DOWNLOAD_FAILED,
@@ -6403,6 +6521,7 @@ async fn download_file(
             network_bytes_done: 0,
             provider: None,
         },
+        op.trace,
     );
     let mut out = Vec::with_capacity(size as usize);
     let mut network_bytes_done = 0u64;
@@ -6442,6 +6561,7 @@ async fn download_file(
                 network_bytes_done,
                 provider,
             },
+            op.trace,
         );
     }
     if out.len() as u64 != size {
@@ -6480,9 +6600,7 @@ async fn post_status(
         server,
         None,
     );
-    let actor = actor_of(&state, server)
-        .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let actor = op.actor(&state, server).await?;
     actor.post_status(text).await;
     persist_server(&state, server).await;
     op.succeeded("STATUS.POST.PERSISTED");
@@ -6527,9 +6645,7 @@ async fn create_event(
         server,
         None,
     );
-    let actor = actor_of(&state, server)
-        .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let actor = op.actor(&state, server).await?;
     // The title and body are content; that an event was created is the record.
     actor
         .create_event(title, body, start_ts, end_ts, image)
@@ -6814,7 +6930,12 @@ async fn set_switchboard_offered(
             entry.switchboard = true;
         }
     }
-    emit_tracked(&app, "switchboard-changed", server);
+    emit_tracked(
+        &app,
+        "switchboard-changed",
+        server,
+        catcoms_diagnostics::TraceId::default(),
+    );
     get_switchboard_status(state, server).await
 }
 
@@ -7557,9 +7678,7 @@ async fn save_wiki_page(
         server,
         None,
     );
-    let actor = actor_of(&state, server)
-        .await
-        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    let actor = op.actor(&state, server).await?;
     // The page body never reaches the record, and neither does its name: a wiki page is content,
     // and the whole point of the privacy model is that content has no representation here.
     let queued = actor
@@ -7794,7 +7913,10 @@ async fn channel_target(
     let actor = actor_of_unchecked(state, server)
         .await
         .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
-    Ok((id, actor))
+    // Bound to this operation here rather than at each caller, which is what makes it impossible
+    // for a new channel command to forget. Everything the actor does in response, and every event
+    // that work produces, then lands under the same trace as the command that asked for it.
+    Ok((id, actor.with_trace(op.trace.0)))
 }
 
 /// Send a chat message to a channel (by id).
@@ -11161,6 +11283,37 @@ mod tests {
         let json = serde_json::to_value(&enhanced).expect("the console event serialises");
         assert_eq!(json["fields"][1]["value"], "/ip6/2001:db8::1/udp/31484/quic-v1");
         assert_eq!(json["capture"], "enhanced");
+    }
+
+    /// An emitted event has to tell the webview which operation it belongs to.
+    ///
+    /// The last hop of P3-004. The trace crosses the actor boundary, reaches the bridge, and then
+    /// has to survive into the payload the listener actually reads, or the frontend stages of an
+    /// operation are back to being lined up against the native ones by wall clock.
+    #[test]
+    fn an_emitted_payload_carries_the_operation_that_caused_it() {
+        let trace = catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001);
+        let stamped = stamp_payload(serde_json::json!({ "server": 1 }), 1198, trace)
+            .expect("an object payload can carry both");
+        assert_eq!(stamped["__seq"], 1198);
+        assert_eq!(stamped["__trace"], "7f2c000000000001");
+        assert_eq!(stamped["server"], 1, "and the payload itself is untouched");
+
+        // An arrival from a peer belongs to no local operation. Left off entirely rather than sent
+        // as sixteen zeroes, so a listener testing for it gets an answer rather than a value that
+        // looks like an operation and is not one.
+        let spontaneous = stamp_payload(
+            serde_json::json!({ "server": 1 }),
+            1199,
+            catcoms_diagnostics::TraceId::default(),
+        )
+        .expect("still numbered");
+        assert_eq!(spontaneous["__seq"], 1199);
+        assert!(spontaneous.get("__trace").is_none());
+
+        // A payload that is not an object can carry neither, and says so by refusing rather than
+        // by silently dropping the sequence the frontend checks for gaps with.
+        assert!(stamp_payload(serde_json::json!(7), 1200, trace).is_none());
     }
 
     /// A trace minted in the webview has to be the *same* trace natively, or the two halves of an

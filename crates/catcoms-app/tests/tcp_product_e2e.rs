@@ -174,7 +174,7 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     timeout(WAIT, async {
         loop {
             match alice_events.recv().await {
-                Some(AppEvent::ConnectivityChanged { online }) if online.contains(&bob_fp) => {
+                Some(ev) if matches!(&ev.event, AppEvent::ConnectivityChanged { online } if online.contains(&bob_fp)) => {
                     return
                 }
                 Some(_) => continue,
@@ -196,7 +196,11 @@ async fn presence_follows_a_real_connection_and_goes_dark_when_the_peer_closes_i
     timeout(WAIT, async {
         loop {
             match alice_events.recv().await {
-                Some(AppEvent::ConnectivityChanged { online }) if online.is_empty() => return,
+                Some(ev)
+                    if matches!(&ev.event, AppEvent::ConnectivityChanged { online } if online.is_empty()) =>
+                {
+                    return
+                }
                 Some(_) => continue,
                 None => panic!("the founder's actor closed"),
             }

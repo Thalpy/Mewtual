@@ -319,6 +319,11 @@ function cleanup() {
   if (viteUp) killPortListener(PORT);
 }
 
+// Held outside the try so a failure on the way *in* can still say what the page complained about.
+// Without this, a module that will not parse reports only "visual fixture never became ready",
+// and the SyntaxError naming the line sits in a buffer nobody prints.
+let connected = null;
+
 // Ctrl-C skips the finally block, which would leak exactly the orphans cleanup exists to
 // prevent. The temp profile is left behind on this path; it lives in tmpdir and is disposable.
 for (const signal of ["SIGINT", "SIGTERM"]) {
@@ -344,7 +349,8 @@ try {
     ],
     { stdio: "ignore" },
   );
-  const cdp = await Cdp.connect();
+  connected = await Cdp.connect();
+  const cdp = connected;
 
   await cdp.waitReady();
   const send = await cdp.eval(SEND_SCENARIO);
@@ -379,6 +385,12 @@ try {
   }
 } catch (e) {
   console.error(`FAIL harness: ${e.message}`);
+  // Whatever the page managed to say before it gave up. This is usually the actual diagnosis: a
+  // "never became ready" is nearly always a module that threw or would not parse, and the browser
+  // has already reported which line.
+  if (connected?.consoleErrors.length) {
+    console.error(`  page said:\n    ${connected.consoleErrors.join("\n    ")}`);
+  }
   failed = true;
 } finally {
   cleanup();

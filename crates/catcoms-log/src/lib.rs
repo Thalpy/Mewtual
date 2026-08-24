@@ -132,6 +132,29 @@ where
 /// [`BridgedMessage`](catcoms_diagnostics::redact::BridgedMessage).
 const BRIDGED_CODE: &str = "LOG.TRACING.EVENT";
 
+/// The field name a `tracing` call site uses to say which operation its work belongs to.
+///
+/// A convention rather than a type, because a library crate emits through the facade and holds no
+/// diagnostic state. `tracing::debug!(trace = %trace.as_hex(), "ACTOR.COMMAND.RECEIVED")` in
+/// `catcoms-app` and a canonical `DiagnosticEvent::trace` set natively are then the same thing to a
+/// reader, which is what lets one `hub.trace(id)` query gather both.
+const TRACE_FIELD: &str = "trace";
+
+/// A trace as a `tracing` field renders it, or `None` if it is not one.
+///
+/// Sixteen hex characters, matching `TraceId::as_hex`. Anything else is left alone as an ordinary
+/// field: a crate is free to have a field called `trace` that means something else, and silently
+/// reinterpreting it would be worse than not lifting it.
+fn parse_trace(value: &str) -> Option<catcoms_diagnostics::TraceId> {
+    if value.len() != 16 {
+        return None;
+    }
+    u64::from_str_radix(value, 16)
+        .ok()
+        .map(catcoms_diagnostics::TraceId)
+        .filter(|t| t.is_set())
+}
+
 /// Renders every field to a string. `tracing` gives typed values; the console shows text, and a
 /// debug rendering is the one representation every value type has.
 struct FieldCollector(Vec<(String, String)>);
@@ -179,6 +202,19 @@ impl<S: tracing::Subscriber> Layer<S> for RingLayer {
         )
         .target(target);
         for (name, value) in collected.0 {
+            // A library crate cannot construct a canonical event: it emits through the `tracing`
+            // facade precisely so it does not depend on whichever binary is observing it. What it
+            // *can* do is state which operation its work belongs to, and lifting that here is what
+            // joins the actor's stages to the command that caused them. Without it the trace stops
+            // at the bridge, and "did the actor ever handle my send" stays unanswerable.
+            if name == TRACE_FIELD {
+                if let Some(trace) = parse_trace(&value) {
+                    recorded = recorded.trace(trace);
+                    // Not also kept as a field. It is structure now, and a duplicate would render
+                    // on every line and be one more thing that could disagree with itself.
+                    continue;
+                }
+            }
             // Both halves are moved rather than copied. This runs on whichever thread emitted the
             // event, which includes actor and network paths, so a per-field allocation that could
             // have been a move is a cost the app pays for being observed.
@@ -455,6 +491,99 @@ mod tests {
             .map(|f| (f.name.as_str(), f.value.as_str()))
             .collect();
         assert_eq!(fields, [("message", "dial failed"), ("peer", "2b5df389")]);
+    }
+
+    /// A library crate says which operation its work belongs to, and the bridge makes that the
+    /// event's real trace.
+    ///
+    /// This is what carries a trace across a boundary the canonical model cannot reach: the actor
+    /// crate emits through the `tracing` facade on purpose, so its stages could otherwise never
+    /// join the command that caused them. A `hub.trace(id)` query has to return both.
+    #[test]
+    fn a_tracing_call_site_can_say_which_operation_its_work_belongs_to() {
+        assert_eq!(
+            parse_trace("7f2c000000000001"),
+            Some(catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001))
+        );
+        // Anything that is not a trace stays an ordinary field. A crate is entitled to a field
+        // called `trace` that means something else, and reinterpreting it silently would be worse
+        // than not lifting it at all.
+        assert_eq!(parse_trace("7f2c"), None, "the short form is not the id");
+        assert_eq!(parse_trace("the quick brown "), None);
+        assert_eq!(parse_trace(""), None);
+        assert_eq!(
+            parse_trace("0000000000000000"),
+            None,
+            "an all-zero trace is what unset renders as"
+        );
+    }
+
+    /// One query has to recover the whole operation, across the bridge.
+    ///
+    /// This is the property P3-004 is about. A command's stages are recorded natively as canonical
+    /// events; the actor's are emitted through the `tracing` facade, because a library crate holds
+    /// no diagnostic state. If those two do not land under the same trace, "which of the ten stages
+    /// failed" is still unanswerable, and every stage added before this worked only made the record
+    /// longer rather than more useful.
+    #[test]
+    fn one_trace_gathers_stages_from_both_sides_of_the_bridge() {
+        use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, Section, TraceId};
+
+        let trace = TraceId(0x7f2c_0000_0000_00a1);
+        // Scoped to this thread rather than installed globally. A `tracing` subscriber can be
+        // installed once per process, and claiming it here would make whichever other test wanted
+        // it fail depending on the order they happened to run in.
+        let subscriber = tracing_subscriber::registry().with(ring_layer());
+        tracing::subscriber::with_default(subscriber, || {
+            // The bridge's side: what a library crate can say about its own work.
+            tracing::debug!(
+                target: "catcoms_app",
+                trace = %trace.as_hex(),
+                "ACTOR.COMMAND.RECEIVED"
+            );
+            // And an unrelated operation, so "gathers everything" cannot pass by gathering
+            // everything.
+            tracing::debug!(
+                target: "catcoms_app",
+                trace = %TraceId(0x64aa_0000_0000_0009).as_hex(),
+                "ACTOR.COMMAND.RECEIVED"
+            );
+        });
+        // The canonical side: what the binary records directly.
+        catcoms_diagnostics::DiagnosticHub::record(
+            &hub(),
+            DiagnosticEvent::new(Section::Ipc, Level::Debug, "IPC.EVENT.EMITTED")
+                .phase(Phase::Success)
+                .trace(trace)
+                .target("catcoms_app"),
+        );
+
+        let stages = hub().trace(trace);
+        assert_eq!(
+            stages.len(),
+            2,
+            "one operation, both its sides, and nothing else: {stages:?}"
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|e| e.code == BRIDGED_CODE && e.target == "catcoms_app"),
+            "the actor's stage, which could only arrive through the facade"
+        );
+        assert!(
+            stages.iter().any(|e| e.code == "IPC.EVENT.EMITTED"),
+            "and the bridge's own, recorded canonically"
+        );
+        // The lifted field is structure now, not a field that renders on every line.
+        let bridged = stages.iter().find(|e| e.code == BRIDGED_CODE).unwrap();
+        assert!(
+            !bridged
+                .fields
+                .iter()
+                .any(|(name, _)| name.as_str() == "trace"),
+            "the trace is the event's own, not a duplicate alongside it: {:?}",
+            bridged.fields
+        );
     }
 
     /// A converted call site is the other half of the same comparison: a stable code, a phase and a

@@ -135,7 +135,12 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
   // below, so recognising it here extends the guarantee transitively rather than punching a hole
   // in it. A helper added to this list without that proof would silently exempt every command
   // that calls it, which is the failure mode this whole test exists to prevent.
-  const gatekeepers = "actor_of|server_actor_of|require_unlocked_session|channel_target";
+  //
+  // `op.actor` is the diagnostics-aware wrapper: it fetches the actor and binds it to the calling
+  // operation's trace in one act, so a command cannot get one without the other. It reaches the
+  // gate through `actor_of`, and the test below checks that it does rather than assuming it.
+  const gatekeepers =
+    "actor_of|server_actor_of|require_unlocked_session|channel_target|op\\.actor";
   for (const [command, segment] of segments) {
     if (bootstrap.has(command)) continue;
     assert.match(
@@ -168,4 +173,17 @@ test("every helper the session-gate audit trusts does the checking itself", () =
       `${helper} is trusted to gate commands but never checks the session`,
     );
   }
+
+  // `op.actor` is a method rather than a free function, so it is found and bounded differently.
+  // It gates transitively, through `actor_of`, which the loop above has just proved does the
+  // checking. Trusting it in the audit without proving this link is what would turn a passing
+  // audit into a false one.
+  const method = bridge.indexOf("    async fn actor(&self, state: &AppState");
+  assert.ok(method > 0, "op.actor is trusted by the audit but does not exist");
+  const body = bridge.slice(method, bridge.indexOf("\n    }", method));
+  assert.match(
+    body,
+    /actor_of\s*\(/,
+    "op.actor is trusted to gate commands but never reaches a helper that checks the session",
+  );
 });

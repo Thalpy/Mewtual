@@ -405,18 +405,19 @@ mod tests {
     #[test]
     fn a_section_level_can_be_changed_without_disturbing_the_others() {
         let (hub, _) = hub(CaptureMode::Safe);
-        hub.set_section_level(Section::Transport, Some(Level::Debug));
+        // Transport is the one section Safe turns down, so raising it is a real change.
+        hub.set_section_level(Section::Transport, Some(Level::Trace));
         assert!(hub
             .record(DiagnosticEvent::new(
                 Section::Transport,
-                Level::Debug,
+                Level::Trace,
                 "NET.CHURN"
             ))
             .is_some());
         assert!(
             hub.record(DiagnosticEvent::new(
                 Section::Voice,
-                Level::Debug,
+                Level::Trace,
                 "VOICE.X"
             ))
             .is_none(),
@@ -499,15 +500,15 @@ mod tests {
         assert!(hub
             .record(DiagnosticEvent::new(
                 Section::Voice,
-                Level::Debug,
+                Level::Trace,
                 "VOICE.X"
             ))
             .is_none());
-        hub.set_section_level(Section::Voice, Some(Level::Debug));
+        hub.set_section_level(Section::Voice, Some(Level::Trace));
         assert!(hub
             .record(DiagnosticEvent::new(
                 Section::Voice,
-                Level::Debug,
+                Level::Trace,
                 "VOICE.X"
             ))
             .is_some());

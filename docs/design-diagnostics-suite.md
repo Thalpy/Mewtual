@@ -58,9 +58,19 @@ making, and `Full` is meant to expire on its own.
 store never touches the disk, so it could afford the more revealing rendering. That was wrong when
 it was written: the console has Copy and Save, so its contents reach a clipboard and a file on the
 first occasion anyone has a reason to look at them, which is the same occasion they are about to
-send them to somebody. Safe costs transport *debug*, which is not captured at all and so cannot be
-recovered by raising the mode afterwards; the console says how many events the settings excluded
-rather than letting that pass as a quiet period.
+send them to somebody.
+
+**A mode decides content, not verbosity.** Safe used to hold every section at `Info`, which made the
+mode do a second, unrelated job. The correlation stages are recorded at `Debug`, because there is one
+per stage of every command and none of them is interesting until something goes wrong, so the
+default mode threw all of them away before anything could ask: the record could say a send failed
+and never which stage. The base level is now the same for Safe and Enhanced. What a mode changes is
+whether values render literally and whether the transport firehose is on; how much of the app speaks
+is the per-section levels, which move separately.
+
+Safe therefore costs exactly one thing: transport *debug*, which is not captured at all and so
+cannot be recovered by raising the mode afterwards. The console says how many events the settings
+excluded rather than letting that pass as a quiet period.
 
 ### 2.4 Typed errors add to the message, never replace it
 
@@ -91,7 +101,7 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M0 | Stop the logger lying and crashing | done |
 | M1 | Console out of `App.svelte` | done |
 | M2 | `catcoms-diagnostics`: canonical event, privacy model, store, renderers | done |
-| M3 | Correlation, typed errors, task supervision, invoke migration | subsystems done, correlation incomplete |
+| M3 | Correlation, typed errors, task supervision, invoke migration | done |
 | M4 | Rebuild the console on the hub | reading and capture control done; findings, checks and virtualised list outstanding |
 | M5 | Findings and checks | not started |
 | M6 | Export bundle and GitHub issue flow | partly: text export done |
@@ -117,17 +127,48 @@ groups have been through:
 be churn with no reader. The same judgment applies throughout: instrument where the diagnosis was
 missing, type the errors a user must act on, and leave the rest.
 
-### What M3 did not do
+### The trace, end to end
 
-All eight subsystem groups have been through, but **M3's headline requirement is not met**, and
-`docs/reviews/Mewtual_PFixes_Part3_Adversarial_Review.md` is right to say so rather than let the
-group tally stand in for it.
+M3's headline requirement, and the last thing it was missing (P3-004). A command's own stages were
+correlated; everything the actor did *in response* was a separate record, so a `channel-updated`
+arriving two seconds after a send carried the emit's sequence number and no evidence of being that
+send's consequence. Six of the ten stages were past that line.
 
-* **The trace does not cross the actor mailbox** (P3-004). A command's own stages are correlated;
-  the work the actor does *later* in response is not. So a `channel-updated` arriving two seconds
-  after a send carries the emit's sequence number but not the send's trace, which is precisely the
-  ten-stage question the milestone existed to answer. This is the next real step.
-* `push_file_chunk` accepts a trace and ignores it, on purpose. See its signature.
+The trace now travels:
+
+```
+frontend invoke → Tauri command → AppCommand → actor → AppEvent → emit → listener → refresh
+```
+
+Three mechanisms carry it, one per boundary, each chosen so the crossing could not be forgotten:
+
+* **Into the actor**, as an envelope on the command channel rather than a field on each of the
+  fifty `AppCommand` variants. `ServerActor::with_trace` returns a handle whose commands carry one;
+  `Operation::actor` and `channel_target` return an already-bound handle, so a command cannot get
+  an actor without also adopting the operation.
+* **Out of the actor**, as an envelope on the event channel. The actor handles one command at a
+  time, so the sink adopts that command's trace for as long as the arm runs and stamps whatever it
+  emits. The `sync_once` branch clears it: an op arriving from a peer belongs to no local operation,
+  and a trace that gathers an unrelated stage asserts a causal link that never existed, which is
+  worse than a trace with a gap in it.
+* **Across the `tracing` facade**, by lifting a `trace` field into the canonical `TraceId`. A
+  library crate emits through the facade precisely so it does not depend on whichever binary is
+  observing it, so `catcoms-app` states its operation as a field and the bridge makes it structure.
+  One `hub.trace(id)` then recovers both sides.
+
+The emit carries `__trace` beside `__seq` in the payload, so the webview's stages join the same
+operation: `UI.EVENT.RECEIVED`, the unread decision, and `UI.REFRESH.APPLIED` when the rows are on
+screen. A send whose trace ends at `CHANNEL.SEND.PERSISTED` reached the disk; one that ends at
+`UI.REFRESH.APPLIED` reached the eye, and until this existed there was no way to tell those apart.
+
+**Not done: `UI.RENDER.SETTLED`.** The review lists it as a final stage. `UI.REFRESH.APPLIED` fires
+when the rows are assigned and in scope, which is the last point the code can honestly speak for;
+anything past it is a claim about paint that would need a frame callback to be true rather than
+plausible. Left out rather than faked.
+
+* `push_file_chunk` still records no per-slice event, on purpose: a large file is thousands of
+  slices. Its trace is used for the per-chunk progress emit, which is what a stalled transfer is
+  diagnosed from.
 
 ### M4, as far as it goes
 
@@ -182,6 +223,21 @@ shared implementation, and M6 should collapse them rather than add a third.
   and a tick that overran simply had another started on top of it. The two polls are separate now,
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
+* **P3-004 (high), fixed.** See "The trace, end to end" above.
+
+### Two things that only showed up by running it
+
+Neither was in a review, and both are the kind of thing a passing suite says nothing about.
+
+* **The default mode was throwing the whole trace away.** Every correlation stage is recorded at
+  `Debug` and Safe held every section at `Info`, so the chain built for P3-004 would have been
+  invisible under the default the previous commit had just introduced. Caught because a test
+  asserting the two sides of the bridge join up returned an empty list. See decision 2.3.
+* **Optional parameters do not survive this file's TypeScript strip.** `trace?: string` in
+  `App.svelte` leaves the `?` behind, and the only symptom is the app's own startup screen with a
+  `SyntaxError` and a stack of no frames. `npm run test:flows` caught it and reported only "visual
+  fixture never became ready"; it now prints what the page said, because the browser had already
+  named the line and the harness was holding it in a buffer nobody printed.
 
 ## 4. Deferred, with reasons
 
@@ -203,8 +259,7 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 
 | ID | Sev | Open finding | Note |
 |---|---|---|---|
-| P3-004 | High | Trace correlation stops before the actor and event pipeline | **Start here.** M3's actual headline requirement. |
-| P3-010 | High | Event sequencing detects gaps but does not repair them | Pairs with P3-004. |
+| P3-010 | High | Event sequencing detects gaps but does not repair them | **Start here.** A gap is now noticed, named and correlated, and still nothing refetches. |
 | P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | The batcher counts sync throws, not rejected promises. |
 | P3-008 | High | A formatted event has no size bound before allocation or queuing | I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
 | P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |
