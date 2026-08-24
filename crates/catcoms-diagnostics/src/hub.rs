@@ -144,6 +144,16 @@ impl DiagnosticHub {
         Some(inner.ring.push(event))
     }
 
+    /// Whether an event at this section and level would be captured, without recording one.
+    ///
+    /// The same two relaxed atomic loads [`record`](Self::record) starts with, exposed so a caller
+    /// can ask *before* paying to build the event. That matters for the `tracing` bridge in
+    /// particular: it formats every field of every event into a `String` before the hub ever sees
+    /// it, so an answer that arrives inside `record` arrives one allocation per field too late.
+    pub fn admits(&self, section: Section, level: Level) -> bool {
+        self.gate.admits(section, level)
+    }
+
     /// A fresh trace, for one user-visible operation.
     pub fn new_trace(&self) -> TraceId {
         let mut inner = self.lock();

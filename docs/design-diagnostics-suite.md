@@ -224,6 +224,26 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-014 (medium), fixed.** Capture settings stopped events at the *store*, and the `tracing`
+  bridge formats every field of every event into a `String` before the store sees it. So turning
+  capture off meant the app kept paying to be watched and stopped keeping the results, which is the
+  worst of both. The hub's gate is consulted in the layer's filter now, before anything is
+  rendered. The test counts renders through the field's own `Debug` impl rather than asserting on a
+  proxy: with capture off, across a hundred events, the count does not move.
+
+### What "turn off the debug log" actually turns off
+
+Worth stating because it is easy to assume otherwise, and a wrong assumption here is a privacy one.
+The Settings checkbox controls the **file**. The console's in-memory record is a separate sink with
+its own control, under Capture in the console, and it is never written anywhere unless the user
+presses copy or save.
+
+They are deliberately separate, for the reason in decision 2.3: the console has to be usable while
+a problem is happening, and making it depend on having enabled a file beforehand and restarted puts
+it out of reach in exactly the situation it exists for. What was wrong was that the Settings page
+did not say so, which left a reader to conclude that one checkbox stopped everything. It says so
+now. Whether the checkbox should *also* stop capture is a product decision, not a technical one; the
+argument against is that it re-conflates the two axes 2.3 exists to separate.
 
 ### Two things that only showed up by running it
 
@@ -240,10 +260,6 @@ Neither was in a review, and both are the kind of thing a passing suite says not
   named the line and the harness was holding it in a buffer nobody printed.
 
 ## 4. Deferred, with reasons
-
-- **Reloadable `tracing` filter.** Runtime capture toggling works through the hub's gate, so a
-  disabled section still costs field formatting before the hub discards it. A performance item;
-  belongs with M7's budgets.
 - **`check_connection` and `retry` remediations.** Added with the subsystems that can return them.
   An enum listing outcomes no code produces invites a UI branch for a case that never happens.
 - **Structured detail on `AppError`.** Removed rather than carried unused.
@@ -265,7 +281,6 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 | P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |
 | P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
-| P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Already known and deferred; see section 4. |
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
 | P3-016 | Med | Startup capture begins too late for static-import failures | `main.ts` imports run before its first statement. |
 | P3-017 | Med | The typed-error registry is conventional, not enforced | Nothing stops a code being used without registering it. |

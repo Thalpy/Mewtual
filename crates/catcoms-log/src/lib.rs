@@ -32,6 +32,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+use tracing_subscriber::filter::FilterExt;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 
@@ -118,11 +119,29 @@ struct RingLayer;
 /// A generic function rather than a local closure: a `Layer` is typed by the subscriber it is
 /// layered onto, the two `init_debug_with` branches stack onto different ones, and a closure would
 /// be monomorphised once against whichever it saw first.
+///
+/// # Two filters, and why the second one matters
+///
+/// [`CONSOLE_RING_FILTER`] is static: it decides, once, which crates may reach the ring at all,
+/// and it is what keeps a dependency's own chatter out.
+///
+/// The hub's capture gate is the live one, and it has to be consulted *here* rather than inside
+/// `record`. The bridge formats every field of every event into a `String` before the hub sees it,
+/// so a capture setting that only stopped events at the store still paid the whole cost of building
+/// them and then threw them away. Turning capture off is supposed to mean the app stops paying to
+/// be watched, and until this it did not: it meant the app kept paying and stopped keeping the
+/// results. See the first review, section 7, "Runtime toggling".
 fn ring_layer<S>() -> impl Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
-    RingLayer.with_filter(EnvFilter::new(CONSOLE_RING_FILTER))
+    let live = tracing_subscriber::filter::FilterFn::new(|metadata: &tracing::Metadata<'_>| {
+        hub().admits(
+            catcoms_diagnostics::Section::from_target(metadata.target()),
+            catcoms_diagnostics::Level::from_tracing(metadata.level().as_str()),
+        )
+    });
+    RingLayer.with_filter(EnvFilter::new(CONSOLE_RING_FILTER).and(live))
 }
 
 /// The code a `tracing` event that has not been converted to a structured one carries.
@@ -446,6 +465,7 @@ mod tests {
     #[test]
     fn capture_starts_in_the_mode_whose_output_can_be_shared() {
         use catcoms_diagnostics::CaptureMode;
+        let _held = capture_lock();
         assert_eq!(hub().mode(), CaptureMode::Safe);
         assert!(!hub().mode().allows_raw_addresses());
     }
@@ -518,6 +538,86 @@ mod tests {
         );
     }
 
+    /// The hub is process-wide, so a test that changes what is being captured changes it for
+    /// whichever other test happens to be running beside it.
+    ///
+    /// Held by every test below that either moves the capture config or depends on it. Found the
+    /// obvious way: two of them did this concurrently and one failed on an assertion about the
+    /// other's setting.
+    static CAPTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn capture_lock() -> std::sync::MutexGuard<'static, ()> {
+        CAPTURE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Turning capture off has to stop the app *paying*, not just stop it keeping the results.
+    ///
+    /// The bridge renders every field into a `String` before the hub sees the event, so a setting
+    /// that only rejected events at the store left the whole cost in place and discarded the
+    /// output. This measures the thing itself rather than a proxy: the field's `Debug` counts its
+    /// own invocations, so the assertion is literally "nothing was formatted".
+    #[test]
+    fn capture_that_is_turned_down_costs_nothing_to_format() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RENDERED: AtomicUsize = AtomicUsize::new(0);
+
+        struct Counted;
+        impl std::fmt::Debug for Counted {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                RENDERED.fetch_add(1, Ordering::Relaxed);
+                f.write_str("counted")
+            }
+        }
+
+        let _held = capture_lock();
+        let hub = hub();
+        let restore = hub.mode();
+        let subscriber = tracing_subscriber::registry().with(ring_layer());
+        tracing::subscriber::with_default(subscriber, || {
+            hub.set_mode(catcoms_diagnostics::CaptureMode::Safe);
+            tracing::debug!(target: "catcoms_app", payload = ?Counted, "ON");
+            assert_eq!(
+                RENDERED.load(Ordering::Relaxed),
+                1,
+                "with capture on, the field is rendered exactly once"
+            );
+
+            hub.set_mode(catcoms_diagnostics::CaptureMode::Off);
+            for _ in 0..100 {
+                tracing::debug!(target: "catcoms_app", payload = ?Counted, "OFF");
+            }
+            assert_eq!(
+                RENDERED.load(Ordering::Relaxed),
+                1,
+                "with capture off, not one field is rendered"
+            );
+
+            // And it comes back without a restart, which is the other half of the same promise.
+            hub.set_mode(catcoms_diagnostics::CaptureMode::Safe);
+            tracing::debug!(target: "catcoms_app", payload = ?Counted, "ON AGAIN");
+            assert_eq!(RENDERED.load(Ordering::Relaxed), 2);
+
+            // The same has to hold for one section turned down, which is the setting somebody
+            // actually reaches for: not "record nothing" but "I do not need the transport
+            // narrating every connection right now". If that only stopped events being kept, the
+            // section a user turned down would still be the most expensive one in the process.
+            hub.set_mode(catcoms_diagnostics::CaptureMode::Enhanced);
+            tracing::debug!(target: "catcoms_net", payload = ?Counted, "DIAL");
+            assert_eq!(RENDERED.load(Ordering::Relaxed), 3);
+
+            hub.set_section_level(catcoms_diagnostics::Section::Transport, None);
+            for _ in 0..50 {
+                tracing::debug!(target: "catcoms_net", payload = ?Counted, "DIAL");
+            }
+            assert_eq!(RENDERED.load(Ordering::Relaxed), 3, "and it stops costing");
+
+            // The others are untouched, so this is a section control and not a mode change.
+            tracing::debug!(target: "catcoms_sync", payload = ?Counted, "POST");
+            assert_eq!(RENDERED.load(Ordering::Relaxed), 4);
+        });
+        hub.set_mode(restore);
+    }
+
     /// One query has to recover the whole operation, across the bridge.
     ///
     /// This is the property P3-004 is about. A command's stages are recorded natively as canonical
@@ -529,6 +629,7 @@ mod tests {
     fn one_trace_gathers_stages_from_both_sides_of_the_bridge() {
         use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, Section, TraceId};
 
+        let _held = capture_lock();
         let trace = TraceId(0x7f2c_0000_0000_00a1);
         // Scoped to this thread rather than installed globally. A `tracing` subscriber can be
         // installed once per process, and claiming it here would make whichever other test wanted
@@ -627,6 +728,8 @@ mod tests {
 
     #[test]
     fn debug_mode_writes_a_timestamped_file_and_reports_it_healthy() {
+        // Reads the hub, so it must not run while another test has capture turned off.
+        let _held = capture_lock();
         let dir = tempfile::tempdir().unwrap();
         let path;
         {

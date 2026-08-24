@@ -19685,6 +19685,14 @@
                   can reproduce a problem and send the file to someone who can read it. Turning it
                   off is permanent until you turn it back on.
                 </p>
+                <!-- Two different things, said plainly. The file and the in-app record are separate
+                     sinks with separate settings, and a reader who assumes this checkbox is the
+                     one off switch would believe nothing is being recorded when something is. -->
+                <p class="muted small">
+                  This controls the file only. The debug console keeps its own record in memory,
+                  which is never written anywhere unless you copy or save it; turn that off, or
+                  change how much of it is kept, under Capture in the console itself.
+                </p>
                 {#if debugLog}
                   <label class="toggle">
                     <input type="checkbox" checked={debugLog.enabled} disabled={debugLogBusy}
