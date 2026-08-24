@@ -3825,13 +3825,19 @@ async fn sync_channels<T, R>(
 }
 
 /// The last-seen fingerprint of one channel's rendered content, kept per open channel so a change
-/// can be classified rather than merely detected. The three signatures are separate because they
-/// answer separate questions, and `ids` is the set of message ids: an arrival is "an id we have
-/// never seen", which is the one definition a concurrent append+delete cannot fool.
+/// can be classified rather than merely detected. The parts are separate because they answer
+/// separate questions, and `ids` is the set of message ids: an arrival is "an id we have never
+/// seen", which is the one definition a concurrent append+delete cannot fool.
+///
+/// `jukebox` holds the queue itself rather than a digest of it. The message log is the only
+/// unbounded part here, so a queue capped at [`crate::MAX_JUKEBOX_ENTRIES`] entries is cheap to
+/// keep whole, and a digest can only ever lose: it can report "nothing moved" for a queue that
+/// moved, which is the one answer this record must not give, since it exists to settle "the
+/// queue changed but the UI did not".
 #[derive(Default)]
 struct ChannelSignature {
     topic: u64,
-    jukebox: u64,
+    jukebox: Vec<JukeEntry>,
     messages: u64,
     ids: std::collections::HashSet<u64>,
 }
@@ -3863,14 +3869,10 @@ where
     // The topic and the jukebox queue ride the same channel document and the same rendered header,
     // so a peer's edit still has to reach the UI; it just no longer claims to be a message.
     let topic = hash_of(server.channel_topic(channel));
-    let jukebox = {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        for e in &server.jukebox(channel) {
-            e.id.hash(&mut h);
-            e.name.hash(&mut h);
-        }
-        h.finish()
-    };
+    // Compared whole. Folding each entry's id and name into a hash lost every other field, so a
+    // peer re-pointing a queued track at a different content address (same id, same display name)
+    // read as an unchanged queue and never reached the UI.
+    let jukebox = server.jukebox(channel);
     // A content signature (not just the count) so an EDIT; which doesn't change the count; is
     // detected too, both locally and when a peer's edit arrives. Cheap over a channel's message
     // list, which this actor already materializes on every sync tick.
@@ -4403,6 +4405,47 @@ mod tests {
 
         actor.shutdown().await;
         let _ = handle.await;
+    }
+
+    /// Every member may write any key of the shared channel document, so an entry already in the
+    /// queue can come back pointing at a different file while its id, name and queue time stay
+    /// put. A signature that folded only id and name called that queue unchanged, so the UI kept
+    /// offering the previous track and the person debugging it saw "the event says nothing moved".
+    #[tokio::test]
+    async fn requeueing_an_entry_onto_a_different_file_reads_as_a_queue_change() {
+        let hub = Hub::new();
+        let mut server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        server.open_channel(GENERAL).await.unwrap();
+        server.jukebox_add(GENERAL, "ab", "purr.mp3").await.unwrap();
+
+        let mut sigs = HashMap::new();
+        assert!(
+            channel_delta(&server, GENERAL, &mut sigs).is_none(),
+            "first sight of a channel only seeds the record"
+        );
+
+        let mut entry = server.jukebox(GENERAL).remove(0);
+        entry.cid = "cd".into();
+        server
+            .sync
+            .post(crate::DocType::Channel, GENERAL, move |d| {
+                crate::add_juke_entry_in_doc(d, &entry)
+            })
+            .await
+            .unwrap();
+
+        let change = channel_delta(&server, GENERAL, &mut sigs).expect(
+            "a queue entry now naming another file is a change the UI has to be told about",
+        );
+        assert!(
+            change.jukebox,
+            "and it is a queue change, not a message one"
+        );
+        assert!(!change.messages_appended && !change.messages_changed && !change.topic);
+        assert!(
+            channel_delta(&server, GENERAL, &mut sigs).is_none(),
+            "a quiet tick after it must not invent a second one"
+        );
     }
 
     /// Unread state has to survive an explicit lock and a restart, neither of which the live event
