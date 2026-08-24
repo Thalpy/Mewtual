@@ -312,51 +312,6 @@ export function installUiLogging(
   };
 }
 
-/**
- * Capture exceptions before the application exists.
- *
- * `main.ts` dynamically imports `App.svelte` and mounts it, and the full logger was installed
- * inside that component's `onMount`. Everything before that point was invisible: a module
- * evaluation error, a failed dynamic import, a mount that threw. Those are the failures that leave
- * a user with a blank window and nothing to report, and they were precisely the ones nothing
- * recorded.
- *
- * Deliberately tiny and dependency-free. It buffers into memory, and whatever installs the real
- * logger drains it once the native bridge is reachable.
- */
-export function installBootstrapCapture(scope: {
-  addEventListener: Window["addEventListener"];
-  removeEventListener?: Window["removeEventListener"];
-  limit?: number;
-}): { drain: () => UiLogRecord[]; stop: () => void } {
-  const limit = scope.limit ?? 50;
-  let held: UiLogRecord[] = [];
-
-  const keep = (message: string) => {
-    // Bounded, because a failure during startup is often a loop and there is no rate limiter yet.
-    if (held.length >= limit) return;
-    held.push({ level: "error", message, repeats: 1 });
-  };
-  const onError = (e: Event) => {
-    const err = e as ErrorEvent;
-    keep(`startup uncaught: ${err.message ?? "error"} at ${err.filename ?? "?"}:${err.lineno ?? 0}`);
-  };
-  const onRejection = (e: Event) => {
-    const reason = (e as PromiseRejectionEvent).reason;
-    keep(`startup unhandled rejection: ${formatLogArgs([reason])}`);
-  };
-  scope.addEventListener("error", onError);
-  scope.addEventListener("unhandledrejection", onRejection);
-
-  return {
-    drain: () => {
-      const out = held;
-      held = [];
-      return out;
-    },
-    stop: () => {
-      scope.removeEventListener?.("error", onError);
-      scope.removeEventListener?.("unhandledrejection", onRejection);
-    },
-  };
-}
+// The bootstrap capture that used to live here now lives in `startup-log.ts`. It was imported from
+// there, which put this whole module ahead of the capture in the evaluation order and made a
+// failure inside it invisible to the thing meant to observe startup failures.

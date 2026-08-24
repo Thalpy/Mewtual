@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   formatLogArgs,
-  installBootstrapCapture,
   installUiLogging,
   makeBatcher,
   makeRepeatCollapser,
@@ -326,37 +325,5 @@ test("a sink that throws cannot break the console it wraps", () => {
   assert.ok(log.dropped >= 1, "and the loss is counted");
 });
 
-// --- bootstrap capture ------------------------------------------------------------------------
-
-test("startup failures are captured before the application exists", () => {
-  const listeners: Array<{ type: string; fn: (e: Event) => void }> = [];
-  const capture = installBootstrapCapture({
-    addEventListener: ((type: string, fn: (e: Event) => void) => {
-      listeners.push({ type, fn });
-    }) as unknown as Window["addEventListener"],
-    removeEventListener: ((type: string, fn: (e: Event) => void) => {
-      const at = listeners.findIndex((l) => l.type === type && l.fn === fn);
-      if (at >= 0) listeners.splice(at, 1);
-    }) as unknown as Window["removeEventListener"],
-    limit: 3,
-  });
-
-  const fire = (type: string, e: unknown) => {
-    for (const l of listeners) if (l.type === type) l.fn(e as Event);
-  };
-  fire("error", { message: "App.svelte failed to evaluate", filename: "App.svelte", lineno: 1 });
-  fire("unhandledrejection", { reason: new Error("dynamic import failed") });
-
-  const held = capture.drain();
-  assert.equal(held.length, 2);
-  assert.ok(held[0].message.startsWith("startup uncaught:"));
-  assert.ok(held[1].message.includes("dynamic import failed"));
-  assert.deepEqual(capture.drain(), [], "draining twice does not duplicate the buffer");
-
-  // Bounded: a startup failure is often a loop, and there is no rate limiter yet at that point.
-  for (let i = 0; i < 10; i += 1) fire("error", { message: `loop ${i}` });
-  assert.equal(capture.drain().length, 3);
-
-  capture.stop();
-  assert.equal(listeners.length, 0);
-});
+// Bootstrap capture moved to `startup-log.ts`, and its tests moved with it: importing it from here
+// was the reason startup capture could not be installed before this module was evaluated.
