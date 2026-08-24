@@ -11696,6 +11696,15 @@ pub fn run() {
                 dir,
             });
             spawn_network_monitor(&handle);
+            // The last line of `setup`, and the only proof that startup got all the way through.
+            //
+            // Everything before this point can fail in ways that leave a plausible-looking log: a
+            // panic here exits the process with no window, and the last thing written is whatever
+            // happened to come before it. A marker at the end turns "the log stops somewhere" into
+            // "the log stops before this", which is the difference between a guess and an answer.
+            // `scripts/startup-check.mjs` asserts on it, because liveness cannot be asserted on:
+            // somebody closing the window is not a failure.
+            tracing::info!(target: "catcoms_app", "STARTUP.SETUP.COMPLETE");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

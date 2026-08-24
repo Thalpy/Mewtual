@@ -333,6 +333,30 @@ did not say so, which left a reader to conclude that one checkbox stopped everyt
 now. Whether the checkbox should *also* stop capture is a product decision, not a technical one; the
 argument against is that it re-conflates the two axes 2.3 exists to separate.
 
+### Nothing was starting the application
+
+The P3-009 work shipped a panic in `setup`: `tokio::spawn` called from the main thread before the
+async runtime is entered, which is fatal at startup. No window, exit code 101, and it passed every
+gate in this repository.
+
+It passed because none of them start the binary. `cargo test` tests functions and never constructs
+a Tauri app; clippy cannot know which thread a call happens on; the flow check drives the visual
+fixture in a browser and never launches the app. The first thing to notice was a person running it.
+
+Two guards, because the bug had two sizes:
+
+* `supervise_detached` gives the hazard one home: Tauri's spawn on the outside, tokio's inside,
+  where a runtime is current. A plain `#[test]` (deliberately not `#[tokio::test]`) calls it from
+  the same context `setup` is in, and reproduces the panic verbatim if the nesting is removed.
+* `npm run test:startup` launches the built binary and waits for a marker written on the last line
+  of `setup`. It does *not* assert liveness: it opens a real window, and somebody closing that
+  window is not a failure. What it asserts is that startup finished, and that nothing panicked.
+  Confirmed by reintroducing the bug and watching it reproduce the exact message and line.
+
+The marker earns its place beyond the test. Everything before it can fail in ways that leave a
+plausible-looking log, so "the log stops before `STARTUP.SETUP.COMPLETE`" turns a guess into an
+answer.
+
 ### Two things that only showed up by running it
 
 Neither was in a review, and both are the kind of thing a passing suite says nothing about.

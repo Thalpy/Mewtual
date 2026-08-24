@@ -82,6 +82,10 @@ pub struct TaskHandle(u64);
 
 impl TaskHandle {
     /// This task's id, for finding it again in a snapshot.
+    ///
+    /// Used by tests rather than by the app, which holds the handle itself. Kept because a
+    /// registration you cannot look up afterwards is a registration you cannot assert about.
+    #[cfg(test)]
     pub fn id(self) -> u64 {
         self.0
     }
