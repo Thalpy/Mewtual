@@ -22,6 +22,8 @@
  *    render loop costs a counter rather than the tab's memory.
  */
 
+import { makeOutbox, type SendOutcome } from "./diagnostics.ts";
+
 export type UiLogLevel = "error" | "warn" | "info" | "debug";
 
 /** One line for the native side, as `log_ui_batch` accepts it. */
@@ -135,67 +137,43 @@ export function makeRepeatCollapser(windowMs = REPEAT_WINDOW_MS) {
  * which is the moment worth capturing. Errors still leave on the next tick rather than waiting out
  * the interval: a page that is about to die should not be holding its explanation in a timer.
  */
+// The queue, the bounded retry and the loss accounting live in `diagnostics.ts` so the two
+// channels cannot drift apart about what "delivered" means.
 export function makeBatcher(
-  send: (records: UiLogRecord[]) => void,
+  send: (records: UiLogRecord[], meta: { batch: number }) => Promise<SendOutcome>,
   scope: {
     setTimeout: (fn: () => void, ms: number) => unknown;
     clearTimeout: (handle: unknown) => void;
   },
 ) {
-  let queue: UiLogRecord[] = [];
-  let dropped = 0;
-  let timer: unknown = null;
-  let timerDelay = Infinity;
-
-  function flush() {
-    if (timer !== null) {
-      scope.clearTimeout(timer);
-      timer = null;
-      timerDelay = Infinity;
-    }
-    while (queue.length) {
-      const batch = queue.slice(0, MAX_BATCH);
-      queue = queue.slice(MAX_BATCH);
-      try {
-        send(batch);
-      } catch {
-        // A sink that is down must not be able to break the page it is observing, and must not be
-        // retried into a loop that needs its own rate limit. The records are gone; the count is not.
-        dropped += batch.length;
-      }
-    }
-  }
-
-  function flushSoon(delay: number) {
-    if (timer !== null && timerDelay <= delay) return;
-    if (timer !== null) scope.clearTimeout(timer);
-    timerDelay = delay;
-    timer = scope.setTimeout(() => {
-      timer = null;
-      timerDelay = Infinity;
-      flush();
-    }, delay);
-  }
+  // The queue, the bounded retry and the accounting are shared with the structured recorder,
+  // because both had the same bug: they counted a send that threw *immediately* and the real send
+  // is a promise that rejects long after the batch has been retired. See `makeOutbox`.
+  const outbox = makeOutbox<UiLogRecord>(send, {
+    setTimeout: scope.setTimeout,
+    clearTimeout: scope.clearTimeout,
+    maxPending: MAX_QUEUE,
+    maxBatch: MAX_BATCH,
+  });
 
   return {
     push(records: readonly UiLogRecord[]) {
       if (!records.length) return;
-      queue.push(...records);
-      if (queue.length > MAX_QUEUE) {
-        // Oldest first: during a storm the newest records describe what is happening now, and the
-        // native ring already holds the run-up.
-        dropped += queue.length - MAX_QUEUE;
-        queue = queue.slice(queue.length - MAX_QUEUE);
-      }
-      flushSoon(records.some((r) => r.level === "error") ? 0 : BATCH_INTERVAL_MS);
+      outbox.push(records);
+      // An error goes now. Everything else waits for the batch window, because one IPC call per
+      // console line is most expensive exactly when the page is emitting fastest.
+      outbox.flushSoon(records.some((r) => r.level === "error") ? 0 : BATCH_INTERVAL_MS);
     },
-    flush,
+    flush: () => outbox.flush(),
+    stop: () => outbox.stop(),
+    /** Losses not yet told to the native side, for the caller to put in the record. */
+    takeLoss: () => outbox.takeLoss(),
     /** Records that never reached the native side. Surfaced so a gap is never presented as quiet. */
     get dropped() {
-      return dropped;
+      return outbox.dropped;
     },
     get pending() {
-      return queue.length;
+      return outbox.pending;
     },
   };
 }
@@ -245,7 +223,7 @@ export type UiLogging = {
  * one of them, and duplicated exception records are indistinguishable from a real retry loop.
  */
 export function installUiLogging(
-  send: (records: UiLogRecord[]) => void,
+  send: (records: UiLogRecord[], meta: { batch: number }) => Promise<SendOutcome>,
   scope: {
     console: Pick<Console, "error" | "warn">;
     addEventListener: Window["addEventListener"];

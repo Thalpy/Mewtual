@@ -12818,12 +12818,11 @@
   // Everything below is bounded and batched; see diagnostics.ts. The cost on the hot path is a
   // counter increment and an array push.
   const traceSource = makeTraceSource(Math.floor(Math.random() * 0xffffffff));
+  // The send is awaited rather than fired and forgotten. Firing it with `void` and a swallowing
+  // `catch` retired the batch the moment it was handed over and dropped the rejection outside the
+  // batcher, so the pipeline reported perfect health exactly when the bridge was unhealthy.
   const diagRecorder = makeRecorder(
-    (events) => {
-      void invoke("record_ui_events", { events }).catch(() => {
-        /* diagnostics must never be able to break what they observe */
-      });
-    },
+    (events) => invoke<{ offered: number; accepted: number }>("record_ui_events", { events }),
     { setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h as ReturnType<typeof setTimeout>) },
   );
   /**
@@ -12978,11 +12977,9 @@
       (records) => {
         // Off means off here too. The hooks stay installed, because reinstalling them on every
         // capture change is how the duplicate-listener bug this cleanup exists for came back; what
-        // stops is the sending.
-        if (!captureOn) return;
-        void invoke("log_ui_batch", { records }).catch(() => {
-          /* the log is not worth an error of its own */
-        });
+        // stops is the sending. Reported as accepted rather than lost: the user asked for it.
+        if (!captureOn) return Promise.resolve({ offered: records.length, accepted: records.length });
+        return invoke<{ offered: number; accepted: number }>("log_ui_batch", { records });
       },
       {
         console: globalThis.console,

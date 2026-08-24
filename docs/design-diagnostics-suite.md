@@ -224,6 +224,19 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-006 (high), fixed.** Both frontend batchers counted a loss only when `send` threw
+  *immediately*, and the real send returns a promise: it was fired and forgotten, the rejection
+  arrived outside the batcher, and the counter still read zero. The pipeline reported perfect health
+  exactly when the bridge was unhealthy. The transport is explicitly asynchronous now, returning
+  `{offered, accepted}`; one batch is in flight at a time and is not retired until it is answered; a
+  rejection is retried exactly once and then counted. Partial acceptance is counted too, because the
+  native limiter suppressing a storm is it working as designed and is still a loss the webview is
+  entitled to know about. What was lost while the bridge could not be reached rides on the first
+  batch that gets through, so the count reaches the record rather than a counter nobody reads.
+  The queue, the retry and the accounting are shared by both channels, which had the same bug.
+  Prose and structured records now have **separate native budgets**: while they shared one, a
+  `console.warn` storm spent it and suppressed the structured events describing what was going
+  wrong.
 * **P3-010 (high), fixed.** Detection existed and repair did not, so the record could say the UI had
   gone stale while the UI stayed stale. All seven parts:
   * Every event goes through one listener wrapper, not just `channel-updated`. It is a shim with
@@ -317,9 +330,7 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 
 | ID | Sev | Open finding | Note |
 |---|---|---|---|
-| P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | **Start here.** The batcher counts sync throws, not rejected promises. |
-| P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | The batcher counts sync throws, not rejected promises. |
-| P3-008 | High | A formatted event has no size bound before allocation or queuing | I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
+| P3-008 | High | A formatted event has no size bound before allocation or queuing | **Start here.** I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
 | P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |
 | P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |

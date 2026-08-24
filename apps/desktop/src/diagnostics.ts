@@ -250,6 +250,228 @@ export function needsResync(anomaly: SeqAnomaly): boolean {
   return anomaly.kind !== "repeat";
 }
 
+// --- getting records across the bridge ----------------------------------------------------------
+
+/**
+ * What the native side did with a batch.
+ *
+ * `accepted` rather than a bare success, because the bridge is rate-limited: it can take a batch,
+ * keep four of its ten records and be working exactly as designed. A transport that reported only
+ * "it went" would count those six as delivered.
+ */
+export type SendOutcome = { accepted: number };
+
+/**
+ * A bounded queue that gets records across an asynchronous boundary and tells the truth about what
+ * did not make it.
+ *
+ * # The bug this exists for
+ *
+ * Both batchers treated `send` as synchronous and counted a loss only when it threw *immediately*.
+ * The real send returns a promise from the bridge and was fired with `void` and a swallowing
+ * `catch`: the rejection arrived long after the batch had been retired, outside the batcher
+ * entirely, and the counter still read zero.
+ * So the pipeline reported perfect health precisely when the bridge was unhealthy, which is the one
+ * moment its own losses matter. Found by adversarial review (P3-006).
+ *
+ * # What it does about it
+ *
+ * One batch is in flight at a time, and it is not retired until the acknowledgement arrives. A
+ * rejection is retried exactly once, because the likely cause is a remount that has already
+ * finished; a second rejection is counted as lost rather than retried into a loop that would need
+ * its own rate limit. Partial acceptance is counted too.
+ *
+ * Memory is bounded by `maxPending` plus the one batch in flight, whatever the producer does.
+ */
+export function makeOutbox<T>(
+  send: (batch: T[], meta: { batch: number }) => Promise<SendOutcome>,
+  scope: {
+    setTimeout: (fn: () => void, ms: number) => unknown;
+    clearTimeout: (handle: unknown) => void;
+    /** How many records may wait. Beyond this the oldest are dropped and counted. */
+    maxPending: number;
+    /** How many may go in one send. */
+    maxBatch?: number;
+    /**
+     * Build a record saying how much has been lost and not yet reported.
+     *
+     * The review's "surface it after the bridge returns": the moment the pipeline can talk again is
+     * the moment it should say what it lost while it could not. A dropped counter the native side
+     * never hears about is not evidence of anything.
+     *
+     * It rides at the *end* of a batch, so that if the far side accepts only a prefix, the record
+     * is the first thing sacrificed rather than something real being dropped in its favour.
+     */
+    lossRecord?: (count: number) => T;
+  },
+) {
+  const maxBatch = scope.maxBatch ?? scope.maxPending;
+  let queue: T[] = [];
+  let inFlight: T[] = [];
+  /** Losses attached to the batch in flight, to be put back if it fails. */
+  let inFlightLoss = 0;
+  let attempt = 0;
+  let dropped = 0;
+  let sent = 0;
+  /** Losses not yet told to the native side. See `takeLoss`. */
+  let unreported = 0;
+  let batchNumber = 0;
+  let timer: unknown = null;
+  let timerDelay = Infinity;
+  let running = false;
+  let stopped = false;
+
+  function lose(count: number) {
+    dropped += count;
+    unreported += count;
+  }
+
+  function clearTimer() {
+    if (timer === null) return;
+    scope.clearTimeout(timer);
+    timer = null;
+    timerDelay = Infinity;
+  }
+
+  async function pump() {
+    if (running || stopped) return;
+    running = true;
+    try {
+      while (queue.length || inFlight.length) {
+        if (!inFlight.length) {
+          // Leave room for the loss record, if one is owed, rather than letting it push a real
+          // record out of the batch.
+          inFlightLoss = scope.lossRecord ? unreported : 0;
+          unreported -= inFlightLoss;
+          // At least one real record per batch, whatever the caps say. Otherwise a small
+          // `maxBatch` plus a loss report that keeps failing would send nothing but loss reports
+          // while the records they describe never moved.
+          const room = Math.max(1, maxBatch - (inFlightLoss > 0 ? 1 : 0));
+          inFlight = queue.slice(0, room);
+          queue = queue.slice(room);
+          attempt = 0;
+          batchNumber += 1;
+        }
+        attempt += 1;
+        const real = inFlight;
+        const owed = inFlightLoss;
+        const payload =
+          owed > 0 && scope.lossRecord ? [...real, scope.lossRecord(owed)] : real;
+        const number = batchNumber;
+        let outcome: SendOutcome | null = null;
+        try {
+          outcome = await send(payload, { batch: number });
+        } catch {
+          // One retry, and only one. The likely cause of a single rejection is a remount that has
+          // already finished; anything more persistent is a sink that is down, and retrying into a
+          // down sink is how a diagnostic pipeline becomes the load it is reporting on.
+          if (attempt < 2 && !stopped) continue;
+          inFlight = [];
+          inFlightLoss = 0;
+          // The report was taken out of the counter on the way in, so a failed delivery has to put
+          // it back, or the loss is lost twice over: once as records and once as the fact of it.
+          unreported += owed;
+          lose(real.length);
+          continue;
+        }
+        inFlight = [];
+        inFlightLoss = 0;
+        // The loss record rides last, so a far side that took only a prefix dropped that before it
+        // dropped anything real.
+        const accepted = Math.max(0, Math.min(outcome.accepted, payload.length));
+        const realAccepted = Math.min(accepted, real.length);
+        sent += realAccepted;
+        if (realAccepted < real.length) lose(real.length - realAccepted);
+        if (owed > 0 && accepted < payload.length) unreported += owed;
+      }
+    } finally {
+      running = false;
+    }
+  }
+
+  return {
+    push(items: readonly T[]) {
+      if (stopped || !items.length) return;
+      queue.push(...items);
+      if (queue.length > scope.maxPending) {
+        // Oldest first: during a storm the newest records describe what is happening now, and the
+        // native ring already holds the run-up.
+        lose(queue.length - scope.maxPending);
+        queue = queue.slice(queue.length - scope.maxPending);
+      }
+    },
+    /** Send whatever is waiting, now. */
+    flush() {
+      clearTimer();
+      void pump();
+    },
+    /** Send whatever is waiting after `delay`, or sooner if something already asked for sooner. */
+    flushSoon(delay: number) {
+      if (stopped) return;
+      if (timer !== null && timerDelay <= delay) return;
+      if (timer !== null) scope.clearTimeout(timer);
+      timerDelay = delay;
+      timer = scope.setTimeout(() => {
+        timer = null;
+        timerDelay = Infinity;
+        void pump();
+      }, delay);
+    },
+    /**
+     * Take the losses that have not been reported yet, so a caller can put them in the record.
+     *
+     * A counter nobody reads is not evidence. The caller sends this back across the bridge on the
+     * next batch that gets through, which is the review's "surface it after the bridge returns":
+     * the moment the pipeline can talk again is the moment it should say what it lost while it
+     * could not.
+     */
+    takeLoss(): number {
+      const owed = unreported;
+      unreported = 0;
+      return owed;
+    },
+    /**
+     * Throw away what is waiting, without counting it as lost.
+     *
+     * For capture being switched off: those are records the user has just said they do not want,
+     * and counting them as dropped would report a loss the user asked for. Distinct from
+     * [`stop`], where the records were wanted and are going nowhere.
+     */
+    discard() {
+      clearTimer();
+      queue = [];
+    },
+    /**
+     * Stop accepting records, and account for what will never go.
+     *
+     * A webview can be torn down by a reload or a window close with a batch still in flight, and
+     * nothing in the page outlives that. What it can do is stop pretending: the pending records are
+     * counted here rather than vanishing, and the native side notices the rest by the batch numbers
+     * it stops seeing.
+     */
+    stop(): { abandoned: number } {
+      clearTimer();
+      stopped = true;
+      const abandoned = queue.length + inFlight.length;
+      lose(abandoned);
+      queue = [];
+      inFlight = [];
+      return { abandoned };
+    },
+    /** Records that reached the native side and were kept. */
+    get sent() {
+      return sent;
+    },
+    /** Records that never reached it. Surfaced so a gap is never presented as quiet. */
+    get dropped() {
+      return dropped;
+    },
+    get pending() {
+      return queue.length + inFlight.length;
+    },
+  };
+}
+
 // --- recording -------------------------------------------------------------------------------
 
 /** One structured observation from the webview. */
@@ -278,7 +500,7 @@ export const MAX_PENDING = 500;
  * most expensive exactly when the app is busiest.
  */
 export function makeRecorder(
-  send: (events: UiEvent[]) => void,
+  send: (events: UiEvent[], meta: { batch: number }) => Promise<SendOutcome>,
   scope: {
     setTimeout: (fn: () => void, ms: number) => unknown;
     clearTimeout: (handle: unknown) => void;
@@ -286,29 +508,22 @@ export function makeRecorder(
   },
 ) {
   const intervalMs = scope.intervalMs ?? 250;
-  let queue: UiEvent[] = [];
-  let dropped = 0;
-  let timer: unknown = null;
   // Capture starts on, and is never persisted, so a fresh webview always begins beside a process
   // that is recording. The native side says otherwise only when somebody moves the control.
   let capturing = true;
 
-  function flush() {
-    if (timer !== null) {
-      scope.clearTimeout(timer);
-      timer = null;
-    }
-    if (!queue.length) return;
-    const batch = queue;
-    queue = [];
-    try {
-      send(batch);
-    } catch {
-      // A sink that is down must not break the app it observes, and must not be retried into a
-      // loop that needs its own rate limit.
-      dropped += batch.length;
-    }
-  }
+  const outbox = makeOutbox<UiEvent>(send, {
+    setTimeout: scope.setTimeout,
+    clearTimeout: scope.clearTimeout,
+    maxPending: MAX_PENDING,
+    // What the pipeline lost while it could not speak, said on the first batch that gets through.
+    lossRecord: (lost) => ({
+      section: "diag",
+      code: "UI.PIPELINE.RECORDS_LOST",
+      level: "warn",
+      fields: { lost },
+    }),
+  });
 
   return {
     record(event: UiEvent) {
@@ -316,12 +531,8 @@ export function makeRecorder(
       // sending them across the bridge for the native side to discard. The check is here rather
       // than at the call site so it is one decision in one place, and so it can be tested.
       if (!capturing) return;
-      queue.push(event);
-      if (queue.length > MAX_PENDING) {
-        dropped += queue.length - MAX_PENDING;
-        queue = queue.slice(queue.length - MAX_PENDING);
-      }
-      if (timer === null) timer = scope.setTimeout(flush, intervalMs);
+      outbox.push([event]);
+      outbox.flushSoon(intervalMs);
     },
     /**
      * Follow the native capture setting.
@@ -333,22 +544,22 @@ export function makeRecorder(
      */
     setCapturing(on: boolean) {
       capturing = on;
-      if (on) return;
-      queue = [];
-      if (timer !== null) {
-        scope.clearTimeout(timer);
-        timer = null;
-      }
+      if (!on) outbox.discard();
     },
-    flush,
+    flush: () => outbox.flush(),
+    /** Give up, accounting for whatever will never go. For a teardown or a reload. */
+    stop: () => outbox.stop(),
     get capturing() {
       return capturing;
     },
+    get sent() {
+      return outbox.sent;
+    },
     get dropped() {
-      return dropped;
+      return outbox.dropped;
     },
     get pending() {
-      return queue.length;
+      return outbox.pending;
     },
   };
 }

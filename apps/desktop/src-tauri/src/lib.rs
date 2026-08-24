@@ -24,7 +24,10 @@ use catcoms_app::{
     ServerRecord, ServerStore, StorageHealth, CHUNK_BYTES, MAX_AVATAR_BYTES, MAX_BANNER_BYTES,
     MAX_FILE_BYTES, MAX_SERVER_CURSOR_BYTES, MAX_SERVER_ICON_BYTES,
 };
-use catcoms_discovery::{Candidate, DiscoveryPolicy, PolicyConfig, Source};
+use catcoms_discovery::{
+    parse_peer_dial_route, Candidate, DialEndpoint, DiscoveryPolicy, EndpointDialScheduler,
+    PolicyConfig, RouteHost, Source,
+};
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_net::{
     addr_is_globally_routable, addr_is_loopback, addr_is_private, addr_is_undialable,
@@ -208,6 +211,10 @@ impl NetworkChangeSignal {
 #[derive(Default)]
 struct AppState {
     servers: Mutex<HashMap<u64, ServerEntry>>,
+    /// One endpoint budget shared by every server swarm and pre-join discovery attempt in this
+    /// desktop process. Per-server ranking remains inside each actor; this is the final bound on
+    /// actual socket fan-out across groups.
+    endpoint_dials: EndpointDialScheduler,
     /// The last few decrypted media chunks. Small and deliberately not an LRU: playback is
     /// sequential, so "the current chunk and the one before it" covers the straddle at a chunk
     /// boundary and a short seek backwards, which is all the locality there is to exploit.
@@ -3872,10 +3879,20 @@ async fn preview_invite(
 /// through the [`DiscoveryPolicy`] (never auto-dial), then dial the chosen addresses; plus the
 /// invite's `bootstrap` addrs as direct fallbacks; and return the connected transport + the
 /// inviter's peer id. Mirrors `tcp_rendezvous_e2e.rs`.
+fn untrusted_peer_endpoint(address: &str, expected_peer: &PeerId) -> Option<DialEndpoint> {
+    let route = parse_peer_dial_route(address, expected_peer.as_bytes())?;
+    if !matches!(route.host, RouteHost::Ip(_)) {
+        return None;
+    }
+    let parsed: Multiaddr = address.parse().ok()?;
+    addr_is_globally_routable(&parsed).then_some(route.endpoint)
+}
+
 async fn discover_and_connect(
     invite: &InviteToken,
     net: &ServerNet,
     expected_inviter: Option<PeerId>,
+    endpoint_dials: &EndpointDialScheduler,
     steps: &mut Vec<DiagStep>,
 ) -> Result<(MeshService, PeerId, Vec<(String, Vec<u8>)>, u16), String> {
     // Invite-supplied, so attacker-controlled: the strict variant. The bootstrap half of this same
@@ -3948,9 +3965,19 @@ async fn discover_and_connect(
             if expected_inviter.is_some_and(|expected| phase0_peer_id(&d.peer) != expected) {
                 continue;
             }
+            let phase_peer = phase0_peer_id(&d.peer);
+            let addresses: Vec<String> = d
+                .addresses
+                .iter()
+                .map(ToString::to_string)
+                .filter(|address| untrusted_peer_endpoint(address, &phase_peer).is_some())
+                .collect();
+            if addresses.is_empty() {
+                continue;
+            }
             candidates.push(Candidate {
                 peer: d.peer.to_bytes(),
-                addresses: d.addresses.iter().map(|a| a.to_string()).collect(),
+                addresses,
                 source: Source::Rendezvous(root.clone()),
                 // The record's own signed seq gives the policy real anti-replay freshness; the
                 // backstop remains request_join's Welcome-signature + group-id check, which fails
@@ -3999,7 +4026,24 @@ async fn discover_and_connect(
         .iter()
         .map(|m| m.to_string())
         .collect();
-    for a in dialed.addresses.iter().chain(fallbacks.iter()) {
+    let mut endpoints = Vec::new();
+    for address in dialed.addresses.iter().chain(fallbacks.iter()) {
+        if let Some(endpoint) = untrusted_peer_endpoint(address, &inviter) {
+            if !endpoints.contains(&endpoint) {
+                endpoints.push(endpoint);
+            }
+        }
+    }
+    let granted = endpoint_dials.reserve(
+        &invite.group_id,
+        inviter.as_bytes(),
+        &endpoints,
+        &SystemClock,
+    );
+    if granted.is_empty() {
+        return Err("the process-wide discovery dial budget deferred every inviter endpoint".into());
+    }
+    for a in &granted {
         match a.parse::<Multiaddr>() {
             Ok(m) => match mesh.dial(m).await {
                 // libp2p dials these concurrently and only the *first* one to complete surfaces
@@ -4173,6 +4217,7 @@ async fn found_server_inner(
         display_name,
     )
     .map_err(|e| e.to_string())?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     server
         .subscribe_control()
         .await
@@ -4503,7 +4548,15 @@ async fn join_server_inner(
             .iter()
             .map(|target| (target.addr.to_string(), target.peer.to_bytes()))
             .collect();
-        match discover_and_connect(&invite, &net, plan_inviter, &mut diag.steps).await {
+        match discover_and_connect(
+            &invite,
+            &net,
+            plan_inviter,
+            &state.endpoint_dials,
+            &mut diag.steps,
+        )
+        .await
+        {
             Ok((mesh, inviter, rz_config, port)) => {
                 net.port = port;
                 (mesh, inviter, rz_config, false, false)
@@ -4810,6 +4863,7 @@ async fn join_server_inner(
         ));
         msg
     })?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     diag.steps
         .push(DiagStep::ok("join", "", "admitted to the group"));
     // A joiner has to subscribe the control topic like the founder does. Without this,
@@ -8482,6 +8536,9 @@ async fn reload_one(
         &record.display_name,
     )
     .map_err(|e| e.to_string())?;
+    // Install the process-wide endpoint budget before the eager cache redial below. Doing this
+    // after that pass would leave startup—the highest-churn moment—as the one unshared path.
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     server
         .subscribe_control()
         .await
@@ -10055,6 +10112,7 @@ async fn join_one_grant(
     )
     .await
     .map_err(|e| e.to_string())?;
+    server.set_endpoint_dial_scheduler(state.endpoint_dials.clone());
     // Same omission as `join_server`, and the same consequence: a companion device that never
     // subscribes the control topic stops seeing membership changes the moment it is paired.
     server
@@ -10869,10 +10927,15 @@ const MAX_UI_LOG_BATCH: usize = 256;
 /// moments worth capturing are exactly the ones where the webview is emitting fastest. See
 /// [`log_ui`] for why this is not gated on an unlocked session.
 #[tauri::command]
-async fn log_ui_batch(records: Vec<UiLogRecord>) {
+async fn log_ui_batch(records: Vec<UiLogRecord>) -> SendOutcome {
+    let offered = records.len() as u64;
+    let mut accepted = 0u64;
     for record in records.into_iter().take(MAX_UI_LOG_BATCH) {
-        record_ui_log(&record.level, record.message, record.repeats.max(1));
+        if record_ui_log(&record.level, record.message, record.repeats.max(1)) {
+            accepted += 1;
+        }
     }
+    SendOutcome { offered, accepted }
 }
 
 /// Shorten `text` to at most `max` **bytes** without splitting a character.
@@ -10906,6 +10969,22 @@ fn wall_ms() -> i64 {
     SystemClock.now_ms() as i64
 }
 
+/// What the native side did with a batch of webview records.
+///
+/// The webview cannot otherwise know. Its send used to be `void invoke(...).catch(() => {})`: the
+/// batch was retired the moment it was handed over, the rejection was swallowed outside the
+/// batcher, and the pipeline reported perfect health precisely when the bridge was unhealthy. An
+/// explicit answer is what lets it count its own losses. Found by adversarial review (P3-006).
+///
+/// `accepted` can be less than `offered` without anything being wrong: the limiter below exists to
+/// suppress a storm, and doing its job is not a delivery failure. It *is* a loss, and the webview
+/// is entitled to know the number.
+#[derive(Serialize, Clone, Copy)]
+struct SendOutcome {
+    offered: u64,
+    accepted: u64,
+}
+
 /// How many webview records may arrive in a burst before the limiter starts suppressing.
 const UI_LOG_BURST: f64 = 200.0;
 
@@ -10929,12 +11008,32 @@ struct UiLogBudget {
     last_report_ms: i64,
 }
 
-static UI_LOG_BUDGET: std::sync::OnceLock<std::sync::Mutex<UiLogBudget>> =
+/// Which of the webview's two channels a record arrived on.
+///
+/// They get separate budgets rather than sharing one. A `console.warn` storm and a stalled send are
+/// both plausible at the same moment, and while the two shared a bucket the storm spent it: the
+/// structured events describing what was actually going wrong were suppressed by the noise about
+/// it. Required by adversarial review (P3-006).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiLogChannel {
+    /// `console.error` and friends, forwarded as prose.
+    Prose,
+    /// Structured observations with a code, a section and a trace.
+    Structured,
+}
+
+static UI_PROSE_BUDGET: std::sync::OnceLock<std::sync::Mutex<UiLogBudget>> =
+    std::sync::OnceLock::new();
+static UI_STRUCTURED_BUDGET: std::sync::OnceLock<std::sync::Mutex<UiLogBudget>> =
     std::sync::OnceLock::new();
 
 /// Whether one more record fits, plus the suppression summary owed to the log if it does.
-fn ui_log_allowance(now_ms: i64) -> (bool, Option<u64>) {
-    let cell = UI_LOG_BUDGET.get_or_init(|| {
+fn ui_log_allowance(channel: UiLogChannel, now_ms: i64) -> (bool, Option<u64>) {
+    let slot = match channel {
+        UiLogChannel::Prose => &UI_PROSE_BUDGET,
+        UiLogChannel::Structured => &UI_STRUCTURED_BUDGET,
+    };
+    let cell = slot.get_or_init(|| {
         std::sync::Mutex::new(UiLogBudget {
             tokens: UI_LOG_BURST,
             last_ms: now_ms,
@@ -10997,11 +11096,13 @@ struct UiDiagnosticEvent {
 /// trustworthy producer this process has, and a render loop must cost a counter rather than a disk.
 /// Also shares its reason for being outside the unlocked-session gate.
 #[tauri::command]
-async fn record_ui_events(events: Vec<UiDiagnosticEvent>) {
+async fn record_ui_events(events: Vec<UiDiagnosticEvent>) -> SendOutcome {
     use catcoms_diagnostics::{DiagnosticEvent, Level, Phase, SafeText, Section};
 
+    let offered = events.len();
+    let mut accepted = 0usize;
     for event in events.into_iter().take(MAX_UI_LOG_BATCH) {
-        let (allowed, suppressed) = ui_log_allowance(wall_ms());
+        let (allowed, suppressed) = ui_log_allowance(UiLogChannel::Structured, wall_ms());
         if let Some(count) = suppressed {
             tracing::warn!(
                 target: "catcoms_ui",
@@ -11044,6 +11145,11 @@ async fn record_ui_events(events: Vec<UiDiagnosticEvent>) {
             }
             recorded
         });
+        // Counted as accepted once it has been offered to the hub. An event the capture config
+        // excludes is not a delivery failure: the webview got it here, and the hub's own `filtered`
+        // counter accounts for the rest. Counting it as lost would report the user's own setting
+        // back to them as a fault.
+        accepted += 1;
     }
 
     fn ui_section(name: &str) -> Section {
@@ -11095,11 +11201,16 @@ async fn record_ui_events(events: Vec<UiDiagnosticEvent>) {
             other => SafeValue::Text(SafeText::describe(&other.to_string())),
         }
     }
+
+    SendOutcome {
+        offered: offered as u64,
+        accepted: accepted as u64,
+    }
 }
 
-/// Bound, rate-limit and emit one webview line.
-fn record_ui_log(level: &str, message: String, repeats: u32) {
-    let (allowed, suppressed) = ui_log_allowance(wall_ms());
+/// Bound, rate-limit and emit one webview line. Returns whether it was kept.
+fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
+    let (allowed, suppressed) = ui_log_allowance(UiLogChannel::Prose, wall_ms());
     if let Some(count) = suppressed {
         tracing::warn!(
             target: "catcoms_ui",
@@ -11108,7 +11219,7 @@ fn record_ui_log(level: &str, message: String, repeats: u32) {
         );
     }
     if !allowed {
-        return;
+        return false;
     }
 
     let mut text = message;
@@ -11127,6 +11238,7 @@ fn record_ui_log(level: &str, message: String, repeats: u32) {
         "debug" => tracing::debug!(target: "catcoms_ui", "{text}"),
         _ => tracing::info!(target: "catcoms_ui", "{text}"),
     }
+    true
 }
 
 /// Build and run the Tauri application.
@@ -13455,7 +13567,7 @@ mod tests {
         let start = 1_700_000_000_000;
         let mut allowed = 0;
         for _ in 0..1000 {
-            if ui_log_allowance(start).0 {
+            if ui_log_allowance(UiLogChannel::Prose, start).0 {
                 allowed += 1;
             }
         }
@@ -13464,9 +13576,18 @@ mod tests {
             "the burst is the burst, not a suggestion"
         );
 
+        // The other channel is untouched by it. A console storm and a stalled send are both
+        // plausible at the same moment, and while the two shared a bucket the storm spent it: the
+        // structured events describing what was going wrong were suppressed by the noise about it.
+        assert!(
+            ui_log_allowance(UiLogChannel::Structured, start).0,
+            "a prose storm must not starve the operation events explaining it"
+        );
+
         // Time passing refills it, and the first record afterwards carries the summary of what was
         // lost, so the count reaches the log rather than a counter nobody reads.
-        let (ok, suppressed) = ui_log_allowance(start + UI_LOG_REPORT_INTERVAL_MS + 1000);
+        let (ok, suppressed) =
+            ui_log_allowance(UiLogChannel::Prose, start + UI_LOG_REPORT_INTERVAL_MS + 1000);
         assert!(ok);
         assert_eq!(
             suppressed,

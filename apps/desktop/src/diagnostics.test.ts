@@ -6,12 +6,14 @@ import {
   describeError,
   errorText,
   makeInvokeDebugged,
+  makeOutbox,
   makeRecorder,
   makeResync,
   makeSeqTracker,
   makeTraceSource,
   needsResync,
   shortTrace,
+  type SendOutcome,
   type UiEvent,
 } from "./diagnostics.ts";
 
@@ -345,6 +347,198 @@ test("a full queue drops the oldest and counts it", () => {
   for (let n = 0; n < MAX_PENDING + 25; n += 1) recorder.record(observation(`E${n}`));
   assert.equal(recorder.dropped, 25);
   assert.equal(recorder.pending, MAX_PENDING);
+});
+
+// --- the bridge is asynchronous ------------------------------------------------------------------
+//
+// The bug: both batchers counted a loss only when `send` threw *immediately*, and the real send is
+// a promise. The rejection arrived long after the batch had been retired, outside the batcher, and
+// the counter still read zero. So the pipeline reported perfect health precisely when the bridge
+// was unhealthy, which is the one moment its own losses matter. Found by adversarial review
+// (P3-006).
+
+/** A send that can be failed, delayed or made to accept only part of a batch, on demand. */
+function bridge() {
+  const settle: Array<(outcome: SendOutcome) => void> = [];
+  const fail: Array<(error: Error) => void> = [];
+  const batches: unknown[][] = [];
+  return {
+    batches,
+    send: (batch: unknown[]) => {
+      batches.push([...batch]);
+      return new Promise<SendOutcome>((resolve, reject) => {
+        settle.push(resolve);
+        fail.push(reject);
+      });
+    },
+    /** Accept the oldest outstanding batch, entirely or in part. */
+    async accept(count?: number) {
+      const at = settle.length - fail.length + 0;
+      void at;
+      const resolve = settle.shift();
+      fail.shift();
+      resolve?.({ offered: 0, accepted: count ?? Number.MAX_SAFE_INTEGER });
+      await drain();
+    },
+    async reject() {
+      settle.shift();
+      const rejecter = fail.shift();
+      rejecter?.(new Error("bridge down"));
+      await drain();
+    },
+    get outstanding() {
+      return settle.length;
+    },
+  };
+}
+
+/** Let the microtask queue settle, which is where an awaited send resumes. */
+const drain = async () => {
+  for (let n = 0; n < 20; n += 1) await Promise.resolve();
+};
+
+test("a rejected send is counted, not silently retired", async () => {
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<string>(b.send, { ...t.scope, maxPending: 100 });
+  outbox.push(["a", "b", "c"]);
+  outbox.flush();
+  await drain();
+  assert.equal(outbox.dropped, 0, "nothing is lost while the answer is outstanding");
+  assert.equal(outbox.pending, 3, "and the batch is not retired until it is answered");
+
+  // One retry, because a single rejection is most likely a remount that has already finished.
+  await b.reject();
+  assert.equal(b.batches.length, 2, "retried exactly once");
+  assert.equal(outbox.dropped, 0);
+
+  await b.reject();
+  assert.equal(b.batches.length, 2, "and not again: a down sink is not retried into a loop");
+  assert.equal(outbox.dropped, 3, "the records are gone, and the count is not");
+  assert.equal(outbox.pending, 0);
+});
+
+test("a delayed send keeps its batch until the answer arrives", async () => {
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<string>(b.send, { ...t.scope, maxPending: 100 });
+  outbox.push(["a"]);
+  outbox.flush();
+  await drain();
+  outbox.push(["b", "c"]);
+  outbox.flush();
+  await drain();
+  assert.equal(b.batches.length, 1, "one batch in flight at a time");
+  assert.deepEqual(b.batches[0], ["a"]);
+
+  await b.accept();
+  assert.deepEqual(b.batches[1], ["b", "c"], "the rest follows once the first is answered");
+  await b.accept();
+  assert.equal(outbox.sent, 3);
+  assert.equal(outbox.dropped, 0);
+});
+
+test("a native side that keeps fewer records than it was offered is counted honestly", async () => {
+  // The limiter exists to suppress a storm, so accepting four of ten is it working as designed.
+  // It is still a loss, and reporting ten delivered would be a lie about the record's completeness.
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<string>(b.send, { ...t.scope, maxPending: 100 });
+  outbox.push(["a", "b", "c", "d", "e"]);
+  outbox.flush();
+  await drain();
+  await b.accept(2);
+  assert.equal(outbox.sent, 2);
+  assert.equal(outbox.dropped, 3);
+});
+
+test("a teardown with records in flight accounts for them rather than losing them quietly", async () => {
+  // A reload or a window close ends the page mid-batch, and nothing in it outlives that. What it
+  // can do is stop pretending the records arrived.
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<string>(b.send, { ...t.scope, maxPending: 100 });
+  outbox.push(["a", "b"]);
+  outbox.flush();
+  await drain();
+  outbox.push(["c"]);
+
+  const { abandoned } = outbox.stop();
+  assert.equal(abandoned, 3, "the batch in flight and the one still queued");
+  assert.equal(outbox.dropped, 3);
+  assert.equal(outbox.pending, 0);
+
+  // And it accepts nothing further, rather than queueing into a page that is going away.
+  outbox.push(["d"]);
+  assert.equal(outbox.pending, 0);
+});
+
+test("a storm stays inside its bounds and every record is accounted for exactly once", async () => {
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<number>(b.send, { ...t.scope, maxPending: 500, maxBatch: 100 });
+  const offered = 10_000;
+  for (let n = 0; n < offered; n += 1) {
+    outbox.push([n]);
+    assert.ok(outbox.pending <= 600, `memory stayed bounded at ${outbox.pending}`);
+  }
+  outbox.flush();
+  await drain();
+  // Drain whatever the bridge is holding, accepting everything.
+  for (let n = 0; n < 20 && b.outstanding; n += 1) await b.accept();
+
+  // The invariant that makes the numbers trustworthy: nothing is counted twice, and nothing
+  // vanishes between the counters.
+  assert.equal(outbox.sent + outbox.dropped + outbox.pending, offered);
+  assert.ok(outbox.dropped > 0, "a storm this size cannot fit, and says so");
+});
+
+test("what the pipeline lost is told to the native side once it can speak again", async () => {
+  // A dropped counter the far side never hears about is not evidence of anything.
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<string>(b.send, {
+    ...t.scope,
+    maxPending: 2,
+    maxBatch: 10,
+    lossRecord: (lost) => `lost:${lost}`,
+  });
+  outbox.push(["a", "b", "c", "d"]);
+  assert.equal(outbox.dropped, 2, "the queue trimmed the oldest two");
+  outbox.flush();
+  await drain();
+  assert.deepEqual(b.batches[0], ["c", "d", "lost:2"], "and says so, last, on the next batch");
+
+  await b.accept();
+  outbox.push(["e"]);
+  outbox.flush();
+  await drain();
+  assert.deepEqual(b.batches[1], ["e"], "reported once, not on every batch afterwards");
+});
+
+test("a loss report that does not get through is owed again rather than forgotten", async () => {
+  const t = timers();
+  const b = bridge();
+  const outbox = makeOutbox<string>(b.send, {
+    ...t.scope,
+    maxPending: 1,
+    maxBatch: 10,
+    lossRecord: (lost) => `lost:${lost}`,
+  });
+  outbox.push(["a", "b"]);
+  assert.equal(outbox.dropped, 1);
+  outbox.flush();
+  await drain();
+  assert.deepEqual(b.batches[0], ["b", "lost:1"]);
+
+  await b.reject();
+  await b.reject();
+  // Both attempts failed, so the report never landed. It is owed again, and the loss it describes
+  // has grown by the record that went with it.
+  outbox.push(["c"]);
+  outbox.flush();
+  await drain();
+  assert.deepEqual(b.batches[2], ["c", "lost:2"], "owed again, and the newer loss folded in");
 });
 
 test("a sink that throws is counted rather than retried into a loop", () => {
