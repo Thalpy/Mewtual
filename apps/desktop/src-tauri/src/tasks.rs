@@ -81,6 +81,11 @@ struct TaskRecord {
 pub struct TaskHandle(u64);
 
 impl TaskHandle {
+    /// This task's id, for finding it again in a snapshot.
+    pub fn id(self) -> u64 {
+        self.0
+    }
+
     /// Note that the task is still doing its job.
     ///
     /// Cheap enough for a loop: one lock on a map with a dozen entries, taken as often as the task

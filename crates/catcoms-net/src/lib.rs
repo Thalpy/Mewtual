@@ -869,6 +869,14 @@ enum Command {
         data: Bytes,
         reply: oneshot::Sender<Result<Bytes, TransportError>>,
     },
+    /// Send only over a connection that is live when this command is handled. Unlike
+    /// [`Command::Request`], this must never consult `recent_peers` or seed an implicit redial.
+    /// It is the proof path used after a reciprocal-dial scheduler denies a new socket pass.
+    RequestConnected {
+        peer: PeerId,
+        data: Bytes,
+        reply: oneshot::Sender<Result<Bytes, TransportError>>,
+    },
     /// Send a request whose reply nobody is waiting for (see [`catcoms_rt::MeshTransport::notify`]).
     /// No `pending_req` entry is registered, so the outcome is logged here and goes nowhere else.
     Notify {
@@ -3303,6 +3311,32 @@ impl Actor {
                     let _ = reply.send(Err(TransportError::Unreachable(peer)));
                 }
             },
+            Command::RequestConnected { peer, data, reply } => {
+                let live = self
+                    .peers
+                    .get(&peer)
+                    .copied()
+                    // `peers` is updated from swarm events, but make the present-time transport
+                    // check as well. No actor event can interleave between this check and
+                    // `send_request`, so a disconnected recent peer cannot turn this command
+                    // into a dial.
+                    .filter(|target| self.swarm.is_connected(target));
+                match live {
+                    Some(libp2p_peer) => {
+                        tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send connected-only request");
+                        let id = self
+                            .swarm
+                            .behaviour_mut()
+                            .request_response
+                            .send_request(&libp2p_peer, data.to_vec());
+                        self.pending_req.insert(id, reply);
+                    }
+                    None => {
+                        tracing::trace!(?peer, "connected-only request refused: peer is not live");
+                        let _ = reply.send(Err(TransportError::Unreachable(peer)));
+                    }
+                }
+            }
             Command::Notify { peer, data } => match self.request_target(&peer) {
                 Some(libp2p_peer) => {
                     tracing::debug!(peer = %libp2p_peer, bytes = data.len(), "send notification");
@@ -4606,6 +4640,24 @@ impl MeshHandle {
         rx.await.map_err(|_| TransportError::Closed)?
     }
 
+    /// Send one control request only when `peer` has a live connection at actor handling time.
+    ///
+    /// This is intentionally narrower than [`MeshHandle::request_control`]: it never consults
+    /// the recent-peer cache and therefore cannot initiate an implicit redial. Reciprocal invite
+    /// proof retries use it when the shared endpoint scheduler has not granted a new socket pass.
+    pub async fn request_control_connected_only(
+        &self,
+        peer: PeerId,
+        data: Bytes,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::RequestConnected { peer, data, reply })
+            .await
+            .map_err(|_| TransportError::Closed)?;
+        rx.await.map_err(|_| TransportError::Closed)?
+    }
+
     /// See [`MeshService::add_external_address`].
     pub async fn add_external_address(&self, addr: Multiaddr) -> Result<(), TransportError> {
         self.cmd_tx
@@ -5782,6 +5834,94 @@ mod tests {
             .expect("the peer-bound control route should connect")
             .expect("the server actor should remain alive");
         assert!(matches!(event, TransportEvent::PeerConnected(_)));
+    }
+
+    /// Reciprocal proof retries are allowed to continue after the endpoint scheduler refuses a
+    /// new socket pass, so their request command must distinguish a live connection from the
+    /// actor's ordinary recent-peer auto-redial cache.
+    #[tokio::test]
+    async fn connected_only_control_requests_never_redial_a_recent_peer() {
+        let listen: Multiaddr = "/memory/918275".parse().unwrap();
+        let mut server_swarm = build_memory_swarm();
+        let server_id = *server_swarm.local_peer_id();
+        server_swarm.listen_on(listen.clone()).unwrap();
+        let server = MeshService::spawn(server_swarm);
+        let client = MeshService::new_memory(None, &[]).unwrap();
+        let server_peer = server.local_peer();
+        let client_peer = client.local_peer();
+
+        let bound: Multiaddr = format!("{listen}/p2p/{server_id}").parse().unwrap();
+        client.dial(bound).await.unwrap();
+        for node in [&client, &server] {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if matches!(
+                        node.next_event().await,
+                        Some(TransportEvent::PeerConnected(_))
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the memory peers should connect");
+        }
+
+        // Positive half: a live connection carries the proof without any additional dial.
+        let handle = client.handle();
+        let request = tokio::spawn(async move {
+            handle
+                .request_control_connected_only(server_peer, Bytes::from_static(b"proof"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TransportEvent::Request {
+                    data, responder, ..
+                }) = server.next_event().await
+                {
+                    assert_eq!(&data[..], b"proof");
+                    responder.respond(Bytes::from_static(b"ok"));
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the connected-only request should reach the live peer");
+        assert_eq!(&request.await.unwrap().unwrap()[..], b"ok");
+
+        // Populate the client's recent-peer cache by severing the established connection. The
+        // server lifts its deny immediately afterwards so any accidental redial would be visible.
+        server.evict_peer(client_peer).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if matches!(
+                    client.next_event().await,
+                    Some(TransportEvent::PeerDisconnected(peer)) if peer == server_peer
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the client should observe the severed connection");
+        server.unevict_peer(client_peer).await.unwrap();
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            client
+                .handle()
+                .request_control_connected_only(server_peer, Bytes::from_static(b"again")),
+        )
+        .await
+        .expect("a disconnected proof is rejected immediately");
+        assert!(matches!(outcome, Err(TransportError::Unreachable(peer)) if peer == server_peer));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), client.next_event())
+                .await
+                .is_err(),
+            "the connected-only request must not reconnect from recent_peers"
+        );
     }
 
     #[test]

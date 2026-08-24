@@ -132,12 +132,18 @@ pub enum RouteHost {
 
 /// One canonical socket endpoint ready to be charged by [`EndpointDialScheduler`].
 ///
-/// `endpoint_key` intentionally excludes the terminal peer id. Otherwise a hostile source could
-/// name the same victim socket under many fresh peer ids and evade per-endpoint accounting.
+/// The scheduler principal is carried inside the endpoint, rather than supplied independently by
+/// its caller. This prevents one transport peer being charged under raw libp2p bytes in one path
+/// and a device id in another. Direct-route attempt keys intentionally exclude the terminal peer
+/// id so rotating a claimed identity cannot reset a victim-socket limit. Relay-route keys include
+/// the authenticated relay and terminal peers because a circuit is a logical resource distinct
+/// from the relay's shared outer socket; the outer host remains bounded by the prefix/process
+/// counters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialEndpoint {
     address: String,
-    endpoint_key: [u8; 32],
+    principal: CanonicalDialPeer,
+    attempt_key: [u8; 32],
     prefix_key: [u8; 32],
 }
 
@@ -147,20 +153,52 @@ impl DialEndpoint {
         &self.address
     }
 
-    /// Build an opaque endpoint for trusted configuration whose route grammar is validated by its
-    /// owner. The material must identify the actual socket independently of a claimed target peer;
-    /// `prefix_material` groups endpoints that share a network/provider boundary.
-    pub fn from_key_material(
+    /// Test-only constructor for exercising scheduler boundaries without depending on a concrete
+    /// multiaddr spelling. Production endpoints can only come from [`parse_peer_dial_route`].
+    #[cfg(test)]
+    fn from_key_material(
         address: impl Into<String>,
-        endpoint_material: &[u8],
+        attempt_material: &[u8],
         prefix_material: &[u8],
+        principal: CanonicalDialPeer,
     ) -> Self {
         Self {
             address: address.into(),
-            endpoint_key: *blake3::hash(endpoint_material).as_bytes(),
+            principal,
+            attempt_key: *blake3::hash(attempt_material).as_bytes(),
             prefix_key: *blake3::hash(prefix_material).as_bytes(),
         }
     }
+}
+
+/// The one identity domain used by the shared per-peer scheduler bucket: the Phase-0 hash of the
+/// terminal libp2p `PeerId` carried by a canonical route.
+///
+/// The bytes are private and no public arbitrary-byte constructor exists. Callers obtain this
+/// value from [`ParsedPeerRoute`], tying accounting to the same terminal identity the parser
+/// authenticated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CanonicalDialPeer([u8; 32]);
+
+impl CanonicalDialPeer {
+    /// The canonical Phase-0 peer bytes used for retry/high-water maps outside this crate.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Which resource a canonical route asks the network to establish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialRouteKind {
+    /// A direct connection to the terminal peer at the route's socket.
+    Direct,
+    /// A logical circuit through an authenticated relay to the terminal peer.
+    Relay {
+        /// Phase-0 identity of the relay named before `/p2p-circuit`.
+        relay_peer: CanonicalDialPeer,
+        /// Phase-0 identity of the route's final target.
+        target_peer: CanonicalDialPeer,
+    },
 }
 
 /// A syntactically canonical peer-bound route and its scheduler identity.
@@ -168,8 +206,10 @@ impl DialEndpoint {
 pub struct ParsedPeerRoute {
     /// The network host contacted by the route (a relay host for a circuit address).
     pub host: RouteHost,
-    /// Whether the route traverses a circuit relay before reaching the terminal peer.
-    pub relayed: bool,
+    /// The canonical terminal identity used by every per-peer accounting caller.
+    pub principal: CanonicalDialPeer,
+    /// Whether this establishes a direct connection or a logical relay circuit.
+    pub kind: DialRouteKind,
     /// The endpoint accounting key and canonical address.
     pub endpoint: DialEndpoint,
 }
@@ -227,10 +267,14 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
         Protocol::Tcp(port) if *port != 0 => {
             index += 1;
             match parts.get(index) {
-                Some(Protocol::Ws(_)) | Some(Protocol::Wss(_)) => index += 1,
+                Some(Protocol::Ws(path)) | Some(Protocol::Wss(path)) if path.as_ref() == "/" => {
+                    index += 1
+                }
+                Some(Protocol::Ws(_)) | Some(Protocol::Wss(_)) => return None,
                 Some(Protocol::Tls) => {
                     index += 1;
-                    if !matches!(parts.get(index), Some(Protocol::Ws(_))) {
+                    if !matches!(parts.get(index), Some(Protocol::Ws(path)) if path.as_ref() == "/")
+                    {
                         return None;
                     }
                     index += 1;
@@ -254,8 +298,8 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
         return None;
     };
     index += 1;
-    let (target, relayed) = if index == parts.len() {
-        (first_peer, false)
+    let (target, kind) = if index == parts.len() {
+        (first_peer, DialRouteKind::Direct)
     } else {
         if !matches!(parts.get(index), Some(Protocol::P2pCircuit)) {
             return None;
@@ -268,20 +312,49 @@ pub fn parse_peer_dial_route(addr: &str, expected_peer: &[u8; 32]) -> Option<Par
         if index != parts.len() {
             return None;
         }
-        (target, true)
+        let relay_peer = CanonicalDialPeer(*blake3::hash(&first_peer.to_bytes()).as_bytes());
+        let target_peer = CanonicalDialPeer(*blake3::hash(&target.to_bytes()).as_bytes());
+        (
+            target,
+            DialRouteKind::Relay {
+                relay_peer,
+                target_peer,
+            },
+        )
     };
-    if blake3::hash(&target.to_bytes()).as_bytes() != expected_peer {
+    let principal = CanonicalDialPeer(*blake3::hash(&target.to_bytes()).as_bytes());
+    if principal.as_bytes() != expected_peer {
         return None;
     }
 
-    let mut endpoint_material = Vec::with_capacity(host_key.len() + 3);
-    endpoint_material.push(transport_tag);
-    endpoint_material.extend_from_slice(&port.to_be_bytes());
-    endpoint_material.extend_from_slice(&host_key);
+    let mut socket_material = Vec::with_capacity(host_key.len() + 3);
+    socket_material.push(transport_tag);
+    socket_material.extend_from_slice(&port.to_be_bytes());
+    socket_material.extend_from_slice(&host_key);
+    let attempt_key = match kind {
+        DialRouteKind::Direct => *blake3::hash(&socket_material).as_bytes(),
+        DialRouteKind::Relay {
+            relay_peer,
+            target_peer,
+        } => scoped_key(
+            b"catcoms/dial/relay-circuit/v1",
+            &[
+                &socket_material,
+                relay_peer.as_bytes(),
+                target_peer.as_bytes(),
+            ],
+        ),
+    };
     Some(ParsedPeerRoute {
         host,
-        relayed,
-        endpoint: DialEndpoint::from_key_material(addr, &endpoint_material, &prefix_key),
+        principal,
+        kind,
+        endpoint: DialEndpoint {
+            address: addr.to_string(),
+            principal,
+            attempt_key,
+            prefix_key: *blake3::hash(&prefix_key).as_bytes(),
+        },
     })
 }
 
@@ -309,7 +382,8 @@ pub struct EndpointDialConfig {
     pub server_limit: u32,
     /// Endpoints granted to one `(server, peer)` pair per window.
     pub peer_limit: u32,
-    /// Attempts to one physical socket per window, regardless of claimed target PeerId.
+    /// Attempts to one direct physical socket or one authenticated relay circuit per window.
+    /// Relay outer-host pressure is bounded separately by `prefix_limit` and the process cap.
     pub endpoint_limit: u32,
     /// Attempts to one IPv4 /24, IPv6 /48, or DNS host per window.
     pub prefix_limit: u32,
@@ -362,10 +436,13 @@ impl EndpointDialScheduler {
     }
 
     /// Reserve a bounded subset of endpoints in caller order.
+    ///
+    /// The canonical peer principal is embedded by the parser in every endpoint. Accepting it as
+    /// a separate byte slice previously allowed cache, rendezvous, and pre-join callers to charge
+    /// the same transport under three unrelated identity representations.
     pub fn reserve(
         &self,
         server: &[u8],
-        peer: &[u8],
         endpoints: &[DialEndpoint],
         clock: &dyn Clock,
     ) -> Vec<String> {
@@ -387,16 +464,19 @@ impl EndpointDialScheduler {
         }
 
         let server_key = scoped_key(b"catcoms/dial/server/v1", &[server]);
-        let peer_key = scoped_key(b"catcoms/dial/peer/v1", &[server, peer]);
         let mut granted = Vec::new();
         for endpoint in endpoints {
+            let peer_key = scoped_key(
+                b"catcoms/dial/peer/v1",
+                &[server, endpoint.principal.as_bytes()],
+            );
             if state.process_spent >= self.config.process_limit
                 || state.server_spent.get(&server_key).copied().unwrap_or(0)
                     >= self.config.server_limit
                 || state.peer_spent.get(&peer_key).copied().unwrap_or(0) >= self.config.peer_limit
                 || state
                     .endpoint_spent
-                    .get(&endpoint.endpoint_key)
+                    .get(&endpoint.attempt_key)
                     .copied()
                     .unwrap_or(0)
                     >= self.config.endpoint_limit
@@ -412,7 +492,7 @@ impl EndpointDialScheduler {
             state.process_spent = state.process_spent.saturating_add(1);
             increment(&mut state.server_spent, server_key);
             increment(&mut state.peer_spent, peer_key);
-            increment(&mut state.endpoint_spent, endpoint.endpoint_key);
+            increment(&mut state.endpoint_spent, endpoint.attempt_key);
             increment(&mut state.prefix_spent, endpoint.prefix_key);
             granted.push(endpoint.address.clone());
         }
@@ -1108,6 +1188,8 @@ mod tests {
             format!("/ip4/203.0.113.1/tcp/4001/tls/sni/example.com/p2p/{PEER_A}"),
             format!("/ip4/203.0.113.1/tcp/4001/tls/sni/example.com/ws/p2p/{PEER_A}"),
             format!("/ip4/203.0.113.1/tcp/4001/tls/wss/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/80/x-parity-ws/%2Fchat/p2p/{PEER_A}"),
+            format!("/ip4/203.0.113.1/tcp/443/x-parity-wss/%2Fchat/p2p/{PEER_A}"),
             format!("/ip4/203.0.113.1/tcp/4001/p2p/{PEER_A}/p2p-circuit"),
         ] {
             assert!(
@@ -1137,21 +1219,31 @@ mod tests {
         let same_socket_b = parse_peer_dial_route(&route_b, &phase0(PEER_B))
             .unwrap()
             .endpoint;
-        let socket_c = DialEndpoint::from_key_material("c", b"socket-c", b"prefix-c");
-        let socket_d = DialEndpoint::from_key_material("d", b"socket-d", b"prefix-d");
+        let socket_c = DialEndpoint::from_key_material(
+            "c",
+            b"socket-c",
+            b"prefix-c",
+            CanonicalDialPeer(phase0(PEER_A)),
+        );
+        let socket_d = DialEndpoint::from_key_material(
+            "d",
+            b"socket-d",
+            b"prefix-d",
+            CanonicalDialPeer(phase0(PEER_B)),
+        );
 
         assert_eq!(
-            scheduler.reserve(b"server-a", b"peer-a", &[same_socket_a], &clock),
+            scheduler.reserve(b"server-a", &[same_socket_a], &clock),
             vec![route_a]
         );
         assert!(
             other_server
-                .reserve(b"server-b", b"peer-b", &[same_socket_b], &clock)
+                .reserve(b"server-b", &[same_socket_b], &clock)
                 .is_empty(),
             "peer/server rotation and IPv4-mapped spelling must not bypass the socket cap"
         );
         assert_eq!(
-            other_server.reserve(b"server-b", b"peer-b", &[socket_c, socket_d], &clock),
+            other_server.reserve(b"server-b", &[socket_c, socket_d], &clock),
             vec!["c", "d"]
         );
         assert_eq!(scheduler.state.lock().unwrap().process_spent, 3);
@@ -1168,21 +1260,26 @@ mod tests {
             prefix_limit: 1,
         });
         let clock = ManualClock::new(10_000);
-        let endpoint = DialEndpoint::from_key_material("route", b"socket", b"prefix");
+        let endpoint = DialEndpoint::from_key_material(
+            "route",
+            b"socket",
+            b"prefix",
+            CanonicalDialPeer(phase0(PEER_A)),
+        );
         assert_eq!(
-            scheduler.reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock),
+            scheduler.reserve(b"server", std::slice::from_ref(&endpoint), &clock),
             vec!["route"]
         );
         clock.set_wall_ms(1);
         assert!(
             scheduler
-                .reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock)
+                .reserve(b"server", std::slice::from_ref(&endpoint), &clock)
                 .is_empty(),
             "wall-clock correction must not refill the window"
         );
         clock.advance_ms(100);
         assert_eq!(
-            scheduler.reserve(b"server", b"peer", &[endpoint], &clock),
+            scheduler.reserve(b"server", &[endpoint], &clock),
             vec!["route"]
         );
     }
@@ -1198,17 +1295,22 @@ mod tests {
             prefix_limit: 1,
         });
         let clock = ManualClock::new(50);
-        let endpoint = DialEndpoint::from_key_material("route", b"socket", b"prefix");
+        let endpoint = DialEndpoint::from_key_material(
+            "route",
+            b"socket",
+            b"prefix",
+            CanonicalDialPeer(phase0(PEER_A)),
+        );
         assert_eq!(
-            scheduler.reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock,),
+            scheduler.reserve(b"server", std::slice::from_ref(&endpoint), &clock,),
             vec!["route"]
         );
         assert!(scheduler
-            .reserve(b"server", b"peer", std::slice::from_ref(&endpoint), &clock)
+            .reserve(b"server", std::slice::from_ref(&endpoint), &clock)
             .is_empty());
         clock.advance_ms(1);
         assert_eq!(
-            scheduler.reserve(b"server", b"peer", &[endpoint], &clock),
+            scheduler.reserve(b"server", &[endpoint], &clock),
             vec!["route"]
         );
     }
@@ -1234,14 +1336,57 @@ mod tests {
             .endpoint;
 
         assert_eq!(
-            scheduler.reserve(b"server-a", b"peer-a", &[tcp], &clock),
+            scheduler.reserve(b"server-a", &[tcp], &clock),
             vec![tcp_route]
         );
         assert!(
-            scheduler
-                .reserve(b"server-b", b"peer-b", &[quic], &clock)
-                .is_empty(),
+            scheduler.reserve(b"server-b", &[quic], &clock).is_empty(),
             "TCP/QUIC and peer/server rotation must still share one IPv4 /24 bucket"
+        );
+    }
+
+    #[test]
+    fn shared_relay_circuits_do_not_alias_distinct_terminal_peers() {
+        const PEER_C: &str = "12D3KooWPiZxJceHKQBZcd79cYdqybt5ijzRGHveTKa3CaEESxVb";
+        let scheduler = EndpointDialScheduler::new(EndpointDialConfig {
+            window_ms: 1_000,
+            process_limit: 8,
+            server_limit: 8,
+            peer_limit: 4,
+            endpoint_limit: 2,
+            prefix_limit: 8,
+        });
+        let clock = ManualClock::new(0);
+        let routes = [PEER_A, PEER_B, PEER_C].map(|target| {
+            let address =
+                format!("/ip4/203.0.113.44/tcp/4001/p2p/{PEER_A}/p2p-circuit/p2p/{target}");
+            let parsed = parse_peer_dial_route(&address, &phase0(target)).unwrap();
+            assert!(matches!(parsed.kind, DialRouteKind::Relay { .. }));
+            (address, parsed.endpoint)
+        });
+        let endpoints: Vec<_> = routes
+            .iter()
+            .map(|(_, endpoint)| endpoint.clone())
+            .collect();
+
+        assert_eq!(
+            scheduler.reserve(b"one-server", &endpoints, &clock),
+            routes
+                .iter()
+                .map(|(address, _)| address.clone())
+                .collect::<Vec<_>>(),
+            "a shared relay socket must not collapse unrelated terminal circuits into one bucket"
+        );
+        assert_eq!(
+            scheduler.reserve(b"one-server", std::slice::from_ref(&endpoints[0]), &clock),
+            vec![routes[0].0.clone()],
+            "the per-circuit limit permits its configured second attempt"
+        );
+        assert!(
+            scheduler
+                .reserve(b"one-server", std::slice::from_ref(&endpoints[0]), &clock)
+                .is_empty(),
+            "the same relay circuit still obeys its exact-attempt cap"
         );
     }
 

@@ -1406,9 +1406,9 @@ where
 /// poll in every discovery loop remains the portable correctness path.
 fn spawn_network_monitor(app: &AppHandle) {
     let signal = app.state::<AppState>().network_changes.clone();
-    // `tokio::spawn` rather than Tauri's wrapper, so the handle is the one the supervisor joins on.
-    // Tauri's returns its own type, which cannot report a panic.
-    let task = tokio::spawn(async move {
+    // No rhythm declared: an interface that does not change is the ordinary case, so silence here
+    // means nothing happened rather than that nothing is watching.
+    supervise_detached("network_monitor", None, None, async move {
         let monitor = match netwatch::netmon::Monitor::new().await {
             Ok(monitor) => monitor,
             Err(error) => {
@@ -1422,9 +1422,6 @@ fn spawn_network_monitor(app: &AppHandle) {
         forward_network_changes(changes, signal, SystemClock).await;
         tracing::warn!("native network monitor stopped; periodic polling remains active");
     });
-    // No rhythm declared: an interface that does not change is the ordinary case, so silence here
-    // means nothing happened rather than that nothing is watching.
-    supervise_task("network_monitor", None, None, task);
 }
 
 /// Poll the route-selected IPv4/IPv6 source addresses and publish one new authoritative address
@@ -2447,6 +2444,41 @@ fn supervise_task(
     let handle = tasks::register(kind, server, wall_ms(), expect_ms);
     supervise_registered(kind, server, handle, task);
     handle
+}
+
+/// Spawn and supervise a task from a caller that may not be on the async runtime yet.
+///
+/// # The nesting is the point
+///
+/// Tauri's `setup` runs on the main thread *before* the async runtime has been entered.
+/// `tokio::spawn` panics there ("there is no reactor running"), and a panic in `setup` means the
+/// application does not start at all: no window, no log beyond the session line, exit code 101.
+/// Tauri's own `spawn` works because it holds a runtime handle already.
+///
+/// But Tauri's `JoinHandle` cannot report a panic, and reporting one is the entire reason these
+/// tasks are supervised. So the outer spawn is Tauri's, and *inside* that block a runtime is
+/// current, which is where the real `tokio::JoinHandle` is made.
+///
+/// One function rather than the pattern written out at each call site, because getting it wrong
+/// looks exactly like getting it right until the app is launched, and nothing in the test suite
+/// launches it. This is the shape a caller before the runtime has to use; the test below calls it
+/// from a plain `#[test]`, which is the same context `setup` is in.
+fn supervise_detached<F>(
+    kind: &'static str,
+    server: Option<u64>,
+    expect_ms: Option<u64>,
+    future: F,
+) -> tasks::TaskHandle
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    // Registered here rather than inside the block, so the task is known from the moment it is
+    // asked for rather than from the moment it gets a thread.
+    let watched = tasks::register(kind, server, wall_ms(), expect_ms);
+    tauri::async_runtime::spawn(async move {
+        supervise_registered(kind, server, watched, tokio::spawn(future));
+    });
+    watched
 }
 
 /// [`supervise_task`] for a task that was registered before it was spawned.
@@ -3955,11 +3987,7 @@ fn schedule_switchboard_candidates(
             continue;
         };
         if !scheduler
-            .reserve(
-                group_id,
-                std::slice::from_ref(&endpoint),
-                clock,
-            )
+            .reserve(group_id, std::slice::from_ref(&endpoint), clock)
             .is_empty()
         {
             granted_peers.insert(peer);
@@ -4066,11 +4094,7 @@ fn schedule_invite_rendezvous_targets(
                 return false;
             };
             !scheduler
-                .reserve(
-                    group_id,
-                    std::slice::from_ref(&endpoint),
-                    clock,
-                )
+                .reserve(group_id, std::slice::from_ref(&endpoint), clock)
                 .is_empty()
         })
         // Cap actual grants, not merely entries considered: a structurally valid but unsupported
@@ -4306,11 +4330,7 @@ async fn discover_and_connect(
         .map(|m| m.to_string())
         .collect();
     let endpoints = join_candidate_endpoints(&dialed.addresses, &fallbacks, &inviter);
-    let granted = endpoint_dials.reserve(
-        &invite.group_id,
-        &endpoints,
-        &SystemClock,
-    );
+    let granted = endpoint_dials.reserve(&invite.group_id, &endpoints, &SystemClock);
     if granted.is_empty() {
         return Err(
             "the process-wide discovery dial budget deferred every inviter endpoint".into(),
@@ -4898,11 +4918,9 @@ async fn join_server_inner(
             .iter()
             .map(|(_, endpoint)| endpoint.clone())
             .collect();
-        let granted = state.endpoint_dials.reserve(
-            &invite.group_id,
-            &endpoints,
-            &SystemClock,
-        );
+        let granted = state
+            .endpoint_dials
+            .reserve(&invite.group_id, &endpoints, &SystemClock);
         let addrs: Vec<Multiaddr> = granted
             .iter()
             .filter_map(|address| address.parse().ok())
@@ -11909,6 +11927,30 @@ mod tests {
         assert_eq!(json["capture"], "enhanced");
     }
 
+    /// A task started from `setup` must not need a runtime that does not exist yet.
+    ///
+    /// Deliberately a plain `#[test]` and not a `#[tokio::test]`. That is the whole point: `setup`
+    /// runs on the main thread before the async runtime is entered, so this test is in the same
+    /// context the real caller is, and a bare `tokio::spawn` panics in it exactly as it did at
+    /// startup.
+    ///
+    /// This is the bug that shipped: `spawn_network_monitor` was changed to `tokio::spawn` to give
+    /// the supervisor a handle it could read a panic from, which is right, and it was called before
+    /// there was anything to spawn onto, which is fatal. Nothing caught it, because the whole suite
+    /// tests functions and never starts the application, so the first thing to notice was a person
+    /// launching it and getting exit code 101.
+    #[test]
+    fn a_task_can_be_supervised_from_before_the_runtime_exists() {
+        let handle = supervise_detached("test_detached", None, None, async {});
+        // Known immediately, rather than once it has been given a thread. A caller that asked for a
+        // task and crashed before it started should still leave evidence that it asked.
+        let found = tasks::snapshot(wall_ms())
+            .into_iter()
+            .find(|t| t.id == handle.id())
+            .expect("the task is registered before it is spawned");
+        assert_eq!(found.kind, "test_detached");
+    }
+
     /// An emitted event has to tell the webview which operation it belongs to.
     ///
     /// The last hop of P3-004. The trace crosses the actor boundary, reaches the bridge, and then
@@ -14340,11 +14382,7 @@ mod tests {
         let inviter_route = format!("/ip4/8.8.8.8/tcp/22487/p2p/{inviter}");
         let endpoint = untrusted_peer_endpoint(&inviter_route, &inviter_phase).unwrap();
         assert_eq!(
-            scheduler.reserve(
-                b"rendezvous-headroom",
-                &[endpoint],
-                &clock,
-            ),
+            scheduler.reserve(b"rendezvous-headroom", &[endpoint], &clock,),
             vec![inviter_route]
         );
     }

@@ -26,8 +26,9 @@ Adversarial review follows [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md).
   switchboard, companion-grant, two-way reply, and cached member routes; remove the transport's
   bare discovery dial fallback.
 - [x] Charge endpoint attempts (not peers) through one transient scheduler shared by every desktop
-  server and pre-join path, with per-process, per-server, per-peer, exact-socket, IPv4 `/24`, and
-  IPv6 `/48` limits on the injected monotonic clock.
+  server and untrusted pre-join/member-discovery path, with per-process, per-server, canonical
+  Phase-0-peer, direct-socket or relay-circuit, IPv4 `/24`, and IPv6 `/48` limits on the injected
+  monotonic clock. Parser-derived opaque endpoints prevent identity-domain aliases.
 - [ ] Add an optional, tightly bounded previous-address-epoch grace window (one record, minutes,
   current routes first); never build an indefinite address history.
 - [ ] Add authenticated reciprocal-dial signalling through an already connected member.
@@ -135,7 +136,8 @@ namespaces. The bridge's existing one-shot found/join `join_ns` registration is 
 the invite); steady-state adds the rotation-aware namespaces on top. The bridge also owns one
 `EndpointDialScheduler` and installs clones before eager cached redial. Invite bootstraps,
 invite-supplied rendezvous seeds, rendezvous results, and consented switchboard candidates cross
-the same final process boundary.
+the same final untrusted-discovery boundary. Trusted operator-infrastructure connections retain
+their separate validator and lifecycle rather than being claimed here.
 
 ## Scope / deferred
 - **Record seq; DONE (follow-up):** the discovered record's signed `seq` is now surfaced
@@ -162,7 +164,10 @@ the same final process boundary.
   signed peer-record epoch before PEX in that same pass. Exact ownership prevents a disappearing
   raw GUA from removing an identical live PCPv6/manual route. The roughly-minute discovery poll
   remains active as the portable repair path if platform monitoring fails or misses an event.
-- **Pairwise reachability and reciprocal dial signalling:** not yet represented. A connected member
+- **Pairwise reachability and general post-join reciprocal dial signalling:** not yet represented.
+  The invite `JoinReply` proof retry now has a connected-only network command and cannot implicitly
+  redial from the ordinary recent-peer cache after the endpoint scheduler refuses a pass. A
+  connected member
   can distribute signed records, but it does not yet carry a bounded, authenticated “please dial
   this member's fresh candidate now” signal or report which address/transport worked from its own
   vantage point.
@@ -228,7 +233,8 @@ Before reciprocal dialing is enabled, implementation status is:
 - [x] enforce one canonical direct-route grammar with a mandatory terminal `/p2p/<PeerId>` matching
   the signed descriptor and remove every discovery bare-address dial path;
 - [x] meter endpoints rather than peers through a process-wide scheduler shared by existing
-  discovery paths; reciprocal work must reuse it when implemented;
+  untrusted discovery paths, using parser-derived canonical transport principals; reciprocal work
+  must reuse it when implemented;
 - [ ] add a typed peer-bound batch transport API;
 - [ ] implement bounded session/replay state, addressed helper forwarding, actor cancellation, and
   deterministic topology-aware A-to-C-to-B tests; and

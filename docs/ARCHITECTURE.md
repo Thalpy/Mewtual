@@ -66,12 +66,17 @@ is broken. The load-bearing fixes:
    sync classifier deliberately retains non-routed documentation/benchmark literals as
    deterministic test stand-ins; those can only consume bounded retry tokens. `DiscoveryPolicy`
    charges addresses rather than peers, then
-   one desktop-owned `EndpointDialScheduler` applies monotonic per-process, per-server, per-peer,
-   exact-socket and IPv4 `/24`/IPv6 `/48` caps before submission. PeerId/sequence rotation cannot
-   reset the socket, prefix, server, or process buckets. The transport refuses a dial command with
-   no terminal peer rather than falling back to an address-only socket dial. Two-way reply retries
-   use the same scheduler for each new socket pass; their proof request may continue over an
-   established/recent connection without opening another socket.
+   one desktop-owned `EndpointDialScheduler` applies monotonic per-process, per-server, canonical
+   Phase-0-peer, attempt, and IPv4 `/24`/IPv6 `/48` caps before submission. The parser embeds that
+   peer principal in each opaque endpoint so cache, rendezvous, and pre-join callers cannot select
+   different accounting identities. A direct attempt is keyed by its physical socket, excluding
+   the claimed terminal id; a relayed attempt is keyed as the authenticated relay/target circuit,
+   while the relay's outer host remains bounded by the prefix and process caps. PeerId/sequence
+   rotation therefore cannot reset a direct socket, prefix, server, or process bucket. The transport
+   refuses a dial command with no terminal peer rather than falling back to an address-only socket
+   dial. Two-way reply retries use the same scheduler for each new socket pass; their proof request
+   may continue only over a connection that is live when the network actor handles it, without
+   consulting the ordinary recent-peer redial cache.
 
 ## 3. Honest residual risks
 
@@ -102,9 +107,14 @@ is broken. The load-bearing fixes:
   withdrawing an identical mapping/manual/relay route. It intentionally does not merge
   withdrawn public IPs forever because an ISP can reassign them. Route signatures and matching
   peer ids still do not prove ownership of an IP/port before the bounded first packet is sent.
-  Scheduler counters are transient and reset with the process; libp2p's pending-outgoing cap is
-  still per swarm, so this slice bounds starts but does not yet provide a process-wide in-flight
-  lease. A fully isolated device whose current address is unknown to every peer still needs
+  Scheduler counters are transient and reset with the process; they charge submitted attempts, not
+  actor-confirmed socket creation or completion. Duplicate suppression, cancellation, and failed
+  command delivery can therefore over- or under-account relative to actual sockets. A relay circuit
+  has its own attempt key so unrelated targets at one relay do not starve each other, but the shared
+  outer relay socket is not separately leased at the exact-socket scope; it is bounded only by the
+  relay-host prefix and process caps. Libp2p's pending-outgoing cap is still per swarm, so this slice
+  does not yet provide a process-wide actor-consumed in-flight lease. A fully isolated device whose
+  current address is unknown to every peer still needs
   out-of-band signalling, rendezvous/relay infrastructure, or a reachable member; swarm sampling
   cannot manufacture a route from no contact.
 - A **fully compromised device** exposes its current keys and plaintext; PCS only heals

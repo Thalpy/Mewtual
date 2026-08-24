@@ -54,8 +54,9 @@ table with the commit that closed it.
   different joiner needs confirmation. Anyone who obtained the original invite can still form a
   valid reply or redeem it. Both apps must remain open during an overlapping window, and symmetric
   NAT/CGNAT can still make punching impossible. Each callback socket pass spends the shared
-  endpoint budget; proof retries continue without opening a socket so a proof queued before the
-  first connection completes cannot strand an otherwise connected reply.
+  endpoint budget; proof retries use a connected-only actor command, so a proof queued before the
+  first connection completes can still use that live connection but cannot consult the ordinary
+  recent-peer cache and silently redial after the scheduler denied a new socket attempt.
 - **The local router is trusted only for a mapping candidate.** UPnP/PCP/NAT-PMP and PCPv6 firewall
   pinholes can expose this app's stable TCP and UDP/QUIC listeners and can return a wrong or stale
   public socket. PCPv6 accepts only a request-matched Global Unicast result from the exact scoped
@@ -72,10 +73,17 @@ table with the commit that closed it.
   revalidated immediately before submission; the network actor refuses a peer-less dial instead
   of falling back to `Swarm::dial(address)`. A signature authenticates who chose a public socket,
   not ownership of that socket, so the local policy charges every address and one desktop-owned
-  scheduler caps process, server, peer, normalized endpoint and IPv4 `/24`/IPv6 `/48` starts.
-  Exact endpoint/prefix/process keys do not include descriptor sequence or PeerId, preventing those
-  rotations from resetting the main scanner bounds. Scheduler state is bounded and transient;
-  restart resets it, and a process-wide in-flight/concurrency lease remains future hardening.
+  scheduler caps process, server, canonical Phase-0 peer, attempt, and IPv4 `/24`/IPv6 `/48`
+  dial-command submissions.
+  The parser embeds the principal into the opaque endpoint, preventing cache, rendezvous, and
+  pre-join callers from selecting different byte representations for the same transport. Direct
+  attempt/prefix/process keys do not include descriptor sequence or terminal PeerId, preventing
+  those rotations from resetting the main scanner bounds. Relay attempts are keyed by relay and
+  terminal target so unrelated circuits sharing a relay do not consume one two-attempt bucket; the
+  relay host is instead bounded by prefix and process caps. Scheduler state is bounded and transient;
+  restart resets it. It accounts submitted dial commands rather than actor-confirmed socket starts,
+  and relay outer sockets have no separate exact-socket permit, so an opaque actor-consumed permit,
+  cancellation/refund path, and process-wide in-flight/concurrency lease remain future hardening.
   Direct routes carried by companion grants use the same canonical invite policy, must name one
   unambiguous contact, and spend this process budget across every grant in a bundle. Pre-join
   rendezvous uses at most two validated seeds so infrastructure routes cannot consume the entire

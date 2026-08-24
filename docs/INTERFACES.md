@@ -64,6 +64,10 @@ Implementations:
 - **`MeshService`** (prod, catcoms-net): `spawn(swarm)` / `new_memory(listen, dial)` /
   `new_tcp(...)`; `build_memory_swarm()` / `build_tcp_swarm()`. Maps `PeerId`↔libp2p
   PeerId, hex-encodes topics, queues+retries publishes until a subscriber appears.
+  `MeshHandle::request_control_connected_only(peer, data)` is the deliberately narrow reciprocal-
+  proof send: the actor succeeds only when its current peer map and `Swarm::is_connected` both say
+  the transport is live. Unlike ordinary `request_control`, it never consults `recent_peers` and
+  cannot implicitly redial after the shared scheduler denied a new socket attempt.
   - **NAT traversal:** `listen_on(circuit)` / `next_listen_addr()` reserve a relay
     circuit; `next_direct_upgrade()` surfaces a DCUtR hole-punch. Infra nodes:
     `build_relay_swarm()`/`run_relay(...)`, `build_rendezvous_swarm()`/`run_rendezvous(...)`.
@@ -128,7 +132,15 @@ Implementations:
 
 ```rust
 pub fn parse_peer_dial_route(addr:&str, expected_peer:&[u8;32]) -> Option<ParsedPeerRoute>;
-pub struct ParsedPeerRoute { pub host:RouteHost, pub relayed:bool, pub endpoint:DialEndpoint }
+pub struct CanonicalDialPeer; // Phase-0 terminal transport id; constructible only by the parser
+pub enum DialRouteKind {
+    Direct,
+    Relay { relay_peer:CanonicalDialPeer, target_peer:CanonicalDialPeer },
+}
+pub struct ParsedPeerRoute {
+    pub host:RouteHost, pub principal:CanonicalDialPeer,
+    pub kind:DialRouteKind, pub endpoint:DialEndpoint,
+}
 pub enum RouteHost { Ip(IpAddr), Dns(String) }
 pub struct EndpointDialConfig {
     pub window_ms:u64, pub process_limit:u32, pub server_limit:u32,
@@ -136,12 +148,12 @@ pub struct EndpointDialConfig {
 }
 pub struct EndpointDialScheduler; // cloneable; clones share one bounded transient counter set
   new(EndpointDialConfig) -> Self;
-  reserve(&self, server:&[u8], peer:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
+  reserve(&self, server:&[u8], endpoints:&[DialEndpoint], clock:&dyn Clock)
     -> Vec<String>;
 ```
 
-The parser accepts only canonical, non-zero raw TCP or WebSocket TCP (exactly `/ws`, `/wss`, or
-`/tls/ws`; SNI and standalone/mixed TLS shapes are not product transports)
+The parser accepts only canonical, non-zero raw TCP or root-path WebSocket TCP (exactly `/ws`,
+`/wss`, or `/tls/ws`; non-root paths, SNI, and standalone/mixed TLS shapes are not product transports)
 or UDP/QUIC-v1 routes, plus the explicit single-relay circuit form. A direct route has exactly one
 terminal `/p2p/<PeerId>`; a circuit has one relay id and one terminal target. The terminal id's
 Phase-0 hash must equal `expected_peer`, with nothing trailing. Syntax and identity binding are
@@ -152,15 +164,22 @@ stricter global-literal classifier. Direct invite bootstraps deliberately retain
 LAN/loopback support.
 
 `DiscoveryPolicy::dial_budget` counts returned addresses, not peers. The desktop creates one
-`EndpointDialScheduler`, installs a clone into every server before cached redial, and also applies
-it to pre-join invite/rendezvous/switchboard routes, repeated two-way reply callbacks, and direct
-companion-grant redemption. Defaults grant at most 32 endpoints per
-60-second process window, 8 per server, 4 per `(server, peer)`, 2 per normalized socket, and 8 per
-IPv4 `/24`, IPv6 `/48`, or DNS host. Normalized socket/prefix keys exclude the claimed PeerId and
-descriptor sequence. A shared denial is refunded to the local policy because no socket started;
-scheduler state is session-only and uses `Clock::monotonic_ms`. Pre-join invite rendezvous seeds
-are capped at two distinct validated nodes so infrastructure cannot exhaust the per-server window
-before the discovered inviter is dialed.
+`EndpointDialScheduler`, installs a clone into every server before cached redial, and applies it to
+untrusted post-join discovery plus pre-join invite/rendezvous/switchboard routes, repeated two-way
+reply callbacks, and direct companion-grant redemption. Trusted operator-configured infrastructure
+connections have separate validation/lifecycle paths and are not universally mediated by this API.
+Defaults grant at most 32 endpoints per 60-second process window, 8 per server, 4 per canonical
+`(server, Phase-0 peer)`, 2 per direct physical socket or authenticated relay/target circuit, and 8
+per IPv4 `/24`, IPv6 `/48`, or DNS host. The parser embeds the canonical peer principal in the opaque
+endpoint; callers cannot supply a device id or raw libp2p id as an accounting alias. Direct-socket
+and prefix keys exclude the claimed PeerId and descriptor sequence. Separate relay-circuit keys keep
+unrelated targets at one relay from exhausting each other's two-attempt cap; the shared relay host is
+bounded at prefix/process scope rather than by a separate outer-socket lease. A shared denial is
+refunded to the local policy because no dial command was submitted. Scheduler state is session-only,
+uses `Clock::monotonic_ms`, and accounts submissions rather than actor-confirmed sockets; opaque
+single-use permits/refunds and process-wide in-flight leases remain future hardening. Pre-join invite
+rendezvous seeds are capped at two distinct validated nodes so infrastructure cannot exhaust the
+per-server window before the discovered inviter is dialed.
 
 ### `SecureKeyStore`; at-rest DEK protection, tiered  *(catcoms-crypto)*
 ```rust
