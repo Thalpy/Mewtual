@@ -43,6 +43,9 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::timeout;
 use zeroize::Zeroizing;
 
+mod errors;
+use errors::{codes, AppError, ErrorCode};
+
 /// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
 /// same IPv6 socket is commonly both a raw interface route and a PCP firewall pinhole; removing
 /// either owner alone must not withdraw the route from PEX, invites, rendezvous, or AutoNAT.
@@ -1989,6 +1992,25 @@ impl Operation {
 
     fn elapsed(&self) -> u64 {
         SystemClock.now_ms().saturating_sub(self.started_ms)
+    }
+
+    /// The trace, in the short form a person quotes.
+    fn short_trace(&self) -> String {
+        self.trace.short()
+    }
+
+    /// End the operation in failure and build the error the frontend receives.
+    ///
+    /// One call rather than two, because the pair has to stay in step: an operation recorded as
+    /// failed with one code and reported to the user with another is a diagnostic that actively
+    /// misleads, and keeping them together is the only reliable way to prevent it.
+    ///
+    /// The recorded event carries the code; the *message* is not recorded, because it comes from a
+    /// deeper layer that may have interpolated something into it. The user sees it, the log does
+    /// not, and that split is deliberate.
+    fn fail(&self, code: ErrorCode, message: impl Into<String>) -> AppError {
+        self.failed(code.code);
+        AppError::new(code, message, &self.short_trace())
     }
 
     fn emit(
@@ -7411,16 +7433,44 @@ async fn rename_wiki_page(
     Ok(())
 }
 
+/// Resolve the two things every channel operation needs, classifying each failure as it happens.
+///
+/// The prefix shared by send, edit, delete, react and pin. Sharing it is not only about repetition:
+/// it makes the five commands classify identically, which is what turns "how often does a server's
+/// actor go missing" into a question with an answer rather than five separate answers that have to
+/// be reconciled by reading prose.
+///
+/// The session gate and the actor lookup are separated on purpose. They are one call today and
+/// they fail for entirely different reasons: one means "unlock the app", the other means "this
+/// server's task has stopped". Collapsing them is how both came to produce the same sentence.
+async fn channel_target(
+    state: &AppState,
+    op: &Operation,
+    server: u64,
+    channel: &str,
+) -> Result<(u128, ServerActor), AppError> {
+    let id: u128 = channel
+        .parse()
+        .map_err(|_| op.fail(codes::CHANNEL_BAD_ID, "bad channel id"))?;
+    require_unlocked_session(state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    let actor = actor_of_unchecked(state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
+    Ok((id, actor))
+}
+
 /// Send a chat message to a channel (by id).
 ///
-/// The first command instrumented end to end, and the pattern every other one adopts. What it
-/// records is the *stages*, because "the message did not arrive" was previously unanswerable: the
-/// evidence could not say whether the command reached Rust, whether the actor was alive, whether
-/// the operation was accepted, or whether persistence completed. Each of those is a different bug
-/// with a different fix, and they all looked the same.
+/// The first command instrumented end to end, and the pattern the others follow. What it records is
+/// the *stages*, because "the message did not arrive" was previously unanswerable: the evidence
+/// could not say whether the command reached Rust, whether the actor was alive, whether the
+/// operation was accepted, or whether persistence completed. Each is a different bug with a
+/// different fix, and they all looked the same.
 ///
 /// Note what is not recorded: the message. Not its text, not its length, not its recipient. The
-/// channel becomes a session reference, and the stage names carry the diagnosis.
+/// channel becomes a session reference and the stage names carry the diagnosis.
 #[tauri::command]
 async fn send_message(
     state: State<'_, AppState>,
@@ -7429,7 +7479,7 @@ async fn send_message(
     text: String,
     reply_to: Option<String>,
     trace: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let op = Operation::start(
         trace,
         catcoms_diagnostics::Section::Channels,
@@ -7437,20 +7487,12 @@ async fn send_message(
         server,
         Some(&channel),
     );
-    let id: u128 = channel.parse().map_err(|_| {
-        op.failed("CHANNEL.SEND.BAD_CHANNEL_ID");
-        "bad channel id".to_string()
-    })?;
-    let actor = actor_of(&state, server).await.inspect_err(|_| {
-        // The stage that used to be invisible. An actor whose task exited leaves a handle that
-        // looks fine and a command that fails with a string, and nothing said which.
-        op.failed("CHANNEL.SEND.NO_ACTOR");
-    })?;
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
     op.stage("CHANNEL.SEND.ENQUEUED");
     actor
         .send_reply(id, text, reply_to.unwrap_or_default())
         .await
-        .inspect_err(|_| op.failed("CHANNEL.SEND.REJECTED"))?;
+        .map_err(|e| op.fail(codes::CHAT_SEND_REJECTED, e))?;
     op.stage("CHANNEL.SEND.ACCEPTED");
     persist_server(&state, server).await;
     // Deliberately after persistence. An operation reported as succeeding before its state reached
@@ -7467,11 +7509,22 @@ async fn edit_message(
     channel: String,
     msg_id: String,
     text: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.edit_message(id, msg_id, text).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "edit_message",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .edit_message(id, msg_id, text)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_EDIT_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.EDIT.PERSISTED");
     Ok(())
 }
 
@@ -7482,11 +7535,22 @@ async fn delete_message(
     server: u64,
     channel: String,
     msg_id: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.delete_message(id, msg_id).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "delete_message",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .delete_message(id, msg_id)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_DELETE_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.DELETE.PERSISTED");
     Ok(())
 }
 
@@ -7498,11 +7562,22 @@ async fn toggle_reaction(
     channel: String,
     msg_id: String,
     emoji: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.toggle_reaction(id, msg_id, emoji).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "toggle_reaction",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .toggle_reaction(id, msg_id, emoji)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_REACTION_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.REACTION.PERSISTED");
     Ok(())
 }
 
@@ -7514,11 +7589,22 @@ async fn set_pin(
     channel: String,
     msg_id: String,
     pinned: bool,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.set_pin(id, msg_id, pinned).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "set_pin",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .set_pin(id, msg_id, pinned)
+        .await
+        .map_err(|e| op.fail(codes::CHAT_PIN_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("CHANNEL.PIN.PERSISTED");
     Ok(())
 }
 

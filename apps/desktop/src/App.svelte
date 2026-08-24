@@ -75,6 +75,7 @@
   import { installUiLogging, type UiLogging } from "./uilog";
   import { drainStartupLog, endStartupCapture } from "./startup-log";
   import {
+    errorText,
     makeInvokeDebugged,
     makeRecorder,
     makeSeqTracker,
@@ -3018,16 +3019,22 @@
       return;
     }
     try {
+      // One trace for the whole sweep rather than one per message: a moderator deleting eleven
+      // messages performed one action, and eleven unrelated traces would hide that the failure on
+      // the ninth belonged to the same operation as the eight that worked.
+      const sweep = traceSource.next();
       for (const message of selected) {
-        await invoke("delete_message", {
-          server, channel: message.channel, msgId: message.id,
-        });
+        await invokeDebugged(
+          "delete_message",
+          { server, channel: message.channel, msgId: message.id },
+          { trace: sweep },
+        );
       }
       moderationSelected = new Set();
       moderationDeleteArmed = false;
       await refreshModeration();
       if (view === "chat") await refresh();
-    } catch (e) { error = String(e); }
+    } catch (e) { error = errorText(e); }
   }
   function toggleCaseEvidence(id: string) {
     const next = new Set(caseEvidence);
@@ -11761,18 +11768,18 @@
     cancelEdit();
     if (text === m.text) return; // no change
     try {
-      await invoke("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
+      await invokeDebugged("edit_message", { server: activeServerId, channel: ch, msgId: m.id, text });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   async function deleteMessage(m: Msg) {
     const ch = cur?.active;
     if (activeServerId === null || !ch) return;
     try {
-      await invoke("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
+      await invokeDebugged("delete_message", { server: activeServerId, channel: ch, msgId: m.id });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 
@@ -11786,9 +11793,9 @@
     reactionPickerFor = "";
     if (activeServerId === null || !ch || !m.id) return;
     try {
-      await invoke("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
+      await invokeDebugged("toggle_reaction", { server: activeServerId, channel: ch, msgId: m.id, emoji });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   // A reaction emoji can be a unicode glyph or a custom `:name:` (a server emoji file). Returns the
@@ -11805,9 +11812,9 @@
     const ch = cur?.active;
     if (activeServerId === null || !ch || !m.id) return;
     try {
-      await invoke("set_pin", { server: activeServerId, channel: ch, msgId: m.id, pinned: !m.pinned });
+      await invokeDebugged("set_pin", { server: activeServerId, channel: ch, msgId: m.id, pinned: !m.pinned });
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
 

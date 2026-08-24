@@ -197,13 +197,81 @@ export type InvokeOutcome = {
  * rather than its prose. Replaced wholesale once the bridge returns typed errors.
  */
 export function classifyInvokeFailure(error: unknown): string {
-  const text = String(error ?? "").toLowerCase();
+  // A migrated command already answered this question properly, and its answer is stable in a way
+  // that sniffing a sentence never is. Prefer it, and fall back only for commands still returning
+  // prose.
+  const view = describeError(error);
+  if (view.code) return view.code;
+  const text = view.message.toLowerCase();
   if (text.includes("locked") || text.includes("unlock")) return "session_locked";
   if (text.includes("no actor") || text.includes("actor stopped")) return "actor_unavailable";
   if (text.includes("not found") || text.includes("unknown server")) return "not_found";
   if (text.includes("permission") || text.includes("not allowed")) return "not_permitted";
   if (text.includes("timeout") || text.includes("timed out")) return "timeout";
   return "failed";
+}
+
+// --- typed errors ------------------------------------------------------------------------------
+
+/** What the app can do about a failure, when there is something to do. */
+export type Remediation = "unlock" | "check_connection" | "amend_input" | "retry" | "restart";
+
+/** A failure, however the command chose to report it. */
+export type ErrorView = {
+  /** What the user sees. Always present, and always the same text they saw before the migration. */
+  message: string;
+  /** The stable code, when the command has been migrated. */
+  code?: string;
+  /** The trace, so a bug report can quote it and the log can be searched for it. */
+  trace?: string;
+  retryable?: boolean;
+  remediation?: Remediation;
+  details?: Record<string, string>;
+};
+
+/**
+ * Read a rejected invoke, whichever shape it arrived in.
+ *
+ * This is what makes the error migration incremental. Most commands still reject with a bare
+ * string, a few now reject with a typed object, and a call site using this behaves correctly
+ * against both. So it can be adopted at a call site *before* that call site's command is migrated,
+ * and a half-migrated bridge is indistinguishable from an unmigrated one.
+ *
+ * Without it, changing a command's error type would silently turn its message into
+ * `[object Object]` on screen, which is a worse error report than the one it replaced.
+ */
+export function describeError(error: unknown): ErrorView {
+  if (error && typeof error === "object" && !(error instanceof Error)) {
+    const candidate = error as Record<string, unknown>;
+    if (typeof candidate.message === "string" && typeof candidate.code === "string") {
+      return {
+        message: candidate.message,
+        code: candidate.code,
+        trace: typeof candidate.trace === "string" ? candidate.trace : undefined,
+        retryable: typeof candidate.retryable === "boolean" ? candidate.retryable : undefined,
+        remediation: typeof candidate.remediation === "string" ? (candidate.remediation as Remediation) : undefined,
+        details:
+          candidate.details && typeof candidate.details === "object"
+            ? (candidate.details as Record<string, string>)
+            : undefined,
+      };
+    }
+  }
+  return { message: String(error) };
+}
+
+/**
+ * The message to show, with the diagnostic code appended when there is one.
+ *
+ * The code is shown rather than hidden because the alternative is a support conversation that
+ * starts with "what did it say exactly". A short code a user can read out loud, or screenshot,
+ * turns that into one round trip instead of three.
+ */
+export function errorText(error: unknown): string {
+  const view = describeError(error);
+  if (!view.code) return view.message;
+  const trace = view.trace ? ` · ${view.trace}` : "";
+  return `${view.message} (${view.code}${trace})`;
 }
 
 /**

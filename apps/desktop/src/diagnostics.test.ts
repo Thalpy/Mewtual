@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   MAX_PENDING,
   classifyInvokeFailure,
+  describeError,
+  errorText,
   makeInvokeDebugged,
   makeRecorder,
   makeSeqTracker,
@@ -159,6 +161,22 @@ test("a failure is classified without carrying its message", () => {
   assert.equal(classifyInvokeFailure(undefined), "failed");
 });
 
+/**
+ * A migrated command already answered this question properly, and its answer is stable in a way
+ * that sniffing a sentence never is. Sniffing was always a stopgap for commands returning prose.
+ */
+test("a typed error is classified by its own code rather than by guessing at its words", () => {
+  assert.equal(
+    classifyInvokeFailure({ code: "CHAT.SEND.REJECTED", message: "message too long" }),
+    "CHAT.SEND.REJECTED",
+  );
+  // And the code wins even when the message would have been sniffed into something else.
+  assert.equal(
+    classifyInvokeFailure({ code: "CHANNEL.ID.INVALID", message: "not found anywhere" }),
+    "CHANNEL.ID.INVALID",
+  );
+});
+
 function wrapper(invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>) {
   const recorded: UiEvent[] = [];
   let clock = 1000;
@@ -211,6 +229,57 @@ test("the trace travels to the native side with the arguments", async () => {
   const { trace } = await debugged("send_message", { server: 1, text: "hello" });
   assert.equal(seen[0].trace, trace);
   assert.equal(seen[0].server, 1, "the real arguments are untouched");
+});
+
+// --- typed errors -------------------------------------------------------------------------------
+//
+// The property that makes the error migration incremental: one reader handles both shapes, so a
+// call site can adopt it before its command is migrated and a half-migrated bridge behaves exactly
+// like an unmigrated one.
+
+test("a bare string error still reads as the message it always was", () => {
+  assert.deepEqual(describeError("message too long"), { message: "message too long" });
+  assert.equal(errorText("message too long"), "message too long");
+});
+
+test("a typed error keeps the message and gains a code, a trace and what to do", () => {
+  const view = describeError({
+    code: "CHAT.SEND.REJECTED",
+    message: "message too long",
+    trace: "7f2c",
+    retryable: false,
+    remediation: "amend_input",
+  });
+  assert.equal(view.message, "message too long", "the text the user already saw is preserved");
+  assert.equal(view.code, "CHAT.SEND.REJECTED");
+  assert.equal(view.trace, "7f2c");
+  assert.equal(view.retryable, false);
+  assert.equal(view.remediation, "amend_input");
+});
+
+/**
+ * The regression this reader exists to prevent. Without it, migrating a command's error type turns
+ * its message into "[object Object]" on screen, which is a worse report than the one it replaced.
+ */
+test("a typed error never renders as [object Object]", () => {
+  const shown = errorText({ code: "SESSION.LOCKED", message: "session is locked", trace: "0001" });
+  assert.equal(shown, "session is locked (SESSION.LOCKED · 0001)");
+  assert.ok(!shown.includes("object Object"));
+});
+
+test("an Error instance is stringified rather than mistaken for a typed error", () => {
+  // An Error has a `message`, so without the guard it would be read as a partly-formed AppError.
+  assert.deepEqual(describeError(new Error("boom")), { message: "Error: boom" });
+});
+
+test("an object that only half looks like a typed error falls back rather than inventing fields", () => {
+  assert.deepEqual(describeError({ message: "no code here" }), { message: "[object Object]" });
+  assert.deepEqual(describeError({ code: "X.Y" }), { message: "[object Object]" });
+});
+
+test("nothing at all still produces something to show", () => {
+  assert.equal(describeError(undefined).message, "undefined");
+  assert.equal(describeError(null).message, "null");
 });
 
 test("a caller can continue an existing trace rather than starting a new one", async () => {

@@ -131,12 +131,41 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     "log_ui_batch",
     "record_ui_events",
   ]);
+  // Helpers that cross the gate on a command's behalf. Each one is verified to do so by the test
+  // below, so recognising it here extends the guarantee transitively rather than punching a hole
+  // in it. A helper added to this list without that proof would silently exempt every command
+  // that calls it, which is the failure mode this whole test exists to prevent.
+  const gatekeepers = "actor_of|server_actor_of|require_unlocked_session|channel_target";
   for (const [command, segment] of segments) {
     if (bootstrap.has(command)) continue;
     assert.match(
       segment,
-      /(?:actor_of|server_actor_of|require_unlocked_session)\s*\(/,
+      new RegExp(`(?:${gatekeepers})\\s*\\(`),
       `${command} does not visibly cross the native session gate`,
+    );
+  }
+});
+
+/**
+ * The gate-crossing helpers have to actually cross the gate.
+ *
+ * The test above trusts them on a command's behalf, so if one of them ever stopped calling
+ * `require_unlocked_session` every command that delegates to it would silently become
+ * unauthenticated while the audit kept passing. That is a worse outcome than having no audit,
+ * because it looks like one.
+ */
+test("every helper the session-gate audit trusts does the checking itself", () => {
+  const bridge = readFileSync(bridgePath, "utf8");
+  for (const helper of ["actor_of", "channel_target"]) {
+    const start = bridge.indexOf(`async fn ${helper}(`);
+    assert.ok(start > 0, `${helper} is trusted by the audit but does not exist`);
+    // The body runs to the next top-level item; enough to see what it calls.
+    const end = bridge.indexOf("\n}", start);
+    const body = bridge.slice(start, end);
+    assert.match(
+      body,
+      /require_unlocked_session\s*\(/,
+      `${helper} is trusted to gate commands but never checks the session`,
     );
   }
 });
