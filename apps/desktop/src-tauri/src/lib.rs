@@ -10242,6 +10242,68 @@ async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
 /// A cap that is never reached in normal use is still the difference between a bug and an outage.
 const MAX_REPORT_BYTES: usize = 8 * 1024 * 1024;
 
+/// The prefix every saved report carries. Retention only ever considers files matching it, so the
+/// debug logs sharing this directory are never at risk from it, and vice versa.
+const REPORT_PREFIX: &str = "mewtual-diagnostics-";
+
+/// How many saved reports survive, and how much they may occupy between them.
+///
+/// The bounded writer next door limits segment size, segment count, session bytes and directory
+/// bytes, and its retention only considers `debug_log_*`. Reports were exempt from all of it: an
+/// unlocked webview could press Save in a loop and fill the disk without touching a single one of
+/// those carefully chosen limits, which would make the console's own export the outage the writer
+/// was designed to prevent. Found by adversarial review (P3-003).
+const MAX_SAVED_REPORTS: usize = 10;
+const MAX_REPORT_DIR_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Delete the oldest saved reports until they are inside both the count and the byte quota.
+///
+/// Never touches the file being written, and never touches anything that is not a report.
+fn retain_reports(dir: &std::path::Path, keeping: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut held: Vec<(std::path::PathBuf, u64)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(REPORT_PREFIX))
+        .map(|e| (e.path(), e.metadata().map(|m| m.len()).unwrap_or(0)))
+        .collect();
+    // The name leads with a zero-padded timestamp, so sorting by name is sorting by age.
+    held.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut total: u64 = held.iter().map(|(_, size)| size).sum();
+    let mut index = 0;
+    while index < held.len() && (held.len() + keeping > MAX_SAVED_REPORTS || total > MAX_REPORT_DIR_BYTES)
+    {
+        let (path, size) = &held[index];
+        if std::fs::remove_file(path).is_ok() {
+            total = total.saturating_sub(*size);
+            held.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+/// Whether a report save is already running.
+///
+/// One at a time. Two concurrent saves would race on retention and could each delete what the other
+/// was about to count, and there is no reason for a person to need two at once.
+static REPORT_SAVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Clears [`REPORT_SAVING`] however the save ends.
+///
+/// A guard rather than a clear at each exit: this function has several `?` returns and one that
+/// forgot to release would wedge the button for the rest of the session, with no symptom except a
+/// feature that quietly stopped working.
+struct ReportSaveGuard;
+
+impl Drop for ReportSaveGuard {
+    fn drop(&mut self) {
+        REPORT_SAVING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Where a saved report went, for the UI to show.
 #[derive(Serialize)]
 struct SavedReport {
@@ -10280,16 +10342,34 @@ async fn save_diagnostics_report(
         ));
     }
 
+    // One save at a time: two would race on retention, each deleting what the other was about to
+    // count. Released on every exit below, including the error paths.
+    if REPORT_SAVING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Err("a diagnostics report is already being written".to_string());
+    }
+    let _release = ReportSaveGuard;
+
     let dir = match app.try_state::<LogState>() {
         Some(log) => log.dir.clone(),
         None => log_dir(&app)?,
     };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Make room before writing, counting the one about to be written.
+    retain_reports(&dir, 1);
 
     let session = catcoms_log::hub().session_id().to_string();
-    let file = format!("mewtual-diagnostics-{session}-{}.txt", wall_ms());
+    // The timestamp leads and is zero-padded so that sorting these by name sorts them by age,
+    // which is what retention above relies on.
+    let file = format!("{REPORT_PREFIX}{:013}-{session}.txt", wall_ms());
     let path = dir.join(&file);
-    std::fs::write(&path, text.as_bytes()).map_err(|e| e.to_string())?;
+    // Written to a temporary file and renamed, so an interrupted save leaves no half-report that
+    // reads as a whole one. A stray `.part` is obvious; a truncated report is not.
+    let staging = dir.join(format!("{file}.part"));
+    std::fs::write(&staging, text.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::rename(&staging, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&staging);
+        e.to_string()
+    })?;
 
     tracing::info!(
         target: "catcoms_app",
@@ -12694,6 +12774,44 @@ mod tests {
         let mut text = "🎹abc".to_string();
         truncate_utf8_bytes(&mut text, 2);
         assert_eq!(text, "");
+    }
+
+    /// The console's own export must not become the outage the bounded writer prevents.
+    ///
+    /// Saved reports live beside the debug logs, and the writer's retention only ever considers
+    /// `debug_log_*`. Before this, pressing Save in a loop could fill the disk without touching a
+    /// single one of the writer's carefully chosen limits.
+    #[test]
+    fn saved_reports_are_bounded_and_never_touch_the_logs_beside_them() {
+        let dir = tempfile::tempdir().unwrap();
+        // Something the quota must leave alone, of each kind that shares this directory.
+        std::fs::write(dir.path().join("debug_log_20260823_120000.txt"), b"a log").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"not ours").unwrap();
+
+        for n in 0..(MAX_SAVED_REPORTS * 3) {
+            let name = format!("{REPORT_PREFIX}{:013}-abcd1234.txt", 1_700_000_000_000u64 + n as u64);
+            std::fs::write(dir.path().join(name), b"report").unwrap();
+            retain_reports(dir.path(), 1);
+        }
+
+        let reports: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(REPORT_PREFIX))
+            .collect();
+        assert!(
+            reports.len() <= MAX_SAVED_REPORTS,
+            "reports grew without bound: {}",
+            reports.len()
+        );
+        // Oldest first out: a report written a moment ago is the one somebody is about to send.
+        assert!(
+            reports.iter().all(|n| n > &format!("{REPORT_PREFIX}1700000000010")),
+            "the newest reports should be the survivors: {reports:?}"
+        );
+        assert!(dir.path().join("debug_log_20260823_120000.txt").exists(), "logs are untouched");
+        assert!(dir.path().join("notes.txt").exists(), "so is everything else");
     }
 
     /// A render loop must not be able to fill the log, and the limiter must not be able to hide
