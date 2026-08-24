@@ -175,16 +175,35 @@ export type JukeEntry = {
 };
 
 /**
- * A short digest of a queue's contents, for noticing when a refresh changed nothing.
+ * Did the queue actually change?
  *
- * The failure this exists to make visible: a `channel-updated` event arrives saying the jukebox
- * moved, the UI dutifully re-reads the queue, and the queue is identical. That means the event and
- * the document disagree, and until now it looked exactly like a queue that had legitimately not
- * changed since the last look. Comparing digests across a refresh separates them.
+ * Compared entry by entry rather than through [`queueDigest`]. Both lists are in memory at the
+ * same moment, so hashing them first can only lose information: a digest is a fixed number of bits
+ * standing in for an unbounded input, and the single case this comparison exists to catch is the
+ * one where an event claims a change the document does not show. A digest collision there reports
+ * "unchanged" and hides precisely the disagreement being looked for. An exact comparison of a
+ * bounded list has no such failure mode.
+ *
+ * Ids only, and in order. A reorder is a change; a rename is not, because names are user content
+ * and the ids already determine the queue completely.
+ */
+export function queueChanged(before: readonly JukeEntry[], after: readonly JukeEntry[]): boolean {
+  if (before.length !== after.length) return true;
+  for (let at = 0; at < before.length; at += 1) {
+    if (before[at].id !== after[at].id) return true;
+  }
+  return false;
+}
+
+/**
+ * A short, stable name for a queue's contents, for the log line.
  *
  * Order matters, because a reorder is a change. Only the entry ids go in: names are user content
  * and have no business in a value that ends up in a diagnostic record, and the ids already
  * determine the queue completely.
+ *
+ * This is a display value. A collision costs nothing here but a confusing readout, so never use it
+ * to decide whether something changed: that is [`queueChanged`], which compares the entries.
  */
 export function queueDigest(entries: readonly JukeEntry[]): string {
   if (!entries.length) return "empty";

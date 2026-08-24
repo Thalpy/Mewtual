@@ -15,6 +15,7 @@ import {
   nudgeRate,
   isStalled,
   playableQueue,
+  queueChanged,
   queueDigest,
   resolveCallName,
   stallChip,
@@ -694,8 +695,7 @@ test("a refresh can tell 'the event was wrong' from 'nothing has happened'", () 
   // digest before the re-read and the digest after. An event claimed the jukebox moved, so a
   // queue that comes back identical means the event and the channel document disagree, and that
   // used to be indistinguishable from a queue nobody had touched since the last look.
-  const refreshChanged = (before: readonly JukeEntry[], after: readonly JukeEntry[]) =>
-    queueDigest(before) !== queueDigest(after);
+  const refreshChanged = queueChanged;
 
   const queue = [queued("a"), queued("b")];
   assert.equal(refreshChanged(queue, [queued("a"), queued("b")]), false, "the event was wrong");
@@ -706,4 +706,24 @@ test("a refresh can tell 'the event was wrong' from 'nothing has happened'", () 
   assert.equal(refreshChanged(queue, [queued("b"), queued("a")]), true, "a reorder");
   // An emptied queue is a change too, not a read that failed to say anything.
   assert.equal(refreshChanged(queue, []), true, "a clear");
+});
+
+test("a digest collision cannot make a changed queue report as quiet", () => {
+  // The review asks for this case by name. These are not a stand-in: they are two real track ids
+  // that collide under the actual `queueDigest`, found by searching its 32-bit output. Any digest
+  // narrower than its input has pairs like this, which is the whole reason the decision does not
+  // go through one.
+  const a = [queued("t7pfs")];
+  const b = [queued("tovja")];
+  assert.equal(queueDigest(a), queueDigest(b), "these two really do collide under the digest");
+  // The queue genuinely changed: a different track is queued, and the room will play something
+  // else next. Deciding by digest would report this refresh as quiet and hide the disagreement
+  // between the event and the document, which is the one thing the record exists to catch.
+  assert.equal(queueChanged(a, b), true);
+});
+
+test("the queue digest stays short enough to read in a log line", () => {
+  // It is a display value, so the constraint on it is legibility rather than collision resistance.
+  const long = Array.from({ length: 200 }, (_unused, at) => queued(`track-${at}`));
+  assert.ok(queueDigest(long).length <= 20, queueDigest(long));
 });
