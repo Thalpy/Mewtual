@@ -597,7 +597,7 @@ body.redacted .dbg-pii { color: var(--warn); }
             <button class="ghost small" data-copy-feed>Copy feed</button>
           </div>
           <div class="dbg-feed-scroll h-md" role="log" aria-label="Dial attempt feed">
-            <div class="dbg-drop-note">Ring full: oldest entries dropped. Showing the last 500 of 1,283 this session. The debug log file keeps everything.</div>
+            <div class="dbg-drop-note">Ring full: oldest entries dropped. Showing the last 500 of 1,283 this session. The debug log file may hold some of these, but it is not a complete record of them.</div>
             <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:58.114</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 3]/udp/4001/quic-v1">/ip6/2a02:8010:6f3e::9c1/udp/4001/quic-v1</span> : network unreachable (no IPv6 route on this host)<button class="dbg-copy" data-copy-line>copy</button></div>
             <div class="dbg-line lvl-err"><span class="dbg-ts">14:52:58.119</span>  <span class="dbg-tag">FAIL</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 3]">12D3&hellip;Ax3c</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip6/[ip 4]/tcp/4001">/ip6/2a02:8010:6f3e:0:1c2f::4b/tcp/4001</span> : network unreachable (no IPv6 route on this host)<button class="dbg-copy" data-copy-line>copy</button></div>
             <div class="dbg-line lvl-info"><span class="dbg-ts">14:53:02.371</span>  <span class="dbg-tag">OK</span> <span class="dbg-pii" data-kind="peer" data-mask="[peer 1]">12D3&hellip;Ld7k</span> <span class="dbg-pii" data-kind="addr" data-mask="/ip4/[ip 2]/udp/4001/quic-v1">/ip4/203.0.113.87/udp/4001/quic-v1</span> : connected in 84ms<button class="dbg-copy" data-copy-line>copy</button></div>
@@ -694,7 +694,7 @@ body.redacted .dbg-pii { color: var(--warn); }
             <button class="ghost small" data-pause aria-pressed="false">Pause</button>
           </div>
           <div class="dbg-feed-scroll h-lg" role="log" aria-label="Backend tracing feed">
-            <div class="dbg-drop-note">Ring full: oldest entries dropped. Showing the last 2,000 of 3,417 this session. The debug log file keeps everything.</div>
+            <div class="dbg-drop-note">Ring full: oldest entries dropped. Showing the last 2,000 of 3,417 this session. The debug log file may hold some of these, but it is not a complete record of them.</div>
             <div class="dbg-line lvl-info"><span class="dbg-ts">14:47:00.112</span>  <span class="dbg-tag">INFO</span>  <span class="dbg-target">catcoms_app</span>  session unlocked, 2 servers loaded<button class="dbg-copy" data-copy-line>copy</button></div>
             <div class="dbg-line lvl-warn"><span class="dbg-ts">14:47:03.590</span>  <span class="dbg-tag">WARN</span>  <span class="dbg-target">catcoms_net</span>  eclipse detector: all reachable peers for server share one relay path <span class="dbg-kvs">server=torpor peers=1</span><button class="dbg-copy" data-copy-line>copy</button></div>
             <div class="dbg-line lvl-debug"><span class="dbg-ts">14:47:04.001</span>  <span class="dbg-tag">DEBUG</span> <span class="dbg-target">catcoms_sync</span>  snapshot check: head unchanged <span class="dbg-kvs">server=moss-garden</span><button class="dbg-copy" data-copy-line>copy</button></div>
