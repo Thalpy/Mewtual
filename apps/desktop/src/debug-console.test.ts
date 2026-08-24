@@ -26,6 +26,8 @@ import {
   routeState,
   shortTrace,
   shownCount,
+  taskChip,
+  taskConsequence,
   traceEvents,
   collectAllEvents,
   deviceLines,
@@ -39,6 +41,7 @@ import {
   type DebugVoicePeer,
   type LogEvent,
   type MemberRoute,
+  type TaskHealth,
 } from "./debug-console.ts";
 
 /**
@@ -543,6 +546,53 @@ test("a relayed call is worth noticing but is not a fault", () => {
   assert.deepEqual(mediaPathChip("relayed"), { label: "TURN RELAY", tone: "warn" });
   assert.deepEqual(mediaPathChip("direct"), { label: "DIRECT", tone: "ok" });
   assert.deepEqual(mediaPathChip("unknown"), { label: "UNKNOWN", tone: "faint" });
+});
+
+// --- supervised background tasks ----------------------------------------------------------------
+//
+// Only the server actor was supervised; six other long-lived tasks had their handles dropped. The
+// event forwarder is the one that matters most, because it can die while the actor stays perfectly
+// healthy: the protocol keeps running and the webview is told none of it. Found by adversarial
+// review (P3-009).
+
+const task = (over: Partial<TaskHealth> = {}): TaskHealth => ({
+  id: 1,
+  kind: "event_forwarder",
+  server: 1,
+  started_ms: 0,
+  last_beat_ms: null,
+  state: "running",
+  fault: false,
+  cause: null,
+  ...over,
+});
+
+test("a running task reads as working and an ordinary exit is not painted as a crash", () => {
+  assert.equal(taskChip(task()).tone, "ok");
+  assert.equal(taskChip(task({ state: "exited" })).tone, "faint");
+  assert.equal(taskChip(task({ state: "panicked", fault: true })).tone, "danger");
+  assert.equal(taskChip(task({ state: "cancelled", fault: true })).tone, "danger");
+  // A stall is a suspicion rather than a certainty: the task is still running and merely late.
+  assert.equal(taskChip(task({ state: "stalled", fault: true })).tone, "warn");
+});
+
+/**
+ * "event_forwarder panicked" is precise and tells a user nothing. The reason a dead task is worth
+ * surfacing at all is that each one has a visible consequence, and the consequence is what somebody
+ * recognises from their own screen.
+ */
+test("a dead task is described by what the user will see, not by its own name", () => {
+  const forwarder = taskConsequence("event_forwarder");
+  assert.match(forwarder, /unread badges/);
+  assert.match(forwarder, /server itself keeps working/, "the distinction that explains it");
+  assert.match(taskConsequence("server_actor"), /stopped entirely/);
+  assert.match(taskConsequence("discovery_timer"), /addresses/);
+  // The reachability folds share one consequence: the report goes stale, connections do not.
+  for (const kind of ["port_mapping_fold", "autonat_fold", "relay_fold", "mesh_observation_fold"]) {
+    assert.match(taskConsequence(kind), /Connections are unaffected/, kind);
+  }
+  // An unrecognised kind still says something true rather than nothing.
+  assert.ok(taskConsequence("something_new").length > 20);
 });
 
 test("level classes match the css, including the one that is not just lowercase", () => {

@@ -47,6 +47,7 @@ use tokio::time::timeout;
 use zeroize::Zeroizing;
 
 mod errors;
+mod tasks;
 use errors::{codes, AppError, ErrorCode};
 
 /// Independent reasons an exact address belongs in this device's aggregate bootstrap set. The
@@ -1405,7 +1406,9 @@ where
 /// poll in every discovery loop remains the portable correctness path.
 fn spawn_network_monitor(app: &AppHandle) {
     let signal = app.state::<AppState>().network_changes.clone();
-    tauri::async_runtime::spawn(async move {
+    // `tokio::spawn` rather than Tauri's wrapper, so the handle is the one the supervisor joins on.
+    // Tauri's returns its own type, which cannot report a panic.
+    let task = tokio::spawn(async move {
         let monitor = match netwatch::netmon::Monitor::new().await {
             Ok(monitor) => monitor,
             Err(error) => {
@@ -1419,6 +1422,9 @@ fn spawn_network_monitor(app: &AppHandle) {
         forward_network_changes(changes, signal, SystemClock).await;
         tracing::warn!("native network monitor stopped; periodic polling remains active");
     });
+    // No rhythm declared: an interface that does not change is the ordinary case, so silence here
+    // means nothing happened rather than that nothing is watching.
+    supervise_task("network_monitor", None, None, task);
 }
 
 /// Poll the route-selected IPv4/IPv6 source addresses and publish one new authoritative address
@@ -1493,10 +1499,21 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
     // first poll cannot be lost. The current startup sample is already authoritative; only future
     // generations wake this server early.
     let mut network_changes = app.state::<AppState>().network_changes.subscribe();
-    tokio::spawn(async move {
+    // Declared before the task starts, so the handle exists for the loop to beat on.
+    let watched = tasks::register(
+        "discovery_timer",
+        Some(server),
+        wall_ms(),
+        // This one does have a rhythm, and it is the rhythm that keeps peer records fresh. A
+        // discovery timer that has silently stopped looks exactly like a network that has gone
+        // quiet, and only one of those is a bug here.
+        Some(DISCOVERY_INTERVAL_SECS * 1_000 + DISCOVERY_JITTER_MS),
+    );
+    let task = tokio::spawn(async move {
         // A short randomised start offset, then an independently randomised period each round.
         let mut delay = jittered_delay(0, DISCOVERY_START_SPREAD_MS);
         loop {
+            watched.beat(wall_ms());
             tokio::select! {
                 _ = SystemClock.sleep(delay) => {}
                 changed = network_changes.changed() => {
@@ -1520,6 +1537,7 @@ fn spawn_discovery_timer(app: AppHandle, server: u64, actor: ServerActor) {
             );
         }
     });
+    supervise_registered("discovery_timer", Some(server), watched, task);
 }
 
 fn forward_events(
@@ -1527,7 +1545,7 @@ fn forward_events(
     server: u64,
     mut events: mpsc::Receiver<catcoms_app::TracedEvent>,
 ) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         while let Some(ev) = events.recv().await {
             // The operation the actor was handling when it produced this, or none for work that
             // arrived from a peer. Carried across as the canonical trace so a `channel-updated`
@@ -1665,6 +1683,14 @@ fn forward_events(
             }
         }
     });
+    // The task whose unobserved death this whole registry was written for. It can stop while the
+    // server actor is perfectly healthy: the protocol keeps running, membership keeps changing,
+    // messages keep arriving, and the webview is told none of it. What a user sees is a stale
+    // unread badge and stale presence, and until now the app's own answer would have been that
+    // everything was fine.
+    //
+    // No rhythm declared, because a quiet server is quiet and not broken.
+    supervise_task("event_forwarder", Some(server), None, task);
 }
 
 /// Extract the listen port from a multiaddr. Both `/tcp/<p>` and `/udp/<p>/quic-v1` carry it,
@@ -2397,30 +2423,67 @@ fn panic_summary(payload: &(dyn std::any::Any + Send)) -> String {
 /// would trade a diagnosable stop for an undiagnosable inconsistency. The policy is to surface the
 /// failure and preserve the cause; recovery is a decision for a level that knows what was lost.
 fn supervise(kind: &'static str, server: u64, task: tokio::task::JoinHandle<()>) {
+    supervise_task(kind, Some(server), None, task);
+}
+
+/// Watch a long-lived task, and keep what became of it after the log line has aged out.
+///
+/// Every critical spawn goes through here. Only the server actor did: six other long-lived tasks
+/// had their `JoinHandle` dropped on the floor, so their deaths were unobserved. The event
+/// forwarder is the one that matters most, because it can die while the actor stays perfectly
+/// healthy: the protocol keeps running and the webview is told none of it, which a user sees as a
+/// stale unread badge and the app would have reported as fine. Found by adversarial review
+/// (P3-009).
+///
+/// `expect_ms` is how often the task promises to report progress, for the ones that have a rhythm.
+/// A task that makes no promise is never called stalled, because silence is not evidence: the
+/// forwarder can have nothing to forward for an hour and be working perfectly.
+fn supervise_task(
+    kind: &'static str,
+    server: Option<u64>,
+    expect_ms: Option<u64>,
+    task: tokio::task::JoinHandle<()>,
+) -> tasks::TaskHandle {
+    let handle = tasks::register(kind, server, wall_ms(), expect_ms);
+    supervise_registered(kind, server, handle, task);
+    handle
+}
+
+/// [`supervise_task`] for a task that was registered before it was spawned.
+///
+/// A task that reports progress needs its own registry handle inside its loop, which means the
+/// registration has to happen first.
+fn supervise_registered(
+    kind: &'static str,
+    server: Option<u64>,
+    handle: tasks::TaskHandle,
+    task: tokio::task::JoinHandle<()>,
+) {
     tauri::async_runtime::spawn(async move {
-        match task.await {
+        let (state, cause) = match task.await {
             // The mailbox closed and the loop returned. Ordinary at shutdown, and worth a line
-            // either way because "the actor is gone" explains a lot of later symptoms.
-            Ok(()) => tracing::info!(
-                target: "catcoms_app",
-                kind,
-                server,
-                "RUNTIME.TASK.EXITED"
-            ),
-            Err(e) if e.is_cancelled() => tracing::warn!(
-                target: "catcoms_app",
-                kind,
-                server,
-                "RUNTIME.TASK.CANCELLED"
-            ),
-            Err(e) => tracing::error!(
-                target: "catcoms_app",
-                kind,
-                server,
-                cause = %panic_summary(&*e.into_panic()),
-                "RUNTIME.TASK.PANICKED"
-            ),
-        }
+            // either way because "the task is gone" explains a lot of later symptoms.
+            Ok(()) => {
+                tracing::info!(target: "catcoms_app", kind, server, "RUNTIME.TASK.EXITED");
+                (tasks::TaskState::Exited, None)
+            }
+            Err(e) if e.is_cancelled() => {
+                tracing::warn!(target: "catcoms_app", kind, server, "RUNTIME.TASK.CANCELLED");
+                (tasks::TaskState::Cancelled, None)
+            }
+            Err(e) => {
+                let cause = panic_summary(&*e.into_panic());
+                tracing::error!(
+                    target: "catcoms_app",
+                    kind,
+                    server,
+                    cause = %cause,
+                    "RUNTIME.TASK.PANICKED"
+                );
+                (tasks::TaskState::Panicked, Some(cause))
+            }
+        };
+        tasks::finished(handle, state, cause);
     });
 }
 
@@ -3438,7 +3501,7 @@ fn spawn_port_mapping_fold(
     mut rx: watch::Receiver<PortMappingSnapshot>,
     peer_id: String,
 ) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let deadline = SystemClock.sleep(Duration::from_secs(PORT_MAPPING_WINDOW_SECS));
         tokio::pin!(deadline);
         let mut waiting = true;
@@ -3488,6 +3551,10 @@ fn spawn_port_mapping_fold(
             store_port_mapping_status(&app, server, &active, &unavailable, waiting).await;
         }
     });
+    // A watch fold: it wakes when its source changes and is silent otherwise, so it declares no
+    // rhythm. What supervision buys here is knowing it died, which is the difference between
+    // "reachability stopped updating" and "reachability stopped changing".
+    supervise_task("port_mapping_fold", Some(server), None, task);
 }
 
 async fn apply_relay_snapshot(
@@ -3514,7 +3581,7 @@ async fn apply_relay_snapshot(
 /// listener can expire or be re-created later; the watch snapshot ensures Settings, invites and
 /// peer records all withdraw/add the same exact circuit address.
 fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAddressSnapshot>) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let mut previous = HashSet::new();
         let initial = rx.borrow_and_update().clone();
         apply_relay_snapshot(&app, server, initial, &mut previous).await;
@@ -3529,6 +3596,7 @@ fn spawn_relay_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<RelayAd
             );
         }
     });
+    supervise_task("relay_fold", Some(server), None, task);
 }
 
 fn spawn_mesh_observation_fold(
@@ -3536,7 +3604,7 @@ fn spawn_mesh_observation_fold(
     server: u64,
     mut rx: watch::Receiver<MeshObservationSnapshot>,
 ) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         loop {
             let snapshot = rx.borrow_and_update().clone();
             let observations: Vec<String> = snapshot
@@ -3573,6 +3641,7 @@ fn spawn_mesh_observation_fold(
             }
         }
     });
+    supervise_task("mesh_observation_fold", Some(server), None, task);
 }
 
 /// How long the background connectivity collector waits for AutoNAT v2.
@@ -3682,7 +3751,7 @@ async fn store_autonat_snapshot(
 /// Collect coalesced per-address AutoNAT v2 evidence. The product filters it against live routes
 /// only when read, closing startup-order and expiry races without an unbounded output queue.
 fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoNatSnapshot>) {
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let deadline = SystemClock.sleep(Duration::from_secs(AUTONAT_WINDOW_SECS));
         tokio::pin!(deadline);
         let mut waiting = true;
@@ -3708,6 +3777,7 @@ fn spawn_autonat_fold(app: AppHandle, server: u64, mut rx: watch::Receiver<AutoN
             }
         }
     });
+    supervise_task("autonat_fold", Some(server), None, task);
 }
 
 /// Decode a pasted invite **and check its signature**, before anything touches the network.
@@ -3887,7 +3957,6 @@ fn schedule_switchboard_candidates(
         if !scheduler
             .reserve(
                 group_id,
-                peer.as_bytes(),
                 std::slice::from_ref(&endpoint),
                 clock,
             )
@@ -3920,7 +3989,7 @@ fn schedule_join_reply_candidates(
         .filter_map(|candidate| untrusted_peer_endpoint(&candidate.to_string(), &phase_peer))
         .collect();
     scheduler
-        .reserve(group_id, phase_peer.as_bytes(), &endpoints, clock)
+        .reserve(group_id, &endpoints, clock)
         .into_iter()
         .filter_map(|address| address.parse().ok())
         .collect()
@@ -3999,7 +4068,6 @@ fn schedule_invite_rendezvous_targets(
             !scheduler
                 .reserve(
                     group_id,
-                    phase_peer.as_bytes(),
                     std::slice::from_ref(&endpoint),
                     clock,
                 )
@@ -4076,7 +4144,7 @@ fn schedule_grant_bootstrap(
         .filter_map(|address| invite_peer_endpoint(&address.to_string(), &contact))
         .collect();
     let granted: Vec<_> = scheduler
-        .reserve(group_id, contact.as_bytes(), &endpoints, clock)
+        .reserve(group_id, &endpoints, clock)
         .into_iter()
         .filter_map(|address| address.parse().ok())
         .collect();
@@ -4240,7 +4308,6 @@ async fn discover_and_connect(
     let endpoints = join_candidate_endpoints(&dialed.addresses, &fallbacks, &inviter);
     let granted = endpoint_dials.reserve(
         &invite.group_id,
-        inviter.as_bytes(),
         &endpoints,
         &SystemClock,
     );
@@ -4833,7 +4900,6 @@ async fn join_server_inner(
             .collect();
         let granted = state.endpoint_dials.reserve(
             &invite.group_id,
-            inviter.as_bytes(),
             &endpoints,
             &SystemClock,
         );
@@ -5455,12 +5521,16 @@ async fn apply_join_reply(
                 // Keep retrying this even when the endpoint scheduler denies another *new* dial:
                 // the actor drains the initial Dial and Request commands before polling the
                 // swarm, so that first request can legitimately precede connection establishment.
-                // A request cannot create a socket without an existing/recent peer mapping.
+                // The connected-only command never consults the actor's recent-peer redial cache;
+                // without that distinction a denied pass could still start an implicit socket.
                 let mut proof_request = Vec::with_capacity(33);
                 proof_request.push(JOIN_REPLY_PROOF_KIND);
                 proof_request.extend_from_slice(&proof);
                 let _ = mesh
-                    .request_control(phase0_peer_id(&joiner), bytes::Bytes::from(proof_request))
+                    .request_control_connected_only(
+                        phase0_peer_id(&joiner),
+                        bytes::Bytes::from(proof_request),
+                    )
                     .await;
                 clock.sleep(Duration::from_millis(delay_ms)).await;
                 delay_ms = delay_ms.saturating_mul(2).min(4_000);
@@ -10906,6 +10976,45 @@ fn capture_config_view() -> CaptureConfigView {
     }
 }
 
+/// One background task, as the console shows it.
+#[derive(Serialize)]
+struct TaskHealthView {
+    id: u64,
+    kind: &'static str,
+    server: Option<u64>,
+    started_ms: i64,
+    last_beat_ms: Option<i64>,
+    state: &'static str,
+    /// Whether this is a state somebody should be told about. Decided natively so the console does
+    /// not hold a second opinion about what counts as a fault.
+    fault: bool,
+    cause: Option<String>,
+}
+
+/// What every supervised background task is doing.
+///
+/// The answer that used to be a log line and then, once the line aged out of the ring, nothing at
+/// all: a healthy-looking app whose only evidence that half of it had stopped had scrolled away.
+/// State that has to stay in a bounded buffer to be true is not state. Found by adversarial review
+/// (P3-009).
+#[tauri::command]
+async fn get_task_health(state: State<'_, AppState>) -> Result<Vec<TaskHealthView>, String> {
+    require_unlocked_session(&state).await?;
+    Ok(tasks::snapshot(wall_ms())
+        .into_iter()
+        .map(|task| TaskHealthView {
+            id: task.id,
+            kind: task.kind,
+            server: task.server,
+            started_ms: task.started_ms,
+            last_beat_ms: task.last_beat_ms,
+            state: task.state,
+            fault: task.fault,
+            cause: task.cause,
+        })
+        .collect())
+}
+
 /// Where the event stream has got to.
 #[derive(Serialize)]
 struct EventCursor {
@@ -11665,6 +11774,7 @@ pub fn run() {
             set_capture_mode,
             set_section_capture,
             get_event_cursor,
+            get_task_health,
             save_diagnostics_report,
             log_ui,
             log_ui_batch,
@@ -14232,7 +14342,6 @@ mod tests {
         assert_eq!(
             scheduler.reserve(
                 b"rendezvous-headroom",
-                inviter_phase.as_bytes(),
                 &[endpoint],
                 &clock,
             ),

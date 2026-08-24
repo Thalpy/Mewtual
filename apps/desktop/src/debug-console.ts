@@ -595,6 +595,64 @@ export type DebugVoicePeer = {
   path: "direct" | "relayed" | "unknown";
 };
 
+/**
+ * One supervised background task, as `get_task_health` returns it.
+ *
+ * The answer that used to be a log line and then, once the line aged out of the ring, nothing at
+ * all. A task can die while everything around it stays healthy: the event forwarder in particular
+ * can stop while the server actor is fine, so the protocol keeps running and the webview is told
+ * none of it. What a user sees is a stale unread badge, and what the app used to say was that
+ * everything was working.
+ */
+export type TaskHealth = {
+  id: number;
+  /** `event_forwarder`, `server_actor`, `discovery_timer`, and so on. */
+  kind: string;
+  server: number | null;
+  started_ms: number;
+  /** Only for a task that declared a rhythm; null means it never promised one. */
+  last_beat_ms: number | null;
+  /** `running` | `exited` | `cancelled` | `panicked` | `stalled`. */
+  state: string;
+  /** Whether somebody should be told. Decided natively, so there is only one opinion about it. */
+  fault: boolean;
+  cause: string | null;
+};
+
+/** The chip for a task's state. */
+export function taskChip(task: TaskHealth): { label: string; tone: "ok" | "warn" | "danger" | "faint" } {
+  const label = task.state.toUpperCase();
+  if (!task.fault) return { label, tone: task.state === "running" ? "ok" : "faint" };
+  return { label, tone: task.state === "stalled" ? "warn" : "danger" };
+}
+
+/**
+ * What a dead task means for the person looking at the app, rather than for the process.
+ *
+ * "event_forwarder panicked" is precise and tells a user nothing. The whole reason this is worth
+ * surfacing is that each of these has a visible consequence, and the consequence is what someone
+ * recognises from their own screen.
+ */
+export function taskConsequence(kind: string): string {
+  switch (kind) {
+    case "event_forwarder":
+      return "This server's updates are no longer reaching the window. Messages, unread badges, presence and the jukebox will all look frozen while the server itself keeps working. Reopening the app restores it.";
+    case "server_actor":
+      return "This server has stopped entirely. Nothing will send or arrive on it until the app is reopened.";
+    case "discovery_timer":
+      return "This server has stopped looking for members' current addresses, so peers that move will gradually become unreachable.";
+    case "network_monitor":
+      return "Network changes are no longer noticed immediately. Reconnection still happens on the ordinary poll, just later.";
+    case "port_mapping_fold":
+    case "autonat_fold":
+    case "relay_fold":
+    case "mesh_observation_fold":
+      return "This server's reachability report has stopped updating. Connections are unaffected; what is shown about them may be out of date.";
+    default:
+      return "A background task stopped. What it was responsible for is no longer being done.";
+  }
+}
+
 /** The console's sections, in rail order. */
 export type DbgSection = "overview" | "network" | "voice" | "backend" | "frontend" | "storage";
 

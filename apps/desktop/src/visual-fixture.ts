@@ -462,6 +462,42 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     // What Safe and Enhanced actually do to a value is pinned by unit tests in `render.rs`, the
     // desktop bridge and `debug-console.test.ts`, which is the right place for a property that is
     // about rendering rather than about layout.
+    // One dead event forwarder, because the fixture exists to show the console doing its job and
+    // this is the failure the rest of the console cannot show: everything else keeps reporting
+    // normally while the thing that was meant to be doing the work is gone.
+    case "get_task_health":
+      return clone([
+        {
+          id: 1,
+          kind: "server_actor",
+          server: 1,
+          started_ms: VISUAL_FIXTURE_NOW - 600_000,
+          last_beat_ms: null,
+          state: "running",
+          fault: false,
+          cause: null,
+        },
+        {
+          id: 2,
+          kind: "event_forwarder",
+          server: 1,
+          started_ms: VISUAL_FIXTURE_NOW - 600_000,
+          last_beat_ms: null,
+          state: "panicked",
+          fault: true,
+          cause: "index out of bounds: the len is 0 but the index is 0",
+        },
+        {
+          id: 3,
+          kind: "discovery_timer",
+          server: 1,
+          started_ms: VISUAL_FIXTURE_NOW - 600_000,
+          last_beat_ms: VISUAL_FIXTURE_NOW - 20_000,
+          state: "running",
+          fault: false,
+          cause: null,
+        },
+      ]);
     case "get_capture_config":
     case "set_capture_mode":
     case "set_section_capture":

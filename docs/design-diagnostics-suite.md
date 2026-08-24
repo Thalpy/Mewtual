@@ -224,6 +224,24 @@ shared implementation, and M6 should collapse them rather than add a third.
   each with a re-entrancy guard; reachability runs every third tick, only while a section that
   renders it is open, and fans out concurrently rather than walking the list.
 * **P3-004 (high), fixed.** See "The trace, end to end" above.
+* **P3-009 (high), fixed.** Only the server actor was supervised. Six other long-lived tasks had
+  their `JoinHandle` dropped on the floor, so their deaths were unobserved: the network monitor, the
+  discovery timer, the four reachability folds, and the event forwarder. The forwarder is the one
+  that matters most, because it can die while the actor stays perfectly healthy, and what a user
+  then sees is a stale unread badge, stale presence and a frozen jukebox on a server that is
+  otherwise working.
+  A `TaskRegistry` holds what became of each. The point is that it *outlives the log line*: a panic
+  used to produce one `tracing` line, and once that aged out of the ring the task's state was not
+  "dead" but unknown. State that has to stay in a bounded buffer to be true is not state.
+  The console shows it first, above everything else, phrased as what the user will see rather than
+  as the task's own name: "event_forwarder panicked" is precise and tells nobody anything.
+  A stall is only ever claimed about a task that declared how often it expects to do something. The
+  forwarder can have nothing to forward for an hour and be working perfectly, and a panel that
+  cried wolf about that would stop being read.
+  **No restart policy.** The review permits a bounded one for stateless monitors. It is not here,
+  because nothing would act on it: the forwarder owns a receiver that dies with it and cannot be
+  restarted without restructuring, and a policy field nobody consults is the same mistake as the
+  unused `Remediation` variants already recorded in section 4.
 * **P3-008 (high), fixed.** `LineWriter::write` did `extend_from_slice` with no per-event bound, so
   one formatted event could allocate an arbitrarily large `Vec` on whichever thread emitted it,
   arrive as a single queue item, and carry the file past a quota in one write rather than being
@@ -345,8 +363,7 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 
 | ID | Sev | Open finding | Note |
 |---|---|---|---|
-| P3-009 | High | Task supervision misses the paths that make the UI silently stale | **Start here.** Only actor tasks are supervised. |
-| P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
+| P3-012 | Med | Console/export reads clone events under the global hub mutex | **Start here.** Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |
 | P3-016 | Med | Startup capture begins too late for static-import failures | `main.ts` imports run before its first statement. |

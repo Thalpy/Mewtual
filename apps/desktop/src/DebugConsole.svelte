@@ -52,6 +52,8 @@
     routeLines,
     routeState,
     shownCount,
+    taskChip,
+    taskConsequence,
     voiceLines,
     webrtcChip,
     type CaptureConfig,
@@ -62,6 +64,7 @@
     type LogEvent,
     type LogStats,
     type MemberRoute,
+    type TaskHealth,
   } from "./debug-console";
 
   let {
@@ -133,6 +136,7 @@
   /** Shared by every feed: a trace pasted from an error banner narrows all of them at once. */
   let traceFilter = $state("");
   let routes = $state<Record<number, MemberRoute[]>>({});
+  let taskHealth = $state<TaskHealth[]>([]);
   let voicePeers = $state<DebugVoicePeer[]>([]);
   let expanded = $state("");
   let copied = $state("");
@@ -216,6 +220,14 @@
     }
   }
 
+  async function pollTasks() {
+    try {
+      taskHealth = await invoke<TaskHealth[]>("get_task_health");
+    } catch {
+      /* the panel simply does not render; supervision itself is unaffected */
+    }
+  }
+
   async function loadCapture() {
     try {
       capture = await invoke<CaptureConfig>("get_capture_config");
@@ -232,6 +244,7 @@
     void loadCapture();
     void pollLog();
     void pollRoutes();
+    void pollTasks();
     const timer = setInterval(() => {
       // Paused freezes the view, not the capture: the ring keeps filling natively and a resume
       // shows what arrived. Skipping the poll instead would lose it.
@@ -239,6 +252,11 @@
       tick += 1;
       void pollLog();
       if (tick % ROUTE_TICKS === 0 && ROUTE_SECTIONS.includes(active)) void pollRoutes();
+      // Task health is a small list that changes only when something starts or stops, so it does
+      // not need the log's cadence. It is polled everywhere rather than only on Overview, because
+      // the rail badge is the point: a dead forwarder should be visible from whichever section
+      // somebody happened to open.
+      if (tick % ROUTE_TICKS === 0) void pollTasks();
       voicePeers = voice();
     }, 1000);
     return () => clearInterval(timer);
@@ -358,6 +376,14 @@
   );
   /** Whether this device has any usable IPv6 route, which decides how a v6-only peer is explained. */
   const hasIpv6 = $derived((device?.public_ipv6.length ?? 0) > 0);
+  /**
+   * Background tasks in a state somebody should be told about.
+   *
+   * Shown first and badged on the rail, because a stopped task is the one failure the rest of this
+   * console cannot show you: everything else keeps reporting normally while the thing that was
+   * meant to be doing the work is gone.
+   */
+  const brokenTasks = $derived(taskHealth.filter((t) => t.fault));
 
   function toggleLevel(which: "back" | "front", level: string) {
     const held = which === "back" ? backLevels : frontLevels;
@@ -496,7 +522,9 @@
       {#each DBG_SECTIONS as s (s.id)}
         <button type="button" class="dbg-rail-item" class:active={active === s.id} onclick={() => (active = s.id)}>
           <span>{s.label}</span>
-          {#if s.id === "backend" && (backErrors || backWarns)}
+          {#if s.id === "overview" && brokenTasks.length}
+            <span class="dbg-rail-count err">{brokenTasks.length}</span>
+          {:else if s.id === "backend" && (backErrors || backWarns)}
             <span class="dbg-rail-count" class:err={backErrors > 0} class:warn={backErrors === 0}>{backErrors || backWarns}</span>
           {:else if s.id === "frontend" && (frontErrors || frontWarns)}
             <span class="dbg-rail-count" class:err={frontErrors > 0} class:warn={frontErrors === 0}>{frontErrors || frontWarns}</span>
@@ -510,6 +538,30 @@
     <div class="dbg-content">
       {#if active === "overview"}
         <div class="dbg-sec">
+          <!-- First, because a stopped background task is the one failure the rest of this console
+               cannot show: everything else keeps reporting normally while the thing that was meant
+               to be doing the work is gone. -->
+          {#if brokenTasks.length}
+            <div class="dbg-card">
+              <div class="dbg-card-h"><span>Stopped working</span></div>
+              {#each brokenTasks as t (t.id)}
+                {@const chip = taskChip(t)}
+                <!-- What the user will see, then what it was. `.dbg-finding` is a flex row, so the
+                     technical detail is its own paragraph rather than a third item that floats to
+                     the far edge away from the sentence it belongs to. -->
+                <p class="dbg-finding {chip.tone === 'danger' ? 'danger' : 'warn'}">
+                  <span class="chip {chip.tone}">{chip.label}</span>
+                  {taskConsequence(t.kind)}
+                </p>
+                <p class="muted small dbg-task-detail">
+                  {t.kind}{t.server !== null
+                    ? ` on ${servers.find((s) => s.id === t.server)?.name ?? `server ${t.server}`}`
+                    : ""}{t.cause ? `: ${text(t.cause)}` : ""}
+                </p>
+              {/each}
+            </div>
+          {/if}
+
           <!-- Two independent axes. One switch used to mean choosing between capturing almost
                nothing and capturing the transport narrating every address this device has seen, so
                it stayed off and nobody had a log when they needed one. -->

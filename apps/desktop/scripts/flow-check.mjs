@@ -295,6 +295,58 @@ const ACCEPT_SCENARIO = `(async () => {
   return out;
 })();`;
 
+/**
+ * Open the debug console and visit every section.
+ *
+ * The gap this fills: a runtime error in one section's markup is invisible to everything else we
+ * run. `svelte-check` type-checks and never renders; the unit suites exercise the pure functions in
+ * `debug-console.ts` and never mount the component. So the only thing standing between a broken
+ * section and a release was somebody opening it and looking, and the tool whose entire job is to
+ * explain failures is a poor choice for the one that fails silently.
+ *
+ * A smoke test, and honest about it: it proves each section rendered something and threw nothing,
+ * not that it rendered the right thing. That is still the difference between a blank panel shipping
+ * and not.
+ */
+const CONSOLE_SECTIONS_SCENARIO = `(async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const out = { opened: false, sections: [], empty: [] };
+  const byText = (selector, text) =>
+    [...document.querySelectorAll(selector)].find((e) =>
+      e.textContent.trim().toLowerCase().includes(text),
+    );
+
+  // The console lives behind Settings, Diagnostics. Navigating there is part of what is being
+  // checked: a button nobody can reach is as broken as a section that will not render.
+  document.querySelector('button[aria-label="Settings"]')?.click();
+  await sleep(400);
+  byText(".stx-item, .stx-nav button, nav button, .stx-sub button", "diagnostics")?.click();
+  await sleep(400);
+  out.reached = !!byText("button", "open debug console");
+  byText("button", "open debug console")?.click();
+  // Polled, not slept: the console is a dynamic import so ordinary chat startup does not pay for
+  // it, which means the first open waits on a module fetch. A fixed delay here is a race that
+  // fails on a cold vite and passes on a warm one.
+  for (let i = 0; i < 60 && !document.querySelector(".dbg"); i += 1) await sleep(100);
+  out.opened = !!document.querySelector(".dbg");
+  if (!out.opened) return out;
+
+  for (const name of ["overview", "network", "voice", "backend", "frontend", "storage"]) {
+    const item = byText(".dbg-rail-item", name);
+    if (!item) { out.empty.push(name + ":no-rail-item"); continue; }
+    item.click();
+    await sleep(350);
+    // A section that threw while rendering leaves the panel behind entirely, so this catches the
+    // whole-console crash as well as the empty one.
+    const cards = document.querySelectorAll(".dbg-content .dbg-card").length;
+    out.sections.push(name);
+    if (!cards) out.empty.push(name);
+  }
+  out.visited = out.sections.length;
+  out.broken = out.empty.join(",");
+  return out;
+})();`;
+
 function assertEqual(scenario, got, want) {
   const failures = [];
   for (const [key, expected] of Object.entries(want)) {
@@ -385,6 +437,17 @@ try {
     requestGone: true,
     newDmInRail: true,
     errorToast: null,
+  });
+
+  // A fresh load again, so the accept test's patched IPC cannot decide what the console shows.
+  await cdp.navigate(URL_UNDER_TEST);
+  await cdp.waitReady();
+  const sections = await cdp.eval(CONSOLE_SECTIONS_SCENARIO);
+  failed |= !assertEqual("debug console renders every section", sections, {
+    reached: true,
+    opened: true,
+    visited: 6,
+    broken: "",
   });
 
   if (cdp.consoleErrors.length) {

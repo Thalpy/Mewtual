@@ -42,6 +42,10 @@ export const TAURI_COMMAND_GROUPS = {
       // installs its listeners so it can tell what it missed while it was not listening, which an
       // F5 or a hot reload opens a window for while the native process keeps emitting.
       "get_event_cursor",
+      // What every supervised background task is doing: a kind, a state and a cause. No content,
+      // and the server ids it names are ones the caller already has. Read so the console can show
+      // that something stopped working after the log line saying so has aged out of the ring.
+      "get_task_health",
       // Writes a diagnostics report next to the debug log. The text is composed by the console so
       // the file matches what was on screen, redaction included; the file NAME is built natively
       // and never taken from the webview, because a caller-supplied name is a path traversal.
