@@ -5596,21 +5596,36 @@ async fn begin_file_upload(
     upload_id: String,
     mime: String,
     size: u64,
-) -> Result<UploadTicket, String> {
+    trace: Option<String>,
+) -> Result<UploadTicket, AppError> {
+    // The first half of the bracket. An upload that begins and never ends is a reservation holding
+    // a slot with no record of what became of it, and the review names it: FILE.UPLOAD.ORPHANED.
+    // Detecting one means being able to see a start with no matching end, which means recording
+    // the start.
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "file_upload",
+        server,
+        None,
+    );
     // Reaching the actor is both the session gate and proof the server exists, before this
     // reserves a slot for it.
-    actor_of(&state, server).await?;
+    actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
     if upload_id.is_empty()
         || upload_id.len() > MAX_UPLOAD_ID_BYTES
         || !upload_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
     {
-        return Err("bad upload id".into());
+        return Err(op.fail(codes::FILE_UPLOAD_REFUSED, "bad upload id"));
     }
     if size > MAX_FILE_BYTES as u64 {
-        return Err(format!(
-            "file is larger than the {MAX_FILE_BYTES}-byte limit"
+        return Err(op.fail(
+            codes::FILE_UPLOAD_REFUSED,
+            format!("file is larger than the {MAX_FILE_BYTES}-byte limit"),
         ));
     }
     let chunk_total = upload_chunk_count(size);
@@ -5631,13 +5646,19 @@ async fn begin_file_upload(
         .collect();
     let retired: Vec<PendingUpload> = retired.iter().filter_map(|k| uploads.remove(k)).collect();
     if uploads.len() >= MAX_PENDING_UPLOADS {
-        return Err("too many uploads are already in flight".into());
+        return Err(op.fail(
+            codes::FILE_UPLOAD_REFUSED,
+            "too many uploads are already in flight",
+        ));
     }
     // The entry cap does not bound vault growth; this does. Counted against what is already
     // staged plus what this upload would add if it ran to the end and never finished.
     let staged: u64 = uploads.values().map(PendingUpload::staged_bytes).sum();
     if staged.saturating_add(chunk_total as u64 * CHUNK_BYTES as u64) > MAX_STAGED_UPLOAD_BYTES {
-        return Err("too much upload data is already waiting to be published".into());
+        return Err(op.fail(
+            codes::FILE_UPLOAD_REFUSED,
+            "too much upload data is already waiting to be published",
+        ));
     }
     uploads.insert(
         (server, token.clone()),
@@ -5656,8 +5677,21 @@ async fn begin_file_upload(
         },
     );
     drop(uploads);
+    let superseded = retired.len();
     for old in retired {
         discard_pending_upload(&state, old).await;
+    }
+    // Not a terminal phase: the upload has started, not finished. `finish` or `cancel` closes it,
+    // and a trace with neither is the orphan.
+    op.stage("FILE.UPLOAD.RESERVED");
+    if superseded > 0 {
+        // A restart of the same visible transfer, or a sweep of uploads whose caller went away.
+        // Worth a line: it is also what an upload loop looks like from the outside.
+        tracing::info!(
+            target: "catcoms_app",
+            superseded,
+            "FILE.UPLOAD.SUPERSEDED"
+        );
     }
     Ok(UploadTicket {
         token,
@@ -5686,6 +5720,11 @@ async fn push_file_chunk(
     token: String,
     offset: u64,
     data: String,
+    // Accepted and deliberately unused. The frontend threads the upload's trace through every
+    // slice so the whole transfer is one operation, but a slice is not worth an event of its own:
+    // a large file is thousands of them and recording each would bury the upload in its own
+    // progress. Begin and finish bracket the transfer; what happened between is the difference.
+    #[allow(unused_variables)] trace: Option<String>,
 ) -> Result<(), String> {
     let actor = actor_of(&state, server).await?;
     // Bound the decode before doing it: base64 expands by 4/3, so this cannot be a legal slice
@@ -5824,6 +5863,7 @@ async fn seal_pending_chunk(
 /// The MIME type is the one declared at `begin_file_upload`, not one passed here, so it always
 /// matches what the chunks were actually sealed with.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn finish_file_upload(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -5831,8 +5871,20 @@ async fn finish_file_upload(
     token: String,
     name: String,
     path: String,
-) -> Result<String, String> {
-    let actor = actor_of(&state, server).await?;
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    // Closes the bracket opened by `begin_file_upload`, under the same trace the frontend threaded
+    // through every slice.
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "file_upload",
+        server,
+        None,
+    );
+    let actor = actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
     let key = (server, token);
     // Seal whatever the last slices left buffered: a file whose size is not a whole number of
     // chunks ends with a short one, and an empty file is still one (empty) chunk.
@@ -5840,14 +5892,20 @@ async fn finish_file_upload(
         let mut uploads = state.uploads.lock().await;
         let up = uploads
             .get_mut(&key)
-            .ok_or_else(|| "no such upload".to_string())?;
-        up.take_tail()?.map(|chunk| (chunk, up.mime.clone()))
+            .ok_or_else(|| op.fail(codes::FILE_UPLOAD_FAILED, "no such upload"))?;
+        up.take_tail()
+            .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?
+            .map(|chunk| (chunk, up.mime.clone()))
     };
     if let Some((chunk, mime)) = tail {
-        seal_pending_chunk(&state, &actor, &key, chunk, mime).await?;
+        seal_pending_chunk(&state, &actor, &key, chunk, mime)
+            .await
+            .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     }
     let locked = require_unlocked_session(&state).await.is_err();
-    let pending = take_publishable_upload(&state, &key, locked).await?;
+    let pending = take_publishable_upload(&state, &key, locked)
+        .await
+        .map_err(|e| op.fail(codes::FILE_UPLOAD_FAILED, e))?;
     let cid = pending.address.cid();
     let chunk_total = pending.chunk_total;
     let upload_id = pending.upload_id;
@@ -5867,7 +5925,9 @@ async fn finish_file_upload(
         Ok(hex) => hex,
         Err(e) => {
             actor.discard_upload(sealed).await;
-            return Err(e);
+            // Sealed bytes existed and were thrown away. Distinguishable from a refusal at begin,
+            // where nothing had been written yet.
+            return Err(op.fail(codes::FILE_UPLOAD_FAILED, e));
         }
     };
     emit_tracked(
@@ -5881,6 +5941,10 @@ async fn finish_file_upload(
         },
     );
     persist_server(&state, server).await;
+    // Deliberately after persistence, like every other operation here: an upload reported as
+    // succeeding before its index entry reached the disk is the shape of "it uploaded and then it
+    // was gone after a restart".
+    op.succeeded("FILE.UPLOAD.PUBLISHED");
     Ok(hex)
 }
 
@@ -5892,11 +5956,32 @@ async fn cancel_file_upload(
     state: State<'_, AppState>,
     server: u64,
     token: String,
-) -> Result<(), String> {
-    require_unlocked_session(&state).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    // The other way the bracket closes. A cancel is not a failure of the app, but it is the
+    // difference between an upload that ended and one that was abandoned without a word.
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "file_upload",
+        server,
+        None,
+    );
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     let pending = state.uploads.lock().await.remove(&(server, token));
+    let had_reservation = pending.is_some();
     if let Some(up) = pending {
         discard_pending_upload(&state, up).await;
+    }
+    if had_reservation {
+        op.succeeded("FILE.UPLOAD.CANCELLED");
+    } else {
+        // Cancelling something that was already gone. Harmless and idempotent by design, but
+        // worth distinguishing: a cancel with nothing to cancel means the reservation was retired
+        // by something else, which is a different story from the user changing their mind.
+        op.succeeded("FILE.UPLOAD.CANCEL_NOOP");
     }
     Ok(())
 }
@@ -6228,18 +6313,37 @@ async fn download_file(
     state: State<'_, AppState>,
     server: u64,
     cid: String,
-) -> Result<String, String> {
-    let raw = hex::decode(cid.trim()).map_err(|e| format!("bad cid: {e}"))?;
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Files,
+        "download_file",
+        server,
+        None,
+    );
+    let raw = hex::decode(cid.trim())
+        .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, format!("bad cid: {e}")))?;
     let target: [u8; 32] = raw
         .clone()
         .try_into()
-        .map_err(|_| "bad cid length".to_string())?;
-    let actor = actor_of(&state, server).await?;
+        .map_err(|_| op.fail(codes::FILE_DOWNLOAD_FAILED, "bad cid length"))?;
+    let actor = actor_of(&state, server)
+        .await
+        .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?;
     let (total, size) = actor.file_download_plan(raw.clone()).await.ok_or_else(|| {
-        "this file can't be downloaded; it isn't listed, or its reference is invalid".to_string()
+        op.fail(
+            codes::FILE_DOWNLOAD_FAILED,
+            "this file can't be downloaded; it isn't listed, or its reference is invalid",
+        )
     })?;
-    inline_download_allowed(size)?;
-    require_unlocked_session(&state).await?;
+    inline_download_allowed(size).map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    // The plan, before any bytes move. A download that stalls is one of these with no completion
+    // after it, and the chunk count is what says how far it got.
+    op.stage("FILE.DOWNLOAD.PLANNED");
     emit_tracked(
         &app,
         "download-progress",
@@ -6259,8 +6363,13 @@ async fn download_file(
     for i in 0..total {
         // A transfer can outlive the click that started it. Do not return plaintext or continue
         // emitting file metadata after an explicit lock closes the webview session.
-        require_unlocked_session(&state).await?;
-        let (chunk, provider) = actor.fetch_file_chunk(raw.clone(), i).await?;
+        require_unlocked_session(&state)
+            .await
+            .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+        let (chunk, provider) = actor
+            .fetch_file_chunk(raw.clone(), i)
+            .await
+            .map_err(|e| op.fail(codes::FILE_DOWNLOAD_FAILED, e))?;
         if provider.is_some() {
             network_bytes_done = network_bytes_done.saturating_add(chunk.len() as u64);
         }
@@ -6268,7 +6377,10 @@ async fn download_file(
         // whose chunks exceed its declared size must be stopped before the next append rather
         // than at the address check after the last one.
         if out.len() as u64 + chunk.len() as u64 > size {
-            return Err("this file's chunks hold more data than it declares".into());
+            return Err(op.fail(
+                codes::FILE_DOWNLOAD_FAILED,
+                "this file's chunks hold more data than it declares",
+            ));
         }
         out.extend_from_slice(&chunk);
         emit_tracked(
@@ -6287,12 +6399,23 @@ async fn download_file(
         );
     }
     if out.len() as u64 != size {
-        return Err("this file's chunks hold less data than it declares".into());
+        return Err(op.fail(
+            codes::FILE_DOWNLOAD_FAILED,
+            "this file's chunks hold less data than it declares",
+        ));
     }
     if Cid::of(&out).as_bytes() != &target {
-        return Err("the reassembled file failed its integrity check".into());
+        // Every chunk verified and the whole did not. Recorded as its own outcome because it means
+        // something specific: a manifest whose parts are individually honest and collectively not.
+        return Err(op.fail(
+            codes::FILE_DOWNLOAD_FAILED,
+            "the reassembled file failed its integrity check",
+        ));
     }
-    require_unlocked_session(&state).await?;
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
+    op.succeeded("FILE.DOWNLOAD.COMPLETED");
     Ok(B64.encode(&out))
 }
 

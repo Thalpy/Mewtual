@@ -36,9 +36,9 @@ const MAX_MESSAGE: usize = 500;
 /// A closed set rather than free text, so the UI can offer the action rather than describing it,
 /// and so a new remediation is a deliberate addition rather than a sentence somebody typed.
 ///
-/// Only what something can currently return. `check_connection` and `retry` belong here too and
-/// arrive with the subsystems that need them: an enum listing outcomes no code can produce invites
-/// a UI branch for a case that never happens.
+/// Only what something can currently return. `check_connection` belongs here too and arrives with
+/// the subsystem that needs it: an enum listing outcomes no code can produce invites a UI branch
+/// for a case that never happens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Remediation {
@@ -46,6 +46,9 @@ pub enum Remediation {
     Unlock,
     /// The input was refused. Changing it is the fix.
     AmendInput,
+    /// Transient. Trying the same thing again is reasonable, usually because the cause is that
+    /// nobody holding what was asked for is reachable right now, and that changes.
+    Retry,
     /// The app is in a state only a restart clears, usually a task that stopped.
     Restart,
 }
@@ -139,6 +142,29 @@ pub mod codes {
         remediation: None,
     };
 
+    /// An upload refused before a byte moved: a malformed id, or a file over the size limit.
+    pub const FILE_UPLOAD_REFUSED: ErrorCode = ErrorCode {
+        code: "FILE.UPLOAD.REFUSED",
+        retryable: false,
+        remediation: Some(Remediation::AmendInput),
+    };
+
+    /// An upload that began and could not be completed. Distinct from a refusal because bytes
+    /// have already moved and a reservation is being held.
+    pub const FILE_UPLOAD_FAILED: ErrorCode = ErrorCode {
+        code: "FILE.UPLOAD.FAILED",
+        retryable: true,
+        remediation: Some(Remediation::Retry),
+    };
+
+    /// A download that could not be completed. Retryable because the usual cause is that nobody
+    /// holding the bytes is reachable right now, which changes.
+    pub const FILE_DOWNLOAD_FAILED: ErrorCode = ErrorCode {
+        code: "FILE.DOWNLOAD.FAILED",
+        retryable: true,
+        remediation: Some(Remediation::Retry),
+    };
+
     /// Every registered code, for the tests that keep this honest. The manifest is the registry:
     /// a code missing from here is a code no test checks the shape of.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -153,6 +179,9 @@ pub mod codes {
         CHAT_PIN_REJECTED,
         JUKEBOX_ADD_REJECTED,
         JUKEBOX_REMOVE_REJECTED,
+        FILE_UPLOAD_REFUSED,
+        FILE_UPLOAD_FAILED,
+        FILE_DOWNLOAD_FAILED,
     ];
 }
 

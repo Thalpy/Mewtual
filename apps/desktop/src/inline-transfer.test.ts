@@ -64,9 +64,19 @@ function frontendSources(dir = sourceDir): Array<[string, string]> {
   return sources;
 }
 
-/** Count occurrences of a literal invoke of `command` across the frontend. */
+/**
+ * Count occurrences of a literal invoke of `command` across the frontend.
+ *
+ * `invokeDebugged` counts as an invoke. It is the instrumented wrapper, and its callers name their
+ * command exactly as a direct caller would; missing it would mean a migrated call site silently
+ * stopped being counted, and this test exists to bound how many callers a memory-hungry command
+ * has. A guard that quietly stops guarding is worse than none.
+ */
 function invokeSites(command: string): Array<[string, number]> {
-  const pattern = new RegExp(String.raw`invoke\s*(?:<[^>]*>)?\s*\(\s*["']${command}["']`, "g");
+  const pattern = new RegExp(
+    String.raw`invoke(?:Debugged)?\s*(?:<[^>]*>)?\s*\(\s*["']${command}["']`,
+    "g",
+  );
   return frontendSources()
     .map(([name, text]) => [name, text.match(pattern)?.length ?? 0] as [string, number])
     .filter(([, n]) => n > 0);
@@ -126,7 +136,7 @@ test("uploads are sent in slices sized by the native side, not by the frontend",
   );
   assert.ok(/offset \+= sliceBytes/.test(text), "the slice loop should step by the native size");
   assert.ok(
-    /ticket = uploadContract\(\s*await invoke<unknown>\("begin_file_upload"/.test(text),
+    /uploadContract\(\s*\(\s*await invokeDebugged<unknown>\(\s*"begin_file_upload"/.test(text),
     "the ticket should be checked at the bridge, not taken on the strength of its declared type",
   );
   assert.ok(

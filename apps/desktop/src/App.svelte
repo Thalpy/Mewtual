@@ -7538,18 +7538,24 @@
       ts: started,
     };
     let ticket: UploadTicket | undefined;
+    // One trace for the whole upload, not one per command. Begin, every slice and finish are three
+    // commands and one operation, and the failure worth catching is an upload that begins and never
+    // ends: a reservation left holding a slot with no record of what became of it. That is only
+    // detectable if all three phases carry the same identifier.
+    const upload = traceSource.next();
     try {
       // Checked, not trusted: the ticket is the whole streaming contract, and a field this side
       // cannot read is a fault worth naming here rather than one the native side reports later
       // as a malformed slice. A ticket rejected here leaves its native reservation for the idle
       // sweep, which is the same position a failed begin leaves it in.
       ticket = uploadContract(
-        await invoke<unknown>("begin_file_upload", {
-          server,
-          uploadId,
-          mime,
-          size: file.size,
-        }),
+        (
+          await invokeDebugged<unknown>(
+            "begin_file_upload",
+            { server, uploadId, mime, size: file.size },
+            { trace: upload, fields: { size: file.size } },
+          )
+        ).value,
       );
       const { token, chunkTotal, sliceBytes } = ticket;
       if (uploads[key]) uploads[key].total = chunkTotal;
@@ -7566,14 +7572,22 @@
           u.status = "uploading";
           u.updatedAt = Date.now();
         }
-        await invoke("push_file_chunk", { server, token, offset, data });
+        // Deliberately the plain invoke. A slice is not an operation: a large file is thousands of
+        // them, and recording each one would bury the upload it belongs to under its own progress.
+        // Begin and finish bracket the transfer; what happened in between is the difference
+        // between them.
+        await invoke("push_file_chunk", { server, token, offset, data, trace: upload });
         const sent = uploads[key];
         if (sent && sent.status !== "done" && sent.status !== "failed") {
           sent.progress = Math.max(sent.progress, (end / file.size) * (chunkTotal / spans));
           sent.updatedAt = Date.now();
         }
       }
-      const cid = await invoke<string>("finish_file_upload", { server, token, name, path });
+      const { value: cid } = await invokeDebugged<string>(
+        "finish_file_upload",
+        { server, token, name, path },
+        { trace: upload },
+      );
       if (uploads[key]) {
         uploads[key].status = "done";
         uploads[key].progress = 1;
@@ -7587,14 +7601,18 @@
       // begin_file_upload is what failed.
       if (ticket) {
         try {
-          await invoke("cancel_file_upload", { server, token: ticket.token });
+          await invokeDebugged(
+            "cancel_file_upload",
+            { server, token: ticket.token },
+            { trace: upload },
+          );
         } catch {
           // Cancelling a failed upload is best-effort: the original error is the one to report.
         }
       }
       if (uploads[key]) {
         uploads[key].status = "failed";
-        uploads[key].error = String(e);
+        uploads[key].error = errorText(e);
         uploads[key].updatedAt = Date.now();
       }
       throw e;
@@ -8410,7 +8428,7 @@
     }
     fileTextState = "loading";
     try {
-      const base64 = await invoke<string>("download_file", { server: id, cid: f.cid });
+      const { value: base64 } = await invokeDebugged<string>("download_file", { server: id, cid: f.cid });
       // Guard against the pane being closed or switched while the fetch was in flight.
       if (fileInfo?.cid !== f.cid) return;
       const decoded = decodeTextFile(Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)));
