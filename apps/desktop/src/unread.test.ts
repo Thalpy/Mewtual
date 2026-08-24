@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   CLOCK_SKEW_GRACE_MS,
   chatIsObserved,
+  observationBlocker,
+  unreadDecision,
   effectiveTs,
   readCeiling,
   readChannelChange,
@@ -141,4 +143,76 @@ test("rebuilt unread only names channels the UI can open", () => {
   const now = 1_000_000;
   const heads = [head("general", 950), head("ghost", 950)];
   assert.deepEqual(unreadFromHeads(heads, () => 0, now, (c) => c === "general"), ["general"]);
+});
+
+// --- why a badge did or did not appear ---------------------------------------------------------
+//
+// The review's highest-value invariant: an append either produces an unread transition or a valid
+// explanation of why it was already seen. Both halves used to live in branches of an event
+// handler, so a badge that failed to appear left no record of which branch decided against it.
+
+test("every way the log can be covered has its own reason, not one shared boolean", () => {
+  assert.equal(observationBlocker(observed()), null, "nothing covering it");
+  assert.equal(observationBlocker(observed({ locked: true })), "locked");
+  assert.equal(observationBlocker(observed({ view: "files" })), "another_view");
+  assert.equal(observationBlocker(observed({ inboxView: true })), "inbox_open");
+  assert.equal(observationBlocker(observed({ dmPlaceholder: true })), "dm_placeholder");
+  assert.equal(observationBlocker(observed({ spaceOpen: true })), "space_open");
+  assert.equal(observationBlocker(observed({ callFocusOpen: true })), "call_focus");
+  assert.equal(observationBlocker(observed({ overlayOpen: true })), "overlay_open");
+  assert.equal(observationBlocker(observed({ windowFocused: false })), "window_unfocused");
+  assert.equal(observationBlocker(observed({ documentVisible: false })), "window_hidden");
+  assert.equal(observationBlocker(observed({ atBottom: false })), "scrolled_up");
+});
+
+test("the reason and the boolean can never disagree, because one is built from the other", () => {
+  const cases: Partial<ChatObservation>[] = [
+    {}, { locked: true }, { view: "wiki" }, { overlayOpen: true },
+    { windowFocused: false }, { atBottom: false }, { spaceOpen: true, atBottom: false },
+  ];
+  for (const over of cases) {
+    const o = observed(over);
+    assert.equal(chatIsObserved(o), observationBlocker(o) === null, JSON.stringify(over));
+  }
+});
+
+test("a reaction or an edit is never an arrival, whatever is on screen", () => {
+  // Treating these as arrivals is what made unread badges untrustworthy in the first place.
+  const decision = unreadDecision({ messagesAppended: false }, observed(), true);
+  assert.deepEqual(decision, { decision: "not_an_arrival", reason: "no_messages_appended" });
+});
+
+test("an arrival in a channel nobody has open is unread, and says so", () => {
+  assert.deepEqual(unreadDecision({ messagesAppended: true }, observed(), false), {
+    decision: "mark_unread",
+    reason: "not_the_open_channel",
+  });
+});
+
+test("an arrival someone is looking straight at is seen", () => {
+  assert.deepEqual(unreadDecision({ messagesAppended: true }, observed(), true), {
+    decision: "seen",
+    reason: "chat_on_screen",
+  });
+});
+
+/**
+ * The case that produced the reports. The channel is selected, so it looks observed, but something
+ * is covering it or the window is not in front, and the badge has to appear anyway. Which of those
+ * it was is exactly what nobody could tell afterwards.
+ */
+test("an arrival in the open channel is still unread when something is covering it", () => {
+  for (const [over, reason] of [
+    [{ overlayOpen: true }, "overlay_open"],
+    [{ windowFocused: false }, "window_unfocused"],
+    [{ documentVisible: false }, "window_hidden"],
+    [{ callFocusOpen: true }, "call_focus"],
+    [{ atBottom: false }, "scrolled_up"],
+  ] as [Partial<ChatObservation>, string][]) {
+    assert.deepEqual(
+      unreadDecision({ messagesAppended: true }, observed(over), true),
+      { decision: "mark_unread", reason },
+      JSON.stringify(over),
+    );
+  }
 });

@@ -66,7 +66,7 @@
   } from "./jukebox";
   import {
     CLOCK_SKEW_GRACE_MS, chatIsObserved, effectiveTs, readCeiling, readChannelChange,
-    unreadFromHeads, type ChannelHead,
+    unreadDecision, unreadFromHeads, type ChannelChange, type ChannelHead,
   } from "./unread";
   import {
     deliveryClass, deliveryGlyph, deliveryLabel, deliveryTip, deliveryVerdict, mergeDelivery,
@@ -5260,6 +5260,35 @@
    */
   function chatOnScreenNow(): boolean {
     return chatIsObserved(chatSurfaceState(true));
+  }
+  /**
+   * Record what a channel update meant for unread state, and why.
+   *
+   * Deliberately does not decide anything: the branches below still own the behaviour. This
+   * observes the same inputs they use and writes down the conclusion, so a badge that failed to
+   * appear leaves evidence of which condition accounted for it rather than none at all.
+   *
+   * Only arrivals are recorded loudly. A reaction or a topic rename firing this on every keystroke
+   * would drown the section it is meant to explain.
+   */
+  function noteUnreadDecision(server: number, channel: string, change: ChannelChange) {
+    const isActive = server === activeServerId && channel === cur?.active;
+    const outcome = unreadDecision(change, chatSurfaceState(chatStickToBottom), isActive);
+    if (outcome.decision === "not_an_arrival") return;
+    diagRecord({
+      section: "channels",
+      code: "UNREAD.DECISION",
+      level: "debug",
+      fields: {
+        decision: outcome.decision,
+        reason: outcome.reason,
+        active_channel: isActive,
+        // The transition, not just the conclusion: "marked unread" on a channel that was already
+        // unread is a different event from one that changed the badge, and the review's invariant
+        // is about transitions.
+        already_unread: servers.find((x) => x.id === server)?.unread.includes(channel) ?? false,
+      },
+    });
   }
   /**
    * Reconcile the active conversation's indicators with what is actually on screen.
@@ -12829,6 +12858,12 @@
         // reacting to an old message, renaming the topic and queueing a track all used to look
         // exactly like somebody talking.
         const change = readChannelChange(e.payload);
+        // Why this update did or did not raise a badge, recorded at the moment it is decided.
+        // The invariant worth being able to check afterwards is that an arrival either produces an
+        // unread transition or a valid explanation of why it was already seen. "Reacted to an old
+        // message", "the window was behind something" and "they were looking straight at it" are
+        // three very different answers, and all three used to produce silence.
+        noteUnreadDecision(server, channel, change);
         spaceActivityAt[server] = Date.now();
         if (server === activeServerId && view === "moderation") void refreshModeration();
         // A new or edited message may be addressed to me → the cross-server inbox may have a new

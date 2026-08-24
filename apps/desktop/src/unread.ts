@@ -108,18 +108,64 @@ export type ChatObservation = {
 
 /** Is the message log actually in front of a person right now? */
 export function chatIsObserved(o: ChatObservation): boolean {
-  return (
-    !o.locked &&
-    o.view === "chat" &&
-    !o.inboxView &&
-    !o.dmPlaceholder &&
-    !o.spaceOpen &&
-    !o.callFocusOpen &&
-    !o.overlayOpen &&
-    o.windowFocused &&
-    o.documentVisible &&
-    o.atBottom
-  );
+  return observationBlocker(o) === null;
+}
+
+/**
+ * The first reason the log is *not* in front of a person, or `null` when it is.
+ *
+ * `chatIsObserved` answers yes or no, which is all the product needs and none of what a diagnostic
+ * needs. When an unread badge fails to appear, the question is never "was it observed" but "what
+ * did the app think was covering the log", and that is ten different conditions producing one
+ * boolean. Ordered from most to least likely to be the real explanation, so the first hit is the
+ * one worth reporting.
+ *
+ * Stable identifiers rather than prose: these end up in a diagnostic record, get counted, and are
+ * compared across reports.
+ */
+export function observationBlocker(o: ChatObservation): string | null {
+  if (o.locked) return "locked";
+  if (o.view !== "chat") return "another_view";
+  if (o.inboxView) return "inbox_open";
+  if (o.dmPlaceholder) return "dm_placeholder";
+  if (o.spaceOpen) return "space_open";
+  if (o.callFocusOpen) return "call_focus";
+  if (o.overlayOpen) return "overlay_open";
+  if (!o.windowFocused) return "window_unfocused";
+  if (!o.documentVisible) return "window_hidden";
+  if (!o.atBottom) return "scrolled_up";
+  return null;
+}
+
+/** What happened to one channel's unread state, and why. */
+export type UnreadDecision = {
+  /** `mark_unread`, `seen`, or `not_an_arrival`. */
+  decision: "mark_unread" | "seen" | "not_an_arrival";
+  /** A stable identifier for the reason. Empty when the decision needs no explanation. */
+  reason: string;
+};
+
+/**
+ * Decide what an update to a channel means for its unread state, and say why.
+ *
+ * The review's highest-value invariant is that an append either produces an unread transition or a
+ * valid explanation of why it was already seen. Both halves of that used to be spread across
+ * branches of an event handler, so a badge that failed to appear left no record of which branch
+ * decided it should not: "reacted to an old message", "the window was behind something", and "the
+ * user was looking straight at it" are three very different answers and they all produced silence.
+ */
+export function unreadDecision(
+  change: { messagesAppended: boolean },
+  observation: ChatObservation,
+  isActiveChannel: boolean,
+): UnreadDecision {
+  // A reaction, an edit, a topic rename or a queued track is not somebody talking, and treating
+  // any of them as an arrival is what made unread badges untrustworthy in the first place.
+  if (!change.messagesAppended) return { decision: "not_an_arrival", reason: "no_messages_appended" };
+  if (!isActiveChannel) return { decision: "mark_unread", reason: "not_the_open_channel" };
+  const blocker = observationBlocker(observation);
+  if (blocker) return { decision: "mark_unread", reason: blocker };
+  return { decision: "seen", reason: "chat_on_screen" };
 }
 
 /** One channel's newest activity, with no message text: what `get_channel_heads` returns. */
