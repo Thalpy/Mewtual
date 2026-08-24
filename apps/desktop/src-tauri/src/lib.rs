@@ -7649,11 +7649,24 @@ async fn jukebox_add(
     channel: String,
     cid: String,
     name: String,
-) -> Result<String, String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    let entry = actor.jukebox_add(id, cid, name).await?;
+    trace: Option<String>,
+) -> Result<String, AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "jukebox_add",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    // The track's name is a user's words and never reaches the record. What it was called does not
+    // explain why the queue failed to converge; that the operation was accepted and persisted does.
+    let entry = actor
+        .jukebox_add(id, cid, name)
+        .await
+        .map_err(|e| op.fail(codes::JUKEBOX_ADD_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("JUKEBOX.ADD.PERSISTED");
     Ok(entry)
 }
 
@@ -7664,11 +7677,22 @@ async fn jukebox_remove(
     server: u64,
     channel: String,
     entry: String,
-) -> Result<(), String> {
-    let id: u128 = channel.parse().map_err(|_| "bad channel id".to_string())?;
-    let actor = actor_of(&state, server).await?;
-    actor.jukebox_remove(id, entry).await?;
+    trace: Option<String>,
+) -> Result<(), AppError> {
+    let op = Operation::start(
+        trace,
+        catcoms_diagnostics::Section::Channels,
+        "jukebox_remove",
+        server,
+        Some(&channel),
+    );
+    let (id, actor) = channel_target(&state, &op, server, &channel).await?;
+    actor
+        .jukebox_remove(id, entry)
+        .await
+        .map_err(|e| op.fail(codes::JUKEBOX_REMOVE_REJECTED, e))?;
     persist_server(&state, server).await;
+    op.succeeded("JUKEBOX.REMOVE.PERSISTED");
     Ok(())
 }
 

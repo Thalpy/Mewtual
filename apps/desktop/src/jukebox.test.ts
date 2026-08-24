@@ -15,6 +15,7 @@ import {
   nudgeRate,
   isStalled,
   playableQueue,
+  queueDigest,
   resolveCallName,
   stallChip,
   jukeClaimWins,
@@ -558,4 +559,60 @@ test("the deck goes to the newest press, with a stable tiebreak", () => {
   // And a frame nobody can order is never adopted, whatever it claims.
   assert.equal(jukeClaimWins(null, { seq: 1e308, fromFp: "z" }), false);
   assert.equal(jukeClaimWins({ seq: 2, fromFp: "a" }, { seq: 1e308, fromFp: "z" }), false);
+});
+
+// --- queue digests -----------------------------------------------------------------------------
+//
+// The failure this exists to make visible: a channel-updated event says the jukebox moved, the UI
+// re-reads the queue, and the queue is identical. The event and the document disagree, and that
+// used to look exactly like a queue that legitimately had not changed since the last look.
+
+const queued = (id: string, over: Partial<JukeEntry> = {}): JukeEntry => ({
+  id,
+  cid: `cid-${id}`,
+  name: `Track ${id}`,
+  author: "741af9ff",
+  added_ms: 1000,
+  ...over,
+});
+
+test("the same queue digests the same, so 'nothing changed' is detectable", () => {
+  const queue = [queued("a"), queued("b"), queued("c")];
+  assert.equal(queueDigest(queue), queueDigest([queued("a"), queued("b"), queued("c")]));
+});
+
+test("adding, removing or reordering all change the digest", () => {
+  const base = queueDigest([queued("a"), queued("b")]);
+  assert.notEqual(queueDigest([queued("a"), queued("b"), queued("c")]), base, "added");
+  assert.notEqual(queueDigest([queued("a")]), base, "removed");
+  // A reorder is a change: whoever is next to play is different.
+  assert.notEqual(queueDigest([queued("b"), queued("a")]), base, "reordered");
+});
+
+test("an empty queue reads as empty rather than as a hash nobody can interpret", () => {
+  assert.equal(queueDigest([]), "empty");
+});
+
+/**
+ * Names are user content and have no business in a value that ends up in a diagnostic record. The
+ * ids already determine the queue completely.
+ */
+test("a digest ignores everything except the ids, in order", () => {
+  const plain = queueDigest([queued("a"), queued("b")]);
+  const renamed = queueDigest([
+    queued("a", { name: "something private", cid: "different", author: "someone" }),
+    queued("b", { name: "also private", added_ms: 99 }),
+  ]);
+  assert.equal(renamed, plain);
+});
+
+test("ids that concatenate to the same string still differ", () => {
+  // Without a separator ["ab","c"] and ["a","bc"] would collide, and a reorder-shaped bug would
+  // be invisible exactly when the ids happen to line up.
+  assert.notEqual(queueDigest([queued("ab"), queued("c")]), queueDigest([queued("a"), queued("bc")]));
+});
+
+test("a digest is short enough to sit in a log line", () => {
+  const long = Array.from({ length: 64 }, (_, n) => queued(`entry-number-${n}`));
+  assert.ok(queueDigest(long).length <= 16, queueDigest(long));
 });

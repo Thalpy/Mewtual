@@ -175,6 +175,34 @@ export type JukeEntry = {
 };
 
 /**
+ * A short digest of a queue's contents, for noticing when a refresh changed nothing.
+ *
+ * The failure this exists to make visible: a `channel-updated` event arrives saying the jukebox
+ * moved, the UI dutifully re-reads the queue, and the queue is identical. That means the event and
+ * the document disagree, and until now it looked exactly like a queue that had legitimately not
+ * changed since the last look. Comparing digests across a refresh separates them.
+ *
+ * Order matters, because a reorder is a change. Only the entry ids go in: names are user content
+ * and have no business in a value that ends up in a diagnostic record, and the ids already
+ * determine the queue completely.
+ */
+export function queueDigest(entries: readonly JukeEntry[]): string {
+  if (!entries.length) return "empty";
+  // FNV-1a over the ids in order. Not a cryptographic claim, just a cheap stable fingerprint that
+  // is the same on both sides of a comparison and short enough to sit in a log line.
+  let hash = 0x811c9dc5;
+  for (const entry of entries) {
+    for (let at = 0; at < entry.id.length; at += 1) {
+      hash ^= entry.id.charCodeAt(at);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    hash ^= 0x2c; // a separator, so ["ab","c"] and ["a","bc"] differ
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${entries.length}:${hash.toString(16).padStart(8, "0")}`;
+}
+
+/**
  * The queue in the order the deck will play it: when it was added, with the id as the tiebreak so
  * two machines that received the same two adds in different orders still agree. Tracks nobody
  * would serve are dropped, so the deck does not stop on one.

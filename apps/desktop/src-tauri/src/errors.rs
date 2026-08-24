@@ -124,6 +124,21 @@ pub mod codes {
         remediation: None,
     };
 
+    /// A queue add refused: not a content address, a blank or over-long name, or the 64-entry cap.
+    /// All four are the input, which is why the user can fix it.
+    pub const JUKEBOX_ADD_REJECTED: ErrorCode = ErrorCode {
+        code: "JUKEBOX.ADD.REJECTED",
+        retryable: false,
+        remediation: Some(Remediation::AmendInput),
+    };
+
+    /// Removal is idempotent, so a refusal is never about the entry being absent.
+    pub const JUKEBOX_REMOVE_REJECTED: ErrorCode = ErrorCode {
+        code: "JUKEBOX.REMOVE.REJECTED",
+        retryable: false,
+        remediation: None,
+    };
+
     /// Every registered code, for the tests that keep this honest. The manifest is the registry:
     /// a code missing from here is a code no test checks the shape of.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -136,6 +151,8 @@ pub mod codes {
         CHAT_DELETE_REJECTED,
         CHAT_REACTION_REJECTED,
         CHAT_PIN_REJECTED,
+        JUKEBOX_ADD_REJECTED,
+        JUKEBOX_REMOVE_REJECTED,
     ];
 }
 

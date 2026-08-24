@@ -60,8 +60,8 @@
   } from "./voice-signaling";
   import {
     deckAdvance, deckPosition, deckSurface, driftAction, fetchPhase, jukeClaimWins, mediaChoices,
-    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, resolveCallName, stallChip,
-    validJukeSeq, STALL_ANNOUNCE_MS,
+    mediaKind, mediaUrl, nextJukeSeq, nudgeRate, playableQueue, queueDigest, resolveCallName,
+    stallChip, validJukeSeq, STALL_ANNOUNCE_MS,
     type FetchPhase, type JukeEntry, type MediaFilter, type MediaKind,
   } from "./jukebox";
   import {
@@ -75,6 +75,7 @@
   import { installUiLogging, type UiLogging } from "./uilog";
   import { drainStartupLog, endStartupCapture } from "./startup-log";
   import {
+    classifyInvokeFailure,
     errorText,
     makeInvokeDebugged,
     makeRecorder,
@@ -10446,13 +10447,46 @@
       jukeQueueStale = false;
       return;
     }
+    const before = queueDigest(jukeQueue);
     try {
       const next = await invoke<JukeEntry[]>("get_jukebox", { server, channel });
-      if (!jukeQueueCurrent(generation, server, channel)) return;
+      if (!jukeQueueCurrent(generation, server, channel)) {
+        // A refresh that resolved for a room the user has since left. Recorded rather than
+        // dropped: "the refresh started but applied to a different channel" is one of the ways a
+        // queue goes stale, and it is indistinguishable from "no refresh happened" without this.
+        diagRecord({
+          section: "channels",
+          code: "JUKEBOX.REFRESH.SUPERSEDED",
+          level: "debug",
+          fields: { entries: next.length },
+        });
+        return;
+      }
+      const after = queueDigest(next);
+      diagRecord({
+        section: "channels",
+        code: "JUKEBOX.REFRESH.APPLIED",
+        level: "debug",
+        fields: {
+          entries_before: jukeQueue.length,
+          entries_after: next.length,
+          // The one that matters. An event said the jukebox moved and the queue came back
+          // identical: the event and the document disagree, which used to be indistinguishable
+          // from a queue that legitimately had not changed since the last look.
+          changed: before !== after,
+          digest: after,
+        },
+      });
       jukeQueue = next;
       jukeQueueStale = false;
-    } catch {
+    } catch (e) {
       if (!jukeQueueCurrent(generation, server, channel)) return;
+      diagRecord({
+        section: "channels",
+        code: "JUKEBOX.REFRESH.FAILED",
+        level: "warn",
+        fields: { failure: classifyInvokeFailure(e) },
+      });
       // "The read failed" is not "the queue is empty". Blanking it here made a closed actor or a
       // dropped call look exactly like a room whose playlist somebody had just cleared.
       jukeQueueStale = true;
@@ -10463,11 +10497,11 @@
     const channel = callChannel;
     if (server === null || !channel) return;
     try {
-      await invoke<string>("jukebox_add", { server, channel, cid, name: name.slice(0, 200) });
+      await invokeDebugged<string>("jukebox_add", { server, channel, cid, name: name.slice(0, 200) });
       jukeFailed.delete(cid); // a re-add is also a retry
       await refreshJukebox();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   async function jukeRemoveTrack(id: string) {
@@ -10475,10 +10509,10 @@
     const channel = callChannel;
     if (server === null || !channel) return;
     try {
-      await invoke("jukebox_remove", { server, channel, entry: id });
+      await invokeDebugged("jukebox_remove", { server, channel, entry: id });
       await refreshJukebox();
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     }
   }
   // Claim the deck: my press outranks everything I have heard, and I apply it to myself on the same
