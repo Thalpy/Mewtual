@@ -63,5 +63,5 @@ pub use redact::{
     AddressFamily, AddressValue, BridgedMessage, RefDomain, SafeText, SafeValue, SessionRef,
     SessionSalt, MAX_BRIDGED_MESSAGE, MAX_SAFE_TEXT,
 };
-pub use render::{event_json, event_line};
+pub use render::{event_json, event_line, event_view, EventView, ViewField};
 pub use ring::{Ring, RingStats};

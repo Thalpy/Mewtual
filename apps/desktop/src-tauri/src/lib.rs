@@ -1958,8 +1958,8 @@ impl Operation {
     ) -> Self {
         let hub = catcoms_log::hub();
         let trace = trace
-            .and_then(|t| u64::from_str_radix(&t, 16).ok())
-            .map(catcoms_diagnostics::TraceId)
+            .as_deref()
+            .and_then(parse_trace)
             .unwrap_or_else(|| hub.new_trace());
         let op = Operation {
             trace,
@@ -2113,6 +2113,23 @@ impl Operation {
         }
         catcoms_diagnostics::DiagnosticHub::record(&catcoms_log::hub(), event);
     }
+}
+
+/// A trace the webview minted, as a canonical [`TraceId`](catcoms_diagnostics::TraceId).
+///
+/// The webview allocates a trace before it invokes, so the half of an operation that happens in the
+/// webview and the half that happens here are stages of one thing rather than two records that have
+/// to be lined up by timestamp afterwards. That only works if both sides agree on the parse, which
+/// is why this is one function rather than the same `from_str_radix` written out at each door the
+/// webview can knock on.
+///
+/// A trace of zero is treated as absent: it is what an unset trace renders as, and correlating on
+/// it would gather every unrelated event that also had none.
+fn parse_trace(text: &str) -> Option<catcoms_diagnostics::TraceId> {
+    u64::from_str_radix(text, 16)
+        .ok()
+        .map(catcoms_diagnostics::TraceId)
+        .filter(|t| t.is_set())
 }
 
 /// Per-name sequence numbers for emitted events.
@@ -10155,17 +10172,89 @@ async fn set_debug_logging(
 /// short enough that a runaway loop cannot fill the disk one line at a time.
 const MAX_UI_LOG_BYTES: usize = 2000;
 
-/// One diagnostic event, as the debug console renders it.
+/// One field of a diagnostic event, rendered at the session's capture mode.
+#[derive(Serialize)]
+struct ConsoleField {
+    name: String,
+    value: String,
+    /// Whether a higher capture mode would show more of this value. Lets the console tell a reader
+    /// what they are *not* seeing, instead of leaving them to find out by switching and comparing.
+    sensitive: bool,
+}
+
+/// One diagnostic event, as the debug console reads it.
+///
+/// A faithful carry of `catcoms_diagnostics::EventView`, which is a faithful carry of the canonical
+/// event. It used to be a flattened `tracing` line: section, phase, span parentage, references and
+/// capture mode were dropped on the way, twelve of the trace's sixteen characters with them, and
+/// every value was rendered at a hard-coded Enhanced regardless of what the user had chosen. The
+/// console then guessed the sections back from target names and by searching the text for the word
+/// "voice". Found by adversarial review (P3-005).
 #[derive(Serialize)]
 struct ConsoleLogEvent {
     seq: u64,
-    at_ms: i64,
-    level: String,
-    /// The emitting module: `catcoms_net`, `catcoms_sync`, and `catcoms_ui` for the webview's own.
-    /// This is what splits the console's Backend tab from its Frontend tab.
+    at_ms: u64,
+    /// Milliseconds since this process started, which never goes backwards. `at_ms` can jump when
+    /// a clock is corrected, so a duration taken across two events uses this one.
+    monotonic_ms: u64,
+    /// The canonical section, one of twenty-two.
+    section: &'static str,
+    /// The console section it falls under, one of six. Stated natively, so the console groups
+    /// events by what they *are* rather than by which crate happened to emit them.
+    view: &'static str,
+    level: &'static str,
+    /// The stable `AREA.COMPONENT.OUTCOME` code. `LOG.TRACING.EVENT` means an un-migrated call
+    /// site whose prose is in the `message` field.
+    code: &'static str,
+    phase: &'static str,
+    operation: &'static str,
+    /// Sixteen hex characters, or empty when the event belongs to no operation.
+    trace: String,
+    span: String,
+    parent_span: String,
+    refs: Vec<(&'static str, String)>,
+    duration_ms: Option<u64>,
+    attempt: Option<u32>,
+    /// The emitting module, e.g. `catcoms_net`. Kept for locating the code that said this; it is
+    /// no longer what decides which console section the event appears in.
     target: String,
-    message: String,
-    fields: Vec<(String, String)>,
+    fields: Vec<ConsoleField>,
+    /// The mode this line was rendered at. On every event rather than only in the page header,
+    /// because an excerpt someone pastes gets separated from its header immediately.
+    capture: &'static str,
+}
+
+impl From<catcoms_diagnostics::EventView> for ConsoleLogEvent {
+    fn from(view: catcoms_diagnostics::EventView) -> Self {
+        ConsoleLogEvent {
+            seq: view.seq,
+            at_ms: view.at_ms,
+            monotonic_ms: view.monotonic_ms,
+            section: view.section,
+            view: view.view,
+            level: view.level,
+            code: view.code,
+            phase: view.phase,
+            operation: view.operation,
+            trace: view.trace,
+            span: view.span,
+            parent_span: view.parent_span,
+            refs: view.refs,
+            duration_ms: view.duration_ms,
+            attempt: view.attempt,
+            target: view.target,
+            fields: view
+                .fields
+                .into_iter()
+                .map(|f| ConsoleField {
+                    name: f.name,
+                    value: f.value,
+                    sensitive: f.sensitive,
+                })
+                .collect(),
+            capture: view.capture,
+        }
+    }
 }
 
 /// A page of diagnostics plus the counters the console's severity roll-up needs.
@@ -10179,8 +10268,16 @@ struct ConsoleLog {
     /// Events the ring dropped to stay bounded. The console says so rather than presenting the
     /// gap as a quiet period.
     dropped: u64,
+    /// Events the capture config excluded. A different thing from `dropped` and worth showing
+    /// separately: it is what distinguishes a section that is silent by policy from one that is
+    /// silent because nothing happened.
+    filtered: u64,
     latest_seq: u64,
     capacity: usize,
+    /// The mode this page was rendered at, so the console can label what it is showing.
+    capture: &'static str,
+    /// Identifies this run, so an excerpt someone pastes can be matched to its report.
+    session_id: String,
 }
 
 /// The most events one poll will return, so a console that has been closed for an hour cannot ask
@@ -10193,6 +10290,10 @@ const MAX_CONSOLE_LOG_PAGE: usize = 500;
 /// message per tick and a freshly opened one gets the backlog the ring still has. The ring is
 /// in-memory only: this reads it, and nothing here writes it anywhere.
 ///
+/// Rendered at the hub's current capture mode, read once per page so every event on it agrees
+/// about what it is. Never at a constant: the mode is the user's decision about how much of their
+/// own network detail to look at, and a viewer that ignored it made the setting a decoration.
+///
 /// Gated on an unlocked session, unlike `log_ui` below. The ring holds peer addresses and stable
 /// identifiers, and a locked app must not show those to whoever picks the machine up. Someone
 /// diagnosing a failure that happens before unlock still has the debug log file.
@@ -10203,27 +10304,24 @@ async fn get_console_log(
     limit: usize,
 ) -> Result<ConsoleLog, String> {
     require_unlocked_session(&state).await?;
-    let ring = catcoms_log::ring();
-    let stats = ring.stats();
-    let events = ring
+    let hub = catcoms_log::hub();
+    let stats = hub.stats();
+    let mode = hub.mode();
+    let events = hub
         .since(after_seq, limit.clamp(1, MAX_CONSOLE_LOG_PAGE))
-        .into_iter()
-        .map(|e| ConsoleLogEvent {
-            seq: e.seq,
-            at_ms: e.at_ms,
-            level: e.level.to_string(),
-            target: e.target,
-            message: e.message,
-            fields: e.fields,
-        })
+        .iter()
+        .map(|e| catcoms_diagnostics::event_view(e, mode).into())
         .collect();
     Ok(ConsoleLog {
         events,
         errors: stats.errors,
         warnings: stats.warnings,
         dropped: stats.dropped,
+        filtered: stats.filtered,
         latest_seq: stats.latest_seq,
         capacity: catcoms_log::LOG_RING_CAPACITY,
+        capture: mode.as_str(),
+        session_id: hub.session_id().to_string(),
     })
 }
 
@@ -10232,8 +10330,116 @@ async fn get_console_log(
 #[tauri::command]
 async fn clear_console_log(state: State<'_, AppState>) -> Result<(), String> {
     require_unlocked_session(&state).await?;
-    catcoms_log::ring().clear();
+    catcoms_log::hub().clear();
     Ok(())
+}
+
+/// One section's capture level, for the console's capture panel.
+#[derive(Serialize)]
+struct SectionCapture {
+    id: &'static str,
+    /// The console section it feeds, so the panel can group twenty-two rows under six headings.
+    view: &'static str,
+    /// `ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`, or absent when the section is off entirely.
+    level: Option<&'static str>,
+}
+
+/// What is being captured right now.
+#[derive(Serialize)]
+struct CaptureConfigView {
+    mode: &'static str,
+    /// Whether this mode is deliberately forgotten at the next launch. Full trace is expensive and
+    /// revealing, and somebody who turned it on to reproduce one bug should not still be running it
+    /// a fortnight later because they forgot.
+    expires_at_restart: bool,
+    /// Whether this mode may render literal addresses. The single question that decides whether a
+    /// report is publishable, answered natively rather than re-derived by the UI.
+    reveals_addresses: bool,
+    sections: Vec<SectionCapture>,
+}
+
+fn capture_config_view() -> CaptureConfigView {
+    let hub = catcoms_log::hub();
+    let config = hub.config();
+    CaptureConfigView {
+        mode: config.mode.as_str(),
+        expires_at_restart: config.mode.expires_at_restart(),
+        reveals_addresses: config.mode.allows_raw_addresses(),
+        sections: catcoms_diagnostics::SECTIONS
+            .iter()
+            .map(|section| SectionCapture {
+                id: section.as_str(),
+                view: section.view().as_str(),
+                level: config.level(*section).map(|l| l.as_str()),
+            })
+            .collect(),
+    }
+}
+
+/// What the diagnostics are currently capturing.
+#[tauri::command]
+async fn get_capture_config(state: State<'_, AppState>) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    Ok(capture_config_view())
+}
+
+/// Change how much is captured, immediately.
+///
+/// Takes effect now rather than at the next launch. That is the whole point of the hub owning the
+/// gate: the previous design could attach a subscriber only once per process, so a user who wanted
+/// to stop being recorded had to quit the app to do it.
+///
+/// Not persisted, deliberately. A capture mode that survived a restart would be a privacy setting
+/// nobody remembers making, and `Full` in particular is meant to expire on its own.
+#[tauri::command]
+async fn set_capture_mode(
+    state: State<'_, AppState>,
+    mode: String,
+) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    let mode = catcoms_diagnostics::CaptureMode::parse(&mode)
+        .ok_or_else(|| format!("unknown capture mode: {mode}"))?;
+    catcoms_log::hub().set_mode(mode);
+    // Recorded through the pipeline's own section, which is never turned down: a report that
+    // changed what it was capturing halfway through, silently, is a report that misleads about a
+    // gap. `Off` records nothing at all, including this, which is what off means.
+    catcoms_diagnostics::DiagnosticHub::record(
+        &catcoms_log::hub(),
+        catcoms_diagnostics::DiagnosticEvent::info(
+            catcoms_diagnostics::Section::Diag,
+            "DIAG.CAPTURE.MODE_CHANGED",
+        )
+        .target("catcoms_app")
+        .field("mode", catcoms_diagnostics::SafeText::describe(mode.as_str())),
+    );
+    Ok(capture_config_view())
+}
+
+/// Turn one section up, down, or off, without disturbing the others.
+///
+/// The second of the two axes. One switch meant choosing between capturing almost nothing and
+/// capturing the transport layer narrating every address the node has ever seen, so it stayed off
+/// and nobody had a log when they needed one.
+#[tauri::command]
+async fn set_section_capture(
+    state: State<'_, AppState>,
+    section: String,
+    level: Option<String>,
+) -> Result<CaptureConfigView, String> {
+    require_unlocked_session(&state).await?;
+    let section = catcoms_diagnostics::Section::parse(&section)
+        .ok_or_else(|| format!("unknown diagnostic section: {section}"))?;
+    // An unrecognised level is refused rather than defaulted. A control that quietly does something
+    // other than what it was asked is worse than one that says no.
+    let level = match level {
+        Some(name) => Some(
+            catcoms_diagnostics::Level::parse(&name)
+                .ok_or_else(|| format!("unknown capture level: {name}"))?,
+        ),
+        None => None,
+    };
+    catcoms_log::hub().set_section_level(section, level);
+    Ok(capture_config_view())
 }
 
 /// The largest diagnostics report that will be written.
@@ -10588,8 +10794,12 @@ async fn record_ui_events(events: Vec<UiDiagnosticEvent>) {
         if let Some(duration) = event.duration_ms {
             recorded = recorded.took(duration);
         }
-        if !event.trace.is_empty() {
-            recorded = recorded.field("trace", SafeText::describe(&event.trace));
+        // The trace becomes the event's own trace, not a field that happens to be called "trace".
+        // As a field it rendered as text, did not reach `DiagnosticHub::trace`, and so could not
+        // gather the webview's half of an operation with the native half: the correlation the whole
+        // mechanism exists for stopped exactly at the bridge. Found by adversarial review (P3-011).
+        if let Some(trace) = parse_trace(&event.trace) {
+            recorded = recorded.trace(trace);
         }
         for (name, value) in event.fields {
             recorded = recorded.field(name, ui_field(&value));
@@ -10820,6 +11030,9 @@ pub fn run() {
             test_debug_logging,
             get_console_log,
             clear_console_log,
+            get_capture_config,
+            set_capture_mode,
+            set_section_capture,
             save_diagnostics_report,
             log_ui,
             log_ui_batch,
@@ -10859,6 +11072,114 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A canonical event as it reaches the webview.
+    ///
+    /// The last hop of P3-005, and the one worth testing separately: the canonical model and the
+    /// view over it can both be right while the bridge quietly drops a field on the way to the
+    /// only thing a person actually looks at. Asserted through the serialised JSON rather than the
+    /// struct, because it is the JSON the console parses.
+    #[test]
+    fn every_canonical_field_reaches_the_webview() {
+        use catcoms_diagnostics::{
+            AddressValue, CaptureMode, DiagnosticEvent, Phase, RefDomain, Refs, Section, SessionSalt,
+            SpanId, TraceId,
+        };
+
+        let salt = SessionSalt::for_tests(3);
+        let mut event = DiagnosticEvent::warn(Section::Join, "JOIN.ROUTES.EXHAUSTED")
+            .phase(Phase::Failure)
+            .operation("join_server")
+            .trace(TraceId(0x7f2c_0000_0000_0001))
+            .span(SpanId(0x91ab), SpanId(0x6dc4))
+            .target("catcoms_sync")
+            .took(60_123)
+            .attempt(4)
+            .refs(Refs {
+                server: Some(salt.reference(RefDomain::Server, b"group-1")),
+                ..Refs::default()
+            })
+            .field("direct_candidates", 4u64)
+            .field(
+                "address",
+                AddressValue::new("/ip6/2001:db8::1/udp/31484/quic-v1"),
+            );
+        event.seq = 4812;
+        event.at_ms = 1_787_000_000_000;
+        event.monotonic_ms = 12_443;
+
+        let bridged: ConsoleLogEvent =
+            catcoms_diagnostics::event_view(&event, CaptureMode::Safe).into();
+        let json = serde_json::to_value(&bridged).expect("the console event serialises");
+
+        assert_eq!(json["seq"], 4812);
+        assert_eq!(json["at_ms"], 1_787_000_000_000u64);
+        assert_eq!(json["monotonic_ms"], 12_443);
+        assert_eq!(json["section"], "join");
+        assert_eq!(
+            json["view"], "network",
+            "the console groups on this instead of guessing from the target"
+        );
+        assert_eq!(json["level"], "WARN");
+        assert_eq!(json["code"], "JOIN.ROUTES.EXHAUSTED");
+        assert_eq!(json["phase"], "failure");
+        assert_eq!(json["operation"], "join_server");
+        assert_eq!(json["trace"], "7f2c000000000001");
+        assert_eq!(json["span"], "00000000000091ab");
+        assert_eq!(json["parent_span"], "0000000000006dc4");
+        assert_eq!(json["duration_ms"], 60_123);
+        assert_eq!(json["attempt"], 4);
+        assert_eq!(json["target"], "catcoms_sync");
+        assert_eq!(json["capture"], "safe");
+        // The key names the slot; the value is the keyed per-session reference, which carries its
+        // domain so a server reference can never be mistaken for a peer one.
+        assert_eq!(json["refs"][0][0], "server");
+        assert!(
+            json["refs"][0][1].as_str().unwrap().starts_with("srv-"),
+            "{}",
+            json["refs"][0][1]
+        );
+        assert!(
+            !json.to_string().contains("group-1"),
+            "and never the identifier it stands for: {json}"
+        );
+        assert_eq!(json["fields"][0]["name"], "direct_candidates");
+        assert_eq!(json["fields"][0]["value"], "4");
+        assert_eq!(json["fields"][0]["sensitive"], false);
+
+        // Safe is Safe all the way to the webview. The projection this replaced hard-coded
+        // Enhanced, so the console rendered a literal address whatever the user had chosen.
+        assert_eq!(json["fields"][1]["name"], "address");
+        assert_eq!(json["fields"][1]["value"], "ip6/quic-v1");
+        assert_eq!(
+            json["fields"][1]["sensitive"], true,
+            "and it says a higher mode would show more"
+        );
+
+        let enhanced: ConsoleLogEvent =
+            catcoms_diagnostics::event_view(&event, CaptureMode::Enhanced).into();
+        let json = serde_json::to_value(&enhanced).expect("the console event serialises");
+        assert_eq!(json["fields"][1]["value"], "/ip6/2001:db8::1/udp/31484/quic-v1");
+        assert_eq!(json["capture"], "enhanced");
+    }
+
+    /// A trace minted in the webview has to be the *same* trace natively, or the two halves of an
+    /// operation are two records that have to be lined up by timestamp. Both doors the webview can
+    /// knock on parse it the same way, which is why they share this function.
+    #[test]
+    fn a_webview_trace_is_the_same_trace_natively() {
+        assert_eq!(
+            parse_trace("7f2c000000000001"),
+            Some(catcoms_diagnostics::TraceId(0x7f2c_0000_0000_0001))
+        );
+        assert_eq!(parse_trace(""), None);
+        assert_eq!(parse_trace("not hex"), None);
+        assert_eq!(
+            parse_trace("0000000000000000"),
+            None,
+            "an all-zero trace is what unset renders as; correlating on it would gather everything"
+        );
+    }
 
     /// The scope rules behind the invite page's "Your network / Internet" chips and the manual
     /// port-forward suggestion. Each address kind must land in exactly one scope, and only a

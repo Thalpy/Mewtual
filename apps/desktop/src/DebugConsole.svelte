@@ -20,21 +20,26 @@
   import { onMount, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import {
+    BRIDGED_CODE,
+    CAPTURE_LEVELS,
+    CAPTURE_MODES,
     DBG_SECTIONS,
     DBG_VIEW_CAP,
     DEFAULT_LEVELS,
     LEVELS,
     PRIVACY_NOTE,
     appendEvents,
+    captureModeIsRevealing,
+    captureModeNote,
     collectAllEvents,
     copyBundle,
     deviceLines,
     dropNote,
     eventLine,
     eventParts,
-    eventText,
     filterEvents,
     formatDuration,
+    inView,
     isFrontend,
     latestSeq,
     levelClass,
@@ -49,6 +54,7 @@
     shownCount,
     voiceLines,
     webrtcChip,
+    type CaptureConfig,
     type DbgSection,
     type DebugDevice,
     type DebugServer,
@@ -101,7 +107,21 @@
   // reactivity mistake.
   let active = $state<DbgSection>(untrack(() => section));
   let events = $state<LogEvent[]>([]);
-  let stats = $state<LogStats>({ errors: 0, warnings: 0, dropped: 0, latest_seq: 0, capacity: 0 });
+  let stats = $state<LogStats>({
+    errors: 0,
+    warnings: 0,
+    dropped: 0,
+    filtered: 0,
+    latest_seq: 0,
+    capacity: 0,
+    capture: "",
+    session_id: "",
+  });
+  let capture = $state<CaptureConfig | null>(null);
+  /** Which mode the user has asked for but not yet confirmed. Empty when nothing is pending. */
+  let pendingMode = $state("");
+  let captureError = $state("");
+  let showSections = $state(false);
   let redact = $state(false);
   let paused = $state(false);
   let frozen = $state<LogEvent[]>([]);
@@ -110,6 +130,8 @@
   let backLevels = $state<string[]>([...DEFAULT_LEVELS]);
   let frontFilter = $state("");
   let frontLevels = $state<string[]>([...DEFAULT_LEVELS]);
+  /** Shared by every feed: a trace pasted from an error banner narrows all of them at once. */
+  let traceFilter = $state("");
   let routes = $state<Record<number, MemberRoute[]>>({});
   let voicePeers = $state<DebugVoicePeer[]>([]);
   let expanded = $state("");
@@ -123,28 +145,83 @@
   // `[redacted]` no longer says it.
   const aliases = makeAliases();
 
-  async function poll() {
+  /**
+   * How often reachability is re-read, as a multiple of the log tick.
+   *
+   * The log poll is one small message. Reachability is one command per server, and it used to run
+   * on the same one-second tick with no guard: five servers meant five round trips per second for
+   * as long as the console stayed open, and a tick that overran simply started another on top of
+   * it. Dial backoff moves on the scale of tens of seconds, so three is generous. Found by
+   * adversarial review (P3-007).
+   */
+  const ROUTE_TICKS = 3;
+  /** Which sections actually render reachability. The others do not pay for it. */
+  const ROUTE_SECTIONS: DbgSection[] = ["overview", "network"];
+
+  /**
+   * Re-entrancy guards.
+   *
+   * A poll that takes longer than the interval must not have a second one started on top of it. The
+   * previous version could stack them without limit, which is worst precisely when the app is
+   * already struggling: the console would then be adding to the load it exists to explain.
+   */
+  let pollingLog = false;
+  let pollingRoutes = false;
+  let tick = 0;
+  /**
+   * Bumped whenever the capture mode changes.
+   *
+   * A page is rendered natively at whatever the mode was when the read started, so one that was
+   * already in flight when the mode changed describes the old setting. Without this it would land
+   * in the freshly cleared feed and put two modes' output in one list with nothing saying which was
+   * which, which is the confusion the whole mode-on-every-event design exists to prevent.
+   */
+  let captureGeneration = 0;
+
+  async function pollLog() {
+    if (pollingLog) return;
+    pollingLog = true;
+    const generation = captureGeneration;
     try {
       const page = await invoke<{ events: LogEvent[] } & LogStats>("get_console_log", {
         afterSeq: latestSeq(events),
         limit: 500,
       });
+      if (generation !== captureGeneration) return;
       events = appendEvents(events, page.events, DBG_VIEW_CAP);
       stats = page;
     } catch {
       /* the console must never be able to break the app it is observing */
+    } finally {
+      pollingLog = false;
     }
-    // Reachability per server, for the Network section. Cheap: local state, no wire traffic.
-    const next: Record<number, MemberRoute[]> = {};
-    for (const s of servers) {
-      try {
-        next[s.id] = await invoke<MemberRoute[]>("get_member_routes", { server: s.id });
-      } catch {
-        next[s.id] = [];
-      }
+  }
+
+  async function pollRoutes() {
+    if (pollingRoutes) return;
+    pollingRoutes = true;
+    try {
+      // Concurrently rather than one after another: these are independent local reads, and a
+      // sequential walk made the whole refresh as slow as the sum of every server on the list.
+      const answers = await Promise.all(
+        servers.map((s) =>
+          invoke<MemberRoute[]>("get_member_routes", { server: s.id }).catch(() => [] as MemberRoute[]),
+        ),
+      );
+      const next: Record<number, MemberRoute[]> = {};
+      servers.forEach((s, at) => (next[s.id] = answers[at]));
+      routes = next;
+    } finally {
+      pollingRoutes = false;
     }
-    routes = next;
-    voicePeers = voice();
+  }
+
+  async function loadCapture() {
+    try {
+      capture = await invoke<CaptureConfig>("get_capture_config");
+    } catch {
+      /* the panel simply does not render; capture itself is unaffected */
+    }
   }
 
   onMount(() => {
@@ -152,23 +229,93 @@
     // reach me at all". Fetched on open rather than polled: it changes on the scale of a router
     // lease, not a second.
     onrefreshdevice();
-    void poll();
+    void loadCapture();
+    void pollLog();
+    void pollRoutes();
     const timer = setInterval(() => {
       // Paused freezes the view, not the capture: the ring keeps filling natively and a resume
       // shows what arrived. Skipping the poll instead would lose it.
-      if (!paused) void poll();
+      if (paused) return;
+      tick += 1;
+      void pollLog();
+      if (tick % ROUTE_TICKS === 0 && ROUTE_SECTIONS.includes(active)) void pollRoutes();
+      voicePeers = voice();
     }, 1000);
     return () => clearInterval(timer);
   });
 
-  /** The backend half of the ring: everything Rust emitted. */
-  const backend = $derived((paused ? frozen : events).filter((e) => !isFrontend(e)));
-  /** The frontend half: whatever the webview logged, which arrives under one tracing target. */
-  const frontend = $derived((paused ? frozen : events).filter(isFrontend));
+  /**
+   * Change what is being captured.
+   *
+   * Enhanced and Full are confirmed rather than applied on the first click. They are the settings
+   * that start writing this device's addresses and protocol detail into something the user is
+   * likely to paste to a stranger, and a control that does that on a stray click is not a control.
+   */
+  async function chooseMode(mode: string) {
+    captureError = "";
+    if (captureModeIsRevealing(mode) && capture?.mode !== mode) {
+      pendingMode = mode;
+      return;
+    }
+    await applyMode(mode);
+  }
+
+  async function applyMode(mode: string) {
+    pendingMode = "";
+    try {
+      capture = await invoke<CaptureConfig>("set_capture_mode", { mode });
+      // The mode decides how every value is rendered, so what is already on screen was drawn under
+      // the old one. Re-reading from the start is the only honest answer: leaving the old lines
+      // would show two modes' output in one feed with nothing saying which was which.
+      captureGeneration += 1;
+      events = [];
+      await pollLog();
+    } catch (e) {
+      captureError = String(e);
+    }
+  }
+
+  async function setSectionLevel(id: string, level: string) {
+    captureError = "";
+    try {
+      capture = await invoke<CaptureConfig>("set_section_capture", {
+        section: id,
+        level: level === "off" ? null : level,
+      });
+    } catch (e) {
+      captureError = String(e);
+    }
+  }
+
+  /**
+   * The visible timeline, which is the frozen copy while paused.
+   *
+   * Every section below is a filter over this one list. They are views of one record rather than
+   * separate feeds, so their counts cannot drift apart, and a failure that crossed two layers stays
+   * in one order: a send failure usually depends on the exact interleaving, and per-subsystem logs
+   * destroy exactly that.
+   */
+  const shown = $derived(paused ? frozen : events);
+  /**
+   * The backend section: everything that is not one of the four sections with a view of its own.
+   *
+   * Decided by the section each event states, not by which crate emitted it. The old rule split on
+   * the tracing target, which put every structured webview event, including the voice stack's, into
+   * "frontend" because of the process it ran in.
+   */
+  const backend = $derived(shown.filter((e) => inView(e, "backend")));
+  const frontend = $derived(shown.filter(isFrontend));
   const backShown = $derived(
-    filterEvents(backend, { levels: backLevels, target: backTarget, text: backFilter }, aliases, redact),
+    filterEvents(
+      backend,
+      { levels: backLevels, target: backTarget, text: backFilter, trace: traceFilter },
+      aliases,
+      redact,
+    ),
   );
-  const frontShown = $derived(filterEvents(frontend, { levels: frontLevels, text: frontFilter }, aliases, redact));
+  const frontShown = $derived(
+    filterEvents(frontend, { levels: frontLevels, text: frontFilter, trace: traceFilter }, aliases, redact),
+  );
   /** Per-section error counts for the rail badges, from the same events the feeds render. */
   const backErrors = $derived(backend.filter((e) => e.level === "ERROR").length);
   const backWarns = $derived(backend.filter((e) => e.level === "WARN").length);
@@ -180,26 +327,31 @@
       .flat()
       .filter((r) => routeState(r) !== "connected").length,
   );
-  /** The transport's own events: dial attempts, dial failures, connection churn. */
-  const netEvents = $derived(backend.filter((e) => e.target === "catcoms_net").slice(-300));
+  /**
+   * The network section: transport, reachability, discovery and join.
+   *
+   * Four canonical sections under one console heading, because from the outside they are one
+   * question. The old rule was `target === "catcoms_net"`, which meant a join failure and a relay
+   * reservation that timed out were somewhere else entirely, and the transport's own answer to "why
+   * can this node not connect" sat next to neither of them.
+   */
+  const netEvents = $derived(shown.filter((e) => inView(e, "network")).slice(-300));
   /**
    * What the voice path logged this session.
    *
-   * Matched on text rather than a dedicated target because the voice stack lives in the webview and
-   * logs through the one `catcoms_ui` target. The whole rendered line is searched, not just the
-   * message: a structured event carries its code in a field (`code=VOICE.SIGNAL.NO_MEMBER_ROUTE`)
-   * while an old-style console line carries it in the message, and matching only the message would
-   * have quietly dropped every migrated event out of this section.
-   *
-   * A stopgap either way. Events already state their section natively, and the console reads that
-   * directly once it is rebuilt on the hub.
+   * Was matched by searching each rendered line for the word "voice", because the voice stack runs
+   * in the webview and logged through one target. That is exactly the heuristic the canonical
+   * section replaces: it caught unrelated lines that happened to mention voice, and it would have
+   * caught nothing at all once the codes stopped spelling the word out.
    */
-  const voiceEvents = $derived(
-    frontend.filter((e) => eventText(e).toLowerCase().includes("voice")).slice(-300),
-  );
+  const voiceEvents = $derived(shown.filter((e) => inView(e, "voice")).slice(-300));
+  /** Vault, blob store and transfers: the section that says what is on this disk. */
+  const storageEvents = $derived(shown.filter((e) => inView(e, "storage")).slice(-300));
+  /** How much of the record still comes from un-migrated call sites. */
+  const bridged = $derived(shown.filter((e) => e.code === BRIDGED_CODE).length);
   /** The newest few loud events, so "why is the badge red" is one glance rather than a hunt. */
   const attention = $derived(
-    (paused ? frozen : events)
+    shown
       .filter((e) => e.level === "ERROR" || e.level === "WARN")
       .slice(-4)
       .reverse(),
@@ -243,22 +395,31 @@
    * run-up to the failure it describes.
    */
   async function buildReport(full: boolean): Promise<string> {
-    let backend = backShown;
-    let frontend = frontShown;
+    let sections: LogEvent[][] = [backShown, netEvents, voiceEvents, storageEvents, frontShown];
     if (full) {
       const every = await collectAllEvents((afterSeq, limit) =>
         invoke<{ events: LogEvent[] }>("get_console_log", { afterSeq, limit }).then((p) => p.events),
       );
-      backend = every.filter((e) => !isFrontend(e));
-      frontend = every.filter(isFrontend);
+      sections = (["backend", "network", "voice", "storage", "frontend"] as DbgSection[]).map((v) =>
+        every.filter((e) => inView(e, v)),
+      );
     }
-    return copyBundle({ version, at: Date.now(), redacted: redact }, [
-      { title: "this device", lines: deviceLines(device, aliases, redact) },
-      { title: "network", lines: routeLines(servers, routes, aliases, redact, hasIpv6) },
-      { title: "voice", lines: voiceLines(voicePeers, aliases, redact) },
-      { title: "backend", lines: backend.map(line) },
-      { title: "frontend", lines: frontend.map(line) },
-    ]);
+    const [back, net, vox, store, front] = sections;
+    return copyBundle(
+      { version, at: Date.now(), redacted: redact, capture: stats.capture, session: stats.session_id },
+      [
+        { title: "this device", lines: deviceLines(device, aliases, redact) },
+        { title: "reachability", lines: routeLines(servers, routes, aliases, redact, hasIpv6) },
+        { title: "call peers", lines: voiceLines(voicePeers, aliases, redact) },
+        // The event sections follow the console's own rail order, so a reader who has seen the
+        // screen knows where to look in the file.
+        { title: "network", lines: net.map(line) },
+        { title: "voice", lines: vox.map(line) },
+        { title: "backend", lines: back.map(line) },
+        { title: "frontend", lines: front.map(line) },
+        { title: "storage", lines: store.map(line) },
+      ],
+    );
   }
 
   async function copyReport() {
@@ -305,8 +466,20 @@
       <span class="dbg-sev-chip" class:warn={stats.warnings > 0} class:quiet={stats.warnings === 0}>
         {stats.warnings} WARNINGS
       </span>
+      <!-- What is being recorded, next to what has been recorded. A Safe view and an Enhanced one
+           look alike and mean very different things, so the screen says which it is rather than
+           leaving a reader to infer it from whether an address looks complete. -->
+      {#if stats.capture}
+        <span class="dbg-sev-chip" class:warn={capture?.reveals_addresses} class:quiet={!capture?.reveals_addresses}>
+          {stats.capture.toUpperCase()} CAPTURE
+        </span>
+      {/if}
     </div>
     <div class="dbg-head-actions">
+      <!-- Paste the four characters off an error banner and every feed narrows to that one
+           operation. The question this console exists for is "what happened when I pressed send",
+           and a trace is the only thing that answers it across ten stages and two processes. -->
+      <input class="dbg-feed-filter" bind:value={traceFilter} placeholder="Trace, e.g. 7f2c" size="12" />
       <button class="ghost small" onclick={copyReport}>{copied === "report" ? "Copied" : "Copy report"}</button>
       <button class="ghost small" disabled={saving} onclick={saveReport}>
         {saving ? "Saving" : "Save report"}
@@ -337,6 +510,88 @@
     <div class="dbg-content">
       {#if active === "overview"}
         <div class="dbg-sec">
+          <!-- Two independent axes. One switch used to mean choosing between capturing almost
+               nothing and capturing the transport narrating every address this device has seen, so
+               it stayed off and nobody had a log when they needed one. -->
+          <div class="dbg-card">
+            <div class="dbg-card-h">
+              <span>Capture</span>
+              <span class="dbg-card-actions">
+                <button class="ghost small" onclick={() => (showSections = !showSections)}>
+                  {showSections ? "Hide sections" : "Per-section detail"}
+                </button>
+              </span>
+            </div>
+            {#if capture}
+              <div class="dbg-modes">
+                {#each CAPTURE_MODES as m (m)}
+                  <button
+                    type="button"
+                    class="dbg-mode"
+                    class:on={capture.mode === m}
+                    aria-pressed={capture.mode === m}
+                    onclick={() => chooseMode(m)}
+                  >{m.toUpperCase()}</button>
+                {/each}
+              </div>
+              <p class="dbg-note">{captureModeNote(capture.mode)}</p>
+              {#if capture.expires_at_restart}
+                <p class="dbg-note">This mode is forgotten at the next launch, on purpose.</p>
+              {/if}
+              {#if pendingMode}
+                <!-- Confirmed rather than applied on the first click. These are the settings that
+                     start writing this device's own addresses into something a user is likely to
+                     paste to a stranger. -->
+                <p class="dbg-finding warn">
+                  <span class="chip warn">CONFIRM</span>
+                  {captureModeNote(pendingMode)}
+                </p>
+                <div class="dbg-card-actions">
+                  <button class="ghost small" onclick={() => applyMode(pendingMode)}>
+                    Turn on {pendingMode.toUpperCase()}
+                  </button>
+                  <button class="ghost small" onclick={() => (pendingMode = "")}>Cancel</button>
+                </div>
+              {/if}
+              {#if captureError}
+                <p class="dbg-finding danger"><span class="chip danger">REFUSED</span>{captureError}</p>
+              {/if}
+              {#if showSections}
+                <div class="dbg-table-wrap dbg-capture-sections">
+                  <table class="dbg-table">
+                    <thead><tr><th>Section</th><th>Shows in</th><th>Captured at</th></tr></thead>
+                    <tbody>
+                      {#each capture.sections as s (s.id)}
+                        <tr>
+                          <td class="name-cell">{s.id}</td>
+                          <td>{s.view}</td>
+                          <td>
+                            <select
+                              value={s.level ?? "off"}
+                              onchange={(e) => setSectionLevel(s.id, e.currentTarget.value)}
+                            >
+                              <option value="off">off</option>
+                              {#each CAPTURE_LEVELS as l (l)}
+                                <option value={l}>{l}</option>
+                              {/each}
+                            </select>
+                          </td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
+                </div>
+              {/if}
+              <p class="muted small">
+                Session {stats.session_id || "(none)"}. {stats.filtered.toLocaleString()} event(s)
+                not captured by these settings, {bridged.toLocaleString()} of the
+                {shown.length.toLocaleString()} shown still from un-migrated call sites.
+              </p>
+            {:else}
+              <div class="dbg-empty">Capture settings unavailable.</div>
+            {/if}
+          </div>
+
           <div class="dbg-card">
             <div class="dbg-card-h"><span>Servers</span></div>
             {#if servers.length}
@@ -503,10 +758,12 @@
           {/if}
 
           <div class="dbg-card dbg-feed">
-            <div class="dbg-card-h"><span>Transport events</span></div>
+            <div class="dbg-card-h"><span>Network events</span></div>
             <p class="muted small">
-              Dial attempts, dial failures and connection churn, straight from the transport.
-              Turn on DEBUG in Backend to see attempts as well as failures.
+              Transport, reachability, discovery and join: dials and their failures, port mapping
+              and relay attempts, peer records arriving, and admission. Four layers under one
+              heading because from the outside they are one question. Raise the transport section
+              in Capture to see dial attempts as well as failures.
             </p>
             <div class="dbg-feed-scroll h-md" role="log">
               {#if netEvents.length}
@@ -514,11 +771,13 @@
                   <div class="dbg-line {levelClass(e.level)}">
                     <span class="dbg-ts">{parts(e).ts}</span>
                     <span class="dbg-tag">{e.level}</span>
+                    <span class="dbg-target">{parts(e).section}</span>
+                    {#if parts(e).trace}<span class="dbg-trace">{parts(e).trace}</span>{/if}
                     <span class="dbg-msg">{parts(e).text}</span>
                   </div>
                 {/each}
               {:else}
-                <div class="dbg-empty">No transport events captured yet.</div>
+                <div class="dbg-empty">No network events captured yet.</div>
               {/if}
             </div>
           </div>
@@ -563,7 +822,8 @@
             <div class="dbg-card-h"><span>Signalling and ICE</span></div>
             <p class="muted small">
               Everything the voice path logged this session: failed signals, rejected
-              candidates, STUN and TURN errors, and router mapping refusals.
+              candidates, STUN and TURN errors, and router mapping refusals. Whether it ran in the
+              webview or natively, because what matters is that it was about a call.
             </p>
             <div class="dbg-feed-scroll h-md" role="log">
               {#if voiceEvents.length}
@@ -571,6 +831,7 @@
                   <div class="dbg-line {levelClass(e.level)}">
                     <span class="dbg-ts">{parts(e).ts}</span>
                     <span class="dbg-tag">{e.level}</span>
+                    {#if parts(e).trace}<span class="dbg-trace">{parts(e).trace}</span>{/if}
                     <span class="dbg-msg">{parts(e).text}</span>
                   </div>
                 {/each}
@@ -587,7 +848,7 @@
             <div class="dbg-card-h"><span>Backend</span></div>
             <div class="dbg-feed-bar">
               <input class="dbg-feed-filter" bind:value={backFilter} placeholder="Filter lines" />
-              <input class="dbg-feed-filter" bind:value={backTarget} placeholder="Target, e.g. catcoms_net" />
+              <input class="dbg-feed-filter" bind:value={backTarget} placeholder="Target, e.g. catcoms_sync" />
               <span class="dbg-lvl-chips">
                 {#each LEVELS as l (l)}
                   <button type="button" class="dbg-lvl {levelClass(l)} l-{l === 'ERROR' ? 'err' : l.toLowerCase()}" class:on={backLevels.includes(l)}
@@ -607,7 +868,8 @@
                   <div class="dbg-line {levelClass(e.level)}">
                     <span class="dbg-ts">{parts(e).ts}</span>
                     <span class="dbg-tag">{e.level}</span>
-                    <span class="dbg-target">{e.target}</span>
+                    <span class="dbg-target">{parts(e).section}</span>
+                    {#if parts(e).trace}<span class="dbg-trace">{parts(e).trace}</span>{/if}
                     <span class="dbg-msg">{parts(e).text}</span>
                   </div>
                 {/each}
@@ -644,6 +906,7 @@
                   <div class="dbg-line {levelClass(e.level)}">
                     <span class="dbg-ts">{parts(e).ts}</span>
                     <span class="dbg-tag">{e.level}</span>
+                    {#if parts(e).trace}<span class="dbg-trace">{parts(e).trace}</span>{/if}
                     <span class="dbg-msg">{parts(e).text}</span>
                   </div>
                 {/each}
@@ -680,6 +943,31 @@
             {:else}
               <div class="dbg-empty">No servers, nothing stored yet.</div>
             {/if}
+          </div>
+
+          <!-- The section had a table and no feed, so an integrity failure, a partial unlock or an
+               upload that was abandoned halfway had nowhere of its own to appear. -->
+          <div class="dbg-card dbg-feed">
+            <div class="dbg-card-h"><span>Storage events</span></div>
+            <p class="muted small">
+              The vault, the blob store and file transfers: lock state, integrity and repair
+              outcomes, and uploads and downloads that started without finishing.
+            </p>
+            <div class="dbg-feed-scroll h-md" role="log">
+              {#if storageEvents.length}
+                {#each storageEvents as e (e.seq)}
+                  <div class="dbg-line {levelClass(e.level)}">
+                    <span class="dbg-ts">{parts(e).ts}</span>
+                    <span class="dbg-tag">{e.level}</span>
+                    <span class="dbg-target">{parts(e).section}</span>
+                    {#if parts(e).trace}<span class="dbg-trace">{parts(e).trace}</span>{/if}
+                    <span class="dbg-msg">{parts(e).text}</span>
+                  </div>
+                {/each}
+              {:else}
+                <div class="dbg-empty">No storage events this session.</div>
+              {/if}
+            </div>
           </div>
         </div>
       {/if}

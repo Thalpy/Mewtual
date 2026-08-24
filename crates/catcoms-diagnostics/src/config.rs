@@ -58,6 +58,23 @@ impl CaptureMode {
             CaptureMode::Full => "full",
         }
     }
+
+    /// Parse a mode name, rejecting anything unrecognised.
+    ///
+    /// Returns `Option` rather than falling back to a default on purpose. This parses a value
+    /// arriving from the webview, and the two plausible defaults are both wrong: falling back to
+    /// `Safe` makes a mistyped `enhanced` look like a control that worked and did nothing, and
+    /// falling back to the *current* mode hides the same mistake even better. A caller that cannot
+    /// understand what it was asked for should say so.
+    pub fn parse(name: &str) -> Option<CaptureMode> {
+        match name {
+            "off" => Some(CaptureMode::Off),
+            "safe" => Some(CaptureMode::Safe),
+            "enhanced" => Some(CaptureMode::Enhanced),
+            "full" => Some(CaptureMode::Full),
+            _ => None,
+        }
+    }
 }
 
 /// Severity, ordered so a filter is a comparison.
@@ -90,6 +107,22 @@ impl Level {
             "DEBUG" => Level::Debug,
             "TRACE" => Level::Trace,
             _ => Level::Info,
+        }
+    }
+
+    /// Parse a level name for a *setting*, rejecting anything unrecognised.
+    ///
+    /// The opposite policy to [`Level::from_tracing`], and deliberately so: that one is classifying
+    /// an event that already happened, where guessing `Info` is better than discarding it. This one
+    /// is applying a control, where guessing means the user asked for one thing and got another.
+    pub fn parse(name: &str) -> Option<Level> {
+        match name.to_ascii_uppercase().as_str() {
+            "ERROR" => Some(Level::Error),
+            "WARN" => Some(Level::Warn),
+            "INFO" => Some(Level::Info),
+            "DEBUG" => Some(Level::Debug),
+            "TRACE" => Some(Level::Trace),
+            _ => None,
         }
     }
 }
@@ -284,6 +317,16 @@ impl Section {
             Section::Performance => "performance",
             Section::Privacy => "privacy",
         }
+    }
+
+    /// Parse a section name, rejecting anything unrecognised.
+    ///
+    /// A scan of [`SECTIONS`] rather than a second twenty-two-arm match. Unlike [`Section::index`]
+    /// this is never on the recording path, it runs when somebody changes a setting, so the cost is
+    /// irrelevant and the property that matters is the other one: a scan reads the names from
+    /// [`Section::as_str`] and therefore cannot drift out of step with them.
+    pub fn parse(name: &str) -> Option<Section> {
+        SECTIONS.iter().copied().find(|s| s.as_str() == name)
     }
 
     /// The section a `tracing` target belongs to.
@@ -495,6 +538,54 @@ mod tests {
         assert_eq!(Section::from_target("catcoms_sync::join"), Section::Sync);
         // Anything unrecognised is still captured, under the section least likely to mislead.
         assert_eq!(Section::from_target("some_dependency"), Section::Runtime);
+    }
+
+    /// A control that silently does something other than what it was asked is worse than one that
+    /// refuses, because the user has no way to tell it did not work. Every name that round-trips
+    /// must parse, and nothing else may.
+    #[test]
+    fn a_setting_that_cannot_be_understood_is_refused_rather_than_guessed() {
+        for mode in [
+            CaptureMode::Off,
+            CaptureMode::Safe,
+            CaptureMode::Enhanced,
+            CaptureMode::Full,
+        ] {
+            assert_eq!(CaptureMode::parse(mode.as_str()), Some(mode));
+        }
+        assert_eq!(CaptureMode::parse("enhaced"), None, "a typo is not Safe");
+        assert_eq!(CaptureMode::parse("SAFE"), None, "and not case-insensitive");
+        assert_eq!(CaptureMode::parse(""), None);
+
+        for level in [
+            Level::Error,
+            Level::Warn,
+            Level::Info,
+            Level::Debug,
+            Level::Trace,
+        ] {
+            assert_eq!(Level::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(
+            Level::parse("warn"),
+            Some(Level::Warn),
+            "a level is spelled either way"
+        );
+        assert_eq!(Level::parse("verbose"), None);
+
+        for section in SECTIONS {
+            assert_eq!(Section::parse(section.as_str()), Some(section));
+        }
+        assert_eq!(
+            Section::parse("network"),
+            None,
+            "a console view is not a section"
+        );
+        assert_eq!(
+            Section::parse("catcoms_net"),
+            None,
+            "nor is a tracing target"
+        );
     }
 
     #[test]

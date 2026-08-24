@@ -44,6 +44,14 @@ pub use writer::{
 use writer::{FileWriter, SYNC_TIMEOUT};
 
 // --- in-memory ring, for the in-app debug console ----------------------------------------
+//
+// This crate installs subscribers and owns the process-wide hub. It deliberately no longer owns a
+// *shape* for the console to read: it used to expose a `LogRing` whose events were flattened
+// `tracing` lines with the section, phase, span, references and capture mode dropped, and the
+// console read that instead of the canonical record. Most of what the app took the trouble to
+// instrument was discarded one layer before the only tool anyone looks at. The console reads
+// `catcoms_diagnostics::event_view` off the hub now, and the flattening is gone rather than
+// deprecated, so nothing can quietly reach for it again. See the Part 3 review, finding P3-005.
 
 /// How many events the console's ring holds. Enough to cover the run-up to a failure that a user
 /// notices and then goes looking for, small enough to be irrelevant against the app's footprint.
@@ -62,151 +70,44 @@ pub const CONSOLE_RING_FILTER: &str = "info,catcoms_app=debug,catcoms_sync=debug
      catcoms_mls=debug,catcoms_discovery=debug,catcoms_ui=debug,catcoms_net=debug,\
      catcoms_storage=debug,catcoms_replication=debug";
 
-/// One captured diagnostic event, as the debug console renders it.
-///
-/// Deliberately plain data with no `serde` derive: this crate installs subscribers and should not
-/// acquire a serialization dependency to do it. The desktop bridge maps this into its own IPC type.
-#[derive(Clone, Debug)]
-pub struct LogEvent {
-    /// Monotonic within the session. The console polls with the last id it has seen, so this is
-    /// what makes "give me what is new" cheap and gap-free.
-    pub seq: u64,
-    /// Wall-clock milliseconds, for display next to the user's own sense of when it happened.
-    pub at_ms: i64,
-    /// `ERROR`, `WARN`, `INFO`, `DEBUG` or `TRACE`.
-    pub level: &'static str,
-    /// The emitting module path, e.g. `catcoms_net`. `catcoms_ui` is the webview's own.
-    pub target: String,
-    /// The event's message field.
-    pub message: String,
-    /// Its remaining structured fields, in declaration order.
-    pub fields: Vec<(String, String)>,
-}
-
-/// What the console needs besides the events themselves.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LogRingStats {
-    /// Errors seen this session, counted **before** the ring evicts anything. A roll-up that said
-    /// "no errors" because the error had aged out would be worse than no roll-up.
-    pub errors: u64,
-    /// Warnings seen this session, on the same basis.
-    pub warnings: u64,
-    /// Events the ring dropped to stay inside its capacity. Surfaced so the console can say it
-    /// lost some rather than presenting a gap as a quiet period.
-    pub dropped: u64,
-    /// The highest sequence number issued so far.
-    pub latest_seq: u64,
-}
-
-/// The name `tracing` gives an event's primary message. It is just another field to `tracing`;
-/// the console wants it as the headline, so it is lifted out on the way in and back out again on
-/// the way to the console.
-const MESSAGE_FIELD: &str = "message";
-
-/// A bounded, in-memory view of this session's diagnostics, shared with the debug console.
-///
-/// A projection over [`catcoms_diagnostics::DiagnosticHub`] rather than a store of its own. There
-/// is one canonical record now, and this is the shape the console already reads it in: keeping the
-/// old type and its methods means the hub could take over the storage without the console, the
-/// desktop bridge or their tests changing at all.
-#[derive(Clone, Default)]
-pub struct LogRing;
-
-impl std::fmt::Debug for LogRing {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("LogRing")
-    }
-}
-
-/// Flatten a canonical event into the console's line-oriented shape.
-///
-/// Lossy in one direction only: the trace, phase and section survive as ordinary fields rather
-/// than as structure, because that is all the current console can render. The canonical event is
-/// still intact in the hub for anything that wants the rest.
-fn project(event: &catcoms_diagnostics::DiagnosticEvent) -> LogEvent {
-    let mode = catcoms_diagnostics::CaptureMode::Enhanced;
-    let mut message = String::new();
-    let mut fields = Vec::with_capacity(event.fields.len() + 2);
-    for (name, value) in &event.fields {
-        if name.as_str() == MESSAGE_FIELD && message.is_empty() {
-            message = value.render(mode);
-        } else {
-            fields.push(((*name).to_string(), value.render(mode)));
-        }
-    }
-    // A structured event has a code rather than prose. Showing the code as the headline is what
-    // makes a converted call site read better in the console than the sentence it replaced.
-    if message.is_empty() && !event.code.is_empty() {
-        message = event.code.to_string();
-    }
-    if event.trace.is_set() {
-        fields.push(("trace".to_string(), event.trace.short()));
-    }
-    LogEvent {
-        seq: event.seq,
-        at_ms: event.at_ms as i64,
-        level: event.level.as_str(),
-        target: event.target.clone(),
-        message,
-        fields,
-    }
-}
-
-impl LogRing {
-    /// Events issued after `after_seq`, oldest first, capped at `limit`.
-    ///
-    /// A caller that has fallen further behind than the ring is deep gets the oldest events the
-    /// ring still holds, and learns from [`LogRingStats::dropped`] that it missed some.
-    pub fn since(&self, after_seq: u64, limit: usize) -> Vec<LogEvent> {
-        hub().since(after_seq, limit).iter().map(project).collect()
-    }
-
-    /// The session counters. See [`LogRingStats`].
-    pub fn stats(&self) -> LogRingStats {
-        let stats = hub().stats();
-        LogRingStats {
-            errors: stats.errors,
-            warnings: stats.warnings,
-            dropped: stats.dropped,
-            latest_seq: stats.latest_seq,
-        }
-    }
-
-    /// Forget every held event, keeping the session counters and the sequence. Used by the
-    /// console's clear button, which is about the view, not about rewriting what happened.
-    pub fn clear(&self) {
-        hub().clear();
-    }
-}
-
 /// The process-wide diagnostic hub.
 static HUB: OnceLock<catcoms_diagnostics::DiagnosticHub> = OnceLock::new();
 
 /// The hub this process records into.
 ///
 /// Created on first use rather than at subscriber installation, so a binary or test that never
-/// asked for diagnostics still gets a working handle instead of a panic. Capture starts in
-/// [`CaptureMode::Enhanced`](catcoms_diagnostics::CaptureMode::Enhanced) because this ring never
-/// touches the disk: it lives in memory, is shown only in this app's own debug console, and leaves
-/// only if the user presses copy. The file, which is the thing a user pastes to a stranger, is a
-/// separate sink with its own narrower filter.
+/// asked for diagnostics still gets a working handle instead of a panic.
+///
+/// # Why it starts Safe
+///
+/// It used to start [`Enhanced`](catcoms_diagnostics::CaptureMode::Enhanced), on the reasoning that
+/// this store never touches the disk: it lives in memory and is only shown in the app's own
+/// console. That reasoning was already wrong when it was written. The console has a Copy button and
+/// a Save button, so its contents reach a clipboard and a file on the very first occasion anybody
+/// has a reason to look at them, which is the same occasion they are about to send them to someone.
+///
+/// Safe is therefore the honest default: identifiers are per-session references and an address
+/// keeps only its family and transport, so what a user copies without thinking about it is
+/// publishable. That is not a reduced diagnosis. `ip6/quic-v1` is exactly what says "every address
+/// this member advertises is IPv6 and this device has no IPv6 route", which is the failure that
+/// stranded a node for an hour.
+///
+/// What Safe does cost is transport *debug*: dial attempts and connection churn are not captured at
+/// all, so raising the mode afterwards will not bring back what was never recorded. That is a real
+/// trade and it is made visible rather than hidden, in the console's capture panel and in the count
+/// of events the settings excluded. Enhanced is one labelled click away and needs no restart, which
+/// is the entire reason capture mode and section level are separate axes.
 pub fn hub() -> catcoms_diagnostics::DiagnosticHub {
     HUB.get_or_init(|| {
         catcoms_diagnostics::DiagnosticHub::with_capacity(
             std::sync::Arc::new(catcoms_rt::SystemClock),
             catcoms_diagnostics::SessionSalt::random(&mut catcoms_rt::OsCryptoRng),
-            catcoms_diagnostics::CaptureMode::Enhanced,
+            catcoms_diagnostics::CaptureMode::Safe,
             LOG_RING_CAPACITY,
             &mut catcoms_rt::OsCryptoRng,
         )
     })
     .clone()
-}
-
-/// The ring this process is capturing into. Empty and inert until a subscriber installs one, so a
-/// binary or test that never asked for a console still gets a working (if silent) handle.
-pub fn ring() -> LogRing {
-    LogRing
 }
 
 /// The `tracing` layer that feeds [`hub`].
@@ -501,11 +402,39 @@ mod tests {
     // is tested where it lives now, in `catcoms-diagnostics`. What is left here is the join
     // between the two: whether a canonical event still reads the way the console expects.
 
-    /// A `tracing` message has to arrive as the headline, not buried among the structured fields.
-    /// It is the first thing on every rendered line, and the thing a person scans for.
+    /// What a user copies without thinking about it has to be publishable.
+    ///
+    /// The console has a Copy button and a Save button, so this store reaches a clipboard and a
+    /// file on the first occasion anybody looks at it, which is the same occasion they are about to
+    /// send it to somebody. Starting Enhanced meant the default report carried literal addresses.
     #[test]
-    fn a_bridged_message_projects_to_the_headline_the_console_renders() {
-        use catcoms_diagnostics::{BridgedMessage, DiagnosticEvent, Level, Section};
+    fn capture_starts_in_the_mode_whose_output_can_be_shared() {
+        use catcoms_diagnostics::CaptureMode;
+        assert_eq!(hub().mode(), CaptureMode::Safe);
+        assert!(!hub().mode().allows_raw_addresses());
+    }
+
+    /// The bridge's code is mirrored in `apps/desktop/src/debug-console.ts`, which renders a
+    /// bridged event's prose as the headline where a migrated one shows its code. A rename here
+    /// with no rename there would turn every un-migrated line in the console into
+    /// `LOG.TRACING.EVENT message=...`, so the literal is pinned rather than left to a comment.
+    #[test]
+    fn the_bridged_code_is_the_literal_the_console_matches_on() {
+        assert_eq!(BRIDGED_CODE, "LOG.TRACING.EVENT");
+    }
+
+    /// An un-migrated `tracing` event still has to land somewhere a person would look for it, and
+    /// still has to be tellable apart from a converted one.
+    ///
+    /// The bridge is a compatibility layer, not a destination: every event that arrives through it
+    /// carries [`BRIDGED_CODE`] and its prose in a `message` field rather than a stable code of its
+    /// own. Counting them is how the migration's progress is measured, so the two must stay
+    /// distinguishable.
+    #[test]
+    fn a_bridged_event_keeps_its_prose_and_says_that_is_what_it_is() {
+        use catcoms_diagnostics::{
+            event_view, BridgedMessage, CaptureMode, DiagnosticEvent, Level, Section,
+        };
         let mut event = DiagnosticEvent::new(Section::Transport, Level::Warn, BRIDGED_CODE)
             .target("catcoms_net")
             .field("message", BridgedMessage::new("dial failed"))
@@ -513,37 +442,43 @@ mod tests {
         event.seq = 12;
         event.at_ms = 1_787_000_000_000;
 
-        let projected = project(&event);
-        assert_eq!(projected.seq, 12);
-        assert_eq!(projected.level, "WARN");
-        assert_eq!(projected.target, "catcoms_net");
-        assert_eq!(projected.message, "dial failed");
-        assert_eq!(
-            projected.fields,
-            vec![("peer".to_string(), "2b5df389".to_string())]
-        );
+        let view = event_view(&event, CaptureMode::Safe);
+        assert_eq!(view.seq, 12);
+        assert_eq!(view.level, "WARN");
+        assert_eq!(view.target, "catcoms_net");
+        assert_eq!(view.code, BRIDGED_CODE, "still prose, and it admits it");
+        assert_eq!(view.section, "transport");
+        assert_eq!(view.view, "network", "a crate lands in a console section");
+        let fields: Vec<(&str, &str)> = view
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(fields, [("message", "dial failed"), ("peer", "2b5df389")]);
     }
 
-    /// A converted call site has a stable code instead of prose. Showing the code as the headline
-    /// is what makes the migration an improvement in the console rather than a blank line.
+    /// A converted call site is the other half of the same comparison: a stable code, a phase and a
+    /// trace, none of which the bridge can produce.
     #[test]
-    fn a_structured_event_shows_its_code_where_a_message_would_be() {
-        use catcoms_diagnostics::{DiagnosticEvent, Level, Section, TraceId};
+    fn a_converted_call_site_carries_structure_the_bridge_cannot() {
+        use catcoms_diagnostics::{
+            event_view, CaptureMode, DiagnosticEvent, Level, Phase, Section, TraceId,
+        };
         let event = DiagnosticEvent::new(Section::Join, Level::Warn, "JOIN.ROUTES.EXHAUSTED")
             .target("catcoms_sync")
+            .phase(Phase::Failure)
             .trace(TraceId(0x7f2c_0000_0000_0001))
             .field("direct_candidates", 4u64);
 
-        let projected = project(&event);
-        assert_eq!(projected.message, "JOIN.ROUTES.EXHAUSTED");
-        assert!(projected
-            .fields
-            .contains(&("direct_candidates".to_string(), "4".to_string())));
-        // The trace is what ties this line to the rest of its operation, so it travels even in the
-        // flattened shape the current console renders.
-        assert!(projected
-            .fields
-            .contains(&("trace".to_string(), "7f2c".to_string())));
+        let view = event_view(&event, CaptureMode::Safe);
+        assert_eq!(view.code, "JOIN.ROUTES.EXHAUSTED");
+        assert_eq!(view.phase, "failure");
+        assert_eq!(
+            view.trace, "7f2c000000000001",
+            "the whole trace reaches the console, not a four-character summary of it"
+        );
+        assert_eq!(view.fields[0].name, "direct_candidates");
+        assert_eq!(view.fields[0].value, "4");
     }
 
     /// Field names arrive from `tracing` as runtime strings, and the event owns them.
@@ -584,17 +519,22 @@ mod tests {
             // the file that gets pasted to somebody and the in-memory record the console reads.
             // They are separate on purpose (different filters, different privacy exposure), and
             // an event landing in one but not the other is the bug this asserts against.
-            let captured = ring().since(0, 100);
+            let captured = hub().since(0, 100);
             let mine = captured
                 .iter()
-                .find(|e| e.message == "hello from the debug log test")
+                .map(|e| catcoms_diagnostics::event_view(e, catcoms_diagnostics::CaptureMode::Safe))
+                .find(|e| {
+                    e.fields
+                        .iter()
+                        .any(|f| f.name == "message" && f.value == "hello from the debug log test")
+                })
                 .expect("the event reached the console record too");
             assert_eq!(mine.level, "INFO");
             assert_eq!(mine.target, "catcoms_log::tests");
             assert!(
                 mine.fields
                     .iter()
-                    .any(|(k, v)| k == "test_marker" && v == "1"),
+                    .any(|f| f.name == "test_marker" && f.value == "1"),
                 "structured fields survive the bridge: {:?}",
                 mine.fields
             );

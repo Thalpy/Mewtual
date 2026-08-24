@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  BRIDGED_CODE,
+  CAPTURE_MODES,
   DEFAULT_LEVELS,
   appendEvents,
   alias,
+  captureModeIsRevealing,
+  captureModeNote,
   copyBundle,
   dropNote,
   eventLine,
@@ -11,6 +15,7 @@ import {
   eventText,
   filterEvents,
   formatDuration,
+  inView,
   isFrontend,
   latestSeq,
   makeAliases,
@@ -19,7 +24,9 @@ import {
   routeChip,
   routeExplanation,
   routeState,
+  shortTrace,
   shownCount,
+  traceEvents,
   collectAllEvents,
   deviceLines,
   levelClass,
@@ -34,17 +41,48 @@ import {
   type MemberRoute,
 } from "./debug-console.ts";
 
+/**
+ * One canonical event, with the parts a test rarely cares about defaulted.
+ *
+ * `message` is not a property any more: an event's headline is its stable code, and an un-migrated
+ * `tracing` line carries its prose in a `message` **field** under `BRIDGED_CODE`. `bridged()` below
+ * builds that shape, and the distinction is the point rather than an inconvenience.
+ */
 function ev(over: Partial<LogEvent> = {}): LogEvent {
   return {
     seq: 1,
     at_ms: Date.UTC(2026, 7, 23, 12, 0, 0),
+    monotonic_ms: 0,
+    section: "transport",
+    view: "network",
     level: "INFO",
+    code: "NET.TEST",
+    phase: "observation",
+    operation: "",
+    trace: "",
+    span: "",
+    parent_span: "",
+    refs: [],
+    duration_ms: null,
+    attempt: null,
     target: "catcoms_net",
-    message: "hello",
     fields: [],
+    capture: "safe",
     ...over,
   };
 }
+
+/** An un-migrated `tracing` event: prose in a `message` field, under the bridge's code. */
+function bridged(message: string, over: Partial<LogEvent> = {}): LogEvent {
+  return ev({
+    code: BRIDGED_CODE,
+    ...over,
+    fields: [{ name: "message", value: message, sensitive: false }, ...(over.fields ?? [])],
+  });
+}
+
+/** A rendered field, for the shape `LogEvent.fields` takes. */
+const f = (name: string, value: string, sensitive = false) => ({ name, value, sensitive });
 
 const route: MemberRoute = {
   fingerprint: "741af9ff",
@@ -56,31 +94,90 @@ const route: MemberRoute = {
   next_dial_in_ms: 0,
 };
 
-test("the webview's own events are the frontend section, everything else is the backend", () => {
-  // One ring split on one field. If the two sections had separate sources their counts could
-  // drift, and a roll-up that disagrees with the feed under it is worse than no roll-up.
-  assert.ok(isFrontend(ev({ target: "catcoms_ui" })));
-  assert.ok(!isFrontend(ev({ target: "catcoms_net" })));
-  assert.ok(!isFrontend(ev({ target: "catcoms_sync" })));
+/**
+ * The heuristics this replaces. The console used to split Backend from Frontend on the tracing
+ * target and pick out voice events by searching each rendered line for the word "voice", so a
+ * structured voice event emitted from the webview landed in Frontend and, once its prose became
+ * `VOICE.SIGNAL.NO_MEMBER_ROUTE`, appeared in no voice section at all. Events state their own
+ * section now. Found by adversarial review (P3-005).
+ */
+test("an event goes where it says it belongs, not where its target or its wording suggests", () => {
+  const uiVoice = ev({ target: "catcoms_ui", section: "voice", view: "voice", code: "VOICE.ICE.FAILED" });
+  assert.ok(inView(uiVoice, "voice"), "a webview voice event is a voice event");
+  assert.ok(!isFrontend(uiVoice), "and is not filed under the process that emitted it");
+
+  // A backend line that merely mentions the word is not a voice event.
+  const mentions = bridged("stored the voice memo attachment", { section: "files", view: "storage" });
+  assert.ok(!inView(mentions, "voice"));
+  assert.ok(inView(mentions, "storage"));
+
+  assert.ok(isFrontend(ev({ section: "ui", view: "frontend" })));
+  assert.ok(inView(ev({ section: "join", view: "network" }), "network"), "join is a network question");
 });
 
 test("debug is captured but off by default, so the net firehose is one click away and not on", () => {
   assert.deepEqual(DEFAULT_LEVELS, ["ERROR", "WARN", "INFO"]);
 });
 
-test("a line carries its time, level, target and structured fields", () => {
+test("a line carries its time, level, section, trace and structured fields", () => {
   const line = eventLine(
-    ev({ level: "WARN", message: "dial failed", fields: [["error", "network unreachable"]] }),
+    bridged("dial failed", { level: "WARN", fields: [f("error", "network unreachable")] }),
     makeAliases(),
     false,
   );
   assert.match(line, /WARN /);
-  assert.match(line, /catcoms_net/);
+  assert.match(line, /transport/);
   assert.match(line, /dial failed error=network unreachable/);
 });
 
+/**
+ * A migrated call site's headline is its code, and everything that qualifies the outcome travels
+ * with it. This is the whole return on the instrumentation: the old projection kept four characters
+ * of the trace and dropped the phase, the duration, the attempt and the references entirely.
+ */
+test("a migrated event renders its code, phase, duration, attempt and references", () => {
+  const e = ev({
+    level: "WARN",
+    section: "join",
+    code: "JOIN.ROUTES.EXHAUSTED",
+    phase: "failure",
+    operation: "join_server",
+    trace: "7f2c000000000001",
+    duration_ms: 60123,
+    attempt: 4,
+    refs: [["server", "server-91ab"]],
+    fields: [f("direct_candidates", "4")],
+  });
+  const text = eventText(e);
+  assert.match(text, /^JOIN\.ROUTES\.EXHAUSTED /);
+  assert.match(text, /phase=failure/);
+  assert.match(text, /duration=60123ms/);
+  assert.match(text, /attempt=4/);
+  assert.match(text, /server=server-91ab/);
+  assert.match(text, /direct_candidates=4/);
+  assert.equal(eventParts(e, makeAliases(), false).trace, "7f2c");
+  assert.equal(shortTrace("7f2c000000000001"), "7f2c");
+});
+
+test("an un-migrated line still reads as its prose, and is tellable apart from a migrated one", () => {
+  // Most of the record is still bridged, so the console has to stay readable against it. The
+  // substitution keys on the bridge's code, not on "has a message field", so a structured event
+  // that happened to carry one would still show what it is.
+  assert.equal(eventText(bridged("dial failed", { fields: [f("peer", "abc")] })), "dial failed peer=abc");
+  const structured = ev({ code: "NET.DIAL.FAILED", fields: [f("message", "ignore me")] });
+  assert.match(eventText(structured), /^NET\.DIAL\.FAILED message=ignore me$/);
+});
+
+test("a phase of observation is not printed, because every bare event would carry it", () => {
+  assert.equal(eventText(ev({ code: "NET.LISTEN" })), "NET.LISTEN");
+});
+
 test("a frontend line drops the target, which would read catcoms_ui on every row", () => {
-  const line = eventLine(ev({ target: "catcoms_ui", message: "voice signal failed" }), makeAliases(), false);
+  const line = eventLine(
+    bridged("voice signal failed", { target: "catcoms_ui", section: "ui", view: "frontend" }),
+    makeAliases(),
+    false,
+  );
   assert.ok(!line.includes("catcoms_ui"), line);
   assert.match(line, /voice signal failed/);
 });
@@ -88,11 +185,12 @@ test("a frontend line drops the target, which would read catcoms_ui on every row
 test("the rendered parts are the source of truth and the joined line agrees with them", () => {
   // Rendering used to slice the joined line back apart by counting characters, and the drift
   // showed up as the level printed twice in the attention list.
-  const e = ev({ level: "WARN", target: "catcoms_net", message: "dial failed", fields: [["addr", "/ip6/2601::1/udp/1"]] });
+  const e = bridged("dial failed", { level: "WARN", fields: [f("addr", "/ip6/2601::1/udp/1")] });
   const a = makeAliases();
   const p = eventParts(e, a, false);
   assert.equal(p.level, "WARN");
   assert.equal(p.target, "catcoms_net");
+  assert.equal(p.section, "transport");
   assert.equal(p.text, "dial failed addr=/ip6/2601::1/udp/1");
   const line = eventLine(e, a, false);
   assert.ok(line.includes(p.ts) && line.includes(p.target) && line.includes(p.text), line);
@@ -101,13 +199,13 @@ test("the rendered parts are the source of truth and the joined line agrees with
 
 test("parts redact their text and drop the target for a frontend event", () => {
   const a = makeAliases();
-  const p = eventParts(ev({ target: "catcoms_ui", message: "dial 203.0.113.9" }), a, true);
+  const p = eventParts(bridged("dial 203.0.113.9", { section: "ui", view: "frontend", target: "catcoms_ui" }), a, true);
   assert.equal(p.target, "");
   assert.equal(p.text, "dial [ip 1]");
 });
 
-test("fields alone still render when an event has no message", () => {
-  assert.equal(eventText(ev({ message: "", fields: [["peer", "abc"]] })), "peer=abc");
+test("fields alone still render when an event has nothing but its code", () => {
+  assert.equal(eventText(ev({ code: "NET.X", fields: [f("peer", "abc")] })), "NET.X peer=abc");
 });
 
 test("redaction gives each distinct value a stable alias, so correlation survives", () => {
@@ -166,19 +264,66 @@ test("redaction is off unless asked for", () => {
 test("a filter matches the rendered line, so typing what you see works", () => {
   const a = makeAliases();
   const events = [
-    ev({ seq: 1, level: "INFO", message: "one" }),
-    ev({ seq: 2, level: "DEBUG", message: "two" }),
-    ev({ seq: 3, level: "WARN", target: "catcoms_sync", message: "three" }),
+    bridged("one", { seq: 1, level: "INFO" }),
+    bridged("two", { seq: 2, level: "DEBUG" }),
+    bridged("three", { seq: 3, level: "WARN", target: "catcoms_sync", section: "sync" }),
   ];
   assert.equal(filterEvents(events, { levels: ["INFO", "WARN"] }, a, false).length, 2);
   assert.equal(filterEvents(events, { levels: ["INFO", "WARN"], target: "sync" }, a, false).length, 1);
+  assert.equal(filterEvents(events, { levels: ["INFO", "WARN"], section: "sync" }, a, false).length, 1);
   assert.equal(filterEvents(events, { levels: ["INFO", "WARN"], text: "THREE" }, a, false).length, 1);
+});
+
+/**
+ * The filter that turns a log viewer into something that answers "what happened when I pressed
+ * send". The four characters on an error banner are the whole query, so a prefix match on the short
+ * form has to work as well as the full sixteen.
+ */
+test("a trace filter narrows a feed to one operation, from either form of the id", () => {
+  const a = makeAliases();
+  const mine = "7f2c000000000001";
+  const events = [
+    ev({ seq: 1, code: "IPC.COMMAND.RECEIVED", trace: mine }),
+    ev({ seq: 2, code: "NET.CHURN", trace: "64aa000000000009" }),
+    ev({ seq: 3, code: "SYNC.POST", trace: mine }),
+    ev({ seq: 4, code: "NET.LISTEN" }),
+  ];
+  assert.deepEqual(
+    filterEvents(events, { levels: ["INFO"], trace: "7f2c" }, a, false).map((e) => e.seq),
+    [1, 3],
+  );
+  assert.deepEqual(filterEvents(events, { levels: ["INFO"], trace: mine }, a, false).map((e) => e.seq), [1, 3]);
+  // An event with no trace must never be swept in with one that has none typed either.
+  assert.deepEqual(traceEvents(events, mine).map((e) => e.seq), [1, 3]);
+  assert.deepEqual(traceEvents(events, ""), [], "no trace asked for is not every traceless event");
 });
 
 test("a filter can search the masked text while redaction is on", () => {
   const a = makeAliases();
-  const events = [ev({ seq: 1, message: "dial 203.0.113.9" })];
+  const events = [bridged("dial 203.0.113.9", { seq: 1 })];
   assert.equal(filterEvents(events, { levels: ["INFO"], text: "[ip 1]" }, a, true).length, 1);
+});
+
+// --- capture control --------------------------------------------------------------------------
+
+test("every capture mode says what choosing it does, in the terms of the decision", () => {
+  // The one control in the app that changes how much of the user's own network is written down.
+  // A mode with no note would be a switch whose consequence is discoverable only by exporting
+  // twice and comparing.
+  for (const mode of CAPTURE_MODES) {
+    assert.ok(captureModeNote(mode).length > 40, `${mode} explains itself`);
+  }
+  assert.match(captureModeNote("safe"), /pasted in public/);
+  assert.match(captureModeNote("enhanced"), /Read a report before sharing it/);
+  assert.match(captureModeNote("full"), /forgotten at the next launch/);
+  assert.equal(captureModeNote("nonsense"), "");
+});
+
+test("the modes that start recording addresses are the ones that ask first", () => {
+  assert.ok(captureModeIsRevealing("enhanced"));
+  assert.ok(captureModeIsRevealing("full"));
+  assert.ok(!captureModeIsRevealing("safe"), "the default must not nag");
+  assert.ok(!captureModeIsRevealing("off"));
 });
 
 test("appending a page never repeats what is already held and stays bounded", () => {
@@ -253,10 +398,14 @@ test("durations read as a countdown, and a sub-second wait is not a stuck zero",
 test("a copied bundle states its redaction mode and carries the privacy contract", () => {
   // The person who receives a pasted report never read the footer it came from.
   const text = copyBundle(
-    { version: "0.3.0", at: Date.UTC(2026, 7, 23), redacted: true },
+    { version: "0.3.0", at: Date.UTC(2026, 7, 23), redacted: true, capture: "safe", session: "eb887278" },
     [{ title: "network", lines: ["a", "b"] }],
   );
   assert.match(text, /redaction: on/);
+  // Safe and Enhanced reports look alike and mean very different things, so a report says which it
+  // is rather than leaving the reader to infer it from whether an address looks complete.
+  assert.match(text, /capture: safe/);
+  assert.match(text, /session: eb887278/, "so an excerpt can be matched back to its report");
   assert.match(text, /== NETWORK ==/);
   // Describes what a report may contain rather than promising what it does not. The old sentence
   // ended "never includes ... names", and the report writes every server's name into itself: a
@@ -415,7 +564,7 @@ function pager(total: number, pageSize = 500) {
     calls += 1;
     const out: LogEvent[] = [];
     for (let seq = afterSeq + 1; seq <= total && out.length < Math.min(limit, pageSize); seq += 1) {
-      out.push({ seq, at_ms: 0, level: "INFO", target: "catcoms_sync", message: `e${seq}`, fields: [] });
+      out.push(bridged(`e${seq}`, { seq, at_ms: 0, target: "catcoms_sync", section: "sync", view: "backend" }));
     }
     return out;
   };
@@ -447,7 +596,7 @@ test("a native side that stops advancing cannot spin the export forever", async 
   let calls = 0;
   const stuck = async () => {
     calls += 1;
-    return [{ seq: 1, at_ms: 0, level: "INFO", target: "t", message: "same", fields: [] }];
+    return [bridged("same", { seq: 1, at_ms: 0, target: "t" })];
   };
   const all = await collectAllEvents(stuck, { pageSize: 10 });
   assert.equal(calls, 1, "the sequence did not advance, so it stopped");

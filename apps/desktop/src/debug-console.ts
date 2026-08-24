@@ -13,16 +13,52 @@
  * than no bug report.
  */
 
-/** One diagnostic event, as `get_console_log` returns it. */
+/** One field of an event, rendered at the session's capture mode. */
+export type LogField = {
+  name: string;
+  value: string;
+  /** Whether a higher capture mode would show more of this value. */
+  sensitive: boolean;
+};
+
+/**
+ * One diagnostic event, as `get_console_log` returns it.
+ *
+ * The canonical event, carried whole. This used to be a flattened `tracing` line: the section, the
+ * phase, the span parentage and the references were dropped on the way here, twelve of the trace's
+ * sixteen characters with them, and every value arrived rendered at a hard-coded Enhanced whatever
+ * the user had chosen. The console then guessed the sections back from target names and by
+ * searching the text for the word "voice", which is why a migrated voice event stopped appearing in
+ * the voice section the moment its prose became a code. Found by adversarial review (P3-005).
+ */
 export type LogEvent = {
   seq: number;
   at_ms: number;
+  /** Milliseconds since the process started. Never goes backwards, unlike `at_ms`. */
+  monotonic_ms: number;
+  /** The canonical section, one of twenty-two: `join`, `transport`, `channels`. */
+  section: string;
+  /** The console section it belongs under, one of six. Decided natively, never guessed here. */
+  view: string;
   /** `ERROR` | `WARN` | `INFO` | `DEBUG` | `TRACE`. */
   level: string;
-  /** The emitting module: `catcoms_net`, `catcoms_sync`, `catcoms_ui` for the webview, and so on. */
+  /** A stable `AREA.COMPONENT.OUTCOME` code, or `LOG.TRACING.EVENT` for an un-migrated call site. */
+  code: string;
+  phase: string;
+  operation: string;
+  /** Sixteen hex characters, or empty when the event belongs to no operation. */
+  trace: string;
+  span: string;
+  parent_span: string;
+  /** Named subjects: `server`, `channel`, `peer`, `document`, `transfer`. */
+  refs: [string, string][];
+  duration_ms: number | null;
+  attempt: number | null;
+  /** The emitting module. Kept for locating the code that said this, no longer used to group. */
   target: string;
-  message: string;
-  fields: [string, string][];
+  fields: LogField[];
+  /** The capture mode this event was rendered at. */
+  capture: string;
 };
 
 /** The counters behind the header roll-up and the rail badges. */
@@ -30,20 +66,44 @@ export type LogStats = {
   errors: number;
   warnings: number;
   dropped: number;
+  /** Events the capture config excluded. A silent section is not the same as a quiet one. */
+  filtered: number;
   latest_seq: number;
   capacity: number;
+  capture: string;
+  session_id: string;
 };
 
 /**
+ * The code every un-migrated `tracing` event carries.
+ *
+ * Must match `BRIDGED_CODE` in `crates/catcoms-log/src/lib.rs`, which has a test pinning the
+ * literal for that reason. Counting these is how the migration's progress is measured, and the
+ * console renders their prose as the headline where a migrated event shows its code.
+ */
+export const BRIDGED_CODE = "LOG.TRACING.EVENT";
+
+/**
  * The webview's own tracing target. Everything the frontend logs arrives through `log_ui` under
- * this name, which is what lets one ring feed both the Backend and Frontend sections: they are the
- * same stream split on one field, so their counts can never drift apart.
+ * this name.
  */
 export const UI_TARGET = "catcoms_ui";
 
-/** Whether an event came from the webview rather than from Rust. */
+/**
+ * Whether an event came from the webview rather than from Rust.
+ *
+ * Reads the section the event states rather than sniffing its target. The two agree for a bridged
+ * console line, and only the section is right for a structured one: a webview event about voice
+ * signalling belongs in the voice section, not lumped into "frontend" because of which process
+ * happened to emit it.
+ */
 export function isFrontend(e: LogEvent): boolean {
-  return e.target === UI_TARGET;
+  return e.view === "frontend";
+}
+
+/** Whether an event belongs to one of the console's six sections. */
+export function inView(e: LogEvent, view: DbgSection): boolean {
+  return e.view === view;
 }
 
 /** Levels in severity order, loudest first. The console's chips are rendered in this order. */
@@ -151,19 +211,41 @@ export function maybeRedact(text: string, aliases: Aliases, on: boolean): string
 
 // --- feed lines --------------------------------------------------------------------------
 
+/** The short form of a trace, which is how one is referred to in prose. */
+export function shortTrace(trace: string): string {
+  return trace.slice(0, 4);
+}
+
 /**
- * One event as its rendered line, minus the level tag (which is a separate span so it can carry
- * the loud colour while the message stays readable).
+ * One event's body: the headline, then everything that qualifies it.
  *
- * Structured `tracing` fields are appended as `key=value`, which is how they read in the log file;
- * someone comparing a screenshot against a pasted log should not have to translate between two
- * renderings of the same event.
+ * Mirrors `event_line` in `crates/catcoms-diagnostics/src/render.rs`, which is what the export
+ * bundle will be written from. The two must stay in step, because a saved report that disagrees
+ * with the screenshot it arrived with makes the reader work out which one is lying before they can
+ * start on the bug.
+ *
+ * The headline is the event's **code**, which is the point of the migration: `SYNC.CATCHUP.STALLED`
+ * is greppable, countable and stable across rewording in a way that a sentence never is. An
+ * un-migrated `tracing` event has no code of its own, so its prose stands in; the substitution is
+ * keyed on the bridge's code rather than on "does it have a message field", so a structured event
+ * that happens to carry one still shows what it is.
  */
 export function eventText(e: LogEvent): string {
-  const fields = e.fields.map(([k, v]) => `${k}=${v}`).join(" ");
-  const head = e.message || "";
-  if (!fields) return head;
-  return head ? `${head} ${fields}` : fields;
+  const bits: string[] = [];
+  const bridged = e.code === BRIDGED_CODE;
+  const lead = bridged && e.fields[0]?.name === "message" ? e.fields[0] : null;
+  bits.push(lead ? lead.value : e.code);
+  // Absent for a bare observation, and its absence is information: an operation that started and
+  // never finished looks exactly like one that was never attempted without it.
+  if (e.phase && e.phase !== "observation") bits.push(`phase=${e.phase}`);
+  if (e.duration_ms != null) bits.push(`duration=${e.duration_ms}ms`);
+  if (e.attempt != null) bits.push(`attempt=${e.attempt}`);
+  for (const [name, value] of e.refs) bits.push(`${name}=${value}`);
+  for (const f of e.fields) {
+    if (f === lead) continue;
+    bits.push(`${f.name}=${f.value}`);
+  }
+  return bits.join(" ");
 }
 
 /**
@@ -177,12 +259,16 @@ export function eventParts(
   e: LogEvent,
   aliases: Aliases,
   redact: boolean,
-): { ts: string; level: string; target: string; text: string } {
+): { ts: string; level: string; section: string; trace: string; target: string; text: string } {
   return {
     ts: formatTime(e.at_ms),
     level: e.level,
-    // A frontend row would otherwise read `catcoms_ui` on every single line, which is a column
-    // that never varies inside the section that only shows that target.
+    // The canonical section, which is a column that actually varies inside a console section: the
+    // Network view holds transport, reachability, discovery and join events, and which one a line
+    // came from is most of what tells them apart.
+    section: e.section,
+    trace: e.trace ? shortTrace(e.trace) : "",
+    // A frontend row would otherwise read `catcoms_ui` on every single line.
     target: isFrontend(e) ? "" : e.target,
     text: maybeRedact(eventText(e), aliases, redact),
   };
@@ -191,8 +277,9 @@ export function eventParts(
 /** The full line as copy writes it and as the filter matches against. */
 export function eventLine(e: LogEvent, aliases: Aliases, redact: boolean): string {
   const p = eventParts(e, aliases, redact);
+  const trace = p.trace ? ` trace=${p.trace}` : "";
   const target = p.target ? ` ${p.target}` : "";
-  return `${p.ts} ${p.level.padEnd(5)}${target} ${p.text}`;
+  return `${p.ts} ${p.level.padEnd(5)} ${p.section.padEnd(12)}${trace}${target} ${p.text}`;
 }
 
 /** How a feed narrows what it shows. Display only: capture is never filtered here. */
@@ -200,6 +287,16 @@ export type FeedFilter = {
   levels: readonly string[];
   /** Substring match against the tracing target. Empty matches everything. */
   target?: string;
+  /** Exact match against the canonical section. Empty matches everything. */
+  section?: string;
+  /**
+   * Prefix match against the trace, in either the short or the full form.
+   *
+   * The filter the review asks for by name, and the one that turns the console from a log viewer
+   * into something that can answer "what happened when I pressed send": paste the four characters
+   * off an error banner and what is left is that operation and nothing else.
+   */
+  trace?: string;
   /** Case-insensitive substring match against the rendered line. Empty matches everything. */
   text?: string;
 };
@@ -218,12 +315,28 @@ export function filterEvents(
 ): LogEvent[] {
   const needle = (f.text ?? "").trim().toLowerCase();
   const target = (f.target ?? "").trim().toLowerCase();
+  const section = (f.section ?? "").trim().toLowerCase();
+  const trace = (f.trace ?? "").trim().toLowerCase();
   return events.filter((e) => {
     if (!f.levels.includes(e.level)) return false;
     if (target && !e.target.toLowerCase().includes(target)) return false;
+    if (section && e.section !== section) return false;
+    if (trace && !e.trace.toLowerCase().startsWith(trace)) return false;
     if (needle && !eventLine(e, aliases, redact).toLowerCase().includes(needle)) return false;
     return true;
   });
+}
+
+/**
+ * Every stage of one operation, oldest first.
+ *
+ * The question the whole correlation architecture exists to answer. Given "my message did not
+ * arrive", the evidence used to be spread across ten stages with nothing tying them together, so
+ * establishing which one failed meant matching wall-clock timestamps by eye across two formats.
+ */
+export function traceEvents(events: readonly LogEvent[], trace: string): LogEvent[] {
+  if (!trace) return [];
+  return events.filter((e) => e.trace === trace);
 }
 
 // --- the ring ----------------------------------------------------------------------------
@@ -497,6 +610,65 @@ export const DBG_SECTIONS: { id: DbgSection; label: string }[] = [
 /** How many events the webview holds. The native ring is deeper; this is what is rendered. */
 export const DBG_VIEW_CAP = 2000;
 
+// --- capture control -----------------------------------------------------------------------
+//
+// Two independent axes, which one on/off switch used to conflate. With a single switch the only
+// honest choices were "capture almost nothing" and "capture the transport layer narrating every
+// address this device has ever seen", so it stayed off and nobody had a log when they needed one.
+
+/** The four capture modes, quietest first. */
+export const CAPTURE_MODES = ["off", "safe", "enhanced", "full"] as const;
+export type CaptureMode = (typeof CAPTURE_MODES)[number];
+
+/** The levels a section can be captured at, plus off. Loudest-only first. */
+export const CAPTURE_LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] as const;
+
+/** One section's capture level, as `get_capture_config` returns it. */
+export type SectionCapture = {
+  id: string;
+  /** Which console section it feeds, so twenty-two rows group under six headings. */
+  view: string;
+  /** Null when the section is off entirely. */
+  level: string | null;
+};
+
+/** What the diagnostics are capturing right now. */
+export type CaptureConfig = {
+  mode: string;
+  expires_at_restart: boolean;
+  /** Whether this mode may render literal addresses. Answered natively, not re-derived here. */
+  reveals_addresses: boolean;
+  sections: SectionCapture[];
+};
+
+/**
+ * What choosing a mode actually does, in the terms of the decision being made.
+ *
+ * Written out rather than left to a label because this is the one control in the app that changes
+ * how much of the user's own network is written down. Someone turning on Enhanced to chase a
+ * connection problem is making a real trade, and they can only make it if they are told what it is
+ * before they press it rather than by comparing two exports afterwards.
+ */
+export function captureModeNote(mode: string): string {
+  switch (mode) {
+    case "off":
+      return "Nothing is recorded and nothing accumulates. The console will stay empty, and there will be no evidence if something goes wrong while it is off.";
+    case "safe":
+      return "Stable codes, counts and durations. Identifiers become per-session references and addresses keep only their family and transport, so a Safe report can be pasted in public.";
+    case "enhanced":
+      return "Safe, plus literal addresses and transport detail. Choose this for a connection or multi-peer problem that cannot be located without knowing which address was actually tried. Read a report before sharing it.";
+    case "full":
+      return "Enhanced, plus per-span protocol detail. Maintainer reproduction only: it is loud, it reveals the most, and it is forgotten at the next launch rather than left running.";
+    default:
+      return "";
+  }
+}
+
+/** Whether a mode should be confirmed before it is entered. */
+export function captureModeIsRevealing(mode: string): boolean {
+  return mode === "enhanced" || mode === "full";
+}
+
 /** The CSS class that colours a feed line's level tag. */
 export function levelClass(level: string): string {
   return `lvl-${level === "ERROR" ? "err" : level.toLowerCase()}`;
@@ -652,16 +824,24 @@ export async function collectAllEvents(
  * Assemble the whole report.
  *
  * States its own redaction mode, because a reader who cannot tell masked output from real output
- * will read `[ip 1]` as a literal address and waste their time.
+ * will read `[ip 1]` as a literal address and waste their time. It states its capture mode for the
+ * stronger version of the same reason: Safe and Enhanced reports look alike and mean very different
+ * things, and a reader who assumes Safe will read a reduced address as the whole story while a
+ * reader who assumes Enhanced will go hunting for detail that was never captured.
+ *
+ * The session id is what matches an excerpt somebody pasted into a chat back to the report it was
+ * taken from, which is otherwise guesswork once two of them exist.
  */
 export function copyBundle(
-  meta: { version: string; at: number; redacted: boolean },
+  meta: { version: string; at: number; redacted: boolean; capture?: string; session?: string },
   sections: readonly { title: string; lines: string[] }[],
 ): string {
   const head = [
     `Mewtual debug console report`,
     `version: ${meta.version}`,
     `captured: ${new Date(meta.at).toISOString()}`,
+    ...(meta.session ? [`session: ${meta.session}`] : []),
+    ...(meta.capture ? [`capture: ${meta.capture}`] : []),
     `redaction: ${meta.redacted ? "on" : "off"}`,
   ].join("\n");
   const body = sections.map((s) => copySection(s.title, s.lines)).join("\n\n");

@@ -21,6 +21,15 @@
 //! No `serde`. Partly because this crate's job is capture and it should not take a serialisation
 //! dependency to do it, but mostly because determinism here means controlling field order exactly,
 //! and the value type is a small closed enum that takes about forty lines to write out.
+//!
+//! # Three renderings, one event
+//!
+//! [`event_line`] is text for a human, [`event_json`] is a line of an export bundle, and
+//! [`event_view`] is the structured form the debug console reads. They live in one file so they
+//! cannot quietly diverge about what an event contains: the console used to read a *different*
+//! projection living in another crate, which flattened the section, phase, span and references
+//! away and rendered every value at a hard-coded Enhanced. Most of what the app recorded was
+//! therefore discarded before it reached the only tool anyone actually looks at.
 
 use crate::config::CaptureMode;
 use crate::event::{DiagnosticEvent, SCHEMA_VERSION};
@@ -116,13 +125,7 @@ pub fn event_json(event: &DiagnosticEvent, mode: CaptureMode) -> String {
     if !event.refs.is_empty() {
         out.push_str(",\"refs\":{");
         let mut first = true;
-        for (name, value) in [
-            ("server", &event.refs.server),
-            ("channel", &event.refs.channel),
-            ("peer", &event.refs.peer),
-            ("document", &event.refs.document),
-            ("transfer", &event.refs.transfer),
-        ] {
+        for (name, value) in ref_slots(event) {
             if let Some(reference) = value {
                 if !first {
                     out.push(',');
@@ -181,13 +184,7 @@ pub fn event_line(event: &DiagnosticEvent, mode: CaptureMode) -> String {
     if let Some(attempt) = event.attempt {
         out.push_str(&format!(" attempt={attempt}"));
     }
-    for (name, reference) in [
-        ("server", &event.refs.server),
-        ("channel", &event.refs.channel),
-        ("peer", &event.refs.peer),
-        ("document", &event.refs.document),
-        ("transfer", &event.refs.transfer),
-    ] {
+    for (name, reference) in ref_slots(event) {
         if let Some(value) = reference {
             out.push_str(&format!(" {name}={value}"));
         }
@@ -196,6 +193,123 @@ pub fn event_line(event: &DiagnosticEvent, mode: CaptureMode) -> String {
         out.push_str(&format!(" {name}={}", value.render(mode)));
     }
     out
+}
+
+/// The named references an event may carry, in the order every rendering lists them.
+///
+/// One array rather than the same five-entry literal repeated in each renderer, because a
+/// reference added to [`crate::event::Refs`] and forgotten in one of them is a subject that is
+/// recorded and never shown, which is indistinguishable from not having been recorded.
+fn ref_slots(event: &DiagnosticEvent) -> [(&'static str, &Option<crate::redact::SessionRef>); 5] {
+    [
+        ("server", &event.refs.server),
+        ("channel", &event.refs.channel),
+        ("peer", &event.refs.peer),
+        ("document", &event.refs.document),
+        ("transfer", &event.refs.transfer),
+    ]
+}
+
+/// One field of an event, rendered at a capture mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewField {
+    pub name: String,
+    pub value: String,
+    /// Whether this value would say more under a higher capture mode.
+    ///
+    /// Carried so a reader can be told what they are *not* seeing. A console that renders a
+    /// reduced address identically to a literal one leaves the user to discover the difference by
+    /// switching modes and comparing, which nobody does.
+    pub sensitive: bool,
+}
+
+/// One canonical event, rendered at a mode, with nothing flattened away.
+///
+/// The shape the debug console consumes. Every field of [`DiagnosticEvent`] survives, including
+/// the ones a line rendering has to drop for space: the canonical section as well as the console
+/// view it falls under, the full trace as well as the short form, and the span parentage that says
+/// which stage of an operation this was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventView {
+    pub seq: u64,
+    pub at_ms: u64,
+    pub monotonic_ms: u64,
+    /// The canonical section, one of twenty-two.
+    pub section: &'static str,
+    /// The console section this falls under, one of six. Stated natively so the console never has
+    /// to guess a section from a target name or by searching the text for the word "voice".
+    pub view: &'static str,
+    pub level: &'static str,
+    pub code: &'static str,
+    pub phase: &'static str,
+    pub operation: &'static str,
+    /// Sixteen hex characters, or empty when this event belongs to no operation.
+    pub trace: String,
+    pub span: String,
+    pub parent_span: String,
+    pub refs: Vec<(&'static str, String)>,
+    pub duration_ms: Option<u64>,
+    pub attempt: Option<u32>,
+    pub target: String,
+    pub fields: Vec<ViewField>,
+    /// The mode this was rendered at.
+    ///
+    /// Travels with every event rather than only in the payload's header, for the same reason
+    /// [`event_json`] carries it on every line: a Safe rendering and a Full one look alike and mean
+    /// very different things, and an excerpt that has been separated from its header must still say
+    /// which it is.
+    pub capture: &'static str,
+}
+
+/// One event as the debug console reads it.
+///
+/// The mode is a parameter, never a constant. The projection this replaced hard-coded Enhanced,
+/// which meant the console showed literal addresses whatever the user had chosen and the mode
+/// control could not have worked even once it existed.
+pub fn event_view(event: &DiagnosticEvent, mode: CaptureMode) -> EventView {
+    EventView {
+        seq: event.seq,
+        at_ms: event.at_ms,
+        monotonic_ms: event.monotonic_ms,
+        section: event.section.as_str(),
+        view: event.section.view().as_str(),
+        level: event.level.as_str(),
+        code: event.code,
+        phase: event.phase.as_str(),
+        operation: event.operation,
+        trace: if event.trace.is_set() {
+            event.trace.as_hex()
+        } else {
+            String::new()
+        },
+        span: if event.span.is_set() {
+            event.span.as_hex()
+        } else {
+            String::new()
+        },
+        parent_span: if event.parent_span.is_set() {
+            event.parent_span.as_hex()
+        } else {
+            String::new()
+        },
+        refs: ref_slots(event)
+            .into_iter()
+            .filter_map(|(name, slot)| slot.as_ref().map(|r| (name, r.as_str().to_string())))
+            .collect(),
+        duration_ms: event.duration_ms,
+        attempt: event.attempt,
+        target: event.target.clone(),
+        fields: event
+            .fields
+            .iter()
+            .map(|(name, value)| ViewField {
+                name: name.as_str().to_string(),
+                value: value.render(mode),
+                sensitive: value.is_mode_sensitive(),
+            })
+            .collect(),
+        capture: mode.as_str(),
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +428,137 @@ mod tests {
         assert!(line.contains("JOIN.ROUTES.EXHAUSTED"), "{line}");
         assert!(line.contains("duration=60123ms"), "{line}");
         assert!(line.contains("attempt=4"), "{line}");
+    }
+
+    /// The finding this rendering exists to answer (P3-005). The console was fed a projection that
+    /// dropped the section, the phase, the span parentage and the references, kept only four
+    /// characters of the trace, and rendered every value at a hard-coded Enhanced. Most of what the
+    /// instrumentation recorded never reached the tool anyone looks at.
+    ///
+    /// Asserted field by field rather than against a golden blob, so a future change that drops one
+    /// of them names the one it dropped.
+    #[test]
+    fn every_canonical_field_survives_into_the_view() {
+        let view = event_view(&sample(), CaptureMode::Safe);
+
+        assert_eq!(view.seq, 4812);
+        assert_eq!(view.at_ms, 1_787_000_000_000);
+        assert_eq!(view.monotonic_ms, 12_443);
+        assert_eq!(
+            view.section, "join",
+            "the canonical section, one of twenty-two"
+        );
+        assert_eq!(
+            view.view, "network",
+            "and the console section it falls under"
+        );
+        assert_eq!(view.level, "WARN");
+        assert_eq!(view.code, "JOIN.ROUTES.EXHAUSTED");
+        assert_eq!(view.phase, "failure");
+        assert_eq!(view.operation, "join_server");
+        assert_eq!(
+            view.trace, "7f2c000000000001",
+            "the whole trace, not the four characters a line has room for"
+        );
+        assert_eq!(view.span, "00000000000091ab");
+        assert_eq!(
+            view.parent_span, "0000000000006dc4",
+            "the parentage that says which stage of the operation this was"
+        );
+        assert_eq!(view.duration_ms, Some(60_123));
+        assert_eq!(view.attempt, Some(4));
+        assert_eq!(view.target, "catcoms_sync");
+        assert_eq!(view.capture, "safe");
+
+        // References survive as structure, named, rather than being collapsed into text.
+        let named: Vec<&str> = view.refs.iter().map(|(name, _)| *name).collect();
+        assert_eq!(named, ["server", "peer"]);
+        assert!(view.refs.iter().all(|(_, value)| !value.is_empty()));
+
+        let fields: Vec<&str> = view.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            fields,
+            ["direct_candidates", "relay_candidates", "address", "reason"],
+            "in the order they were added, which is what makes a report diffable"
+        );
+        assert_eq!(view.fields[0].value, "4");
+    }
+
+    /// An unset trace or span must read as absent rather than as a run of zeroes, which a reader
+    /// would otherwise try to correlate against.
+    #[test]
+    fn an_event_that_belongs_to_no_operation_says_so() {
+        let view = event_view(
+            &DiagnosticEvent::info(Section::Sync, "SYNC.OK"),
+            CaptureMode::Safe,
+        );
+        assert_eq!(view.trace, "");
+        assert_eq!(view.span, "");
+        assert_eq!(view.parent_span, "");
+        assert!(view.refs.is_empty());
+        assert_eq!(view.phase, "observation");
+        assert_eq!(view.operation, "");
+    }
+
+    /// The half of P3-005 that was a privacy bug rather than a fidelity one: the projection
+    /// hard-coded Enhanced, so the console showed literal addresses whatever mode was chosen.
+    #[test]
+    fn the_same_event_renders_differently_at_each_mode() {
+        let event = sample();
+        let safe = event_view(&event, CaptureMode::Safe);
+        let enhanced = event_view(&event, CaptureMode::Enhanced);
+
+        let address_of = |v: &EventView| {
+            v.fields
+                .iter()
+                .find(|f| f.name == "address")
+                .expect("the sample carries an address")
+                .clone()
+        };
+        assert_eq!(address_of(&safe).value, "ip6/quic-v1");
+        assert_eq!(
+            address_of(&enhanced).value,
+            "/ip6/2001:db8::1/udp/31484/quic-v1"
+        );
+        assert_eq!(safe.capture, "safe");
+        assert_eq!(enhanced.capture, "enhanced");
+
+        // And the console can say what it is not showing, rather than leaving a reader to find out
+        // by switching modes and comparing.
+        assert!(address_of(&safe).sensitive);
+        assert!(
+            !safe
+                .fields
+                .iter()
+                .find(|f| f.name == "direct_candidates")
+                .unwrap()
+                .sensitive,
+            "a count says the same thing in every mode"
+        );
+    }
+
+    /// One event, three renderings, one set of facts. They live in one module so they cannot
+    /// disagree about what an event contains, and this is what would catch it if they did.
+    #[test]
+    fn the_three_renderings_agree_about_what_the_event_says() {
+        let event = sample();
+        let view = event_view(&event, CaptureMode::Safe);
+        let line = event_line(&event, CaptureMode::Safe);
+        let json = event_json(&event, CaptureMode::Safe);
+
+        assert!(line.contains(view.code) && json.contains(view.code));
+        assert!(line.contains(&view.trace[..4]) && json.contains(&view.trace));
+        for (name, value) in &view.refs {
+            assert!(line.contains(value), "{name} missing from the line: {line}");
+            assert!(json.contains(value), "{name} missing from the json: {json}");
+        }
+        for field in &view.fields {
+            assert!(
+                line.contains(&field.value),
+                "{} missing from the line: {line}",
+                field.name
+            );
+        }
     }
 
     #[test]

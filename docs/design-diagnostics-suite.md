@@ -50,7 +50,17 @@ how far the migration to structured codes has got.
 One switch forced a choice between capturing almost nothing and capturing the transport layer
 narrating every address the node sees. So it stayed off, and nobody had a log when they needed one.
 Mode (`Off`/`Safe`/`Enhanced`/`Full`) and per-section level move independently, and both change at
-runtime without a restart.
+runtime without a restart. Both are controls in the console's Capture card, and neither is
+persisted: a capture mode that survived a restart would be a privacy setting nobody remembers
+making, and `Full` is meant to expire on its own.
+
+**Capture starts Safe**, corrected from Enhanced. The original reasoning was that the in-memory
+store never touches the disk, so it could afford the more revealing rendering. That was wrong when
+it was written: the console has Copy and Save, so its contents reach a clipboard and a file on the
+first occasion anyone has a reason to look at them, which is the same occasion they are about to
+send them to somebody. Safe costs transport *debug*, which is not captured at all and so cannot be
+recovered by raising the mode afterwards; the console says how many events the settings excluded
+rather than letting that pass as a quiet period.
 
 ### 2.4 Typed errors add to the message, never replace it
 
@@ -82,7 +92,7 @@ Default on, one click to turn off permanently. Revisit before general release, n
 | M1 | Console out of `App.svelte` | done |
 | M2 | `catcoms-diagnostics`: canonical event, privacy model, store, renderers | done |
 | M3 | Correlation, typed errors, task supervision, invoke migration | subsystems done, correlation incomplete |
-| M4 | Rebuild the console on the hub | not started |
+| M4 | Rebuild the console on the hub | reading and capture control done; findings, checks and virtualised list outstanding |
 | M5 | Findings and checks | not started |
 | M6 | Export bundle and GitHub issue flow | partly: text export done |
 | M7 | Hardening, privacy property tests, performance budgets, CI gates | not started |
@@ -117,12 +127,37 @@ group tally stand in for it.
   the work the actor does *later* in response is not. So a `channel-updated` arriving two seconds
   after a send carries the emit's sequence number but not the send's trace, which is precisely the
   ten-stage question the milestone existed to answer. This is the next real step.
-* **The console consumes a lossy projection** (P3-005). `catcoms-log`'s `project()` flattens
-  section, phase, span and refs away and hard-codes Enhanced rendering, so the console cannot
-  faithfully show what the canonical model now records. The review argues M4 should be pulled
-  forward before more subsystems are instrumented, and that argument is sound: instrumenting
-  further widens the gap between what is recorded and what can be read.
 * `push_file_chunk` accepts a trace and ignores it, on purpose. See its signature.
+
+### M4, as far as it goes
+
+The console reads the canonical record now (P3-005). `catcoms-log`'s `LogRing` and its `project()`
+are **deleted** rather than deprecated, so nothing can reach for the flattening again;
+`catcoms_diagnostics::event_view` renders an event at a mode passed in by the caller, and the
+desktop bridge carries every field of it across.
+
+What that buys, concretely:
+
+* The console groups by the section an event states, not by which crate emitted it or by searching
+  the rendered text for the word "voice". A structured voice event from the webview is a voice
+  event; a storage line that mentions a voice memo is not.
+* A line shows its section, its trace and, for a migrated call site, its code, phase, duration,
+  attempt and references. Previously four characters of the trace survived and the rest did not.
+* The mode is a real control with a confirmation on the two modes that start writing this device's
+  addresses down, and every page and every event says which mode it was rendered at.
+* Per-section levels are adjustable, which is the half of decision 2.3 that had no user interface.
+* Storage gained a feed, so an integrity failure or an abandoned upload has somewhere to appear.
+* A trace filter, so pasting four characters off an error banner narrows every feed to that one
+  operation.
+
+Still outstanding for M4: the findings panel, the checks panel, the notes pad, and the virtualised
+list the review asks for. The current feeds render a capped slice, which is bounded but is not the
+same thing.
+
+**Two renderers now describe one event.** `eventText` in `debug-console.ts` deliberately mirrors
+`event_line` in `render.rs`, because the console composes the report text today and M6's bundle will
+be written natively. They agree by inspection and by the comment on each; that is weaker than a
+shared implementation, and M6 should collapse them rather than add a third.
 
 ### Corrections made after review
 
@@ -136,6 +171,17 @@ group tally stand in for it.
   bridge carries arbitrary prose. The wording now describes what a report may contain and asks the
   reader to check. The real fix is the export validator, which is M6's work; until it exists the
   honest sentence is the fix, because a false safety label is worse than none.
+* **P3-005 (high), fixed.** See "M4, as far as it goes" above.
+* **P3-011 (medium), fixed.** A trace minted in the webview arrived as a *field* called `trace`, so
+  it rendered as text, never reached `DiagnosticHub::trace`, and could not gather the webview's half
+  of an operation with the native half. Correlation stopped precisely at the bridge it exists to
+  cross. Both doors the webview can knock on now share one `parse_trace`, and an all-zero trace is
+  treated as absent rather than as something to correlate on.
+* **P3-007 (high), fixed.** The console's poll ran the log read and one `get_member_routes` per
+  server on the same one-second tick, with no guard, so five servers meant five round trips a second
+  and a tick that overran simply had another started on top of it. The two polls are separate now,
+  each with a re-entrancy guard; reachability runs every third tick, only while a section that
+  renders it is open, and fans out concurrently rather than walking the list.
 
 ## 4. Deferred, with reasons
 
@@ -157,15 +203,12 @@ and it is sound: more instrumentation widens the gap between what is recorded an
 
 | ID | Sev | Open finding | Note |
 |---|---|---|---|
-| P3-005 | High | The console consumes a lossy, hard-coded Enhanced projection | **Start here.** This is M4, pulled forward. |
-| P3-004 | High | Trace correlation stops before the actor and event pipeline | M3's actual headline requirement. |
+| P3-004 | High | Trace correlation stops before the actor and event pipeline | **Start here.** M3's actual headline requirement. |
 | P3-010 | High | Event sequencing detects gaps but does not repair them | Pairs with P3-004. |
-| P3-011 | Med | Frontend structured events flatten into `UI.EVENT` | Falls out of P3-005. |
 | P3-006 | High | Async frontend diagnostic-send failures are silently uncounted | The batcher counts sync throws, not rejected promises. |
-| P3-007 | High | Console polling can overlap and scales linearly with server count | One `get_member_routes` per server per second, unguarded. |
 | P3-008 | High | A formatted event has no size bound before allocation or queuing | I removed `MAX_EVENT_CHARS` when the ring moved to the hub. |
 | P3-009 | High | Task supervision misses the paths that make the UI silently stale | Only actor tasks are supervised. |
-| P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. |
+| P3-012 | Med | Console/export reads clone events under the global hub mutex | Contradicts the hot-path work; the read side was never audited. Now worse, not better: a page renders every field. |
 | P3-013 | Med | The event format permits duplicate JSON keys and forged text rows | My hand-rolled JSON does not reject repeated field names. |
 | P3-014 | Med | Capture modes cannot override the tracing layer's static filter | Already known and deferred; see section 4. |
 | P3-015 | Med | Redaction and frontend field ordering break deterministic export | Directly undercuts the determinism claim in `render.rs`. |

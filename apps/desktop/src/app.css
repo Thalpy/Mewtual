@@ -13875,10 +13875,67 @@ button.dbg-lvl.on.l-trace {
 }
 .dbg-target {
   flex: none;
+  min-width: 11ch;
   color: var(--muted);
+}
+/* The four characters that tie a line to the rest of its operation. Given a column of its own
+   rather than left inside the message, because scanning for a repeated trace down the left edge is
+   how a reader picks one operation out of an interleaved feed. */
+.dbg-trace {
+  flex: none;
+  min-width: 4ch;
+  color: var(--accent);
 }
 .dbg-msg {
   min-width: 0;
+}
+/* Capture mode: four exclusive choices, laid out as one row so the trade between them reads as a
+   single decision rather than four independent switches. */
+.dbg-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+button.dbg-mode {
+  cursor: pointer;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border-soft);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  padding: 4px 10px;
+  border-radius: var(--r);
+  width: auto;
+  flex: none;
+}
+button.dbg-mode:hover {
+  color: var(--text-2);
+  border-color: var(--border);
+}
+button.dbg-mode.on {
+  color: var(--text);
+  border-color: color-mix(in oklab, var(--accent) 50%, transparent);
+  background: var(--accent-dim);
+}
+/* Twenty-two rows is a reference list, not something to scroll the whole page past. It scrolls in
+   place, and the columns sit next to each other rather than being pushed to opposite edges by the
+   full-width table the reachability view wants. */
+.dbg-capture-sections {
+  max-height: 260px;
+  max-width: 460px;
+  overflow-y: auto;
+}
+.dbg-capture-sections select {
+  width: 9ch;
+  padding: 1px 2px;
+  background: var(--bg-elev);
+  color: var(--text-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: 0.68rem;
 }
 .dbg-pii {
   /* No visual change unredacted; the hook exists so the markup says what is maskable. */
