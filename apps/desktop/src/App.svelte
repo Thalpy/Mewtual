@@ -272,9 +272,9 @@
     backupBusy = true;
     backupResult = null;
     try {
-      backupResult = await invoke("create_backup");
+      backupResult = (await invokeDebugged<typeof backupResult>("create_backup")).value;
     } catch (e) {
-      error = String(e);
+      error = errorText(e);
     } finally {
       backupBusy = false;
     }
@@ -4528,7 +4528,9 @@
     // latency that exists anyway, and a failed unlock aborts it below.
     if (unlockMethod === "sigil") startSummon();
     try {
-      const reloaded = await invoke<Reloaded[]>("unlock", { passphrase: secret });
+      // The passphrase is an argument and never a recorded field: invokeDebugged records the
+      // command name and its outcome, not what it was called with.
+      const { value: reloaded } = await invokeDebugged<Reloaded[]>("unlock", { passphrase: secret });
       passphrase = "";
       sigilStrokes = [];
       sigilDrawing = [];

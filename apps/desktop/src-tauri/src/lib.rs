@@ -8686,8 +8686,24 @@ fn backup_destination(downloads: &Path, stamp: u64) -> Result<PathBuf, String> {
 /// secret; no plaintext snapshots, drafts, identities or attachments are written to Downloads.
 /// Restore is intentionally a locked-screen operation and is not performed by this command.
 #[tauri::command]
-async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<BackupResult, String> {
-    require_unlocked_session(&state).await?;
+async fn create_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trace: Option<String>,
+) -> Result<BackupResult, AppError> {
+    // A backup is the operation whose silent failure costs the most. It writes every server's
+    // snapshot and the registry before copying, so a failure part-way through is a partial image,
+    // and the phases say which part.
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Vault,
+        "create_backup",
+        None,
+        None,
+    );
+    require_unlocked_session(&state)
+        .await
+        .map_err(|e| op.fail(codes::SESSION_LOCKED, e))?;
     // Capture every actor first, without holding either state lock across its round trip.
     let servers: Vec<(u64, ServerActor, ServerRecord)> = {
         let servers = state.servers.lock().await;
@@ -8709,36 +8725,51 @@ async fn create_backup(app: AppHandle, state: State<'_, AppState>) -> Result<Bac
     };
     let mut snapshots = Vec::with_capacity(servers.len());
     for (id, actor, _) in &servers {
-        snapshots.push((*id, actor.snapshot().await?));
+        snapshots.push((
+            *id,
+            actor
+                .snapshot()
+                .await
+                .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?,
+        ));
     }
     let records: Vec<ServerRecord> = servers.into_iter().map(|(_, _, record)| record).collect();
+    op.stage("VAULT.BACKUP.SNAPSHOTTED");
 
     let downloads = app
         .path()
         .download_dir()
-        .map_err(|error| error.to_string())?;
-    let destination = backup_destination(&downloads, SystemClock.now_ms())?;
+        .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
+    let destination = backup_destination(&downloads, SystemClock.now_ms())
+        .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?;
     let (files, bytes) = {
         // Serialize persistence and the filesystem copy with every other vault write so the
         // exported registry and snapshots form one coherent point-in-time image.
         let guard = state.store.lock().await;
-        let store = guard
-            .as_ref()
-            .ok_or_else(|| "unlock the vault before creating a backup".to_string())?;
+        let store = guard.as_ref().ok_or_else(|| {
+            op.fail(
+                codes::VAULT_BACKUP_FAILED,
+                "unlock the vault before creating a backup",
+            )
+        })?;
         let mut rng = OsCryptoRng;
         for (id, snapshot) in snapshots {
             store
                 .save_server(id, &snapshot, &mut rng)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
         }
         store
             .save_registry(&records, &mut rng)
-            .map_err(|error| error.to_string())?;
-        copy_backup_tree(store.backup_source_dir(), &destination)?
+            .map_err(|error| op.fail(codes::VAULT_BACKUP_FAILED, error.to_string()))?;
+        copy_backup_tree(store.backup_source_dir(), &destination)
+            .map_err(|e| op.fail(codes::VAULT_BACKUP_FAILED, e))?
     };
     let warning = reveal_path(&destination)
         .err()
         .map(|error| format!("The backup was created, but Downloads could not be opened: {error}"));
+    // The bytes are on disk by this point; failing to open a file manager afterwards is not a
+    // failed backup and must not be recorded as one.
+    op.succeeded("VAULT.BACKUP.WRITTEN");
     Ok(BackupResult {
         path: destination.to_string_lossy().into_owned(),
         files,
@@ -9087,26 +9118,42 @@ async fn unlock(
     app: AppHandle,
     state: State<'_, AppState>,
     passphrase: String,
-) -> Result<Vec<ReloadedServer>, String> {
+    trace: Option<String>,
+) -> Result<Vec<ReloadedServer>, AppError> {
+    // Unlock is the one operation whose failures a user meets before anything else works, and the
+    // three of them are entirely different: the passphrase is wrong, the vault is unreadable, or it
+    // opened and some servers did not come back. All three were one string.
+    let op = Operation::start_maybe(
+        trace,
+        catcoms_diagnostics::Section::Vault,
+        "unlock",
+        None,
+        None,
+    );
     let dir = app
         .path()
         .app_data_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| op.fail(codes::VAULT_READ_FAILED, e.to_string()))?
         .join("vault");
     let mut rng = OsCryptoRng;
     // Opening the vault verifies the passphrase (the DEK won't decrypt otherwise).
-    let store =
-        ServerStore::open(&dir, passphrase.as_bytes(), &mut rng).map_err(|e| e.to_string())?;
+    let store = ServerStore::open(&dir, passphrase.as_bytes(), &mut rng)
+        .map_err(|e| op.fail(codes::VAULT_LOCKED_OUT, e.to_string()))?;
 
     // If the vault is already unlocked (e.g. a dev HMR re-mounted the frontend while the Rust
     // process kept running), don't reload from disk; that would spawn a duplicate actor +
     // transport per server. Return the servers already registered so the rail repopulates.
     if state.store.lock().await.is_some() {
         *state.session_resumable.lock().await = true;
+        // Not a fresh unlock. Worth its own outcome: a session that came back without touching
+        // the disk explains why nothing was reloaded and why no restore failures appear.
+        op.succeeded("VAULT.UNLOCK.ALREADY_OPEN");
         return Ok(running_servers(&state).await);
     }
 
-    let records = store.load_registry().map_err(|e| e.to_string())?;
+    let records = store
+        .load_registry()
+        .map_err(|e| op.fail(codes::VAULT_READ_FAILED, e.to_string()))?;
 
     // Restore the grant-ceremony ledger: a pairing request must stay single-use across a restart,
     // or re-pasting one would mint a second bundle. A corrupt/missing blob leaves an empty ledger
@@ -9150,10 +9197,15 @@ async fn unlock(
     }
 
     let mut reloaded = Vec::new();
+    let mut failed = 0usize;
     for (record, snap) in records.iter().zip(snapshots.iter()) {
-        let Some(bytes) = snap else { continue };
+        let Some(bytes) = snap else {
+            failed += 1;
+            continue;
+        };
         if let Err(e) = reload_one(&app, &state, bytes, record).await {
             tracing::error!(target: "catcoms_app", server = record.id, error = %e, "VAULT.SERVER.RESTORE_FAILED");
+            failed += 1;
             continue;
         }
         reloaded.push(ReloadedServer {
@@ -9163,7 +9215,8 @@ async fn unlock(
             channel: channel_id("general").to_string(),
             channels: ui_channels(
                 actor_of_unchecked(&state, record.id)
-                    .await?
+                    .await
+                    .map_err(|e| op.fail(codes::SERVER_UNAVAILABLE, e))?
                     .channels()
                     .await,
             ),
@@ -9171,6 +9224,28 @@ async fn unlock(
         });
     }
     *state.session_resumable.lock().await = true;
+    // The summary that makes a partial unlock visible.
+    //
+    // Individual failures already log, but an unlock that returns four servers when the registry
+    // held five is reported to the user as a success, and the missing one simply is not on the
+    // rail. Somebody noticing that a week later has no way to tell whether the server was left,
+    // never joined, or failed to restore every single launch since. This is the difference between
+    // those, at a level Safe mode keeps when anything went wrong.
+    if failed > 0 {
+        tracing::warn!(
+            target: "catcoms_app",
+            restored = reloaded.len(),
+            failed,
+            expected = records.len(),
+            "VAULT.UNLOCK.PARTIAL"
+        );
+    } else {
+        tracing::info!(
+            target: "catcoms_app",
+            restored = reloaded.len(),
+            "VAULT.UNLOCK.COMPLETED"
+        );
+    }
     Ok(reloaded)
 }
 

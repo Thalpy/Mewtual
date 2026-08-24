@@ -173,6 +173,30 @@ pub mod codes {
         remediation: Some(Remediation::Retry),
     };
 
+    /// The vault would not open. Overwhelmingly a wrong passphrase, which is why it is retryable
+    /// and why the message is left exactly as it was: telling somebody their passphrase is wrong
+    /// is the entire useful content of this failure.
+    pub const VAULT_LOCKED_OUT: ErrorCode = ErrorCode {
+        code: "VAULT.OPEN.REFUSED",
+        retryable: true,
+        remediation: Some(Remediation::AmendInput),
+    };
+
+    /// The vault opened and something inside it could not be read. A different problem from a
+    /// wrong passphrase, and one the user cannot fix by typing more carefully.
+    pub const VAULT_READ_FAILED: ErrorCode = ErrorCode {
+        code: "VAULT.READ.FAILED",
+        retryable: false,
+        remediation: Some(Remediation::Restart),
+    };
+
+    /// A backup that could not be written.
+    pub const VAULT_BACKUP_FAILED: ErrorCode = ErrorCode {
+        code: "VAULT.BACKUP.FAILED",
+        retryable: true,
+        remediation: Some(Remediation::Retry),
+    };
+
     /// Every registered code, for the tests that keep this honest. The manifest is the registry:
     /// a code missing from here is a code no test checks the shape of.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -191,6 +215,9 @@ pub mod codes {
         FILE_UPLOAD_FAILED,
         FILE_DOWNLOAD_FAILED,
         VOICE_SIGNAL_FAILED,
+        VAULT_LOCKED_OUT,
+        VAULT_READ_FAILED,
+        VAULT_BACKUP_FAILED,
     ];
 }
 
