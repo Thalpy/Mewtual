@@ -49,6 +49,7 @@
 
 pub mod config;
 pub mod event;
+pub mod export;
 pub mod hub;
 pub mod redact;
 pub mod render;
