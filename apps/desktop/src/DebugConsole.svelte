@@ -42,6 +42,7 @@
     mediaPathChip,
     routeChip,
     routeExplanation,
+    routeFindings,
     routeLines,
     routeState,
     shownCount,
@@ -245,7 +246,7 @@
     }
     return copyBundle({ version, at: Date.now(), redacted: redact }, [
       { title: "this device", lines: deviceLines(device, aliases, redact) },
-      { title: "network", lines: routeLines(servers, routes, aliases, redact) },
+      { title: "network", lines: routeLines(servers, routes, aliases, redact, hasIpv6) },
       { title: "voice", lines: voiceLines(voicePeers, aliases, redact) },
       { title: "backend", lines: backend.map(line) },
       { title: "frontend", lines: frontend.map(line) },
@@ -425,11 +426,25 @@
         <div class="dbg-sec">
           {#each servers as s (s.id)}
             {@const rows = routes[s.id] ?? []}
+            {@const findings = routeFindings(rows, hasIpv6)}
+            {#if findings.length}
+              <!-- Conclusions, above the table they were drawn from. Working this out used to mean
+                   reading multiaddrs one at a time and knowing whether this host had IPv6. -->
+              <div class="dbg-card">
+                <div class="dbg-card-h"><span>{s.name}: what is wrong</span></div>
+                {#each findings as f (f.code)}
+                  <p class="dbg-finding {f.severity}">
+                    <span class="chip {f.severity}">{f.code}</span>
+                    {f.detail}
+                  </p>
+                {/each}
+              </div>
+            {/if}
             <div class="dbg-card">
               <div class="dbg-card-h">
                 <span>{s.name}</span>
                 <span class="dbg-card-actions">
-                  <button class="ghost small" onclick={() => copy("routes", routeLines(servers, routes, aliases, redact).join("\n"))}>
+                  <button class="ghost small" onclick={() => copy("routes", routeLines(servers, routes, aliases, redact, hasIpv6).join("\n"))}>
                     {copied === "routes" ? "Copied" : "Copy"}
                   </button>
                 </span>

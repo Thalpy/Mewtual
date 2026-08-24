@@ -350,6 +350,102 @@ export function isIpv6Addr(addr: string): boolean {
   return addr.startsWith("/ip6/");
 }
 
+/** One conclusion about why members cannot be reached, across a whole server. */
+export type RouteFinding = {
+  /** A stable code, so this can be counted and searched rather than read. */
+  code: string;
+  severity: "warn" | "danger";
+  /** How many members this accounts for. */
+  affected: number;
+  /** One sentence a person can act on. Never contains an address. */
+  detail: string;
+};
+
+/**
+ * "1 member" / "3 members", because "member(s)" is the sort of thing that makes a person trust the
+ * rest of the sentence a little less.
+ */
+function members(n: number): string {
+  return n === 1 ? "1 member" : `${n} members`;
+}
+
+/**
+ * Diagnose a server's reachability as a whole, rather than one member at a time.
+ *
+ * `routeExplanation` answers "what is happening with this member", which is the right question when
+ * you already suspect a member. The question nobody could answer was the aggregate one: a node sat
+ * isolated for an hour dialling addresses it could never reach, and the evidence for that was a
+ * scattering of raw `sendmsg` warnings from inside the QUIC stack. Working it out required reading
+ * multiaddrs one at a time and knowing that the host had no IPv6 route.
+ *
+ * These are conclusions, not observations, and they carry codes so they can be counted across
+ * reports instead of re-derived by whoever is reading.
+ */
+export function routeFindings(routes: readonly MemberRoute[], hasIpv6: boolean): RouteFinding[] {
+  const findings: RouteFinding[] = [];
+  if (routes.length === 0) return findings;
+
+  const unreachable = routes.filter((r) => routeState(r) !== "connected");
+  if (unreachable.length === 0) return findings;
+
+  // The failure that stranded a node for an hour. Every candidate is IPv6 on a host with no IPv6
+  // route, so each dial fails instantly and forever, and nothing about a retry will ever help.
+  const v6Only = unreachable.filter(
+    (r) => r.addresses.length > 0 && r.addresses.every(isIpv6Addr),
+  );
+  if (!hasIpv6 && v6Only.length > 0) {
+    findings.push({
+      code: "NET.ROUTE.NO_IPV6_PATH",
+      severity: "danger",
+      affected: v6Only.length,
+      detail:
+        `${members(v6Only.length)} ${v6Only.length === 1 ? "advertises" : "advertise"} only IPv6 ` +
+        `addresses and this device has no IPv6 route, so every attempt fails immediately. Retrying ` +
+        `cannot help: they need an IPv4 or relay route, or this device needs IPv6.`,
+    });
+  }
+
+  const noRecord = unreachable.filter((r) => routeState(r) === "no-record");
+  if (noRecord.length > 0) {
+    findings.push({
+      code: "NET.ROUTE.NO_RECORD",
+      severity: "warn",
+      affected: noRecord.length,
+      detail:
+        `${members(noRecord.length)} ${noRecord.length === 1 ? "has" : "have"} no signed peer ` +
+        `record yet, so ${noRecord.length === 1 ? "it" : "they"} cannot be dialled, called or sent ` +
+        `a friend request. Records arrive over PEX once any member holding them is reachable.`,
+    });
+  }
+
+  const noRoute = unreachable.filter((r) => routeState(r) === "no-route");
+  if (noRoute.length > 0) {
+    findings.push({
+      code: "NET.ROUTE.NO_DIALABLE_ADDRESS",
+      severity: "warn",
+      affected: noRoute.length,
+      detail:
+        `${members(noRoute.length)} ${noRoute.length === 1 ? "has" : "have"} a record carrying no ` +
+        `dialable address, so nothing can be attempted until one is published.`,
+    });
+  }
+
+  // Reported last because it is the consequence, and the findings above are the cause. A reader
+  // scanning from the top meets the explanation before the symptom.
+  if (unreachable.length === routes.length) {
+    findings.push({
+      code: "NET.ROUTE.ISOLATED",
+      severity: "danger",
+      affected: routes.length,
+      detail:
+        routes.length === 1
+          ? "This server's only other member is not reachable from here."
+          : `Not one of this server's ${routes.length} other members is reachable from here.`,
+    });
+  }
+  return findings;
+}
+
 // --- what the console is given ------------------------------------------------------------
 //
 // The console takes plain data and nothing else. It is a viewer over the diagnostics, not a second
@@ -453,22 +549,33 @@ export function deviceLines(device: DebugDevice | null, aliases: Aliases, redact
   ];
 }
 
-/** Every member's reachability as copyable lines, the same values the table renders. */
+/**
+ * Every member's reachability as copyable lines, the same values the table renders.
+ *
+ * Each server's findings lead, before its rows. Whoever receives a pasted report should meet the
+ * conclusion before the evidence: the rows are what the conclusion was drawn from, and asking a
+ * reader to re-derive it from a column of multiaddrs is how the original incident stayed
+ * undiagnosed for an hour.
+ */
 export function routeLines(
   servers: readonly DebugServer[],
   routes: Readonly<Record<number, MemberRoute[]>>,
   aliases: Aliases,
   redact: boolean,
+  hasIpv6 = true,
 ): string[] {
   const mask = (s: string) => maybeRedact(s, aliases, redact);
-  return servers.flatMap((s) =>
-    (routes[s.id] ?? []).map((r) => {
+  return servers.flatMap((s) => [
+    ...routeFindings(routes[s.id] ?? [], hasIpv6).map(
+      (f) => `${s.name} [${f.severity.toUpperCase()}] ${f.code} (${f.affected}) ${f.detail}`,
+    ),
+    ...(routes[s.id] ?? []).map((r) => {
       const chip = routeChip(routeState(r));
       const addresses = r.addresses.map(mask).join(" ") || "(no address)";
       const next = r.next_dial_in_ms ? formatDuration(r.next_dial_in_ms) : "-";
       return `${s.name} ${mask(r.fingerprint)} ${chip.label} peer=${mask(r.peer) || "(none)"} seq=${r.seq} fails=${r.dial_attempts} next=${next} ${addresses}`;
     }),
-  );
+  ]);
 }
 
 /** The live call's per-peer state as copyable lines. Empty outside a call. */

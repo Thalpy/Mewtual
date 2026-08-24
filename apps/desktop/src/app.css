@@ -13564,6 +13564,19 @@ button.dbg-rail-item.active {
   color: var(--ok);
   margin-left: 6px;
 }
+/* A conclusion, above the table it was drawn from. Coloured by job like every other status here:
+   danger means retrying will not fix it, warn means it may resolve on its own. */
+.dbg-finding {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-2);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.dbg-finding .chip {
+  flex: none;
+}
 .dbg-redact {
   margin-left: auto;
   flex: none;

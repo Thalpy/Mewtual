@@ -24,6 +24,7 @@ import {
   deviceLines,
   levelClass,
   mediaPathChip,
+  routeFindings,
   routeLines,
   voiceLines,
   webrtcChip,
@@ -302,10 +303,13 @@ test("device lines are redacted by the same rules the screen uses", () => {
   assert.ok(!lines[0].includes("203.0.113.9"), "the real address must not survive redaction");
 });
 
+/** The row lines, as distinct from the findings that now lead each server's block. */
+const rowLines = (lines: string[]) => lines.filter((l) => !/\[(WARN|DANGER)\]/.test(l));
+
 test("route lines carry the state, the counters and every candidate address", () => {
   const servers = [{ id: 1, name: "Studio" }];
   const routes = { 1: [{ ...route, dial_attempts: 3, next_dial_in_ms: 42_000 }] };
-  const [line] = routeLines(servers, routes, makeAliases(), false);
+  const [line] = rowLines(routeLines(servers, routes, makeAliases(), false));
   assert.match(line, /^Studio /);
   assert.match(line, /BACKING OFF/);
   assert.match(line, /fails=3/);
@@ -314,8 +318,36 @@ test("route lines carry the state, the counters and every candidate address", ()
 });
 
 test("a member with no address says so rather than trailing off", () => {
-  const [line] = routeLines([{ id: 1, name: "Studio" }], { 1: [{ ...route, addresses: [] }] }, makeAliases(), false);
-  assert.match(line, /\(no address\)/);
+  const lines = routeLines([{ id: 1, name: "Studio" }], { 1: [{ ...route, addresses: [] }] }, makeAliases(), false);
+  assert.match(rowLines(lines)[0], /\(no address\)/);
+});
+
+/**
+ * Whoever receives a pasted report should meet the conclusion before the evidence. Asking a reader
+ * to re-derive it from a column of multiaddrs is how the original incident stayed undiagnosed for
+ * an hour.
+ */
+test("a copied report leads with what is wrong, then the rows it was drawn from", () => {
+  const lines = routeLines(
+    [{ id: 1, name: "Studio" }],
+    { 1: [{ ...route, addresses: ["/ip6/2001:db8::1/udp/1/quic-v1"], dial_attempts: 2 }] },
+    makeAliases(),
+    false,
+    false,
+  );
+  assert.match(lines[0], /\[DANGER\] NET\.ROUTE\.NO_IPV6_PATH/);
+  assert.match(lines[0], /^Studio /, "each finding names its server, as the rows do");
+  assert.ok(rowLines(lines).length === 1, "and the row still follows");
+});
+
+test("a healthy server's report is rows only, with nothing to conclude", () => {
+  const lines = routeLines(
+    [{ id: 1, name: "Studio" }],
+    { 1: [{ ...route, connected: true }] },
+    makeAliases(),
+    false,
+  );
+  assert.deepEqual(lines, rowLines(lines));
 });
 
 test("a server with no members contributes nothing rather than an empty row", () => {
@@ -422,4 +454,98 @@ test("the page budget bounds the export even if pages keep advancing", async () 
   const all = await collectAllEvents(source.page, { pageSize: 500, maxPages: 4 });
   assert.equal(all.length, 2000);
   assert.equal(source.calls, 4);
+});
+
+// --- aggregate route diagnosis ------------------------------------------------------------------
+//
+// routeExplanation answers "what is happening with this member", which is right once you already
+// suspect one. The question nobody could answer was the aggregate: a node sat isolated for an hour
+// and the evidence was a scattering of raw sendmsg warnings from inside the QUIC stack.
+
+const v6 = (fingerprint: string, over: Partial<MemberRoute> = {}): MemberRoute => ({
+  ...route,
+  fingerprint,
+  addresses: ["/ip6/2001:db8::1/udp/31484/quic-v1"],
+  dial_attempts: 3,
+  ...over,
+});
+
+test("a healthy server produces no findings at all", () => {
+  const connected = [{ ...route, connected: true }, { ...route, fingerprint: "b", connected: true }];
+  assert.deepEqual(routeFindings(connected, true), []);
+});
+
+test("a server with nobody else in it is not a reachability problem", () => {
+  assert.deepEqual(routeFindings([], false), []);
+});
+
+/** The hour-long isolation, as one sentence instead of a pile of multiaddrs. */
+test("v6-only members on a host with no v6 route are named as unreachable forever", () => {
+  const found = routeFindings([v6("a"), v6("b")], false);
+  const ipv6 = found.find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH");
+  assert.ok(ipv6, JSON.stringify(found));
+  assert.equal(ipv6.severity, "danger");
+  assert.equal(ipv6.affected, 2);
+  // The actionable part: this is not something retrying fixes.
+  assert.match(ipv6.detail, /Retrying cannot help/);
+  assert.ok(!ipv6.detail.includes("2001:db8"), "a finding never carries an address");
+});
+
+test("the same members on a host that has IPv6 are not diagnosed that way", () => {
+  const found = routeFindings([v6("a"), v6("b")], true);
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH"), undefined);
+});
+
+test("a member with no record is a different problem from one with no address", () => {
+  const found = routeFindings(
+    [
+      { ...route, fingerprint: "a", peer: "" },
+      { ...route, fingerprint: "b", addresses: [] },
+    ],
+    true,
+  );
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_RECORD")?.affected, 1);
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_DIALABLE_ADDRESS")?.affected, 1);
+});
+
+test("total isolation is reported, and after the reason for it", () => {
+  const found = routeFindings([v6("a"), v6("b")], false);
+  const codes = found.map((f) => f.code);
+  assert.ok(codes.includes("NET.ROUTE.ISOLATED"));
+  // A reader scanning from the top meets the explanation before the symptom.
+  assert.ok(
+    codes.indexOf("NET.ROUTE.NO_IPV6_PATH") < codes.indexOf("NET.ROUTE.ISOLATED"),
+    codes.join(","),
+  );
+});
+
+test("partial reachability is not reported as isolation", () => {
+  const found = routeFindings([v6("a"), { ...route, fingerprint: "b", connected: true }], false);
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.ISOLATED"), undefined);
+  assert.equal(found.find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH")?.affected, 1);
+});
+
+test("a member advertising a mix of families is not blamed on IPv6", () => {
+  // One usable v4 candidate means the v6 ones are not the explanation.
+  const mixed = v6("a", {
+    addresses: ["/ip6/2001:db8::1/udp/1/quic-v1", "/ip4/203.0.113.9/udp/1/quic-v1"],
+  });
+  assert.equal(
+    routeFindings([mixed], false).find((f) => f.code === "NET.ROUTE.NO_IPV6_PATH"),
+    undefined,
+  );
+});
+
+test("a finding reads as a sentence for one member and for several", () => {
+  // "1 member(s) advertise" is the sort of thing that makes a reader trust the rest a little less.
+  const one = routeFindings([v6("a")], false);
+  assert.match(one[0].detail, /^1 member advertises only IPv6/);
+  assert.match(one.find((f) => f.code === "NET.ROUTE.ISOLATED").detail, /only other member/);
+
+  const many = routeFindings([v6("a"), v6("b"), v6("c")], false);
+  assert.match(many[0].detail, /^3 members advertise only IPv6/);
+  assert.match(many.find((f) => f.code === "NET.ROUTE.ISOLATED").detail, /3 other members/);
+
+  const singleNoRecord = routeFindings([{ ...route, peer: "", connected: false }], true);
+  assert.match(singleNoRecord[0].detail, /1 member has no signed peer record/);
 });
